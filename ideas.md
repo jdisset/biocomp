@@ -22,6 +22,42 @@ One solution would be to still do the forward compilation pass: unconstrained
 NN -> SN -> GRN. but then, it is very likely that a very large number of SN/GRN
 will not result in a doable GC.
 
+# general thoughts
+
+the original idea of being able to compile a NN to a GC is theoretically
+doable. The compler algorithm already presented should be able to do just that.
+However, I believe the compiler in this form will stay in the realm of theory
+for a long while, and perhaps even, I'd say that it should.
+
+The problems I see all stem from the fact that the NN abstraction is fairly ill
+suited for the biological substrate. In CS terms, it is a very, *very*, leaky
+abstraction, in the sense that we are almost certainly going to be faced with
+the harsh reality of the constraints of our actual library of parts and have to
+deal with "one off" fixes to obtain suboptimal solutions.
+
+That's one major drawback: this abstraction relies so much on the content of
+the library of parts that it requires constant back and forth between the
+neuromorphic abstraction and the lower levels, for little benefits and great
+disadvantages.
+
+The other major drawback is that the neural abstraction is actually unable to
+express cleanly some constructs that would otherwise be very efficients. The
+only solution to reach these constructs is to proceed to complex optimizations
+that reason at a more suited level of abstraction and take into consideration
+the real constraints of the biological engineering world.
+
+The purposed benefits are mostly that we can leverage the explosion in
+neuromorphic machine learning sucess and litterature and directly apply that to
+synthetic biology. This is an obvious source of excitement - that I share.
+
+I argue that other subfields of machine learning and other abstractions are
+much more suited than the neuromorphic ones. I also argue that the neural
+networks we would be dealing with (a few neurons, a few dozens at best, a few
+hundred in our wildest dreams) are not comparable with the ones that are moving
+the field of neuromorphic machine learning forward, and would therefore not
+benefit from the recent explosion of the field.
+
+
 
 # Discrete vs Continuous weights
 
@@ -308,7 +344,6 @@ much smaller networks.
 The good old Perceptron model of the 60's has suddenly been able to thrive and
 shine with the democratization of massively parallel computational hardware and
 the availability of obscenes amount of training data. 
-
 
 Unfortunately, biology will deal much less happily with the luxury of bloating
 and innefficiency that NN can afford in DL. The NN abstraction uselessly
