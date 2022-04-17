@@ -1,0 +1,10 @@
+name,transcripted,translated
+promoter,0,0
+ERN,1,1
+uORF_group,1,0
+ERN_recog_site,1,0
+insulator,0,0
+fluo_marker,1,1
+inverted_seq,1,0
+recombinase_fwd,1,1
+recombinase_bwd,1,1

@@ -363,6 +363,3 @@ also, incidentaly, the way evolution operates.
 
 
 
-
-
-
