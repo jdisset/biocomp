@@ -2,6 +2,7 @@ import networkx as nx
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import matplotlib.pyplot as plt
+import collections.abc
 import pandas as pd
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -63,6 +64,20 @@ def pandasGraphToNx(gdf):
         if n.successor:
             G.add_edge(i,n.successor,type='transcription' if n.type == 'dna' else 'translation')
     return G
+
+def dicupdate(dict1, dict2):
+    res = {}
+    for key, val in dict1.items():
+        if type(val) == dict:
+            if key in dict2 and type(dict2[key] == dict):
+                dicupdate(dict1[key], dict2[key])
+        else:
+            if key in dict2:
+                dict1[key] = dict2[key]
+    for key, val in dict2.items():
+        if not key in dict1:
+            dict1[key] = val
+    return dict1
 
 GOOGLE_APP_CREDENTIALS = '/Users/jeandisset/.google/biocomp/key.json'
 # This function grabs the content of a google sheet and returns a pandas dataframe:

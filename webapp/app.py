@@ -1,14 +1,22 @@
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                          --     imports     --
 #···············································································
+import streamlit as st
+st.set_page_config(layout="wide")
+
 import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
 import numpy as np
 from enum import Enum
+import sys
+import os
 
-import torch
-import torchmodules as tm
+try: print(__file__)
+except NameError: __file__ = ''
+parent_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(parent_dir+'/../')
+
 import utils as ut
 from types import SimpleNamespace
 
@@ -16,23 +24,51 @@ import jax.numpy as jnp
 from jax import grad, jit, vmap
 from jax import random
 
-%load_ext autoreload
-%autoreload 2
+
+
+def md(t):
+    return st.markdown(t)
+
+def h1(t):
+    return md(f'# {t}')
+
+def h2(t):
+    return md(f'## {t}')
+
+def h3(t):
+    return md(f'### {t}')
+
+def h4(t):
+    return md(f'#### {t}')
+
+def b():
+    return md('---')
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{             --     Loading library from google sheet     --
 #···············································································
 SHEET_KEY = '1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQAzME'
-lib = ut.getAllGoogleSheets(SHEET_KEY)
-lib = SimpleNamespace(**lib)
-print(f'Loaded library with {len(lib.__dict__)} tables: '+', '.join(lib.__dict__.keys()))
+
+if 'lib' not in st.session_state:
+    lib = ut.getAllGoogleSheets(SHEET_KEY)
+    lib = SimpleNamespace(**lib)
+    md(f'Loaded library with {len(lib.__dict__)} tables: '+', '.join(lib.__dict__.keys()))
+    st.session_state.lib = lib
+else:
+    lib = st.session_state.lib
+
+col1, col2, col3 = st.columns(3)
+col1.markdown('### Parts')
+col1.write(lib.parts)
+col2.markdown('### Parts categories')
+col2.write(lib.categories)
+col3.markdown('### Sequestrons')
+col3.write(lib.sequestrons)
+b()
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
-# ---- LIBRARY ENCODING AND GRN REPRESENTATION
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                      --     Define a few L1s     --
 #···············································································
@@ -43,19 +79,20 @@ pc = pd.merge(p,c, left_on='category', right_index=True, how='left')
 
 def getRna(dna):
     d = pc.loc[dna]
-    return frozenset(d[d.transcripted == 1].index)
+    return tuple(d[d.transcripted == 1].index)
+
 
 def getPrt(dna):
     d = pc.loc[dna]
-    return frozenset(d[d.translated == 1].index)
+    return tuple(d[d.translated == 1].index)
 
 l1_DNAs=[['hEF1a','NeonGreen','CasE_recog_5p'],['hEF1a','CasE'],['hEF1a', 'Csy4'],['hEF1a','NeonGreen','Csy4_recog_5p'],['hEF1a','NeonGreen','CasE_recog_5p']]
-l1 = [{'dna':frozenset(d), 'rna':getRna(d), 'prt':getPrt(d)} for d in l1_DNAs]
+l1 = [{'dna':tuple(d), 'rna':getRna(d), 'prt':getPrt(d)} for d in l1_DNAs]
 l1df = pd.DataFrame(l1)
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{       --     We need to merge nodes with identical content     --
 #···············································································
@@ -87,10 +124,11 @@ gdf.loc[~gdf.predecessor.astype(bool), 'predecessor'] = None
 
 # add content of each node
 gdf['content'] = gdf.apply(lambda x: l1df.loc[x.l1_id].iloc[0][x.type], axis=1)
+gdf['content_type'] = gdf.apply(lambda x: tuple([lib.parts.loc[p][0] for p in x.content]), axis=1)
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                --     defining outputs of the GRN     --
 #···············································································
@@ -109,69 +147,68 @@ gdf.loc[gdf.type == 'prt', 'is_output'] = gdf.loc[gdf.type == 'prt'].l1_id.apply
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-# - STUDY OF THE GRN -> SN DIRECTION
-# ---- BASIS OF COMPUTATIONAL GRAPH GENERATION WITH PYTORCH
-# We start by generating a Compute Graph from a list of manually curated L1s
+
+  # { id: "1", type: "input", data: { label: "Input Node" }, position: { x: 250, y: 25 } },
+
+nodes = [ {'id':f'{i}', 'type':n.type, 'data':{'content':n.content, 'content_type':n.content_type}} for i,n in gdf.iterrows()]
+edges = [ { 'id': f'{i}', 'source': f'{i}', 'target': f'{n.successor}'} for i,n in gdf.iterrows() if n.successor]
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{            --     generating compute graph from GRN     --
+# {{{                     --     plotting the GRN     --
 #···············································································
-# we only need things that are connected to the output
-# so we generate the computation graph starting from the bottom
 
-# Example of Compute Graph:
-cg_ex = [{ 'type':'ERNSequestron', 'output_to':[1], 'input_from':[[1,2],[3]] },
-    { 'type':'RtoP', 'output_to':None, 'input_from':[0] }]
+import streamlit.components.v1 as components
+_component_func = components.declare_component("ned_component", 
+        url="http://localhost:3001")
 
-# The Gene Expression Graph describes each nodes by their type (dna, rna, prt), their successor nodes ids, and their predecessor nodes ids.
-# The Compute Graph is also represented in a dataframe (named cdf). It is just 1 level of abstraction above the Gene Expression graph (stored in the gdf dataframe). 
-# Each row of the Compute Graph dataframe describes a node with:
-# - function_name: ("ERNSeq", "transcription", "translation") taken from the function description dataframe (named fdf)
-# - input_from: a list of compute nodes ids whose output we will feed into the function
-# - output_to: the list of compute nodes this node is outputing the result of the function to
-# - gene_nodes: the id of the gdf rows this compute node contains
+other_component_func = components.declare_component("other_component", 
+        url="http://localhost:3001")
 
-# fdf is a dataframe containing the list of available functions, and it applies to a library
+def updated_dict(d1, d2):
+    res = {}
+    for key, val in d1.items():
+        if type(val) == dict:
+            if key in d2 and type(d2[key] == dict):
+                res[key] = updated_dict(d1[key], d2[key])
+        else:
+            if key in d2:
+                res[key] = d2[key]
+            else:
+                res[key] = d1[key]
+    for key, val in d2.items():
+        if not key in d1:
+            res[key] = val
+    return res
 
+
+def grnGraph(nodes, edges, key=None):
+    tnodes = [updated_dict(n,{'data':{'id':n['id']}}) for n in nodes]
+    _component_func(nodes=tnodes,edges=edges,output_type='GRN',key=key)
+
+def dnaOutput(nodes, key=None):
+    tnodes = [updated_dict(n,{'data':{'id':n['id']}}) for n in nodes if n['type'] == 'dna']
+    _component_func(nodes=tnodes,output_type='DNA',key=key)
+
+# h3('Gene expression graph')
+# grnGraph(nodes, edges)
+
+h3('DNA constructs')
+dnaOutput(nodes)
+b()
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                       --     compute graph     --
+#···············································································
 # Here we generate a dataframe that contains all the available functions for our current library
 seqs = lib.sequestrons.merge(lib.sequestron_types, left_on='type', right_index=True)
-
-## 
-# now let's generate the compute graph that matches gdf. There should actually be only one. Building it is simple: we start from the output node, and we go up. At every level, we check if there's an actual sequestration node. If yes we add it to the CG. And we also need to not forget to add the translation / transcription nodes as required.
-
-# in the compute graph, each node is a computation (that "mostly" matches with a grn edge)
-
-preds = gdf[gdf.is_output].predecessor.tolist()[0]
-columns = ['function','inputs','outputs','params']
-
-cur = {}
-preds
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-
-
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                          --     Archive     --
-#···············································································
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{           --     Load Library of Parts into DataFrames     --
-#···············································································
-
-# import sqlite3
-# import pandas as pd
-# cnx = sqlite3.connect('data/database.db')
-# part_df = pd.read_sql_query("SELECT * FROM part", cnx)
-# category_df = pd.read_sql_query("SELECT * FROM category", cnx)
-# lib = part_df.merge(category_df.rename({'name': 'category'}, axis=1))
-# lib = lib.set_index('name')
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-
+seqs
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────

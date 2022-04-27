@@ -1,0 +1,107 @@
+@import url("http://fonts.googleapis.com/css?family=Roboto:400,100,100italic,300,300italic,400italic,500,500italic,700,700italic,900italic,900");
+
+body {
+  margin-top: 10px;
+  background: #fff;
+  font-family: Roboto;
+}
+
+.react-flow {
+}
+.react-flow__background {
+  background: none;
+}
+.react-flow__renderer {
+  background: #fff;
+}
+.react-flow__node {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 0.8em;
+  font-weight: 300;
+  padding: 20px;
+  border: 1px solid white;
+  min-height: 60px;
+  min-width: 60px;
+  background: none;
+  border-radius: 50px;
+  border-width: 2px;
+}
+.react-flow__node-default,
+.react-flow__node-input,
+.react-flow__node-output {
+  width: auto;
+}
+
+.react-flow__node-dna {
+  border-color: #cad1da;
+}
+.react-flow__node-rna {
+  border-color: #7dc0c9;
+}
+.react-flow__node-prt {
+  border-color: #079fb7;
+}
+.dna-node {
+  /*width:50px;*/
+  /*height:50px;*/
+  /*background:red;*/
+}
+li:not(:last-child) {
+  margin-bottom: 15px;
+}
+
+.dna-list {
+  display: inline-block;
+  height:auto;
+  min-height:300px;
+}
+
+.dna-content {
+  list-style-type: none;
+  border: 0.5px solid black;
+  border-radius: 15px;
+  padding: 25px;
+  margin: 10px;
+  float: left;
+  transition: width 0.2s;
+}
+
+.dna-content li {
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+}
+
+.dna-content img {
+  width: 40px;
+}
+
+.dna-content .dna-elmt {
+  margin-left: 15px;
+  transition: width 0.2s, opacity 0.2s;
+}
+
+.dna-content.expanded {
+  width: 210px;
+  transition-delay: 0;
+}
+
+.dna-content.notexpanded {
+  width: 100px;
+  transition-delay: 0.1s;
+}
+
+.dna-content.notexpanded .dna-elmt {
+  width: 0px;
+  opacity: 0;
+  transition-delay: 0;
+}
+
+.dna-content.expanded .dna-elmt {
+  width: 150px;
+  opacity: 1;
+  transition-delay: 0.1s;
+}
