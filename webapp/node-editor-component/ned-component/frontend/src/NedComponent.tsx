@@ -2,7 +2,7 @@ import { Streamlit, StreamlitComponentBase, withStreamlitConnection } from "stre
 
 import ReactTooltip from "react-tooltip"
 import DNAContent from "./DNAContent.jsx"
-import GRNComponent from "./GRNComponent"
+import GRNComponent from "./GRNComponent.jsx"
 import React, { ReactNode } from "react"
 
 interface Point {

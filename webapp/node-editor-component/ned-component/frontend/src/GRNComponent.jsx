@@ -1,7 +1,7 @@
 import { Streamlit, StreamlitComponentBase, withStreamlitConnection } from "streamlit-component-lib"
 import DNANode from "./DNANode"
-import RNANode from "./RNANode"
-import PRTNode from "./PRTNode"
+import RNANode from "./RNANode.jsx"
+import PRTNode from "./PRTNode.jsx"
 import React, { ReactNode } from "react"
 import dagre from "dagre"
 import ReactFlow, {
@@ -15,19 +15,19 @@ const dagreGraph = new dagre.graphlib.Graph()
 dagreGraph.setDefaultEdgeLabel(() => ({}))
 
 const nodeWidth = 150
-const nodeHeight = 150
+const nodeHeight = 270
 
-const getLayoutedElements = (nodes: any, edges: any, direction = "TB") => {
+const getLayoutedElements = (nodes, edges, direction = "TB") => {
   const isHorizontal = direction === "LR"
   dagreGraph.setGraph({ rankdir: direction })
-  nodes.forEach((node: any) => {
+  nodes.forEach((node) => {
     dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight })
   })
-  edges.forEach((edge: any) => {
+  edges.forEach((edge) => {
     dagreGraph.setEdge(edge.source, edge.target)
   })
   dagre.layout(dagreGraph)
-  nodes.forEach((node: any) => {
+  nodes.forEach((node) => {
     const nodeWithPosition = dagreGraph.node(node.id)
     node.targetPosition = isHorizontal ? "left" : "top"
     node.sourcePosition = isHorizontal ? "right" : "bottom"
@@ -44,8 +44,9 @@ const getLayoutedElements = (nodes: any, edges: any, direction = "TB") => {
 
 const nodeTypes = { dna: DNANode, rna: RNANode, prt: PRTNode }
 
-function GRNComponent(props:any) {
-  const layouted = getLayoutedElements(props.data.nodes, props.data.edges)
+function GRNComponent(props) {
+	const styled_edges = props.data.edges.map(e => ({'style':{'stroke':'black' ,"stroke-width":"0.5"}, ...e}))
+  const layouted = getLayoutedElements(props.data.nodes, styled_edges)
   const [nodes, setNodes, onNodesChange] = useNodesState(layouted.nodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(layouted.edges)
 

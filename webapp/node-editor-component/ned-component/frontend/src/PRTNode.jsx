@@ -1,12 +1,14 @@
 import React, { ReactNode, useCallback } from "react"
 import { Handle, Position } from "react-flow-renderer"
 
-function PRTNode({ data }: any) {
-	const content = data.content.map((c:string) => <em>{c}</em>);
+function PRTNode(props) {
   return (
-    <div className="text-updater-node">
-        {content}
+    <div className="prt-node-border-wrap">
+    <div className="prt-node">
+		<ul> <li>{props.data.content[0]} </li> </ul>
       <Handle type="target" position={Position.Top} />
+		<div className="prt-name"> PRT </div>
+    </div>
     </div>
   )
 }

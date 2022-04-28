@@ -4,68 +4,34 @@ body {
   margin-top: 10px;
   background: #fff;
   font-family: Roboto;
-}
-
-.react-flow {
-}
-.react-flow__background {
-  background: none;
-}
-.react-flow__renderer {
-  background: #fff;
-}
-.react-flow__node {
-  display: flex;
-  justify-content: center;
-  align-items: center;
   font-size: 0.8em;
   font-weight: 300;
-  padding: 20px;
-  border: 1px solid white;
-  min-height: 60px;
-  min-width: 60px;
-  background: none;
-  border-radius: 50px;
-  border-width: 2px;
-}
-.react-flow__node-default,
-.react-flow__node-input,
-.react-flow__node-output {
-  width: auto;
 }
 
-.react-flow__node-dna {
-  border-color: #cad1da;
-}
-.react-flow__node-rna {
-  border-color: #7dc0c9;
-}
-.react-flow__node-prt {
-  border-color: #079fb7;
-}
-.dna-node {
-  /*width:50px;*/
-  /*height:50px;*/
-  /*background:red;*/
-}
-li:not(:last-child) {
-  margin-bottom: 15px;
+.react-flow__handle-bottom {
+  background: url("./grnsymbols/downarrow.png") no-repeat center center;
+  width: 15px;
+  height: 15px;
+  background-size: 10px 10px;
+  border: none;
 }
 
 .dna-list {
   display: inline-block;
-  height:auto;
-  min-height:300px;
+  height: auto;
+  min-height: 300px;
 }
 
 .dna-content {
   list-style-type: none;
   border: 0.5px solid black;
   border-radius: 15px;
-  padding: 25px;
+  padding: 20px;
   margin: 10px;
   float: left;
   transition: width 0.2s;
+  align-items: center;
+  background: white;
 }
 
 .dna-content li {
@@ -74,7 +40,6 @@ li:not(:last-child) {
   display: flex;
   align-items: center;
 }
-
 .dna-content img {
   width: 40px;
 }
@@ -90,7 +55,7 @@ li:not(:last-child) {
 }
 
 .dna-content.notexpanded {
-  width: 100px;
+  width: 82px;
   transition-delay: 0.1s;
 }
 
@@ -104,4 +69,71 @@ li:not(:last-child) {
   width: 150px;
   opacity: 1;
   transition-delay: 0.1s;
+}
+
+.dna-name {
+  margin: 5px -4px -15px;
+  font-size: 0.75em;
+  white-space: nowrap;
+  font-weight: 100;
+  letter-spacing: 0.2rem;
+}
+
+.rna-name,
+.prt-name {
+  position: absolute;
+  bottom: 5px;
+  font-size: 0.75em;
+  white-space: nowrap;
+  font-weight: 100;
+  letter-spacing: 0.2rem;
+}
+
+.rna-node,
+.prt-node {
+  width: 110px;
+  height: 110px;
+  border-radius: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: white;
+  text-align: center;
+  border: 0.5px solid black;
+}
+
+.rna-node .react-flow__handle-bottom {
+  margin-bottom: -10px;
+}
+
+/*.rna-node-border-wrap,*/
+/*.prt-node-border-wrap {*/
+/*width: 116px;*/
+/*height: 116px;*/
+/*border-radius: 100px;*/
+/*position: relative;*/
+/*padding: 3px;*/
+/*}*/
+
+/*.rna-node-border-wrap {*/
+/*background: linear-gradient(135deg, #0C99A6BB, #9274C8bb);*/
+/*}*/
+
+/*.prt-node-border-wrap {*/
+/*background: linear-gradient(135deg, #FF764eaa, #FF2256aa);*/
+/*}*/
+
+.rna-node ul,
+.prt-node ul {
+  margin: 0;
+  padding: 0;
+}
+
+.rna-node li,
+.prt-node li {
+  margin: 0;
+  padding: 0;
+  width: 80px;
+  text-align: center;
+  list-style: none;
 }

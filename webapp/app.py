@@ -190,12 +190,12 @@ def dnaOutput(nodes, key=None):
     tnodes = [updated_dict(n,{'data':{'id':n['id']}}) for n in nodes if n['type'] == 'dna']
     _component_func(nodes=tnodes,output_type='DNA',key=key)
 
-# h3('Gene expression graph')
-# grnGraph(nodes, edges)
 
 h3('DNA constructs')
 dnaOutput(nodes)
 b()
+h3('Gene expression graph')
+grnGraph(nodes, edges)
 
 
 #                                                                            }}}
