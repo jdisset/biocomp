@@ -4,6 +4,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 import matplotlib.pyplot as plt
 import collections.abc
 import pandas as pd
+import json
+import sys
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                          --     draw GRN   --
@@ -52,6 +54,7 @@ def drawGRN(S):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+
 def flatten(t):
     return [item for sublist in t for item in sublist]
 
@@ -65,19 +68,33 @@ def pandasGraphToNx(gdf):
             G.add_edge(i,n.successor,type='transcription' if n.type == 'dna' else 'translation')
     return G
 
-def dicupdate(dict1, dict2):
+def updated_dict(d1, d2):
     res = {}
-    for key, val in dict1.items():
+    for key, val in d1.items():
         if type(val) == dict:
-            if key in dict2 and type(dict2[key] == dict):
-                dicupdate(dict1[key], dict2[key])
+            if key in d2 and type(d2[key] == dict):
+                res[key] = updated_dict(d1[key], d2[key])
         else:
-            if key in dict2:
-                dict1[key] = dict2[key]
-    for key, val in dict2.items():
-        if not key in dict1:
-            dict1[key] = val
-    return dict1
+            if key in d2:
+                res[key] = d2[key]
+            else:
+                res[key] = d1[key]
+    for key, val in d2.items():
+        if not key in d1:
+            res[key] = val
+    return res
+
+def decode_json(df, cols):
+    for col in cols:
+        df[col] = df[col].apply(lambda x: json.loads(str(x)))
+    return df
+
+def isSubset(l1, l2):
+    for e in l1:
+        if e not in l2:
+            return False
+    return True
+
 
 GOOGLE_APP_CREDENTIALS = '/Users/jeandisset/.google/biocomp/key.json'
 # This function grabs the content of a google sheet and returns a pandas dataframe:
