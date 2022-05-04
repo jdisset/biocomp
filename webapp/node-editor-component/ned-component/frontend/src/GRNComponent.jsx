@@ -3,7 +3,7 @@ import DNANode from "./DNANode"
 import RNANode from "./RNANode.jsx"
 import PRTNode from "./PRTNode.jsx"
 import React, { ReactNode } from "react"
-import dagre from "dagre"
+import Util from "./util.jsx"
 import ReactFlow, {
   ReactFlowProvider,
   addEdge,
@@ -11,45 +11,20 @@ import ReactFlow, {
   useEdgesState,
 } from "react-flow-renderer"
 
-const dagreGraph = new dagre.graphlib.Graph()
-dagreGraph.setDefaultEdgeLabel(() => ({}))
-
-const nodeWidth = 150
-const nodeHeight = 270
-
-const getLayoutedElements = (nodes, edges, direction = "TB") => {
-  const isHorizontal = direction === "LR"
-  dagreGraph.setGraph({ rankdir: direction })
-  nodes.forEach((node) => {
-    dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight })
-  })
-  edges.forEach((edge) => {
-    dagreGraph.setEdge(edge.source, edge.target)
-  })
-  dagre.layout(dagreGraph)
-  nodes.forEach((node) => {
-    const nodeWithPosition = dagreGraph.node(node.id)
-    node.targetPosition = isHorizontal ? "left" : "top"
-    node.sourcePosition = isHorizontal ? "right" : "bottom"
-    // We are shifting the dagre node position (anchor=center center) to the top left
-    // so it matches the React Flow node anchor point (top left).
-    node.position = {
-      x: nodeWithPosition.x - nodeWidth / 2,
-      y: nodeWithPosition.y - nodeHeight / 2,
-    }
-    return node
-  })
-  return { nodes, edges }
-}
-
 const nodeTypes = { DNA: DNANode, RNA: RNANode, PRT: PRTNode }
+
+const typeDim = {
+  DNA: { width: 180, height: 350 },
+  RNA: { width: 180, height: 100 },
+  PRT: { width: 180, height: 100 },
+}
 
 function GRNComponent(props) {
   const styled_edges = props.data.edges.map((e) => ({
-    style: { stroke: "black", "strokeWidth": "0.5" },
+    style: { stroke: "black", strokeWidth: "0.5" },
     ...e,
   }))
-  const layouted = getLayoutedElements(props.data.nodes, styled_edges)
+  const layouted = Util.getLayoutedElements(props.data.nodes, styled_edges, 60, 60, typeDim)
   const [nodes, setNodes, onNodesChange] = useNodesState(layouted.nodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(layouted.edges)
 

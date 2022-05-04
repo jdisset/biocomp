@@ -39,22 +39,29 @@ body {
   padding: 0;
   display: flex;
   align-items: center;
+  position: relative;
 }
 .dna-content img {
   width: 40px;
+  position: relative;
 }
 
 .dna-content .dna-elmt {
   margin-left: 15px;
   transition: width 0.2s, opacity 0.2s;
+  position: relative;
 }
 
 .dna-content.expanded {
+  position: relative;
+  z-index: 3000;
   width: 210px;
   transition-delay: 0;
 }
 
 .dna-content.notexpanded {
+  position: relative;
+  z-index: 0;
   width: 82px;
   transition-delay: 0.1s;
 }
@@ -137,16 +144,16 @@ body {
 .out-node {
   width: 20px;
   height: 20px;
-  border:none;
-  background:none;
+  border: none;
+  background: none;
 }
 .out-node .react-flow__handle {
-	background:none;
-	border:none;
+  background: none;
+  border: none;
 }
 
-.seq-name{
-bottom:20px;
+.seq-name {
+  bottom: 20px;
 }
 
 .seq-node {

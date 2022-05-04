@@ -16,20 +16,33 @@ import Util from "./util.jsx"
 
 const nodeTypes = {
   sequestron_ERN: SEQNode,
+  sequestron_RECOMBINASE: SEQNode,
   translation: TLNode,
   transcription: TCNode,
   constant: INNode,
   out: OUTNode,
 }
 
+const typeDim = {
+  sequestron_ERN: { width: 100, height: 50 },
+  sequestron_RECOMBINASE: { width: 100, height: 50 },
+  translation: { width: 30, height: 50 },
+  transcription: { width: 30, height: 50 },
+  constant: { width: 45, height: 63 },
+  out: { width: 20, height: 10 },
+}
+
 function ComputeComponent(props) {
-  const styled_edges = props.data.edges.map((e) => ({ style: { stroke: "black", strokeWidth: "0.5" }, ...e, }))
-  const layouted = Util.getLayoutedElements(props.data.nodes, styled_edges, 140, 100)
+  const styled_edges = props.data.edges.map((e) => ({
+    style: { stroke: "black", strokeWidth: "0.5" },
+    ...e,
+  }))
+  const layouted = Util.getLayoutedElements(props.data.nodes, styled_edges, 60, 60, typeDim)
   const [nodes, setNodes, onNodesChange] = useNodesState(layouted.nodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(layouted.edges)
 
   return (
-    <div style={{ width: "100%", height: 800 }}>
+    <div style={{ width: "100%", height: 1000 }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
