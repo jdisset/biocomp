@@ -7,53 +7,6 @@ import pandas as pd
 import json
 import sys
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                          --     draw GRN   --
-#···············································································
-
-def drawGRN(S):
-    bgcol = "#ffffff"
-    nodeColor = { 'dna' : "#699da3" ,  
-            'rna' : "#5a708a",
-            'prt':"#1e384e"}
-    edgeColor = { 'transcription': [0.155, 0.144, 0.209],
-            'translation' :[0.155, 0.144, 0.209],
-            'erncut': [0.844, 0.1, 0.111]}
-
-    fig, ax = plt.subplots(1, 1, figsize=(12,12),facecolor=bgcol)
-    MIN_MARGIN = 30
-    NODE_SIZE = 2500
-    startpos = np.array([0,0])
-    shiftX = 1000
-    # pos = nx.spring_layout(S, pos = fixed_pos, k = 0.5, iterations = 50, fixed = fixed_pos.keys())
-    startpos = np.array([0,0])
-    shiftX = 100
-    shiftY = -300
-    pos = {n:startpos + i * np.array([shiftX, 0]) for i,n in enumerate(gdf[gdf.type=='dna'].index)}
-    pos.update({n:startpos + np.array([0,shiftY]) + i * np.array([shiftX, 0]) for i,n in enumerate(gdf[gdf.type=='rna'].index)})
-    pos.update({n:startpos + np.array([0,2*shiftY]) + i * np.array([shiftX, 0]) for i,n in enumerate(gdf[gdf.type=='prt'].index)})
-    tr_edges = [[i,j] for i,j,d in S.edges(data=True) if d['type']=='transcription']
-    tl_edges = [[i,j] for i,j,d in S.edges(data=True) if d['type']=='translation']
-    cut_edges = [[i,j] for i,j,d in S.edges(data=True) if d['type']=='erncut']
-    n_colors = [nodeColor[d['type']] for _,d in S.nodes(data=True)]
-    n_labels = {i:str(i) for i in S.nodes()}
-
-    nx.draw_networkx_nodes(S, pos, ax=ax, node_color=n_colors, node_size=NODE_SIZE, margins=0.25) 
-    nx.draw_networkx_labels(S, pos, ax=ax, font_color='white', font_weight=800,labels = n_labels)
-    nx.draw_networkx_edges(S, pos, ax=ax, edgelist=tr_edges, edge_color=edgeColor['transcription'],
-                            width=3, min_source_margin=MIN_MARGIN, min_target_margin=MIN_MARGIN)
-    nx.draw_networkx_edges(S, pos, ax=ax, edgelist=tl_edges, edge_color=edgeColor['translation'],
-                            width=3, min_source_margin=MIN_MARGIN, min_target_margin=MIN_MARGIN)
-    nx.draw_networkx_edges(S, pos, ax=ax, edgelist=cut_edges, edge_color=edgeColor['erncut'],
-                            width=3, arrowstyle='-[', min_source_margin=MIN_MARGIN, min_target_margin=MIN_MARGIN) 
-    ax.set_facecolor(bgcol)
-    plt.show()
-    print('')
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
 
 def flatten(t):
     return [item for sublist in t for item in sublist]
@@ -95,6 +48,12 @@ def isSubset(l1, l2):
             return False
     return True
 
+class DotDict(dict):
+    def __getattr__(*args):
+        val = dict.__getitem__(*args)
+        return DotDict(val) if type(val) is dict else val
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
 
 GOOGLE_APP_CREDENTIALS = '/Users/jeandisset/.google/biocomp/key.json'
 # This function grabs the content of a google sheet and returns a pandas dataframe:

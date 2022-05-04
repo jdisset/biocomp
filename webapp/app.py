@@ -142,7 +142,17 @@ def getPrt(dna):
     d = pc.loc[dna]
     return tuple(d[d.translated == 1].index)
 
-l1_DNAs=[['hEF1a','NeonGreen','CasE_recog_5p'],['hEF1a','CasE'],['hEF1a', 'Csy4'],['hEF1a','NeonGreen','Csy4_recog_5p'],['hEF1a','NeonGreen','CasE_recog_5p']]
+# l1_DNAs=[['hEF1a','NeonGreen','CasE_recog_5p'],['hEF1a','CasE'],['hEF1a', 'Csy4'],['hEF1a','NeonGreen','Csy4_recog_5p'],['hEF1a','NeonGreen','CasE_recog_5p']]
+
+l1_DNAs=[ ['hEF1a','CasE'],
+        ['hEF1a', 'Csy4'],
+        ['hEF1a', 'Csy4'],
+        ['hEF1a','PhiC31','Csy4_recog_5p'],
+        ['hEF1a','PhiC31','Csy4_recog_5p'],
+        ['hEF1a','PhiC31','Csy4_recog_5p'],
+        ['hEF1a','PhiC31RDF','CasE_recog_5p'],
+        ['hEF1a','attP','NeonGreen','attB']
+        ]
 l1 = [{'DNA':tuple(d), 'RNA':getRna(d), 'PRT':getPrt(d)} for d in l1_DNAs]
 l1df = pd.DataFrame(l1)
 
@@ -241,7 +251,7 @@ def set_list_item(lst, i, val):
         lst.extend([None] * (i - len(lst) + 1))
     lst[i] = val
 
-class ComputeNode:
+class GraphComputeNode:
     def __init__(self, id, type, gdf_input, gdf_output):
         self.id = id
         self.type = type
@@ -257,8 +267,6 @@ class ComputeNode:
             if self.output_to[i][0]==other.id:
                 self.output_to.pop(i)
                 break
-
-
 
     def toDict(self):
         return {
@@ -318,7 +326,7 @@ def removeShortcuts(nodes, root_id):
 
 newnodes = []
 output_gene_nodes = gdf[gdf.is_output]
-onode = ComputeNode(uniqueId(),'out',[],None)
+onode = GraphComputeNode(uniqueId(),'out',[],None)
 for i, r in output_gene_nodes.iterrows():
     onode.gdf_input += [i]
 newnodes.append(onode)
@@ -332,9 +340,11 @@ for _,r in seqs.iterrows():
     olvl = gdf[gdf.type == r.output_level]
     oparts = olvl[olvl.content.apply(lambda x: ut.isSubset(r.output_part,x))]
     if (len(nparts) > 0 and len(pparts) > 0):
+        # if (len(nparts) > 1): pprint(nparts)
+        if (len(pparts) > 1): pprint(pparts)
         assert(len(pparts) == 1)
         assert(len(nparts) == 1)
-        cnode = ComputeNode(uniqueId(), f'sequestron_{r.type}', [nparts.index[0],pparts.index[0]], oparts.index[0])
+        cnode = GraphComputeNode(uniqueId(), f'sequestron_{r.type}', [nparts.index[0],pparts.index[0]], oparts.index[0])
         newnodes.append(cnode)
 
 
@@ -363,7 +373,7 @@ while newnodes:
                 gn = gdf.loc[n_inp] # input gene
                 nid = uniqueId()
                 ntype = {'PRT':'translation','RNA':'transcription','DNA':'constant'}[gn.type]
-                newn = ComputeNode(nid, ntype, gn.predecessor, n_inp)
+                newn = GraphComputeNode(nid, ntype, gn.predecessor, n_inp)
                 newn.input_from = []
                 newn.output_to = [(n.id,i)]
                 newnodes.append(newn)
@@ -391,6 +401,118 @@ computeGraph(nodes, edges)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{       --     Creating a JAX model from the Compute Graph    --
+#···············································································
+import numpy as np
+import jax
+import jax.numpy as jnp
+
+
+class ComputeTree:
+
+    f = lambda self, x: x
+
+    def __init__(self, id, ftype, params, parents):
+        self.id = id
+        self.ftype = ftype
+        self.params = params
+        self.parents = parents
+
+    def toDict(self):
+        return {
+            "id": self.id,
+            "ftype": self.ftype,
+            "params": self.params,
+            "parents": [c.toDict() for c in self.parents]
+        }
+
+    def __repr__(self):
+        return str(self.toDict())
+
+# list of params that are not learnable
+static_params = ut.DotDict({
+    'rna_deg_rate' : 1.0,
+    'prt_deg_rate' : 1.0
+})
+
+def identity(self, x, _):
+    return x
+
+def f_transcription(self, x, static):
+    return jnp.dot(x, self.params['tc_rates']) / static.rna_deg_rate
+
+def f_translation(self, x, static):
+    return jnp.dot(x, self.params['tl_rates']) / static.prt_deg_rate
+
+def f_sequestronERN(self, x, _):
+    return jnp.maximum(x[1] - x[0], 0)
+
+def f_sequestronRECOMBINASE(self, x, _):
+    return jnp.maximum(x[1] - x[0], 0)
+
+def f_constant(self, x, _):
+    return jnp.array([self.params['copy_number']]) 
+
+funcDict = {
+        'out':identity,
+        'constant':f_constant,
+        'transcription':f_transcription,
+        'translation':f_translation,
+        'sequestron_ERN':f_sequestronERN,
+        'sequestron_RECOMBINASE':f_sequestronRECOMBINASE
+        }
+
+funcDict['out']
+
+def treeFromDataFrame(cdf, tid_list):
+    res = []
+    for tid in tid_list:
+        n = cdf.loc[tid]
+        t = ComputeTree(tid, n.type, {}, treeFromDataFrame(cdf, n.input_from))
+        t.f = funcDict[n.type]
+        res.append(t)
+    return res
+
+croot = treeFromDataFrame(cdf, [0])[0]
+
+
+def genParams(node):
+    seed = jax.random.PRNGKey(uniqueId())
+    if node.ftype == 'translation':
+        node.params = {
+            'tl_rates': jax.random.uniform(key = seed, shape=[len(node.parents)], minval=0.0, maxval=1.0, dtype=jnp.float32),
+            }
+
+    elif node.ftype == 'transcription':
+        node.params = {
+            'tc_rates': jax.random.uniform(key = seed, shape=[len(node.parents)], minval=0.0, maxval=1.0, dtype=jnp.float32),
+            }
+
+    elif node.ftype == 'constant':
+        node.params = {
+            # copy_number as a parameter of constant nodes (DNA) is certainly less performant than having it vectorized at the transcription node
+            # but I like it because it's conceptually more elegant this way. Sue me.
+            'copy_number': jax.random.uniform(key = seed, shape=[1], minval=0.0, maxval=1.0, dtype=jnp.float32),
+            }
+
+    for n in node.parents:
+        genParams(n)
+
+genParams(croot)
+
+
+def compute(node):
+    return node.f(node, jnp.array([compute(p) for p in node.parents]), static_params)
+
+pprint(croot)
+compute(croot)
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     Archives     --
