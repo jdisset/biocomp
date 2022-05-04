@@ -14,8 +14,3 @@ function PRTNode(props) {
 }
 
 export default PRTNode
-
-
-      //<ReactTooltip id={"node_" + data.id} aria-haspopup="true">
-        //<ul>{content}</ul>
-      //</ReactTooltip>

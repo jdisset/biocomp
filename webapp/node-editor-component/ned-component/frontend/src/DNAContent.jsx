@@ -1,6 +1,6 @@
 import React, { ReactNode } from "react"
 
-const zeroPad = (num, places) => String(num).padStart(places, '0')
+const zeroPad = (num, places) => String(num).padStart(places, "0")
 
 function DNAContent({ initExpanded = false, expandable = true, ...props }) {
   const content = props.data.content.map((c, i) => (
@@ -21,9 +21,7 @@ function DNAContent({ initExpanded = false, expandable = true, ...props }) {
         <img src={require("./grnsymbols/terminator.png")} alt="terminator symbol" />
       </li>
 
-		<div className="dna-name">
-			DNA {zeroPad(parseInt(props.data.id),2)}
-		</div>
+      <div className="dna-name">DNA {zeroPad(parseInt(props.data.id), 2)}</div>
     </div>
   )
 }

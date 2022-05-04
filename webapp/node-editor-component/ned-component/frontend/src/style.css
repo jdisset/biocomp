@@ -80,8 +80,11 @@ body {
 }
 
 .rna-name,
-.prt-name {
+.prt-name,
+.seq-name {
   position: absolute;
+  text-align: center;
+  width: 100%;
   bottom: 5px;
   font-size: 0.75em;
   white-space: nowrap;
@@ -90,7 +93,8 @@ body {
 }
 
 .rna-node,
-.prt-node {
+.prt-node,
+.out-node {
   width: 110px;
   height: 110px;
   border-radius: 100px;
@@ -106,23 +110,6 @@ body {
   margin-bottom: -10px;
 }
 
-/*.rna-node-border-wrap,*/
-/*.prt-node-border-wrap {*/
-/*width: 116px;*/
-/*height: 116px;*/
-/*border-radius: 100px;*/
-/*position: relative;*/
-/*padding: 3px;*/
-/*}*/
-
-/*.rna-node-border-wrap {*/
-/*background: linear-gradient(135deg, #0C99A6BB, #9274C8bb);*/
-/*}*/
-
-/*.prt-node-border-wrap {*/
-/*background: linear-gradient(135deg, #FF764eaa, #FF2256aa);*/
-/*}*/
-
 .rna-node ul,
 .prt-node ul {
   margin: 0;
@@ -136,4 +123,36 @@ body {
   width: 80px;
   text-align: center;
   list-style: none;
+}
+
+/* ----------------------------------- */
+
+.input-node,
+.transcription-node,
+.translation-node,
+.seq-node {
+  margin-bottom: 8px;
+}
+
+.out-node {
+  width: 20px;
+  height: 20px;
+  border:none;
+  background:none;
+}
+.out-node .react-flow__handle {
+	background:none;
+	border:none;
+}
+
+.seq-name{
+bottom:20px;
+}
+
+.seq-node {
+  width: 120px;
+  height: 50px;
+  border: 0.5px solid black;
+  border-radius: 5px;
+  margin-bottom: 12px;
 }

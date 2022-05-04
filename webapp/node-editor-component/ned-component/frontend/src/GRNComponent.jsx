@@ -42,27 +42,29 @@ const getLayoutedElements = (nodes, edges, direction = "TB") => {
   return { nodes, edges }
 }
 
-const nodeTypes = { dna: DNANode, rna: RNANode, prt: PRTNode }
+const nodeTypes = { DNA: DNANode, RNA: RNANode, PRT: PRTNode }
 
 function GRNComponent(props) {
-	const styled_edges = props.data.edges.map(e => ({'style':{'stroke':'black' ,"stroke-width":"0.5"}, ...e}))
+  const styled_edges = props.data.edges.map((e) => ({
+    style: { stroke: "black", "strokeWidth": "0.5" },
+    ...e,
+  }))
   const layouted = getLayoutedElements(props.data.nodes, styled_edges)
   const [nodes, setNodes, onNodesChange] = useNodesState(layouted.nodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(layouted.edges)
 
   return (
     <div style={{ width: "100%", height: 800 }}>
-		<ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-			nodeTypes={nodeTypes}
-            fitView
-          />
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        nodeTypes={nodeTypes}
+        fitView
+      />
     </div>
   )
-
 }
 
 export default GRNComponent
