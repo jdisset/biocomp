@@ -144,18 +144,15 @@ def getPrt(dna):
 
 # l1_DNAs=[['hEF1a','NeonGreen','CasE_recog_5p'],['hEF1a','CasE'],['hEF1a', 'Csy4'],['hEF1a','NeonGreen','Csy4_recog_5p'],['hEF1a','NeonGreen','CasE_recog_5p']]
 
-l1_DNAs=[ ['hEF1a','CasE'],
+l1_DNAs= [
+        ['hEF1a', 'CasE'],
         ['hEF1a', 'Csy4'],
-        ['hEF1a', 'Csy4'],
-        ['hEF1a','PhiC31','Csy4_recog_5p'],
-        ['hEF1a','PhiC31','Csy4_recog_5p'],
-        ['hEF1a','PhiC31','Csy4_recog_5p'],
-        ['hEF1a','PhiC31RDF','CasE_recog_5p'],
-        ['hEF1a','attP','NeonGreen','attB']
-        ]
+        ['hEF1a', 'PhiC31', 'Csy4_recog_5p'],
+        ['hEF1a', 'PhiC31RDF','CasE_recog_5p'],
+        ['hEF1a', 'attP', 'NeonGreen', 'attB']]
+
 l1 = [{'DNA':tuple(d), 'RNA':getRna(d), 'PRT':getPrt(d)} for d in l1_DNAs]
 l1df = pd.DataFrame(l1)
-
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -213,6 +210,9 @@ gdf['is_output'] = False
 gdf.loc[gdf.type == 'PRT', 'is_output'] = gdf.loc[gdf.type == 'PRT'].l1_id.apply(
                 lambda x: containsOutput(l1df.loc[x].PRT.tolist()[0],outputs))
 
+gdf['is_input'] = False
+gdf.is_input.iloc[[0,1]] = True
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -220,14 +220,16 @@ gdf.loc[gdf.type == 'PRT', 'is_output'] = gdf.loc[gdf.type == 'PRT'].l1_id.apply
 #···············································································
 
 def gdfToGraph(gdf):
-    nodes = [ {'id':f'{i}', 'type':n.type, 'data':{'content':n.content, 'content_type':n.content_type}} for i,n in gdf.iterrows()]
+    nodes = [ {'id':f'{i}', 'type':n.type, 'data':n.to_dict()} for i,n in gdf.iterrows()]
     edges = [ { 'id': f'{i}', 'source': f'{i}', 'target': f'{n.successor}'} for i,n in gdf.iterrows() if n.successor]
     return (nodes, edges)
 
 nodes, edges = gdfToGraph(gdf)
 
 h3('Gene expression graph')
+ag(gdf)
 grnGraph(nodes, edges)
+b()
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -237,9 +239,6 @@ grnGraph(nodes, edges)
 import logging
 from rich.pretty import pprint
 
-b()
-h4('Gdf')
-ag(gdf)
 
 # Here we generate a dataframe that contains all the available functions for our current library
 seqs = lib.sequestrons.merge(lib.sequestron_types, left_on='type', right_index=True)
@@ -256,7 +255,7 @@ class GraphComputeNode:
         self.id = id
         self.type = type
         self.gdf_input = gdf_input
-        self.gdf_output = gdf_output
+        self.gdf_output = gdf_output if gdf_output is not None else -1
         self.input_from = []
         self.output_to = []
 
@@ -285,7 +284,7 @@ class GraphComputeNode:
         return str(self.toDict())
 
 
-unique_id = 0
+unique_id = int(0)
 def uniqueId():
     global unique_id
     unique_id += 1
@@ -344,7 +343,7 @@ for _,r in seqs.iterrows():
         if (len(pparts) > 1): pprint(pparts)
         assert(len(pparts) == 1)
         assert(len(nparts) == 1)
-        cnode = GraphComputeNode(uniqueId(), f'sequestron_{r.type}', [nparts.index[0],pparts.index[0]], oparts.index[0])
+        cnode = GraphComputeNode(uniqueId(), f'sequestron_{r.type}', [int(nparts.index[0]),int(pparts.index[0])], int(oparts.index[0]))
         newnodes.append(cnode)
 
 
@@ -373,11 +372,11 @@ while newnodes:
                 gn = gdf.loc[n_inp] # input gene
                 nid = uniqueId()
                 ntype = {'PRT':'translation','RNA':'transcription','DNA':'constant'}[gn.type]
-                newn = GraphComputeNode(nid, ntype, gn.predecessor, n_inp)
+                newn = GraphComputeNode(nid, ntype, gn.predecessor, int(n_inp))
                 newn.input_from = []
                 newn.output_to = [(n.id,i)]
                 newnodes.append(newn)
-                n.input_from += [nid]
+                n.input_from += [int(nid)]
                 print('    created new node:',end =" ")
                 pprint(newn)
     cg += [n]
@@ -385,226 +384,121 @@ while newnodes:
 removeShortcuts(cg,0)
 
 cdf = pd.DataFrame([n.toDict() for n in cg]).set_index('id').sort_index()
-h4('Compute nodes:')
-ag(cdf.astype(str))
-pprint(cdf)
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                 --     Drawing the Compute Graph     --
 #···············································································
+cdf.input_from = cdf.input_from.apply(lambda x: None if x is None else [int(e) for e in x])
+cdf.output_to = cdf.output_to.apply(lambda x: None if x is None else [(int(i),h) for i,h in x])
 
-nodes = [ {'id':str(i), 'type':n.type, 'data':{'type':n.type}} for i,n in cdf.iterrows()]
+for index, row in cdf.iterrows():
+    if row['type'] == 'constant':
+        if gdf.at[row['gdf_output'], 'is_input']:
+            cdf.at[index, 'type'] = 'in'
+
+nodes = [ {'id':str(i), 'type':n.type, 'data':n.to_dict()} for i,n in cdf.iterrows()]
 edges = [ { 'id': f'edge_{uniqueId()}', 'source': str(i), 'target': str(o), 'targetHandle':str(h)} for i,n in cdf.iterrows() if n.output_to for o,h in n.output_to ]
 
+
+h3('Compute nodes:')
 computeGraph(nodes, edges)
+ag(cdf.astype(str))
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{       --     Creating a JAX model from the Compute Graph    --
+# {{{         --     Experimenting with JAX and comptue trees     --
 #···············································································
-import numpy as np
+
 import jax
 import jax.numpy as jnp
 
 
-class ComputeTree:
+def rate_init_continuous(rng, n, minval=0.0, maxval=1.0):
+    return jax.random.uniform(key = rng, shape=(n,), minval=minval, maxval=maxval, dtype=jnp.float32)
 
-    f = lambda self, x: x
-
-    def __init__(self, id, ftype, params, parents):
-        self.id = id
-        self.ftype = ftype
-        self.params = params
-        self.parents = parents
-
-    def toDict(self):
-        return {
-            "id": self.id,
-            "ftype": self.ftype,
-            "params": self.params,
-            "parents": [c.toDict() for c in self.parents]
-        }
-
-    def __repr__(self):
-        return str(self.toDict())
-
-# list of params that are not learnable
-static_params = ut.DotDict({
-    'rna_deg_rate' : 1.0,
-    'prt_deg_rate' : 1.0
-})
-
-def identity(self, x, _):
-    return x
-
-def f_transcription(self, x, static):
-    return jnp.dot(x, self.params['tc_rates']) / static.rna_deg_rate
-
-def f_translation(self, x, static):
-    return jnp.dot(x, self.params['tl_rates']) / static.prt_deg_rate
-
-def f_sequestronERN(self, x, _):
-    return jnp.maximum(x[1] - x[0], 0)
-
-def f_sequestronRECOMBINASE(self, x, _):
-    return jnp.maximum(x[1] - x[0], 0)
-
-def f_constant(self, x, _):
-    return jnp.array([self.params['copy_number']]) 
-
-funcDict = {
-        'out':identity,
-        'constant':f_constant,
-        'transcription':f_transcription,
-        'translation':f_translation,
-        'sequestron_ERN':f_sequestronERN,
-        'sequestron_RECOMBINASE':f_sequestronRECOMBINASE
-        }
-
-funcDict['out']
-
-def treeFromDataFrame(cdf, tid_list):
-    res = []
-    for tid in tid_list:
-        n = cdf.loc[tid]
-        t = ComputeTree(tid, n.type, {}, treeFromDataFrame(cdf, n.input_from))
-        t.f = funcDict[n.type]
-        res.append(t)
-    return res
-
-croot = treeFromDataFrame(cdf, [0])[0]
+def copy_n_init(rng, minval=0.0, maxval=1.0):
+    return jax.random.uniform(key = rng, shape=(1,), minval=minval, maxval=maxval, dtype=jnp.float32)[0]
 
 
-def genParams(node):
-    seed = jax.random.PRNGKey(uniqueId())
-    if node.ftype == 'translation':
-        node.params = {
-            'tl_rates': jax.random.uniform(key = seed, shape=[len(node.parents)], minval=0.0, maxval=1.0, dtype=jnp.float32),
-            }
-
-    elif node.ftype == 'transcription':
-        node.params = {
-            'tc_rates': jax.random.uniform(key = seed, shape=[len(node.parents)], minval=0.0, maxval=1.0, dtype=jnp.float32),
-            }
-
-    elif node.ftype == 'constant':
-        node.params = {
-            # copy_number as a parameter of constant nodes (DNA) is certainly less performant than having it vectorized at the transcription node
-            # but I like it because it's conceptually more elegant this way. Sue me.
-            'copy_number': jax.random.uniform(key = seed, shape=[1], minval=0.0, maxval=1.0, dtype=jnp.float32),
-            }
-
-    for n in node.parents:
-        genParams(n)
-
-genParams(croot)
+# each node type is a function that returns 2 other functions:
+# - init(rng, n_inputs) -> returns the parameters (this node, others)
+# - apply(params, X) -> returns the value of the compute node  
+#                       X, the inputs, is only useful for the input leaves
 
 
-def compute(node):
-    return node.f(node, jnp.array([compute(p) for p in node.parents]), static_params)
+def apply_upstream(params, apply_funs, inputs, **kwargs):
+    nbranches = len(apply_funs)
+    rng = kwargs.pop('rng', None)
+    rngs = random.split(rng, nbranches) if rng is not None else (None,) * nbranches
+    return jnp.array([f(p, inputs, rng=r, **kwargs) for f, p, r in zip(apply_funs, params, rngs)])
 
-pprint(croot)
-compute(croot)
+def init_upstream(rng, init_funs):
+    nbranches = len(init_funs)
+    rngs = random.split(rng, nbranches)
+    return [init(rng) for init, rng in zip(init_funs, rngs)]
+
+
+def Transcription(*branches):
+    nbranches= len(branches)
+    init_funs, apply_funs = zip(*branches)
+    def init(rng): 
+        return (rate_init_continuous(rng, nbranches), init_upstream(rng, init_funs))
+    def apply(params, inputs, **kwargs):
+        (tc_rates, others) = params
+        return jnp.dot(apply_upstream(others, apply_funs, inputs, **kwargs), tc_rates)
+    return init, apply
+
+def Bias(v=1.0):
+    def init_fun(rng):
+        return copy_n_init(rng)
+    def apply_fun(copy_n, inputs, **kwargs):
+        return v * copy_n
+    return init_fun, apply_fun
+
+def In(id):
+    def init_fun(rng):
+        return copy_n_init(rng)
+    def apply_fun(copy_n, inputs, **kwargs):
+        return inputs[id] * copy_n
+    return init_fun, apply_fun
+
+def Cte(v=1.0):
+    def init_fun(rng):
+        return None
+    def apply_fun(*args, **kwargs):
+        return v
+    return init_fun, apply_fun
+
+def Plus(*branches):
+    init_funs, apply_funs = zip(*branches)
+    def init(rng): 
+        return init_upstream(rng, init_funs)
+    def apply(params, inputs, **kwargs):
+        return jnp.sum(apply_upstream(params, apply_funs, inputs, **kwargs))
+    return init, apply
+
+rng = jax.random.PRNGKey(10)
+
+
+init, apply = Plus(Plus(In(0),Cte(3)), Plus(Cte(4), Plus(Cte(2), In(1))))
+
+p = init(rng)
+print('params =')
+pprint(p)
+
+print('res =')
+pprint(apply(p, [50, 10] , rng=rng))
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
-
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     Archives     --
 #···············································································
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{       --     Constructing the Compute Graph from the GEG     --
-#···············································································
-# b()
-# h4('Gdf')
-# ag(gdf)
-
-# # Here we generate a dataframe that contains all the available functions for our current library
-# seqs = lib.sequestrons.merge(lib.sequestron_types, left_on='type', right_index=True)
-# seqs = ut.decode_json(seqs, ['output_part', 'output_category'])
-
-
-
-# unique_id = 0
-# def uniqueId():
-    # global unique_id
-    # unique_id += 1
-    # return unique_id - 1
-
-# # check if input_id is 
-# def isOutputOf(gdf_input_node, compute_nodes):
-    # res = [other for other in compute_nodes if gdf_input_node == other['gdf_output']]
-    # return res 
-
-# # make sure that a list has at least i elements and then assign val to the ith element
-# def set_list_item(lst, i, val):
-    # if len(lst) <= i:
-        # lst.extend([None] * (i - len(lst) + 1))
-    # lst[i] = val
-
-# newnodes = []
-# # first we add the sequestron nodes with a list of their gdf input nodes
-# for _,r in seqs.iterrows():
-    # nlvl = gdf[gdf.type == r.negative_level]
-    # nparts = nlvl[nlvl.content.apply(lambda x: r.negative_part in x)]
-    # plvl = gdf[gdf.type == r.positive_level]
-    # pparts = plvl[plvl.content.apply(lambda x: r.positive_part in x)]
-    # olvl = gdf[gdf.type == r.output_level]
-    # oparts = olvl[olvl.content.apply(lambda x: ut.isSubset(r.output_part,x))]
-    # if (len(nparts) > 0 and len(pparts) > 0):
-        # assert(len(pparts) == 1)
-        # assert(len(nparts) == 1)
-        # cnode = { 'id': uniqueId(), 'type' : f'sequestron_{r.type}', 
-                # 'gdf_input':[nparts.index[0],pparts.index[0]], 
-                # 'gdf_output':[oparts.index[0]], 
-                # 'input_from':[], 'output_to':[] }
-        # newnodes.append(cnode)
-
-# # we now add the output through a special output compute node
-# # which just assembles all the output proteins into one output vector
-
-# output_gene_nodes = gdf[gdf.is_output]
-# onode = { 'id': uniqueId(), 'type' : 'out', 'gdf_input':[], 'gdf_output':None, 'output_to':None, 'input_from':[] }
-# for i, r in output_gene_nodes.iterrows():
-    # onode['gdf_input'] += [i]
-# newnodes.append(onode)
-
-# # then for each input node, we need to go back up to the original DNA using translation
-# # and transcription nodes, making sure along the way to connect if it is actually also part 
-# # of a sequestron node
-# cg = []
-# while newnodes:
-    # n = newnodes.pop()
-    # if n['type'] != 'constant':
-        # # for every gene input of this compute node
-        # for i, n_inp in enumerate(n['gdf_input']):
-            # gn = gdf.loc[n_inp] # input gene
-            # other = isOutputOf(n_inp, cg + newnodes)
-            # print(f'For node {n["id"]}, gdf_input {n_inp} isOutput res = {other}')
-            # if other: # if this node's input is some other compute node's output
-                # set_list_item(n['input_from'],i,other[0]['id'])
-                # other[0]['output_to'] += [(n['id'], i)]
-            # else:
-                # nid = uniqueId()
-                # ntype = {'PRT':'translation','RNA':'transcription','DNA':'constant'}[gn.type]
-                # newn = {'id': nid, 'type':ntype, 
-                        # 'gdf_input':gn.predecessor, 'gdf_output':n_inp,
-                        # 'output_to':[(n['id'],i)], 'input_from':[]}
-                # newnodes.append(newn)
-                # n['input_from'] += [nid]
-    # cg += [n]
-
-# cdf = pd.DataFrame(cg).set_index('id').sort_index()
-# h4('Compute nodes:')
-# ag(cdf.astype(str))
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
