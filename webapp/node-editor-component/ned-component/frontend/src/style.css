@@ -16,6 +16,12 @@ body {
   border: none;
 }
 
+.input-node .react-flow__handle-bottom,
+.react-flow__handle-left{
+  background: none;
+  border: none;
+}
+
 .dna-list {
   display: inline-block;
   height: auto;

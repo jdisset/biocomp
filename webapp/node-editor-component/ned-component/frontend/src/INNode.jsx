@@ -3,6 +3,7 @@ import { Handle, Position } from "react-flow-renderer"
 
 const zeroPad = (num, places) => String(num).padStart(places, "0")
 function INNode(props) {
+  console.log(props.data)
   return (
     <div className="input-node">
       <svg version="1.1" viewBox="1108.75 -525.25 44.5 62.58349" width="44.5" height="62.58349">
@@ -12,11 +13,16 @@ function INNode(props) {
           strokeWidth=".5"
           fill="none"
         />
-        <text transform="translate(1114 -509.4791)" fill="black" x="10" y="11">
-			{zeroPad(props.data.id,2)}
+        <text transform="translate(1117 -510)" fill="black" x="10" y="11">
+          <tspan font-size="10" fontWeight="300" fill="black" x="0" y="9">
+			INPUT
+          </tspan>
+          <tspan font-size="12" fontWeight="300" fill="black" x="7" y="25">
+            {zeroPad(props.data.gdf_output, 2)}
+          </tspan>
         </text>
       </svg>
-      <Handle type="source" position={Position.Bottom} />
+		<Handle type="source" position={Position.Bottom} style={{bottom:10}}/>
     </div>
   )
 }

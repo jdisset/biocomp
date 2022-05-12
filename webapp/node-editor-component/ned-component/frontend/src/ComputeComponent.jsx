@@ -4,6 +4,7 @@ import TLNode from "./TLNode.jsx"
 import TCNode from "./TCNode.jsx"
 import INNode from "./INNode.jsx"
 import OUTNode from "./OUTNode.jsx"
+import CTENode from "./CTENode.jsx"
 import React, { ReactNode } from "react"
 import ReactFlow, {
   ReactFlowProvider,
@@ -19,7 +20,8 @@ const nodeTypes = {
   sequestron_RECOMBINASE: SEQNode,
   translation: TLNode,
   transcription: TCNode,
-  constant: INNode,
+  constant: CTENode,
+  in: INNode,
   out: OUTNode,
 }
 
