@@ -20,7 +20,7 @@ const nodeTypes = {
   sequestron_RECOMBINASE: SEQNode,
   translation: TLNode,
   transcription: TCNode,
-  constant: CTENode,
+  bias: CTENode,
   in: INNode,
   out: OUTNode,
 }
@@ -30,8 +30,8 @@ const typeDim = {
   sequestron_RECOMBINASE: { width: 100, height: 50 },
   translation: { width: 30, height: 50 },
   transcription: { width: 30, height: 50 },
-  constant: { width: 45, height: 63 },
-  out: { width: 20, height: 10 },
+  bias: { width: 45, height: 63 },
+  output: { width: 20, height: 10 },
 }
 
 function ComputeComponent(props) {
