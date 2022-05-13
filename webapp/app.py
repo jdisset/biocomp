@@ -87,7 +87,14 @@ def grnGraph(nodes, edges, key=None):
         _component_func(nodes=tnodes,edges=edges,output_type='GRN',key=key)
 
 def computeGraph(nodes, edges, key=None):
-    tnodes = [ut.updated_dict(n,{'data':{'id':n['id']}}) for n in nodes]
+    def filterType(n):
+        if n['type'] == 'input':
+            n['type'] = 'in'
+        if n['type'] == 'output':
+            n['type'] = 'out'
+        return n
+
+    tnodes = [ut.updated_dict(filterType(n),{'data':{'id':n['id']}}) for n in nodes]
     if not is_interactive():
         _component_func(nodes=tnodes,edges=edges,output_type='COMPUTE',key=key)
 
@@ -193,11 +200,11 @@ for i,r in gdf.iterrows():
 gdf.loc[~gdf.predecessor.astype(bool), 'predecessor'] = None
 
 
-# We explicit the part content of each node:
+# We explicitly describe the part content of each node:
 gdf['content'] = gdf.apply(lambda x: l1df.loc[x.l1_id].iloc[0][x.type], axis=1)
 gdf['content_type'] = gdf.apply(lambda x: tuple([lib.parts.loc[p][0] for p in x.content]), axis=1)
 
-# And finally add information about useful output of the whole graph:
+# And finally add information about the output of the whole graph:
 outputs = ['NeonGreen']
 
 def containsOutput(l,outputs):
@@ -210,8 +217,9 @@ gdf['is_output'] = False
 gdf.loc[gdf.type == 'PRT', 'is_output'] = gdf.loc[gdf.type == 'PRT'].l1_id.apply(
                 lambda x: containsOutput(l1df.loc[x].PRT.tolist()[0],outputs))
 
-gdf['is_input'] = False
-gdf.is_input.iloc[[0,1]] = True
+gdf['is_input'] = None
+gdf.is_input.iloc[0] = 0
+gdf.is_input.iloc[1] = 1
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -234,7 +242,7 @@ b()
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                 --     Consctruct Compute Graph     --
+# {{{             --     Consctructing the Compute Graph     --
 #···············································································
 import logging
 from rich.pretty import pprint
@@ -325,7 +333,7 @@ def removeShortcuts(nodes, root_id):
 
 newnodes = []
 output_gene_nodes = gdf[gdf.is_output]
-onode = GraphComputeNode(uniqueId(),'out',[],None)
+onode = GraphComputeNode(uniqueId(),'output',[],None)
 for i, r in output_gene_nodes.iterrows():
     onode.gdf_input += [i]
 newnodes.append(onode)
@@ -349,42 +357,45 @@ for _,r in seqs.iterrows():
 
 
 # then for each input node, we need to go back up to the original DNA using translation
-# and transcription nodes, making sure along the way to connect if it is actually also part 
-# of a sequestron node
+# and transcription nodes, making sure to connect it to relevant sequestron nodes along the way
 cg = []
-pprint(newnodes)
 
 while newnodes:
     n = newnodes.pop()
-    print('-'*120)
-    print('-'*120)
-    pprint(n)
-    if n.type != 'constant':
+    if n.type != 'bias':
         # for every gene input of this compute node
         for i, n_inp in enumerate(n.gdf_input):
             others = isOutputOf(n_inp, cg + newnodes)
             print(f'  n_inp = {n_inp}, isOutput = {others}')
             for other in others:
-                # set_list_item(n.input_from,i,other.id)
-                n.input_from += [other.id]
+                set_list_item(n.input_from,i,other.id)
+                # n.input_from += [other.id]
                 other.output_to += [(n.id, i)]
             if not others:
                 gn = gdf.loc[n_inp] # input gene
                 nid = uniqueId()
-                ntype = {'PRT':'translation','RNA':'transcription','DNA':'constant'}[gn.type]
+                ntype = {'PRT':'translation','RNA':'transcription','DNA':'bias'}[gn.type]
                 newn = GraphComputeNode(nid, ntype, gn.predecessor, int(n_inp))
                 newn.input_from = []
                 newn.output_to = [(n.id,i)]
                 newnodes.append(newn)
                 n.input_from += [int(nid)]
-                print('    created new node:',end =" ")
-                pprint(newn)
     cg += [n]
 
-removeShortcuts(cg,0)
+removeShortcuts(cg,0) # turns the graph back into a tree
 
 cdf = pd.DataFrame([n.toDict() for n in cg]).set_index('id').sort_index()
 
+# add input ids
+cdf['is_input'] = None
+for index, row in cdf.iterrows():
+    if row['type'] == 'bias':
+        input_id = gdf.at[row['gdf_output'], 'is_input']
+        if input_id is not None:
+            cdf.at[index, 'type'] = 'input'
+            cdf.at[index, 'is_input'] = input_id
+
+pprint(cdf)
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -393,10 +404,6 @@ cdf = pd.DataFrame([n.toDict() for n in cg]).set_index('id').sort_index()
 cdf.input_from = cdf.input_from.apply(lambda x: None if x is None else [int(e) for e in x])
 cdf.output_to = cdf.output_to.apply(lambda x: None if x is None else [(int(i),h) for i,h in x])
 
-for index, row in cdf.iterrows():
-    if row['type'] == 'constant':
-        if gdf.at[row['gdf_output'], 'is_input']:
-            cdf.at[index, 'type'] = 'in'
 
 nodes = [ {'id':str(i), 'type':n.type, 'data':n.to_dict()} for i,n in cdf.iterrows()]
 edges = [ { 'id': f'edge_{uniqueId()}', 'source': str(i), 'target': str(o), 'targetHandle':str(h)} for i,n in cdf.iterrows() if n.output_to for o,h in n.output_to ]
@@ -409,18 +416,27 @@ ag(cdf.astype(str))
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{         --     Experimenting with JAX and comptue trees     --
+# {{{         --     Definition of JAX compute nodes     --
 #···············································································
 
 import jax
 import jax.numpy as jnp
 
 
-def rate_init_continuous(rng, n, minval=0.0, maxval=1.0):
+DEFAULT_RNA_DEG_RATE = 1.0
+DEFAULT_PRT_DEG_RATE = 1.0
+
+DEFAULT_MIN_RATE = 0.0
+DEFAULT_MAX_RATE = 1.0
+
+DEFAULT_MIN_COPY_N = 0.0
+DEFAULT_MAX_COPY_N = 1.0
+
+def rate_init_continuous(rng, n, minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
     return jax.random.uniform(key = rng, shape=(n,), minval=minval, maxval=maxval, dtype=jnp.float32)
 
-def copy_n_init(rng, minval=0.0, maxval=1.0):
-    return jax.random.uniform(key = rng, shape=(1,), minval=minval, maxval=maxval, dtype=jnp.float32)[0]
+def copy_n_init(rng, minval=DEFAULT_MIN_COPY_N, maxval=DEFAULT_MAX_COPY_N):
+    return jax.random.uniform(key = rng, minval=minval, maxval=maxval, dtype=jnp.float32)
 
 
 # each node type is a function that returns 2 other functions:
@@ -429,9 +445,23 @@ def copy_n_init(rng, minval=0.0, maxval=1.0):
 #                       X, the inputs, is only useful for the input leaves
 
 
+CNODE = {}
+
+def debug(f):
+    def wrap(*args, **kwargs):
+        print(f'{f.__name__} called with args: ')
+        pprint([*args])
+        pprint({**kwargs})
+        return f(*args, **kwargs)
+    return wrap
+
+def compnode(f):
+    CNODE[f.__name__] = f
+    return f
+
 def apply_upstream(params, apply_funs, inputs, **kwargs):
     nbranches = len(apply_funs)
-    rng = kwargs.pop('rng', None)
+    rng = kwargs.pop('rng', None) # we transmit rngs upstream as some apply functions might need randomness
     rngs = random.split(rng, nbranches) if rng is not None else (None,) * nbranches
     return jnp.array([f(p, inputs, rng=r, **kwargs) for f, p, r in zip(apply_funs, params, rngs)])
 
@@ -441,38 +471,70 @@ def init_upstream(rng, init_funs):
     return [init(rng) for init, rng in zip(init_funs, rngs)]
 
 
-def Transcription(*branches):
+@compnode
+def transcription(*branches, deg_rate = DEFAULT_RNA_DEG_RATE):
     nbranches= len(branches)
     init_funs, apply_funs = zip(*branches)
     def init(rng): 
         return (rate_init_continuous(rng, nbranches), init_upstream(rng, init_funs))
     def apply(params, inputs, **kwargs):
-        (tc_rates, others) = params
-        return jnp.dot(apply_upstream(others, apply_funs, inputs, **kwargs), tc_rates)
+        (t_rates, others) = params
+        return jnp.dot(apply_upstream(others, apply_funs, inputs, **kwargs), t_rates) / deg_rate
     return init, apply
 
-def Bias(v=1.0):
+@compnode
+def translation(*branches, deg_rate = DEFAULT_PRT_DEG_RATE):
+    return transcription(*branches, deg_rate=deg_rate)
+
+@compnode
+def sequestron_ERN(neg, pos):
+    def init(rng): 
+        return init_upstream(rng, (neg[0], pos[0]))
+    def apply(params, inputs, **kwargs):
+        res = apply_upstream(params, (neg[1], pos[1]), inputs, **kwargs)
+        return jnp.maximum(0, res[1] - res[0])
+    return init, apply
+
+@compnode
+def sequestron_RECOMBINASE(neg, pos):
+    return sequestron_ERN(neg,pos)
+
+@compnode
+def bias(*_):
     def init_fun(rng):
         return copy_n_init(rng)
     def apply_fun(copy_n, inputs, **kwargs):
-        return v * copy_n
+        return copy_n
     return init_fun, apply_fun
 
-def In(id):
+@compnode
+def input(id):
     def init_fun(rng):
         return copy_n_init(rng)
     def apply_fun(copy_n, inputs, **kwargs):
         return inputs[id] * copy_n
     return init_fun, apply_fun
 
-def Cte(v=1.0):
+
+@compnode
+def output(*branches): # simply returns the vector of results from all branches
+    init_funs, apply_funs = zip(*branches)
+    def init(rng): 
+        return init_upstream(rng, init_funs)
+    def apply(params, inputs, **kwargs):
+        return apply_upstream(params, apply_funs, inputs, **kwargs)
+    return init, apply
+
+@compnode
+def constant(v=1.0):
     def init_fun(rng):
         return None
     def apply_fun(*args, **kwargs):
         return v
     return init_fun, apply_fun
 
-def Plus(*branches):
+@compnode
+def plus(*branches):
     init_funs, apply_funs = zip(*branches)
     def init(rng): 
         return init_upstream(rng, init_funs)
@@ -480,20 +542,50 @@ def Plus(*branches):
         return jnp.sum(apply_upstream(params, apply_funs, inputs, **kwargs))
     return init, apply
 
+
+
+
+init, apply = CNODE['output'](
+                CNODE['plus'](CNODE['constant'](2),constant(5),input(0)),
+                CNODE['input'](1),
+                plus(input(2),translation(bias(),input(3)))
+                )
+
+
 rng = jax.random.PRNGKey(10)
-
-
-init, apply = Plus(Plus(In(0),Cte(3)), Plus(Cte(4), Plus(Cte(2), In(1))))
-
 p = init(rng)
-print('params =')
-pprint(p)
 
-print('res =')
-pprint(apply(p, [50, 10] , rng=rng))
+apply(p,[0,1,2,3])
+
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{              --     Building the JAX compute tree     --
+#···············································································
+
+
+
+outNode = cdf[cdf.type=='output'].iloc[0]
+
+def buildTree(node):
+    if node.input_from: # recursive case: any non-input node
+        branches = cdf.loc[node.input_from]
+        return CNODE[node.type](*[buildTree(b) for _,b in branches.iterrows()])
+    return CNODE[node.type](node.is_input) # terminal node
+
+
+init, compute = buildTree(outNode)
+
+rng = jax.random.PRNGKey(1)
+p = init(rng)
+pprint(p)
+compute(p, [0.2, 0.1])
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
