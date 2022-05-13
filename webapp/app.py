@@ -564,11 +564,6 @@ apply(p,[0,1,2,3])
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{              --     Building the JAX compute tree     --
 #···············································································
-
-
-
-outNode = cdf[cdf.type=='output'].iloc[0]
-
 def buildTree(node):
     if node.input_from: # recursive case: any non-input node
         branches = cdf.loc[node.input_from]
@@ -576,15 +571,63 @@ def buildTree(node):
     return CNODE[node.type](node.is_input) # terminal node
 
 
-init, compute = buildTree(outNode)
+outNode = cdf[cdf.type=='output'].iloc[0]
+
+init_tree, apply_fun = buildTree(outNode)
 
 rng = jax.random.PRNGKey(1)
-p = init(rng)
+p = init_tree(rng)
 pprint(p)
-compute(p, [0.2, 0.1])
+
+compute = jit(apply_fun)
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                         --     Training     --
+#···············································································
+from functools import partial
+from jax import jit, grad
+from jax.example_libraries.optimizers import adam
+from time import time
+
+init, update, get_params = adam(step_size=1e-1)
+update = jit(update)
+get_params = jit(get_params)
+
+def mseloss(params, model, x, y_true):
+    y_preds = vmap(partial(model, params))(x)
+    return jnp.mean(jnp.power(y_preds - y_true, 2))
+
+dmseloss = grad(mseloss)
+
+def step(i, state, dlossfunc, get_params, update, model, x, y_true):
+    params = get_params(state)
+    g = dlossfunc(params, model, x, y_true)
+    state = update(i, g, state)
+    return state
+
+X = jnp.array([[1.0,1.0], [1.0,1.0]])
+y_true = jnp.array([[0.5], [0.5]])
+step_partial = partial(step, get_params=get_params, dlossfunc=dmseloss, update=update, model=compute, x=X, y_true=y_true)
+step_partial_jit = jit(step_partial)
+
+start = time()
+state = init(p)
+pprint(compute(p,[1.0,1.0]))
+for i in range(1000):
+    state = step_partial_jit(i, state)
+end = time()
+print(end - start)
+params = get_params(state)
+pprint(compute(params,[1.0,1.0]))
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
 
 
 
