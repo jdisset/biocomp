@@ -6,84 +6,70 @@
 PRINT_DATABASE = True
 SHEET_KEY = '1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQAzME'
 
-def is_interactive():
-    try:
-        shell = get_ipython().__class__.__name__
-        if shell == 'ZMQInteractiveShell':
-            return True   # Jupyter notebook or qtconsole
-        elif shell == 'TerminalInteractiveShell':
-            return True # Terminal running IPython
-        if not hasattr(sys, 'ps1'):
-            return True;
-        else:
-            return False  # Other type (?)
-    except NameError:
-        return False      # Probably standard Python interpreter
 
 # -- imports
 import streamlit as st
 st.set_page_config(layout="wide")
 
-# if is_interactive():
-    # %load_ext autoreload
-    # %autoreload 2
-
-import pandas as pd
-import networkx as nx
-import matplotlib.pyplot as plt
-import numpy as np
-from enum import Enum
-import sys
-import os
-from st_aggrid import AgGrid
-
-try: print(__file__)
-except NameError: __file__ = ''
-parent_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(parent_dir+'/../')
+%load_ext autoreload
+%autoreload 2
 
 import utils as ut
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
 from types import SimpleNamespace
 
+from tqdm import tqdm
+
+# JAX stuff
+import jax
 import jax.numpy as jnp
-from jax import grad, jit, vmap
-from jax import random
+from jax import grad, jit, vmap, random, lax, tree_map
+from jax import tree_util as pytree
+from jax.tree_util import Partial as partial
+from jax.experimental import host_callback
+from jax.example_libraries.optimizers import adam
+from time import time
 
-from rich.logging import RichHandler
+# Rich logging
+from rich import print
+from rich.pretty import Pretty
 
+import matplotlib.pyplot as plt
 
-# -- streamlit utils
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{              --     Streamlit utils and components     --
+#···············································································
+from st_aggrid import AgGrid
 
 def md(t):
     return st.markdown(t)
-
 def h1(t):
     return md(f'# {t}')
-
 def h2(t):
     return md(f'## {t}')
-
 def h3(t):
     return md(f'### {t}')
-
 def h4(t):
     return md(f'#### {t}')
-
 def b():
     return md('---')
-
 def ag(df):
     rowH = 29
     AgGrid(df.reset_index(), fit_columns_on_grid_load=True, theme='light', height=(len(df)+1)*rowH)
 
 # -- custom streamlit components
 import streamlit.components.v1 as components
-if not is_interactive():
+if not ut.is_interactive():
     _component_func = components.declare_component("ned_component", url="http://localhost:3001")
 
 def grnGraph(nodes, edges, key=None):
     tnodes = [ut.updated_dict(n,{'data':{'id':n['id']}}) for n in nodes]
-    if not is_interactive():
+    if not ut.is_interactive():
         _component_func(nodes=tnodes,edges=edges,output_type='GRN',key=key)
 
 def computeGraph(nodes, edges, key=None):
@@ -95,12 +81,12 @@ def computeGraph(nodes, edges, key=None):
         return n
 
     tnodes = [ut.updated_dict(filterType(n),{'data':{'id':n['id']}}) for n in nodes]
-    if not is_interactive():
+    if not ut.is_interactive():
         _component_func(nodes=tnodes,edges=edges,output_type='COMPUTE',key=key)
 
 def dnaOutput(nodes, key=None):
     tnodes = [ut.updated_dict(n,{'data':{'id':n['id']}}) for n in nodes if n['type'] == 'dna']
-    if not is_interactive():
+    if not ut.is_interactive():
         _component_func(nodes=tnodes,output_type='DNA',key=key)
 
 
@@ -244,9 +230,6 @@ b()
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{             --     Consctructing the Compute Graph     --
 #···············································································
-import logging
-from rich.pretty import pprint
-
 
 # Here we generate a dataframe that contains all the available functions for our current library
 seqs = lib.sequestrons.merge(lib.sequestron_types, left_on='type', right_index=True)
@@ -347,8 +330,8 @@ for _,r in seqs.iterrows():
     olvl = gdf[gdf.type == r.output_level]
     oparts = olvl[olvl.content.apply(lambda x: ut.isSubset(r.output_part,x))]
     if (len(nparts) > 0 and len(pparts) > 0):
-        # if (len(nparts) > 1): pprint(nparts)
-        if (len(pparts) > 1): pprint(pparts)
+        # if (len(nparts) > 1): print(nparts)
+        if (len(pparts) > 1): print(pparts)
         assert(len(pparts) == 1)
         assert(len(nparts) == 1)
         cnode = GraphComputeNode(uniqueId(), f'sequestron_{r.type}', [int(nparts.index[0]),int(pparts.index[0])], int(oparts.index[0]))
@@ -395,7 +378,7 @@ for index, row in cdf.iterrows():
             cdf.at[index, 'type'] = 'input'
             cdf.at[index, 'is_input'] = input_id
 
-pprint(cdf)
+print(cdf)
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -418,10 +401,6 @@ ag(cdf.astype(str))
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{         --     Definition of JAX compute nodes     --
 #···············································································
-
-import jax
-import jax.numpy as jnp
-
 
 DEFAULT_RNA_DEG_RATE = 1.0
 DEFAULT_PRT_DEG_RATE = 1.0
@@ -450,8 +429,8 @@ CNODE = {}
 def debug(f):
     def wrap(*args, **kwargs):
         print(f'{f.__name__} called with args: ')
-        pprint([*args])
-        pprint({**kwargs})
+        print([*args])
+        print({**kwargs})
         return f(*args, **kwargs)
     return wrap
 
@@ -543,91 +522,96 @@ def plus(*branches):
     return init, apply
 
 
-
-
-init, apply = CNODE['output'](
-                CNODE['plus'](CNODE['constant'](2),constant(5),input(0)),
-                CNODE['input'](1),
-                plus(input(2),translation(bias(),input(3)))
-                )
-
-
-rng = jax.random.PRNGKey(10)
-p = init(rng)
-
-apply(p,[0,1,2,3])
-
-
+def buildTree(cdf):
+    outNode = cdf[cdf.type=='output'].iloc[0]
+    def buildImpl(node):
+        if node.input_from: # recursive case: any non-input node
+            branches = cdf.loc[node.input_from]
+            return CNODE[node.type](*[buildImpl(b) for _,b in branches.iterrows()])
+        return CNODE[node.type](node.is_input) # terminal node
+    init_tree, apply_fun = buildImpl(outNode)
+    return (init_tree, jit(apply_fun))
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{              --     Building the JAX compute tree     --
+# {{{                      --     Training tools     --
 #···············································································
-def buildTree(node):
-    if node.input_from: # recursive case: any non-input node
-        branches = cdf.loc[node.input_from]
-        return CNODE[node.type](*[buildTree(b) for _,b in branches.iterrows()])
-    return CNODE[node.type](node.is_input) # terminal node
+from jax import value_and_grad
 
 
-outNode = cdf[cdf.type=='output'].iloc[0]
+def base_step(i, state, dlossfunc, get_params, update, model, x, y_true):
+    params = get_params(state)
+    loss, g = dlossfunc(params, model, x, y_true)
+    return (update(i, g, state), loss)
 
-init_tree, apply_fun = buildTree(outNode)
+def mseloss(params, model, x, y_true):
+    y_preds = vmap(pytree.Partial(model, params))(x)
+    return jnp.mean(jnp.power(y_preds - y_true, 2))
 
-rng = jax.random.PRNGKey(1)
-p = init_tree(rng)
-pprint(p)
+dmseloss = value_and_grad(mseloss)
 
-compute = jit(apply_fun)
+def make_training_start(params_initializer, state_initializer, stepfunc, n_steps):
+
+    @ut.tqdm_scan(n_steps)
+    def scannable_step(previous_state, iteration):
+        new_state, loss = stepfunc(iteration, previous_state)
+        return new_state, loss
+
+    def train_one_start(key):
+        params = params_initializer(key)
+        initial_state =state_initializer(params)
+        final_state, states_history = lax.scan(scannable_step, initial_state, np.arange(n_steps))
+        return final_state, states_history
+    return train_one_start
 
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     Training     --
 #···············································································
-from functools import partial
-from jax import jit, grad
-from jax.example_libraries.optimizers import adam
-from time import time
 
-init, update, get_params = adam(step_size=1e-1)
-update = jit(update)
-get_params = jit(get_params)
+# training parameters
+N_INITIALIZATIONS = 20
+N_TRAINING_STEPS = 500
+LEARNING_RATE = 1e-2
 
-def mseloss(params, model, x, y_true):
-    y_preds = vmap(partial(model, params))(x)
-    return jnp.mean(jnp.power(y_preds - y_true, 2))
+rng = jax.random.PRNGKey(42)
+initialization_keys = random.split(rng, N_INITIALIZATIONS)
 
-dmseloss = grad(mseloss)
+# training data
+X = jax.random.uniform(key = rng, shape=(500,2))
+y_true = jax.random.uniform(key = rng, minval=0.5, maxval=0.6, shape=(500,1))
 
-def step(i, state, dlossfunc, get_params, update, model, x, y_true):
-    params = get_params(state)
-    g = dlossfunc(params, model, x, y_true)
-    state = update(i, g, state)
-    return state
+# generate compute tree functions from dataframe
+init_params, model = buildTree(cdf)
 
-X = jnp.array([[1.0,1.0], [1.0,1.0]])
-y_true = jnp.array([[0.5], [0.5]])
-step_partial = partial(step, get_params=get_params, dlossfunc=dmseloss, update=update, model=compute, x=X, y_true=y_true)
-step_partial_jit = jit(step_partial)
+# compiled training functions
+opt_init, update, get_params = adam(step_size=LEARNING_RATE) # optimizer
+step = jit(partial(base_step, get_params=get_params, dlossfunc=dmseloss, update=update, model=model, x=X, y_true=y_true))
+train_fun = make_training_start(init_params, opt_init, step, N_TRAINING_STEPS)
 
+# actual training "loop"
 start = time()
-state = init(p)
-pprint(compute(p,[1.0,1.0]))
-for i in range(1000):
-    state = step_partial_jit(i, state)
+final_states, losses_histories = vmap(train_fun)(initialization_keys)
 end = time()
 print(end - start)
-params = get_params(state)
-pprint(compute(params,[1.0,1.0]))
+
+# result analysis
+final_params = ut.tree_unstack(get_params(final_states))
+
+for l in losses_histories:
+    plt.plot(l)
+
+
+plt.show()
+
+
 
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 
 
