@@ -139,10 +139,7 @@ def tqdm_scan(num_samples, message=None):
             # message = f"Running for {num_samples:,} iterations"
     tqdm_bars = {}
 
-    if num_samples > 20:
-        print_rate = int(num_samples / 100)
-    else:
-        print_rate = 1
+    print_rate = max(1,int(num_samples / 100))
     remainder = num_samples % print_rate
 
     def _define_tqdm(arg, transform):

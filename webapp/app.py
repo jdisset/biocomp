@@ -556,7 +556,7 @@ def make_training_start(params_initializer, state_initializer, stepfunc, n_steps
     @ut.tqdm_scan(n_steps)
     def scannable_step(previous_state, iteration):
         new_state, loss = stepfunc(iteration, previous_state)
-        return new_state, loss
+        return new_state, (loss, previous_state)
 
     def train_one_start(key):
         params = params_initializer(key)
@@ -573,8 +573,8 @@ def make_training_start(params_initializer, state_initializer, stepfunc, n_steps
 #···············································································
 
 # training parameters
-N_INITIALIZATIONS = 20
-N_TRAINING_STEPS = 500
+N_INITIALIZATIONS = 2
+N_TRAINING_STEPS = 50
 LEARNING_RATE = 1e-2
 
 rng = jax.random.PRNGKey(42)
@@ -594,17 +594,19 @@ train_fun = make_training_start(init_params, opt_init, step, N_TRAINING_STEPS)
 
 # actual training "loop"
 start = time()
-final_states, losses_histories = vmap(train_fun)(initialization_keys)
+final_states, loss_state_histories = vmap(train_fun)(initialization_keys)
 end = time()
 print(end - start)
 
 # result analysis
+
 final_params = ut.tree_unstack(get_params(final_states))
 
-for l in losses_histories:
+losses, stacked_states = loss_state_histories
+param_histories = [ut.tree_unstack(t) for t in ut.tree_unstack(get_params(stacked_states))]
+
+for l in losses:
     plt.plot(l)
-
-
 plt.show()
 
 
