@@ -192,11 +192,12 @@ def tqdm_scan(num_samples, message=None):
         This means that `iter_num` is the current iteration number
         """
 
+        @jit
         def wrapper_progress_bar(carry, x):
             if type(x) is tuple:
                 iter_num, *_ = x
             else:
-                iter_num = x   
+                iter_num = x
             _update_progress_bar(iter_num)
             result = func(carry, x)
             return close_tqdm(result, iter_num)
@@ -205,13 +206,25 @@ def tqdm_scan(num_samples, message=None):
 
     return _progress_bar_scan
 
+@jit
+def tree_shape(t):
+    return pytree.tree_map(lambda x : x.shape, t)
 
+@jit
+def tree_append(t,e):
+    fa,tt = pytree.tree_flatten(t)
+    fb,te = pytree.tree_flatten(e)
+    assert(te == tt)
+    return pytree.tree_unflatten(tt,[jnp.concatenate([a,jnp.array([b])]) for a,b in zip(fa,fb)])
+
+@jit
 def get_pytree(t, i):
     return tree_map(lambda x: x[i], t)
 
 def param_unstack(t, N):
-    return [tree_map(lambda x: x[i], t) for i in range(N)]
+    return [get_pytree(t,i) for i in range(N)]
 
+@jit
 def tree_stack(trees):
     """Takes a list of trees and stacks every corresponding leaf.
     For example, given two trees ((a, b), c) and ((a', b'), c'), returns
@@ -230,7 +243,7 @@ def tree_stack(trees):
     result_leaves = [jnp.stack(l) for l in grouped_leaves]
     return treedef_list[0].unflatten(result_leaves)
 
-
+@jit
 def tree_unstack(tree):
     """Takes a tree and turns it into a list of trees. Inverse of tree_stack.
     For example, given a tree ((a, b), c), where a, b, and c all have first

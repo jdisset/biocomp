@@ -11,8 +11,8 @@ SHEET_KEY = '1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQAzME'
 import streamlit as st
 st.set_page_config(layout="wide")
 
-%load_ext autoreload
-%autoreload 2
+# %load_ext autoreload
+# %autoreload 2
 
 import utils as ut
 
@@ -137,12 +137,18 @@ def getPrt(dna):
 
 # l1_DNAs=[['hEF1a','NeonGreen','CasE_recog_5p'],['hEF1a','CasE'],['hEF1a', 'Csy4'],['hEF1a','NeonGreen','Csy4_recog_5p'],['hEF1a','NeonGreen','CasE_recog_5p']]
 
+# l1_DNAs= [
+        # ['hEF1a', 'CasE'],
+        # ['hEF1a', 'Csy4'],
+        # ['hEF1a', 'PhiC31', 'Csy4_recog_5p'],
+        # ['hEF1a', 'PhiC31RDF','CasE_recog_5p'],
+        # ['hEF1a', 'attP', 'NeonGreen', 'attB']]
+
 l1_DNAs= [
         ['hEF1a', 'CasE'],
-        ['hEF1a', 'Csy4'],
-        ['hEF1a', 'PhiC31', 'Csy4_recog_5p'],
-        ['hEF1a', 'PhiC31RDF','CasE_recog_5p'],
-        ['hEF1a', 'attP', 'NeonGreen', 'attB']]
+        ['hEF1a', 'NeonGreen','CasE_recog_5p']]
+
+l1_DNAs= [['hEF1a', 'NeonGreen']]
 
 l1 = [{'DNA':tuple(d), 'RNA':getRna(d), 'PRT':getPrt(d)} for d in l1_DNAs]
 l1df = pd.DataFrame(l1)
@@ -351,8 +357,8 @@ while newnodes:
             others = isOutputOf(n_inp, cg + newnodes)
             print(f'  n_inp = {n_inp}, isOutput = {others}')
             for other in others:
-                set_list_item(n.input_from,i,other.id)
-                # n.input_from += [other.id]
+                # set_list_item(n.input_from,i,other.id)
+                n.input_from += [other.id]
                 other.output_to += [(n.id, i)]
             if not others:
                 gn = gdf.loc[n_inp] # input gene
@@ -422,6 +428,8 @@ def copy_n_init(rng, minval=DEFAULT_MIN_COPY_N, maxval=DEFAULT_MAX_COPY_N):
 # - init(rng, n_inputs) -> returns the parameters (this node, others)
 # - apply(params, X) -> returns the value of the compute node  
 #                       X, the inputs, is only useful for the input leaves
+# - assign(params, dic) -> assign the param values to the dict[key] node
+#TODO: add constrain functions to add parameter constraints?
 
 
 CNODE = {}
@@ -438,88 +446,107 @@ def compnode(f):
     CNODE[f.__name__] = f
     return f
 
+def init_upstream(rng, init_funs):
+    nbranches = len(init_funs)
+    rngs = random.split(rng, nbranches)
+    return [init(rng) for init, rng in zip(init_funs, rngs)]
+
 def apply_upstream(params, apply_funs, inputs, **kwargs):
     nbranches = len(apply_funs)
     rng = kwargs.pop('rng', None) # we transmit rngs upstream as some apply functions might need randomness
     rngs = random.split(rng, nbranches) if rng is not None else (None,) * nbranches
     return jnp.array([f(p, inputs, rng=r, **kwargs) for f, p, r in zip(apply_funs, params, rngs)])
 
-def init_upstream(rng, init_funs):
-    nbranches = len(init_funs)
-    rngs = random.split(rng, nbranches)
-    return [init(rng) for init, rng in zip(init_funs, rngs)]
+def assign_upstream(params, assign_funs, D):
+    for f,p in zip(assign_funs, params):
+        f(p,D)
 
 
 @compnode
-def transcription(*branches, deg_rate = DEFAULT_RNA_DEG_RATE):
+def transcription(*branches, deg_rate = DEFAULT_RNA_DEG_RATE, nid=None):
     nbranches= len(branches)
-    init_funs, apply_funs = zip(*branches)
+    init_funs, apply_funs, assign_funs = zip(*branches)
+
     def init(rng): 
         return (rate_init_continuous(rng, nbranches), init_upstream(rng, init_funs))
+
     def apply(params, inputs, **kwargs):
-        (t_rates, others) = params
+        t_rates, others = params
         return jnp.dot(apply_upstream(others, apply_funs, inputs, **kwargs), t_rates) / deg_rate
-    return init, apply
+
+    def assign(params, D):
+        t_rates, others = params
+        if nid is not None:
+            D[nid] = {'tr_rates':t_rates}
+        assign_upstream(others, assign_funs, D)
+
+    return init, apply, assign
 
 @compnode
-def translation(*branches, deg_rate = DEFAULT_PRT_DEG_RATE):
-    return transcription(*branches, deg_rate=deg_rate)
+def translation(*branches, deg_rate = DEFAULT_PRT_DEG_RATE, **kwargs):
+    return transcription(*branches, deg_rate=deg_rate, **kwargs)
 
 @compnode
-def sequestron_ERN(neg, pos):
+def sequestron_ERN(neg, pos, nid=None):
     def init(rng): 
         return init_upstream(rng, (neg[0], pos[0]))
+
     def apply(params, inputs, **kwargs):
         res = apply_upstream(params, (neg[1], pos[1]), inputs, **kwargs)
         return jnp.maximum(0, res[1] - res[0])
-    return init, apply
+
+    def assign(params, D):
+        assign_upstream(params, (neg[1], pos[1]), D)
+
+    return init, apply, assign
 
 @compnode
-def sequestron_RECOMBINASE(neg, pos):
-    return sequestron_ERN(neg,pos)
+def sequestron_RECOMBINASE(neg, pos, **kwargs):
+    return sequestron_ERN(neg, pos, **kwargs)
 
 @compnode
-def bias(*_):
-    def init_fun(rng):
+def bias(*_, nid=None):
+    def init(rng):
         return copy_n_init(rng)
-    def apply_fun(copy_n, inputs, **kwargs):
+
+    def apply(copy_n, inputs, **kwargs):
         return copy_n
-    return init_fun, apply_fun
+
+    def assign(copy_n, D):
+        if nid is not None:
+            D[nid] = {'copy_number':copy_n}
+
+    return init, apply, assign
 
 @compnode
-def input(id):
-    def init_fun(rng):
+def input(id, nid=None):
+    def init(rng):
         return copy_n_init(rng)
-    def apply_fun(copy_n, inputs, **kwargs):
+
+    def apply(copy_n, inputs, **kwargs):
         return inputs[id] * copy_n
-    return init_fun, apply_fun
+
+    def assign(copy_n, D):
+        if nid is not None:
+            D[nid] = {'copy_number':copy_n}
+
+    return init, apply, assign
 
 
 @compnode
-def output(*branches): # simply returns the vector of results from all branches
-    init_funs, apply_funs = zip(*branches)
+def output(*branches, nid=None): # simply returns the vector of results from all branches
+    init_funs, apply_funs, assign_funs = zip(*branches)
+
     def init(rng): 
         return init_upstream(rng, init_funs)
+
     def apply(params, inputs, **kwargs):
         return apply_upstream(params, apply_funs, inputs, **kwargs)
-    return init, apply
 
-@compnode
-def constant(v=1.0):
-    def init_fun(rng):
-        return None
-    def apply_fun(*args, **kwargs):
-        return v
-    return init_fun, apply_fun
+    def assign(params, D):
+        assign_upstream(params, assign_funs, D)
 
-@compnode
-def plus(*branches):
-    init_funs, apply_funs = zip(*branches)
-    def init(rng): 
-        return init_upstream(rng, init_funs)
-    def apply(params, inputs, **kwargs):
-        return jnp.sum(apply_upstream(params, apply_funs, inputs, **kwargs))
-    return init, apply
+    return init, apply, assign
 
 
 def buildTree(cdf):
@@ -527,18 +554,17 @@ def buildTree(cdf):
     def buildImpl(node):
         if node.input_from: # recursive case: any non-input node
             branches = cdf.loc[node.input_from]
-            return CNODE[node.type](*[buildImpl(b) for _,b in branches.iterrows()])
-        return CNODE[node.type](node.is_input) # terminal node
-    init_tree, apply_fun = buildImpl(outNode)
-    return (init_tree, jit(apply_fun))
+            return CNODE[node.type](*[buildImpl(b) for _,b in branches.iterrows()], nid=node.name)
+        return CNODE[node.type](node.is_input, nid=node.name) # terminal node
+    init_tree, apply_fun, assign = buildImpl(outNode)
+    return (init_tree, jit(apply_fun), assign)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                      --     Training tools     --
+# {{{                      --     Training functions --
 #···············································································
 from jax import value_and_grad
-
 
 def base_step(i, state, dlossfunc, get_params, update, model, x, y_true):
     params = get_params(state)
@@ -552,8 +578,8 @@ def mseloss(params, model, x, y_true):
 dmseloss = value_and_grad(mseloss)
 
 def make_training_start(params_initializer, state_initializer, stepfunc, n_steps):
-
-    @ut.tqdm_scan(n_steps)
+    # print("Compiling..")
+    @ut.tqdm_scan(n_steps, 'Training model')
     def scannable_step(previous_state, iteration):
         new_state, loss = stepfunc(iteration, previous_state)
         return new_state, (loss, previous_state)
@@ -561,9 +587,36 @@ def make_training_start(params_initializer, state_initializer, stepfunc, n_steps
     def train_one_start(key):
         params = params_initializer(key)
         initial_state =state_initializer(params)
-        final_state, states_history = lax.scan(scannable_step, initial_state, np.arange(n_steps))
-        return final_state, states_history
+        final_state, states_and_losses_history = lax.scan(scannable_step, initial_state, np.arange(n_steps))
+        losses, sthists = states_and_losses_history
+        return (losses, ut.tree_append(sthists, final_state))
+
     return train_one_start
+
+# training parameters
+N_INITIALIZATIONS = 20
+N_TRAINING_STEPS = 500
+LEARNING_RATE = 1e-2
+
+def trainComputeGraph(cdf, key, X, y_true, learning_rate = LEARNING_RATE, n_init = N_INITIALIZATIONS, n_steps = N_TRAINING_STEPS):
+    initialization_keys = random.split(key, n_init)
+
+    # generate compute tree functions from dataframe
+    init_params, model, assign = buildTree(cdf)
+
+    # compiled training functions
+    opt_init, update, get_params = adam(step_size=learning_rate) # optimizer
+    step = jit(partial(base_step, get_params=get_params, dlossfunc=dmseloss, update=update, model=model, x=X, y_true=y_true))
+    train_fun = make_training_start(init_params, opt_init, step, n_steps)
+
+    # actual training "loop"
+    start = time()
+    loss_state_histories = vmap(train_fun)(initialization_keys)
+    end = time()
+    print('Trained in',end - start)
+
+    losses, stacked_states = loss_state_histories
+    return (get_params(stacked_states), losses, assign)
 
 
 #                                                                            }}}
@@ -571,46 +624,33 @@ def make_training_start(params_initializer, state_initializer, stepfunc, n_steps
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     Training     --
 #···············································································
-
-# training parameters
-N_INITIALIZATIONS = 2
-N_TRAINING_STEPS = 50
-LEARNING_RATE = 1e-2
-
-rng = jax.random.PRNGKey(42)
-initialization_keys = random.split(rng, N_INITIALIZATIONS)
-
 # training data
-X = jax.random.uniform(key = rng, shape=(500,2))
-y_true = jax.random.uniform(key = rng, minval=0.5, maxval=0.6, shape=(500,1))
+key = jax.random.PRNGKey(42)
+X = jax.random.uniform(key = key, shape=(500,2))
+y_true = jax.random.uniform(key = key, minval=0.5, maxval=0.6, shape=(500,1))
 
-# generate compute tree functions from dataframe
-init_params, model = buildTree(cdf)
+stacked_params, losses, assign_f = trainComputeGraph(cdf, key, X, y_true,
+                                            n_init=2, n_steps=100,
+                                            learning_rate=0.01)
 
-# compiled training functions
-opt_init, update, get_params = adam(step_size=LEARNING_RATE) # optimizer
-step = jit(partial(base_step, get_params=get_params, dlossfunc=dmseloss, update=update, model=model, x=X, y_true=y_true))
-train_fun = make_training_start(init_params, opt_init, step, N_TRAINING_STEPS)
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                 --     Adding parameters to CDF    --
+#···············································································
 
-# actual training "loop"
-start = time()
-final_states, loss_state_histories = vmap(train_fun)(initialization_keys)
-end = time()
-print(end - start)
+best_run = np.argmin(losses[:,-1])
+best_losses = losses[best_run]
+stacked_best = ut.get_pytree(stacked_params, best_run)
+best_params = ut.get_pytree(stacked_best,len(best_losses))
+# best_hist = ut.param_unstack(stacked_best, len(best_loss)+1)
 
-# result analysis
+print(best_params)
 
-final_params = ut.tree_unstack(get_params(final_states))
+bestD = {}
+assign_f(best_params, bestD)
 
-losses, stacked_states = loss_state_histories
-param_histories = [ut.tree_unstack(t) for t in ut.tree_unstack(get_params(stacked_states))]
-
-for l in losses:
-    plt.plot(l)
-plt.show()
-
-
-
+print(bestD)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -620,6 +660,31 @@ plt.show()
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     Archives     --
 #···············································································
+print(final_params)
+onep = ut.tree_unstack(final_params)[0]
+
+
+fl,t = jax.tree_util.tree_flatten(final_params)
+op,ot = jax.tree_util.tree_flatten(onep)
+
+print(ot)
+print(fl)
+print(op)
+print([jnp.append(a,b) if b.ndim == 0 else jnp.vstack((a,b)) for a,b in zip(fl,op)])
+
+merged = [jnp.concatenate([a,jnp.array([b])]) for a,b in zip(fl,op)]
+
+print([jnp.vstack((a,b)) for a,b in zip(fl,op)])
+
+jnp.append(jnp.array([1.0,2.0]), jnp.array(1.0))
+jnp.concatenate((jnp.array([[[1.0]]]), jnp.array([[1.0]])))
+jnp.array(1.0).ndim
+
+print(jax.tree_util.tree_unflatten(t,fl))
+jax.tree_util.tree_all(final_params)
+
+ut.tree_stack()
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
