@@ -140,6 +140,10 @@ body {
 
 /* ----------------------------------- */
 
+.react-flow__edge-textwrapper{
+	margin-left:30px;
+}
+
 .input-node,
 .transcription-node,
 .translation-node,
@@ -168,4 +172,11 @@ body {
   border: 0.5px solid black;
   border-radius: 5px;
   margin-bottom: 12px;
+}
+.copy_number{
+
+position:relative;
+z-index:10;
+left: 30px;
+top: -78px;
 }

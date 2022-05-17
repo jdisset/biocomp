@@ -6,6 +6,7 @@ import collections.abc
 import pandas as pd
 import json
 import sys
+import copy
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                    --     random misc stuff     --
@@ -46,14 +47,16 @@ def updated_dict(d1, d2):
         if type(val) == dict:
             if key in d2 and type(d2[key] == dict):
                 res[key] = updated_dict(d1[key], d2[key])
+            else:
+                res[key] = copy.deepcopy(d1[key])
         else:
             if key in d2:
-                res[key] = d2[key]
+                res[key] = copy.deepcopy(d2[key])
             else:
-                res[key] = d1[key]
+                res[key] = copy.deepcopy(d1[key])
     for key, val in d2.items():
         if not key in d1:
-            res[key] = val
+            res[key] = copy.deepcopy(val)
     return res
 
 def decode_json(df, cols):

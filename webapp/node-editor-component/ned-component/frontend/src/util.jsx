@@ -1,6 +1,24 @@
 import dagre from "dagre"
 
+let colormap = require("colormap")
+const NCOLORS = 100
+const colors = colormap({
+  colormap: [
+    { index: 0.0, rgb: [41, 41, 41] },
+    { index: 0.33, rgb: [86, 34, 50] },
+    { index: 0.67, rgb: [173, 42, 92] },
+    { index: 1.0, rgb: [233, 43, 71] },
+  ],
+  nshades: NCOLORS,
+  format: "hex",
+  alpha: 1,
+})
+
 class Util {
+  static cmap(x) {
+    console.log(colors)
+    return colors[Math.max(0, Math.min(NCOLORS - 1, Math.floor(x * (NCOLORS - 1))))]
+  }
   static getLayoutedElements = (
     nodes,
     edges,

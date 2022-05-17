@@ -20,6 +20,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from types import SimpleNamespace
+from copy import deepcopy
 
 from tqdm import tqdm
 
@@ -70,7 +71,7 @@ if not ut.is_interactive():
 def grnGraph(nodes, edges, key=None):
     tnodes = [ut.updated_dict(n,{'data':{'id':n['id']}}) for n in nodes]
     if not ut.is_interactive():
-        _component_func(nodes=tnodes,edges=edges,output_type='GRN',key=key)
+        _component_func(nodes=nodes,edges=edges,output_type='GRN',key=key)
 
 def computeGraph(nodes, edges, key=None):
     def filterType(n):
@@ -80,14 +81,14 @@ def computeGraph(nodes, edges, key=None):
             n['type'] = 'out'
         return n
 
-    tnodes = [ut.updated_dict(filterType(n),{'data':{'id':n['id']}}) for n in nodes]
     if not ut.is_interactive():
+        tnodes = [filterType(n) for n in nodes]
         _component_func(nodes=tnodes,edges=edges,output_type='COMPUTE',key=key)
 
 def dnaOutput(nodes, key=None):
     tnodes = [ut.updated_dict(n,{'data':{'id':n['id']}}) for n in nodes if n['type'] == 'dna']
     if not ut.is_interactive():
-        _component_func(nodes=tnodes,output_type='DNA',key=key)
+        _component_func(nodes=nodes,output_type='DNA',key=key)
 
 
 #                                                                            }}}
@@ -382,24 +383,38 @@ for index, row in cdf.iterrows():
         input_id = gdf.at[row['gdf_output'], 'is_input']
         if input_id is not None:
             cdf.at[index, 'type'] = 'input'
-            cdf.at[index, 'is_input'] = input_id
+            cdf.at[index, 'is_input'] = int(input_id)
 
-print(cdf)
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                 --     Drawing the Compute Graph     --
 #···············································································
-cdf.input_from = cdf.input_from.apply(lambda x: None if x is None else [int(e) for e in x])
-cdf.output_to = cdf.output_to.apply(lambda x: None if x is None else [(int(i),h) for i,h in x])
+import json
 
 
-nodes = [ {'id':str(i), 'type':n.type, 'data':n.to_dict()} for i,n in cdf.iterrows()]
-edges = [ { 'id': f'edge_{uniqueId()}', 'source': str(i), 'target': str(o), 'targetHandle':str(h)} for i,n in cdf.iterrows() if n.output_to for o,h in n.output_to ]
+def np_converter(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
 
+def make_json_compatible(o):
+    return json.loads(json.dumps(o, default=np_converter))
+    
+
+def draw_compute_graph(df):
+    nodes = [ {'id':str(i), 'type':n.type, 'data':ut.updated_dict(n.to_dict(), {'id':i})} for i,n in df.iterrows()]
+    edges = [ { 'id': f'edge_{uniqueId()}', 'source': str(i), 'target': str(o), 'targetHandle':str(h),
+        'data':{'srcdata':df.loc[i].to_dict(), 'tgtdata':df.loc[o].to_dict(), 
+            'tgthandle':str(h)}}
+                        for i,n in df.iterrows() if n.output_to for o,h in n.output_to ]
+    computeGraph(make_json_compatible(nodes), make_json_compatible(edges))
 
 h3('Compute nodes:')
-computeGraph(nodes, edges)
+draw_compute_graph(cdf)
 ag(cdf.astype(str))
 
 #                                                                            }}}
@@ -477,7 +492,7 @@ def transcription(*branches, deg_rate = DEFAULT_RNA_DEG_RATE, nid=None):
     def assign(params, D):
         t_rates, others = params
         if nid is not None:
-            D[nid] = {'tr_rates':t_rates}
+            D[nid] = {'tr_rates':np.array(t_rates)}
         assign_upstream(others, assign_funs, D)
 
     return init, apply, assign
@@ -514,7 +529,7 @@ def bias(*_, nid=None):
 
     def assign(copy_n, D):
         if nid is not None:
-            D[nid] = {'copy_number':copy_n}
+            D[nid] = {'copy_number':float(copy_n)}
 
     return init, apply, assign
 
@@ -528,7 +543,7 @@ def input(id, nid=None):
 
     def assign(copy_n, D):
         if nid is not None:
-            D[nid] = {'copy_number':copy_n}
+            D[nid] = {'copy_number':float(copy_n)}
 
     return init, apply, assign
 
@@ -636,55 +651,60 @@ stacked_params, losses, assign_f = trainComputeGraph(cdf, key, X, y_true,
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                 --     Adding parameters to CDF    --
+# {{{             --     Adding trained parameters to CDF    --
 #···············································································
 
 best_run = np.argmin(losses[:,-1])
 best_losses = losses[best_run]
 stacked_best = ut.get_pytree(stacked_params, best_run)
 best_params = ut.get_pytree(stacked_best,len(best_losses))
-# best_hist = ut.param_unstack(stacked_best, len(best_loss)+1)
+best_hist = ut.param_unstack(stacked_best, len(best_losses)+1)
 
-print(best_params)
+def assign_params_to_dataframe(params, df, assign_f):
+    D = {}
+    assign_f(params, D)
+    df['parameters'] = None
+    for row_id in D:
+        df.loc[row_id, 'parameters'] = [deepcopy(D[row_id])]
 
-bestD = {}
-assign_f(best_params, bestD)
+assign_params_to_dataframe(best_params, cdf, assign_f)
+h3('Compute nodes after training:')
+draw_compute_graph(cdf)
+ag(cdf.astype(str))
 
-print(bestD)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 
 
+
+
+
+
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     Archives     --
 #···············································································
-print(final_params)
-onep = ut.tree_unstack(final_params)[0]
 
+# fl,t = jax.tree_util.tree_flatten(final_params)
+# print([jnp.append(a,b) if b.ndim == 0 else jnp.vstack((a,b)) for a,b in zip(fl,op)])
+# merged = [jnp.concatenate([a,jnp.array([b])]) for a,b in zip(fl,op)]
+# print([jnp.vstack((a,b)) for a,b in zip(fl,op)])
+# jnp.append(jnp.array([1.0,2.0]), jnp.array(1.0))
+# jnp.concatenate((jnp.array([[[1.0]]]), jnp.array([[1.0]])))
+# print(jax.tree_util.tree_unflatten(t,fl))
 
-fl,t = jax.tree_util.tree_flatten(final_params)
-op,ot = jax.tree_util.tree_flatten(onep)
+# def add_parameters_to_dataframe(D, P):
+    # for row_id in D:
+        # for param_name in D[row_id]:
+            # if param_name not in P.columns:
+                # P[param_name] = None
+            # P.loc[row_id, param_name] = D[row_id][param_name]
 
-print(ot)
-print(fl)
-print(op)
-print([jnp.append(a,b) if b.ndim == 0 else jnp.vstack((a,b)) for a,b in zip(fl,op)])
-
-merged = [jnp.concatenate([a,jnp.array([b])]) for a,b in zip(fl,op)]
-
-print([jnp.vstack((a,b)) for a,b in zip(fl,op)])
-
-jnp.append(jnp.array([1.0,2.0]), jnp.array(1.0))
-jnp.concatenate((jnp.array([[[1.0]]]), jnp.array([[1.0]])))
-jnp.array(1.0).ndim
-
-print(jax.tree_util.tree_unflatten(t,fl))
-jax.tree_util.tree_all(final_params)
-
-ut.tree_stack()
-
+# make sure node ids are int
+# cdf.input_from = cdf.input_from.apply(lambda x: None if x is None else [int(e) for e in x])
+# cdf.output_to = cdf.output_to.apply(lambda x: None if x is None else [(int(i),h) for i,h in x])
+# cdf.gdf_output = cdf.gdf_output.apply(lambda x: int(x))
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────

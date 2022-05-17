@@ -34,9 +34,35 @@ const typeDim = {
   output: { width: 20, height: 10 },
 }
 
+function hasEdgeLabel(data) {
+  if (data.tgtdata.parameters) {
+    if (data.tgtdata.type === "transcription" || data.tgtdata.type === "translation") {
+      return true
+    }
+  }
+  return false
+}
+
+function getRate(data) {
+  if (hasEdgeLabel(data)) {
+    var i = parseInt(data.tgthandle)
+    return data.tgtdata.parameters.tr_rates[i]
+  } else return 0
+}
+function getEdgeLabel(data) {
+  if (hasEdgeLabel(data)) {
+    return getRate(data).toFixed(2)
+  }
+  return ""
+}
+
 function ComputeComponent(props) {
   const styled_edges = props.data.edges.map((e) => ({
-    style: { stroke: "black", strokeWidth: "0.5" },
+    style: {
+      stroke: hasEdgeLabel(e.data) ? Util.cmap(getRate(e.data)) : "black",
+      strokeWidth: 0.5 + getRate(e.data)*2.0,
+    },
+    label: getEdgeLabel(e.data),
     ...e,
   }))
   const layouted = Util.getLayoutedElements(props.data.nodes, styled_edges, 60, 60, typeDim)
