@@ -266,3 +266,46 @@ def tree_unstack(tree):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+from p_tqdm import p_umap
+from time import sleep
+from functools import partial
+from pathlib import Path
+from selenium.webdriver import Firefox, FirefoxOptions
+import urllib.parse
+
+
+def takeScreen(opts, url, outputfile):
+    driver = Firefox(options=opts)
+    driver.get(url)
+    sleep(2)
+    driver.get_screenshot_as_file(outputfile)
+    driver.quit()
+
+DEFAULT_COMPONENT_PATH = Path('.') / 'node-editor-component/ned-component/frontend/dist/static_index.html'
+
+
+def screenCaptures(f, *args, out_dir_path = './', filenames=None, module_path = DEFAULT_COMPONENT_PATH, width=1500, height=1500):
+
+    outpath = Path(out_dir_path)
+    outpath.mkdir(parents=True, exist_ok=True)
+
+    def param_extractor(**kwargs):
+        return {**kwargs}
+
+    opts = FirefoxOptions()
+    opts.add_argument(f'--width={width}')
+    opts.add_argument(f'--height={height}')
+    opts.add_argument('--headless')
+
+    params = [f(*a, func=param_extractor) for a in zip(*args)]
+    pj = [urllib.parse.quote_plus(json.dumps(p)) for p in params]
+    urls = ['file://'+str(module_path.resolve())+'?args='+p for p in pj]
+
+    if filenames is not None:
+        assert(len(filenames) == len(params))
+        outfiles = filenames
+    else:
+        outfiles = [str(outpath / f'{i}.png') for i in range(len(params))]
+
+    p_umap(partial(takeScreen, opts), urls, outfiles, num_cpus=min(28, len(urls)))

@@ -66,29 +66,27 @@ def ag(df):
 # -- custom streamlit components
 import streamlit.components.v1 as components
 if not ut.is_interactive():
-    _component_func = components.declare_component("ned_component", url="http://localhost:3001")
+    _component_func = components.declare_component("ned_component", url="http://localhost:1234")
+else:
+    _component_func = lambda:None
 
-def grnGraph(nodes, edges, key=None):
+def grnGraph(nodes, edges, key=None, func=_component_func):
     tnodes = [ut.updated_dict(n,{'data':{'id':n['id']}}) for n in nodes]
-    if not ut.is_interactive():
-        _component_func(nodes=nodes,edges=edges,output_type='GRN',key=key)
+    return func(nodes=tnodes,edges=edges,output_type='GRN',key=key)# {{{}}}
 
-def computeGraph(nodes, edges, key=None):
+def computeGraph(nodes, edges, key=None, func = _component_func, **kwargs):
     def filterType(n):
         if n['type'] == 'input':
             n['type'] = 'in'
         if n['type'] == 'output':
             n['type'] = 'out'
         return n
+    tnodes = [filterType(n) for n in nodes]
+    return func(nodes=tnodes,edges=edges,output_type='COMPUTE',key=key, **kwargs)
 
-    if not ut.is_interactive():
-        tnodes = [filterType(n) for n in nodes]
-        _component_func(nodes=tnodes,edges=edges,output_type='COMPUTE',key=key)
-
-def dnaOutput(nodes, key=None):
+def dnaOutput(nodes, key=None, func=_component_func):
     tnodes = [ut.updated_dict(n,{'data':{'id':n['id']}}) for n in nodes if n['type'] == 'dna']
-    if not ut.is_interactive():
-        _component_func(nodes=nodes,output_type='DNA',key=key)
+    return func(nodes=tnodes,output_type='DNA',key=key)
 
 
 #                                                                            }}}
@@ -138,18 +136,18 @@ def getPrt(dna):
 
 # l1_DNAs=[['hEF1a','NeonGreen','CasE_recog_5p'],['hEF1a','CasE'],['hEF1a', 'Csy4'],['hEF1a','NeonGreen','Csy4_recog_5p'],['hEF1a','NeonGreen','CasE_recog_5p']]
 
-# l1_DNAs= [
-        # ['hEF1a', 'CasE'],
-        # ['hEF1a', 'Csy4'],
-        # ['hEF1a', 'PhiC31', 'Csy4_recog_5p'],
-        # ['hEF1a', 'PhiC31RDF','CasE_recog_5p'],
-        # ['hEF1a', 'attP', 'NeonGreen', 'attB']]
-
 l1_DNAs= [
         ['hEF1a', 'CasE'],
-        ['hEF1a', 'NeonGreen','CasE_recog_5p']]
+        ['hEF1a', 'Csy4'],
+        ['hEF1a', 'PhiC31', 'Csy4_recog_5p'],
+        ['hEF1a', 'PhiC31RDF','CasE_recog_5p'],
+        ['hEF1a', 'attP', 'NeonGreen', 'attB']]
 
-l1_DNAs= [['hEF1a', 'NeonGreen']]
+# l1_DNAs= [
+        # ['hEF1a', 'CasE'],
+        # ['hEF1a', 'NeonGreen','CasE_recog_5p']]
+
+# l1_DNAs= [['hEF1a', 'NeonGreen']]
 
 l1 = [{'DNA':tuple(d), 'RNA':getRna(d), 'PRT':getPrt(d)} for d in l1_DNAs]
 l1df = pd.DataFrame(l1)
@@ -405,17 +403,20 @@ def make_json_compatible(o):
     return json.loads(json.dumps(o, default=np_converter))
     
 
-def draw_compute_graph(df):
+def draw_compute_graph(df, func=None, **kwargs):
     nodes = [ {'id':str(i), 'type':n.type, 'data':ut.updated_dict(n.to_dict(), {'id':i})} for i,n in df.iterrows()]
     edges = [ { 'id': f'edge_{uniqueId()}', 'source': str(i), 'target': str(o), 'targetHandle':str(h),
         'data':{'srcdata':df.loc[i].to_dict(), 'tgtdata':df.loc[o].to_dict(), 
             'tgthandle':str(h)}}
                         for i,n in df.iterrows() if n.output_to for o,h in n.output_to ]
-    computeGraph(make_json_compatible(nodes), make_json_compatible(edges))
+    if func is None:
+        return computeGraph(make_json_compatible(nodes), make_json_compatible(edges), **kwargs)
+    else:
+        return computeGraph(make_json_compatible(nodes), make_json_compatible(edges), func=func, **kwargs)
 
 h3('Compute nodes:')
-draw_compute_graph(cdf)
-ag(cdf.astype(str))
+# draw_compute_graph(cdf)
+# ag(cdf.astype(str))
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -511,7 +512,7 @@ def sequestron_ERN(neg, pos, nid=None):
         return jnp.maximum(0, res[1] - res[0])
 
     def assign(params, D):
-        assign_upstream(params, (neg[1], pos[1]), D)
+        assign_upstream(params, (neg[2], pos[2]), D)
 
     return init, apply, assign
 
@@ -645,7 +646,7 @@ X = jax.random.uniform(key = key, shape=(500,2))
 y_true = jax.random.uniform(key = key, minval=0.5, maxval=0.6, shape=(500,1))
 
 stacked_params, losses, assign_f = trainComputeGraph(cdf, key, X, y_true,
-                                            n_init=2, n_steps=100,
+                                            n_init=2, n_steps=120,
                                             learning_rate=0.01)
 
 #                                                                            }}}
@@ -660,6 +661,7 @@ stacked_best = ut.get_pytree(stacked_params, best_run)
 best_params = ut.get_pytree(stacked_best,len(best_losses))
 best_hist = ut.param_unstack(stacked_best, len(best_losses)+1)
 
+
 def assign_params_to_dataframe(params, df, assign_f):
     D = {}
     assign_f(params, D)
@@ -667,10 +669,16 @@ def assign_params_to_dataframe(params, df, assign_f):
     for row_id in D:
         df.loc[row_id, 'parameters'] = [deepcopy(D[row_id])]
 
-assign_params_to_dataframe(best_params, cdf, assign_f)
-h3('Compute nodes after training:')
-draw_compute_graph(cdf)
-ag(cdf.astype(str))
+hist_dfs = [cdf.copy() for _ in best_hist]
+for h,p in zip(hist_dfs, best_hist):
+    assign_params_to_dataframe(p, h, assign_f)
+
+# h3('Compute nodes after training:')
+# draw_compute_graph(cdf)
+# ag(cdf.astype(str))
+
+print(best_params)
+
 
 
 #                                                                            }}}
@@ -678,8 +686,10 @@ ag(cdf.astype(str))
 
 
 
+ut.screenCaptures(partial(draw_compute_graph, height=800), hist_dfs, out_dir_path='./outtest', height=1000, width=800)
 
 
+print('done')
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
