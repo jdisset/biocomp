@@ -1,19 +1,24 @@
-import { Streamlit, StreamlitComponentBase, withStreamlitConnection } from "streamlit-component-lib"
-import SEQNode from "./SEQNode.jsx"
-import TLNode from "./TLNode.jsx"
-import TCNode from "./TCNode.jsx"
-import INNode from "./INNode.jsx"
-import OUTNode from "./OUTNode.jsx"
-import CTENode from "./CTENode.jsx"
-import React, { ReactNode } from "react"
+import {
+  Streamlit,
+  StreamlitComponentBase,
+  withStreamlitConnection,
+} from "streamlit-component-lib";
+import SEQNode from "./SEQNode.jsx";
+import TLNode from "./TLNode.jsx";
+import TCNode from "./TCNode.jsx";
+import INNode from "./INNode.jsx";
+import OUTNode from "./OUTNode.jsx";
+import CTENode from "./CTENode.jsx";
+import React, { ReactNode, useRef } from "react";
 import ReactFlow, {
   ReactFlowProvider,
   addEdge,
   useNodesState,
   useEdgesState,
-} from "react-flow-renderer"
+} from "react-flow-renderer";
 
-import Util from "./util.jsx"
+import html2canvas from "html2canvas";
+import Util from "./util.jsx";
 
 const nodeTypes = {
   sequestron_ERN: SEQNode,
@@ -23,7 +28,7 @@ const nodeTypes = {
   bias: CTENode,
   in: INNode,
   out: OUTNode,
-}
+};
 
 const typeDim = {
   sequestron_ERN: { width: 100, height: 50 },
@@ -32,45 +37,56 @@ const typeDim = {
   transcription: { width: 30, height: 50 },
   bias: { width: 45, height: 63 },
   output: { width: 20, height: 10 },
-}
+};
 
 function hasEdgeLabel(data) {
   if (data.tgtdata.parameters) {
     if (data.tgtdata.type === "transcription" || data.tgtdata.type === "translation") {
-      return true
+      return true;
     }
   }
-  return false
+  return false;
 }
 
 function getRate(data) {
   if (hasEdgeLabel(data)) {
-    var i = parseInt(data.tgthandle)
-    return data.tgtdata.parameters.tr_rates[i]
-  } else return 0
+    var i = parseInt(data.tgthandle);
+    return data.tgtdata.parameters.tr_rates[i];
+  } else return 0;
 }
 function getEdgeLabel(data) {
   if (hasEdgeLabel(data)) {
-    return getRate(data).toFixed(2)
+    return getRate(data).toFixed(2);
   }
-  return ""
+  return "";
 }
 
 function ComputeComponent(props) {
+  const exportRef = React.createRef();
+  const rootRef = useRef(null);
+  const onClick = () => {
+    const elements = rootRef.current;
+    Util.exportAsImage(elements, "test");
+  };
   const styled_edges = props.data.edges.map((e) => ({
     style: {
       stroke: hasEdgeLabel(e.data) ? Util.cmap(getRate(e.data)) : "black",
-      strokeWidth: 0.5 + getRate(e.data)*2.0,
+      strokeWidth: 0.5 + getRate(e.data) * 2.0,
     },
     label: getEdgeLabel(e.data),
     ...e,
-  }))
-  const layouted = Util.getLayoutedElements(props.data.nodes, styled_edges, 60, 60, typeDim)
-  const [nodes, setNodes, onNodesChange] = useNodesState(layouted.nodes)
-  const [edges, setEdges, onEdgesChange] = useEdgesState(layouted.edges)
+  }));
+  const layouted = Util.getLayoutedElements(props.data.nodes, styled_edges, 60, 60, typeDim);
+  const [nodes, setNodes, onNodesChange] = useNodesState(layouted.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(layouted.edges);
 
   return (
-    <div style={{ width: "100%", height: 1000 }}>
+    <div
+      style={{
+        width: props.data.width === undefined ? "100%" : props.data.width,
+        height: props.data.height === undefined ? 1000 : props.data.height,
+      }}
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -80,7 +96,7 @@ function ComputeComponent(props) {
         fitView
       />
     </div>
-  )
+  );
 }
 
-export default ComputeComponent
+export default ComputeComponent;

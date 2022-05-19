@@ -1,4 +1,5 @@
 import dagre from "dagre"
+import html2canvas from "html2canvas"
 
 let colormap = require("colormap")
 const NCOLORS = 100
@@ -13,12 +14,32 @@ const colors = colormap({
   format: "hex",
   alpha: 1,
 })
-
 class Util {
   static cmap(x) {
-    console.log(colors)
     return colors[Math.max(0, Math.min(NCOLORS - 1, Math.floor(x * (NCOLORS - 1))))]
   }
+
+  static screenCap = (fname) => {
+    html2canvas(document.body,{scale: 2.5} ).then((canvas) => {
+	  const image = canvas.toDataURL("image/png", 1.0)
+	  this.downloadImage(image, fname)
+    })
+  }
+
+  static downloadImage = (blob, fileName) => {
+    const fakeLink = window.document.createElement("a")
+    fakeLink.style = "display:none;"
+    fakeLink.download = fileName
+
+    fakeLink.href = blob
+
+    document.body.appendChild(fakeLink)
+    fakeLink.click()
+    document.body.removeChild(fakeLink)
+
+    fakeLink.remove()
+  }
+
   static getLayoutedElements = (
     nodes,
     edges,

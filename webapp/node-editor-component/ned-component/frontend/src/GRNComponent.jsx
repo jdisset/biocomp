@@ -1,5 +1,5 @@
 import { Streamlit, StreamlitComponentBase, withStreamlitConnection } from "streamlit-component-lib"
-import DNANode from "./DNANode"
+import DNANode from "./DNANode.jsx"
 import RNANode from "./RNANode.jsx"
 import PRTNode from "./PRTNode.jsx"
 import React, { ReactNode } from "react"

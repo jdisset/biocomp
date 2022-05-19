@@ -1,15 +1,16 @@
-import React, { ReactNode } from "react"
+import React, { ReactNode } from "react";
+import images from "./grnsymbols/*.png";
 
-const zeroPad = (num, places) => String(num).padStart(places, "0")
+const zeroPad = (num, places) => String(num).padStart(places, "0");
 
 function DNAContent({ initExpanded = false, expandable = true, ...props }) {
   const content = props.data.content.map((c, i) => (
-    <li>
-      <img src={require("./grnsymbols/" + props.data.content_type[i] + ".png")} alt={c} />
+    <li key={i}>
+      <img src={images[props.data.content_type[i]]} alt={c} />
       <span className="dna-elmt">{c}</span>
     </li>
-  ))
-  const [expanded, setExpanded] = React.useState(initExpanded)
+  ));
+  const [expanded, setExpanded] = React.useState(initExpanded);
   return (
     <div
       className={"dna-content" + (expanded ? " expanded" : " notexpanded")}
@@ -17,12 +18,12 @@ function DNAContent({ initExpanded = false, expandable = true, ...props }) {
       onMouseLeave={() => setExpanded(expandable ? false : initExpanded)}
     >
       {content}
-      <li>
-        <img src={require("./grnsymbols/terminator.png")} alt="terminator symbol" />
+      <li key="term">
+        <img src={images["terminator"]} alt="terminator symbol" />
       </li>
 
       <div className="dna-name">DNA {zeroPad(parseInt(props.data.id), 2)}</div>
     </div>
-  )
+  );
 }
-export default DNAContent
+export default DNAContent;
