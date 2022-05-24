@@ -1,56 +1,45 @@
-import React, { ReactNode, useCallback } from "react"
-import { Handle, Position } from "react-flow-renderer"
-import Util from "./util.jsx"
-function hasCopyNunmber(data) {
-  return data.parameters && data.parameters.copy_number >= 0
+import React, { ReactNode, useCallback } from "react";
+import { Handle, Position } from "react-flow-renderer";
+import { theme } from "./shapes.jsx";
+import Util from "./util.jsx";
+
+function hasCopyNumber(data) {
+  return data.parameters && data.parameters.copy_number >= 0;
 }
 
-function displayCopyNumber(data) {
-  if (hasCopyNunmber(data)) {
-    let cn = data.parameters.copy_number
-    let col = Util.cmap(cn)
-    return (
-      <div className="copy_number">
-        <svg version="1.1" viewBox="0 0 37 37" width="35" height="35">
-          <circle cx="18" cy="18" r="15" stroke={col} strokeWidth={0.5 + cn*3.0} fill="white" />
-          <text fontSize="10" fontWeight="300" transform="translate(11 22)" fill="black">
-            {cn.toFixed(1)}
-          </text>
-        </svg>
-      </div>
-    )
-  }
-}
 
-const zeroPad = (num, places) => String(num).padStart(places, "0")
 function INNode(props) {
-  console.log(props)
+  console.log(props);
   return (
     <div className="input-node">
-      <svg version="1.1" viewBox="1108.75 -525.25 44.5 62.58349" width="45" height="63">
+      <svg version="1.1" viewBox="569 -1352 33 55" width="32.5" height="53.34853">
         <path
-          d="M 1110.83 -479.4519 L 1127.83 -465.51524 C 1129.6732 -464.0042 1132.3268 -464.0042 1134.17 -465.51524 L 1151.17 -479.4519 C 1152.3284 -480.4016 1153 -481.82064 1153 -483.3186 L 1153 -520 C 1153 -522.7614 1150.7614 -525 1148 -525 L 1114 -525 C 1111.2386 -525 1109 -522.7614 1109 -520 L 1109 -483.3186 C 1109 -481.82064 1109.6716 -480.4016 1110.83 -479.4519 Z"
+          d="M 569.62825 -1316.5078 C 569.62825 -1316.5078 569.62825 -1316.5078 569.62825 -1316.5078 Z M 569.62825 -1316.5078 L 569.62825 -1312.7078 C 569.62825 -1311.2598 570.256 -1309.883 571.3491 -1308.9333 L 582.3491 -1299.377 C 584.2299 -1297.743 587.0266 -1297.743 588.9074 -1299.377 L 599.9074 -1308.9333 C 601.0005 -1309.883 601.62825 -1311.2598 601.62825 -1312.7078 L 601.62825 -1316.5078 L 601.62825 -1331.4 L 601.62825 -1332.0203 L 601.62825 -1335.2 L 601.62825 -1335.8203 L 601.62825 -1344.2 L 601.62825 -1348 C 601.62825 -1349.6569 600.2851 -1351 598.62825 -1351 L 572.62825 -1351 C 570.9714 -1351 569.62825 -1349.6569 569.62825 -1348 L 569.62825 -1344.2 L 569.62825 -1335.8203 L 569.62825 -1335.2 L 569.62825 -1332.0203 L 569.62825 -1331.4 Z"
+          fill="#ffb703"
+        />
+        <path
+          d="M 569.62825 -1316.5078 C 569.62825 -1316.5078 569.62825 -1316.5078 569.62825 -1316.5078 Z M 569.62825 -1316.5078 L 569.62825 -1312.7078 C 569.62825 -1311.2598 570.256 -1309.883 571.3491 -1308.9333 L 582.3491 -1299.377 C 584.2299 -1297.743 587.0266 -1297.743 588.9074 -1299.377 L 599.9074 -1308.9333 C 601.0005 -1309.883 601.62825 -1311.2598 601.62825 -1312.7078 L 601.62825 -1316.5078 L 601.62825 -1331.4 L 601.62825 -1332.0203 L 601.62825 -1335.2 L 601.62825 -1335.8203 L 601.62825 -1344.2 L 601.62825 -1348 C 601.62825 -1349.6569 600.2851 -1351 598.62825 -1351 L 572.62825 -1351 C 570.9714 -1351 569.62825 -1349.6569 569.62825 -1348 L 569.62825 -1344.2 L 569.62825 -1335.8203 L 569.62825 -1335.2 L 569.62825 -1332.0203 L 569.62825 -1331.4 Z"
           stroke="black"
-          strokeWidth=".5"
+          fill={theme.DNAcolor}
+          strokeWidth="1"
+        />
+        <path
+          d="M 569.89354 -1335.6822 L 569.89354 -1335.0644 L 569.89354 -1316.4485 C 569.89354 -1315.0064 570.5109 -1313.6351 571.58585 -1312.6893 L 582.40346 -1303.172 C 584.2531 -1301.5446 587.00344 -1301.5446 588.85305 -1303.172 L 599.67066 -1312.6893 C 600.7456 -1313.6351 601.36296 -1315.0064 601.36296 -1316.4485 L 601.36296 -1335.0644 L 601.36296 -1335.6822 L 601.36296 -1347.8122 C 601.36296 -1349.4623 600.0421 -1350.8 598.4127 -1350.8 L 572.8438 -1350.8 C 571.2144 -1350.8 569.89354 -1349.4623 569.89354 -1347.8122 Z"
           fill="white"
         />
-        <text transform="translate(1117 -510)" fill="black" x="10" y="11">
-          <tspan fontSize="10" fontWeight="300" fill="black" x="0" y="9">
-            INPUT
-          </tspan>
-          <tspan fontSize="12" fontWeight="300" fill="black" x="7" y="25">
-            {zeroPad(props.data.gdf_output, 2)}
+        <text clip-path="url(#clip_path)" transform="translate(569.89354 -1350.8)" fill="#322f30">
+          <tspan font-family="Roboto" font-size="18" font-weight="700" x="6" y="23">
+            {Util.zeroPad(props.data.is_input, 2)}
           </tspan>
         </text>
       </svg>
-      {displayCopyNumber(props.data)}
+      {Util.displayCopyNumber(props.data)}
       <Handle
         type="source"
         position={Position.Bottom}
-        style={{ bottom: hasCopyNunmber(props.data) ? 40 : 10 }}
+        style={{left: hasCopyNumber(props.data) ? 16 : 16,  bottom: hasCopyNumber(props.data) ? 44 : 3 }}
       />
     </div>
-  )
+  );
 }
-
-export default INNode
+export default INNode;

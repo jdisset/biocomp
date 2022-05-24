@@ -70,8 +70,9 @@ function ComputeComponent(props) {
   };
   const styled_edges = props.data.edges.map((e) => ({
     style: {
-      stroke: hasEdgeLabel(e.data) ? Util.cmap(getRate(e.data)) : "black",
-      strokeWidth: 0.5 + getRate(e.data) * 2.0,
+      //stroke: hasEdgeLabel(e.data) ? Util.cmap(getRate(e.data)) : "black",
+      stroke: "black",
+      strokeWidth: 0.5 + Math.max(getRate(e.data) * 4.0, 0),
     },
     label: getEdgeLabel(e.data),
     ...e,

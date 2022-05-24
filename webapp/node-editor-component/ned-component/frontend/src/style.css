@@ -8,16 +8,18 @@ body {
   font-weight: 300;
 }
 
-.react-flow__handle-bottom {
-  background: url("./grnsymbols/downarrow.png") no-repeat center center;
-  width: 15px;
-  height: 15px;
-  background-size: 10px 10px;
+.input-node .react-flow__handle-bottom,
+.seq-node .react-flow__handle-top,
+.seq-node .react-flow__handle-bottom,
+.translation-node .react-flow__handle-top,
+.translation-node .react-flow__handle-bottom,
+.transcription-node .react-flow__handle-top,
+.transcription-node .react-flow__handle-bottom {
+  background: none;
   border: none;
 }
 
-.input-node .react-flow__handle-bottom,
-.react-flow__handle-left{
+.cte-node .react-flow__handle-left {
   background: none;
   border: none;
 }
@@ -140,15 +142,15 @@ body {
 
 /* ----------------------------------- */
 
-.react-flow__edge-textwrapper{
-	margin-left:30px;
+.react-flow__edge-textwrapper {
+  margin-left: 30px;
 }
 
 .input-node,
 .transcription-node,
 .translation-node,
 .seq-node {
-  margin-bottom: 8px;
+  margin-bottom: 2px;
 }
 
 .out-node {
@@ -157,26 +159,22 @@ body {
   border: none;
   background: none;
 }
+
 .out-node .react-flow__handle {
   background: none;
   border: none;
 }
 
-.seq-name {
-  bottom: 20px;
+.copy_number {
+  position: relative;
+  z-index: 10;
+  left: 18px;
+  top: -78px;
 }
 
-.seq-node {
-  width: 120px;
-  height: 50px;
-  border: 0.5px solid black;
-  border-radius: 5px;
-  margin-bottom: 12px;
-}
-.copy_number{
-
-position:relative;
-z-index:10;
-left: 30px;
-top: -78px;
+.cte-node .copy_number {
+  position: relative;
+  z-index: 10;
+  left: 35px;
+  top: -55px;
 }
