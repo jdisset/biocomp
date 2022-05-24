@@ -267,25 +267,21 @@ def tree_unstack(tree):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-from p_tqdm import p_umap
+from p_tqdm import p_umap, p_map
 from time import sleep
 from functools import partial
 from pathlib import Path
 from selenium.webdriver import Firefox, FirefoxOptions
 import urllib.parse
+import math
+import pathos.multiprocessing as mp
 
-
-def takeScreen(opts, url, outputfile):
-    driver = Firefox(options=opts)
-    driver.get(url)
-    sleep(2)
-    driver.get_screenshot_as_file(outputfile)
-    driver.quit()
+from time import time
 
 DEFAULT_COMPONENT_PATH = Path('.') / 'node-editor-component/ned-component/frontend/dist/static_index.html'
 
 
-def screenCaptures(f, *args, out_dir_path = './', filenames=None, module_path = DEFAULT_COMPONENT_PATH, width=1500, height=1500):
+def screenCaptures_old(f, *args, out_dir_path = './', filenames=None, module_path = DEFAULT_COMPONENT_PATH, width=1500, height=1500):
 
     outpath = Path(out_dir_path)
     outpath.mkdir(parents=True, exist_ok=True)
@@ -308,4 +304,84 @@ def screenCaptures(f, *args, out_dir_path = './', filenames=None, module_path = 
     else:
         outfiles = [str(outpath / f'{i}.png') for i in range(len(params))]
 
-    p_umap(partial(takeScreen, opts), urls, outfiles, num_cpus=min(28, len(urls)))
+    n_nodes = min(32, len(urls))
+
+    def takeScreen(opts, batch_urls, batch_outputfiles):
+        print('init')
+        driver=Firefox(options=opts)
+        for url, outfile in list(zip(batch_urls, batch_outputfiles)):
+            driver.get(url)
+            sleep(0.1)
+            # print('saving')
+            # driver.get_screenshot_as_file(outfile)
+            print('saved')
+        driver.quit()
+
+    def make_batches(L, n):
+        perbatch= len(L)/n
+        return [L[int(perbatch*i):int(perbatch*(i+1))] for i in range(n)]
+
+    start = time()
+    # pool = mp.ProcessPool(n_nodes)
+    # pool.map(partial(takeScreen, opts), make_batches(urls,n_nodes), make_batches(outfiles, n_nodes))
+    p_umap(partial(takeScreen, opts), make_batches(urls,n_nodes), make_batches(outfiles, n_nodes), num_cpus=n_nodes)
+    # pool.clear()
+    end = time()
+    print(f'Saved all screenshots in {end-start}s')
+
+
+
+
+import asyncio
+from pyppeteer import launch
+
+from concurrent.futures import ProcessPoolExecutor
+
+
+def screenCaptures(f, *args, out_dir_path = './', filenames=None, module_path = DEFAULT_COMPONENT_PATH, width=1500, height=1500):
+    #TODO: combine with multiprocessing (https://pymotw.com/3/asyncio/executors.html)
+
+    outpath = Path(out_dir_path)
+    outpath.mkdir(parents=True, exist_ok=True)
+
+    def make_batches(L, n):
+        perbatch= len(L)/n
+        return [L[int(perbatch*i):int(perbatch*(i+1))] for i in range(n)]
+
+    def param_extractor(**kwargs):
+        return {**kwargs}
+
+    params = [f(*a, func=param_extractor) for a in zip(*args)]
+    pj = [urllib.parse.quote_plus(json.dumps(p)) for p in params]
+    urls = ['file://'+str(module_path.resolve())+'?args='+p for p in pj]
+
+    if filenames is not None:
+        assert(len(filenames) == len(params))
+        outfiles = filenames
+    else:
+        outfiles = [str(outpath / f'{i}.png') for i in range(len(params))]
+
+    async def main(urls, outfiles):
+        browser = await launch()
+        async def take(url, outfile):
+            page = await browser.newPage()
+            await page.setViewport({ 'width': width, 'height': height});
+            await page.goto(url)
+            await page.screenshot({'path': outfile})
+            print('saved', outfile)
+            await page.close()
+        await asyncio.gather(*[take(*args) for args in zip(urls, outfiles)])
+        await browser.close()
+
+    start = time()
+    loop = asyncio.get_event_loop()
+    # p = ProcessPoolExecutor(8)
+    loop.run_until_complete(main(urls, outfiles))
+    try:
+        loop.close()
+    except:
+        pass
+    end = time()
+    print(f'Saved all screenshots in {end-start}s')
+
+

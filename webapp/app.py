@@ -18,6 +18,7 @@ import utils as ut
 
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap,LinearSegmentedColormap
 import numpy as np
 from types import SimpleNamespace
 from copy import deepcopy
@@ -137,10 +138,15 @@ def getPrt(dna):
 # l1_DNAs=[['hEF1a','NeonGreen','CasE_recog_5p'],['hEF1a','CasE'],['hEF1a', 'Csy4'],['hEF1a','NeonGreen','Csy4_recog_5p'],['hEF1a','NeonGreen','CasE_recog_5p']]
 
 l1_DNAs= [
-        ['hEF1a', 'CasE'],
-        ['hEF1a', 'Csy4'],
-        ['hEF1a', 'PhiC31', 'Csy4_recog_5p'],
         ['hEF1a', 'PhiC31RDF','CasE_recog_5p'],
+        ['hEF1a', 'Csy4'],
+        ['hEF1a', 'PhiC31RDF','CasE_recog_5p'],
+        ['hEF1a', 'Csy4'],
+        # biases:
+        ['hEF1a', 'CasE'],
+        ['hEF1a', 'PhiC31RDF', 'Csy4_recog_5p'],
+        ['hEF1a', 'PhiC31'],
+        # output
         ['hEF1a', 'attP', 'NeonGreen', 'attB']]
 
 # l1_DNAs= [
@@ -210,7 +216,9 @@ gdf.loc[gdf.type == 'PRT', 'is_output'] = gdf.loc[gdf.type == 'PRT'].l1_id.apply
 
 gdf['is_input'] = None
 gdf.is_input.iloc[0] = 0
-gdf.is_input.iloc[1] = 1
+gdf.is_input.iloc[1] = 0
+gdf.is_input.iloc[2] = 1
+gdf.is_input.iloc[3] = 1
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -415,8 +423,8 @@ def draw_compute_graph(df, func=None, **kwargs):
         return computeGraph(make_json_compatible(nodes), make_json_compatible(edges), func=func, **kwargs)
 
 h3('Compute nodes:')
-# draw_compute_graph(cdf)
-# ag(cdf.astype(str))
+draw_compute_graph(cdf)
+ag(cdf.astype(str))
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -632,22 +640,45 @@ def trainComputeGraph(cdf, key, X, y_true, learning_rate = LEARNING_RATE, n_init
     print('Trained in',end - start)
 
     losses, stacked_states = loss_state_histories
-    return (get_params(stacked_states), losses, assign)
+    return (model, get_params(stacked_states), losses, assign)
 
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                   --     getting training data     --
+#···············································································
+import matplotlib.image as mpimg
+target = mpimg.imread('../data/band_pass_dec.png')[::-1]
+
+# plt.imshow(target, origin='lower')
+# plt.show()
+
+
+TARGET_OUTPUT=0.5
+N_SAMPLES = 2000
+samples = []
+key = jax.random.PRNGKey(42)
+X = jax.random.uniform(key = key, shape=(N_SAMPLES,2))* jnp.array(target.shape[:2])
+y_true = jnp.array(target[X.astype(int)[:,1], X.astype(int)[:,0], 0]*TARGET_OUTPUT).reshape(-1,1)
+X = X / jnp.array(target.shape[:2])
+
+# plt.scatter(X[:,0], X[:,1], c=y_true)
+# plt.show()
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     Training     --
 #···············································································
 # training data
-key = jax.random.PRNGKey(42)
-X = jax.random.uniform(key = key, shape=(500,2))
-y_true = jax.random.uniform(key = key, minval=0.5, maxval=0.6, shape=(500,1))
 
-stacked_params, losses, assign_f = trainComputeGraph(cdf, key, X, y_true,
-                                            n_init=2, n_steps=120,
-                                            learning_rate=0.01)
+
+model, stacked_params, losses, assign_f = trainComputeGraph(cdf, key, X, y_true,
+                                            n_init=2, n_steps=20,
+                                            learning_rate=0.003)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -673,23 +704,77 @@ hist_dfs = [cdf.copy() for _ in best_hist]
 for h,p in zip(hist_dfs, best_hist):
     assign_params_to_dataframe(p, h, assign_f)
 
-# h3('Compute nodes after training:')
-# draw_compute_graph(cdf)
-# ag(cdf.astype(str))
+h3('Compute nodes after training:')
+draw_compute_graph(hist_dfs[-1])
+ag(hist_dfs[-1].astype(str))
 
-print(best_params)
+# print(best_params)
 
-
+# plt.figure(figsize=(20, 15))
+# for l in losses:
+    # plt.plot(l)
+    # plt.ylim(0,0.15)
+# plt.show()
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                 --     decision boundaries plots     --
+#···············································································
 
+# from p_tqdm import p_umap, p_map
+# figsize =10 
+# alp = 1
+# bgalp = 0.65
+# MESHRES = 500
+# scatsize = 6 * figsize
 
-ut.screenCaptures(partial(draw_compute_graph, height=800), hist_dfs, out_dir_path='./outtest', height=1000, width=800)
+# blist = np.array([[0.073, 0.292, 0.419],[0.844, 0.1, 0.111]])
+# flist = [[0.0, 0.493, 0.579],[0.896, 0.866, 0.806],[0.844, 0.1, 0.111]]
+# bcmap = ListedColormap(blist)
+# cmap = LinearSegmentedColormap.from_list("",flist)
 
+# XX, YY = np.meshgrid(np.linspace(0,1,MESHRES),np.linspace(0,1,MESHRES), indexing='xy')
+# coords = np.column_stack((XX.ravel(), YY.ravel()))
 
-print('done')
+# mseloss(best_params, model, X, y_true)
+
+# plt.rcParams["axes.grid"] = False
+
+# def drawOnlyPred(a,fig,XX,YY,ZZ,cmap='Reds'):
+    # pc = a.pcolormesh(XX,YY,ZZ, cmap=cmap, shading='auto', vmin=0, vmax=0.6)
+    # a.contour(XX, YY, ZZ, [0.5], colors='black', linewidths=1, alpha=0.65)
+    # a.set_xlim(0,1)
+    # a.set_ylim(0,1)
+    # a.xaxis.set_ticks([])
+    # a.yaxis.set_ticks([])
+    # a.set_aspect('equal')
+    # a.set_xlabel('predicted')
+    # cax = a.inset_axes([1.04, 0.2, 0.05, 0.6], transform=a.transAxes)
+    # fig.colorbar(pc, ax=a, cax=cax)
+
+# def savePred(i,p):
+    # ZZ = vmap(pytree.Partial(model, p))(coords).reshape(XX.shape)
+    # fig, a = plt.subplots(1, 1, figsize=(12,10))
+    # drawOnlyPred(a, fig, XX, YY, ZZ)
+    # fig.savefig(f'./predict/{i}.png', dpi=120)
+    # plt.close()
+
+# # p_umap(savePred, *zip(*list(enumerate(best_hist[::400]))))
+
+# for i,p in tqdm(list(enumerate(best_hist[::10]))):
+    # savePred(i,p)
+
+# print()
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+# import nest_asyncio
+# nest_asyncio.apply()
+# ut.screenCaptures(partial(draw_compute_graph, height=2000), hist_dfs[::10], out_dir_path='./outbiased', height=2000, width=1500)
+
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -718,3 +803,5 @@ print('done')
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+
