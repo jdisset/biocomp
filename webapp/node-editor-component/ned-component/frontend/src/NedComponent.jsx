@@ -19,8 +19,9 @@ class NedComponent extends StreamlitComponentBase {
       case "COMPUTE":
         return <ComputeComponent data={this.props.args} />;
       case "DNA":
+        let initexpanded = this.props.args.initexpanded | false;
         const dnaData = this.props.args.nodes.map((d) =>
-          d.type === "DNA" ? <DNAContent data={d.data} /> : ""
+          d.type === "DNA" ? <DNAContent data={d.data} initExpanded={initexpanded} /> : ""
         );
         return <div className="dna-list">{dnaData}</div>;
       default:

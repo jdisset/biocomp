@@ -41,24 +41,16 @@ class Util {
     fakeLink.remove();
   };
 
-  static polarToCartesian = (centerX, centerY, radius, angle) => {
-    return {
-      x: centerX + radius * Math.cos(angle),
-      y: centerY + radius * Math.sin(angle),
-    };
-  };
-
-  static describeArc = (x, y, radius, value) => {
-    const v = Math.min(1.0, Math.max(0.0, value));
-    const endAngle = Math.PI * v * 2.0;
-    var start = this.polarToCartesian(x, y, radius, endAngle);
-    var end = this.polarToCartesian(x, y, radius, -Math.PI / 2.0);
-    var largeArcFlag = v <= 0.5 ? "0" : "1";
-    var d = ["M", start.x, start.y, "A", radius, radius, 0, largeArcFlag, 0, end.x, end.y].join(
-      " "
-    );
-
-    return d;
+  static describeArc = (x, y, r, sAng, eAng) => {
+    var M = Math;
+    eAng = M.max(0.0, eAng - 0.0001);
+    var f = eAng - sAng <= 180 ? 0 : 1,
+      q,
+      cXY = (x, y, a) => {
+        q = ((a - 90) * M.PI) / 180;
+        return [x + r * M.cos(q), y + r * M.sin(q)];
+      };
+    return ["M", ...cXY(x, y, eAng), "A", r, r, 0, f, 0, ...cXY(x, y, sAng)].join(" ");
   };
 
   static hasCopyNumber = (data) => {
@@ -68,6 +60,7 @@ class Util {
   static displayCopyNumber = (data, color = "black") => {
     if (this.hasCopyNumber(data)) {
       let cn = data.parameters.copy_number;
+      let v = Math.min(1.0, Math.max(0.0, cn));
       let col = this.cmap(cn);
       let radius = 15;
       let innerRadius = 14;
@@ -85,14 +78,14 @@ class Util {
               stroke="black"
             />
             <path
-              d={this.describeArc(0, 0, radius, 0.2)}
+              d={this.describeArc(0, 0, radius, 0, 360.0 * v)}
               stroke={color}
               fill="none"
               strokeWidth="5"
             />
             <text transform="translate(-8 3)" fill="black">
               <tspan fontFamily="Roboto" fontSize="8" fontWeight="300" fill="black" x="0" y="0">
-                0.45
+                {cn.toFixed(2)}
               </tspan>
             </text>
           </svg>
@@ -101,8 +94,6 @@ class Util {
     } else return "";
   };
 
-  //{cn.toFixed(1)}
-  //strokeWidth={0.5 + Math.max(0, cn * 5.0)}
   static zeroPad = (num, places) => String(num).padStart(places, "0");
 
   static getLayoutedElements = (

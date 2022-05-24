@@ -85,9 +85,9 @@ def computeGraph(nodes, edges, key=None, func = _component_func, **kwargs):
     tnodes = [filterType(n) for n in nodes]
     return func(nodes=tnodes,edges=edges,output_type='COMPUTE',key=key, **kwargs)
 
-def dnaOutput(nodes, key=None, func=_component_func):
-    tnodes = [ut.updated_dict(n,{'data':{'id':n['id']}}) for n in nodes if n['type'] == 'dna']
-    return func(nodes=tnodes,output_type='DNA',key=key)
+def dnaOutput(nodes, key=None, func=_component_func, **kwargs):
+    tnodes = [ut.updated_dict(n,{'data':{'id':n['id']}}) for n in nodes if n['type'] == 'DNA']
+    return func(nodes=tnodes,output_type='DNA',key=key, **kwargs)
 
 
 #                                                                            }}}
@@ -235,6 +235,7 @@ nodes, edges = gdfToGraph(gdf)
 
 h3('Gene expression graph')
 ag(gdf)
+dnaOutput(nodes, initexpanded=True)
 grnGraph(nodes, edges)
 b()
 
@@ -485,14 +486,21 @@ def assign_upstream(params, assign_funs, D):
     for f,p in zip(assign_funs, params):
         f(p,D)
 
+def constrain_upstream(params, constrain_funs):
+    return [constrain(p) for constrain,p in zip(constrain_funs, params)]
 
 @compnode
 def transcription(*branches, deg_rate = DEFAULT_RNA_DEG_RATE, nid=None):
     nbranches= len(branches)
-    init_funs, apply_funs, assign_funs = zip(*branches)
+    init_funs, apply_funs, assign_funs, constrain_funs = zip(*branches)
 
     def init(rng): 
         return (rate_init_continuous(rng, nbranches), init_upstream(rng, init_funs))
+
+    def constrain(params):
+        t_rates, others = params
+        t_rates = jnp.clip(t_rates, 0.0, 1.0)
+        return (t_rates, constrain_upstream(others, constrain_funs))
 
     def apply(params, inputs, **kwargs):
         t_rates, others = params
@@ -504,25 +512,33 @@ def transcription(*branches, deg_rate = DEFAULT_RNA_DEG_RATE, nid=None):
             D[nid] = {'tr_rates':np.array(t_rates)}
         assign_upstream(others, assign_funs, D)
 
-    return init, apply, assign
+
+    return init, constrain, apply, assign
 
 @compnode
 def translation(*branches, deg_rate = DEFAULT_PRT_DEG_RATE, **kwargs):
     return transcription(*branches, deg_rate=deg_rate, **kwargs)
 
+
 @compnode
 def sequestron_ERN(neg, pos, nid=None):
+
+    ini, con, app, ass = zip(neg,pos)
+
     def init(rng): 
-        return init_upstream(rng, (neg[0], pos[0]))
+        return init_upstream(rng, ini)
+
+    def constrain(params):
+        return constrain_upstream(params, con)
 
     def apply(params, inputs, **kwargs):
-        res = apply_upstream(params, (neg[1], pos[1]), inputs, **kwargs)
+        res = apply_upstream(params, app, inputs, **kwargs)
         return jnp.maximum(0, res[1] - res[0])
 
     def assign(params, D):
-        assign_upstream(params, (neg[2], pos[2]), D)
+        assign_upstream(params, ass, D)
 
-    return init, apply, assign
+    return init, constrain, apply, assign
 
 @compnode
 def sequestron_RECOMBINASE(neg, pos, **kwargs):
@@ -533,6 +549,10 @@ def bias(*_, nid=None):
     def init(rng):
         return copy_n_init(rng)
 
+    def constrain(copy_n):
+        copy_n = jnp.clip(copy_n, 0.0, 1.0)
+        return copy_n
+
     def apply(copy_n, inputs, **kwargs):
         return copy_n
 
@@ -540,12 +560,16 @@ def bias(*_, nid=None):
         if nid is not None:
             D[nid] = {'copy_number':float(copy_n)}
 
-    return init, apply, assign
+    return init, constrain, apply, assign
 
 @compnode
 def input(id, nid=None):
     def init(rng):
         return copy_n_init(rng)
+
+    def constrain(copy_n):
+        copy_n = jnp.clip(copy_n, 0.0, 1.0)
+        return copy_n
 
     def apply(copy_n, inputs, **kwargs):
         return inputs[id] * copy_n
@@ -554,15 +578,18 @@ def input(id, nid=None):
         if nid is not None:
             D[nid] = {'copy_number':float(copy_n)}
 
-    return init, apply, assign
+    return init, constrain,  apply, assign
 
 
 @compnode
 def output(*branches, nid=None): # simply returns the vector of results from all branches
-    init_funs, apply_funs, assign_funs = zip(*branches)
+    init_funs, constrain_funs, apply_funs, assign_funs = zip(*branches)
 
     def init(rng): 
         return init_upstream(rng, init_funs)
+
+    def constrain(params):
+        return constrain_upstream(params, constrain_funs)
 
     def apply(params, inputs, **kwargs):
         return apply_upstream(params, apply_funs, inputs, **kwargs)
@@ -570,7 +597,7 @@ def output(*branches, nid=None): # simply returns the vector of results from all
     def assign(params, D):
         assign_upstream(params, assign_funs, D)
 
-    return init, apply, assign
+    return init, constrain,  apply, assign
 
 
 def buildTree(cdf):
@@ -580,8 +607,8 @@ def buildTree(cdf):
             branches = cdf.loc[node.input_from]
             return CNODE[node.type](*[buildImpl(b) for _,b in branches.iterrows()], nid=node.name)
         return CNODE[node.type](node.is_input, nid=node.name) # terminal node
-    init_tree, apply_fun, assign = buildImpl(outNode)
-    return (init_tree, jit(apply_fun), assign)
+    init_tree, constrain_fun, apply_fun, assign = buildImpl(outNode)
+    return (init_tree, constrain_fun, jit(apply_fun), assign)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -626,7 +653,7 @@ def trainComputeGraph(cdf, key, X, y_true, learning_rate = LEARNING_RATE, n_init
     initialization_keys = random.split(key, n_init)
 
     # generate compute tree functions from dataframe
-    init_params, model, assign = buildTree(cdf)
+    init_params, constrain, model, assign = buildTree(cdf)
 
     # compiled training functions
     opt_init, update, get_params = adam(step_size=learning_rate) # optimizer
@@ -656,7 +683,7 @@ target = mpimg.imread('../data/band_pass_dec.png')[::-1]
 
 
 TARGET_OUTPUT=0.5
-N_SAMPLES = 2000
+N_SAMPLES = 3000
 samples = []
 key = jax.random.PRNGKey(42)
 X = jax.random.uniform(key = key, shape=(N_SAMPLES,2))* jnp.array(target.shape[:2])
@@ -677,7 +704,7 @@ X = X / jnp.array(target.shape[:2])
 
 
 model, stacked_params, losses, assign_f = trainComputeGraph(cdf, key, X, y_true,
-                                            n_init=2, n_steps=20,
+                                            n_init=20, n_steps=200,
                                             learning_rate=0.003)
 
 #                                                                            }}}
@@ -704,17 +731,27 @@ hist_dfs = [cdf.copy() for _ in best_hist]
 for h,p in zip(hist_dfs, best_hist):
     assign_params_to_dataframe(p, h, assign_f)
 
-h3('Compute nodes after training:')
-draw_compute_graph(hist_dfs[-1])
-ag(hist_dfs[-1].astype(str))
+# h3('Compute nodes after training:')
+# draw_compute_graph(hist_dfs[-1])
+# ag(hist_dfs[-1].astype(str))
 
 # print(best_params)
 
-# plt.figure(figsize=(20, 15))
-# for l in losses:
-    # plt.plot(l)
-    # plt.ylim(0,0.15)
-# plt.show()
+def plotBest(best,others,outfile):
+    fig, a = plt.subplots(1, 1, figsize=(6,5))
+    for l in others:
+        a.plot(l, color="#aaaaaa", linewidth=1)
+    a.plot(best, color="red", linewidth=2.5)
+    if outfile is not None:
+        fig.savefig(outfile, dpi=100)
+        plt.close()
+    else:
+        plt.show()
+
+
+# for i,l in tqdm(list(enumerate([best_losses[:n] for n in range(0,len(best_losses),10)]))):
+    # plotBest(l,losses,f'./losses2/{i}.png')
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -723,57 +760,65 @@ ag(hist_dfs[-1].astype(str))
 # {{{                 --     decision boundaries plots     --
 #···············································································
 
-# from p_tqdm import p_umap, p_map
-# figsize =10 
-# alp = 1
-# bgalp = 0.65
-# MESHRES = 500
-# scatsize = 6 * figsize
+from p_tqdm import p_umap, p_map
+figsize =10 
+alp = 1
+bgalp = 0.65
+MESHRES = 500
+scatsize = 6 * figsize
 
-# blist = np.array([[0.073, 0.292, 0.419],[0.844, 0.1, 0.111]])
-# flist = [[0.0, 0.493, 0.579],[0.896, 0.866, 0.806],[0.844, 0.1, 0.111]]
-# bcmap = ListedColormap(blist)
-# cmap = LinearSegmentedColormap.from_list("",flist)
+blist = np.array([[0.073, 0.292, 0.419],[0.844, 0.1, 0.111]])
+flist = [[0.0, 0.493, 0.579],[0.896, 0.866, 0.806],[0.844, 0.1, 0.111]]
+bcmap = ListedColormap(blist)
+cmap = LinearSegmentedColormap.from_list("",flist)
 
-# XX, YY = np.meshgrid(np.linspace(0,1,MESHRES),np.linspace(0,1,MESHRES), indexing='xy')
-# coords = np.column_stack((XX.ravel(), YY.ravel()))
+XX, YY = np.meshgrid(np.linspace(0,1,MESHRES),np.linspace(0,1,MESHRES), indexing='xy')
+coords = np.column_stack((XX.ravel(), YY.ravel()))
 
-# mseloss(best_params, model, X, y_true)
+mseloss(best_params, model, X, y_true)
 
-# plt.rcParams["axes.grid"] = False
+plt.rcParams["axes.grid"] = False
 
-# def drawOnlyPred(a,fig,XX,YY,ZZ,cmap='Reds'):
-    # pc = a.pcolormesh(XX,YY,ZZ, cmap=cmap, shading='auto', vmin=0, vmax=0.6)
-    # a.contour(XX, YY, ZZ, [0.5], colors='black', linewidths=1, alpha=0.65)
-    # a.set_xlim(0,1)
-    # a.set_ylim(0,1)
-    # a.xaxis.set_ticks([])
-    # a.yaxis.set_ticks([])
-    # a.set_aspect('equal')
-    # a.set_xlabel('predicted')
-    # cax = a.inset_axes([1.04, 0.2, 0.05, 0.6], transform=a.transAxes)
-    # fig.colorbar(pc, ax=a, cax=cax)
+def drawOnlyPred(a,fig,XX,YY,ZZ,cmap='Reds'):
+    pc = a.pcolormesh(XX,YY,ZZ, cmap=cmap, shading='auto', vmin=0, vmax=0.6)
+    a.contour(XX, YY, ZZ, [0.5], colors='black', linewidths=1, alpha=0.65)
+    a.set_xlim(0,1)
+    a.set_ylim(0,1)
+    a.xaxis.set_ticks([])
+    a.yaxis.set_ticks([])
+    a.set_aspect('equal')
+    a.set_xlabel('predicted')
+    cax = a.inset_axes([1.04, 0.2, 0.05, 0.6], transform=a.transAxes)
+    fig.colorbar(pc, ax=a, cax=cax)
 
-# def savePred(i,p):
-    # ZZ = vmap(pytree.Partial(model, p))(coords).reshape(XX.shape)
-    # fig, a = plt.subplots(1, 1, figsize=(12,10))
-    # drawOnlyPred(a, fig, XX, YY, ZZ)
-    # fig.savefig(f'./predict/{i}.png', dpi=120)
-    # plt.close()
+def savePred(i,p):
+    ZZ = vmap(pytree.Partial(model, p))(coords).reshape(XX.shape)
+    fig, a = plt.subplots(1, 1, figsize=(12,10))
+    drawOnlyPred(a, fig, XX, YY, ZZ)
+    fig.savefig(f'./predict2/{i}.png', dpi=120)
+    plt.close()
 
-# # p_umap(savePred, *zip(*list(enumerate(best_hist[::400]))))
+# p_umap(savePred, *zip(*list(enumerate(best_hist[::400]))))
 
-# for i,p in tqdm(list(enumerate(best_hist[::10]))):
-    # savePred(i,p)
+for i,p in tqdm(list(enumerate(best_hist[::10]))):
+    savePred(i,p)
 
 # print()
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                      --     screencaptures     --
+#···············································································
 # import nest_asyncio
 # nest_asyncio.apply()
-# ut.screenCaptures(partial(draw_compute_graph, height=2000), hist_dfs[::10], out_dir_path='./outbiased', height=2000, width=1500)
+# ut.screenCaptures(partial(draw_compute_graph, height=2000), hist_dfs[::10], out_dir_path='./outbiased2', height=2000, width=1500)
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
 
 
 
