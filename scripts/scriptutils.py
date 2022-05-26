@@ -1,0 +1,490 @@
+import pandas as pd
+from time import time
+from pathlib import Path
+from pyppeteer import launch
+import urllib.parse
+import sys
+import streamlit as st
+import gspread
+from functools import partial
+import asyncio
+from tqdm import tqdm
+import json
+import numpy as np
+from types import SimpleNamespace
+import biocomp as bc
+
+
+def is_interactive():
+    try:
+        shell = get_ipython().__class__.__name__
+        if shell == 'ZMQInteractiveShell':
+            return True  # Jupyter notebook or qtconsole
+        elif shell == 'TerminalInteractiveShell':
+            return True  # Terminal running IPython
+        if not hasattr(sys, 'ps1'):
+            return True
+        else:
+            return False  # Other type (?)
+    except NameError:
+        return False  # Probably standard Python interpreter
+
+
+def np_converter(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+
+def make_json_compatible(o):
+    return json.loads(json.dumps(o, default=np_converter))
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{              --     Streamlit utils and components     --
+# ···············································································
+from st_aggrid import AgGrid
+
+
+def getStState(varname, func, *args, **kwargs):
+    if varname not in st.session_state:
+        st.session_state[varname] = None
+    if varname not in st.session_state:  # probably streamlit is not runing?
+        print('Warning: streamlit session_state is disabled')
+        return func(*args, **kwargs)
+    if st.session_state[varname] is None:
+        st.session_state[varname] = func(*args, **kwargs)
+    return st.session_state[varname]
+
+
+def md(t):
+    return st.markdown(t)
+
+
+def h1(t):
+    return md(f'# {t}')
+
+
+def h2(t):
+    return md(f'## {t}')
+
+
+def h3(t):
+    return md(f'### {t}')
+
+
+def h4(t):
+    return md(f'#### {t}')
+
+
+def b():
+    return md('---')
+
+
+def ag(df):
+    rowH = 29
+    AgGrid(
+        df.reset_index(), fit_columns_on_grid_load=True, theme='light', height=(len(df) + 1) * rowH
+    )
+
+
+# -- custom streamlit components
+import streamlit.components.v1 as components
+
+if not is_interactive():
+    _component_func = components.declare_component("ned_component", url="http://localhost:1234")
+else:
+    _component_func = lambda: None
+
+
+def grnGraph(nodes, edges, key=None, func=_component_func):
+    tnodes = [bc.ut.updated_dict(n, {'data': {'id': n['id']}}) for n in nodes]
+    return func(nodes=tnodes, edges=edges, output_type='GRN', key=key)  # {{{}}}
+
+
+def computeGraph(nodes, edges, key=None, func=_component_func, **kwargs):
+    def filterType(n):
+        if n['type'] == 'input':
+            n['type'] = 'in'
+        if n['type'] == 'output':
+            n['type'] = 'out'
+        return n
+
+    tnodes = [filterType(n) for n in nodes]
+    return func(nodes=tnodes, edges=edges, output_type='COMPUTE', key=key, **kwargs)
+
+
+def dnaOutput(nodes, key=None, func=_component_func, **kwargs):
+    tnodes = [bc.ut.updated_dict(n, {'data': {'id': n['id']}}) for n in nodes if n['type'] == 'DNA']
+    return func(nodes=tnodes, output_type='DNA', key=key, **kwargs)
+
+
+def drawComputeGraph(df, func=None, **kwargs):
+    uidGen = bc.ut.uniqueIdGenerator()
+    nodes = [
+        {'id': str(i), 'type': n.type, 'data': bc.ut.updated_dict(n.to_dict(), {'id': i})}
+        for i, n in df.iterrows()
+    ]
+    edges = [
+        {
+            'id': f'edge_{uidGen()}',
+            'source': str(i),
+            'target': str(o),
+            'targetHandle': str(h),
+            'data': {
+                'srcdata': df.loc[i].to_dict(),
+                'tgtdata': df.loc[o].to_dict(),
+                'tgthandle': str(h),
+            },
+        }
+        for i, n in df.iterrows()
+        if n.output_to
+        for o, h in n.output_to
+    ]
+    if func is None:
+        return computeGraph(make_json_compatible(nodes), make_json_compatible(edges), **kwargs)
+    else:
+        return computeGraph(
+            make_json_compatible(nodes), make_json_compatible(edges), func=func, **kwargs
+        )
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                   --     google sheet helpers     --
+# ···············································································
+
+GOOGLE_APP_CREDENTIALS = '/Users/jeandisset/.google/biocomp/key.json'
+SHEET_KEY = '1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQAzME'
+# This function grabs the content of a google sheet and returns a pandas dataframe:
+def getGoogleSheet(key, sheet_name, credentials=GOOGLE_APP_CREDENTIALS):
+    gspread_client = gspread.service_account(filename=credentials)
+    workbook = gspread_client.open_by_key(key)
+    sheet = workbook.worksheet(sheet_name)
+    data = sheet.get_all_values()
+    headers = data.pop(0)
+    df = pd.DataFrame(data, columns=headers)
+    df = df.set_index(df.columns[0])
+    return df
+
+
+def getAllGoogleSheets(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
+    gspread_client = gspread.service_account(filename=credentials)
+    workbook = gspread_client.open_by_key(key)
+    sheets = workbook.worksheets()
+    sheets_dict = {}
+    for sheet in sheets:
+        df = pd.DataFrame(sheet.get_all_records())
+        df.set_index(df.columns[0], inplace=True)
+        sheets_dict[sheet.title] = df
+    lib = SimpleNamespace(**sheets_dict)
+    return lib
+
+
+def listGoogleSpreadsheets(credentials=GOOGLE_APP_CREDENTIALS):
+    gspread_client = gspread.service_account(filename=credentials)
+    spreadsheets = gspread_client.openall()
+    if spreadsheets:
+        print("Available spreadsheet workbooks:")
+        for spreadsheet in spreadsheets:
+            print("Title:", spreadsheet.title, "URL:", spreadsheet.url)
+    else:
+        print("No spreadsheets available")
+        print("Please share the spreadsheet with Service Account email")
+
+
+def getLibFromGoogleSheet(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
+    l = getAllGoogleSheets(key, credentials)
+    return bc.PartsLibrary(l.parts, l.categories, l.sequestrons, l.sequestron_types)
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                   --     react screen captures     --
+# ···············································································
+
+DEFAULT_COMPONENT_PATH = Path('../biocomp-ui/frontend/dist/static_index.html')
+
+
+def make_batches(L, n):
+    perbatch = len(L) / n
+    return [L[int(perbatch * i) : int(perbatch * (i + 1))] for i in range(n)]
+
+
+def screenCaptures(
+    f,
+    *args,
+    out_dir_path='./',
+    filenames=None,
+    module_path=DEFAULT_COMPONENT_PATH,
+    width=1500,
+    height=1500,
+    n_batches=1,
+):
+    def param_extractor(**kwargs):
+        return {**kwargs}
+
+    params = [f(*a, func=param_extractor) for a in zip(*args)]
+    pj = [urllib.parse.quote_plus(json.dumps(p)) for p in params]
+    urls = ['file://' + str(module_path.resolve()) + '?args=' + p for p in pj]
+
+    if filenames is not None:
+        assert len(filenames) == len(params)
+        outfiles = filenames
+    else:
+        outpath = Path(out_dir_path)
+        outpath.mkdir(parents=True, exist_ok=True)
+        outfiles = [str(outpath / f'{i}.png') for i in range(len(params))]
+
+    url_batches = make_batches(urls, n_batches)
+    file_batches = make_batches(outfiles, n_batches)
+
+    async def main(urls, outfiles):
+        browser = await launch()
+
+        async def take(url, outfile):
+            page = await browser.newPage()
+            await page.setViewport({'width': width, 'height': height})
+            await page.goto(url)
+            await page.screenshot({'path': outfile})
+            print('saved', outfile)
+            await page.close()
+
+        await asyncio.gather(*[take(*args) for args in zip(urls, outfiles)])
+
+        await browser.close()
+
+    start = time()
+    loop = asyncio.get_event_loop()
+    for args in zip(url_batches, file_batches):
+        loop.run_until_complete(main(*args))
+    try:
+        loop.close()
+    except:
+        pass
+    end = time()
+    print(f'Saved all screenshots in {end-start}s')
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                   --     react screen captures     --
+# ···············································································
+import concurrent.futures
+
+
+def screenCaptures_multi(
+    f,
+    *args,
+    out_dir_path='./',
+    filenames=None,
+    module_path=DEFAULT_COMPONENT_PATH,
+    width=1500,
+    height=1500,
+    n_batches=8,
+):
+    # TODO: combine with multiprocessing (https://pymotw.com/3/asyncio/executors.html)
+
+    def param_extractor(**kwargs):
+        return {**kwargs}
+
+    params = [f(*a, func=param_extractor) for a in zip(*args)]
+    pj = [urllib.parse.quote_plus(json.dumps(p)) for p in params]
+    urls = ['file://' + str(module_path.resolve()) + '?args=' + p for p in pj]
+
+    if filenames is not None:
+        assert len(filenames) == len(params)
+        outfiles = filenames
+    else:
+        outpath = Path(out_dir_path)
+        outpath.mkdir(parents=True, exist_ok=True)
+        outfiles = [str(outpath / f'{i}.png') for i in range(len(params))]
+
+    url_batches = make_batches(urls, n_batches)
+    file_batches = make_batches(outfiles, n_batches)
+
+    async def capture(urls, outfiles):
+        browser = await launch()
+
+        innerstart = time()
+
+        async def take(url, outfile):
+            print('running things')
+            page = await browser.newPage()
+            await page.setViewport({'width': width, 'height': height})
+            await page.goto(url)
+            await page.screenshot({'path': outfile})
+            print('saved', outfile)
+            await page.close()
+
+        await asyncio.gather(*[take(*args) for args in zip(urls, outfiles)])
+
+        await browser.close()
+        innerend = time()
+        return innerend - innerstart
+
+    async def run(corofn, *args):
+        loop = asyncio.new_event_loop()
+        try:
+            coro = corofn(*args)
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    async def main():
+        loop = asyncio.get_event_loop()
+        # executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(n_batches, 8))
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        futures = [
+            loop.run_in_executor(executor, run, capture, url, outfile)
+            for url, outfile in zip(url_batches, file_batches)
+        ]
+        # print(await asyncio.gather(*futures))
+        await asyncio.wait(futures)
+
+    start = time()
+    loop = asyncio.get_event_loop()
+    # loop.run_until_complete(capture(urls, outfiles))
+    loop.run_until_complete(main())
+    try:
+        loop.close()
+    except:
+        pass
+    end = time()
+    print(f'Saved all screenshots in {end-start}s')
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                         --     plotting     --
+# ···············································································
+
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap, LinearSegmentedColormap
+from pathos.pools import ProcessPool
+
+import jax
+from jax import tree_util as pytree
+from multiprocess import Process
+
+
+def plotBestLoss(best, others, title='', outfile=None):
+    fig, a = plt.subplots(1, 1, figsize=(6, 5))
+    for l in others:
+        a.plot(l, color="#aaaaaa", linewidth=1)
+    a.plot(best, color="red", linewidth=2.5)
+    fig.suptitle(title)
+    if outfile is not None:
+        fig.savefig(outfile, dpi=100)
+        plt.close()
+    else:
+        plt.show()
+
+
+def plotModelOutput(
+    model,
+    params,
+    figsize=(12, 10),
+    meshres=(500, 500),
+    xrange=(0, 1),
+    yrange=(0, 1),
+    outfile=None,
+    title='',
+):
+    flist = [[0.0, 0.493, 0.579], [0.896, 0.866, 0.806], [0.844, 0.1, 0.111]]
+    teals = [
+        [0.957, 0.913, 0.804],
+        [0.613, 0.745, 0.734],
+        [0.465, 0.672, 0.635],
+        [0.272, 0.507, 0.535],
+        [0.01, 0.1, 0.15],
+    ]
+    cmap = LinearSegmentedColormap.from_list("", teals)
+
+    XX, YY = np.meshgrid(
+        np.linspace(xrange[0], xrange[1], meshres[0]),
+        np.linspace(yrange[0], yrange[1], meshres[1]),
+        indexing='xy',
+    )
+    coords = np.column_stack((XX.ravel(), YY.ravel()))
+
+    ZZ = jax.vmap(pytree.Partial(model, params))(coords).reshape(XX.shape)
+
+    plt.rcParams["axes.grid"] = False
+
+    fig, a = plt.subplots(1, 1, figsize=figsize)
+    pc = a.pcolormesh(XX, YY, ZZ, cmap=cmap, shading='auto', vmin=0)
+    a.contour(XX, YY, ZZ, 1, colors='black', linewidths=1, alpha=0.7)
+    a.set_xlim(*xrange)
+    a.set_ylim(*yrange)
+
+    a.xaxis.set_ticks([])
+    a.yaxis.set_ticks([])
+    a.set_aspect('equal')
+    a.set_xlabel('predicted')
+
+    cax = a.inset_axes([1.04, 0.2, 0.05, 0.6], transform=a.transAxes)
+    fig.colorbar(pc, ax=a, cax=cax)
+
+    fig.suptitle(title)
+    if outfile is not None:
+        fig.savefig(outfile, dpi=120)
+    else:
+        plt.show()
+    plt.close()
+
+
+def trainingMovie(
+    model, compg_history, params, best_loss, losses, outdir='../__out/movie_00', step=1
+):
+    outpath = Path(outdir)
+    losspath = outpath / 'loss/'
+    predpath = outpath / 'pred/'
+    graphpath = outpath / 'graph/'
+    losspath.mkdir(parents=True, exist_ok=True)
+    predpath.mkdir(parents=True, exist_ok=True)
+    graphpath.mkdir(parents=True, exist_ok=True)
+
+    # assert len(compg_history) == len(best_loss)
+
+    n_batches = int(len(compg_history) / step / 50) + 1
+    screenCaptures(
+        partial(drawComputeGraph, height=2000),
+        compg_history[::step],
+        out_dir_path=graphpath,
+        height=2000,
+        width=1500,
+        n_batches=n_batches,
+    )
+
+    c = 0
+    for i in tqdm(list(range(0, len(params), step)), 'Saving loss and predictions'):
+        l = best_loss[i]
+        plotBestLoss(best_loss[:i], losses, f'Best loss ={l:.4f}', str(losspath / f'{c}.png'))
+        plotModelOutput(model, params[i], outfile=str(predpath / f'{c}.png'))
+        c+=1
+
+
+# ut.plotBestLoss(best_loss, losses, 'Best loss history')
+# ut.plotModelOutput(model, best_params)
+
+##
+# import nest_asyncio
+# nest_asyncio.apply()
+# ut.screenCaptures(partial(ut.drawComputeGraph, height=2000), compg_history[::10], out_dir_path='../__out/test', height=2000, width=1500)
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
