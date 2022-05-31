@@ -100,7 +100,13 @@ else:
     _component_func = lambda: None
 
 
-def grnGraph(nodes, edges, key=None, func=_component_func):
+def grnGraph(gdf, key=None, func=_component_func):
+    nodes = [{'id': f'{i}', 'type': n.type, 'data': n.to_dict()} for i, n in gdf.iterrows()]
+    edges = [
+        {'id': f'{i}', 'source': f'{i}', 'target': f'{n.successor}'}
+        for i, n in gdf.iterrows()
+        if n.successor
+    ]
     tnodes = [bc.ut.updated_dict(n, {'data': {'id': n['id']}}) for n in nodes]
     return func(nodes=tnodes, edges=edges, output_type='GRN', key=key)  # {{{}}}
 
@@ -391,6 +397,7 @@ def plotBestLoss(best, others, title='', outfile=None):
         plt.close()
     else:
         plt.show()
+    return fig
 
 
 def plotModelOutput(
@@ -444,6 +451,7 @@ def plotModelOutput(
     else:
         plt.show()
     plt.close()
+    return fig
 
 
 def trainingMovie(
@@ -474,7 +482,7 @@ def trainingMovie(
         l = best_loss[i]
         plotBestLoss(best_loss[:i], losses, f'Best loss ={l:.4f}', str(losspath / f'{c}.png'))
         plotModelOutput(model, params[i], outfile=str(predpath / f'{c}.png'))
-        c+=1
+        c += 1
 
 
 # ut.plotBestLoss(best_loss, losses, 'Best loss history')
