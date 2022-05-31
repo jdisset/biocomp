@@ -168,16 +168,25 @@ def buildComputeGraph(lib, cdg):
         pparts = plvl[plvl.content.apply(lambda x: r.positive_part in x)]
         olvl = cdg[cdg.type == r.output_level]
         oparts = olvl[olvl.content.apply(lambda x: ut.isSubset(r.output_part, x))]
-        if len(nparts) > 0 and len(pparts) > 0:
+        print(oparts)
+        if len(nparts) > 0 and len(pparts) > 0 and len(oparts.index) > 0:
             assert len(pparts) == 1
             assert len(nparts) == 1
-            cnode = GraphComputeNode(
-                uidGen(),
-                f'sequestron_{r.type}',
-                [int(nparts.index[0]), int(pparts.index[0])],
-                int(oparts.index[0]),
-            )
-            newnodes.append(cnode)
+            try:
+                cnode = GraphComputeNode(
+                    uidGen(),
+                    f'sequestron_{r.type}',
+                    [int(nparts.index[0]), int(pparts.index[0])],
+                    int(oparts.index[0]),
+                )
+                newnodes.append(cnode)
+            except:
+                print('nparts', nparts)
+                print('pparts', nparts)
+                print('olvl', olvl)
+                print('oparts', nparts)
+                print('outlevel', r.output_level)
+                print('outpart', r.output_part)
 
     # then for each input node, we need to go back up to the original DNA using translation
     # and transcription nodes, making sure to connect it to relevant sequestron nodes along the way
