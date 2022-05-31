@@ -10,6 +10,7 @@ from jax.tree_util import Partial as partial
 import jax.numpy as jnp
 from time import time
 from copy import deepcopy
+import optax
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                      --     Model building     --
@@ -191,36 +192,6 @@ def output(*branches, nid=None):  # simply returns the vector of results from al
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                  --     ComputeGraphModel class     --
 # ···············································································
-def base_step(i, state, dlossfunc, get_params, update, model, x, y_true):
-    params = get_params(state)
-    loss, g = dlossfunc(params, model.apply, x, y_true)
-    return (update(i, g, state), loss)
-
-
-def mseloss(params, apply_f, x, y_true):
-    y_preds = vmap(pytree.Partial(apply_f, params))(x)
-    return jnp.mean(jnp.power(y_preds - y_true, 2))
-
-
-dmseloss = value_and_grad(mseloss)
-
-
-def make_training_start(params_initializer, state_initializer, stepfunc, n_steps):
-    @ut.tqdm_scan(n_steps, 'Training model')
-    def scannable_step(previous_state, iteration):
-        new_state, loss = stepfunc(iteration, previous_state)
-        return new_state, (loss, previous_state)
-
-    def train_one_start(key):
-        params = params_initializer(key)
-        initial_state = state_initializer(params)
-        final_state, states_and_losses_history = jax.lax.scan(
-            scannable_step, initial_state, np.arange(n_steps)
-        )
-        losses, sthists = states_and_losses_history
-        return (losses, ut.tree_append(sthists, final_state))
-
-    return train_one_start
 
 
 # training parameters
@@ -239,7 +210,6 @@ LEARNING_RATE = 1e-2
 # return CNODE[node.type](*[buildImpl(b) for _, b in branches.iterrows()], nid=node.name)
 # return CNODE[node.type](node.is_input, nid=node.name)  # terminal node
 # return ComputeGraphModel(*buildImpl(outNode))
-
 
 class ComputeGraphModel:
     def __init__(self, init, constrain, apply, collect, compg=None):
@@ -283,48 +253,51 @@ class ComputeGraphModel:
                 """
             )
         else:
-            df =self.compg.copy(deep=True)
+            df = self.compg.copy(deep=True)
             self.collectParamsToDataframe(params, df)
             return df
 
     def __call__(self, *args, **kwargs):
         return self.apply(*args, **kwargs)
 
-    def train(
-        self,
-        key,
-        X,
-        y_true,
-        learning_rate=LEARNING_RATE,
-        n_init=N_INITIALIZATIONS,
-        n_steps=N_TRAINING_STEPS,
-    ):
+    def train(self, key, X, y_true, n_init=N_INITIALIZATIONS, n_steps=N_TRAINING_STEPS, learning_rate=LEARNING_RATE):
+        optimizer = optax.adam(learning_rate=learning_rate)
         initialization_keys = jax.random.split(key, n_init)
 
-        # compiled training functions
-        opt_init, update, get_params = adam(step_size=learning_rate)  # optimizer
-        step = jit(
-            partial(
-                base_step,
-                get_params=get_params,
-                dlossfunc=dmseloss,
-                update=update,
-                model=self,
-                x=X,
-                y_true=y_true,
+        def loss(params, x: jnp.ndarray, y_true: jnp.ndarray) -> jnp.ndarray:
+            y_pred = jax.vmap(partial(self.apply, params))(x)
+            l = optax.l2_loss(y_pred, y_true)
+            return l.mean()
+
+        @jax.jit
+        def step(params, opt_state):
+            loss_value, grads = jax.value_and_grad(loss)(params, X, y_true)
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            return params, opt_state, loss_value
+
+        def train_one(key):
+            initial_params = self.init(key)
+            initial_state = optimizer.init(initial_params)
+
+            @ut.tqdm_scan(n_steps, 'Training model')
+            def scannable_step(params_and_state, iter_num):
+                params, state = params_and_state
+                new_params, new_state, loss = step(params, state)
+                return (new_params, new_state), (loss, params)
+
+            _, losses_and_params_history = jax.lax.scan(
+                scannable_step, (initial_params, initial_state), np.arange(n_steps)
             )
-        )
-        train_fun = make_training_start(self.init, opt_init, step, n_steps)
+            return losses_and_params_history
 
         # actual training "loop"
         start = time()
-        loss_state_histories = vmap(train_fun)(initialization_keys)
+        all_losses, all_params = jax.vmap(train_one)(initialization_keys)
         end = time()
         print('Trained in', end - start)
 
-        losses, stacked_states = loss_state_histories
-        return (get_params(stacked_states), losses)
-
+        return all_losses, all_params
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
