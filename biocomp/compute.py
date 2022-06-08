@@ -2,18 +2,16 @@ import pandas as pd
 from . import utils as ut
 import numpy as np
 from .library import PartsLibrary as PartsLibrary
-from jax.example_libraries.optimizers import adam
 import jax
-from jax import jit, vmap, value_and_grad
+from jax import jit, vmap
 from jax import tree_util as pytree
 from jax.tree_util import Partial as partial
 import jax.numpy as jnp
 from time import time
-from copy import deepcopy
 import optax
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                      --     Model building     --
+# {{{                      --     Compute Nodes     --
 # ···············································································
 
 DEFAULT_RNA_DEG_RATE = 1.0
@@ -23,14 +21,17 @@ DEFAULT_MIN_RATE = 0.0
 DEFAULT_MAX_RATE = 1.0
 
 DEFAULT_MIN_COPY_N = 0.0
-DEFAULT_MAX_COPY_N = 1.0
+DEFAULT_MAX_COPY_N = 50.0
+
+POSSIBLE_TL_RATES = jnp.array([1.0 / 2**n for n in range(5)] + [0.75, 0.9])
+POSSIBLE_TX_RATES = jnp.array([1.0, 0.5, 0.1])
 
 
 def rate_init_continuous(rng, n, minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
     return jax.random.uniform(key=rng, shape=(n,), minval=minval, maxval=maxval, dtype=jnp.float32)
 
 
-def copy_n_init(rng, minval=DEFAULT_MIN_COPY_N, maxval=DEFAULT_MAX_COPY_N):
+def copy_n_init(rng, minval=0.0, maxval=2.0):
     return jax.random.uniform(key=rng, minval=minval, maxval=maxval, dtype=jnp.float32)
 
 
@@ -40,6 +41,32 @@ def copy_n_init(rng, minval=DEFAULT_MIN_COPY_N, maxval=DEFAULT_MAX_COPY_N):
 #                       X, the inputs, is only useful for the input leaves
 # - collect(params, dic) -> collect the param values to the dict[key] node
 # - constrain(params) -> constrain params to certain ranges or values
+
+
+@partial(jax.custom_jvp, nondiff_argnums=(1,))
+def quantize(x, arr):
+    return arr[jnp.argmin(jnp.abs(arr - x))]
+
+
+# we define the derivative of the quantize function as if it was just the identity function (x -> x)
+@quantize.defjvp
+def quantize_jvp(_, x, x_tang):
+    (x,) = x
+    (x_dot,) = x_tang
+    return x, x_dot
+
+
+@jax.custom_jvp
+def round_to_int(x):
+    return jnp.round(x)
+
+
+# we define the derivative of the quantize function as if it was just the identity function (x -> x)
+@round_to_int.defjvp
+def round_to_int_jvp(x, x_tang):
+    (x,) = x
+    (x_dot,) = x_tang
+    return x, x_dot
 
 
 CNODE = {}
@@ -77,7 +104,9 @@ def constrain_upstream(params, constrain_funs):
 
 
 @compnode
-def transcription(*branches, deg_rate=DEFAULT_RNA_DEG_RATE, nid=None):
+def transcription(
+    *branches, deg_rate=DEFAULT_RNA_DEG_RATE, nid=None, possible_rates=POSSIBLE_TX_RATES
+):
     nbranches = len(branches)
     init_funs, constrain_funs, apply_funs, collect_funs = zip(*branches)
 
@@ -91,18 +120,20 @@ def transcription(*branches, deg_rate=DEFAULT_RNA_DEG_RATE, nid=None):
     def constrain(params):
         t_rates, others = params
         t_rates = jnp.clip(t_rates, 0.0, 1.0)
+        t_rates = vmap(quantize)(t_rates, jnp.tile(possible_rates, (len(t_rates), 1)))
         return (t_rates, constrain_upstream(others, constrain_funs))
 
     def apply(params, inputs, **kwargs):
         t_rates, others = params
+        t_rates = vmap(quantize)(t_rates, jnp.tile(possible_rates, (len(t_rates), 1)))
         return jnp.dot(apply_upstream(others, apply_funs, inputs, **kwargs), t_rates) / deg_rate
 
     return init, constrain, apply, collect
 
 
 @compnode
-def translation(*branches, deg_rate=DEFAULT_PRT_DEG_RATE, **kwargs):
-    return transcription(*branches, deg_rate=deg_rate, **kwargs)
+def translation(*branches, deg_rate=DEFAULT_PRT_DEG_RATE, possible_rates=POSSIBLE_TL_RATES, **kwargs):
+    return transcription(*branches, deg_rate=deg_rate, possible_rates=possible_rates, **kwargs)
 
 
 @compnode
@@ -132,13 +163,12 @@ def sequestron_RECOMBINASE(neg, pos, **kwargs):
 
 
 @compnode
-def bias(*_, nid=None):
+def bias(*_, nid=None, MAX_COPY_N=DEFAULT_MAX_COPY_N):
     def init(rng):
         return copy_n_init(rng)
 
     def constrain(copy_n):
-        copy_n = jnp.clip(copy_n, 0.0, 1.0)
-        return copy_n
+        return jnp.clip(copy_n, 0.0, MAX_COPY_N)
 
     def apply(copy_n, inputs, **kwargs):
         return copy_n
@@ -150,13 +180,12 @@ def bias(*_, nid=None):
 
 
 @compnode
-def input(id, nid=None):
+def input(id, nid=None, MAX_COPY_N=DEFAULT_MAX_COPY_N):
     def init(rng):
         return copy_n_init(rng)
 
     def constrain(copy_n):
-        copy_n = jnp.clip(copy_n, 0.0, 1.0)
-        return copy_n
+        return jnp.clip(copy_n, 0.0, MAX_COPY_N)
 
     def apply(copy_n, inputs, **kwargs):
         return inputs[id] * copy_n
@@ -199,17 +228,6 @@ N_INITIALIZATIONS = 10
 N_TRAINING_STEPS = 100
 LEARNING_RATE = 1e-2
 
-
-# # builds the model from the compute graph representation
-# # cdf: compute graph dataframe
-# def buildModel(cdf):
-# outNode = cdf[cdf.type == 'output'].iloc[0]
-# def buildImpl(node):
-# if node.input_from:  # recursive case: any non-input node
-# branches = cdf.loc[node.input_from]
-# return CNODE[node.type](*[buildImpl(b) for _, b in branches.iterrows()], nid=node.name)
-# return CNODE[node.type](node.is_input, nid=node.name)  # terminal node
-# return ComputeGraphModel(*buildImpl(outNode))
 
 class ComputeGraphModel:
     def __init__(self, init, constrain, apply, collect, compg=None):
@@ -260,27 +278,39 @@ class ComputeGraphModel:
     def __call__(self, *args, **kwargs):
         return self.apply(*args, **kwargs)
 
-    def train(self, key, X, y_true, n_init=N_INITIALIZATIONS, n_steps=N_TRAINING_STEPS, learning_rate=LEARNING_RATE):
+    def train(
+        self,
+        key,
+        X,
+        y_true,
+        n_init=N_INITIALIZATIONS,
+        n_steps=N_TRAINING_STEPS,
+        learning_rate=LEARNING_RATE,
+        compile_train_loop=False,
+        progress_type=ut.TQDMProgress
+    ):
         optimizer = optax.adam(learning_rate=learning_rate)
         initialization_keys = jax.random.split(key, n_init)
 
+        @jit
         def loss(params, x: jnp.ndarray, y_true: jnp.ndarray) -> jnp.ndarray:
-            y_pred = jax.vmap(partial(self.apply, params))(x)
+            # p = self.constrain(params) # influences grad. do we want that?
+            y_pred = vmap(partial(self.apply, params))(x)
             l = optax.l2_loss(y_pred, y_true)
             return l.mean()
 
-        @jax.jit
         def step(params, opt_state):
             loss_value, grads = jax.value_and_grad(loss)(params, X, y_true)
             updates, opt_state = optimizer.update(grads, opt_state, params)
             params = optax.apply_updates(params, updates)
+            params = self.constrain(params)
             return params, opt_state, loss_value
 
         def train_one(key):
             initial_params = self.init(key)
             initial_state = optimizer.init(initial_params)
 
-            @ut.tqdm_scan(n_steps, 'Training model')
+            @ut.progress_scan(n_steps, progress_type, 'Training model')
             def scannable_step(params_and_state, iter_num):
                 params, state = params_and_state
                 new_params, new_state, loss = step(params, state)
@@ -293,11 +323,15 @@ class ComputeGraphModel:
 
         # actual training "loop"
         start = time()
-        all_losses, all_params = jax.vmap(train_one)(initialization_keys)
+        train_all = vmap(train_one)
+        if compile_train_loop:
+            train_all = jax.jit(train_all)
+        all_losses, all_params = train_all(initialization_keys)
         end = time()
         print('Trained in', end - start)
 
         return all_losses, all_params
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────

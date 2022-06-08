@@ -58,9 +58,10 @@ class Util {
   };
 
   static displayCopyNumber = (data, color = "black") => {
+    const MAX_COPY_N = 100.0;
     if (this.hasCopyNumber(data)) {
       let cn = data.parameters.copy_number;
-      let v = Math.min(1.0, Math.max(0.0, cn));
+      let v = Math.min(1.0, Math.max(0.0, cn / MAX_COPY_N));
       let col = this.cmap(cn);
       let radius = 15;
       let innerRadius = 14;
@@ -83,9 +84,9 @@ class Util {
               fill="none"
               strokeWidth="5"
             />
-            <text transform="translate(-8 3)" fill="black">
-              <tspan fontFamily="Roboto" fontSize="8" fontWeight="300" fill="black" x="0" y="0">
-                {cn.toFixed(2)}
+            <text transform="translate(0 1)" fill="black" dominantBaseline="middle" textAnchor="middle">
+              <tspan fontFamily="Roboto" fontSize="10" fontWeight="300" fill="black" x="0" y="0">
+                {cn.toFixed(1)}
               </tspan>
             </text>
           </svg>

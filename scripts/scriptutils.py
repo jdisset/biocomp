@@ -386,18 +386,41 @@ from jax import tree_util as pytree
 from multiprocess import Process
 
 
-def plotBestLoss(best, others, title='', outfile=None):
+def plotBestLoss(best, others, title='', outfile=None, vmax=None):
     fig, a = plt.subplots(1, 1, figsize=(6, 5))
     for l in others:
         a.plot(l, color="#aaaaaa", linewidth=1)
     a.plot(best, color="red", linewidth=2.5)
     fig.suptitle(title)
+    if vmax is not None:
+        a.set_ylim([0,vmax])
     if outfile is not None:
         fig.savefig(outfile, dpi=100)
         plt.close()
     else:
         plt.show()
     return fig
+
+
+def grid_map(F, xrange, yrange, meshres):
+    XX, YY = np.meshgrid(
+        np.linspace(xrange[0], xrange[1], meshres[0]),
+        np.linspace(yrange[0], yrange[1], meshres[1]),
+        indexing='xy',
+    )
+    coords = np.column_stack((XX.ravel(), YY.ravel()))
+    ZZ = jax.vmap(F)(coords).reshape(XX.shape)
+    return XX, YY, ZZ
+
+
+def plotFuncOutput(F, ax, xrange=(0, 1), yrange=(0, 1), meshres=(500, 500), cmap=None):
+    if cmap is None:
+        cmap = "Reds"
+    XX, YY, ZZ = grid_map(F, xrange, yrange, meshres)
+    pc = ax.pcolormesh(XX, YY, ZZ, cmap=cmap, shading='auto', vmin=0)
+    ax.set_xlim(*xrange)
+    ax.set_ylim(*yrange)
+    return pc, XX, YY, ZZ
 
 
 def plotModelOutput(
@@ -419,33 +442,20 @@ def plotModelOutput(
         [0.01, 0.1, 0.15],
     ]
     cmap = LinearSegmentedColormap.from_list("", teals)
-
-    XX, YY = np.meshgrid(
-        np.linspace(xrange[0], xrange[1], meshres[0]),
-        np.linspace(yrange[0], yrange[1], meshres[1]),
-        indexing='xy',
-    )
-    coords = np.column_stack((XX.ravel(), YY.ravel()))
-
-    ZZ = jax.vmap(pytree.Partial(model, params))(coords).reshape(XX.shape)
-
     plt.rcParams["axes.grid"] = False
 
     fig, a = plt.subplots(1, 1, figsize=figsize)
-    pc = a.pcolormesh(XX, YY, ZZ, cmap=cmap, shading='auto', vmin=0)
+    pc, XX, YY, ZZ = plotFuncOutput(pytree.Partial(model, params), a, xrange, yrange, meshres, cmap)
     a.contour(XX, YY, ZZ, 1, colors='black', linewidths=1, alpha=0.7)
-    a.set_xlim(*xrange)
-    a.set_ylim(*yrange)
-
+    a.set_xlabel('predicted')
     a.xaxis.set_ticks([])
     a.yaxis.set_ticks([])
     a.set_aspect('equal')
-    a.set_xlabel('predicted')
-
     cax = a.inset_axes([1.04, 0.2, 0.05, 0.6], transform=a.transAxes)
     fig.colorbar(pc, ax=a, cax=cax)
 
     fig.suptitle(title)
+
     if outfile is not None:
         fig.savefig(outfile, dpi=120)
     else:

@@ -82,30 +82,45 @@ def set_list_item(lst, i, val):
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                        --     JAX helpers     --
 # ···············································································
+
+
+class TQDMProgress:
+    def __init__(self, num_samples, message):
+        self.bar = tqdm(range(num_samples))
+        self.bar.set_description(message, refresh=False)
+
+    def update(self, count):
+        self.bar.update(count)
+
+    def close(self):
+        self.bar.close()
+        pass
+
+
 # --- tqdm progress bar for jax scan ---
 # This code is from this blog post: https://www.jeremiecoullon.com/2021/01/29/jax_progress_bar/
-def tqdm_scan(num_samples, message=None):
+def progress_scan(num_samples, progress_type=TQDMProgress, message=None):
     "Progress bar for a JAX scan"
     if message is None:
         message = ""
         # message = f"Running for {num_samples:,} iterations"
-    tqdm_bars = {}
+    bars = {}
 
     print_rate = max(1, int(num_samples / 100))
     remainder = num_samples % print_rate
 
-    def _define_tqdm(arg, transform):
-        tqdm_bars[0] = tqdm(range(num_samples))
-        tqdm_bars[0].set_description(message, refresh=False)
+    def create(arg, transform):
+        bars[0] = progress_type(num_samples, message)
+        pass
 
-    def _update_tqdm(arg, transform):
-        tqdm_bars[0].update(arg)
+    def update(arg, transform):
+        bars[0].update(arg)
 
     def _update_progress_bar(iter_num):
         "Updates tqdm progress bar of a JAX scan or loop"
         _ = lax.cond(
             iter_num == 0,
-            lambda _: host_callback.id_tap(_define_tqdm, None, result=iter_num),
+            lambda _: host_callback.id_tap(create, None, result=iter_num),
             lambda _: iter_num,
             operand=None,
         )
@@ -113,7 +128,7 @@ def tqdm_scan(num_samples, message=None):
         _ = lax.cond(
             # update tqdm every multiple of `print_rate` except at the end
             (iter_num % print_rate == 0) & (iter_num != num_samples - remainder),
-            lambda _: host_callback.id_tap(_update_tqdm, print_rate, result=iter_num),
+            lambda _: host_callback.id_tap(update, print_rate, result=iter_num),
             lambda _: iter_num,
             operand=None,
         )
@@ -121,18 +136,18 @@ def tqdm_scan(num_samples, message=None):
         _ = lax.cond(
             # update tqdm by `remainder`
             iter_num == num_samples - remainder,
-            lambda _: host_callback.id_tap(_update_tqdm, remainder, result=iter_num),
+            lambda _: host_callback.id_tap(update, remainder, result=iter_num),
             lambda _: iter_num,
             operand=None,
         )
 
-    def _close_tqdm(arg, transform):
-        tqdm_bars[0].close()
+    def close(arg, transform):
+        bars[0].close()
 
-    def close_tqdm(result, iter_num):
+    def _close_progress_bar(result, iter_num):
         return lax.cond(
             iter_num == num_samples - 1,
-            lambda _: host_callback.id_tap(_close_tqdm, None, result=result),
+            lambda _: host_callback.id_tap(close, None, result=result),
             lambda _: result,
             operand=None,
         )
@@ -152,7 +167,7 @@ def tqdm_scan(num_samples, message=None):
                 iter_num = x
             _update_progress_bar(iter_num)
             result = func(carry, x)
-            return close_tqdm(result, iter_num)
+            return _close_progress_bar(result, iter_num)
 
         return wrapper_progress_bar
 
@@ -177,8 +192,20 @@ def get_pytree(t, i):
     return pytree.tree_map(lambda x: x[i], t)
 
 
+@pytree.Partial(jit, static_argnums=2)
+def get_pytree2(t, i, ts):
+    pp, _ = pytree.tree_flatten(t)
+    l = [p[i] for p in pp]
+    print(l)
+    return pytree.tree_unflatten(l, ts)
+
+
 def param_unstack(t, N):
     return [get_pytree(t, i) for i in range(N)]
+
+
+def param_unstack2(t, N):
+    return [get_pytree2(t, i) for i in range(N)]
 
 
 @jit
