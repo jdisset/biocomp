@@ -19,8 +19,8 @@ import biocomp as bc
 import biocomp.utils as bu
 from time import time
 
-from jax.experimental import stax
-from jax.experimental.stax import BatchNorm, Conv, Dense, Flatten, Relu, LogSoftmax
+from jax.example_libraries import stax
+from jax.example_libraries.stax import BatchNorm, Conv, Dense, Flatten, Relu, LogSoftmax
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -134,26 +134,11 @@ def loss(params, init_grid, target):
     return l.mean()
 
 
+n_training_steps = 30
+n_init = 3
+n_simulation_steps = 30
 
-# _, initial_params = init_fun(key, input_shape)
-# params = initial_params * 0.000000001
-# params = pytree.tree_map(lambda x:x*0.0000000001, initial_params)
-
-# loss_value, grads = jax.value_and_grad(loss)(params, init, target)
-
-# y_pred = run(params, init)
-# l = optax.l2_loss(y_pred[:,:,:4], target[:,:,:4])
-
-# plt.imshow(y_pred[:,:,:4])
-# plt.imshow(target[:,:,:4])
-
-
-# print(params)
-# print(loss_value)
-
-
-n_training_steps = 300
-n_simulation_steps = 300
+initialization_keys = jax.random.split(key, n_init)
 
 def training_step(params, opt_state, init_grid, target):
     loss_value, grads = jax.value_and_grad(loss)(params, init_grid, target)
@@ -178,31 +163,19 @@ def train_one(init_grid, target, key, input_shape=(CHANNELS * 3,)):
     )
     return losses_and_params_history
 
+# losses, stacked_params = train_one(init, target, key)
 
-losses, stacked_params = train_one(init, target, key)
+# actual training "loop"
+start = time()
+train_all = vmap(train_one)
+all_losses, all_params = train_all(initialization_keys)
+end = time()
+print('Trained in', end - start)
 
+ut.save(all_losses, './all_losses.pickle')
+ut.save(all_params, './all_params.pickle')
 
-params_history = bu.param_unstack(stacked_params, len(losses) + 1)
-
-final = run(params_history[-1], init)
-
-plt.plot(losses)
-plt.show()
-
-plt.imshow(final[:,:,:4])
-plt.show()
-
-
-
-# # actual training "loop"
-# start = time()
-# train_all = vmap(train_one)
-# if compile_train_loop:
-# train_all = jax.jit(train_all)
-# all_losses, all_params = train_all(initialization_keys)
-# end = time()
-# print('Trained in', end - start)
-
+all_losses
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
