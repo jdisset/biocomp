@@ -2,6 +2,7 @@ import pandas as pd
 from time import time
 from pathlib import Path
 from pyppeteer import launch
+from jax import tree_util as pytree
 import urllib.parse
 import sys
 import streamlit as st
@@ -382,7 +383,6 @@ from matplotlib.colors import ListedColormap, LinearSegmentedColormap
 from pathos.pools import ProcessPool
 
 import jax
-from jax import tree_util as pytree
 from multiprocess import Process
 
 
@@ -507,7 +507,6 @@ def trainingMovie(
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-from jax.tree_util import pytree
 import pickle
 
 suffix = '.pickle'

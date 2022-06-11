@@ -118,9 +118,9 @@ def grow(params, prev_state, _):
     return next_state, None
 
 
-def run(params, init_grid):
+def run(params, init_grid, n_steps):
     final_state, _ = jax.lax.scan(
-        partial(grow, params), init_grid, xs=None, length=n_simulation_steps
+        partial(grow, params), init_grid, xs=None, length=n_steps
     )
     return final_state
 
@@ -128,20 +128,20 @@ def run(params, init_grid):
 key = jax.random.PRNGKey(1)
 optimizer = optax.adam(learning_rate=0.01)
 
-def loss(params, init_grid, target):
-    y_pred = run(params, init_grid)
+def loss(params, init_grid, target, n_steps):
+    y_pred = run(params, init_grid, n_steps)
     l = optax.l2_loss(y_pred[:,:,:4], target[:,:,:4])
     return l.mean()
 
 
-n_training_steps = 30
-n_init = 3
-n_simulation_steps = 30
+n_init = 5
+n_training_steps = 10
+n_simulation_steps = 100
 
 initialization_keys = jax.random.split(key, n_init)
 
 def training_step(params, opt_state, init_grid, target):
-    loss_value, grads = jax.value_and_grad(loss)(params, init_grid, target)
+    loss_value, grads = jax.value_and_grad(loss)(params, init_grid, target, n_simulation_steps)
     updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     return params, opt_state, loss_value
@@ -163,19 +163,34 @@ def train_one(init_grid, target, key, input_shape=(CHANNELS * 3,)):
     )
     return losses_and_params_history
 
-# losses, stacked_params = train_one(init, target, key)
 
-# actual training "loop"
 start = time()
-train_all = vmap(train_one)
-all_losses, all_params = train_all(initialization_keys)
+train_all = vmap(partial(train_one, init, target))
+losses, stacked_params = train_all(initialization_keys)
 end = time()
 print('Trained in', end - start)
 
-ut.save(all_losses, './all_losses.pickle')
-ut.save(all_params, './all_params.pickle')
+best_run = np.argmin(losses[:, -1])
+best_loss = losses[best_run]
+params_history = bu.param_unstack(bu.get_pytree(stacked_params, best_run), len(best_loss) + 1)
 
-all_losses
+def plotCAState(state, title='', outfile=None):
+    fig, a = plt.subplots(1, 1, figsize=(5, 5))
+    a.imshow(state[:,:,4])
+    fig.suptitle(title)
+    if outfile is not None:
+        fig.savefig(outfile, dpi=100)
+        plt.close()
+    else:
+        plt.show()
+    return fig
+
+best_state = run(params_history[-1], init, n_simulation_steps)
+plotCAState(best_state, outfile='best_state.png')
+ut.plotBestLoss(best_loss, losses, outfile='lossplot.png')
+ut.save(losses, './all_losses.pickle', overwrite=True)
+ut.save(params_history[-1], './best_params.pickle', overwrite=True)
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
