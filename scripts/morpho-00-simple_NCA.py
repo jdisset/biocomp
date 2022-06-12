@@ -22,6 +22,16 @@ from time import time
 from jax.example_libraries import stax
 from jax.example_libraries.stax import BatchNorm, Conv, Dense, Flatten, Relu, LogSoftmax
 
+def plotCAState(state, title='', outfile=None):
+    fig, a = plt.subplots(1, 1, figsize=(5, 5))
+    a.imshow(state[:,:,:4])
+    fig.suptitle(title)
+    if outfile is not None:
+        fig.savefig(outfile, dpi=100)
+        plt.close()
+    else:
+        plt.show()
+    return fig
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -56,7 +66,7 @@ def perceive(state_grid):
 # {{{                       --      load data     --
 # ···············································································
 
-N_CHANNEL = 8
+N_CHANNEL = 16
 
 path = Path('../data/morpho/liverlobule')
 
@@ -73,7 +83,6 @@ plt.imshow(init, origin='lower')
 plt.title('initial state')
 plt.show()
 
-*target.shape[:2], 1
 
 missing_channels = max(N_CHANNEL - target.shape[2], 0)
 if missing_channels > 0:
@@ -126,17 +135,17 @@ def run(params, init_grid, n_steps):
 
 
 key = jax.random.PRNGKey(1)
-optimizer = optax.adam(learning_rate=0.01)
+optimizer = optax.adamw(learning_rate=0.0001)
 
 def loss(params, init_grid, target, n_steps):
     y_pred = run(params, init_grid, n_steps)
-    l = optax.l2_loss(y_pred[:,:,:4], target[:,:,:4])
+    l = (y_pred[:,:,:4] - target[:,:,:4])**2
     return l.mean()
 
 
 n_init = 5
-n_training_steps = 10
-n_simulation_steps = 100
+n_training_steps = 30000
+n_simulation_steps = 64
 
 initialization_keys = jax.random.split(key, n_init)
 
@@ -147,9 +156,9 @@ def training_step(params, opt_state, init_grid, target):
     return params, opt_state, loss_value
 
 @jit
-def train_one(init_grid, target, key, input_shape=(CHANNELS * 3,)):
+def train_one(init_grid, target, key, input_shape=input_shape):
     _, initial_params = init_fun(key, input_shape)
-    initial_params = pytree.tree_map(lambda x:x*0.000001, initial_params)
+    initial_params = pytree.tree_map(lambda x:x*0.00001, initial_params)
     initial_state = optimizer.init(initial_params)
 
     @bu.progress_scan(n_training_steps, bu.TQDMProgress, 'Training model')
@@ -164,33 +173,35 @@ def train_one(init_grid, target, key, input_shape=(CHANNELS * 3,)):
     return losses_and_params_history
 
 
-start = time()
-train_all = vmap(partial(train_one, init, target))
-losses, stacked_params = train_all(initialization_keys)
-end = time()
-print('Trained in', end - start)
+train_all_vmaped = jit(vmap(partial(train_one, init, target)))
 
-best_run = np.argmin(losses[:, -1])
-best_loss = losses[best_run]
-params_history = bu.param_unstack(bu.get_pytree(stacked_params, best_run), len(best_loss) + 1)
 
-def plotCAState(state, title='', outfile=None):
-    fig, a = plt.subplots(1, 1, figsize=(5, 5))
-    a.imshow(state[:,:,4])
-    fig.suptitle(title)
-    if outfile is not None:
-        fig.savefig(outfile, dpi=100)
-        plt.close()
-    else:
-        plt.show()
-    return fig
+for i,k in enumerate(initialization_keys):
+    start = time()
+    runloss, params = train_one(init, target, k)
+    end = time()
+    print('Trained in', end - start)
+    params_history = bu.param_unstack(params, len(runloss) + 1)
+    best_epoch = np.argmin(np.array(runloss))
+    best_loss = f'{runloss[best_epoch]:.4f}'
+    ut.plotBestLoss(runloss, [], title=f'run {i}\nbest = {best_loss} at epoch {best_epoch}', outfile=f'lossplot_{i}_{best_loss}.png')
+    best_params = params_history[best_epoch]
+    best_state = run(best_params, init, n_simulation_steps)
+    plotCAState(best_state, outfile=f'best_state_{i}_{best_loss}.png')
+    title = f'Epoch {i}, after {n_simulation_steps} steps'
+    ut.save(runloss, f'./losses_{i}.pickle', overwrite=True)
+    ut.save(best_params, f'./params_{i}.pickle', overwrite=True)
 
-best_state = run(params_history[-1], init, n_simulation_steps)
-plotCAState(best_state, outfile='best_state.png')
-ut.plotBestLoss(best_loss, losses, outfile='lossplot.png')
-ut.save(losses, './all_losses.pickle', overwrite=True)
-ut.save(params_history[-1], './best_params.pickle', overwrite=True)
-
+# best_run = np.argmin(np.array(losses)[:, -1])
+# best_loss = losses[best_run]
+# params_history = bu.param_unstack(all_params[best_run], len(best_loss) + 1)
+# losses = ut.load('./all_losses.pickle')
+# best_run = np.argmin(np.array(losses)[:, -1])
+# best_loss = losses[best_run]
+# params = ut.load('./best_params.pickle')
+# best_state = run(params, init, n_simulation_steps)
+# plotCAState(best_state, outfile='best_state.png')
+# ut.plotBestLoss(best_loss, losses, outfile='lossplot.png', vmax=0.1)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
