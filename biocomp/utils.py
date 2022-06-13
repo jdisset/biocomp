@@ -99,14 +99,16 @@ class TQDMProgress:
 
 # --- tqdm progress bar for jax scan ---
 # This code is from this blog post: https://www.jeremiecoullon.com/2021/01/29/jax_progress_bar/
-def progress_scan(num_samples, progress_type=TQDMProgress, message=None):
+def progress_scan(num_samples, progress_type=TQDMProgress, message=None, print_rate=None):
     "Progress bar for a JAX scan"
     if message is None:
         message = ""
         # message = f"Running for {num_samples:,} iterations"
     bars = {}
 
-    print_rate = max(1, int(num_samples / 100))
+    if print_rate is None:
+        print_rate = max(1, int(num_samples / 100))
+
     remainder = num_samples % print_rate
 
     def create(arg, transform):
@@ -126,7 +128,7 @@ def progress_scan(num_samples, progress_type=TQDMProgress, message=None):
         )
 
         _ = lax.cond(
-            # update tqdm every multiple of `print_rate` except at the end
+            # update every multiple of `print_rate` except at the end
             (iter_num % print_rate == 0) & (iter_num != num_samples - remainder),
             lambda _: host_callback.id_tap(update, print_rate, result=iter_num),
             lambda _: iter_num,
@@ -134,7 +136,7 @@ def progress_scan(num_samples, progress_type=TQDMProgress, message=None):
         )
 
         _ = lax.cond(
-            # update tqdm by `remainder`
+            # update by `remainder`
             iter_num == num_samples - remainder,
             lambda _: host_callback.id_tap(update, remainder, result=iter_num),
             lambda _: iter_num,
@@ -172,6 +174,9 @@ def progress_scan(num_samples, progress_type=TQDMProgress, message=None):
         return wrapper_progress_bar
 
     return _progress_bar_scan
+
+
+
 
 
 @jit

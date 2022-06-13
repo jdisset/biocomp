@@ -393,7 +393,7 @@ def plotBestLoss(best, others, title='', outfile=None, vmax=None):
     a.plot(best, color="red", linewidth=2.5)
     fig.suptitle(title)
     if vmax is not None:
-        a.set_ylim([0,vmax])
+        a.set_ylim([0, vmax])
     if outfile is not None:
         fig.savefig(outfile, dpi=100)
         plt.close()
@@ -512,7 +512,7 @@ import pickle
 suffix = '.pickle'
 
 
-def save(data, path, overwrite = False):
+def save(data, path, overwrite=False):
     path = Path(path)
     if path.suffix != suffix:
         path = path.with_suffix(suffix)
@@ -535,3 +535,37 @@ def load(path):
     with open(path, 'rb') as file:
         data = pickle.load(file)
     return data
+
+
+from jax import lax
+from jax.experimental import host_callback
+
+
+def hooked_scan(num_samples, on_update, call_rate=1):
+
+    def update(args, transform):
+        result, iternum = args
+        carry, acc = result
+        on_update(acc, iternum)
+
+    def _update_(result, iter_num):
+        return lax.cond(
+            (iter_num % call_rate == 0) | (iter_num == num_samples - 1),
+            lambda _: host_callback.id_tap(update, (result, iter_num), result=result),
+            lambda _: result,
+            operand=None,
+        )
+
+    def _hooked_scan(func):
+        @jax.jit
+        def wrapper(carry, x):
+            if type(x) is tuple:
+                iter_num, *_ = x
+            else:
+                iter_num = x
+            result = func(carry, x)
+            return _update_(result, iter_num)
+
+        return wrapper
+
+    return _hooked_scan
