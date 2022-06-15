@@ -3,7 +3,6 @@
 # ···············································································
 
 import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
 
 import jax
 from jax import vmap, jit, lax
@@ -17,13 +16,11 @@ import scriptutils as ut
 import numpy as np
 from pathlib import Path
 import optax
-import biocomp as bc
-import biocomp.utils as bu
 from time import time
 from scriptutils import ddict
 
 from jax.example_libraries import stax
-from jax.example_libraries.stax import BatchNorm, Conv, Dense, Flatten, Relu, LogSoftmax, Sigmoid
+from jax.example_libraries.stax import Dense, Relu, Sigmoid
 
 
 plt.rcParams['axes.facecolor'] = 'white'
@@ -61,25 +58,31 @@ cfg = ddict(
         "learning_rate": 0.001,
         "adam_w_decay": 0.01,
         "clipping": 0.001,
-        "initial_param_scaling": 0.00001,
-        "epochs": 200000,
-        "log_rate": 100,
-        "rng_key": 1,
+        "initial_param_scaling": 0.0001,
+        "epochs": 500000,
+        "log_rate": 50,
+        "rng_key": 11,
         # CA sim
-        "grid_size": (32, 32),
-        "update_prob": 0.5,
+        "grid_size": (64, 64),
+        "update_prob": 0.65,
         "alive_threshold": 0.2,
         "steps_per_run": 64,
         # model
-        "nn_size": 32,
-        "channels": 8,
-        "neighbors_sobel": False,
-        "neighbors_states": True,
+        # - i/o
+        "fluo_channels": 3,
+        "morphos": [0.75, 0.5, 0, 0],  #  npixel for kernel = max(1, r*grid_size)
+        # - controler
+        "nn_size": 128,
         "activation": "Sigmoid",
     }
 )
 
-wb.init(config=cfg, project="morpholiver", entity="jdisset", reinit=True)
+INDEX_FLUO = 0
+INDEX_ALIVE = 3
+INDEX_DIVIDE = 4
+INDEX_MORPHO = 5
+
+N_MORPHO = len(cfg.morphos)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -88,48 +91,20 @@ wb.init(config=cfg, project="morpholiver", entity="jdisset", reinit=True)
 # {{{                       --      load data     --
 # ···············································································
 
-from PIL import Image
-
 path = Path('../data/morpho/liverlobule')
+init = ut.readimg(path / 'init.png', threshold=0.5, size=cfg.grid_size)
+target = ut.readimg(path / 'target.png', threshold=0.5, size=cfg.grid_size)
 
 
-def readimg(p, threshold=None, size=None):
-    im = Image.open(p)
-    if size is not None:
-        im = im.resize(size)
-    im = jnp.array(im) / 255
-    if threshold:
-        im = (im > threshold) * 1.0
-    return im
+extra_output_channels = 1 + N_MORPHO
 
+if extra_output_channels > 0:
+    extra = jnp.zeros((*init.shape[:2], extra_output_channels))
+    init = jnp.concatenate((init, extra), axis=2)
+    target = jnp.concatenate((target, extra), axis=2)
 
-init = readimg(path / 'init.png', threshold=0.5, size=cfg.grid_size)
-target = readimg(path / 'target.png', threshold=0.5, size=cfg.grid_size)
+OUTPUT_SIZE = 4 + extra_output_channels
 
-wb.log(
-    {
-        'init': wb.Image(np.array(init), caption="initial state"),
-        'target': wb.Image(np.array(target), caption="target state"),
-    },
-    step=0,
-)
-
-missing_channels = max(cfg.channels - target.shape[2], 0)
-if missing_channels > 0:
-    init = jnp.concatenate((init, jnp.zeros((*init.shape[:2], missing_channels))), axis=2)
-    target = jnp.concatenate((target, jnp.zeros((*target.shape[:2], missing_channels))), axis=2)
-
-
-GRID_W, GRID_H, CHANNELS = target.shape
-
-n_inputs = CHANNELS
-if cfg.neighbors_sobel:
-    n_inputs += CHANNELS * 2
-if cfg.neighbors_states:
-    n_inputs += CHANNELS
-
-input_shape = (n_inputs,)
-assert init.shape == target.shape
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -138,70 +113,74 @@ assert init.shape == target.shape
 # ···············································································
 
 
-# TODO: stochastic update with masking
-# TODO: the weights of the final convolutional layer should be zero to default to no-op
-# TODO: in the originam paper, update computes by how much we should update a cell's state, given its neighbors
-# no final Relu as we need to be able to decrease state's variables... why not output directly the state???
-
 act = {'Sigmoid': Sigmoid, 'Relu': Relu}[cfg.activation]
-init_fun, model = stax.serial(Dense(cfg.nn_size), act, Dense(CHANNELS*2), act, Dense(CHANNELS), act)
+init_fun, model = stax.serial(Dense(cfg.nn_size), act, Dense(OUTPUT_SIZE), act)
 model = jit(model)
-
-
-def perceive(state_grid):
-    def conv(im, f):
-        return jsp.signal.convolve(im, f, mode='same')
-
-    def vconvol(im, f):
-        return vmap(partial(conv, f=f), in_axes=2, out_axes=2)(im)
-
-    perception = [state_grid]
-
-    if cfg.neighbors_states:
-        sq2 = jnp.sqrt(2)
-        filter = jnp.array([[sq2, 1, sq2], [1, 0, 1], [sq2, 1, sq2]])
-        states = vconvol(state_grid, filter)
-        perception.append(states)
-
-    if cfg.neighbors_sobel:
-        sobel_x = jnp.array([[-1, 0, +1], [-2, 0, +2], [-1, 0, +1]])
-        sobel_y = sobel_x.transpose()
-        perception += [vconvol(state_grid, sobel_x), vconvol(state_grid, sobel_y)]
-
-    perception_grid = jnp.concatenate(perception, axis=2)
-    return perception_grid
-
-##
 
 
 def maxpool(x, dims, strides=(1, 1), border_mode='same'):
     return lax.reduce_window(x, -np.inf, lax.max, dims, strides, border_mode)
 
 
-def alive_masking(state_grid):
-    # Take the alpha channel as the measure of “life”.
-    alive = maxpool(state_grid[:, :, 3], (3, 3)) > cfg.alive_threshold
-    return vmap(partial(jnp.multiply, alive), in_axes=2, out_axes=2)(state_grid)
+def gaussian_kernel(l=5, sig=1.0):
+    ax = np.linspace(-(l - 1) / 2.0, (l - 1) / 2.0, l)
+    gauss = np.exp(-0.5 * np.square(ax) / np.square(sig))
+    kernel = np.outer(gauss, gauss)
+    return kernel / np.sum(kernel)
 
 
-key = jax.random.PRNGKey(2)
-test = jax.random.uniform(key, (500, 500, 60)).astype(float)
+def morpho_kernel(l):
+    if l == 0.0:
+        sq2 = np.sqrt(2)
+        filter = np.array([[sq2, 1, sq2], [1, 0, 1], [sq2, 1, sq2]])
+        return filter
+    W = max(cfg.grid_size)
+    return gaussian_kernel(int(np.round(l * W)), l * W/2.0)
 
 
-##
+morpho_kernels = [morpho_kernel(l) for l in cfg.morphos]
 
-def grow(params, prev_state, key):
-    alive = alive_masking(prev_state)
-    perceptions = perceive(alive)
+
+def perceive(state_grid, kernels):
+    return jnp.stack(
+        [
+            jsp.signal.convolve(state_grid[:, :, INDEX_MORPHO+i], kernels[i], mode='same')
+            for i in range(len(kernels))
+        ],
+        axis=2,
+    )
+
+
+@partial(jit, static_argnums=2)
+def multiply_axis(A, B, axis=2):
+    return vmap(partial(jnp.multiply, B), in_axes=axis, out_axes=axis)(A)
+
+
+def cell_division(state, key):
+    div_prob = jnp.maximum(state[:, :, INDEX_ALIVE], maxpool(state[:, :, INDEX_DIVIDE], (3, 3)))
+    div_draw = jax.random.uniform(key, state.shape[:2])
+    divide = div_draw <= div_prob  # mask with the old and new alive cells
+    return state.at[:, :, INDEX_ALIVE].set(divide.astype(float))
+
+@jit
+def grow(params, state_grid, key):
+    alive = multiply_axis(state_grid, state_grid[:, :, INDEX_ALIVE])
+    prev_state = cell_division(alive, key)
+    alive_mask = prev_state[:, :, INDEX_ALIVE]
+
+    perceptions = perceive(prev_state, morpho_kernels)
     next_state = vmap(vmap(partial(model, params)))(perceptions)
 
     # random masking for simulated asynchronicity
     mask = jax.random.uniform(key, prev_state.shape[:2]) > cfg.update_prob
-    mask = jnp.repeat(jnp.expand_dims(mask, axis=2), prev_state.shape[2], axis=2)
     inv_mask = jnp.invert(mask)
-    next_state = next_state * mask.astype(float) + alive * inv_mask.astype(float)
+    # mask = jnp.repeat(jnp.expand_dims(mask, axis=2), prev_state.shape[2], axis=2)
 
-    return next_state, None
+    next_state = multiply_axis(next_state, mask.astype(float)) + multiply_axis(
+        prev_state, inv_mask.astype(float)
+    )
+
+    return next_state.at[:,:,INDEX_ALIVE].set(alive_mask), None
 
 
 def run(params, init_grid, n_steps, key):
@@ -229,13 +208,12 @@ def training_step(params, opt_state, init_grid, target, key):
     params = optax.apply_updates(params, updates)
     return params, opt_state, grads, loss_value
 
+
 from rich.progress import track
 
 import jax.profiler
 
 evalrate = 10
-
-
 evalnum = 0
 
 
@@ -246,10 +224,12 @@ def wandb_update(loss, params, grads, iter_num):
     if evalnum % evalrate == 0:
         res = run(params, init, cfg.steps_per_run, key)
         wb.log({'eval': wb.Image(np.array(res[:, :, :4]), caption="current state")}, step=iter_num)
-        wb.log({'ch4': wb.Image(np.array(res[:, :, 4]))}, step=iter_num)
-        wb.log({'ch5': wb.Image(np.array(res[:, :, 5]))}, step=iter_num)
-        wb.log({'ch6': wb.Image(np.array(res[:, :, 6]))}, step=iter_num)
-        wb.log({'ch7': wb.Image(np.array(res[:, :, 7]))}, step=iter_num)
+        fig, axs = plt.subplots(1,OUTPUT_SIZE+1, figsize=(OUTPUT_SIZE*4,4))
+        axs[0].imshow(np.array(res[:, :, :4]))
+        for i in range(OUTPUT_SIZE):
+            axs[i+1].imshow(np.array(res[:, :, i]))
+        wb.log({'channels': fig}, step=iter_num)
+        plt.close()
     wb.log(
         {'loss': loss, 'gradients': wb.Histogram(fgrad), 'parameters': wb.Histogram(fpar)},
         step=iter_num,
@@ -257,7 +237,7 @@ def wandb_update(loss, params, grads, iter_num):
     evalnum += 1
 
 
-def train(init_grid, target, key, input_shape=input_shape):
+def train(init_grid, target, key, input_shape=(N_MORPHO,)):
     _, initial_params = init_fun(key, input_shape)
     params = pytree.tree_map(lambda x: x * cfg.initial_param_scaling, initial_params)
     opt_state = optimizer.init(initial_params)
@@ -278,14 +258,24 @@ def train(init_grid, target, key, input_shape=input_shape):
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                    --     update  and train     --
+# {{{                    --     train     --
 # ···············································································
+wb.init(config=cfg, project="morpholiver_01", entity="jdisset", reinit=True)
+
+wb.log(
+    {
+        'init': wb.Image(np.array(init[:, :, :4]), caption="initial state"),
+        'target': wb.Image(np.array(target[:, :, :4]), caption="target state"),
+    },
+    step=0,
+)
+
 
 start = time()
 params_history, runloss = train(init, target, key)
 end = time()
 
-print()
+print('------------')
 print('Trained in', end - start)
 
 # params_history = bu.param_unstack(params, len(runloss) + 1)

@@ -1,8 +1,10 @@
 import pandas as pd
 from time import time
+from jax import vmap, jit
 from pathlib import Path
 from pyppeteer import launch
 from jax import tree_util as pytree
+import jax.numpy as jnp
 import urllib.parse
 import sys
 import streamlit as st
@@ -14,6 +16,17 @@ import json
 import numpy as np
 from types import SimpleNamespace
 import biocomp as bc
+import pickle
+from PIL import Image
+
+
+class ddict(dict):
+    def __getattr__(*args):
+        val = dict.get(*args)
+        return DotDict(val) if type(val) is dict else val
+
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
 
 
 def is_interactive():
@@ -494,6 +507,38 @@ def trainingMovie(
         plotModelOutput(model, params[i], outfile=str(predpath / f'{c}.png'))
         c += 1
 
+def plotGrads(gradlist):
+    vmax = 10
+    agg = 100
+    nbins = 82
+    flattened_grads = np.array(
+        [np.concatenate([f.flatten() for g in grad for f in g]) for grad in gradlist]
+    )
+    s = np.add.reduceat(flattened_grads, range(0, len(flattened_grads), agg))
+    bins = np.concatenate(
+        [
+            np.zeros(1),
+            np.logspace(np.log10(1e-4), np.log10(vmax + 1), nbins // 2 - 1, endpoint=True),
+            np.array([np.inf]),
+        ]
+    )
+    bins = np.concatenate([-bins[1:][::-1], bins])
+
+    def hist(bins, a):
+        h = jnp.histogram(a, bins=bins)[0]
+        return h / jnp.max(h)
+
+    gradhist = vmap(jit(partial(hist, bins)))(s)
+
+    labels_interval = 10
+    binlabels = [f'{l:.1E}' for l in bins]
+    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+    ax.pcolormesh(gradhist.T, cmap='GnBu')
+    ax.set_xlabel('epochs')
+    ax.set_yticks(np.arange(len(bins))[1:-1:labels_interval], binlabels[1:-1:labels_interval])
+    plt.show()
+
+
 
 # ut.plotBestLoss(best_loss, losses, 'Best loss history')
 # ut.plotModelOutput(model, best_params)
@@ -507,7 +552,6 @@ def trainingMovie(
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-import pickle
 
 suffix = '.pickle'
 
@@ -536,13 +580,20 @@ def load(path):
         data = pickle.load(file)
     return data
 
+def readimg(p, threshold=None, size=None):
+    im = Image.open(p)
+    if size is not None:
+        im = im.resize(size)
+    im = jnp.array(im) / 255
+    if threshold:
+        im = (im > threshold) * 1.0
+    return im
 
 from jax import lax
 from jax.experimental import host_callback
 
 
 def hooked_scan(num_samples, on_update, call_rate=1):
-
     def update(args, transform):
         result, iternum = args
         carry, acc = result
