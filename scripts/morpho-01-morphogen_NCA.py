@@ -99,14 +99,38 @@ target = ut.readimg(path / 'target.png', threshold=0.5, size=cfg.grid_size)
 extra_output_channels = 1 + N_MORPHO
 
 if extra_output_channels > 0:
-    extra = jnp.zeros((*init.shape[:2], extra_output_channels))
-    init = jnp.concatenate((init, extra), axis=2)
-    target = jnp.concatenate((target, extra), axis=2)
+    extra = np.zeros((*init.shape[:2], extra_output_channels))
+    init = np.concatenate((init, extra), axis=2)
+    target = np.concatenate((target, extra), axis=2)
 
 OUTPUT_SIZE = 4 + extra_output_channels
 
+
+def sweep(op, A, B, axis=2):
+    return vmap(partial(op, B), in_axes=axis, out_axes=axis)(A)
+
+@partial(jit, static_argnums=2)
+def subtract_sweep(A, B, axis=2):
+    return sweep(jnp.subtract, A, B, axis)
+
+
+from scipy.ndimage.interpolation import rotate
+
+# generate rotated versions of the target to make the loss rotation invariant
+t = target[:,:,:4]
+targets = []
+for a in np.linspace(0,360/12,10):
+    rotated = rotate(t, angle=a, reshape=False)
+    rotated[:,:,3] = (rotated[:,:,3] >= 0.5) * 1.0
+    targets.append(rotated)
+targets = np.array(targets)
+
+
+
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                    --     model, loss, updates     --
@@ -183,16 +207,15 @@ def grow(params, state_grid, key):
     return next_state.at[:,:,INDEX_ALIVE].set(alive_mask), None
 
 
-def run(params, init_grid, n_steps, key):
-    final_state, _ = jax.lax.scan(partial(grow, params), init_grid, jax.random.split(key, n_steps))
+def run(params, n_steps, key):
+    final_state, _ = jax.lax.scan(partial(grow, params), init, jax.random.split(key, n_steps))
     return final_state
 
 
-def loss(params, init_grid, target, n_steps, key):
-    y_pred = run(params, init_grid, n_steps, key)
-    l = (y_pred[:, :, :4] - target[:, :, :4]) ** 2
-    return l.mean()
-
+def loss(params, n_steps, key):
+    y_pred = run(params, n_steps, key)
+    l = (subtract_sweep(targets, y_pred[:,:,:4], axis=0) ** 2)
+    return l.mean(axis=(1,2,3)).min()
 
 key = jax.random.PRNGKey(cfg.rng_key)
 optimizer = optax.chain(
@@ -202,8 +225,8 @@ optimizer = optax.chain(
 
 
 @jit
-def training_step(params, opt_state, init_grid, target, key):
-    loss_value, grads = jax.value_and_grad(loss)(params, init_grid, target, cfg.steps_per_run, key)
+def training_step(params, opt_state, key):
+    loss_value, grads = jax.value_and_grad(loss)(params, cfg.steps_per_run, key)
     updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     return params, opt_state, grads, loss_value
@@ -222,7 +245,7 @@ def wandb_update(loss, params, grads, iter_num):
     fgrad = np.concatenate([f.flatten() for g in grads for f in g])
     fpar = np.concatenate([a.flatten() for a in pytree.tree_leaves(params)]).flatten()
     if evalnum % evalrate == 0:
-        res = run(params, init, cfg.steps_per_run, key)
+        res = run(params, cfg.steps_per_run, key)
         wb.log({'eval': wb.Image(np.array(res[:, :, :4]), caption="current state")}, step=iter_num)
         fig, axs = plt.subplots(1,OUTPUT_SIZE+1, figsize=(OUTPUT_SIZE*4,4))
         axs[0].imshow(np.array(res[:, :, :4]))
@@ -237,7 +260,7 @@ def wandb_update(loss, params, grads, iter_num):
     evalnum += 1
 
 
-def train(init_grid, target, key, input_shape=(N_MORPHO,)):
+def train(key, input_shape=(N_MORPHO,)):
     _, initial_params = init_fun(key, input_shape)
     params = pytree.tree_map(lambda x: x * cfg.initial_param_scaling, initial_params)
     opt_state = optimizer.init(initial_params)
@@ -245,7 +268,7 @@ def train(init_grid, target, key, input_shape=(N_MORPHO,)):
     params_history = []
     loss_history = []
     for i in track(range(cfg.epochs), description='Training...'):
-        params, opt_state, grads, loss = training_step(params, opt_state, init_grid, target, key)
+        params, opt_state, grads, loss = training_step(params, opt_state, key)
         loss_history.append(loss)
         params_history.append(params)
         if i == cfg.epochs or i % cfg.log_rate == 0 or i == 0:
@@ -272,7 +295,7 @@ wb.log(
 
 
 start = time()
-params_history, runloss = train(init, target, key)
+params_history, runloss = train(key)
 end = time()
 
 print('------------')
