@@ -50,18 +50,18 @@ def plotCAState(state, title='', outfile=None):
 cfg = ddict(
     {
         # training
-        "learning_rate": 0.001,
+        "learning_rate": 0.01,
         "adam_w_decay": 0.01,
         "clipping": 0.001,
         "initial_param_scaling": 0.0001,
         "epochs": 150000,
         "log_rate": 50,
         "rng_key": 11,
-        "target_steps_per_run": (70, 100),
+        "target_steps_per_run": (75, 100),
         "pool_size": 8,
         # CA sim
         "grid_size": (64, 64),
-        "update_prob": 0.65,
+        "update_prob": 0.6,
         "alive_threshold": 0.2,
         # model
         # - i/o
@@ -160,10 +160,6 @@ def morpho_kernel(l):
 
 morpho_kernels = [morpho_kernel(l) for l in cfg.morphos]
 
-# a = jax.random.uniform(key, (5, 5, 2))
-# b = jax.random.uniform(key, (5, 5, 6))
-# c = jnp.concatenate((a, b), axis=2)
-
 
 def perceive(state_grid, kernels):
 
@@ -207,7 +203,7 @@ def grow(params, state_grid, key):
     )
 
     new_switch_channels = jnp.asarray(
-        (prev_switch_channels & alive_mask[:, :, None].astype(bool)) | sw, float
+        (prev_switch_channels | sw) & alive_mask[:, :, None].astype(bool), float
     )
     prev_state = prev_state.at[:, :, INDEX_SWITCH:].set(new_switch_channels)
 
@@ -229,10 +225,9 @@ def run(params, n_steps, key):
 
 @partial(jit, static_argnums=(1,))
 def run_acc(params, n_steps, key):
-    final_state, state_history = jax.lax.scan(
-        partial(grow, params), init, jax.random.split(key, n_steps)
-    )
-    return final_state, state_history
+    keys = jax.random.split(key, n_steps)
+    final_state, statehist = jax.lax.scan(partial(grow, params), init, keys)
+    return final_state, statehist
 
 
 def loss(params, n_steps, key):
@@ -243,9 +238,9 @@ def loss(params, n_steps, key):
 
 # pool loss creates n_indiv individuals and average the loss over them
 # def pool_loss(params, n_steps_arr, key):
-    # keys = jax.random.split(key, len(n_steps_arr))
-    # losses = vmap(partial(loss, params, n_steps_arr[0]))(keys)
-    # return losses.mean()
+# keys = jax.random.split(key, len(n_steps_arr))
+# losses = vmap(partial(loss, params, n_steps_arr[0]))(keys)
+# return losses.mean()
 
 
 key = jax.random.PRNGKey(cfg.rng_key)
@@ -257,7 +252,7 @@ optimizer = optax.chain(
 
 @partial(jit, static_argnums=(2,))
 def training_step(params, opt_state, n_steps, key):
-    loss_value, grads = jax.value_and_grad(loss)( params, n_steps, key)
+    loss_value, grads = jax.value_and_grad(loss)(params, n_steps, key)
     updates, opt_state = optimizer.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     return params, opt_state, grads, loss_value
@@ -277,16 +272,29 @@ def wandb_update(loss, params, grads, iter_num):
     fgrad = np.concatenate([f.flatten() for g in grads['model'] for f in g])
     fpar = np.concatenate([a.flatten() for a in pytree.tree_leaves(params['model'])]).flatten()
     if evalnum % evalrate == 0:
-        res = run(params, cfg.target_steps_per_run[1]-5, key)
-        wb.log({'eval': wb.Image(np.array(res[:, :, :4]), caption="current state")}, step=iter_num)
+
+        res, hist = run_acc(params, cfg.target_steps_per_run[1], key)
+
         fig, axs = plt.subplots(1, OUTPUT_SIZE + 1, figsize=(OUTPUT_SIZE * 4, 4))
         axs[0].imshow(np.array(res[:, :, :4]))
         for i in range(OUTPUT_SIZE):
             axs[i + 1].imshow(np.array(res[:, :, i]))
-        wb.log({'channels': fig}, step=iter_num)
+        wb.log({'channels_final': fig}, step=iter_num)
+
+        fig, axs = plt.subplots(1, OUTPUT_SIZE + 1, figsize=(OUTPUT_SIZE * 4, 4))
+        axs[0].imshow(np.array(hist[:, :, :4, 20]))
+        for i in range(OUTPUT_SIZE):
+            axs[i + 1].imshow(np.array(hist[:, :, i, 20]))
+        wb.log({'channels_20': fig}, step=iter_num)
+
         plt.close()
     wb.log(
-        {'loss': loss, 'gradients': wb.Histogram(fgrad), 'parameters': wb.Histogram(fpar), 'switch_prob': params['switch_prob'][0]},
+        {
+            'loss': loss,
+            'gradients': wb.Histogram(fgrad),
+            'parameters': wb.Histogram(fpar),
+            'switch_prob': params['switch_prob'][0],
+        },
         step=iter_num,
     )
     evalnum += 1
@@ -294,15 +302,17 @@ def wandb_update(loss, params, grads, iter_num):
 
 def train(key, input_shape=(N_MORPHO + cfg.switch_channels,)):
     _, initial_model_params = init_fun(key, input_shape)
-    switch_rates = jax.random.uniform(key, (cfg.switch_channels,))
+    switch_rates = jax.random.uniform(key, (cfg.switch_channels,)) * 0.1
     model_params = pytree.tree_map(lambda x: x * cfg.initial_param_scaling, initial_model_params)
     params = {'model': model_params, 'switch_prob': switch_rates}
     opt_state = optimizer.init(params)
 
     params_history = []
     loss_history = []
-    n_steps_arr = np.array(jax.random.randint(key, (cfg.epochs,), * cfg.target_steps_per_run))
-    for i,n_steps in track(enumerate(n_steps_arr), description='Training...', total=cfg.epochs):
+    # n_steps_arr = np.array(jax.random.randint(key, (cfg.epochs,), * cfg.target_steps_per_run))
+    n_steps_arr = [cfg.target_steps_per_run[1]] * cfg.epochs
+
+    for i, n_steps in track(enumerate(n_steps_arr), description='Training...', total=cfg.epochs):
         params, opt_state, grads, loss = training_step(params, opt_state, n_steps, key)
         loss_history.append(loss)
         params_history.append(params)
