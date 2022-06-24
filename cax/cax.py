@@ -65,11 +65,7 @@ def model(perception):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-
-##
-
 plt.rcParams['figure.facecolor'] = 'white'
-
 
 def plot(ar):
     data = ar if len(ar.shape) > 1 else np.array([ar])
@@ -78,11 +74,8 @@ def plot(ar):
         for x in range(data.shape[1]):
             plt.text(x + 0.5, y + 0.5, '%i' % data[y, x],
                      horizontalalignment='center',
-                     verticalalignment='center',
-                      )
-    plt.show()
-
-
+                     verticalalignment='center') 
+            plt.show()
 
 def unison_shuffled(key, a, b):
     p = jax.random.permutation(key, len(a))
@@ -95,15 +88,16 @@ def neighbor_shuffle_nobranch(k, ar, m):
     ars, ms = unison_shuffled(k, ar,m)
     return ar * m + ars * (~ms | ~m), ms
 
-
-sh = (1,3)
+sh = (2,3)
 axis = 1
 key = jax.random.PRNGKey(30)
 data = jnp.arange(sh[0]*sh[1]) + 1
 mask = jax.random.uniform(key, (sh[0]*sh[1],)) > 0.5
 data = data.reshape(sh)
 mask = mask.reshape(sh)
+
 rows, cols = data.shape
+
 s0 = data[:,0:cols-(cols%2)].reshape(-1,2)
 res = s0.reshape(rows, cols-(cols%2))
 if cols%2 == 1:
@@ -121,6 +115,36 @@ else:
 assert(np.all(data == res))
 
 
+def rdmwlk_2D(key, data, mask, offset=0, axis=0):
+    s0 = data[:,0:cols-(cols%2)].reshape(-1,2)
+    res = s0.reshape(rows, cols-(cols%2))
+    if cols%2 == 1:
+        end = jnp.expand_dims(data[:,-1], axis=axis)
+        res = jnp.concatenate((res, end), axis=1)
+
+d = np.array(data)
+offset = 0
+axis = 1
+l_axis = d.shape[axis]
+start, stop = np.zeros(len(d.shape)), np.array(d.shape)
+stop[axis] -= (l_axis%2)
+s0 = d[:, 0:cols-(cols%2)].reshape(-1,2)
+s1 = d[:, 0:cols-(cols%2)].reshape(-1,2)
+
+
+
+##
+def test(key, shp):
+    dd = jax.random.uniform(key, shp)
+    return dd.at[range(0,shp[0]//2)]
+
+dd = jax.random.uniform(key, (100,100))
+dd.at[range(0,)]
+
+jit(test, static_argnums=1)(key, (1000,1000))
+
+##
+
 @jit
 def pair_masked_shuffle(key, data, mask):
     assert(data.shape == mask.shape)
@@ -135,13 +159,5 @@ def randomwalk_to_empty_2d(key, data, mask):
     d, m = pair_masked_shuffle(k[0], data.reshape(-1,2), mask.reshape(-1, 2))
     d, m = pair_masked_shuffle(k[1], data.reshape(-1,2), mask.reshape(-1, 2))
 
-
-def randomwalk_to_empty(key, data, mask):
-
-d0, m0 = data, mask
-for k in jax.random.split(key, 10):
-    plot(data*mask)
-    data, mask = randomwalk_to_empty(k, data, mask)
-    print(np.mean((m0.astype(int) - mask.astype(int))**2))
 
 
