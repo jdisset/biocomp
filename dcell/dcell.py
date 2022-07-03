@@ -357,7 +357,7 @@ def plot_2d(pos, mask, title=None, fsize=1.25):
         ax.set_title(title)
     plt.show()
 
-WS2D = (3,4)
+WS2D = (5,7)
 alive = jax.random.bernoulli(jax.random.PRNGKey(0), 0.3, WS2D)
 natural = jnp.stack(jnp.meshgrid(jnp.arange(WS2D[0]), jnp.arange(WS2D[1]),indexing='ij'), axis=2)
 pos = natural + jax.random.uniform(jax.random.PRNGKey(0), natural.shape, maxval=0.99)
@@ -370,6 +370,7 @@ pos = pos.at[:, :, 0].set(jnp.clip(pos[:, :, 0], 0, WS2D[0] - 0.01))
 pos = pos.at[:, :, 1].set(jnp.clip(pos[:, :, 1], 0, WS2D[1] - 0.01))
 np.indices(WS2D)
 desired = jnp.floor(pos)
+
 plot_2d(desired, alive)
 
 # instead of just from_left and from_righht, from_neighbor should be filled
@@ -403,7 +404,9 @@ n3 = jnp.where(eq3[:,:,None], natural, -1)
 
 
 # and now as a generalized version of the above
-def get_n(desired, natural, i, j):
+@partial(jit, static_argnums=(1,2))
+def get_n(desired, i, j):
+    natural = jnp.stack(jnp.meshgrid(jnp.arange(desired.shape[0]), jnp.arange(desired.shape[1]),indexing='ij'), axis=2)
     def start_end(i,j):
         start = (max(i, 0), max(j, 0),  0)
         end = (desired.shape[0] - max(-i, 0), desired.shape[1] - max(-j, 0), desired.shape[2])
@@ -413,16 +416,25 @@ def get_n(desired, natural, i, j):
     eq = jnp.all(lax.slice(desired, *anti_shift) == lax.slice(natural, *shift), axis=2)
     n = jnp.where(eq[:,:,None], lax.slice(natural, *anti_shift), -1)
     return jnp.pad(n, ((max(i, 0), max(-i, 0)), (max(j, 0), max(-j, 0)), (0,0)), 'constant', constant_values=-1)
+# todo: try using roll instead of pad and slices
 
 plot_2d(desired, alive)
 
 # now we can use the above function to get all 3x3 neighbors (except center)
-neighbors = [get_n(desired, natural, i, j) for i in range(-1,2) for j in range(-1,2) if i != 0 or j != 0]
+neighbors = [get_n(desired, i, j) for i in range(-1,2) for j in range(-1,2) if i != 0 or j != 0]
 from_neighbor = jnp.stack(neighbors, axis=2)
 
-# and now we just need to grap 1 from each neighboorhood (one that wants to move if available)
-s = jnp.sum(from_neighbor, axis=3)
-a = jnp.argmax(s, axis=2)
-# a gives us the index of the neighbor that wants to move, (id of the neighbor along the 3rd axis of from_neighbor)
-from_neighbor[..., a].shape # not working. Should use unravel_index maybe?
+
+# and now we just need to grab 1 from each neighboorhood (one that wants to move if available)
+s = jnp.expand_dims(jnp.sum(from_neighbor, axis=3), axis=3)
+a = jnp.expand_dims(jnp.argmax(s, axis=2), axis=2)
+from_neighbor = jnp.take_along_axis(from_neighbor, a, axis=2)
+
+# yay we have from_neighbor, we can compute reorder now.
+# again, from_neighbor now contains either a pair of -1, or the coordinates of the neighbor that wants to move
+# at this location
+# reorder will contain the new indexing that allows to move elements in the array to the right location when they 
+# desire it and when it's not in conflict with other elements that are alive. 
+# (And when multiple want to move at the same location, just one has been picked by from_neighbor).
+
 
