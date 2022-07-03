@@ -53,10 +53,10 @@ cfg = ddict(
         "learning_rate": 0.01,
         "adam_w_decay": 0.01,
         "clipping": 0.001,
-        "initial_param_scaling": 0.0001,
+        "initial_param_scaling": 0.01,
         "epochs": 150000,
         "log_rate": 50,
-        "rng_key": 11,
+        "rng_key": 1,
         "target_steps_per_run": (75, 100),
         "pool_size": 8,
         # CA sim
@@ -67,7 +67,7 @@ cfg = ddict(
         # - i/o
         "fluo_channels": 3,
         "switch_channels": 1,  # channels that have a probability to switch from 0 to 1
-        "morphos": [0.8, 0.8, 0, 0],  #  npixel for kernel = max(1, r*grid_size)
+        "morphos": [0.8, 0.8, 0.25, 0.25, 0, 0, 0, 0],  #  npixel for kernel = max(1, r*grid_size)
         # - controler
         "nn_size": 128,
         "activation": "Sigmoid",
@@ -81,7 +81,12 @@ INDEX_ALIVE = 3
 INDEX_DIVIDE = 4
 INDEX_MORPHO = 5
 N_MORPHO = len(cfg.morphos)
+
 INDEX_SWITCH = INDEX_MORPHO + N_MORPHO - 1
+
+MODEL_OUTPUT_CHANNELS = np.append(INDEX_DIVIDE, np.arange(INDEX_MORPHO, INDEX_MORPHO + N_MORPHO))
+
+STATE_SIZE = INDEX_SWITCH + 1
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -95,14 +100,11 @@ init = ut.readimg(path / 'init.png', threshold=0.5, size=cfg.grid_size)
 target = ut.readimg(path / 'target.png', threshold=0.5, size=cfg.grid_size)
 
 
-extra_output_channels = 1 + N_MORPHO
-
-if extra_output_channels > 0:
-    extra = np.zeros((*init.shape[:2], extra_output_channels))
+extra_state_channels = STATE_SIZE - (INDEX_ALIVE + 1)
+if extra_state_channels > 0:
+    extra = np.zeros((*init.shape[:2], extra_state_channels))
     init = np.concatenate((init, extra), axis=2)
     target = np.concatenate((target, extra), axis=2)
-
-OUTPUT_SIZE = 4 + extra_output_channels
 
 
 def sweep(op, A, B, axis=2):
@@ -134,7 +136,7 @@ targets = np.array(targets)
 
 
 act = {'Sigmoid': Sigmoid, 'Relu': Relu}[cfg.activation]
-init_fun, model = stax.serial(Dense(cfg.nn_size), act, Dense(OUTPUT_SIZE), act)
+init_fun, model = stax.serial(Dense(cfg.nn_size), act, Dense(len(MODEL_OUTPUT_CHANNELS)), act)
 model = jit(model)
 
 
@@ -184,7 +186,8 @@ def multiply_axis(A, B, axis=2):
 
 
 def cell_division(state, key):
-    div_prob = jnp.maximum(state[:, :, INDEX_ALIVE], maxpool(state[:, :, INDEX_DIVIDE], (3, 3)))
+    mp = maxpool(state[:, :, INDEX_DIVIDE], (3, 3))
+    div_prob = jnp.maximum(state[:, :, INDEX_ALIVE], mp)
     div_draw = jax.random.uniform(key, state.shape[:2])
     divide = div_draw <= div_prob  # mask with the old and new alive cells
     return state.at[:, :, INDEX_ALIVE].set(divide.astype(float))
@@ -194,6 +197,7 @@ def cell_division(state, key):
 def grow(params, state_grid, key):
     alive = multiply_axis(state_grid, state_grid[:, :, INDEX_ALIVE])
     prev_state = cell_division(alive, key)
+
     alive_mask = prev_state[:, :, INDEX_ALIVE]
 
     # random switch channel
@@ -208,7 +212,7 @@ def grow(params, state_grid, key):
     prev_state = prev_state.at[:, :, INDEX_SWITCH:].set(new_switch_channels)
 
     perceptions = perceive(prev_state, morpho_kernels)
-    next_state = vmap(vmap(partial(model, params['model'])))(perceptions)
+    next_state = prev_state.at[:,:,MODEL_OUTPUT_CHANNELS].set(vmap(vmap(partial(model, params['model'])))(perceptions))
 
     # random masking for simulated asynchronicity
     mask = jax.random.uniform(key, prev_state.shape[:2]) > cfg.update_prob
@@ -232,15 +236,18 @@ def run_acc(params, n_steps, key):
 
 def loss(params, n_steps, key):
     y_pred = run(params, n_steps, key)
-    l = subtract_sweep(targets, y_pred[:, :, :4], axis=0) ** 2
+    l = (targets - y_pred[None, :,:,:4])**2
+    # l = subtract_sweep(targets, y_pred[:, :, :4], axis=0) ** 2
     return l.mean(axis=(1, 2, 3)).min()
 
 
-# pool loss creates n_indiv individuals and average the loss over them
-# def pool_loss(params, n_steps_arr, key):
-# keys = jax.random.split(key, len(n_steps_arr))
-# losses = vmap(partial(loss, params, n_steps_arr[0]))(keys)
-# return losses.mean()
+
+
+# _, initial_model_params = init_fun(key, (INPUT_SIZE, ))
+# switch_rates = jax.random.uniform(key, (cfg.switch_channels,)) * 0.1
+# model_params = pytree.tree_map(lambda x: x * cfg.initial_param_scaling, initial_model_params)
+# params = {'model': model_params, 'switch_prob': switch_rates}
+# opt_state = optimizer.init(params)
 
 
 key = jax.random.PRNGKey(cfg.rng_key)
@@ -265,6 +272,8 @@ import jax.profiler
 evalrate = 10
 evalnum = 0
 
+INPUT_SIZE = N_MORPHO + cfg.switch_channels
+
 
 def wandb_update(loss, params, grads, iter_num):
     global evalnum
@@ -273,19 +282,20 @@ def wandb_update(loss, params, grads, iter_num):
     fpar = np.concatenate([a.flatten() for a in pytree.tree_leaves(params['model'])]).flatten()
     if evalnum % evalrate == 0:
 
-        res, hist = run_acc(params, cfg.target_steps_per_run[1], key)
+        res, (statehist, percephist) = run_acc(params, cfg.target_steps_per_run[1], key)
 
-        fig, axs = plt.subplots(1, OUTPUT_SIZE + 1, figsize=(OUTPUT_SIZE * 4, 4))
-        axs[0].imshow(np.array(res[:, :, :4]))
-        for i in range(OUTPUT_SIZE):
-            axs[i + 1].imshow(np.array(res[:, :, i]))
-        wb.log({'channels_final': fig}, step=iter_num)
+        def frame_fig(frame):
+            fig, axs = plt.subplots(2, STATE_SIZE + 1, figsize=(STATE_SIZE * 4, 8))
+            axs[0][0].imshow(np.array(statehist[frame, :, :, :4]))
+            for i in range(STATE_SIZE):
+                axs[0][i + 1].imshow(np.array(statehist[frame, :, :, i]))
+            for i in range(INPUT_SIZE):
+                axs[1][i].imshow(np.array(percephist[frame, :, :, i]))
+            return fig
 
-        fig, axs = plt.subplots(1, OUTPUT_SIZE + 1, figsize=(OUTPUT_SIZE * 4, 4))
-        axs[0].imshow(np.array(hist[:, :, :4, 20]))
-        for i in range(OUTPUT_SIZE):
-            axs[i + 1].imshow(np.array(hist[:, :, i, 20]))
-        wb.log({'channels_20': fig}, step=iter_num)
+        wb.log({'state_10': frame_fig(10)}, step=iter_num)
+        wb.log({'state_50': frame_fig(50)}, step=iter_num)
+        wb.log({'state_end': frame_fig(-1)}, step=iter_num)
 
         plt.close()
     wb.log(
@@ -300,7 +310,8 @@ def wandb_update(loss, params, grads, iter_num):
     evalnum += 1
 
 
-def train(key, input_shape=(N_MORPHO + cfg.switch_channels,)):
+def train(key, input_shape=(INPUT_SIZE,)):
+
     _, initial_model_params = init_fun(key, input_shape)
     switch_rates = jax.random.uniform(key, (cfg.switch_channels,)) * 0.1
     model_params = pytree.tree_map(lambda x: x * cfg.initial_param_scaling, initial_model_params)

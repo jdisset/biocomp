@@ -6,6 +6,7 @@ from jax._src.api import block_until_ready
 import numpy as np
 import matplotlib.pyplot as plt
 import numpy as np
+from numpy.ma.core import default_fill_value
 from rich import print
 from jax import jit, vmap, lax
 from jax import tree_util as pytree
@@ -15,67 +16,10 @@ import jax.numpy as jnp
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                      --     core functions     --
+# {{{                   --     2d random walk thingy     --
 #···············································································
-def make_world(state_layers, shape):
-
-
-def set_perception(percept_layers):
-    pass
-
-def update(state_layers, perception_stack, n_steps):
-    pass
-
-
-def channel(name, shape=(1,), dtype=float):
-    def set(val):
-        return {name:val.astype(dtype)}
-
-    def zeros(world_shape):
-        return set(jnp.zeros(world_shape + shape).squeeze())
-
-    return zeros
-
-def channel_stack(*channels):
-    def build(world_shape):
-        out = {}
-        for c in channels:
-            out.update(c(world_shape))
-        return out
-    return build
-
-def channel_tree():
-    pass
-
-# w.set_perception({'m0':cax.diffusion('m0', 0.2), 'm1':cax.diffusion('m1', 0.5)})
-
-c = channel_stack(channel('fluo', (3,)), channel('d'), channel('morphogens', (2,)))
-
-
-
-def model(perception):
-    ## fluo[0] = perception['morphogens'][0]
-    
-    out = dosomething(jax.tree_leaves())
-
-    return apply(perception)
-
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
 
 plt.rcParams['figure.facecolor'] = 'white'
-
-def plot(ar):
-    data = ar if len(ar.shape) > 1 else np.array([ar])
-    heatmap = plt.pcolor(data, vmin=0, vmax=1)
-    for y in range(data.shape[0]):
-        for x in range(data.shape[1]):
-            plt.text(x + 0.5, y + 0.5, '%i' % data[y, x],
-                     horizontalalignment='center',
-                     verticalalignment='center') 
-            plt.show()
 
 def unison_shuffled(key, a, b):
     p = jax.random.permutation(key, len(a))
@@ -100,13 +44,16 @@ rows, cols = data.shape
 
 s0 = data[:,0:cols-(cols%2)].reshape(-1,2)
 res = s0.reshape(rows, cols-(cols%2))
+
 if cols%2 == 1:
     end = jnp.expand_dims(data[:,-1], axis=axis)
     res = jnp.concatenate((res, end), axis=1)
 assert(np.all(data == res))
+
 s1 = data[:,1:cols-((cols+1)%2)].reshape(-1,2)
 res = s1.reshape(rows, cols-1-((cols+1)%2))
 beg = jnp.expand_dims(data[:,0], axis=1)
+
 if cols%2 == 1:
     res = jnp.concatenate((beg, res), axis=1)
 else:
@@ -157,7 +104,77 @@ def pair_masked_shuffle(key, data, mask):
 def randomwalk_to_empty_2d(key, data, mask):
     k = jax.random.split(key, 4)
     d, m = pair_masked_shuffle(k[0], data.reshape(-1,2), mask.reshape(-1, 2))
-    d, m = pair_masked_shuffle(k[1], data.reshape(-1,2), mask.reshape(-1, 2))
 
 
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+# example usage:
+
+def init_state(params):
+
+
+world = dc.channel_stack(channel('fluo', (3,)),channel('divide'), channel('morphogens', (2,)))
+init_func_, update_func = dc.parallel(dc.sequential(perceive, model), dc.sequential(divide))
+
+params = init_func(key)
+
+init_state = world(world_shape, default_value=0).set('fluo', init_fig).set('alive')
+
+
+# implementation
+
+# Channels are just stored in a dict. The keys are the names of the channels.
+# The values are the shapes of the channels.
+
+# channel_stack returns a function that will instantiate the channels in the given world shape
+# (to which we add each channel's own shape as extra dimensions)
+
+def channel_stack(channels):
+    def stack(world_shape, default_value=0):
+        return {name: np.zeros(world_shape + shape) for name, shape in channels.items()}
+    return stack
+
+world = channel_stack({'fluo': (3,), 'divide': (1,), 'morphogens': (2,)})
+
+# sequential accepts a sequence of transforms. Each transforms returns 2 functions: init and apply (aka update).
+# An init function takes a key and returns a tuple of parameters. The parameters are passed to the apply functions.
+# The return of Sequential is also a tuple of init and apply functions, which will dispatch to the transforms in the sequence.
+
+def sequential(*transforms):
+
+    ntransforms = len(transforms)
+    init_funcs, apply_funcs = zip(*transforms)
+
+    def init(key):
+        _, keys = jax.random.split(key, num=ntransforms)
+        return tuple(f(k) for f, k in zip(init_funcs, keys))
+
+    def apply(params, key, world):
+        _, keys = jax.random.split(key, num=ntransforms)
+        # we feed the result of each transform to the next and return the final result
+        for f, k in zip(apply_funcs, keys):
+            world = f(params, k, world)
+        return world
+
+    return init, apply
+
+def parallel(*transforms):
+
+    ntransforms = len(transforms)
+    init_funcs, apply_funcs = zip(*transforms)
+
+    def init(key):
+        _, keys = jax.random.split(key, num=ntransforms)
+        return tuple(f(k) for f, k in zip(init_funcs, keys))
+
+    def apply(params, key, world):
+        _, keys = jax.random.split(key, num=ntransforms)
+        # each transform is applied in parallel, we return a tuple of all the results
+        return tuple(f(p, k, w) for f, p, k, w in zip(apply_funcs, params, keys, world))
+
+    return init, apply
 
