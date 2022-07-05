@@ -10,6 +10,10 @@ from jax import grad, jit, vmap, lax
 from jax.scipy.signal import convolve
 import numpy as np
 import jax
+# default matplotlib background white:
+plt.rcParams['figure.facecolor'] = 'white'
+plt.rcParams['axes.facecolor'] = 'white'
+plt.rcParams['savefig.facecolor'] = 'white'
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -181,20 +185,6 @@ assert np.array(mid).shape == (10, 6)
 assert np.all(rebuild_array(pre, mid, post, axis=1) == a)
 
 
-def plot_positions_and_gradient(m, g, d, title=None, fsize=(10, 10)):
-    fig, ax = plt.subplots(figsize=fsize)
-    ax.imshow(g, cmap='Reds', alpha=0.5)
-    y, x = np.where(m > 0.0)
-    # scatter with a cross symbol
-    ax.scatter(x, y, c='black', s=20)
-    # values = [d[xx, yy] for xx, yy in zip(x, y)]
-    # for xx, yy, v in zip(x, y, values):
-    # ax.text(xx, yy, str(v), fontsize=10, ha='center', va='center')
-    # ax.set_xticks([])
-    # ax.set_yticks([])
-    if title is not None:
-        ax.set_title(title)
-    plt.show()
 
 
 @partial(jit, static_argnums=(3, 4))
@@ -261,7 +251,6 @@ for i in range(60):
 # The int part of the postion of the cell is its index in the array.
 # When we update positions, we need to move cells whose position is in a new index.
 
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                           --     print     --
 # ···············································································
@@ -289,13 +278,9 @@ def prnt(pos, mask=None):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-# default matplotlib background white:
-plt.rcParams['figure.facecolor'] = 'white'
-plt.rcParams['axes.facecolor'] = 'white'
-plt.rcParams['savefig.facecolor'] = 'white'
-
-
-
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{            --     compute reorder 1d experiment/proto     --
+#···············································································
 
 # a live cell that doesn't want to move has the priority over a neighbor that wants to move in the same index.
 # we also need to handle the case where there was multiple neighbors that wanted to move in the same index.
@@ -337,9 +322,15 @@ reorder = compute_reorder_1d(desired, alive)
 prnt(pos, alive)
 prnt(pos[reorder], alive[reorder])
 
-## 2d
-def plot_2d(pos, mask, title=None, fsize=1.25):
-    figsize = (np.array(pos.shape[:2][::-1])*fsize)
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                          --     plot 2d     --
+#···············································································
+def plot_2d(pos, mask, title=None, fsize=1.):
+    figsize = np.array(pos.shape[:2][::-1]) * fsize
     fig, ax = plt.subplots(figsize=figsize)
     cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
         'my_colormap', ['#333333', '#FCDD80'], N=2
@@ -348,93 +339,296 @@ def plot_2d(pos, mask, title=None, fsize=1.25):
     r, c = np.where(mask)
     ax.set_ylim(ax.get_ylim()[::-1])
     # at all coordinates including the ones that are not alive
-    for rr, cc in zip(*np.where(mask.astype(int)> -1)):
-        ax.text(cc + 0.5, rr + 0.85, f'{rr},{cc}', ha='center', va='center', fontsize=10, color='#000000')
+    for rr, cc in zip(*np.where(mask.astype(int) > -1)):
+        ax.text(
+            cc + 0.5,
+            rr + 0.85,
+            f'{rr},{cc}',
+            ha='center',
+            va='center',
+            fontsize=10,
+            color='#000000',
+        )
     for rr, cc in zip(r, c):
-        color = 'k' if int(rr) == int(pos[rr,cc,0]) and int(cc) == int(pos[rr,cc,1]) else '#BF1719'
-        ax.text(cc + 0.5, rr + 0.4, f'{int(pos[rr, cc, 0])},{int(pos[rr,cc,1])}', ha='center', va='center', fontsize=14, fontweight='bold', color=color)
+        color = (
+            'k' if int(rr) == int(pos[rr, cc, 0]) and int(cc) == int(pos[rr, cc, 1]) else '#BF1719'
+        )
+        ax.text(
+            cc + 0.5,
+            rr + 0.4,
+            f'{int(pos[rr, cc, 0])},{int(pos[rr,cc,1])}',
+            ha='center',
+            va='center',
+            fontsize=14,
+            fontweight='bold',
+            color=color,
+        )
     if title is not None:
         ax.set_title(title)
     plt.show()
 
-WS2D = (5,7)
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+# now let's experiment with a 2d version.
+# first with random impulses
+WORLD_SIZE = 25
+WS2D = (WORLD_SIZE, WORLD_SIZE)
 alive = jax.random.bernoulli(jax.random.PRNGKey(0), 0.3, WS2D)
-natural = jnp.stack(jnp.meshgrid(jnp.arange(WS2D[0]), jnp.arange(WS2D[1]),indexing='ij'), axis=2)
+natural = jnp.stack(jnp.meshgrid(jnp.arange(WS2D[0]), jnp.arange(WS2D[1]), indexing='ij'), axis=2)
 pos = natural + jax.random.uniform(jax.random.PRNGKey(0), natural.shape, maxval=0.99)
 impulses = (
-    jax.random.uniform(jax.random.PRNGKey(0), pos.shape, minval=-0.2, maxval=0.2)
-    * alive[..., None]
+    jax.random.uniform(jax.random.PRNGKey(0), pos.shape, minval=-0.2, maxval=0.2) * alive[..., None]
 )
 pos += impulses
 pos = pos.at[:, :, 0].set(jnp.clip(pos[:, :, 0], 0, WS2D[0] - 0.01))
 pos = pos.at[:, :, 1].set(jnp.clip(pos[:, :, 1], 0, WS2D[1] - 0.01))
 np.indices(WS2D)
-desired = jnp.floor(pos)
+desired = jnp.floor(pos).astype(int)
 
-plot_2d(desired, alive)
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{          --     prototyping code for compute_reorder_2d      --
+#···············································································
 
 # instead of just from_left and from_righht, from_neighbor should be filled
 # with candidates from the whole 3x3 neighborhood (not including the center)
-# So we are finding all neighbors that want to swich positions by checking 
-# where the array of desired positions, when shifted by 1 in every direction, 
+# So we are finding all neighbors that want to swich positions by checking
+# where the array of desired positions, when shifted by 1 in every direction,
 # is the same as the array of natural positions (i.e a neighbor wants to move here)
 
 
 # let's start manually:
 
 # -1, -1 (we check that if each top left neighbor wants to move)
-eq = jnp.all(desired[1:,1:, :] == natural[:-1,:-1, :], axis=2)
+eq = jnp.all(desired[1:, 1:, :] == natural[:-1, :-1, :], axis=2)
 eq = jnp.pad(eq, ((0, 1), (0, 1)), 'constant', constant_values=False)
-n0 = jnp.where(eq[:,:,None], natural, -1)
+n0 = jnp.where(eq[:, :, None], natural, -1)
 
 # 0, -1 (center left)
-eq1 = jnp.all(desired[:,1:, :] == natural[:,:-1, :], axis=2)
+eq1 = jnp.all(desired[:, 1:, :] == natural[:, :-1, :], axis=2)
 eq1 = jnp.pad(eq1, ((0, 0), (0, 1)), 'constant', constant_values=False)
-n1 = jnp.where(eq1[:,:,None], natural, -1)
+n1 = jnp.where(eq1[:, :, None], natural, -1)
 
 # 1, -1 (bottom left)
-eq = jnp.all(desired[:-1,1:, :] == natural[1:,:-1, :], axis=2)
+eq = jnp.all(desired[:-1, 1:, :] == natural[1:, :-1, :], axis=2)
 eq = jnp.pad(eq, ((1, 0), (0, 1)), 'constant', constant_values=False)
-n2 = jnp.where(eq[:,:,None], natural, -1)
+n2 = jnp.where(eq[:, :, None], natural, -1)
 
 # 0, 1 (center right)
-eq3 = jnp.all(desired[:,:-1, :] == natural[:,1:, :], axis=2)
+eq3 = jnp.all(desired[:, :-1, :] == natural[:, 1:, :], axis=2)
 eq3 = jnp.pad(eq3, ((0, 0), (1, 0)), 'constant', constant_values=False)
-n3 = jnp.where(eq3[:,:,None], natural, -1)
+n3 = jnp.where(eq3[:, :, None], natural, -1)
 
 
 # and now as a generalized version of the above
-@partial(jit, static_argnums=(1,2))
+@partial(jit, static_argnums=(1, 2))
 def get_n(desired, i, j):
-    natural = jnp.stack(jnp.meshgrid(jnp.arange(desired.shape[0]), jnp.arange(desired.shape[1]),indexing='ij'), axis=2)
-    def start_end(i,j):
-        start = (max(i, 0), max(j, 0),  0)
+    # todo: try using roll instead of pad and slices
+    natural = jnp.stack(
+        jnp.meshgrid(jnp.arange(desired.shape[0]), jnp.arange(desired.shape[1]), indexing='ij'),
+        axis=2,
+    )
+
+    def start_end(i, j):
+        start = (max(i, 0), max(j, 0), 0)
         end = (desired.shape[0] - max(-i, 0), desired.shape[1] - max(-j, 0), desired.shape[2])
         return start, end
-    shift = start_end(i,j)
-    anti_shift = start_end(-i,-j)
-    eq = jnp.all(lax.slice(desired, *anti_shift) == lax.slice(natural, *shift), axis=2)
-    n = jnp.where(eq[:,:,None], lax.slice(natural, *anti_shift), -1)
-    return jnp.pad(n, ((max(i, 0), max(-i, 0)), (max(j, 0), max(-j, 0)), (0,0)), 'constant', constant_values=-1)
-# todo: try using roll instead of pad and slices
 
-plot_2d(desired, alive)
+    shift = start_end(i, j)
+    anti_shift = start_end(-i, -j)
+    eq = jnp.all(lax.slice(desired, *anti_shift) == lax.slice(natural, *shift), axis=2)
+    n = jnp.where(eq[:, :, None], lax.slice(natural, *anti_shift), -1)
+    return jnp.pad(
+        n,
+        ((max(i, 0), max(-i, 0)), (max(j, 0), max(-j, 0)), (0, 0)),
+        'constant',
+        constant_values=-1,
+    )
+
+
 
 # now we can use the above function to get all 3x3 neighbors (except center)
-neighbors = [get_n(desired, i, j) for i in range(-1,2) for j in range(-1,2) if i != 0 or j != 0]
-from_neighbor = jnp.stack(neighbors, axis=2)
+neighbors = [get_n(desired, i, j) for i in range(-1, 2) for j in range(-1, 2) if i != 0 or j != 0]
+stacked_neighbor = jnp.stack(neighbors, axis=2)
 
 
 # and now we just need to grab 1 from each neighboorhood (one that wants to move if available)
-s = jnp.expand_dims(jnp.sum(from_neighbor, axis=3), axis=3)
+s = jnp.expand_dims(jnp.sum(stacked_neighbor, axis=3), axis=3)
 a = jnp.expand_dims(jnp.argmax(s, axis=2), axis=2)
-from_neighbor = jnp.take_along_axis(from_neighbor, a, axis=2)
+from_neighbor = jnp.take_along_axis(stacked_neighbor, a, axis=2).squeeze()
 
 # yay we have from_neighbor, we can compute reorder now.
 # again, from_neighbor now contains either a pair of -1, or the coordinates of the neighbor that wants to move
 # at this location
-# reorder will contain the new indexing that allows to move elements in the array to the right location when they 
-# desire it and when it's not in conflict with other elements that are alive. 
+# reorder will contain the new indexing that allows to move elements in the array to the right location when they
+# desire it and when it's not in conflict with other elements that are alive.
 # (And when multiple want to move at the same location, just one has been picked by from_neighbor).
 
 
+going = (natural != desired).any(axis=2)  # indicates that a cell wants to move
+
+# oh no! a cell is alive at a desired position. It's not possible to move there.
+# could also be an alive cell that just wants to stay where it is though, in which case ok!
+alive_at_desired = alive[desired[:, :, 0], desired[:, :, 1]]
+neighbor_desired = from_neighbor[desired[:, :, 0], desired[:, :, 1]]
+
+# selected to move indicates for a cell that wants to move, that indeed it is expected as its new location.
+# this is a useful check in case several cells want to move at the same location (only one is selected)
+selected_to_move = (neighbor_desired == natural).all(axis=2)
+# I think ~alive_at_desired is not necessary since selected_to_move should be false for alive cells
+# but I'm really not sure yet so we'll keep it for now.
+
+reorder = jnp.where(
+    # TODO: simplify. Only 2 where are needed.
+    alive[:, :, None],  # where there were alive cells
+    jnp.where(
+        (
+            (going)  # where they want to move
+            & (~alive_at_desired)  # and no alive cell is already at the desired position
+            & (selected_to_move)  # and this cell has been selected to move
+        )[:, :, None],
+        desired,  # then we want to pick the element at the desired position
+        natural,  # else we don't change this element
+    ),
+    jnp.where(
+        from_neighbor >= 0,  # wherever there was no alive cell, and we have a neighbor coming
+        from_neighbor,  # we welcome it
+        natural,
+    ),
+)
+reorder = tuple(reorder[:, :, i] for i in range(2))
+
+plot_2d(desired, alive, fsize=0.8)
+plot_2d(desired[reorder], alive[reorder], fsize=0.8)
+
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                --     compute reorder 2d function     --
+#···············································································
+# This function will return the new indexing that allows to move the alive elements in desired
+# to the neighboring index the point to (max distance (1,1)), as long as there is no alive cell
+# at the desired position. If multiple cells want to move at the same position, only one will;
+# currently the one with the "max" coordinates, i.e it favors lower-right-most indices.
+
+@jit
+def compute_reorder_2d(desired, alive):
+    natural = jnp.stack(
+            jnp.meshgrid(jnp.arange(desired.shape[0]), jnp.arange(desired.shape[1]), indexing='ij'),
+            axis=2,
+        )
+    def get_n(i, j):
+        # TODO[optim]: try using roll instead of pad and slices
+        def start_end(i, j):
+            start = (max(i, 0), max(j, 0), 0)
+            end = (desired.shape[0] - max(-i, 0), desired.shape[1] - max(-j, 0), desired.shape[2])
+            return start, end
+
+        shift = start_end(i, j)
+        anti_shift = start_end(-i, -j)
+        eq = jnp.all(lax.slice(desired, *anti_shift) == lax.slice(natural, *shift), axis=2)
+        n = jnp.where(eq[:, :, None], lax.slice(natural, *anti_shift), -1)
+        return jnp.pad(
+            n,
+            ((max(i, 0), max(-i, 0)), (max(j, 0), max(-j, 0)), (0, 0)),
+            'constant',
+            constant_values=-1,
+        )
+    neighbors = [get_n(i, j) for i in range(-1, 2) for j in range(-1, 2) if i != 0 or j != 0]
+    stacked_neighbor = jnp.stack(neighbors, axis=2)
+    s = jnp.expand_dims(jnp.sum(stacked_neighbor, axis=3), axis=3)
+    a = jnp.expand_dims(jnp.argmax(s, axis=2), axis=2)
+    from_neighbor = jnp.take_along_axis(stacked_neighbor, a, axis=2).squeeze()
+
+    going = (natural != desired).any(axis=2)  # indicates that a cell wants to move
+
+    # oh no! a cell is alive at a desired position. It's not possible to move there.
+    # could also be an alive cell that just wants to stay where it is though, in which case ok!
+    alive_at_desired = alive[desired[:, :, 0], desired[:, :, 1]]
+    neighbor_desired = from_neighbor[desired[:, :, 0], desired[:, :, 1]]
+
+    # selected to move indicates for a cell that wants to move, that indeed it is expected as its new location.
+    # this is a useful check in case several cells want to move at the same location (only one is selected)
+    selected_to_move = (neighbor_desired == natural).all(axis=2)
+    # I think ~alive_at_desired is not necessary since selected_to_move should be false for alive cells
+    # but I'm really not sure yet so we'll keep it for now.
+
+    reorder = jnp.where(
+        # TODO[optim]: simplify. Only 2 where are needed.
+        alive[:, :, None],  # where there were alive cells
+        jnp.where(
+            (
+                (going)  # where they want to move
+                & (~alive_at_desired)  # and no alive cell is already at the desired position
+                & (selected_to_move)  # and this cell has been selected to move
+            )[:, :, None],
+            desired,  # then we want to pick the element at the desired position
+            natural,  # else we don't change this element
+        ),
+        jnp.where(
+            from_neighbor >= 0,  # wherever there was no alive cell, and we have a neighbor coming
+            from_neighbor,  # we welcome it
+            natural,
+        ),
+    )
+    return (reorder[:, :, 0], reorder[:, :, 1])
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+reorder = compute_reorder_2d(desired, alive)
+plot_2d(desired, alive, fsize=0.8)
+
+##
+def plot_positions_and_gradient(m, g, title=None, fsize=(10, 10), csize=5):
+    fig, ax = plt.subplots(figsize=fsize)
+    ax.imshow(g, cmap='Reds', alpha=0.5)
+    masked_data = np.ma.masked_where(~m, m)
+    ax.imshow(masked_data, cmap='Greys_r', interpolation='none')
+    if title is not None:
+        ax.set_title(title)
+    plt.show()
+# now let's experiment with a 2d version.
+# first with random impulses
+WORLD_SIZE = 256
+attr_intensity = 0.1
+rep_intensity = 1.0
+attr_radius = 0.1
+rep_radius = 0.01
+WS2D = (WORLD_SIZE, WORLD_SIZE)
+alive = jax.random.bernoulli(jax.random.PRNGKey(0), 0.03, WS2D)
+natural = jnp.stack(jnp.meshgrid(jnp.arange(WS2D[0]), jnp.arange(WS2D[1]), indexing='ij'), axis=2)
+pos = natural.astype(jnp.int32)
+k_attract = diffuse_kernel(attr_radius, WORLD_SIZE)
+k_repel = diffuse_kernel(rep_radius, WORLD_SIZE)
+attractions = convolve(alive, k_attract, mode='same')
+repulsions = convolve(alive, k_repel, mode='same')
+plot_positions_and_gradient(alive, attractions)
+
+@jit
+def step(alive, pos):
+    attractions = convolve(alive, k_attract, mode='same')
+    repulsions = convolve(alive, k_repel, mode='same')
+    # apply sobel to get attraction gradient in x and y:
+    attr_g = jnp.clip(jnp.stack(jnp.gradient(attractions), axis=2) * attr_intensity, -1, 1)
+    rep_g = jnp.clip(jnp.stack(jnp.gradient(repulsions), axis=2) * rep_intensity, -1, 1)
+    pos = pos + attr_g - rep_g
+    pos = pos.at[:, :, 0].set(jnp.clip(pos[:, :, 0], 0, WS2D[0] - 0.01))
+    pos = pos.at[:, :, 1].set(jnp.clip(pos[:, :, 1], 0, WS2D[1] - 0.01))
+    desired = jnp.floor(pos).astype(int)
+    reorder = compute_reorder_2d(desired, alive)
+    alive = alive[reorder]
+    pos = pos[reorder]
+    return alive, pos, attractions, repulsions
+
+for i in range(1000):
+    alive, pos, attr, rep = step(alive, pos)
+    if i % 50 == 0:
+        plot_positions_and_gradient(alive, attr, title=f'{i}')
+        print(alive.sum())
+
+%timeit step(alive, pos)[0].block_until_ready()
