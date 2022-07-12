@@ -514,7 +514,6 @@ plot_2d(desired[reorder], alive[reorder], fsize=0.8)
 # at the desired position. If multiple cells want to move at the same position, only one will;
 # currently the one with the "max" coordinates, i.e it favors lower-right-most indices.
 
-@jit
 def compute_reorder_2d(desired, alive):
     natural = jnp.stack(
             jnp.meshgrid(jnp.arange(desired.shape[0]), jnp.arange(desired.shape[1]), indexing='ij'),
@@ -555,16 +554,16 @@ def compute_reorder_2d(desired, alive):
     selected_to_move = (neighbor_desired == natural).all(axis=2)
     # I think ~alive_at_desired is not necessary since selected_to_move should be false for alive cells
     # but I'm really not sure yet so we'll keep it for now.
+    big_cond = ( (going)  # where they want to move
+                & (~alive_at_desired)  # and no alive cell is already at the desired position
+                & (selected_to_move)  # and this cell has been selected to move
+            )
 
     reorder = jnp.where(
         # TODO[optim]: simplify. Only 2 where are needed.
         alive[:, :, None],  # where there were alive cells
         jnp.where(
-            (
-                (going)  # where they want to move
-                & (~alive_at_desired)  # and no alive cell is already at the desired position
-                & (selected_to_move)  # and this cell has been selected to move
-            )[:, :, None],
+            big_cond[:, :, None],
             desired,  # then we want to pick the element at the desired position
             natural,  # else we don't change this element
         ),
@@ -574,6 +573,17 @@ def compute_reorder_2d(desired, alive):
             natural,
         ),
     )
+
+    big_cond_and_alive = (big_cond & alive)
+
+    # reorder = jnp.where(
+            # (~alive[:,:,None] & from_neighbor < 0) | (alive & ~big_cond)[:,:,None],
+            # natural,
+        # jnp.where(big_cond_and_alive[:,:,None], desired, from_neighbor,),
+        # natural
+    # )
+
+    # natural where from_neighbor < 0 & not alive or alive & not big cond
     return (reorder[:, :, 0], reorder[:, :, 1])
 
 
@@ -592,25 +602,26 @@ def plot_positions_and_gradient(m, g, title=None, fsize=(10, 10), csize=5):
     if title is not None:
         ax.set_title(title)
     plt.show()
+
 # now let's experiment with a 2d version.
 # first with random impulses
-WORLD_SIZE = 256
-attr_intensity = 0.1
-rep_intensity = 1.0
-attr_radius = 0.1
-rep_radius = 0.01
+WORLD_SIZE = 350
+attr_intensity = 10
+rep_intensity = 1000
+attr_radius = 31.0/WORLD_SIZE
+rep_radius = 3.0/WORLD_SIZE
 WS2D = (WORLD_SIZE, WORLD_SIZE)
 alive = jax.random.bernoulli(jax.random.PRNGKey(0), 0.03, WS2D)
 natural = jnp.stack(jnp.meshgrid(jnp.arange(WS2D[0]), jnp.arange(WS2D[1]), indexing='ij'), axis=2)
-pos = natural.astype(jnp.int32)
 k_attract = diffuse_kernel(attr_radius, WORLD_SIZE)
+pos = natural.astype(jnp.float32)
 k_repel = diffuse_kernel(rep_radius, WORLD_SIZE)
 attractions = convolve(alive, k_attract, mode='same')
 repulsions = convolve(alive, k_repel, mode='same')
 plot_positions_and_gradient(alive, attractions)
 
-@jit
-def step(alive, pos):
+def step(alive_pos, _):
+    alive, pos = alive_pos
     attractions = convolve(alive, k_attract, mode='same')
     repulsions = convolve(alive, k_repel, mode='same')
     # apply sobel to get attraction gradient in x and y:
@@ -623,12 +634,244 @@ def step(alive, pos):
     reorder = compute_reorder_2d(desired, alive)
     alive = alive[reorder]
     pos = pos[reorder]
-    return alive, pos, attractions, repulsions
+    pos = jnp.clip(pos, natural, natural + 0.99999)
+    return (alive, pos), None
 
-for i in range(1000):
-    alive, pos, attr, rep = step(alive, pos)
-    if i % 50 == 0:
-        plot_positions_and_gradient(alive, attr, title=f'{i}')
-        print(alive.sum())
+@partial(jit, static_argnums=(2,))
+def n_steps(alive, pos, n):
+    final_state, _ = jax.lax.scan(step, (alive, pos), None, length=n)
+    return final_state
 
-%timeit step(alive, pos)[0].block_until_ready()
+# for i in range(1000):
+    # alive, pos, attr, rep = step(alive, pos)
+    # if i % 50 == 0:
+        # plot_positions_and_gradient(alive, attr, title=f'{i}')
+        # print(alive.sum())
+
+for i in range(20):
+    alive, pos = n_steps(alive, pos, 50)
+    plot_positions_and_gradient(alive, convolve(alive, k_attract, mode='same'), title=f'{i}')
+    print(alive.sum())
+
+
+%timeit jit(step)((alive, pos), None)[0][0].block_until_ready()
+%timeit n_steps(alive, pos, 100)[0].block_until_ready()
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                 --     version without indexing     --
+#···············································································
+
+# doing things through reindexing is porbably slower than it could be. 
+# here I want to try to do everything without indexing at all.
+# Since a desired index can only be 1 away (in every dimensions), 
+# the key is to treat one shift after another. 
+
+WS2D = (60,100)
+alive = jax.random.bernoulli(jax.random.PRNGKey(0), 0.35, WS2D)
+natural = jnp.stack(jnp.meshgrid(jnp.arange(WS2D[0]), jnp.arange(WS2D[1]), indexing='ij'), axis=2)
+pos = natural + jax.random.uniform(jax.random.PRNGKey(0), natural.shape, maxval=0.99)
+impulses = (
+    jax.random.uniform(jax.random.PRNGKey(0), pos.shape, minval=-0.6, maxval=0.6) * alive[..., None]
+)
+pos += impulses
+pos = pos.at[:, :, 0].set(jnp.clip(pos[:, :, 0], 0, WS2D[0] - 0.01))
+pos = pos.at[:, :, 1].set(jnp.clip(pos[:, :, 1], 0, WS2D[1] - 0.01))
+np.indices(WS2D)
+desired = jnp.floor(pos).astype(int)
+
+
+i,j = -1,1
+data = pos
+
+def get_n(i, j):
+
+        def start_end(i, j):
+            start = (max(i, 0), max(j, 0), 0)
+            end = (desired.shape[0] - max(-i, 0), desired.shape[1] - max(-j, 0), desired.shape[2])
+            return start, end
+        shift = start_end(i, j)
+        anti_shift = start_end(-i, -j)
+
+        eq = jnp.all(lax.slice(desired, *anti_shift) == lax.slice(natural, *shift), axis=2)
+        n = jnp.where(eq[:, :, None], lax.slice(natural, *anti_shift), -1)
+        return jnp.pad(
+            n,
+            ((max(i, 0), max(-i, 0)), (max(j, 0), max(-j, 0)), (0, 0)),
+            'constant',
+            constant_values=-1,
+        )
+
+
+def update_data_noind(alive, data, desired):
+
+    movement = desired - natural
+
+
+    def with_offset(alive, data, i, j):
+
+        def start_end(i, j):
+            start = (max(i, 0), max(j, 0))
+            end = (alive.shape[0] - max(-i, 0), alive.shape[1] - max(-j, 0))
+            return start, end
+
+        offset=start_end(i,j)
+        counter_offset = start_end(-i,-j)
+
+
+
+        going = alive & (movement == jnp.array((i,j))[None, None, :]).all(axis=2)  # indicates that a cell wants to move in the current offset's direction
+
+        # offsets with the padding based technique
+        receiving = lax.slice(going, *offset)
+        offset_data = lax.slice(data,  offset[0]+(0,), offset[1]+(data.shape[2],))
+        target_alive = lax.slice(alive, *counter_offset)
+        offset_going = lax.slice(going, *counter_offset)
+        offset_alive = lax.slice(alive, *offset)
+        counter_data= lax.slice(data, counter_offset[0]+(0,), counter_offset[1]+(data.shape[2],))
+        new_alive = (offset_alive & (~offset_going | target_alive)) | (~offset_alive & receiving)
+        new_data = jnp.where((receiving & ~offset_alive)[:,:,None], offset_data, counter_data)
+        new_alive = jnp.pad(new_alive, ((max(i, 0), max(-i, 0)), (max(j, 0), max(-j, 0))), 'constant', constant_values=False)
+        new_data = jnp.pad(new_data, ((max(i, 0), max(-i, 0)), (max(j, 0), max(-j, 0)), (0, 0)), 'constant', constant_values=0)
+
+        # with rolling:
+
+        # offset=(i,j)
+        # counter_offset = (-i,-j)
+        # receiving = jnp.roll(going, offset, axis=(0,1))
+        # offset_data = jnp.roll(data, offset, axis=(0,1))
+        # target_alive = jnp.roll(alive, counter_offset, axis=(0,1))
+        # new_alive = (alive & (~going | target_alive)) | (~alive & receiving)
+        # new_data = jnp.where((receiving & ~alive)[:,:,None], offset_data, data)
+
+        return new_alive, new_data
+
+    a, d = alive, data
+    a, d = with_offset(a, d, -1,-1)
+    a, d = with_offset(a, d, -1, 0)
+    a, d = with_offset(a, d, -1, 1)
+    a, d = with_offset(a, d,  0,-1)
+    a, d = with_offset(a, d,  0, 1)
+    a, d = with_offset(a, d,  1,-1)
+    a, d = with_offset(a, d,  1, 0)
+    a, d = with_offset(a, d,  1, 1)
+
+    # with lax scan:
+    # possible_offsets = [(i,j) for i in range(-1,2) for j in range(-1,2) if i != 0 or j != 0]
+
+    return a, d
+
+# plot_2d(pos, alive)
+a, p = update_data_noind(alive, pos, desired)
+# plot_2d(p, a)
+print(alive.sum())
+print(a.sum())
+
+##
+
+import jax.scipy as jsp
+
+WORLD_SIZE = 512
+attr_intensity = 10
+rep_intensity = 1000
+attr_radius = 3.0/WORLD_SIZE
+rep_radius = 3.0/WORLD_SIZE
+WS2D = (WORLD_SIZE, WORLD_SIZE)
+alive = jax.random.bernoulli(jax.random.PRNGKey(0), 0.03, WS2D)
+natural = jnp.stack(jnp.meshgrid(jnp.arange(WS2D[0]), jnp.arange(WS2D[1]), indexing='ij'), axis=2)
+k_attract = diffuse_kernel(attr_radius, WORLD_SIZE)
+pos = natural.astype(jnp.float32)
+k_repel = diffuse_kernel(rep_radius, WORLD_SIZE)
+attractions = convolve(alive, k_attract, mode='same')
+repulsions = convolve(alive, k_repel, mode='same')
+plot_positions_and_gradient(alive, attractions)
+
+
+def sob_gradient(arr):
+    sobel_x = jnp.array([[-1, 0, +1], [-2, 0, +2], [-1, 0, +1]])
+    return jnp.stack((jsp.signal.convolve(arr, sobel_x.transpose(), mode='same'), jsp.signal.convolve(arr, sobel_x, mode='same')), axis=2)
+
+def jnp_grad(arr):
+    return jnp.stack(jnp.gradient(arr), axis=2)
+
+def dumb_grad(arr):
+    r = arr[:-1,:] - arr[1:,:]
+    c = arr[:,:-1] - arr[:,1:]
+    # pad with zeros
+    r = jnp.pad(r, ((0,1),(0,0)), mode='constant')
+    c = jnp.pad(c, ((0,0),(0,1)), mode='constant')
+    return jnp.stack((r, c), axis=2)
+
+# jit(sob_gradient)(attractions).block_until_ready()
+# %timeit jit(sob_gradient)(attractions).block_until_ready()
+
+# jit(jnp_grad)(attractions).block_until_ready()
+# %timeit jit(jnp_grad)(attractions).block_until_ready()
+
+# jit(dumb_grad)(attractions).block_until_ready()
+# %timeit jit(dumb_grad)(attractions).block_until_ready()
+
+##
+def step(alive_pos, _):
+    alive, pos = alive_pos
+    # attractions = convolve(alive, k_attract, mode='same')
+    repulsions = convolve(alive, k_repel, mode='same')
+    # attr_g = jnp.clip(jnp.stack(jnp.gradient(attractions), axis=2) * attr_intensity, -1, 1)
+    rep_g = jnp.clip(jnp.stack(jnp.gradient(repulsions), axis=2) * rep_intensity, -1, 1)
+    # pos = pos + attr_g - rep_g
+    pos = pos - rep_g
+    pos = pos.at[:, :, 0].set(jnp.clip(pos[:, :, 0], 0, WS2D[0] - 0.01))
+    pos = pos.at[:, :, 1].set(jnp.clip(pos[:, :, 1], 0, WS2D[1] - 0.01))
+    desired = jnp.floor(pos).astype(int)
+    a, p = update_data_noind(alive, pos, desired)
+    p = jnp.clip(p, natural, natural + 0.99999)
+    return (a, p), None
+
+@partial(jit, static_argnums=(2,))
+def n_steps(alive, pos, n):
+    final_state, _ = jax.lax.scan(step, (alive, pos), None, length=n)
+    return final_state
+
+n_steps(alive, pos, 100)[0].block_until_ready()
+%timeit n_steps(alive, pos, 100)[0].block_until_ready()
+##
+# for i in range(1000):
+    # alive, pos, attr, rep = step(alive, pos)
+    # if i % 50 == 0:
+        # plot_positions_and_gradient(alive, attr, title=f'{i}')
+        # print(alive.sum())
+
+for i in range(20):
+    alive, pos = n_steps(alive, pos, 50)
+    plot_positions_and_gradient(alive, convolve(alive, k_attract, mode='same'), title=f'{i}')
+    print(alive.sum())
+
+# (a, p), _ = step((alive, pos), None)
+# plot_positions_and_gradient(a, convolve(alive, k_attract, mode='same'), title=f'{i}')
+# print(alive.sum())
+# print(a.sum())
+
+def update_data_ind(alive, data, desired):
+    reorder = compute_reorder_2d(desired, alive)
+    a = alive[reorder]
+    d = data[reorder]
+    return a,d
+
+desired = jnp.floor(pos).astype(int)
+jit(update_data_ind)(alive, pos, desired)[0].block_until_ready()
+jit(update_data_noind)(alive, pos, desired)[0].block_until_ready()
+
+%timeit jit(update_data_noind)(alive, pos, desired)[0].block_until_ready()
+%timeit jit(update_data_ind)(alive, pos, desired)[0].block_until_ready()
+
+jit(step)((alive, pos), None)[0][0].block_until_ready()
+%timeit jit(step)((alive, pos), None)[0][0].block_until_ready()
+
+
+
+
+
+#                                                                            }}}
+## ──────────────────────────────────────────────────────────────────────────data
+
+
