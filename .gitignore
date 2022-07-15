@@ -4,6 +4,7 @@ __*/
 *.py[cod]
 *$py.class
 *package-lock.json
+*.pickle
 # C extensions
 *.so
 
@@ -155,3 +156,6 @@ chrome-user-data
 .vscode
 *.swp
 *.swo
+
+
+*/wandb/*
