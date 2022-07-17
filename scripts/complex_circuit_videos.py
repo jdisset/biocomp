@@ -1,5 +1,3 @@
-# %load_ext autoreload
-# %autoreload 2
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                          --     imports     --
 # ···············································································
@@ -18,35 +16,89 @@ import jax
 import jax.numpy as jnp
 from tqdm import tqdm
 from functools import partial
+from copy import deepcopy
 
 lib = ut.getStState('lib', ut.getLibFromGoogleSheet)
 
+lib2 = deepcopy(lib)
 print(lib)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                       --     build graphs     --
+# {{{                      --     adding new ERNs     --
+# ···············································································
+lib = deepcopy(lib2)
+
+
+def add_fake_ERN(lib, name):
+    recog_name = f'{name}_recog_5p'
+    seq = {
+        'type': 'ERN',
+        'negative_part': name,
+        'positive_part': recog_name,
+        'output_part': f'["{recog_name}"]',
+        'parameter_values': {},
+    }
+    lib.addSequestron(seq)
+    lib.addPart(recog_name, 'ERN_recog_site_5p')
+    lib.addPart(name, 'ERN')
+
+
+for i in range(20):
+    add_fake_ERN(lib, f'ERN_{i}')
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                       --     N + 1 graphs     --
 # ···············································································
 
 
-l1_DNAs = [
-    ['hEF1a', 'PhiC31', 'Csy4_recog_5p'],
-    ['hEF1a', 'CasE'],
-    ['hEF1a', 'PhiC31', 'Csy4_recog_5p'],
-    ['hEF1a', 'CasE'],
-    # biases:
-    ['hEF1a', 'Csy4'],
-    ['hEF1a', 'CasE_recog_5p', 'PhiC31'],
-    ['hEF1a', 'PhiC31RDF'],
-    # output
-    ['hEF1a', 'attL', 'NeonGreen', 'attR'],
-]
-inputs = {0: 0, 1: 0, 2: 1, 3: 1}
+def num_to_bits(num, n):
+    return [num >> i & 1 for i in range(n)]
 
 
-cdg = bc.buildCentralDogmaGraph(lib, l1_DNAs, inputs)
+# ERN nodes:
+N = 8
+
+
+def make_recog(i, sign):
+    rcb = 'PhiC31' if sign == 0 else 'PhiC31RDF'
+    return ['hEF1a', rcb, f'ERN_{i}_recog_5p']
+
+
+def generate_all_l1s(N):
+    result = []
+    ERNs = [['hEF1a', f'ERN_{i}'] for i in range(N)]
+    output = [['hEF1a', 'PhiC31'], ['hEF1a', 'PhiC31RDF'], ['hEF1a', 'attL', 'NeonGreen', 'attR']]
+    for i in range((2**N)):
+        bits = num_to_bits(i, N)
+        recogs = [make_recog(i, sign) for i, sign in enumerate(bits)]
+        result.append([*ERNs, *recogs] * 3 + [*output])
+    return result
+
+
+l1s = generate_all_l1s(N)
+l1s
+# bourrin:
+inputs = {**{l: 0 for l in range(N * 2)}, **{l: 1 for l in range(N * 2, N * 4)}}
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                       --     build graphs     --
+# ···············································································
+
+id = int('11100000', 2)
+cdg = bc.buildCentralDogmaGraph(lib, l1s[id], inputs)
 compg = bc.buildComputeGraph(lib, cdg)
 
 col1, col2 = st.columns([70, 30])
@@ -56,7 +108,6 @@ with col1:
 with col2:
     ut.h3('Compute graph:')
     ut.drawComputeGraph(compg)
-
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -65,10 +116,10 @@ with col2:
 # ···············································································
 import matplotlib.image as mpimg
 
-target = mpimg.imread('../data/band_pass_dec.png')[::-1]
+target = mpimg.imread('../data/double_triangle.png')[::-1]
 
 OUTPUT_LVL = 0.5
-N_SAMPLES = 2000
+N_SAMPLES = 3000
 
 samples = []
 key = jax.random.PRNGKey(42)
@@ -132,109 +183,6 @@ if trained:
     with col2:
         st.pyplot(ut.plotModelOutput(model, params_history[-1]))
         st.pyplot(ut.plotBestLoss(best_loss, losses, vmax=0.15))
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{               --     experimenting with gradients     --
-# ···············································································
-
-# from jax import grad
-# import matplotlib.pyplot as plt
-
-
-# def wx(w, x):
-# return w * x
-
-
-# @partial(jax.custom_jvp, nondiff_argnums=(1,))
-# def quantize(x, arr):
-# return arr[jnp.argmin(jnp.abs(arr - x))]
-
-
-# # we define the derivative of the quantize function as if it was unquantized (i.e x -> x)
-# @quantize.defjvp
-# def quantize_jvp(_, x, x_tang):
-# (x,) = x
-# (x_dot,) = x_tang
-# return x, x_dot
-
-
-# arr = jnp.array([1, 3, 6.3, 9.0])
-
-
-# @jax.jit
-# def wx_q(w, x):
-# return quantize(w, arr) * x
-
-
-# def plotF(F, title=''):
-# fig, a = plt.subplots(1, 1, figsize=(10, 10))
-# pc, *_ = ut.plotFuncOutput(lambda X: F(*X), a, xrange=(0, 10), yrange=(0, 10))
-# cax = a.inset_axes([1.04, 0.2, 0.05, 0.6], transform=a.transAxes)
-# fig.colorbar(pc, ax=a, cax=cax)
-# fig.suptitle(title)
-# plt.show()
-
-
-# # plotF(wx_qcustom)
-# # plotF(grad(wx_qcustom, argnums=1))
-
-# plotF(jax.jit(wx_q), 'original: wx')
-# plotF(grad(wx_q, argnums=0), 'original: dwx / dw')
-# plotF(grad(wx_q, argnums=1), 'original: dwx / dx')
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{             --     experimenting with stochasticity     --
-# ···············································································
-
-# from jax import jit, grad
-
-
-# def plotF_prob(Fp, key, title=''):
-# meshres = (200, 200)
-# rngs = jax.random.split(key, meshres[0] * meshres[1])
-# fig, a = plt.subplots(1, 1, figsize=(10, 10))
-
-# cpt = 0
-
-# def F(xtup):
-# w, x = xtup
-# nonlocal cpt
-# cpt += 1
-# return Fp(w, x, rngs[cpt])
-
-# pc, XX, YY, ZZ = ut.plotFuncOutput(F, a, xrange=(0, 10), yrange=(0, 10), meshres=meshres)
-# cax = a.inset_axes([1.04, 0.2, 0.05, 0.6], transform=a.transAxes)
-# fig.colorbar(pc, ax=a, cax=cax)
-# fig.suptitle(title)
-# plt.show()
-# return ZZ
-
-
-# def wx(w, x, key):
-# return w * x
-
-
-# def wx_prob(w, x, key):
-# (noise,) = jax.random.multivariate_normal(key, mean=jnp.array([10.0]), cov=jnp.array([[0.5]]))
-# return (w + noise) * x
-
-
-# determ = plotF_prob(wx, key)
-# prob = plotF_prob(wx_prob, key)
-# g_determ = plotF_prob(grad(wx), key)
-# g_prob = plotF_prob(grad(wx_prob), key)
-
-# np.max(np.abs(determ - prob))
-# np.max(np.abs(g_determ - g_prob))
-
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────

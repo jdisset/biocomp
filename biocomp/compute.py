@@ -24,7 +24,7 @@ DEFAULT_MIN_COPY_N = 0.0
 DEFAULT_MAX_COPY_N = 50.0
 
 POSSIBLE_TL_RATES = jnp.array([1.0 / 2**n for n in range(5)] + [0.75, 0.9])
-POSSIBLE_TX_RATES = jnp.array([1.0, 0.5, 0.1])
+POSSIBLE_TX_RATES = jnp.linspace(0.0, 1.0, num=21)
 
 
 def rate_init_continuous(rng, n, minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
@@ -45,6 +45,8 @@ def copy_n_init(rng, minval=0.0, maxval=2.0):
 
 @partial(jax.custom_jvp, nondiff_argnums=(1,))
 def quantize(x, arr):
+    if len(arr) == 0:
+        return x
     return arr[jnp.argmin(jnp.abs(arr - x))]
 
 
@@ -77,6 +79,7 @@ def compnode(f):
     return f
 
 
+# TODO: all the *_upstream functions should be one generic implementation
 def init_upstream(rng, init_funs):
     nbranches = len(init_funs)
     rngs = jax.random.split(rng, nbranches)
@@ -97,7 +100,6 @@ def collect_upstream(params, collect_funs):
     for f, p in zip(collect_funs, params):
         res += f(p)
     return res
-
 
 def constrain_upstream(params, constrain_funs):
     return [constrain(p) for constrain, p in zip(constrain_funs, params)]

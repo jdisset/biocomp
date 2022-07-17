@@ -11,6 +11,15 @@ class PartsLibrary:
         self.seqs = self.sequestrons.merge(self.sequestron_types, left_on='type', right_index=True)
         self.seqs = ut.decode_json(self.seqs, ['output_part', 'output_category'])
 
+    def addPart(self, part, category):
+        self.parts.loc[part] = {'category': category}
+        self.pc = pd.merge(self.parts, self.categories, left_on='category', right_index=True, how='left')
+
+    def addSequestron(self, dic):
+        self.sequestrons = self.sequestrons.append(dic, ignore_index=True)
+        self.seqs = self.sequestrons.merge(self.sequestron_types, left_on='type', right_index=True)
+        self.seqs = ut.decode_json(self.seqs, ['output_part', 'output_category'])
+
     def getRna(self, dna):
         d = self.pc.loc[dna]
         return tuple(d[d.transcripted == 1].index)
