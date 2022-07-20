@@ -1,5 +1,5 @@
 import geostruct as gs
-from geostruct import flowgeo
+# from geostruct import heatmap
 print('geostruct imported.')
 import cytoflow
 print('cytoflow imported.')
