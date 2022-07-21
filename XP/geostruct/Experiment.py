@@ -1,6 +1,7 @@
 import pandas as pd
 from .Tube import Tube
 from .flowgeo import *
+import json
 
 class Experiment:
     '''
@@ -24,12 +25,17 @@ class Experiment:
         self.channels = [] if channels is None else channels
         self.data = pd.DataFrame if data is None else data
 
-
+    """
     def __iter__(self):
         '''
         iterate through tubes `for tube in experiment`
         '''
         return self.tubes
+    """
+    
+    def to_json(self):
+        return json.dumps(self, default=lambda o: o.__dict__,
+                          sort_keys=True, indent=4)
     
     def populate_data(self, dataframe, singlets_conditions=None, ALLOWED_COLORS=None):
         '''
@@ -87,12 +93,12 @@ class Experiment:
         else:
             ex_data = dataframe
         
-        self.data = ex_data
+        self.data = ex_data.to_dict()
 
-        tube_names = list(ex_data['TUBE_NAMES'].unique())
+        tube_names = list(ex_data['TUBE_NAME'].unique())
 
         for tube_name in tube_names:
             tube = self.ExperimentTube(name=tube_name, 
-                data=subset(ex_data, ('TUBE_NAME'), tube_name))
+                data=subset(ex_data, ('TUBE_NAME', tube_name)).to_dict())
             self.tubes[tube_name] = tube
 

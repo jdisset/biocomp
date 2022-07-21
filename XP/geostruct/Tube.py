@@ -1,5 +1,5 @@
 import pandas as pd
-
+import json
 
 class Tube:
     '''
@@ -12,5 +12,9 @@ class Tube:
         aggregates=None):
 
         self.name = name
-        self.data = pd.DataFrame if data is None else data
-        aggregates = {} if aggregates is None else aggregates
+        self.data = {} if data is None else data
+        self.aggregates = {} if aggregates is None else aggregates
+
+    def to_json(self):
+        return json.dumps(self, default=lambda o: o.__dict__,
+                          sort_keys=True, indent=4)
