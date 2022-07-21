@@ -61,7 +61,7 @@ class Experiment:
 
         returns
         -------
-        Experiment object
+        Updated experiment object
         '''
 
         ALLOWED_COLORS_default = [
