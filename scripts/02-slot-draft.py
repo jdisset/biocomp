@@ -16,6 +16,7 @@ import time
 from rich import print
 import biocomp.utils as bu
 import jax
+from jax import jit,vmap,grad
 import jax.numpy as jnp
 from tqdm import tqdm
 from functools import partial
@@ -47,6 +48,13 @@ l1_DNAs = [
 
 inputs = {0: 0, 1: 0, 2: 1, 3: 1}
 
+l1_DNAs = [
+    ['hEF1a', 'CasE'],
+    ['hEF1a', 'CasE_recog_5p', 'NeonGreen'],
+]
+inputs = {0: 0, 1: 1}
+
+inputs = {}
 
 cdg = bc.buildCentralDogmaGraph(lib, l1_DNAs, inputs)
 compg = bc.buildComputeGraph(lib, cdg)
@@ -61,6 +69,8 @@ with col2:
 
 cdg
 compg
+
+model = bc.ComputeGraphModel.fromDataframe(compg)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -200,8 +210,6 @@ l1[2].is_resolved
 
 # extract parameter constraints
 
-
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     build graphs     --
 # ···············································································
@@ -231,9 +239,75 @@ compg
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+# ok now let's try to make a version of a node that can accept better parameters
+# We need the parameters to be partitionable into any set of trainable and fixed params. 
+# Some parameters should be shared, such as the ones specific to a node type. 
+# This could easily be done using a flat dictionnary alongside the pytree:
+# the pytree contains all the node-specific parameters, and the flat dict contains the shared ones.
+# Jax uses positional arguments to determine which arguments are to be differentiated wrt.
+# So the apply function should take the parameters in 2 arguments, trainable and fixed.
+
+# We have:
+# - node-specific parameters, the edge weights, mostly. Stored as a pytree
+# - shared parameters. Stored as a flat dictionnary
+
+# Both can be either trainable or fixed.
+
+# Or we could choose to use a dictionnary for everything...
+# yeah let's try that.
+
+DEFAULT_RNA_DEG_RATE = 1.0
+DEFAULT_PRT_DEG_RATE = 1.0
+
+DEFAULT_MIN_RATE = 0.0
+DEFAULT_MAX_RATE = 1.0
+
+DEFAULT_MIN_COPY_N = 0.0
+DEFAULT_MAX_COPY_N = 50.0
+
+POSSIBLE_TL_RATES = jnp.array([1.0 / 2**n for n in range(5)] + [0.75, 0.9])
+POSSIBLE_TX_RATES = jnp.linspace(0.0, 1.0, num=21)
 
 
+def rate_init_continuous(rng, n, minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
+    return jax.random.uniform(key=rng, shape=(n,), minval=minval, maxval=maxval, dtype=jnp.float32)
 
 
+def copy_n_init(rng, minval=0.0, maxval=2.0):
+    return jax.random.uniform(key=rng, minval=minval, maxval=maxval, dtype=jnp.float32)
 
 
+@partial(jax.custom_jvp, nondiff_argnums=(1,))
+def quantize(x, arr):
+    if len(arr) == 0:
+        return x
+    return arr[jnp.argmin(jnp.abs(arr - x))]
+
+@quantize.defjvp
+def quantize_jvp(_, x, x_tang):
+    (x,) = x
+    (x_dot,) = x_tang
+    return x, x_dot
+
+def init_upstream(rng, init_funs):
+    nbranches = len(init_funs)
+    rngs = jax.random.split(rng, nbranches)
+    res = []
+    for init, r in zip(init_funs, rngs):
+        res += init(r)
+    return res
+
+def apply_upstream(params, apply_funs, inputs, **kwargs):
+    nbranches = len(apply_funs)
+    rng = kwargs.pop(
+        'rng', None
+    )  # we transmit rngs upstream as some apply functions might need randomness
+    rngs = jax.random.split(rng, nbranches) if rng is not None else (None,) * nbranches
+    return jnp.array([f(p, inputs, rng=r, **kwargs) for f, p, r in zip(apply_funs, params, rngs)])
+
+##
+
+def test(a):
+    return a + 1
+
+test(1, lol=2)

@@ -1,4 +1,5 @@
 import pandas as pd
+from scipy.signal.filter_design import EPSILON
 from . import utils as ut
 import numpy as np
 from .library import PartsLibrary as PartsLibrary
@@ -79,134 +80,146 @@ def compnode(f):
     return f
 
 
-# TODO: all the *_upstream functions should be one generic implementation
+# TODO: init should definitely initialize to a possible (quantized) value.
+# This way when we load a fully determined circuit from XP results, we can just have the right value
+# and they won't move (since they should be marked as non-trainable)
+
+
 def init_upstream(rng, init_funs):
     nbranches = len(init_funs)
     rngs = jax.random.split(rng, nbranches)
-    return [init(rng) for init, rng in zip(init_funs, rngs)]
-
-
-def apply_upstream(params, apply_funs, inputs, **kwargs):
-    nbranches = len(apply_funs)
-    rng = kwargs.pop(
-        'rng', None
-    )  # we transmit rngs upstream as some apply functions might need randomness
-    rngs = jax.random.split(rng, nbranches) if rng is not None else (None,) * nbranches
-    return jnp.array([f(p, inputs, rng=r, **kwargs) for f, p, r in zip(apply_funs, params, rngs)])
+    res = []
+    for init, r in zip(init_funs, rngs):
+        res += init(r)
+    return res
 
 
 def collect_upstream(params, collect_funs):
     res = []
-    for f, p in zip(collect_funs, params):
-        res += f(p)
+    for c in collect_funs:
+        res += c(params)
     return res
 
-def constrain_upstream(params, constrain_funs):
-    return [constrain(p) for constrain, p in zip(constrain_funs, params)]
+
+def apply_upstream(params, apply_funs, inputs, **kwargs):
+    nbranches = len(apply_funs)
+    rng = kwargs.pop('rng', None)
+    rngs = jax.random.split(rng, nbranches) if rng is not None else (None,) * nbranches
+    return jnp.array([f(p, inputs, rng=r, **kwargs) for f, p, r in zip(apply_funs, params, rngs)])
 
 
-@compnode
-def transcription(
-    *branches, deg_rate=DEFAULT_RNA_DEG_RATE, nid=None, possible_rates=POSSIBLE_TX_RATES
-):
+def linear(nid, quantized_rates_ids, rate_name, deg_name, *branches):
+    # quantized_rates_ids is a list of keys for the rates we can use in this node
     nbranches = len(branches)
-    init_funs, constrain_funs, apply_funs, collect_funs = zip(*branches)
+    print(f"nbranches: {nbranches}, branches: {branches}")
+    init_funs, apply_funs, collect_funs = zip(*branches)
 
     def init(rng):
-        return (rate_init_continuous(rng, nbranches), init_upstream(rng, init_funs))
+        return [(nid, {rate_name: rate_init_continuous(rng, nbranches)})] + init_upstream(
+            rng, init_funs
+        )
 
-    def collect(params):
-        t_rates, others = params
-        return [(nid, {'tr_rates': np.array(t_rates)})] + collect_upstream(others, collect_funs)
+    def quantized_rates(params):
+        possible_rates = params['shared']['quantized'][rate_name][quantized_rates_ids]
+        t_rates = vmap(partial(quantize, arr=possible_rates))(params['local'][nid][rate_name])
+        return t_rates
 
-    def constrain(params):
-        t_rates, others = params
-        t_rates = jnp.clip(t_rates, 0.0, 1.0)
-        t_rates = vmap(quantize)(t_rates, jnp.tile(possible_rates, (len(t_rates), 1)))
-        return (t_rates, constrain_upstream(others, constrain_funs))
+
+    def quantized_rates(params):
+        possible_rates = [l1_qfs["tx_rate"](params['shared']['quantized']) for l1_qfs in list_of_l1_quantize_functions]
+        t_rates = vmap(quantize)(params['local'][nid][rate_name], possible_rates)
+        return t_rates
 
     def apply(params, inputs, **kwargs):
-        t_rates, others = params
-        t_rates = vmap(quantize)(t_rates, jnp.tile(possible_rates, (len(t_rates), 1)))
-        return jnp.dot(apply_upstream(others, apply_funs, inputs, **kwargs), t_rates) / deg_rate
+        t_rates = quantized_rates(params)
+        return (
+            jnp.dot(apply_upstream(params, apply_funs, inputs, **kwargs), t_rates)
+            / params['shared'][deg_name]
+        )
 
-    return init, constrain, apply, collect
+    def collect(params):
+        return [(nid, {rate_name: quantized_rates(params)})] + collect_upstream(
+            params, collect_funs
+        )
+
+    return init, apply, collect
 
 
 @compnode
-def translation(*branches, deg_rate=DEFAULT_PRT_DEG_RATE, possible_rates=POSSIBLE_TL_RATES, **kwargs):
-    return transcription(*branches, deg_rate=deg_rate, possible_rates=possible_rates, **kwargs)
+def transcription(nid, quantized_rates_ids, *branches):
+    return linear(nid, quantized_rates_ids, 'tx_rate', 'rna_deg_rate', *branches)
 
 
 @compnode
-def sequestron_ERN(neg, pos, nid=None):
+def translation(nid, quantized_rates_ids, *branches):
+    return linear(nid, quantized_rates_ids, 'tl_rate', 'prt_deg_rate', *branches)
 
-    ini, con, app, ass = zip(neg, pos)
+
+@compnode
+def sequestron_ERN(nid, pos, neg):
+
+    ini, app, col = zip(neg, pos)
 
     def init(rng):
         return init_upstream(rng, ini)
-
-    def collect(params):
-        return collect_upstream(params, ass)
-
-    def constrain(params):
-        return constrain_upstream(params, con)
 
     def apply(params, inputs, **kwargs):
         res = apply_upstream(params, app, inputs, **kwargs)
         return jnp.maximum(0, res[1] - res[0])
 
-    return init, constrain, apply, collect
+    def collect(params):
+        return collect_upstream(params, col)
+
+    return init, apply, collect
 
 
 @compnode
-def sequestron_RECOMBINASE(neg, pos, **kwargs):
-    return sequestron_ERN(neg, pos, **kwargs)
+def sequestron_RECOMBINASE(nid, neg, pos):
+
+    DIV_EPSILON = 1e-9
+
+    _, app, _ = zip(neg, pos)
+
+    init, _, collect = sequestron_ERN(nid, neg, pos)
+
+    def apply(params, inputs, **kwargs):
+        res = apply_upstream(params, app, inputs, **kwargs)
+        return res[1] / (res[1] + res[0] + DIV_EPSILON)
+
+    return init, apply, collect
 
 
 @compnode
-def bias(*_, nid=None, MAX_COPY_N=DEFAULT_MAX_COPY_N):
+def bias(nid, MAX_COPY_N=DEFAULT_MAX_COPY_N):
     def init(rng):
-        return copy_n_init(rng)
+        return [(nid, {'copy_number': copy_n_init(rng)})]
 
-    def constrain(copy_n):
-        return jnp.clip(copy_n, 0.0, MAX_COPY_N)
-
-    def apply(copy_n, inputs, **kwargs):
-        return copy_n
+    def apply(params, *_, **__):
+        return params['local'][nid]['copy_number']
 
     def collect(copy_n):
         return [(nid, {'copy_number': float(copy_n)})]
 
-    return init, constrain, apply, collect
+    return init, apply, collect
 
 
 @compnode
-def input(id, nid=None, MAX_COPY_N=DEFAULT_MAX_COPY_N):
-    def init(rng):
-        return copy_n_init(rng)
+def input(nid, id, MAX_COPY_N=DEFAULT_MAX_COPY_N):
 
-    def constrain(copy_n):
-        return jnp.clip(copy_n, 0.0, MAX_COPY_N)
+    init, _, collect = bias(nid, MAX_COPY_N)
 
-    def apply(copy_n, inputs, **kwargs):
-        return inputs[id] * copy_n
+    def apply(params, inputs, **kwargs):
+        return inputs[id] * params['local'][nid]['copy_number']
 
-    def collect(copy_n):
-        return [(nid, {'copy_number': float(copy_n)})]
-
-    return init, constrain, apply, collect
+    return init, apply, collect
 
 
 @compnode
-def output(*branches, nid=None):  # simply returns the vector of results from all branches
-    init_funs, constrain_funs, apply_funs, collect_funs = zip(*branches)
+def output(nid, *branches):  # simply returns the vector of results from all branches
+    init_funs, apply_funs, collect_funs = zip(*branches)
 
     def init(rng):
         return init_upstream(rng, init_funs)
-
-    def constrain(params):
-        return constrain_upstream(params, constrain_funs)
 
     def apply(params, inputs, **kwargs):
         return apply_upstream(params, apply_funs, inputs, **kwargs)
@@ -214,7 +227,7 @@ def output(*branches, nid=None):  # simply returns the vector of results from al
     def collect(params):
         return collect_upstream(params, collect_funs)
 
-    return init, constrain, apply, collect
+    return init, apply, collect
 
 
 #                                                                            }}}
@@ -232,9 +245,8 @@ LEARNING_RATE = 1e-2
 
 
 class ComputeGraphModel:
-    def __init__(self, init, constrain, apply, collect, compg=None):
+    def __init__(self, init, apply, collect, compg=None):
         self.init = init
-        self.constrain = constrain
         self.apply = jit(apply)
         self.collect = collect
         self.compg = compg
@@ -246,17 +258,24 @@ class ComputeGraphModel:
         outNode = cdf[cdf.type == 'output'].iloc[0]
 
         def buildImpl(node):
+            print(f'\n---\nbuilding node {node.name}, of type {node.type}')
+
+            # if node requires a quantier
+
+            if node.type == 'transcription' or node.type == 'translation':
+                quantized_rates_ids = node.quantized_rates_ids.split(',')
+                quantized_rates_ids = [int(x) for x in quantized_rates_ids]
+                return linear(node.name, quantized_rates_ids, node.rate_name, node.deg_name, *[buildImpl(n) for n in node.branches])
+
             if node.input_from:  # recursive case: any non-input node
                 branches = cdf.loc[node.input_from]
-                return CNODE[node.type](
-                    *[buildImpl(b) for _, b in branches.iterrows()], nid=node.name
-                )
-            return CNODE[node.type](node.is_input, nid=node.name)  # terminal node
+                return CNODE[node.type](node.name, *[buildImpl(b) for _, b in branches.iterrows()])
+            return CNODE[node.type](node.name, node.is_input)  # terminal node
 
         return cls(*(buildImpl(outNode) + (cdf,)))
 
     def asTuple(self):
-        return (self.init, self.constrain, self.apply, self.collect)
+        return (self.init, self.apply, self.collect)
 
     def collectParamsToDataframe(self, params, df):
         c = self.collect(params)
@@ -289,14 +308,13 @@ class ComputeGraphModel:
         n_steps=N_TRAINING_STEPS,
         learning_rate=LEARNING_RATE,
         compile_train_loop=False,
-        progress_type=ut.TQDMProgress
+        progress_type=ut.TQDMProgress,
     ):
         optimizer = optax.adam(learning_rate=learning_rate)
         initialization_keys = jax.random.split(key, n_init)
 
         @jit
         def loss(params, x: jnp.ndarray, y_true: jnp.ndarray) -> jnp.ndarray:
-            # p = self.constrain(params) # influences grad. do we want that?
             y_pred = vmap(partial(self.apply, params))(x)
             l = optax.l2_loss(y_pred, y_true)
             return l.mean()
@@ -305,7 +323,7 @@ class ComputeGraphModel:
             loss_value, grads = jax.value_and_grad(loss)(params, X, y_true)
             updates, opt_state = optimizer.update(grads, opt_state, params)
             params = optax.apply_updates(params, updates)
-            params = self.constrain(params)
+            # params = self.constrain(params)
             return params, opt_state, loss_value
 
         def train_one(key):
@@ -333,6 +351,150 @@ class ComputeGraphModel:
         print('Trained in', end - start)
 
         return all_losses, all_params
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                          --     Archive     --
+# ···············································································
+# # def init_upstream(rng, init_funs):
+# nbranches = len(init_funs)
+# rngs = jax.random.split(rng, nbranches)
+# return [init(rng) for init, rng in zip(init_funs, rngs)]
+
+
+# def apply_upstream(params, apply_funs, inputs, **kwargs):
+# nbranches = len(apply_funs)
+# rng = kwargs.pop(
+# 'rng', None
+# )  # we transmit rngs upstream as some apply functions might need randomness
+# rngs = jax.random.split(rng, nbranches) if rng is not None else (None,) * nbranches
+# return jnp.array([f(p, inputs, rng=r, **kwargs) for f, p, r in zip(apply_funs, params, rngs)])
+
+
+# def collect_upstream(params, collect_funs):
+# res = []
+# for f, p in zip(collect_funs, params):
+# res += f(p)
+# return res
+
+# def constrain_upstream(params, constrain_funs):
+# return [constrain(p) for constrain, p in zip(constrain_funs, params)]
+
+
+# @compnode
+# def transcription(
+# *branches, deg_rate=DEFAULT_RNA_DEG_RATE, nid=None, possible_rates=POSSIBLE_TX_RATES
+# ):
+# nbranches = len(branches)
+# init_funs, constrain_funs, apply_funs, collect_funs = zip(*branches)
+
+# def init(rng):
+# return (rate_init_continuous(rng, nbranches), init_upstream(rng, init_funs))
+
+# def collect(params):
+# t_rates, others = params
+# return [(nid, {'tr_rates': np.array(t_rates)})] + collect_upstream(others, collect_funs)
+
+# def constrain(params):
+# t_rates, others = params
+# t_rates = jnp.clip(t_rates, 0.0, 1.0)
+# t_rates = vmap(quantize)(t_rates, jnp.tile(possible_rates, (len(t_rates), 1)))
+# return (t_rates, constrain_upstream(others, constrain_funs))
+
+# def apply(params, inputs, **kwargs):
+# t_rates, others = params
+# t_rates = vmap(quantize)(t_rates, jnp.tile(possible_rates, (len(t_rates), 1)))
+# return jnp.dot(apply_upstream(others, apply_funs, inputs, **kwargs), t_rates) / deg_rate
+
+# return init, constrain, apply, collect
+
+
+# @compnode
+# def translation(*branches, deg_rate=DEFAULT_PRT_DEG_RATE, possible_rates=POSSIBLE_TL_RATES, **kwargs):
+# return transcription(*branches, deg_rate=deg_rate, possible_rates=possible_rates, **kwargs)
+
+
+# @compnode
+# def sequestron_ERN(neg, pos, nid=None):
+
+# ini, con, app, ass = zip(neg, pos)
+
+# def init(rng):
+# return init_upstream(rng, ini)
+
+# def collect(params):
+# return collect_upstream(params, ass)
+
+# def constrain(params):
+# return constrain_upstream(params, con)
+
+# def apply(params, inputs, **kwargs):
+# res = apply_upstream(params, app, inputs, **kwargs)
+# return jnp.maximum(0, res[1] - res[0])
+
+# return init, constrain, apply, collect
+
+
+# @compnode
+# def sequestron_RECOMBINASE(neg, pos, **kwargs):
+# return sequestron_ERN(neg, pos, **kwargs)
+
+
+# @compnode
+# def bias(*_, nid=None, MAX_COPY_N=DEFAULT_MAX_COPY_N):
+# def init(rng):
+# return copy_n_init(rng)
+
+# def constrain(copy_n):
+# return jnp.clip(copy_n, 0.0, MAX_COPY_N)
+
+# def apply(copy_n, inputs, **kwargs):
+# return copy_n
+
+# def collect(copy_n):
+# return [(nid, {'copy_number': float(copy_n)})]
+
+# return init, constrain, apply, collect
+
+
+# @compnode
+# def input(id, nid=None, MAX_COPY_N=DEFAULT_MAX_COPY_N):
+# def init(rng):
+# return copy_n_init(rng)
+
+# def constrain(copy_n):
+# return jnp.clip(copy_n, 0.0, MAX_COPY_N)
+
+# def apply(copy_n, inputs, **kwargs):
+# return inputs[id] * copy_n
+
+# def collect(copy_n):
+# return [(nid, {'copy_number': float(copy_n)})]
+
+# return init, constrain, apply, collect
+
+
+# @compnode
+# def output(*branches, nid=None):  # simply returns the vector of results from all branches
+# init_funs, constrain_funs, apply_funs, collect_funs = zip(*branches)
+
+# def init(rng):
+# return init_upstream(rng, init_funs)
+
+# def constrain(params):
+# return constrain_upstream(params, constrain_funs)
+
+# def apply(params, inputs, **kwargs):
+# return apply_upstream(params, apply_funs, inputs, **kwargs)
+
+# def collect(params):
+# return collect_upstream(params, collect_funs)
+
+# return init, constrain, apply, collect
 
 
 #                                                                            }}}
