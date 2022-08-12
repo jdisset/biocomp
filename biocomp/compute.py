@@ -124,9 +124,11 @@ def linear(nid, quantized_rates_ids, rate_name, deg_name, *branches):
         t_rates = vmap(partial(quantize, arr=possible_rates))(params['local'][nid][rate_name])
         return t_rates
 
-
     def quantized_rates(params):
-        possible_rates = [l1_qfs["tx_rate"](params['shared']['quantized']) for l1_qfs in list_of_l1_quantize_functions]
+        possible_rates = [
+            l1_qfs["tx_rate"](params['shared']['quantized'])
+            for l1_qfs in list_of_l1_quantize_functions
+        ]
         t_rates = vmap(quantize)(params['local'][nid][rate_name], possible_rates)
         return t_rates
 
@@ -265,7 +267,13 @@ class ComputeGraphModel:
             if node.type == 'transcription' or node.type == 'translation':
                 quantized_rates_ids = node.quantized_rates_ids.split(',')
                 quantized_rates_ids = [int(x) for x in quantized_rates_ids]
-                return linear(node.name, quantized_rates_ids, node.rate_name, node.deg_name, *[buildImpl(n) for n in node.branches])
+                return linear(
+                    node.name,
+                    quantized_rates_ids,
+                    node.rate_name,
+                    node.deg_name,
+                    *[buildImpl(n) for n in node.branches],
+                )
 
             if node.input_from:  # recursive case: any non-input node
                 branches = cdf.loc[node.input_from]
@@ -355,7 +363,6 @@ class ComputeGraphModel:
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                          --     Archive     --
