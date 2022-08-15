@@ -4,7 +4,6 @@ import numpy as np
 
 part_type_to_parameter_name = {'promoter': 'tx_rate', 'uORF': 'tl_rate'}
 
-
 class Slot:
     def __init__(self, f):
         self.resolve_function = f
@@ -104,7 +103,6 @@ class Source:
         tu.resolve_all_slots(lib)
         return tu
 
-
     def __init__(self, ratio, pid, lib):
         self.ratio = ratio
         self.pid = pid
@@ -118,7 +116,6 @@ class Source:
             self.transcription_units = [self.__transcription_unit_from_L1(l1id, lib) for l1id in l1ids]
         else:
             raise (ValueError(f'Unknown plasmid: {self.pid}'))
-
 
     def __repr__(self):
         return f'(ratio={self.ratio:.2f}, id={self.pid}), transcription units: {self.transcription_units}'
