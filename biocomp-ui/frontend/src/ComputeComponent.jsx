@@ -9,6 +9,9 @@ import TCNode from "./TCNode.jsx";
 import INNode from "./INNode.jsx";
 import OUTNode from "./OUTNode.jsx";
 import CTENode from "./CTENode.jsx";
+import ContentEdge from "./ContentEdge.jsx";
+
+import images from "./grnsymbols/*.png";
 import React, { ReactNode, useRef } from "react";
 import ReactFlow, {
   ReactFlowProvider,
@@ -30,35 +33,21 @@ const nodeTypes = {
   out: OUTNode,
 };
 
-const typeDim = {
-  sequestron_ERN: { width: 100, height: 50 },
-  sequestron_RECOMBINASE: { width: 100, height: 50 },
-  translation: { width: 30, height: 50 },
-  transcription: { width: 30, height: 50 },
-  bias: { width: 45, height: 63 },
-  output: { width: 20, height: 10 },
+const edgeTypes = {
+  content: ContentEdge,
 };
 
-function hasEdgeLabel(data) {
-  if (data.tgtdata.parameters) {
-    if (data.tgtdata.type === "transcription" || data.tgtdata.type === "translation") {
-      return true;
-    }
-  }
-  return false;
-}
+const typeDim = {
+  sequestron_ERN: { width: 100, height: 70 },
+  sequestron_RECOMBINASE: { width: 100, height: 70 },
+  translation: { width: 40, height: 80 },
+  transcription: { width: 40, height: 80 },
+  bias: { width: 45, height: 40 },
+  output: { width: 20, height: 20 },
+};
 
-function getRate(data) {
-  if (hasEdgeLabel(data)) {
-    var i = parseInt(data.tgthandle);
-    return data.tgtdata.parameters.tr_rates[i];
-  } else return 0;
-}
 function getEdgeLabel(data) {
-  if (hasEdgeLabel(data)) {
-    return getRate(data).toFixed(2);
-  }
-  return "";
+  return data.srccdg.content.join(", ");
 }
 
 function ComputeComponent(props) {
@@ -72,9 +61,12 @@ function ComputeComponent(props) {
     style: {
       //stroke: hasEdgeLabel(e.data) ? Util.cmap(getRate(e.data)) : "black",
       stroke: "black",
-      strokeWidth: 0.5 + Math.max(getRate(e.data) * 4.0, 0),
+      strokeWidth: 0.5,
+      //strokeWidth: 0.5 + Math.max(getRate(e.data) * 4.0, 0),
     },
-    label: getEdgeLabel(e.data),
+    //label: getEdgeLabel(e.data),
+    label: "test",
+    type: "content",
     ...e,
   }));
   const layouted = Util.getLayoutedElements(props.data.nodes, styled_edges, 60, 60, typeDim);
@@ -94,6 +86,7 @@ function ComputeComponent(props) {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         fitView
       />
     </div>

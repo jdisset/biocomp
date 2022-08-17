@@ -142,7 +142,7 @@ def dnaOutput(nodes, key=None, func=_component_func, **kwargs):
     return func(nodes=tnodes, output_type='DNA', key=key, **kwargs)
 
 
-def drawComputeGraph(df, func=None, **kwargs):
+def drawComputeGraph(df, func=None, cdg=None, **kwargs):
     uidGen = bc.ut.uniqueIdGenerator()
     nodes = [
         {'id': str(i), 'type': n.type, 'data': bc.ut.updated_dict(n.to_dict(), {'id': i})}
@@ -157,6 +157,7 @@ def drawComputeGraph(df, func=None, **kwargs):
             'data': {
                 'srcdata': df.loc[i].to_dict(),
                 'tgtdata': df.loc[o].to_dict(),
+                'srccdg': None if cdg is None else cdg.loc[df.loc[o].cdg_input[h]].to_dict(),
                 'tgthandle': str(h),
             },
         }
@@ -507,6 +508,7 @@ def trainingMovie(
         plotModelOutput(model, params[i], outfile=str(predpath / f'{c}.png'))
         c += 1
 
+
 def plotGrads(gradlist):
     vmax = 10
     agg = 100
@@ -537,7 +539,6 @@ def plotGrads(gradlist):
     ax.set_xlabel('epochs')
     ax.set_yticks(np.arange(len(bins))[1:-1:labels_interval], binlabels[1:-1:labels_interval])
     plt.show()
-
 
 
 # ut.plotBestLoss(best_loss, losses, 'Best loss history')
@@ -580,6 +581,7 @@ def load(path):
         data = pickle.load(file)
     return data
 
+
 def readimg(p, threshold=None, size=None):
     im = Image.open(p)
     if size is not None:
@@ -588,6 +590,7 @@ def readimg(p, threshold=None, size=None):
     if threshold:
         im = (im > threshold) * 1.0
     return im
+
 
 from jax import lax
 from jax.experimental import host_callback

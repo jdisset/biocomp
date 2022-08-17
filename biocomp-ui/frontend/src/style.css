@@ -178,3 +178,17 @@ body {
   left: 35px;
   top: -55px;
 }
+
+.edge-content {
+	padding: 5px;
+	font-size:0.75em
+}
+
+.edge-content li{
+	list-style: none;
+	/* centered */
+	display: flex;
+	align-items: center;
+	justify-content: center;
+
+}

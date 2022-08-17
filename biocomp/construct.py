@@ -58,34 +58,34 @@ def Part(name):
 class TranscriptionUnit:
     def __init__(self, slots):
         self.name = ''
-        self.parts_slots = slots
+        self.slots = slots
         self.quantized_params = {}
         self.is_resolved = False
 
     def resolve_all_slots(self, lib, random_seed=1, random_order=True):
         rdm = jax.random.PRNGKey(random_seed)
-        allrdm = jax.random.split(rdm, len(self.parts_slots))
-        order = list(range(len(self.parts_slots)))
+        allrdm = jax.random.split(rdm, len(self.slots))
+        order = list(range(len(self.slots)))
         if random_order:
-            order = jax.random.permutation(rdm, len(self.parts_slots))
+            order = jax.random.permutation(rdm, len(self.slots))
         for i, r in zip(order, allrdm):
-            if not self.parts_slots[i].is_resolved:
-                self.parts_slots[i].resolve(lib, l1=self, rdm_key=r)
+            if not self.slots[i].is_resolved:
+                self.slots[i].resolve(lib, l1=self, rdm_key=r)
 
         self.__get_quantized_parameters()
 
-        assert all(s.is_resolved for s in self.parts_slots)
+        assert all(s.is_resolved for s in self.slots)
 
 
     def __get_quantized_parameters(self):
-        for s in self.parts_slots:
+        for s in self.slots:
             assert s.is_resolved
             if s.maps_to_parameter is not None:
                 assert s.maps_to_parameter not in self.quantized_params
                 self.quantized_params[s.maps_to_parameter] = s.part
 
     def __repr__(self):
-        return f'L1({self.parts_slots})'
+        return f'L1({self.slots})'
 
 
 # a DNA source is basically a plasmid. It contains one or several transcription units,

@@ -18,9 +18,6 @@ function DNAContent({ initExpanded = false, expandable = true, ...props }) {
       onMouseLeave={() => setExpanded(expandable ? false : initExpanded)}
     >
       {content}
-      <li key="term">
-        <img src={images["terminator"]} alt="terminator symbol" />
-      </li>
 
       <div className="dna-name">DNA {zeroPad(parseInt(props.data.id), 2)}</div>
     </div>
