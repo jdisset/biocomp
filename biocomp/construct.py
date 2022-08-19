@@ -1,9 +1,16 @@
 from .library import PartsLibrary as PartsLibrary
 import jax
 import numpy as np
+import pandas as pd
+import os
+import sqlite3
 
 part_type_to_parameter_name = {'promoter': 'tx_rate', 'uORF': 'tl_rate'}
 
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                       --     base classes     --
+# ···············································································
 class Slot:
     def __init__(self, f):
         self.resolve_function = f
@@ -76,7 +83,6 @@ class TranscriptionUnit:
 
         assert all(s.is_resolved for s in self.slots)
 
-
     def __get_quantized_parameters(self):
         for s in self.slots:
             assert s.is_resolved
@@ -88,55 +94,271 @@ class TranscriptionUnit:
         return f'L1({self.slots})'
 
 
-# a DNA source is basically a plasmid. It contains one or several transcription units,
-# and can be either an L1 or a L2.
-class Source:
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
 
-    def __transcription_unit_from_L1(self, l1id, lib):
-        l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
-        L0s = lib.L1s.loc[l1id][l0_cols].tolist()
-        part_cols = [f'part_{i}' for i in range(1,7)]
-        parts = []
-        for l in L0s:
-            parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
-        tu = TranscriptionUnit([Part(p) for p in parts])
-        tu.resolve_all_slots(lib)
-        return tu
+# into sqlite
+def create_db(conn):
+    sql = """
+    CREATE TABLE IF NOT EXISTS `tubes` (
+        name TEXT PRIMARY KEY,
+        comment TEXT);
 
-    def __init__(self, ratio, pid, lib):
-        self.ratio = ratio
-        self.pid = pid
-        if self.pid in lib.L1s.index:
-            self.level = 1
-            self.transcription_units = [self.__transcription_unit_from_L1(self.pid, lib)]
-        elif self.pid in lib.L2s.index:
-            self.level = 2
-            slot_cols=[f'slot_{i}' for i in range(1, 7)]
-            l1ids = [s for s in lib.L2s.loc['pGW0010'][slot_cols].tolist() if s]
-            self.transcription_units = [self.__transcription_unit_from_L1(l1id, lib) for l1id in l1ids]
-        else:
-            raise (ValueError(f'Unknown plasmid: {self.pid}'))
+    CREATE TABLE IF NOT EXISTS `aggregations` (
+        id INTEGER PRIMARY KEY,
+        qtty REAL,
+        tube TEXT,
+        FOREIGN KEY (tube) REFERENCES tubes(name));
 
-    def __repr__(self):
-        return f'(ratio={self.ratio:.2f}, id={self.pid}), transcription units: {self.transcription_units}'
+    CREATE TABLE IF NOT EXISTS `sources` (
+        name TEXT PRIMARY KEY,
+        type TEXT);
 
+    CREATE TABLE IF NOT EXISTS `TU_in_source`(
+        source TEXT,
+        TU INTEGER,
+        position INTEGER,
+        FOREIGN KEY(source) REFERENCES sources(name),
+        FOREIGN KEY(TU) REFERENCES TUs(id),
+        PRIMARY KEY(source, TU));
 
-class Aggregation:
-    def __init__(self, agobj, lib):
-        ratios = np.array([o['qtty'] for o in agobj])
-        self.qtty = ratios.sum()
-        ratios = ratios / self.qtty
-        self.sources = [Source(r, o['plasmid'], lib) for (r, o) in zip(ratios, agobj)]
-
-    def __repr__(self):
-        return f'total qtty = {self.qtty}, sources = {self.sources}'
+    CREATE TABLE IF NOT EXISTS `source_in_aggregation`(
+        aggregation INTEGER,
+        source TEXT,
+        ratio REAL,
+        FOREIGN KEY (aggregation) REFERENCES aggregations(id),
+        FOREIGN KEY (source) REFERENCES sources(name),
+        PRIMARY KEY(aggregation, source));
+    """
+    c = conn.cursor()
+    c.executescript(sql)
+    return conn
 
 
-class Run:
-    def __init__(self, obj, lib):
-        self.datafile = obj['datafile']
-        self.name = obj['name']
-        self.aggregations = [Aggregation(o, lib) for o in obj['content']['aggregations']]
+def transcription_unit_from_L1(l1id, lib):
+    l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
+    L0s = lib.L1s.loc[l1id][l0_cols].tolist()
+    part_cols = [f'part_{i}' for i in range(1, 7)]
+    parts = []
+    for l in L0s:
+        parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
+    tu = TranscriptionUnit([Part(p) for p in parts])
+    tu.resolve_all_slots(lib)
+    return tu
 
-    def __repr__(self):
-        return f'{self.name}, agg = {self.aggregations}'
+
+def json_to_sql(xpdict, conn, lib):
+    TranscriptionUnits = {}
+    c = conn.cursor()
+    tubes = xpdict['tubes']
+    for t in tubes:
+        c.execute("SELECT name FROM tubes WHERE name = ?", (t['name'],))
+        if c.fetchone():
+            print(f'Warning: tube {t["name"]} already exists in the database')
+            break
+        c.execute("INSERT INTO tubes VALUES (?, ?)", (t['name'], t['comment']))
+        for agg in t['content']:
+            ratios = np.array([s['qtty'] for s in agg])
+            qtty = float(np.sum(ratios))
+            c.execute("INSERT INTO aggregations VALUES (?, ?, ?)", (None, qtty, t['name']))
+            aggregation_id = c.lastrowid
+            ratios = ratios / qtty
+            for (r, s) in zip(ratios, agg):
+                type = None
+                l1ids = []
+                if s['plasmid'] in lib.L1s.index:
+                    type = 1
+                    l1ids = [lib.L1s.loc[s['plasmid']].name]
+                elif s['plasmid'] in lib.L2s.index:
+                    type = 2
+                    slot_cols = [f'slot_{i}' for i in range(1, 7)]
+                    l1ids = [s for s in lib.L2s.loc[s['plasmid']][slot_cols].tolist() if s]
+                if type is None:
+                    raise Exception("Unknown plasmid")
+                c.execute("SELECT name FROM sources WHERE name = ?", (s['plasmid'],))
+                if not c.fetchone():
+                    c.execute("INSERT INTO sources VALUES (?, ?)", (s['plasmid'], type))
+                    for i, l1id in enumerate(l1ids):
+                        c.execute(
+                            "INSERT INTO TU_in_source VALUES (?, ?, ?)", (s['plasmid'], l1id, i)
+                        )
+
+                c.execute(
+                    "INSERT INTO source_in_aggregation VALUES (?, ?, ?)",
+                    (aggregation_id, s['plasmid'], r),
+                )
+    conn.commit()
+    return TranscriptionUnits
+
+
+# tubes:[#name, comment]
+# aggregations:[#id, qtty, tube*]
+# sources:[#name, type];
+# TU_in_source:[#source*,#TU*,position]
+# source_in_aggregation:[#aggregation*,#source*,ratio]
+
+
+class XP:
+    def __init__(self, dbconn, tube_name, lib):
+        self.dbconnection = dbconn
+        self.name = tube_name
+        # select all transcription units in the tube
+        c = self.dbconnection.cursor()
+        c.execute(
+            """SELECT TU FROM TU_in_source tis, source_in_aggregation sia, aggregations a 
+           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.tube = ?""",
+            (tube_name,),
+        )
+        self.tuids = [t[0] for t in c.fetchall()]
+        self.transcription_units = [transcription_unit_from_L1(t, lib) for t in self.tuids]
+        self.cdg = None
+        self.outputs = []
+
+    def __getDna(self, tu):
+        return [s.part for s in tu.slots if s.is_resolved and not isinstance(s.part, list)]
+
+    def __getRna(self, tu, lib):
+        dna = self.__getDna(tu)
+        d = lib.pc.loc[dna]
+        return tuple(d[d.transcripted == 1].index)
+
+    def __getPrt(self, tu, lib):
+        dna = self.__getDna(tu)
+        d = lib.pc.loc[dna]
+        return tuple(d[d.translated == 1].index)
+
+    def build_central_dogma_graph(self, lib):
+        l1 = [
+            {
+                'DNA': self.__getDna(t),
+                'RNA': self.__getRna(t, lib),
+                'PRT': self.__getPrt(t, lib),
+            }
+            for t in self.transcription_units
+        ]
+
+        l1df = pd.DataFrame(l1)
+
+        dna_df = pd.DataFrame(
+            {'l1_id': [[x] for x in l1df.index], 'type': 'DNA', 'successor': None}
+        )
+        rna_df = pd.DataFrame(
+            {
+                'l1_id': list(l1df.reset_index().groupby(by='RNA').agg(list)['index']),
+                'type': 'RNA',
+                'successor': None,
+            }
+        )
+        prt_df = pd.DataFrame(
+            {
+                'l1_id': list(l1df.reset_index().groupby(by='PRT').agg(list)['index']),
+                'type': 'PRT',
+                'successor': None,
+            }
+        )
+
+        # Then concatenate them:
+        cdg = pd.concat([dna_df, rna_df, prt_df]).reset_index(drop=True)
+
+        # Add successor and predecessor information:
+        for i, r in cdg[cdg.type == 'RNA'].iterrows():
+            cdg.loc[r.l1_id, 'successor'] = i
+        for i, r in cdg[cdg.type == 'PRT'].iterrows():
+            cdg.loc[cdg.loc[r.l1_id].successor, 'successor'] = i
+
+        cdg['predecessor'] = [list() for _ in range(len(cdg))]
+        for i, r in cdg.iterrows():
+            if r.successor is not None:
+                cdg.loc[r.successor]['predecessor'] += [i]
+        cdg.loc[~cdg.predecessor.astype(bool), 'predecessor'] = None
+
+        # We explicitly describe the part content of each node:
+        cdg['content'] = cdg.apply(lambda x: l1df.loc[x.l1_id].iloc[0][x.type], axis=1)
+        cdg['content_type'] = cdg.apply(
+            lambda x: tuple([lib.parts.loc[p][0] for p in x.content]), axis=1
+        )
+
+        # And finally add information about the output of the whole graph:
+        # by default outputs are all parts whose category is fluo_marker
+        self.outputs = lib.parts[lib.parts['category'] == 'fluo_marker'].index.tolist()
+
+        def containsOutput(l, outputs):
+            for o in outputs:
+                if o in l:
+                    return True
+            return False
+
+        cdg['is_output'] = False
+        cdg.loc[cdg.type == 'PRT', 'is_output'] = cdg.loc[cdg.type == 'PRT'].l1_id.apply(
+            lambda x: containsOutput(l1df.loc[x].PRT.tolist()[0], self.outputs)
+        )
+
+        cdg['is_input'] = None
+
+        self.cdg = cdg
+
+
+def xp_series_from_json(jsonobj, lib):
+    conn = create_db(':memory:')
+    json_to_sql(jsonobj, conn, lib)
+    xps = {t: XP(conn, t, lib) for t in jsonobj['tubes']}
+    return xps
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                          --     Archive     --
+# ···············································································
+
+# class Source:
+
+# def __transcription_unit_from_L1(self, l1id, lib):
+# l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
+# L0s = lib.L1s.loc[l1id][l0_cols].tolist()
+# part_cols = [f'part_{i}' for i in range(1,7)]
+# parts = []
+# for l in L0s:
+# parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
+# tu = TranscriptionUnit([Part(p) for p in parts])
+# tu.resolve_all_slots(lib)
+# return tu
+
+# def __init__(self, ratio, pid, lib):
+# self.ratio = ratio
+# self.pid = pid
+# if self.pid in lib.L1s.index:
+# self.level = 1
+# self.transcription_units = [self.__transcription_unit_from_L1(self.pid, lib)]
+# elif self.pid in lib.L2s.index:
+# self.level = 2
+# slot_cols=[f'slot_{i}' for i in range(1, 7)]
+# l1ids = [s for s in lib.L2s.loc['pGW0010'][slot_cols].tolist() if s]
+# self.transcription_units = [self.__transcription_unit_from_L1(l1id, lib) for l1id in l1ids]
+# else:
+# raise (ValueError(f'Unknown plasmid: {self.pid}'))
+
+# def __repr__(self):
+# return f'(ratio={self.ratio:.2f}, id={self.pid}), transcription units: {self.transcription_units}'
+
+
+# class Aggregation:
+# def __init__(self, agobj, lib):
+# ratios = np.array([o['qtty'] for o in agobj])
+# self.qtty = ratios.sum()
+# ratios = ratios / self.qtty
+# self.sources = [Source(r, o['plasmid'], lib) for (r, o) in zip(ratios, agobj)]
+
+# def __repr__(self):
+# return f'total qtty = {self.qtty}, sources = {self.sources}'
+
+
+# class Run:
+# def __init__(self, obj, lib):
+# self.datafile = obj['datafile']
+# self.name = obj['name']
+# self.aggregations = [Aggregation(o, lib) for o in obj['content']['aggregations']]
+
+# def __repr__(self):
+# return f'{self.name}, agg = {self.aggregations}'
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────

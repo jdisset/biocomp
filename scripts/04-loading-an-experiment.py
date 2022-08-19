@@ -29,9 +29,9 @@ xp = json.load(open("example_xpfile.json"))
 
 # TODO:
 # [x] convert xp to (temp) sql db
-# [ ] build central dogma from db
-# [ ] build compute graph
-# [ ] add aggregations to the compute graph
+# [x] build central dogma from db
+# [x] build compute graph
+# [x] add content to graph edges
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     xp to db     --
@@ -252,6 +252,9 @@ def build_central_dogma_graph(tuids, outputs = list()):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                --     display all compute graphs     --
+#···············································································
 c = conn.cursor()
 c.execute(
     """SELECT a.tube, tis.TU FROM TU_in_source tis, source_in_aggregation sia, aggregations a
@@ -270,5 +273,7 @@ for tubename, tuids in tubedict.items():
     ut.h2(f'Tube {tubename}')
     ut.drawComputeGraph(compg, cdg=cdg, key=f'{tubename}comp')
 
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
 
-cdg
+
