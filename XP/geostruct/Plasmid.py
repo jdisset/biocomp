@@ -8,10 +8,13 @@ def __init__(self, name=None, function=None, DNA=None):
 if __name__ == '__main__':
     po = {
         'name': 'pGW0001',
-        
-        'funtion': 'Promoter',  # case L0. Can infer position in L1 from functional component
-        'funtion': 'ST1-2',  # case L1. Can infer L2 position from BB
-        'funtion': 'L2.PB',  # case L2
+
+        'contained_in': 'pGW0001',  # in case of L1 / L2 put in the parent.
+        'contained_in': None,  # now it's the top level (L2, or L1 not in L2)
+
+        'function': 'Promoter',  # case L0. Can infer position in L1 from functional component
+        'function': 'ST1-2',  # case L1. Can infer L2 position from BB
+        'function': 'L2.PB',  # case L2
 
         'DNA': ['hef1a'],  # case L0
         'DNA': ['CasErec', 'uORF', 'uORF'],  # case L0 special?    
