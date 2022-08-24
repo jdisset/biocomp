@@ -1,0 +1,98 @@
+{
+  "XP": "E20220515A",
+  "tubes": [
+    {
+      "datafile": ["t1.json", "t1_2.json"],
+      "name": "L2_all",
+      "comment": "aggregation of L2_pGW0042 and L2_pGW0010",
+      "content": [
+        [
+          {
+            "qtty": 300,
+            "plasmid": "pGW0042"
+          }
+        ],
+        [
+          {
+            "qtty": 300,
+            "plasmid": "pGW0010"
+          }
+        ]
+      ]
+    },
+    {
+      "datafile": ["t1.json", "t1_2.json"],
+      "name": "L2_pGW0042+CasE-R",
+      "comment": "aggregation of L2_pGW0010 and NW-B",
+      "content": [
+        [
+          {
+            "qtty": 200,
+            "plasmid": "pNW114.001"
+          },
+          {
+            "qtty": 200,
+            "plasmid": "pAK0007",
+            "notes": "eBFP"
+          }
+        ],
+        [
+          {
+            "qtty": 400,
+            "plasmid": "pGW0010"
+          }
+        ]
+      ]
+    },
+    {
+      "datafile": ["t1.json", "t1_2.json"],
+      "name": "NW-B+pGW0010",
+      "comment": "aggregation of L2_pGW0042 and CasE-R",
+      "content": [
+        [
+          {
+            "qtty": 200,
+            "plasmid": "pSEP1.08"
+          },
+          {
+            "qtty": 200,
+            "plasmid": "pAK0006"
+          }
+        ],
+        [
+          {
+            "qtty": 300,
+            "plasmid": "pGW0042"
+          }
+        ]
+      ]
+    },
+    {
+      "datafile": ["t1.json", "t1_2.json"],
+      "name": "CoTXall",
+      "comment": "aggregation of two L1 co tx, NW-B and CasE-R",
+      "content": [
+        [
+          {
+            "qtty": 200,
+            "plasmid": "pSEP1.08"
+          },
+          {
+            "qtty": 200,
+            "plasmid": "pAK0006"
+          }
+        ],
+        [
+          {
+            "qtty": 200,
+            "plasmid": "pNW114.001"
+          },
+          {
+            "qtty": 200,
+            "plasmid": "pAK0007"
+          }
+        ]
+      ]
+    }
+  ]
+}

@@ -22,6 +22,7 @@ from rich import print
 l = ut.load("all_sheets.pickle")
 lib = bc.PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types)
 xp = json.load(open("example_xpfile.json"))
+xp['tubes']
 
 
 #                                                                            }}}
@@ -32,6 +33,7 @@ xp = json.load(open("example_xpfile.json"))
 # [x] build central dogma from db
 # [x] build compute graph
 # [x] add content to graph edges
+# [ ] add aggregations to the compute graph
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     xp to db     --
