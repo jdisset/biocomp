@@ -22,15 +22,17 @@ from rich import print
 
 l = ut.load("all_sheets.pickle")
 lib = bc.PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types)
-series_obj = json.load(open("example_xpfile.json"))
+series_obj = json.load(open("../XP/example_xpfile.json"))
 
 series = bc.xp_series_from_json(series_obj, lib)
 
+series_obj
+
 # series['L2_all'].build_central_dogma_graph(lib)
-# 
+#
 # Hierarchy of nodes: Aggregations -> sources (aka plasmid) -> transcription units -> rest of graph.
 
-# TODO: 
+# TODO:
 # - rewrite compute graph / cdg so that unresolved nodes are considered different (and thus not merged)
 # - link conditionning of node parameters to content of the edge, not TU_id (so basically link it to cdg_node_id)
 
@@ -45,55 +47,177 @@ series = bc.xp_series_from_json(series_obj, lib)
 # previous thinking:
 # -------------------------------
 # THE GOAL HERE IS TO REWRITE AND COMBINE CENTRAL DOGMA GRAPH + COMPUTE GRAPH
-# it stems from the need to handle case where an edge is from 2 different TUs. 
-# We actually have a wider range of effective weights because a single edge is actually a combination of 
-# multiple TUs. Example: 
+# it stems from the need to handle case where an edge is from 2 different TUs.
+# We actually have a wider range of effective weights because a single edge is actually a combination of
+# multiple TUs. Example:
 # a same ERN recog produced by 2 separate TUs... After the ERN node, we have a single edge, but the translation rate should actually be the combination of 2 nodes...
-# However, if we want to be able to condition some values on the TUs (such as degradation rates), 
+# However, if we want to be able to condition some values on the TUs (such as degradation rates),
 # we have to keep one edge per TU.
 # But how does that work for an ERN node for example? An ERN node will apply to multiple edges...
-# We could consider that there are several ERN nodes in parallell, as many as there are edges. 
-# A decent way of dealing with this is to actually not merge anything until the PRT level. 
-
+# We could consider that there are several ERN nodes in parallell, as many as there are edges.
+# A decent way of dealing with this is to actually not merge anything until the PRT level.
 
 # Let's try to write a function that produces the compute graph
 
-network = series['L2_all']
-
-def getDna(tu):
-    return [s.part for s in tu.slots if s.is_resolved and not isinstance(s.part, list)]
-
-def getRna(tu, lib):
-    dna = getDna(tu)
-    d = lib.pc.loc[dna]
-    return tuple(d[d.transcripted == 1].index)
-
-def getPrt(tu, lib):
-    dna = getDna(tu)
-    d = lib.pc.loc[dna]
-    return tuple(d[d.translated == 1].index)
-
-
-tu = [
-    {
-        'name': tuid,
-        'DNA': getDna(t),
-        'RNA': getRna(t, lib),
-        'PRT': getPrt(t, lib),
-    }
-    for tuid, t in zip(network.tuids, network.transcription_units)
-]
-tudf = pd.DataFrame(tu)
-
-newtudf = tudf.copy()
-newtudf['type'] = newtudf.DNA.apply(lambda x: "DNA")
-newtudf['content'] = newtudf.DNA
 
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-print(tudf)
+series
+network = series['L2_pGW0042+CasE-R']
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                            --     cdg     --
+# ···············································································
+
+# these functions also return a boolean that indicates if there are still some parameters at this level
+# (preventing the nodes from being merged)
+def getDna(tu):
+    content, params = [], []
+    for s in tu.slots:
+        assert s.is_resolved
+        if not isinstance(s.part, list):
+            content.append(s.part)
+        else:
+            params += s.part
+    return content, params
+
+
+def getRna(tu, lib):
+    dna, params = getDna(tu)
+    d = lib.pc.loc[dna]
+    p = lib.pc.loc[params]
+    return (tuple(d[d.transcripted == 1].index), tuple(p[p.transcripted == 1].index))
+
+
+def getPrt(tu, lib):
+    dna, params = getDna(tu)
+    d = lib.pc.loc[dna]
+    p = lib.pc.loc[params]
+    return (tuple(d[d.translated == 1].index), tuple(p[p.translated == 1].index))
+
+
+network.transcription_units
+# from resolved TUs, build compute graph
+tu = []
+for tuid, t in zip(network.tuids, network.transcription_units):
+    dna, dna_params = tuple(tuple(l) for l in getDna(t))
+    rna, rna_params = getRna(t, lib)
+    prt, prt_params = getPrt(t, lib)
+    tu.append(
+        {
+            'name': tuid,
+            'DNA': dna,
+            'DNA_params': dna_params,
+            'RNA': rna,
+            'RNA_params': rna_params,
+            'PRT': prt,
+            'PRT_params': prt_params,
+        }
+    )
+tudf = pd.DataFrame(tu)
+tudf
+
+ntu = network.transcription_units
+assert ntu[0].slots[1].is_resolved == True
+getRna(ntu[0], lib)
+
+tudf[tudf['RNA_params'] == ()]
+
+# transcription units are never grouped
+dna_df = pd.DataFrame({'tu_id': [[x] for x in tudf.name], 'type': 'DNA'})
+rna_noparams_df = pd.DataFrame(  # we group RNA with same content if they don't have a parameter
+    {
+        'tu_id': list(tudf[tudf['RNA_params'] == ()].groupby(by='RNA').agg(list).name),
+        'type': 'RNA',
+    }
+)
+rna_params_df = pd.DataFrame(  # no grouping even if RNA content was identical...
+    {
+        'tu_id': list(tudf[tudf['RNA_params'] != ()].name),
+        'type': 'RNA',
+    }
+)
+prt_noparams_df = pd.DataFrame(  # we group PRT with same content if they don't have a parameter
+    {
+        'tu_id': list(tudf[tudf['PRT_params'] == ()].groupby(by='RNA').agg(list).name),
+        'type': 'PRT',
+    }
+)
+prt_params_df = pd.DataFrame(  # no grouping even if content was identical...
+    {
+        'tu_id': list(tudf[tudf['PRT_params'] != ()].name),
+        'type': 'PRT',
+    }
+)
+tudf.set_index('name', inplace=True)
+
+
+# Then concatenate them:
+cdg = pd.concat(
+    [dna_df, rna_params_df, rna_noparams_df, prt_params_df, prt_noparams_df]
+).reset_index(drop=True)
+cdg['predecessor'] = None
+cdg['successor'] = None
+
+# there's probably a better, faster, more pandas way of doing this...
+for i, r in cdg[cdg.type == 'DNA'].iterrows():
+    cdg.loc[i, 'successor'] = []
+    for ii, rr in cdg[cdg.type == 'RNA'].iterrows():
+        for tuid in r.tu_id:
+            if tuid in rr.tu_id:
+                cdg.loc[i, 'successor'].append(ii)
+for i, r in cdg[cdg.type == 'RNA'].iterrows():
+    cdg.loc[i, 'successor'] = []
+    for ii, rr in cdg[cdg.type == 'PRT'].iterrows():
+        for tuid in r.tu_id:
+            if tuid in rr.tu_id:
+                cdg.loc[i, 'successor'].append(ii)
+
+cdg['predecessor'] = [list() for _ in range(len(cdg))]
+for i, r in cdg.iterrows():
+    if r.successor is not None:
+        for s in r.successor:
+            cdg.loc[s]['predecessor'] += [i]
+cdg.loc[~cdg.predecessor.astype(bool), 'predecessor'] = None
+
+tudf
+# We explicitly describe the part content of each node:
+cdg['content'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type], axis=1)
+cdg['content_type'] = cdg.apply(lambda x: tuple([lib.parts.loc[p][0] for p in x.content]), axis=1)
+cdg
+
+
+# And finally add information about the output of the whole graph:
+# by default outputs are all parts whose category is fluo_marker
+manual_outputs = []
+outputs = manual_outputs + lib.parts[lib.parts['category'] == 'fluo_marker'].index.tolist()
+
+
+def containsOutput(l, outputs):
+    for o in outputs:
+        if o in l:
+            return True
+    return False
+
+
+cdg['is_output'] = False
+cdg.loc[cdg.type == 'PRT', 'is_output'] = cdg.loc[cdg.type == 'PRT'].tu_id.apply(
+    lambda x: containsOutput(tudf.loc[x].PRT.tolist()[0], outputs)
+)
+cdg['is_input'] = None
+# for k, v in inputDict.items():
+# cdg.loc[k, 'is_input'] = v
+
+cdg
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                       --     compute graph     --
+# ···············································································
+
 
 class GraphComputeNode:
     def __init__(self, id, type, cdg_input, cdg_output):
@@ -127,12 +251,14 @@ class GraphComputeNode:
     def __repr__(self):
         return str(self.toDict())
 
+
 uidGen = bu.uniqueIdGenerator()
 
 
 def isOutputOf(cdg_input_node, compute_nodes):
     res = [other for other in compute_nodes if cdg_input_node == other.cdg_output]
     return res
+
 
 def getNode(nodes, id):
     for node in nodes:
@@ -205,9 +331,10 @@ for _, r in lib.seqs.iterrows():
 # and transcription nodes, making sure to connect it to relevant sequestron nodes along the way
 cg = []
 
+# at first, each TU has a corresponding source, but we later merge sources (for TUs that are on a same plasmid)
 while newnodes:
     n = newnodes.pop()
-    if n.type != 'bias':
+    if n.type != 'source':
         # for every gene input of this compute node
         for i, n_inp in enumerate(n.cdg_input):
             others = isOutputOf(n_inp, cg + newnodes)
@@ -227,18 +354,52 @@ while newnodes:
     cg += [n]
 
 removeShortcuts(cg, 0)  # turns the graph back into a tree
-
-# at this point all transcription units are independent.
-# Let's merge the L2s
-
-
 cdf = pd.DataFrame([n.toDict() for n in cg]).set_index('id').sort_index()
 
-# add input ids
-cdf['is_input'] = None
-for index, row in cdf.iterrows():
-    if row['type'] == 'bias':
-        input_id = cdg.at[row['cdg_output'], 'is_input']
-        if input_id is not None:
-            cdf.at[index, 'type'] = 'input'
-            cdf.at[index, 'is_input'] = int(input_id)
+# merge sources (i.e aggregate TUs into plasmids)
+c = network.dbconnection.cursor()
+c.execute(
+    """SELECT tis.source,tis.TU,position  FROM TU_in_source tis, source_in_aggregation sia, aggregations a 
+   WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.tube = ?""",
+    (network.name,),
+)
+tu_in_sources = pd.DataFrame([t for t in c.fetchall()]).sort_values(2)
+sources_tuids = cdg.loc[cdf[cdf.type == 'source'].cdg_output].tu_id.apply(lambda x: x[0])
+tmpdf = pd.DataFrame(
+    {'compute_id': cdf[cdf.type == 'source'].index, 'tuid': sources_tuids}
+).set_index('compute_id')
+
+cdf['source_id'] = None
+sources = {} # plasmid name -> list of compute nodes ids
+for i, r in tu_in_sources.groupby(0).agg(list).iterrows():
+    # order matters.
+    group = []
+    for t in r[1]:
+        group.append(tmpdf[tmpdf.tuid == t].index[0])
+    sources[i] = group
+
+for k,v in sources.items():
+    nid = uidGen()
+    print(k)
+    newsource = GraphComputeNode(nid, 'source', None, [cdf.loc[vv].cdg_output for vv in v])
+    newsource.output_to = [cdf.loc[vv].output_to[0] for vv in v]
+    cdf = cdf.append(pd.DataFrame([newsource.toDict()]).set_index('id')).drop(v)
+    print(nid)
+    cdf.loc[nid, 'source_id'] = k
+
+cdf
+
+# add aggregations
+# TODO
+
+# # add input ids
+# cdf['is_input'] = None
+# for index, row in cdf.iterrows():
+    # if row['type'] == 'source':
+        # input_id = cdg.at[row['cdg_output'], 'is_input']
+        # if input_id is not None:
+            # cdf.at[index, 'type'] = 'input'
+            # cdf.at[index, 'is_input'] = int(input_id)
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
