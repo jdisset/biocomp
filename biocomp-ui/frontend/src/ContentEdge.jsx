@@ -52,26 +52,25 @@ export default function CustomEdge({
     } else return 0;
   }
 
-  const content = data.srccdg.content;
-  const listItems = data.srccdg.content.map((e) => <li>{e}</li>);
-  const height = baseHeight * listItems.length + 10;
+  let foreignObject = "";
+  if (data.srccdf && (data.srcdata.type == "transcription" || data.srcdata.type == "translation")) {
+    const content = data.srccdg.content;
+    const listItems = data.srccdg.content.map((e) => <li>{e}</li>);
+    const height = baseHeight * listItems.length + 10;
 
-  let foreignObject = (
-    <foreignObject
-      width={width}
-      height={height}
-      x={edgeCenterX - width / 2}
-      y={edgeCenterY - height / 2}
-      className="edgecontent-foreignobject"
-    >
-      <body>
-        <div className="edge-content">{listItems}</div>
-      </body>
-    </foreignObject>
-  );
-
-  if (data.srcdata.type != "transcription" && data.srcdata.type != "translation") {
-    foreignObject = "";
+    foreignObject = (
+      <foreignObject
+        width={width}
+        height={height}
+        x={edgeCenterX - width / 2}
+        y={edgeCenterY - height / 2}
+        className="edgecontent-foreignobject"
+      >
+        <body>
+          <div className="edge-content">{listItems}</div>
+        </body>
+      </foreignObject>
+    );
   }
 
   return (

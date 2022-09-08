@@ -4,6 +4,8 @@ import {
   withStreamlitConnection,
 } from "streamlit-component-lib";
 import SEQNode from "./SEQNode.jsx";
+import AGGNode from "./AGGNode.jsx";
+import SRCNode from "./SRCNode.jsx";
 import TLNode from "./TLNode.jsx";
 import TCNode from "./TCNode.jsx";
 import INNode from "./INNode.jsx";
@@ -31,6 +33,8 @@ const nodeTypes = {
   bias: CTENode,
   in: INNode,
   out: OUTNode,
+  aggregation: AGGNode,
+  source: SRCNode,
 };
 
 const edgeTypes = {
@@ -47,7 +51,7 @@ const typeDim = {
 };
 
 function getEdgeLabel(data) {
-  return data.srccdg.content.join(", ");
+  //return data.rrccdg.content.join(", ");
 }
 
 function ComputeComponent(props) {

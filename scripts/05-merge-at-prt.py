@@ -26,7 +26,6 @@ series_obj = json.load(open("../XP/example_xpfile.json"))
 
 series = bc.xp_series_from_json(series_obj, lib)
 
-series_obj
 
 # series['L2_all'].build_central_dogma_graph(lib)
 #
@@ -60,11 +59,9 @@ series_obj
 # Let's try to write a function that produces the compute graph
 
 
-
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-series
 network = series['L2_pGW0042+CasE-R']
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                            --     cdg     --
@@ -97,7 +94,6 @@ def getPrt(tu, lib):
     return (tuple(d[d.translated == 1].index), tuple(p[p.translated == 1].index))
 
 
-network.transcription_units
 # from resolved TUs, build compute graph
 tu = []
 for tuid, t in zip(network.tuids, network.transcription_units):
@@ -116,13 +112,9 @@ for tuid, t in zip(network.tuids, network.transcription_units):
         }
     )
 tudf = pd.DataFrame(tu)
-tudf
 
 ntu = network.transcription_units
 assert ntu[0].slots[1].is_resolved == True
-getRna(ntu[0], lib)
-
-tudf[tudf['RNA_params'] == ()]
 
 # transcription units are never grouped
 dna_df = pd.DataFrame({'tu_id': [[x] for x in tudf.name], 'type': 'DNA'})
@@ -181,11 +173,9 @@ for i, r in cdg.iterrows():
             cdg.loc[s]['predecessor'] += [i]
 cdg.loc[~cdg.predecessor.astype(bool), 'predecessor'] = None
 
-tudf
 # We explicitly describe the part content of each node:
 cdg['content'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type], axis=1)
 cdg['content_type'] = cdg.apply(lambda x: tuple([lib.parts.loc[p][0] for p in x.content]), axis=1)
-cdg
 
 
 # And finally add information about the output of the whole graph:
@@ -208,8 +198,6 @@ cdg.loc[cdg.type == 'PRT', 'is_output'] = cdg.loc[cdg.type == 'PRT'].tu_id.apply
 cdg['is_input'] = None
 # for k, v in inputDict.items():
 # cdg.loc[k, 'is_input'] = v
-
-cdg
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -370,7 +358,7 @@ tmpdf = pd.DataFrame(
 ).set_index('compute_id')
 
 cdf['source_id'] = None
-sources = {} # plasmid name -> list of compute nodes ids
+sources = {}  # plasmid name -> list of compute nodes ids
 for i, r in tu_in_sources.groupby(0).agg(list).iterrows():
     # order matters.
     group = []
@@ -378,7 +366,7 @@ for i, r in tu_in_sources.groupby(0).agg(list).iterrows():
         group.append(tmpdf[tmpdf.tuid == t].index[0])
     sources[i] = group
 
-for k,v in sources.items():
+for k, v in sources.items():
     nid = uidGen()
     print(k)
     newsource = GraphComputeNode(nid, 'source', None, [cdf.loc[vv].cdg_output for vv in v])
@@ -387,19 +375,34 @@ for k,v in sources.items():
     print(nid)
     cdf.loc[nid, 'source_id'] = k
 
-cdf
+c.execute(
+    """SELECT a.id, a.qtty, a.tube, sia.source, sia.ratio FROM aggregations a, source_in_aggregation sia
+    WHERE a.id = sia.aggregation AND a.tube = ?""",
+    (network.name,),
+)
+aggregations = pd.DataFrame([t for t in c.fetchall()], columns=['id', 'qtty', 'tube', 'source', 'ratio']).groupby('id').agg(list)
+# for each aggregation id with more than one source
+for i, r in aggregations[aggregations.source.apply(len) > 1].iterrows():
+    nid = uidGen()
+    newaggregation = GraphComputeNode(nid, 'aggregation', None, r.source)
+    # find the compute node id through the source_id column
+    newaggregation.output_to = [(cdf[cdf.source_id == s].index[0], 0) for s in r.source]
+    # add the input_from to the cooresponding sources
+    for s in r.source:
+        cdf.loc[cdf.source_id == s, 'input_from'] = [nid]
+    cdf = cdf.append(pd.DataFrame([newaggregation.toDict()]).set_index('id'))
 
-# add aggregations
-# TODO
-
-# # add input ids
-# cdf['is_input'] = None
-# for index, row in cdf.iterrows():
-    # if row['type'] == 'source':
-        # input_id = cdg.at[row['cdg_output'], 'is_input']
-        # if input_id is not None:
-            # cdf.at[index, 'type'] = 'input'
-            # cdf.at[index, 'is_input'] = int(input_id)
+cdf.source_id = cdf.source_id.apply(lambda x: str(x) if not pd.isnull(x) else None)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                         --     rendering     --
+#···············································································
+# ut.grnGraph(cdg)
+ut.drawComputeGraph(cdf)
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+

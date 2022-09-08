@@ -222,6 +222,7 @@ class XP:
         )
         # converter them to TranscriptionUnits objects
         self.tuids = [t[0] for t in c.fetchall()]
+
         self.transcription_units = [transcription_unit_from_L1(t, lib) for t in self.tuids]
         self.cdg = None
         self.outputs = []

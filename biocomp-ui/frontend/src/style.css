@@ -8,6 +8,7 @@ body {
   font-weight: 300;
 }
 
+.input-node .react-flow__handle-top,
 .input-node .react-flow__handle-bottom,
 .seq-node .react-flow__handle-top,
 .seq-node .react-flow__handle-bottom,

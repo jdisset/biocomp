@@ -152,6 +152,7 @@ def drawComputeGraph(df, func=None, cdg=None, **kwargs):
         {
             'id': f'edge_{uidGen()}',
             'source': str(i),
+            'sourceHandle': str(n_out + 1),
             'target': str(o),
             'targetHandle': str(h),
             'data': {
@@ -163,7 +164,7 @@ def drawComputeGraph(df, func=None, cdg=None, **kwargs):
         }
         for i, n in df.iterrows()
         if n.output_to
-        for o, h in n.output_to
+        for n_out, (o, h) in enumerate(n.output_to)
     ]
     if func is None:
         return computeGraph(make_json_compatible(nodes), make_json_compatible(edges), **kwargs)
