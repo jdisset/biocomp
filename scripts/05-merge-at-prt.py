@@ -206,7 +206,6 @@ cdg['is_input'] = None
 # {{{                       --     compute graph     --
 # ···············································································
 
-
 class GraphComputeNode:
     def __init__(self, id, type, cdg_input, cdg_output):
         self.id = id
@@ -358,6 +357,7 @@ tmpdf = pd.DataFrame(
 ).set_index('compute_id')
 
 cdf['source_id'] = None
+cdf['extra'] = None
 sources = {}  # plasmid name -> list of compute nodes ids
 for i, r in tu_in_sources.groupby(0).agg(list).iterrows():
     # order matters.
@@ -376,33 +376,54 @@ for k, v in sources.items():
     cdf.loc[nid, 'source_id'] = k
 
 c.execute(
-    """SELECT a.id, a.qtty, a.tube, sia.source, sia.ratio FROM aggregations a, source_in_aggregation sia
+    """SELECT a.id,  a.qtty, a.tube, sia.source, sia.ratio FROM aggregations a, source_in_aggregation sia
     WHERE a.id = sia.aggregation AND a.tube = ?""",
     (network.name,),
 )
-aggregations = pd.DataFrame([t for t in c.fetchall()], columns=['id', 'qtty', 'tube', 'source', 'ratio']).groupby('id').agg(list)
-# for each aggregation id with more than one source
-for i, r in aggregations[aggregations.source.apply(len) > 1].iterrows():
-    nid = uidGen()
-    newaggregation = GraphComputeNode(nid, 'aggregation', None, r.source)
-    # find the compute node id through the source_id column
-    newaggregation.output_to = [(cdf[cdf.source_id == s].index[0], 0) for s in r.source]
-    # add the input_from to the cooresponding sources
-    for s in r.source:
-        cdf.loc[cdf.source_id == s, 'input_from'] = [nid]
-    cdf = cdf.append(pd.DataFrame([newaggregation.toDict()]).set_index('id'))
+
+# we also want an "extra" column.
+aggregations = (
+    pd.DataFrame([t for t in c.fetchall()], columns=['id', 'qtty', 'tube', 'source', 'ratio'])
+    .groupby('id')
+    .agg(list)
+)
+for i, r in aggregations.iterrows():
+    if len(r.source) > 1:
+        nid = uidGen()
+        newaggregation = GraphComputeNode(nid, 'aggregation', None, r.source)
+        # find the compute node id through the source_id column
+        newaggregation.output_to = [(cdf[cdf.source_id == s].index[0], 0) for s in r.source]
+        # add the input_from to the cooresponding sources
+        for s in r.source:
+            cdf.loc[cdf.source_id == s, 'input_from'] = [[nid]]
+        # For aggregations, we will store a dictionnary with the name of the aggregation and the ratio of each source
+        tmp = pd.DataFrame([newaggregation.toDict()]).set_index('id')
+        tmp['extra'] = [{'id': i, 'qtty': np.sum(r.qtty), 'ratios': r.ratio}]
+        cdf = cdf.append(tmp)
+    else :
+        # no need for an aggregation node if there is only one source
+        cdf.loc[cdf.source_id == r.source[0], 'extra'] = [{'qtty': np.sum(r.qtty)}]
 
 cdf.source_id = cdf.source_id.apply(lambda x: str(x) if not pd.isnull(x) else None)
 
+# now we add numeric nodes (can be constant or inputs). They will mostly be used for copy numbers.
+# Let's start by adding 1 constant per source or aggregation that's "at the top", i.e its input_from is empty.
+topnodes = cdf[cdf.input_from.apply(len) == 0]
+for i, r in topnodes.iterrows():
+    nid = uidGen()
+    newnode = GraphComputeNode(nid, 'numeric', None, 1)
+    newnode.output_to = [(i, 0)]
+    tmp = pd.DataFrame([newnode.toDict()]).set_index('id')
+    assert 'qtty' in r.extra
+    tmp['extra'] = [{'is_input': False, 'is_constant': True, 'role': 'copy_number', 'value': r.extra['qtty']}]
+    cdf = cdf.append(tmp)
+
+cdf = cdf.replace({np.nan: None})
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                         --     rendering     --
-#···············································································
 # ut.grnGraph(cdg)
-ut.drawComputeGraph(cdf)
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
+# remove any nan from cdf and replace by None:
+ut.drawComputeGraph(cdf, cdg=cdg)
 

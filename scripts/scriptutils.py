@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import biocomp as bc
 import pickle
 from PIL import Image
+import copy
 
 
 class ddict(dict):
@@ -45,12 +46,18 @@ def is_interactive():
 
 
 def np_converter(obj):
+    # print type:
+    print(type(obj))
     if isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
         return float(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif np.isnan(obj):
+        return None
 
 
 def make_json_compatible(o):
@@ -158,7 +165,9 @@ def drawComputeGraph(df, func=None, cdg=None, **kwargs):
             'data': {
                 'srcdata': df.loc[i].to_dict(),
                 'tgtdata': df.loc[o].to_dict(),
-                'srccdg': None if cdg is None else cdg.loc[df.loc[o].cdg_input[h]].to_dict(),
+                'srccdg': None
+                if (cdg is None or df.loc[o].cdg_input is None)
+                else cdg.loc[df.loc[o].cdg_input[h]].to_dict(),
                 'tgthandle': str(h),
             },
         }

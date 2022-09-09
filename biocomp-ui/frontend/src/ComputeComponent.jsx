@@ -10,6 +10,7 @@ import TLNode from "./TLNode.jsx";
 import TCNode from "./TCNode.jsx";
 import INNode from "./INNode.jsx";
 import OUTNode from "./OUTNode.jsx";
+import NUMNode from "./NUMNode.jsx";
 import CTENode from "./CTENode.jsx";
 import ContentEdge from "./ContentEdge.jsx";
 
@@ -25,6 +26,8 @@ import ReactFlow, {
 import html2canvas from "html2canvas";
 import Util from "./util.jsx";
 
+console.log("ComputeComponent.jsx loaded");
+
 const nodeTypes = {
   sequestron_ERN: SEQNode,
   sequestron_RECOMBINASE: SEQNode,
@@ -35,6 +38,7 @@ const nodeTypes = {
   out: OUTNode,
   aggregation: AGGNode,
   source: SRCNode,
+  numeric: NUMNode,
 };
 
 const edgeTypes = {
@@ -51,7 +55,7 @@ const typeDim = {
 };
 
 function getEdgeLabel(data) {
-  //return data.rrccdg.content.join(", ");
+  return data.srccdg ? data.srccdg.content.join(", ") : "";
 }
 
 function ComputeComponent(props) {
@@ -63,13 +67,10 @@ function ComputeComponent(props) {
   };
   const styled_edges = props.data.edges.map((e) => ({
     style: {
-      //stroke: hasEdgeLabel(e.data) ? Util.cmap(getRate(e.data)) : "black",
       stroke: "black",
       strokeWidth: 0.5,
-      //strokeWidth: 0.5 + Math.max(getRate(e.data) * 4.0, 0),
     },
-    //label: getEdgeLabel(e.data),
-    label: "test",
+    label: getEdgeLabel(e.data),
     type: "content",
     ...e,
   }));

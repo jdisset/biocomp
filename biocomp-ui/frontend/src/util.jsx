@@ -78,12 +78,14 @@ class Util {
               strokeWidth="2"
               stroke="black"
             />
+
             <path
               d={this.describeArc(0, 0, radius, 0, 360.0 * v)}
               stroke={color}
               fill="none"
               strokeWidth="5"
             />
+
             <text transform="translate(0 1)" fill="black" dominantBaseline="middle" textAnchor="middle">
               <tspan fontFamily="Roboto" fontSize="10" fontWeight="300" fill="black" x="0" y="0">
                 {cn.toFixed(1)}

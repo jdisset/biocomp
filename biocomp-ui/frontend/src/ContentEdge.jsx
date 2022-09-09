@@ -53,7 +53,7 @@ export default function CustomEdge({
   }
 
   let foreignObject = "";
-  if (data.srccdf && (data.srcdata.type == "transcription" || data.srcdata.type == "translation")) {
+  if (data.srccdg && (data.srcdata.type == "transcription" || data.srcdata.type == "translation")) {
     const content = data.srccdg.content;
     const listItems = data.srccdg.content.map((e) => <li>{e}</li>);
     const height = baseHeight * listItems.length + 10;
