@@ -13,6 +13,8 @@ import numpy as np
 import sqlite3
 import os
 
+import jax
+from jax import jit, vmap, grad
 import scriptutils as ut
 import biocomp.utils as bu
 from functools import partial
@@ -427,3 +429,122 @@ cdf = cdf.replace({np.nan: None})
 # remove any nan from cdf and replace by None:
 ut.drawComputeGraph(cdf, cdg=cdg)
 
+
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{               --     template + generator for TUs     --
+#···············································································
+##
+def any_promoter(lib, **_):
+    all_promoters = lib.pc[lib.pc.category == 'promoter'].index.tolist()
+    return all_promoters
+
+def any_uorf(lib, **_):
+    all_uORFs = lib.pc[lib.pc.category == 'uORF'].index.tolist()
+    return all_uORFs + [None]
+
+# picks a randmo ern_rec, and ensure that it is not for an ERN that's already in the L1
+def random_ERN_rec(lib, rdm_key, l1, **_):
+    all_sequestrons = lib.sequestrons[lib.sequestrons.type == 'ERN']
+    already_in_l1 = []
+    for s in l1.slots:
+        if s.is_resolved and s.part in all_sequestrons['negative_part'].values:
+            already_in_l1.append(s.part)
+    possible_recog = all_sequestrons[~all_sequestrons['negative_part'].isin(already_in_l1)][
+        'positive_part'
+    ].values.tolist()
+
+    if already_in_l1:
+        possible_recog = possible_recog + [None]
+
+    return possible_recog[jax.random.randint(rdm_key, (1,), 0, len(possible_recog))[0]]
+
+
+# picks a random ern, and ensure that it is not for an ERN_rec that's already in the L1
+def random_ERN(lib, rdm_key, l1, **_):
+    all_sequestrons = lib.sequestrons[lib.sequestrons.type == 'ERN']
+    already_in_l1 = []
+    for s in l1.slots:
+        if s.is_resolved and s.part in all_sequestrons['positive_part'].values:
+            already_in_l1.append(s.part)
+    possible_ern = all_sequestrons[~all_sequestrons['positive_part'].isin(already_in_l1)][
+        'negative_part'
+    ].values.tolist()
+
+    if already_in_l1:
+        possible_ern = possible_ern + [None]
+
+    return possible_ern[jax.random.randint(rdm_key, (1,), 0, len(possible_ern))[0]]
+
+
+def random_seed():
+    return random.randint(0, 2**32)
+
+
+# map L1 to parameter values for each node
+
+ERN_template = bc.TranscriptionUnit(
+    [
+        bc.Slot(any_promoter),
+        bc.Slot(any_uorf),
+        bc.Slot(random_ERN_rec),
+        bc.Slot(random_ERN),
+        bc.Part('NeonGreen'),
+    ]
+)
+ERN_template.resolve_all_slots(lib, random_seed=3)
+
+
+ERN_template
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+cdf
+
+# TODO:
+# [ ] Complete the compute graph construction from the XP file
+# -> [ ] Replace Bias and Input nodes by a Numeric one 
+# -> [ ] Add a Source node. Basically a no-op splitter?
+# -> [ ] Add an Aggregation node.
+# -> [ ] Add noise distribution to all nodes?
+# Maybe / TBD depending on how fixed vs trainable parameters are handled:
+# -> [ ] Pass quantizers and param_accessor functors to all node creator.
+# -> [ ] Handle inputs at the param level: we can just set the inputs to be fixed parameters in the param dictionnary. 
+#        Example: we know that numeric node #012 is an input. Therefore we can just:
+#                 - set params['local'][12]['value'] to be a non-trainable param
+#                 - set the value of the input just before calling compute.
+#        Problem: might be slow? instead of being able to use the same dict for each computations, we need copies??
+
+
+# [ ] Train
+# -> [ ] Add a way to specify params that are fixed vs trainable before traning,
+#        and aggregate them in a transparent dictionnary that will be passed to the compute graph
+#        Probably should just split into 2 dictionnaries given to the train method (1st is differentiated against, 2nd is fixed).
+#        Then do a merge of the 2 before passing them to the CG. Q: will Jax be ok to compile that?
+# -> [ ] Invertible path addition to the compute graph: 
+#    -> [ ] ensure that each numeric node is tied to an invertible path.
+#    -> [ ] add the inverse path to the compute graph (fluo -> invpath -> numeric -> fwdpath -> fluo) 
+# -> [ ] Parse data file (start with Georgss) and load into dataframe
+# -> [ ] write training loop. Loss = L2 (fluo_out_from_full_gaph, fluo_out_measured)
+
+
+cdf
+
+## 
+
+def test(x):
+    d = {}
+    d['x'] = x
+    d['a'] = d['x'] + 1
+    d['b'] = d['a'] * 9
+    d['c'] = d['b'] + d['a']*2
+    return d['c'] + d['b'] * 2
+
+test(3)
+
+jt = jit(test)
+jt(3)
+%timeit test(3)
+%timeit jt(3).block_until_ready()

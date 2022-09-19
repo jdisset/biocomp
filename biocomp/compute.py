@@ -190,28 +190,21 @@ def sequestron_RECOMBINASE(nid, neg, pos):
 
     return init, apply, collect
 
+# @compnode
+# def split(nid, inp):
+    # def init:
+
 
 @compnode
-def bias(nid, MAX_COPY_N=DEFAULT_MAX_COPY_N):
+def numeric(nid, init_f = copy_n_init):
     def init(rng):
-        return [(nid, {'copy_number': copy_n_init(rng)})]
+        return [(nid, {'value': init_f(rng)})]
 
     def apply(params, *_, **__):
-        return params['local'][nid]['copy_number']
+        return params['local'][nid]['value']
 
     def collect(copy_n):
-        return [(nid, {'copy_number': float(copy_n)})]
-
-    return init, apply, collect
-
-
-@compnode
-def input(nid, id, MAX_COPY_N=DEFAULT_MAX_COPY_N):
-
-    init, _, collect = bias(nid, MAX_COPY_N)
-
-    def apply(params, inputs, **kwargs):
-        return inputs[id] * params['local'][nid]['copy_number']
+        return [(nid, {'value': float(copy_n)})]
 
     return init, apply, collect
 
@@ -230,6 +223,8 @@ def output(nid, *branches):  # simply returns the vector of results from all bra
         return collect_upstream(params, collect_funs)
 
     return init, apply, collect
+
+
 
 
 #                                                                            }}}
