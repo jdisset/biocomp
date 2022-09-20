@@ -8,14 +8,17 @@ https://docs.google.com/spreadsheets/d/1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQA
 
 # 3 types of file: recipe, xp, data
 
-### Recipe files
+## Recipe files
+#### Naming convention: `{recipe_name}.recipe.json5`
+
 Recipes are json (or json5) files describing a set of interacting constructs.
 They can be written manually to describe an experiment in which they have been implemented, or be outputed by the biocompiler 
 (in which case they may contain additional information). Each recipe file allows the compiler to build a corresponding compute graph.
 
 They follow this general template:
 
-` file {recipe_name}.recipe.json5 `
+
+
 ``` JSON5
 {
 	name: "L2_pGW0042+CasE-R", // should be a unique name for this recipe
@@ -59,7 +62,8 @@ They follow this general template:
 }
 ```
 
-### XP files
+## XP files
+#### Naming convention: `{xpname}.xp.json5`
 XP files (aka metadata files) contain information related to the content and the conditions of a specific experiment and its data collection. 
 An experiment implements one or several recipes, and its data collection is organised in [tubes/samples/runs ??]. 
 
@@ -69,7 +73,6 @@ Experiment should have unique identifiers, a string with no spaces. I suggest we
 - `20220501-GW-l1vsl2`
 
 Here is the template for an xp file:
-` file {xpname}.xp.json5 `
 
 ``` json5
 {
@@ -118,10 +121,11 @@ Here is the template for an xp file:
 
 ``` 
 
-### Data files
+## Data files
+#### Naming convention: `{sample name}.{xpname}.csv`. 
+Example: `tube001.20220708-CVDM-uorfthings.csv`
 
-CSV file containing the actual MEFL intensity reads. One file per sample. Filename MUST follow the naming convention `{sample name}.{xpname}.csv`. Example:
-`tube001.20220708-CVDM-uorfthings.csv`
+CSV file containing the actual MEFL intensity reads. One file per sample. 
 One cell per row. Columns = fluo channel intensity in MEFL. Comma separated. First row = column names.
 
 
