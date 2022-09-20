@@ -10,6 +10,7 @@ https://docs.google.com/spreadsheets/d/1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQA
 
 ## Recipe files
 #### Naming convention: `{recipe_name}.recipe.json5`
+Store in `recipes` folder
 
 Recipes are json (or json5) files describing a set of interacting constructs.
 They can be written manually to describe an experiment in which they have been implemented, or be outputed by the biocompiler 
@@ -64,6 +65,7 @@ They follow this general template:
 
 ## XP files
 #### Naming convention: `{xpname}.xp.json5`
+Store in `experiments/{xpname}/` folder
 XP files (aka metadata files) contain information related to the content and the conditions of a specific experiment and its data collection. 
 An experiment implements one or several recipes, and its data collection is organised in [tubes/samples/runs ??]. 
 
@@ -124,20 +126,21 @@ Here is the template for an xp file:
 ## Data files
 #### Naming convention: `{sample name}.{xpname}.csv`. 
 Example: `tube001.20220708-CVDM-uorfthings.csv`
+Store in `experiments/{xpname}/data/` 
 
 CSV file containing the actual MEFL intensity reads. One file per sample. 
 One cell per row. Columns = fluo channel intensity in MEFL. Comma separated. First row = column names.
 
 
-# PROTOCOL: How to save, format, and share XP data:
+# SUMMARY: How to save, format, and share XP data:
 
 Everything is stored on the MIT Dropbox /Biocomp folder. (That will be our root / for the rest of these instructions)
 > !!USE THE NAMING CONVENTIONS DEFINED ABOVE!!
 
-1. Write the recipe files that your XP implements (or check that they already exist). Save in /Recipes/****.recipe.json5
-2. Write the xp file and save in /XP/{xpname}/{xpname}.xp.json5
-3. Preprocess your data to make sure everything is in MEFL, and debris have been gated out. Each tube has its own individual file. Remove all the columns except the fluo channel intensities. If you want you can keep a copy of the raw unprocessed data under /XP/{xpname}/raw_data/
-4. Put each processed data file under /XP/{xpname}/data/{samplename}.{xpname}.csv
+1. Write the recipe files that your XP implements (or check that they already exist). Save in /recipes/****.recipe.json5
+2. Write the xp file and save in /experiments/{xpname}/{xpname}.xp.json5
+3. Preprocess your data to make sure everything is in MEFL, and debris have been gated out. Each tube has its own individual file. Remove all the columns except the fluo channel intensities. If you want you can keep a copy of the raw unprocessed data under /experiments/{xpname}/raw_data/
+4. Put each processed data file under /experiments/{xpname}/data/{samplename}.{xpname}.csv
 
 
 That's it!
