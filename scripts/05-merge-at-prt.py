@@ -117,6 +117,8 @@ for tuid, t in zip(network.tuids, network.transcription_units):
     )
 tudf = pd.DataFrame(tu)
 
+network.transcription_units
+
 ntu = network.transcription_units
 assert ntu[0].slots[1].is_resolved == True
 
@@ -524,34 +526,6 @@ ERN_template
 
 cdf
 
-# TODO:
-# [ ] Complete the compute graph construction from the XP file
-# -> [ ] Switch to a dependency-based approach
-# -> [ ] Replace Bias and Input nodes by a Numeric one
-# -> [ ] Add a Source node. Basically a no-op splitter?
-# -> [ ] Add an Aggregation node.
-# -> [ ] Add noise distribution to all nodes?
-# Maybe / TBD depending on how fixed vs trainable parameters are handled:
-# -> [ ] Pass quantizers and param_accessor functors to all node creator.
-# -> [ ] Handle inputs at the param level: we can just set the inputs to be fixed parameters in the param dictionnary.
-#        Example: we know that numeric node #012 is an input. Therefore we can just:
-#                 - set params['local'][12]['value'] to be a non-trainable param
-#                 - set the value of the input just before calling compute.
-#        Problem: might be slow? instead of being able to use the same dict for each computations, we need copies??
-
-
-# [ ] Train
-# -> [ ] Add a way to specify params that are fixed vs trainable before traning,
-#        and aggregate them in a transparent dictionnary that will be passed to the compute graph
-#        Probably should just split into 2 dictionnaries given to the train method (1st is differentiated against, 2nd is fixed).
-#        Then do a merge of the 2 before passing them to the CG. Q: will Jax be ok to compile that?
-# -> [ ] Invertible path addition to the compute graph:
-#    -> [ ] ensure that each numeric node is tied to an invertible path.
-#    -> [ ] add the inverse path to the compute graph (fluo -> invpath -> numeric -> fwdpath -> fluo)
-# -> [ ] Parse data file (start with Georgss) and load into dataframe
-# -> [ ] write training loop. Loss = L2 (fluo_out_from_full_gaph, fluo_out_measured)
-
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{           --     Construction of the compute function     --
 # ···············································································
@@ -595,11 +569,44 @@ def getParam(params, name, init, shared=False, nodeid=None):
         params[nid][name] = init()
     return params[nid][name]
 
+
+def getQuantized(params, param_name, values, node_id, cdf, cdg, mode='input'):
+    """Return a quantized version of the parameter, conditioned on the
+    relevant species (either input or output cdg nodes). mode can be 'input' or 'output'."""
+    # We are selecting possible values for a parameter depending on which path, or edge, they come from.
+    # The edges of the compute graph are basically nodes in the central dogma graph, i.e they're *more or less* 
+    # dual to each other, but not exactly since the compute graph adds interactions and extra nodes). 
+    # Anyway I think it's reasonable to consider that the type of nodes that will call getQuantized
+    # are the types for which it's ok to consider the CDG as the dual of the COMPG.
+    cdg_id = cdf.loc[node_id]['cdg_input'] if mode == 'input' else cdf.loc[node_id]['cdg_output']
+    if cdg_id is None:
+            raise ValueError(f'Node {node_id} has no {mode} CDG node')
+
+tudf
+
+
+
+
+
+
+    # TODO: quantize
+    return possible_values
+
+def get_possible_values(param_name, node_id, out_pos, cdf):
+    # should return the name of possible parts for a given node, slot and param name
+    # example: get_possible_values('transcription_rate', ...) -> ['hEF1a', 'hEF1b', 'hEF1c']
+
+
+
+
+
+
 def constant(params, value):
     return [value]
 
-def add(getParam, *values, **kwargs):
-    cte = getParam('cte', shared=True, init=lambda: 42.0)
+def add(get_param, get_quantized, *values, **kwargs):
+    cte = get_param('cte', shared=True, init=lambda: 42.0)
+    cte = get_quantized('cte', cte)
     return jnp.array([jnp.sum(jnp.array(values)), cte])
 
 getfn = defaultdict(lambda: add, {'add': add})
@@ -638,3 +645,45 @@ ut.print_xla(model,params)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+
+
+# Param accessors can be handled directly by passing a different/customized getParams function to each node.
+# Now we need to add quantizers. Quantizers are called by compute nodes, they know which possible values a parameter can take because.
+# A distinction: quantizers can be called by a node to quantize 2 different things:
+# - parameters that pertain to an incoming edge (a weight such as translation rate)
+# - parameters that are only specific to this node (degradation rate for example)
+#
+# Let's see some example usage:
+# in a transcription node:
+# translation rates are being learned,
+# but we need to quantize them before computing the output
+# quantize_funcs["tc_rate"](params['shared']['quantized'])
+# t_rates = quantize(params[nid]['tc_rate'], possible_rates)
+
+
+# get_possible_values('tc_rate') -> [[0.2,0.7],[1.0],[1.0,0.7,0.0]]
+# get_possible_values('deg_rate') -> [0.2,0.1]
+
+# Or, directly, get_quantized('tc_rate', [0.234,0.45647,0.1112901]) -> ...
+
+# all we should need for such a quantize function is to know which node is calling (easy, because partialed when given to the node)
+# then we can deduce from the cdf which branches 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
