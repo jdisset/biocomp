@@ -3,7 +3,7 @@
 
 - [x] Write specs for recipe, xp and data files
 
-- [ ] Complete the compute graph construction from new recipe file
+- [ ] Complete the new version of the compute graph construction from new recipe file
     - [x] Implement TU representation with slots
 		- [x] distinguish btwnm parts and params slots
 		- [x] implement a constraint system for slots
