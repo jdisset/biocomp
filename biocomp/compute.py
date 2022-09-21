@@ -152,6 +152,7 @@ def transcription(nid, quantized_rates_ids, *branches):
     return linear(nid, quantized_rates_ids, 'tx_rate', 'rna_deg_rate', *branches)
 
 
+
 @compnode
 def translation(nid, quantized_rates_ids, *branches):
     return linear(nid, quantized_rates_ids, 'tl_rate', 'prt_deg_rate', *branches)
@@ -190,13 +191,9 @@ def sequestron_RECOMBINASE(nid, neg, pos):
 
     return init, apply, collect
 
-# @compnode
-# def split(nid, inp):
-    # def init:
-
 
 @compnode
-def numeric(nid, init_f = copy_n_init):
+def numeric(nid, init_f=copy_n_init):
     def init(rng):
         return [(nid, {'value': init_f(rng)})]
 
@@ -223,8 +220,6 @@ def output(nid, *branches):  # simply returns the vector of results from all bra
         return collect_upstream(params, collect_funs)
 
     return init, apply, collect
-
-
 
 
 #                                                                            }}}

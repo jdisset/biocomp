@@ -10,9 +10,11 @@ st.set_page_config(layout='wide')
 
 import pandas as pd
 import numpy as np
+import jax.numpy as jnp
 import sqlite3
 import os
 
+from collections import defaultdict
 import jax
 from jax import jit, vmap, grad
 import scriptutils as ut
@@ -64,11 +66,11 @@ series = bc.xp_series_from_json(series_obj, lib)
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-network = series['L2_pGW0042+CasE-R']
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                            --     cdg     --
 # ···············································································
 
+network = series['L2_pGW0042+CasE-R']
 # these functions also return a boolean that indicates if there are still some parameters at this level
 # (preventing the nodes from being merged)
 def getDna(tu):
@@ -208,6 +210,7 @@ cdg['is_input'] = None
 # {{{                       --     compute graph     --
 # ···············································································
 
+
 class GraphComputeNode:
     def __init__(self, id, type, cdg_input, cdg_output):
         self.id = id
@@ -296,7 +299,6 @@ for _, r in lib.seqs.iterrows():
     pparts = plvl[plvl.content.apply(lambda x: r.positive_part in x)]
     olvl = cdg[cdg.type == r.output_level]
     oparts = olvl[olvl.content.apply(lambda x: bu.isSubset(r.output_part, x))]
-    print(oparts)
     if len(nparts) > 0 and len(pparts) > 0 and len(oparts.index) > 0:
         assert len(pparts) == 1
         assert len(nparts) == 1
@@ -360,6 +362,7 @@ tmpdf = pd.DataFrame(
 
 cdf['source_id'] = None
 cdf['extra'] = None
+
 sources = {}  # plasmid name -> list of compute nodes ids
 for i, r in tu_in_sources.groupby(0).agg(list).iterrows():
     # order matters.
@@ -368,14 +371,20 @@ for i, r in tu_in_sources.groupby(0).agg(list).iterrows():
         group.append(tmpdf[tmpdf.tuid == t].index[0])
     sources[i] = group
 
+print('sources', sources)
+
 for k, v in sources.items():
     nid = uidGen()
-    print(k)
     newsource = GraphComputeNode(nid, 'source', None, [cdf.loc[vv].cdg_output for vv in v])
     newsource.output_to = [cdf.loc[vv].output_to[0] for vv in v]
+    print('newsource', newsource)
+    # and update input_from of these nodes too 
+    cdf.loc[[o[0] for o in newsource.output_to], 'input_from'] = [nid]*len(newsource.output_to)
     cdf = cdf.append(pd.DataFrame([newsource.toDict()]).set_index('id')).drop(v)
-    print(nid)
     cdf.loc[nid, 'source_id'] = k
+
+# turn every input_from that's a single int into a list
+cdf.input_from = cdf.input_from.apply(lambda x: [x] if isinstance(x, int) else x)
 
 c.execute(
     """SELECT a.id,  a.qtty, a.tube, sia.source, sia.ratio FROM aggregations a, source_in_aggregation sia
@@ -383,12 +392,13 @@ c.execute(
     (network.name,),
 )
 
-# we also want an "extra" column.
+# adding the aggregation nodes
 aggregations = (
     pd.DataFrame([t for t in c.fetchall()], columns=['id', 'qtty', 'tube', 'source', 'ratio'])
     .groupby('id')
     .agg(list)
 )
+
 for i, r in aggregations.iterrows():
     if len(r.source) > 1:
         nid = uidGen()
@@ -402,11 +412,12 @@ for i, r in aggregations.iterrows():
         tmp = pd.DataFrame([newaggregation.toDict()]).set_index('id')
         tmp['extra'] = [{'id': i, 'qtty': np.sum(r.qtty), 'ratios': r.ratio}]
         cdf = cdf.append(tmp)
-    else :
+    else:
         # no need for an aggregation node if there is only one source
         cdf.loc[cdf.source_id == r.source[0], 'extra'] = [{'qtty': np.sum(r.qtty)}]
 
 cdf.source_id = cdf.source_id.apply(lambda x: str(x) if not pd.isnull(x) else None)
+cdf
 
 # now we add numeric nodes (can be constant or inputs). They will mostly be used for copy numbers.
 # Let's start by adding 1 constant per source or aggregation that's "at the top", i.e its input_from is empty.
@@ -417,10 +428,21 @@ for i, r in topnodes.iterrows():
     newnode.output_to = [(i, 0)]
     tmp = pd.DataFrame([newnode.toDict()]).set_index('id')
     assert 'qtty' in r.extra
-    tmp['extra'] = [{'is_input': False, 'is_constant': True, 'role': 'copy_number', 'value': r.extra['qtty']}]
+    tmp['extra'] = [
+        {'is_input': False, 'is_constant': True, 'role': 'copy_number', 'value': r.extra['qtty']}
+    ]
     cdf = cdf.append(tmp)
+    # don't forget to add the new node as input_from to the top node
+    cdf.loc[i, 'input_from'] = [[nid]]
 
 cdf = cdf.replace({np.nan: None})
+
+# reconstruct all input_froms from the output_to:
+# output_to is a list of (target_node_id, input_position) tuples
+# we want to turn input_from into a list of (source_node_id, output_position) tuples
+for i, r in cdf.iterrows():
+    for p, o in enumerate(r.output_to):
+        cdf.loc[o[0], 'input_from'][o[1]] = (i, p)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -430,19 +452,18 @@ cdf = cdf.replace({np.nan: None})
 ut.drawComputeGraph(cdf, cdg=cdg)
 
 
-
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{               --     template + generator for TUs     --
-#···············································································
-##
+# ···············································································
 def any_promoter(lib, **_):
     all_promoters = lib.pc[lib.pc.category == 'promoter'].index.tolist()
     return all_promoters
 
+
 def any_uorf(lib, **_):
     all_uORFs = lib.pc[lib.pc.category == 'uORF'].index.tolist()
     return all_uORFs + [None]
+
 
 # picks a randmo ern_rec, and ensure that it is not for an ERN that's already in the L1
 def random_ERN_rec(lib, rdm_key, l1, **_):
@@ -505,13 +526,14 @@ cdf
 
 # TODO:
 # [ ] Complete the compute graph construction from the XP file
-# -> [ ] Replace Bias and Input nodes by a Numeric one 
+# -> [ ] Switch to a dependency-based approach
+# -> [ ] Replace Bias and Input nodes by a Numeric one
 # -> [ ] Add a Source node. Basically a no-op splitter?
 # -> [ ] Add an Aggregation node.
 # -> [ ] Add noise distribution to all nodes?
 # Maybe / TBD depending on how fixed vs trainable parameters are handled:
 # -> [ ] Pass quantizers and param_accessor functors to all node creator.
-# -> [ ] Handle inputs at the param level: we can just set the inputs to be fixed parameters in the param dictionnary. 
+# -> [ ] Handle inputs at the param level: we can just set the inputs to be fixed parameters in the param dictionnary.
 #        Example: we know that numeric node #012 is an input. Therefore we can just:
 #                 - set params['local'][12]['value'] to be a non-trainable param
 #                 - set the value of the input just before calling compute.
@@ -523,28 +545,96 @@ cdf
 #        and aggregate them in a transparent dictionnary that will be passed to the compute graph
 #        Probably should just split into 2 dictionnaries given to the train method (1st is differentiated against, 2nd is fixed).
 #        Then do a merge of the 2 before passing them to the CG. Q: will Jax be ok to compile that?
-# -> [ ] Invertible path addition to the compute graph: 
+# -> [ ] Invertible path addition to the compute graph:
 #    -> [ ] ensure that each numeric node is tied to an invertible path.
-#    -> [ ] add the inverse path to the compute graph (fluo -> invpath -> numeric -> fwdpath -> fluo) 
+#    -> [ ] add the inverse path to the compute graph (fluo -> invpath -> numeric -> fwdpath -> fluo)
 # -> [ ] Parse data file (start with Georgss) and load into dataframe
 # -> [ ] write training loop. Loss = L2 (fluo_out_from_full_gaph, fluo_out_measured)
 
 
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{           --     Construction of the compute function     --
+# ···············································································
+
+
+# We have a directed acyclic graph of nodes, and a dictionnary of parameters.
+# We used to be able to treat the whole compute graph as a simple tree. However adding split
+# and merge nodes makes it a DAG. We need to be able to compute the graph in topological order.
+# Let's treat the whole thing as a dependency graph and generate the ordered list of nodes batches to compute.
+
 cdf
 
-## 
+def getBatchSequence(cdf):
+    """Return a list of lists of nodes, where each node of a sublist can be computed independently of the others,
+    but each sublist must be computed in order."""
+    visited = set()
+    batches = []
+    while len(visited) < len(cdf):
+        independent = [
+            i
+            for i, row in cdf.iterrows()
+            if (not row['input_from'] or all([x[0] in visited for x in row['input_from']]))
+            and i not in visited
+        ]
+        if not independent:
+            raise ValueError('Graph is not acyclic')
+        visited.update(independent)
+        batches.append(independent)
+    return batches
 
-def test(x):
-    d = {}
-    d['x'] = x
-    d['a'] = d['x'] + 1
-    d['b'] = d['a'] * 9
-    d['c'] = d['b'] + d['a']*2
-    return d['c'] + d['b'] * 2
 
-test(3)
+batches = getBatchSequence(cdf)
 
-jt = jit(test)
-jt(3)
-%timeit test(3)
-%timeit jt(3).block_until_ready()
+flat_batches = [item for sublist in batches for item in sublist]
+
+def getParam(params, name, init, shared=False, nodeid=None):
+    nid = nodeid if not shared else 'shared'
+    if nid not in params:
+        params[nid] = {}
+    if name not in params[nid]:
+        params[nid][name] = init()
+    return params[nid][name]
+
+def constant(params, value):
+    return [value]
+
+def add(getParam, *values, **kwargs):
+    cte = getParam('cte', shared=True, init=lambda: 42.0)
+    return jnp.array([jnp.sum(jnp.array(values)), cte])
+
+getfn = defaultdict(lambda: add, {'add': add})
+
+def generate():
+
+    def comp(params):
+        results = {}
+        for nid in flat_batches:
+            getp = partial(getParam, params, nodeid=nid)
+            node = cdf.loc[nid]
+            if node.type == 'numeric':
+                results[nid] = constant(params, 1.0)
+            else:
+                results[nid] = getfn[node.type](getp, *[results[n][p] for n,p in node.input_from])
+        return results[flat_batches[-1]]
+
+    def init():
+        params = {}
+        comp(params)
+        return params
+
+    return init, comp
+
+init, model = generate()
+
+params = init()
+print(params)
+model(params)
+
+jit(model)(params)
+
+ut.print_jaxpr(model,params)
+ut.print_xla(model,params)
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────

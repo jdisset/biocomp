@@ -19,6 +19,11 @@ import biocomp as bc
 import pickle
 from PIL import Image
 import copy
+from rich import print as rprint
+import rich
+from rich.console import Console
+import jaxlib.xla_extension as xla_ext
+
 
 
 class ddict(dict):
@@ -562,6 +567,19 @@ def plotGrads(gradlist):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+
+def print_jaxpr(fun, *args):
+    print(jax.make_jaxpr(fun)(*args))
+
+def print_xla(fun, *args):
+    console = Console(highlighter=rich.highlighter.ReprHighlighter())
+    c = jax.xla_computation(fun)(*args)
+    backend = jax.lib.xla_bridge.get_backend()
+    e = backend.compile(c)
+    option = xla_ext.HloPrintOptions.short_parsable()
+    console.print(e.hlo_modules()[0].to_string(option))
+
 
 
 suffix = '.pickle'
