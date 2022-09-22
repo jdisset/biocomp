@@ -22,9 +22,9 @@
 	- [ ] Add noise distribution to all compute nodes?
 
 - [ ] generate_model from the compute graph
-	- [ ] transparent get_quantized()
-		- [ ] each compute node should receive a partialed get_quantized method
-		- [ ] get_possible_values() from input/output dual CDG (grab them from tuids)
+	- [x] transparent get_quantized()
+		- [x] each compute node should receive a partialed get_quantized method
+		- [x] get_possible_values() from input/output dual CDG (grab them from tuids)
 	- [ ] transparent get_params()
 		- [ ] each compute node should receive a partialed get_params method
 		- [ ] later: add a condition_on param, that will activate a transform layer on the params. 

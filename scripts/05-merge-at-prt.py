@@ -1,8 +1,8 @@
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                      --     import and init     --
 # ···············································································
-# %load_ext autoreload
-# %autoreload 2
+%load_ext autoreload
+%autoreload 2
 
 import streamlit as st
 
@@ -71,37 +71,36 @@ series = bc.xp_series_from_json(series_obj, lib)
 # ···············································································
 
 network = series['L2_pGW0042+CasE-R']
-# these functions also return a boolean that indicates if there are still some parameters at this level
-# (preventing the nodes from being merged)
+
 def getDna(tu):
-    content, params = [], []
+    content = []
     for s in tu.slots:
         assert s.is_resolved
-        if not isinstance(s.part, list):
+        if s.maps_to_parameter is None:
             content.append(s.part)
-        else:
-            params += s.part
-    return content, params
+    return content, tu.params
 
+def getDownstream(tu, lib, transform='transcripted'):
+    dna_content, dna_params = getDna(tu)
+    d = lib.pc.loc[dna_content]
+    content = tuple(d[d[transform] == 1].index)
+    rna_params = {}
+    for param_name, parts in dna_params.items():
+        p = lib.pc.loc[parts]
+        if p[transform].sum() > 0:
+            assert p[transform].sum() == len(p)
+            rna_params[param_name] = tuple(p.index)
+    return content, rna_params
 
 def getRna(tu, lib):
-    dna, params = getDna(tu)
-    d = lib.pc.loc[dna]
-    p = lib.pc.loc[params]
-    return (tuple(d[d.transcripted == 1].index), tuple(p[p.transcripted == 1].index))
-
+    return getDownstream(tu, lib, transform='transcripted')
 
 def getPrt(tu, lib):
-    dna, params = getDna(tu)
-    d = lib.pc.loc[dna]
-    p = lib.pc.loc[params]
-    return (tuple(d[d.translated == 1].index), tuple(p[p.translated == 1].index))
+    return getDownstream(tu, lib, transform='translated')
 
-
-# from resolved TUs, build compute graph
 tu = []
 for tuid, t in zip(network.tuids, network.transcription_units):
-    dna, dna_params = tuple(tuple(l) for l in getDna(t))
+    dna, dna_params = getDna(t)
     rna, rna_params = getRna(t, lib)
     prt, prt_params = getPrt(t, lib)
     tu.append(
@@ -117,34 +116,29 @@ for tuid, t in zip(network.tuids, network.transcription_units):
     )
 tudf = pd.DataFrame(tu)
 
-network.transcription_units
-
-ntu = network.transcription_units
-assert ntu[0].slots[1].is_resolved == True
-
 # transcription units are never grouped
 dna_df = pd.DataFrame({'tu_id': [[x] for x in tudf.name], 'type': 'DNA'})
 rna_noparams_df = pd.DataFrame(  # we group RNA with same content if they don't have a parameter
     {
-        'tu_id': list(tudf[tudf['RNA_params'] == ()].groupby(by='RNA').agg(list).name),
+        'tu_id': list(tudf[tudf['RNA_params'].map(len) == 0].groupby(by='RNA').agg(list).name),
         'type': 'RNA',
     }
 )
 rna_params_df = pd.DataFrame(  # no grouping even if RNA content was identical...
     {
-        'tu_id': list(tudf[tudf['RNA_params'] != ()].name),
+        'tu_id': list(tudf[tudf['RNA_params'].map(len) > 0].name),
         'type': 'RNA',
     }
 )
 prt_noparams_df = pd.DataFrame(  # we group PRT with same content if they don't have a parameter
     {
-        'tu_id': list(tudf[tudf['PRT_params'] == ()].groupby(by='RNA').agg(list).name),
+        'tu_id': list(tudf[tudf['PRT_params'].map(len) == 0].groupby(by='RNA').agg(list).name),
         'type': 'PRT',
     }
 )
 prt_params_df = pd.DataFrame(  # no grouping even if content was identical...
     {
-        'tu_id': list(tudf[tudf['PRT_params'] != ()].name),
+        'tu_id': list(tudf[tudf['PRT_params'].map(len) > 0].name),
         'type': 'PRT',
     }
 )
@@ -158,6 +152,7 @@ cdg = pd.concat(
 cdg['predecessor'] = None
 cdg['successor'] = None
 
+
 # there's probably a better, faster, more pandas way of doing this...
 for i, r in cdg[cdg.type == 'DNA'].iterrows():
     cdg.loc[i, 'successor'] = []
@@ -165,6 +160,7 @@ for i, r in cdg[cdg.type == 'DNA'].iterrows():
         for tuid in r.tu_id:
             if tuid in rr.tu_id:
                 cdg.loc[i, 'successor'].append(ii)
+
 for i, r in cdg[cdg.type == 'RNA'].iterrows():
     cdg.loc[i, 'successor'] = []
     for ii, rr in cdg[cdg.type == 'PRT'].iterrows():
@@ -182,6 +178,8 @@ cdg.loc[~cdg.predecessor.astype(bool), 'predecessor'] = None
 # We explicitly describe the part content of each node:
 cdg['content'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type], axis=1)
 cdg['content_type'] = cdg.apply(lambda x: tuple([lib.parts.loc[p][0] for p in x.content]), axis=1)
+# and add the available paras with their possible parts
+cdg['params'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type + '_params'], axis=1)
 
 
 # And finally add information about the output of the whole graph:
@@ -524,7 +522,6 @@ ERN_template
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-cdf
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{           --     Construction of the compute function     --
@@ -556,7 +553,6 @@ def getBatchSequence(cdf):
         batches.append(independent)
     return batches
 
-
 batches = getBatchSequence(cdf)
 
 flat_batches = [item for sublist in batches for item in sublist]
@@ -569,8 +565,17 @@ def getParam(params, name, init, shared=False, nodeid=None):
         params[nid][name] = init()
     return params[nid][name]
 
+def get_possible_parts(param_name, cdg_node_id, cdg):
+    # should return the name of possible parts for a given cdg node, slot and param name
+    # example: get_possible_values('transcription_rate', ...) -> ['hEF1a', 'hEF1b', 'hEF1c']
+    #          get_possible_values('translation_rate', ...) -> [None, '1xuORF', '2xuORF', ...]
+    # params are stored in the params column of the cdg as a dict {param_name:[possiblevaluees]}
+    available_params = cdg.loc[cdg_node_id, 'params']
+    if param_name not in available_params:
+        raise ValueError(f'param {param_name} not available for node {cdg_node_id}')
+    return available_params[param_name]
 
-def getQuantized(params, param_name, values, node_id, cdf, cdg, mode='input'):
+def getQuantized(params, param_name, values, node_id, cdf,  cdg, quantize_fun, mode='input'):
     """Return a quantized version of the parameter, conditioned on the
     relevant species (either input or output cdg nodes). mode can be 'input' or 'output'."""
     # We are selecting possible values for a parameter depending on which path, or edge, they come from.
@@ -578,27 +583,16 @@ def getQuantized(params, param_name, values, node_id, cdf, cdg, mode='input'):
     # dual to each other, but not exactly since the compute graph adds interactions and extra nodes). 
     # Anyway I think it's reasonable to consider that the type of nodes that will call getQuantized
     # are the types for which it's ok to consider the CDG as the dual of the COMPG.
-    cdg_id = cdf.loc[node_id]['cdg_input'] if mode == 'input' else cdf.loc[node_id]['cdg_output']
-    if cdg_id is None:
+    cdg_ids = cdf.loc[node_id]['cdg_input'] if mode == 'input' else cdf.loc[node_id]['cdg_output']
+    if cdg_ids is None:
             raise ValueError(f'Node {node_id} has no {mode} CDG node')
-
-tudf
-
-
-
-
-
-
-    # TODO: quantize
-    return possible_values
-
-def get_possible_values(param_name, node_id, out_pos, cdf):
-    # should return the name of possible parts for a given node, slot and param name
-    # example: get_possible_values('transcription_rate', ...) -> ['hEF1a', 'hEF1b', 'hEF1c']
-
-
-
-
+    possible_parts = [get_possible_parts(param_name, cdg_id, cdg) for cdg_id in cdg_ids]
+    # concat part names with param_name
+    possible_names = [[f'{part}_{param_name}' for part in parts] for parts in possible_parts]
+    assert len(possible_names) == len(values)
+    possible_values = [ [getParam(params, n, lambda: val, shared=True) for n in names]
+                            for names, val in zip(possible_names, values) ]
+    return jnp.array([quantize_fun(v, p) for v, p in zip(values, possible_values)])
 
 
 def constant(params, value):
@@ -606,7 +600,6 @@ def constant(params, value):
 
 def add(get_param, get_quantized, *values, **kwargs):
     cte = get_param('cte', shared=True, init=lambda: 42.0)
-    cte = get_quantized('cte', cte)
     return jnp.array([jnp.sum(jnp.array(values)), cte])
 
 getfn = defaultdict(lambda: add, {'add': add})

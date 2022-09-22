@@ -66,7 +66,7 @@ class TranscriptionUnit:
     def __init__(self, slots):
         self.name = ''
         self.slots = slots
-        self.quantized_params = {}
+        self.params = {}
         self.is_resolved = False
 
     def resolve_all_slots(self, lib, random_seed=1, random_order=True):
@@ -79,16 +79,16 @@ class TranscriptionUnit:
             if not self.slots[i].is_resolved:
                 self.slots[i].resolve(lib, l1=self, rdm_key=r)
 
-        self.__get_quantized_parameters()
+        self.__get_parameters()
 
         assert all(s.is_resolved for s in self.slots)
 
-    def __get_quantized_parameters(self):
+    def __get_parameters(self):
         for s in self.slots:
             assert s.is_resolved
             if s.maps_to_parameter is not None:
-                assert s.maps_to_parameter not in self.quantized_params
-                self.quantized_params[s.maps_to_parameter] = s.part
+                assert s.maps_to_parameter not in self.params
+                self.params[s.maps_to_parameter] = s.part
 
     def __repr__(self):
         return f'L1({self.slots})'
