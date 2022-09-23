@@ -29,4 +29,14 @@ lib = bc.PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons,
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-# create network from test_data/recipe00.json5:
+# TODO:
+
+# write all the compute functions using the prototypes 
+# in script-05 and commit all that to the compute module.
+
+# then try things here! 
+# - create network from recipe
+# - build model, try to compute things
+# - load xp data, train model
+# - ...
+# - profit
