@@ -32,8 +32,8 @@
 	- [ ] Handle inputs
 
 - [ ] Refactor:
-	- [ ] Rename things consistently. XP -> Recipe (or network?), etc.
-	- [ ] Move all the compg and cdg creation to the Recipe class, including the generate_model method.
+	- [x] Rename things consistently. XP -> Recipe (or network?), etc.
+	- [x] Move all the compg and cdg creation to the Recipe class, including the generate_model method.
 	- [ ] Make a separate train module, with a train function that takes a recipe and a dataset as input.
 
 - [ ] Train
