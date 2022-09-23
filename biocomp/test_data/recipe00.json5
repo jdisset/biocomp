@@ -1,0 +1,40 @@
+{
+	name: "L2_pGW0042+CasE-R", // should be a unique name for this recipe
+	description: "Aggregation of L2_pGW0010 and NW-B (L1 vs L2), cotransfection ",
+	notes: "Manually designed by Jean from Georg's L2 vs L1 coTx study. Meant to be a simple template.", // notes are optional but it would be nice to briefly describe origin and intent.
+	content: [
+		// list of aggregations (which are lists of cotransfected plasmids)
+		{
+			// aggregation 0
+			sources: [
+				{
+					ratio: 0.5,
+					plasmid: "pNW114.001" // plasmid id, should match either an L1 or an L2 in the database
+				},
+				{
+					ratio: 0.5,
+					plasmid: "pAK0007",
+					notes: "This is the eBFP marker", // optional notes about this plasmid
+
+					// some biocomp additions (not needed when designed manually for traning purposes)
+					optimal_intensity: 152.4, // MEFL intensity at which the circuit is predicted to produce the desired output.
+					sensitivity: 0.75 // I'm thinking about a few ways to indicate how critical it is to pick the right intensity
+				}
+			],
+			notes: "Aggregation of CasE and a marker" // optional notes for the whole aggregation object
+		},
+		{
+			// aggregation 1: only one plasmid
+			sources: [
+				{
+					ratio: 1.0, // could be anything really since there's only one plasmid in this aggregation
+					plasmid: "pGW0010"
+
+					// + same potential biocomp additions
+					// ...
+				}
+			],
+			notes: "Single independant L2" // optional notes for the whole aggregation object
+		}
+	]
+}
