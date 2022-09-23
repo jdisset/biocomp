@@ -582,10 +582,10 @@ def print_xla(fun, *args):
 
 
 
-suffix = '.pickle'
 
 
-def save(data, path, overwrite=False):
+def save(data, path, overwrite=False, suffix = '.pickle'):
+   
     path = Path(path)
     if path.suffix != suffix:
         path = path.with_suffix(suffix)
@@ -599,7 +599,7 @@ def save(data, path, overwrite=False):
         pickle.dump(data, file)
 
 
-def load(path):
+def load(path, suffix = '.pickle'):
     path = Path(path)
     if not path.is_file():
         raise ValueError(f'Not a file: {path}')

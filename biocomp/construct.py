@@ -3,7 +3,6 @@ import jax
 import numpy as np
 import pandas as pd
 from . import utils as ut
-import os
 import sqlite3
 
 part_type_to_parameter_name = {'promoter': 'tx_rate', 'uORF': 'tl_rate'}
@@ -98,45 +97,8 @@ class TranscriptionUnit:
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{               --     helpers to import experiments     --
+# {{{                         --     XP class     --
 #···············································································
-
-# into sqlite
-def create_db(conn):
-    sql = """
-    CREATE TABLE IF NOT EXISTS `tubes` (
-        name TEXT PRIMARY KEY,
-        comment TEXT);
-
-    CREATE TABLE IF NOT EXISTS `aggregations` (
-        id INTEGER PRIMARY KEY,
-        qtty REAL,
-        tube TEXT,
-        FOREIGN KEY (tube) REFERENCES tubes(name));
-
-    CREATE TABLE IF NOT EXISTS `sources` (
-        name TEXT PRIMARY KEY,
-        type TEXT);
-
-    CREATE TABLE IF NOT EXISTS `TU_in_source`(
-        source TEXT,
-        TU INTEGER,
-        position INTEGER,
-        FOREIGN KEY(source) REFERENCES sources(name),
-        FOREIGN KEY(TU) REFERENCES TUs(id),
-        PRIMARY KEY(source, TU));
-
-    CREATE TABLE IF NOT EXISTS `source_in_aggregation`(
-        aggregation INTEGER,
-        source TEXT,
-        ratio REAL,
-        FOREIGN KEY (aggregation) REFERENCES aggregations(id),
-        FOREIGN KEY (source) REFERENCES sources(name),
-        PRIMARY KEY(aggregation, source));
-    """
-    c = conn.cursor()
-    c.executescript(sql)
-
 
 def transcription_unit_from_L1(l1id, lib):
     l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
@@ -149,76 +111,18 @@ def transcription_unit_from_L1(l1id, lib):
     tu.resolve_all_slots(lib)
     return tu
 
-
-def json_to_sql(xpdict, conn, lib):
-    TranscriptionUnits = {}
-    c = conn.cursor()
-    tubes = xpdict['tubes']
-    for t in tubes:
-        c.execute("SELECT name FROM tubes WHERE name = ?", (t['name'],))
-        if c.fetchone():
-            print(f'Warning: tube {t["name"]} already exists in the database')
-            break
-        c.execute("INSERT INTO tubes VALUES (?, ?)", (t['name'], t['comment']))
-        for agg in t['content']:
-            ratios = np.array([s['qtty'] for s in agg])
-            qtty = float(np.sum(ratios))
-            c.execute("INSERT INTO aggregations VALUES (?, ?, ?)", (None, qtty, t['name']))
-            aggregation_id = c.lastrowid
-            ratios = ratios / qtty
-            for (r, s) in zip(ratios, agg):
-                type = None
-                l1ids = []
-                if s['plasmid'] in lib.L1s.index:
-                    type = 1
-                    l1ids = [lib.L1s.loc[s['plasmid']].name]
-                elif s['plasmid'] in lib.L2s.index:
-                    type = 2
-                    slot_cols = [f'slot_{i}' for i in range(1, 7)]
-                    l1ids = [s for s in lib.L2s.loc[s['plasmid']][slot_cols].tolist() if s]
-                if type is None:
-                    raise Exception("Unknown plasmid")
-                c.execute("SELECT name FROM sources WHERE name = ?", (s['plasmid'],))
-                if not c.fetchone():
-                    c.execute("INSERT INTO sources VALUES (?, ?)", (s['plasmid'], type))
-                    for i, l1id in enumerate(l1ids):
-                        c.execute(
-                            "INSERT INTO TU_in_source VALUES (?, ?, ?)", (s['plasmid'], l1id, i)
-                        )
-
-                c.execute(
-                    "INSERT INTO source_in_aggregation VALUES (?, ?, ?)",
-                    (aggregation_id, s['plasmid'], r),
-                )
-    conn.commit()
-    return TranscriptionUnits
-
-# tubes:[#name, comment]
-# aggregations:[#id, qtty, tube*]
-# sources:[#name, type];
-# TU_in_source:[#source*,#TU*,position]
-# source_in_aggregation:[#aggregation*,#source*,ratio]
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                         --     XP class     --
-#···············································································
-
 class XP:
-    def __init__(self, dbconn, tube_name, lib):
+    def __init__(self, dbconn, recipe_name, lib):
         self.dbconnection = dbconn
-        self.name = tube_name
-        # select all transcription units in the tube
+        self.name = recipe_name
+        # select all transcription units in the recipe
         c = self.dbconnection.cursor()
 
-        print('tube name:',tube_name)
+        print('recipe name:',recipe_name)
         c.execute(
             """SELECT TU FROM TU_in_source tis, source_in_aggregation sia, aggregations a 
-           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.tube = ?""",
-            (tube_name,),
+           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
+            (recipe_name,),
         )
         # converter them to TranscriptionUnits objects
         self.tuids = [t[0] for t in c.fetchall()]
@@ -472,7 +376,7 @@ def xp_series_from_json(jsonobj, lib):
     conn = sqlite3.connect(':memory:')
     create_db(conn)
     json_to_sql(jsonobj, conn, lib)
-    xps = {t['name']: XP(conn, t['name'], lib) for t in jsonobj['tubes']}
+    xps = {t['name']: XP(conn, t['name'], lib) for t in jsonobj['recipes']}
     return xps
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────

@@ -29,7 +29,7 @@ They follow this general template:
 		// list of aggregations (which are lists of cotransfected plasmids)
 		{
 			// aggregation 0
-			plasmids: [
+			sources: [
 				{
 					ratio: 0.5,
 					plasmid: "pNW114.001" // plasmid id, should match either an L1 or an L2 in the database
@@ -48,9 +48,9 @@ They follow this general template:
 		},
 		{
 			// aggregation 1: only one plasmid
-			plasmids: [
+			sources: [
 				{
-					ration: 1.0, // could be anything really since there's only one plasmid in this aggregation
+					ratio: 1.0, // could be anything really since there's only one plasmid in this aggregation
 					plasmid: "pGW0010"
 
 					// + same potential biocomp additions

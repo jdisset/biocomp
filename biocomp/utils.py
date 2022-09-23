@@ -2,11 +2,14 @@ import json
 import copy
 
 from jax.experimental import host_callback
+from pathlib import Path
 from tqdm import tqdm
 import jax
 from jax import jit, vmap, lax
 from jax import tree_util as pytree
 import jax.numpy as jnp
+import pickle
+import json5
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                    --     random misc stuff     --
@@ -75,6 +78,20 @@ def set_list_item(lst, i, val):
         lst.extend([None] * (i - len(lst) + 1))
     lst[i] = val
 
+
+def load(path, suffix='.pickle'):
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f'Not a file: {path}')
+    if path.suffix != suffix:
+        raise ValueError(f'Not a {suffix} file: {path}')
+    with open(path, 'rb') as file:
+        data = pickle.load(file)
+    return data
+
+def load_json5(path):
+    with open(path) as f:
+        return json5.load(f)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
