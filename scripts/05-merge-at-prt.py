@@ -24,10 +24,9 @@ import biocomp as bc
 import json
 from rich import print
 
-l = ut.load("all_sheets.pickle")
+l = ut.load("../biocomp/test_data/all_sheets.pickle")
 lib = bc.PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types)
-series_obj = json.load(open("../XP/example_xpfile.json"))
-
+series_obj = json.load(open("../biocomp/test_data/recipe00.json5"))
 series = bc.xp_series_from_json(series_obj, lib)
 
 
@@ -579,7 +578,8 @@ def getQuantized(params, param_name, values, node_id, cdf,  cdg, quantize_fun, m
     """Return a quantized version of the parameter, conditioned on the
     relevant species (either input or output cdg nodes). mode can be 'input' or 'output'."""
     # We are selecting possible values for a parameter depending on which path, or edge, they come from.
-    # The edges of the compute graph are basically nodes in the central dogma graph, i.e they're *more or less* 
+    # The edges of the compute graph are basically nodes in the central dogma graph, 
+    # i.e they're *more or less* 
     # dual to each other, but not exactly since the compute graph adds interactions and extra nodes). 
     # Anyway I think it's reasonable to consider that the type of nodes that will call getQuantized
     # are the types for which it's ok to consider the CDG as the dual of the COMPG.

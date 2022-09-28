@@ -5,7 +5,7 @@ import pandas as pd
 from . import utils as ut
 import sqlite3
 
-__part_type_to_parameter_name = {'promoter': 'tx_rate', 'uORF': 'tl_rate'}
+part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF': 'tl_rate'}
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     base classes     --
@@ -16,6 +16,7 @@ class Slot:
         self.part = None  # list means multiple parts that should map to a single parameter. Otherwise single string
         self.maps_to_parameter = None
         self.is_resolved = False
+
 
     def resolve(self, lib, *args, **kwargs):
         if not self.is_resolved:
@@ -33,7 +34,7 @@ class Slot:
                 self.part = [self.part]
             self.is_resolved = True
 
-    def __mapped_parameter(self, lib, part_name, category_to_param=__part_type_to_parameter_name):
+    def __mapped_parameter(self, lib, part_name, category_to_param=part_type_to_parameter_name):
         if part_name is not None:
             if part_name in lib.pc.index:
                 category = lib.pc.loc[part_name, 'category']
@@ -111,21 +112,36 @@ def transcription_unit_from_L1(l1id, lib):
 
 # main class: a network of interacting transcription units
 class Network:
-    def __init__(self, lib, recipe_name, recipe_db, custom_outputs=None):
+    def __init__(self, lib, recipe_name, recipe_db, custom_outputs=None, build=True):
         self.lib = lib
         self.name = recipe_name
         self.db = recipe_db
+        self.db.commit()
+        self.custom_outputs = custom_outputs
+        self.central_dogma_graph = None
+        self.compute_graph = None
+        if build:
+            self.build()
+
+    def build(self):
         c = self.db.cursor()
+        # first let's check that there is a recipe with this name
+        c.execute('SELECT * FROM recipes WHERE name=?', (self.name,))
+        assert c.fetchone() is not None, f'No recipe named {self.name} in database'
         c.execute(
-            """SELECT TU FROM TU_in_source tis, source_in_aggregation sia, aggregations a 
+            """SELECT TU FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
-            (recipe_name,),
+            (self.name,),
         )
         self.transcription_units = {
-            tu[0]: transcription_unit_from_L1(tu[0], lib) for tu in c.fetchall()
+            tu[0]: transcription_unit_from_L1(tu[0], self.lib) for tu in c.fetchall()
         }
-        self.central_dogma_graph = self.__build_central_dogma_graph(custom_outputs)
-        # self.compute_graph = self.__build_compute_graph()
+        assert len(self.transcription_units) > 0, f'No transcription units in recipe {self.name}'
+        self.__build_central_dogma_graph(self.custom_outputs)
+        self.__build_compute_graph()
+
+    def is_built(self):
+        return self.compute_graph is not None and self.central_dogma_graph is not None
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                           --     utils     --
@@ -244,10 +260,11 @@ class Network:
                     'PRT_params': prt_params,
                 }
             )
+        assert len(tu) > 0
         tudf = pd.DataFrame(tu)
 
         # transcription units are never grouped
-        dna_df = pd.DataFrame({'tu_id': [[x] for x in tudf.name], 'type': 'DNA'})
+        dna_df = pd.DataFrame({'tu_id': [[x] for x in tudf['name']], 'type': 'DNA'})
         rna_noparams_df = (
             pd.DataFrame(  # we group RNA with same content if they don't have a parameter
                 {
@@ -347,8 +364,8 @@ class Network:
         # merge TUs that are from a same source into a single node
         c = self.db.cursor()
         c.execute(
-            """SELECT tis.source,tis.TU,position  FROM TU_in_source tis, source_in_aggregation sia, aggregations a 
-           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.tube = ?""",
+            """SELECT tis.source,tis.TU,position FROM TU_in_source tis, source_in_aggregation sia, aggregations a 
+           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
             (self.name,),
         )
         tu_in_sources = pd.DataFrame([t for t in c.fetchall()]).sort_values(2)
@@ -492,26 +509,24 @@ class Network:
         return cg
 
     def __addNumericNodes(self, cdf, uidGen):
-        # Let's start by adding 1 constant per source or aggregation that's "at the top", i.e its input_from is empty.
+        # we add 1 numeric node per source or aggregation that's "at the top", 
+        # i.e its input_from is empty.
         topnodes = cdf[cdf.input_from.apply(len) == 0]
         for i, r in topnodes.iterrows():
             nid = uidGen()
             newnode = self.GraphComputeNode(nid, 'numeric', None, 1)
             newnode.output_to = [(i, 0)]
             tmp = pd.DataFrame([newnode.toDict()]).set_index('id')
-            assert 'qtty' in r.extra
-            tmp['extra'] = [
-                {
-                    'is_input': False,
-                    'is_constant': True,
+            extra = {
                     'role': 'copy_number',
-                    'value': r.extra['qtty'],
                 }
-            ]
+            if 'qtty' in r.extra:
+                extra['qtty'] = r.extra['qtty']
+            tmp['extra'] = [extra]
             cdf = cdf.append(tmp)
             # don't forget to add the new node as input_from to the top node
             cdf.loc[i, 'input_from'] = [[nid]]
-            return cdf
+        return cdf
 
     def __build_compute_graph(self):
         assert self.central_dogma_graph is not None, 'central dogma graph not built yet'

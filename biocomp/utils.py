@@ -89,9 +89,11 @@ def load(path, suffix='.pickle'):
         data = pickle.load(file)
     return data
 
+
 def load_json5(path):
     with open(path) as f:
         return json5.load(f)
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────

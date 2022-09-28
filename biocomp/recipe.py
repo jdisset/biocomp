@@ -46,6 +46,7 @@ def create_db(conn):
 
 def __to_sql(obj, conn, lib):
     c = conn.cursor()
+    create_db(conn)
     c.execute("SELECT name FROM recipes WHERE name = ?", (obj['name'],))
     if c.fetchone():
         raise RuntimeError(f'Error while importing recipe {obj["name"]}: already in the database')

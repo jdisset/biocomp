@@ -1,10 +1,11 @@
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                      --     import and init     --
 # ···············································································
-%load_ext autoreload
-%autoreload 2
+# %load_ext autoreload
+# %autoreload 2
 
 import streamlit as st
+
 st.set_page_config(layout='wide')
 
 import pandas as pd
@@ -22,6 +23,7 @@ from functools import partial
 import biocomp as bc
 import json
 from rich import print
+from pathlib import Path
 
 l = ut.load("../biocomp/test_data/all_sheets.pickle")
 lib = bc.PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types)
@@ -31,12 +33,45 @@ lib = bc.PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons,
 
 # TODO:
 
-# write all the compute functions using the prototypes 
+# write all the compute functions using the prototypes
 # in script-05 and commit all that to the compute module.
 
-# then try things here! 
+# then try things here!
 # - create network from recipe
 # - build model, try to compute things
 # - load xp data, train model
 # - ...
 # - profit
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{               --     load recipe and build network     --
+# ···············································································
+recipe_path = "../biocomp/test_data/recipe00.json5"
+dbpath = "./test.db"
+if Path(dbpath).exists():
+    os.remove(dbpath)
+
+dbconn = sqlite3.connect(dbpath)
+bc.import_recipes_to_sql([recipe_path], dbconn, lib)
+
+c = dbconn.cursor()
+c.execute("SELECT name FROM recipes")
+recipes = [r[0] for r in c.fetchall()]
+recipe_name = st.sidebar.selectbox("Recipe", recipes)
+recipe_name = recipes[0]
+
+network = bc.Network(lib, recipe_name, dbconn)
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+#TODO FIX BUG: no numeric node on top of aggregation
+
+ut.h2(f'Recipe {recipe_name}')
+ut.drawComputeGraph(network.compute_graph, cdg=network.central_dogma_graph)
+
+model = bc.ComputeGraphModel(network)
+model.build()
+
+rng_key = jax.random.PRNGKey(0)
+params = model.init(rng_key)
+print(params)
