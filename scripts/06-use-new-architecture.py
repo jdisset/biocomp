@@ -4,6 +4,7 @@
 # %load_ext autoreload
 # %autoreload 2
 
+from scipy.special import ellipkinc
 import streamlit as st
 
 st.set_page_config(layout='wide')
@@ -25,11 +26,14 @@ import json
 from rich import print
 from pathlib import Path
 
-l = ut.load("../biocomp/test_data/all_sheets.pickle")
-lib = bc.PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types)
+# l = ut.load("../biocomp/test_data/all_sheets.pickle")
+# lib = bc.PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types)
+lib = ut.getLibFromGoogleSheet()
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+print(lib)
 
 # TODO:
 
@@ -61,13 +65,10 @@ recipe_name = st.sidebar.selectbox("Recipe", recipes)
 recipe_name = recipes[0]
 
 network = bc.Network(lib, recipe_name, dbconn)
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-#TODO FIX BUG: no numeric node on top of aggregation
-
 ut.h2(f'Recipe {recipe_name}')
 ut.drawComputeGraph(network.compute_graph, cdg=network.central_dogma_graph)
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
 
 model = bc.ComputeGraphModel(network)
 model.build()
@@ -75,3 +76,7 @@ model.build()
 rng_key = jax.random.PRNGKey(0)
 params = model.init(rng_key)
 print(params)
+
+
+def d(truc):
+    pass

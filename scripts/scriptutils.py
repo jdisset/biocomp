@@ -236,7 +236,8 @@ def listGoogleSpreadsheets(credentials=GOOGLE_APP_CREDENTIALS):
 
 def getLibFromGoogleSheet(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
     l = getAllGoogleSheets(key, credentials)
-    return bc.PartsLibrary(l.parts, l.categories, l.sequestrons, l.sequestron_types)
+    lib = bc.PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types)
+    return lib
 
 
 #                                                                            }}}

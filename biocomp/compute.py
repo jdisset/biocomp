@@ -223,7 +223,7 @@ def get_quantized(params, param_name, values, node_id, cdf, cdg, quantize_fun, m
         possible_parts = [get_possible_parts(param_name, cdg_id, cdg) for cdg_id in cdg_ids]
     except ValueError as e:
         raise ValueError(
-            f"""Error getting possible parts for node {node_id} with cdg_ids {cdg_ids} and param_name {param_name}, mode {mode}:
+            f"""get_quantized: Error getting possible parts for node {node_id} with cdg_ids {cdg_ids} and param_name {param_name}, mode {mode}:
             \n-> {e}.
             \n compute graph:
             \n{cdf}
@@ -329,3 +329,4 @@ class ComputeGraphModel:
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+

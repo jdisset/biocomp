@@ -1,4 +1,4 @@
-from .library import PartsLibrary as PartsLibrary
+'from' .library import PartsLibrary as PartsLibrary
 import jax
 import numpy as np
 import pandas as pd
@@ -6,6 +6,8 @@ from . import utils as ut
 import sqlite3
 
 part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF': 'tl_rate'}
+parameter_to_default_part = {'tl_rate': 'empty_tc'} 
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     base classes     --
@@ -16,7 +18,6 @@ class Slot:
         self.part = None  # list means multiple parts that should map to a single parameter. Otherwise single string
         self.maps_to_parameter = None
         self.is_resolved = False
-
 
     def resolve(self, lib, *args, **kwargs):
         if not self.is_resolved:
@@ -34,12 +35,13 @@ class Slot:
                 self.part = [self.part]
             self.is_resolved = True
 
-    def __mapped_parameter(self, lib, part_name, category_to_param=part_type_to_parameter_name):
+    def __mapped_parameter(self, lib, part_name):
+
         if part_name is not None:
             if part_name in lib.pc.index:
                 category = lib.pc.loc[part_name, 'category']
-                if category in category_to_param:
-                    return category_to_param[category]
+                if category in part_type_to_parameter_name:
+                    return part_type_to_parameter_name[category]
             else:
                 raise ValueError(f'Unknown part: {part_name}')
         return None
@@ -89,6 +91,10 @@ class TranscriptionUnit:
             if s.maps_to_parameter is not None:
                 assert s.maps_to_parameter not in self.params
                 self.params[s.maps_to_parameter] = s.part
+        # then for each param that is not in the slots, add it with default value
+        for _, p in part_type_to_parameter_name.items():
+            if p not in self.params:
+                self.params[p] = parameter_to_default_part[p]
 
     def __repr__(self):
         return f'L1({self.slots})'
@@ -154,7 +160,7 @@ class Network:
                 content.append(s.part)
         return content, tu.params
 
-    def __getDownstream(self, tu, transform='transcripted'):
+    def __getDownstream(self, tu, transform):
         dna_content, dna_params = self.__getDna(tu)
         d = self.lib.pc.loc[dna_content]
         content = tuple(d[d[transform] == 1].index)
@@ -162,7 +168,7 @@ class Network:
         for param_name, parts in dna_params.items():
             p = self.lib.pc.loc[parts]
             if p[transform].sum() > 0:
-                assert p[transform].sum() == len(p)
+                assert p[transform].sum() == len(p), f'Part {parts} is not {transform}. p: \n{p}, sum: {p[transform].sum()}, len: {len(p)}'
                 rna_params[param_name] = tuple(p.index)
         return content, rna_params
 
@@ -509,7 +515,7 @@ class Network:
         return cg
 
     def __addNumericNodes(self, cdf, uidGen):
-        # we add 1 numeric node per source or aggregation that's "at the top", 
+        # we add 1 numeric node per source or aggregation that's "at the top",
         # i.e its input_from is empty.
         topnodes = cdf[cdf.input_from.apply(len) == 0]
         for i, r in topnodes.iterrows():
@@ -518,8 +524,8 @@ class Network:
             newnode.output_to = [(i, 0)]
             tmp = pd.DataFrame([newnode.toDict()]).set_index('id')
             extra = {
-                    'role': 'copy_number',
-                }
+                'role': 'copy_number',
+            }
             if 'qtty' in r.extra:
                 extra['qtty'] = r.extra['qtty']
             tmp['extra'] = [extra]
