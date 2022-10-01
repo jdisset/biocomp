@@ -266,10 +266,13 @@ class ComputeGraphModel:
             keys = jax.random.split(rng_key, len(flat_batches))
             for nid, key in zip(flat_batches, keys):
                 node_row = self.network.compute_graph.loc[nid]
+                upstream_results = [results[inp[0]][inp[1]] for inp in node_row.input_from]
                 if node_row.type == 'input':
                     results[nid] = inputs[node_row.extra['input_position']]
                     break
-                assert node_row.type in CNODE
+                if node_row.type == 'output':
+                    return jnp.array(upstream_results)
+                assert node_row.type in CNODE, f'Invalid node type {node_row.type}'
                 get_p = partial(get_param, params, nodeid=nid)
                 get_q = partial(
                     get_quantized,
@@ -286,14 +289,14 @@ class ComputeGraphModel:
                 if node_row.extra is not None:
                     extra_params.update(node_row.extra)
                 comp_node = CNODE[node_row.type](get_p, get_q, **extra_params)
-                upstream_results = [results[inp[0]][inp[1]] for inp in node_row.input_from]
                 res = comp_node(*upstream_results, rng_key=key)
                 if extra_params['n_outputs'] == 1:
                     results[nid] = jnp.array([res])
                 else:
                     results[nid] = res
 
-            return results[flat_batches[-1]]
+            # should never reach this point
+            raise ValueError('Invalid compute graph, no output node found')
 
         def init(rng_key):
             params = {}
@@ -329,4 +332,3 @@ class ComputeGraphModel:
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
