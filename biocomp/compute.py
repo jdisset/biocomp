@@ -172,16 +172,19 @@ def aggregation(get_param, get_quantized, n_outputs, ratios=None, **_):
 
 
 def get_param(params, name, init, shared=False, nodeid=None):
-    nid = nodeid if not shared else 'shared'
-    if nid not in params:
-        params[nid] = {}
-    if name not in params[nid]:
+    if not shared:
+        params.setdefault('node', {})
+        pardict = params['node'].setdefault(nodeid, {})
+    else:
+        params.setdefault('shared', {})
+        pardict = params['shared']
+    if name not in pardict:
         try:
-            params[nid][name] = init()
+            pardict[name] = init()
         except Exception as e:
             print(f'Error initializing param "{name}" from node {nodeid}: {e}')
             raise e
-    return params[nid][name]
+    return pardict[name]
 
 
 def get_possible_parts(param_name, cdg_node_id, cdg):
@@ -250,6 +253,7 @@ class ComputeGraphModel:
         self.network = network
         self.built = False
 
+
     def build(self):
         assert self.network is not None
         assert self.network.is_built()
@@ -309,6 +313,10 @@ class ComputeGraphModel:
         self.apply = apply
         self.init = init
         self.built = True
+
+    def __call__(self, params, inputs, rng_key):
+        assert self.built
+        return self.apply(params, inputs, rng_key)
 
     def __get_batch_sequence_of_nodes(self):
         """Return a list of lists of compute nodes from the network,

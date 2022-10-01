@@ -76,4 +76,15 @@ model.build()
 rng_key = jax.random.PRNGKey(0)
 params = model.init(rng_key)
 print(params)
+model(params, [], rng_key)
 
+
+def sum_model(params, inputs, rng_key):
+    return jnp.sum(model(params, inputs, rng_key))
+
+
+jit(model)(params, [], rng_key)
+
+grad(sum_model)(params, [], rng_key)
+
+# TODO: check why empty_tc_rate and hEF1a_tc_rate have a gradient of 0. Probably because of the quantization. But I don't think we want that.
