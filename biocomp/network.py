@@ -1,12 +1,13 @@
-'from' .library import PartsLibrary as PartsLibrary
+from .library import PartsLibrary as PartsLibrary
 import jax
 import numpy as np
 import pandas as pd
 from . import utils as ut
-import sqlite3
+from typing import Callable, List, Dict, Tuple
+
 
 part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF': 'tl_rate'}
-parameter_to_default_part = {'tl_rate': 'empty_tc'} 
+parameter_to_default_part = {'tl_rate': 'empty_tc'}
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -94,7 +95,7 @@ class TranscriptionUnit:
         # then for each param that is not in the slots, add it with default value
         for _, p in part_type_to_parameter_name.items():
             if p not in self.params:
-                self.params[p] = parameter_to_default_part[p]
+                self.params[p] = [parameter_to_default_part[p]]
 
     def __repr__(self):
         return f'L1({self.slots})'
@@ -102,6 +103,13 @@ class TranscriptionUnit:
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+
+class hashabledict(dict):
+    def __hash__(self):
+        # general idea is return hash(tuple(sorted(self.items())))
+        # but we need to turn the values (list in our case) into tuples
+        return hash(tuple(sorted((k, tuple(v)) for k, v in self.items())))
 
 
 def transcription_unit_from_L1(l1id, lib):
@@ -152,7 +160,7 @@ class Network:
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                           --     utils     --
     # ···············································································
-    def __getDna(self, tu):
+    def __getDna(self, tu: TranscriptionUnit) -> Tuple[List[str], Dict[str, List[str]]]:
         content = []
         for s in tu.slots:
             assert s.is_resolved
@@ -160,22 +168,22 @@ class Network:
                 content.append(s.part)
         return content, tu.params
 
-    def __getDownstream(self, tu, transform):
+    def __getDownstream(self, tu: TranscriptionUnit, transform: str):
         dna_content, dna_params = self.__getDna(tu)
         d = self.lib.pc.loc[dna_content]
         content = tuple(d[d[transform] == 1].index)
-        rna_params = {}
+        params = {}
         for param_name, parts in dna_params.items():
             p = self.lib.pc.loc[parts]
             if p[transform].sum() > 0:
-                assert p[transform].sum() == len(p), f'Part {parts} is not {transform}. p: \n{p}, sum: {p[transform].sum()}, len: {len(p)}'
-                rna_params[param_name] = tuple(p.index)
-        return content, rna_params
+                assert p[transform].sum() == len(p)
+                params[param_name] = list(p.index)
+        return content, params
 
-    def __getRna(self, tu):
+    def __getRna(self, tu: TranscriptionUnit):
         return self.__getDownstream(tu, transform='transcripted')
 
-    def __getPrt(self, tu):
+    def __getPrt(self, tu: TranscriptionUnit):
         return self.__getDownstream(tu, transform='translated')
 
     def __isOutputOf(self, cdg_input_node, compute_nodes):
@@ -260,10 +268,13 @@ class Network:
                     'name': tuid,
                     'DNA': dna,
                     'DNA_params': dna_params,
+                    'DNA_params_hashable': hashabledict(dna_params),
                     'RNA': rna,
                     'RNA_params': rna_params,
+                    'RNA_params_hashable': hashabledict(rna_params),
                     'PRT': prt,
                     'PRT_params': prt_params,
+                    'PRT_params_hashable': hashabledict(prt_params),
                 }
             )
         assert len(tu) > 0
@@ -271,44 +282,54 @@ class Network:
 
         # transcription units are never grouped
         dna_df = pd.DataFrame({'tu_id': [[x] for x in tudf['name']], 'type': 'DNA'})
-        rna_noparams_df = (
-            pd.DataFrame(  # we group RNA with same content if they don't have a parameter
-                {
-                    'tu_id': list(
-                        tudf[tudf['RNA_params'].map(len) == 0].groupby(by='RNA').agg(list).name
-                    ),
-                    'type': 'RNA',
-                }
-            )
+
+        def only_one_value_per_param(params: Dict[str, List[str]]) -> bool:
+            for _, parts in params.items():
+                if len(parts) > 1:
+                    return False
+            return True
+
+        rna_tuids_noparams = list(
+            tudf[tudf['RNA_params'].map(len) == 0].groupby(by='RNA').agg(list).name
         )
-        rna_params_df = pd.DataFrame(  # no grouping even if RNA content was identical...
-            {
-                'tu_id': list(tudf[tudf['RNA_params'].map(len) > 0].name),
-                'type': 'RNA',
-            }
+
+        rna_tuids_oneparamvalue = (
+            tudf[tudf['RNA_params'].map(len) > 0]
+            .groupby(by='RNA')
+            .filter(lambda x: only_one_value_per_param(x['RNA_params']))
+            .groupby(by=['RNA', 'RNA_params_hashable'])
+            .agg(list)
         )
-        prt_noparams_df = (
-            pd.DataFrame(  # we group PRT with same content if they don't have a parameter
-                {
-                    'tu_id': list(
-                        tudf[tudf['PRT_params'].map(len) == 0].groupby(by='RNA').agg(list).name
-                    ),
-                    'type': 'PRT',
-                }
-            )
+        rna_tuids_oneparamvalue = (
+            [] if rna_tuids_oneparamvalue.empty else list(rna_tuids_oneparamvalue.name)
         )
-        prt_params_df = pd.DataFrame(  # no grouping even if content was identical...
-            {
-                'tu_id': list(tudf[tudf['PRT_params'].map(len) > 0].name),
-                'type': 'PRT',
-            }
+
+        rna_tuids_manyparamvalues = list(tudf[tudf['RNA_params'].map(len) > 1].name)
+        rna_tuids = rna_tuids_noparams + rna_tuids_oneparamvalue + rna_tuids_manyparamvalues
+        rna_df = pd.DataFrame({'tu_id': rna_tuids, 'type': 'RNA'})
+
+        prt_tuids_noparams = list(
+            tudf[tudf['PRT_params'].map(len) == 0].groupby(by='PRT').agg(list).name
         )
+        # we group PRT with same content and same parameters if they have a single parameters
+        prt_tuids_oneparamvalue = (
+            tudf[tudf['PRT_params'].map(len) > 0]
+            .groupby(by='PRT')
+            .filter(lambda x: only_one_value_per_param(x['PRT_params']))
+            .groupby(by=['PRT', 'PRT_params_hashable'])
+            .agg(list)
+        )
+        prt_tuids_oneparamvalue = (
+            [] if prt_tuids_oneparamvalue.empty else list(prt_tuids_oneparamvalue.name)
+        )
+        prt_tuids_manyparamvalues = list(tudf[tudf['PRT_params'].map(len) > 1].name)
+        prt_tuids = prt_tuids_noparams + prt_tuids_oneparamvalue + prt_tuids_manyparamvalues
+        prt_df = pd.DataFrame({'tu_id': prt_tuids, 'type': 'PRT'})
+
         tudf.set_index('name', inplace=True)
 
         # Then concatenate them:
-        cdg = pd.concat(
-            [dna_df, rna_params_df, rna_noparams_df, prt_params_df, prt_noparams_df]
-        ).reset_index(drop=True)
+        cdg = pd.concat([dna_df, rna_df, prt_df], sort=False).reset_index(drop=True)
         cdg['predecessor'] = None
         cdg['successor'] = None
 
@@ -334,10 +355,17 @@ class Network:
         cdg.loc[~cdg.predecessor.astype(bool), 'predecessor'] = None
 
         # We explicitly describe the part content of each node:
-        cdg['content'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type], axis=1)
-        cdg['content_type'] = cdg.apply(
-            lambda x: tuple([self.lib.parts.loc[p][0] for p in x.content]), axis=1
-        )
+        try:
+            cdg['content'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type], axis=1)
+            cdg['content_type'] = cdg.apply(
+                lambda x: tuple([self.lib.parts.loc[p][0] for p in x.content]), axis=1
+            )
+        except Exception as e:
+            msg = f'Error while building central dogma graph. Error: {e}'
+            msg += f'\ntudf: \n{tudf}'
+            msg += f'\n\ncdg: \n{cdg}'
+            raise Exception(msg)
+
         # and add the available paras with their possible parts
         cdg['params'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type + '_params'], axis=1)
 
@@ -367,17 +395,20 @@ class Network:
 
     def __mergeSources(self, cdf, uidGen):
         assert self.central_dogma_graph is not None
-        # merge TUs that are from a same source into a single node
+        # merge TUs that are from a same source into a single source node (aka plasmid)
         c = self.db.cursor()
         c.execute(
-            """SELECT tis.source,tis.TU,position FROM TU_in_source tis, source_in_aggregation sia, aggregations a 
+            """SELECT tis.source,tis.TU,position FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
             (self.name,),
         )
-        tu_in_sources = pd.DataFrame([t for t in c.fetchall()]).sort_values(2)
+        tu_in_sources = pd.DataFrame([t for t in c.fetchall()], columns=['source', 'TU', 'position'])
+        tu_in_sources.sort_values(by='position', inplace=True)
+
         sources_tuids = self.central_dogma_graph.loc[
             cdf[cdf.type == 'source'].cdg_output
         ].tu_id.apply(lambda x: x[0])
+
         tmpdf = pd.DataFrame(
             {'compute_id': cdf[cdf.type == 'source'].index, 'tuid': sources_tuids}
         ).set_index('compute_id')
@@ -386,10 +417,10 @@ class Network:
         cdf['extra'] = None
 
         sources = {}  # plasmid name -> list of compute nodes ids
-        for i, r in tu_in_sources.groupby(0).agg(list).iterrows():
+        for i, r in tu_in_sources.groupby('source').agg(list).iterrows():
             # order matters.
             group = []
-            for t in r[1]:
+            for t in r['TU']:
                 group.append(tmpdf[tmpdf.tuid == t].index[0])
             sources[i] = group
 
@@ -444,7 +475,7 @@ class Network:
 
         return cdf
 
-    def __buildRawGraph(self, uidGen):
+    def __buildRawGraph(self, uidGen: Callable[[], int]) -> List[GraphComputeNode]:
         cdg = self.central_dogma_graph
         assert cdg is not None
         assert isinstance(cdg, pd.DataFrame)

@@ -77,6 +77,3 @@ rng_key = jax.random.PRNGKey(0)
 params = model.init(rng_key)
 print(params)
 
-
-def d(truc):
-    pass
