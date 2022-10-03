@@ -36,18 +36,23 @@ def continuous_initializer(rng, n, minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_R
 
     return init
 
+def quantize(x, possible_values):
+    if len(possible_values) == 0:
+        return x
+    if len(possible_values) == 1:
+        return possible_values[0]
+    else :
+        return quantize_impl(x, possible_values)
 
 @partial(jax.custom_jvp, nondiff_argnums=(1,))
-def quantize(x, arr):
-    if len(arr) == 0:
-        return x
+def quantize_impl(x, arr):
     return arr[jnp.argmin(jnp.abs(arr - x))]
 
 
 # TODO reverse diff
 # we define the derivative of the quantize function as if it was just the identity function (x -> x)
-@quantize.defjvp
-def quantize_jvp(_, x, x_tang):
+@quantize_impl.defjvp
+def quantize_impl_jvp(_, x, x_tang):
     (x,) = x
     (x_dot,) = x_tang
     return x, x_dot
@@ -81,14 +86,15 @@ def compnode(f):
 @compnode
 def transcription(get_param, get_quantized, **_):
     def apply(*values, rng_key):
+        k0, k1 = jax.random.split(rng_key, 2)
         t_rates = get_quantized(
             "tc_rate",
-            get_param("tc_rate", init=continuous_initializer(rng_key, len(values))),
+            get_param("tc_rate", init=continuous_initializer(k0, len(values))),
             mode='input_edges',
         )
         assert len(t_rates) == len(values)
         return jnp.dot(t_rates, jnp.array(values)) / get_param(
-            "rna_deg_rate", init=continuous_initializer(rng_key, 1), shared=True
+            "rna_deg_rate", init=continuous_initializer(k1, 1), shared=True
         )
 
     return apply
@@ -97,14 +103,15 @@ def transcription(get_param, get_quantized, **_):
 @compnode
 def translation(get_param, get_quantized, **_):
     def apply(*values, rng_key):
+        k0, k1 = jax.random.split(rng_key, 2)
         tl_rates = get_quantized(
             "tl_rate",
-            get_param("tl_rate", init=continuous_initializer(rng_key, len(values))),
+            get_param("tl_rate", init=continuous_initializer(k0, len(values))),
             mode='input_edges',
         )
         assert len(tl_rates) == len(values)
         return jnp.dot(tl_rates, jnp.array(values)) / get_param(
-            "prt_deg_rate", init=continuous_initializer(rng_key, 1), shared=True
+            "prt_deg_rate", init=continuous_initializer(k1, 1), shared=True
         )
 
     return apply
@@ -236,7 +243,7 @@ def get_quantized(params, param_name, values, node_id, cdf, cdg, quantize_fun, m
             \n{cdg}"""
         )
     # concat part names with param_name
-    possible_names = [[f'{part}_{param_name}' for part in parts] for parts in possible_parts]
+    possible_names = [[f'{part}::{param_name}' for part in parts] for parts in possible_parts]
     assert len(possible_names) == len(
         values
     ), f'len(possible_names)={len(possible_names)} != len(values)={len(values)}'
