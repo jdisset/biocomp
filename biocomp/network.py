@@ -621,13 +621,15 @@ class Network:
 # {{{                       --     the inverter     --
 # ···············································································
 # When training the intrinsic parameters of the model (aka the simulation part),
-# we actually cannot access the value of critical pieces of information,
-# namely copy numbers. Indeed, training data is only a list of output fluorescence.
+# we actually don't really have data about the numeric values involved (which would
+# logically be the inputs of the network, as they most likely represent copy numbers).
+# Indeed, training data is only a list of output fluorescence.
 # The model needs copy numbers, or at least some number correlated to copy numbers,
 # in order to compute the output.
-# Luckily, there should always be an invertible path that links some component of
+# One solution is to make sure there's always an invertible path that links some component of
 # the output to the copy numbers.
-# When traning from xp data, we use the output as both input and target.
+# When traning from xp data, we prepend an inverter module to the network,
+# and we use (part of) the output as both input and target.
 
 # The plan:
 # -> define the inverse version of some compute nodes

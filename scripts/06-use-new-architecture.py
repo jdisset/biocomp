@@ -91,6 +91,4 @@ ut.h2(f'With inverse path prepended')
 ut.drawComputeGraph(inv_network.compute_graph, cdg=inv_network.central_dogma_graph)
 
 
-inv_network.compute_graph
-
 
