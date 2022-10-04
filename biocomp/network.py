@@ -3,7 +3,9 @@ import jax
 import numpy as np
 import pandas as pd
 from . import utils as ut
-from typing import Callable, List, Dict, Tuple
+from .compute import INVERSE_NODES_DICT as INVERSE_NODES_DICT
+from typing import Callable, List, Dict, Tuple, Iterable
+import copy
 
 
 part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF': 'tl_rate'}
@@ -62,6 +64,42 @@ class Slot:
 # util for a slot that resolves to a single part
 def Part(name):
     return Slot(lambda *_, **__: name)
+
+
+class GraphComputeNode:
+    # a simple convenience one-off class to store the information about a node
+    def __init__(self, id, type, cdg_input, cdg_output):
+        self.id = id
+        self.type = type
+        self.cdg_input = cdg_input
+        self.cdg_output = cdg_output if cdg_output is not None else -1
+        self.input_from = []
+        self.output_to = []
+        self.extra = {}
+
+    def removeOutput(self, other):
+        other.input_from.remove(self.id)
+        for i in range(len(self.output_to)):
+            if self.output_to[i][0] == other.id:
+                self.output_to.pop(i)
+                break
+
+    def toDict(self):
+        return {
+            "id": self.id,
+            "type": self.type,
+            "cdg_input": self.cdg_input,
+            "cdg_output": self.cdg_output,
+            "input_from": self.input_from,
+            "output_to": self.output_to,
+            "extra": self.extra,
+        }
+
+    def __str__(self):
+        return str(self.toDict())
+
+    def __repr__(self):
+        return str(self.toDict())
 
 
 # transcription unit: 1 per L1, multiple per L2
@@ -132,8 +170,6 @@ class Network:
         self.db = recipe_db
         self.db.commit()
         self.custom_outputs = custom_outputs
-        self.central_dogma_graph = None
-        self.compute_graph = None
         if build:
             self.build()
 
@@ -155,7 +191,11 @@ class Network:
         self.__build_compute_graph()
 
     def is_built(self):
-        return self.compute_graph is not None and self.central_dogma_graph is not None
+        return (
+            self.compute_graph is not None
+            and self.central_dogma_graph is not None
+            and self.transcription_units is not None
+        )
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                           --     utils     --
@@ -216,39 +256,6 @@ class Network:
             for d in node.input_from:
                 if labels[node.id] + 1 < labels[d]:
                     self.__getNode(nodes, d).removeOutput(node)
-
-    class GraphComputeNode:
-        # a simple convenience one-off class to store the information about a node
-        def __init__(self, id, type, cdg_input, cdg_output):
-            self.id = id
-            self.type = type
-            self.cdg_input = cdg_input
-            self.cdg_output = cdg_output if cdg_output is not None else -1
-            self.input_from = []
-            self.output_to = []
-
-        def removeOutput(self, other):
-            other.input_from.remove(self.id)
-            for i in range(len(self.output_to)):
-                if self.output_to[i][0] == other.id:
-                    self.output_to.pop(i)
-                    break
-
-        def toDict(self):
-            return {
-                "id": self.id,
-                "type": self.type,
-                "cdg_input": self.cdg_input,
-                "cdg_output": self.cdg_output,
-                "input_from": self.input_from,
-                "output_to": self.output_to,
-            }
-
-        def __str__(self):
-            return str(self.toDict())
-
-        def __repr__(self):
-            return str(self.toDict())
 
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
@@ -402,7 +409,9 @@ class Network:
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
             (self.name,),
         )
-        tu_in_sources = pd.DataFrame([t for t in c.fetchall()], columns=['source', 'TU', 'position'])
+        tu_in_sources = pd.DataFrame(
+            [t for t in c.fetchall()], columns=['source', 'TU', 'position']
+        )
         tu_in_sources.sort_values(by='position', inplace=True)
 
         sources_tuids = self.central_dogma_graph.loc[
@@ -426,9 +435,7 @@ class Network:
 
         for k, v in sources.items():
             nid = uidGen()
-            newsource = self.GraphComputeNode(
-                nid, 'source', None, [cdf.loc[vv].cdg_output for vv in v]
-            )
+            newsource = GraphComputeNode(nid, 'source', None, [cdf.loc[vv].cdg_output for vv in v])
             newsource.output_to = [cdf.loc[vv].output_to[0] for vv in v]
             # and update input_from of these nodes too
             cdf.loc[[o[0] for o in newsource.output_to], 'input_from'] = [nid] * len(
@@ -459,7 +466,7 @@ class Network:
         for i, r in aggregations.iterrows():
             if len(r.source) > 1:
                 nid = uidGen()
-                newaggregation = self.GraphComputeNode(nid, 'aggregation', None, r.source)
+                newaggregation = GraphComputeNode(nid, 'aggregation', None, r.source)
                 # find the compute node id through the source_id column
                 newaggregation.output_to = [(cdf[cdf.source_id == s].index[0], 0) for s in r.source]
                 # add the input_from to the cooresponding sources
@@ -484,7 +491,7 @@ class Network:
         # we start building the compute graph from the output:
         output_gene_nodes = cdg[cdg.is_output]
 
-        onode = self.GraphComputeNode(uidGen(), 'output', [], None)
+        onode = GraphComputeNode(uidGen(), 'output', [], None)
         for i, r in output_gene_nodes.iterrows():
             onode.cdg_input += [i]
         newnodes.append(onode)
@@ -501,7 +508,7 @@ class Network:
                 assert len(pparts) == 1
                 assert len(nparts) == 1
                 try:
-                    cnode = self.GraphComputeNode(
+                    cnode = GraphComputeNode(
                         uidGen(),
                         f'sequestron_{r.type}',
                         [int(nparts.index[0]), int(pparts.index[0])],
@@ -537,7 +544,7 @@ class Network:
                         ntype = {'PRT': 'translation', 'RNA': 'transcription', 'DNA': 'source'}[
                             gn.type
                         ]
-                        newn = self.GraphComputeNode(nid, ntype, gn.predecessor, int(n_inp))
+                        newn = GraphComputeNode(nid, ntype, gn.predecessor, int(n_inp))
                         newn.input_from = []
                         newn.output_to = [(n.id, i)]
                         newnodes.append(newn)
@@ -551,7 +558,7 @@ class Network:
         topnodes = cdf[cdf.input_from.apply(len) == 0]
         for i, r in topnodes.iterrows():
             nid = uidGen()
-            newnode = self.GraphComputeNode(nid, 'numeric', None, 1)
+            newnode = GraphComputeNode(nid, 'numeric', None, 1)
             newnode.output_to = [(i, 0)]
             tmp = pd.DataFrame([newnode.toDict()]).set_index('id')
             extra = {
@@ -583,18 +590,158 @@ class Network:
         cdf = self.__addAggregations(cdf, uidGen)  # add aggregation nodes
         cdf = self.__addNumericNodes(cdf, uidGen)  # now add numeric nodes (constant or inuts)
 
-        assert cdf is not None
-
-        # quick clean up / sanity check
-        cdf.source_id = cdf.source_id.apply(lambda x: str(x) if not pd.isnull(x) else None)
-        cdf = cdf.replace({np.nan: None})
+        self.compute_graph = cdf
+        self.cleanup()
 
         # reconstruct all input_froms from the output_to:
-        for i, r in cdf.iterrows():
+        for i, r in self.compute_graph.iterrows():
             for p, o in enumerate(r.output_to):
-                cdf.loc[o[0], 'input_from'][o[1]] = (i, p)
-
-        self.compute_graph = cdf
+                self.compute_graph.loc[o[0], 'input_from'][o[1]] = (i, p)
 
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
+
+    def cleanup(self):
+        if self.compute_graph is not None:
+            self.compute_graph.source_id = self.compute_graph.source_id.apply(
+                lambda x: str(x) if not pd.isnull(x) else None
+            )
+            self.compute_graph = self.compute_graph.replace({np.nan: None})
+
+
+    def copy(self):
+        N = Network(self.lib, self.name, self.db, custom_outputs=self.custom_outputs, build=False)
+        N.transcription_units = self.transcription_units.copy()
+        N.central_dogma_graph = self.central_dogma_graph.copy()
+        N.compute_graph = self.compute_graph.copy()
+        return N
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                       --     the inverter     --
+# ···············································································
+# When training the intrinsic parameters of the model (aka the simulation part),
+# we actually cannot access the value of critical pieces of information,
+# namely copy numbers. Indeed, training data is only a list of output fluorescence.
+# The model needs copy numbers, or at least some number correlated to copy numbers,
+# in order to compute the output.
+# Luckily, there should always be an invertible path that links some component of
+# the output to the copy numbers.
+# When traning from xp data, we use the output as both input and target.
+
+# The plan:
+# -> define the inverse version of some compute nodes
+# -> take a model, and find all invertible path from copy numbers to output
+# -> prepend the invertible paths to the model, define inputs from output
+
+
+def get_invertible_paths(network, start_node_id, inverse_dict):
+    def _is_invertible(node):
+        invertible = node.type in inverse_dict and len(node['input_from']) <= 1
+        return invertible
+
+    paths = []
+    # we want ALL paths from start_node_id to output nodes that consist of invertible nodes
+    def _get_invertible_paths(network, start_node_id, path, visited):
+        nonlocal paths
+        node = network.compute_graph.loc[start_node_id]
+
+        # we need to know how we are connected to the output node
+        # i.e we store the path as a list of (node_id, output_id) tuples except for the last node
+        # (the output node), where we store (output_id, input_id) instead
+
+        assert node.type != 'output'
+
+        if start_node_id in visited or not _is_invertible(node):
+            return []
+        visited.add(start_node_id)
+
+        for o, (n, i) in enumerate(node['output_to']):
+            if network.compute_graph.loc[n].type == 'output':
+                paths.append(path + [(n, i)])
+            else:
+                _get_invertible_paths(network, n, path + [(n, o)], visited)
+
+    _get_invertible_paths(network, start_node_id, [], set())
+
+    return paths
+
+
+def inverter(network: Network, nodes='auto', inverse_dict=INVERSE_NODES_DICT):
+    # inverse_dict: node_type -> inverse_node_type
+    if nodes == 'auto':
+        # we assume all numeric nodes should be linked to an inverted path
+        start_nodes = network.compute_graph[
+            network.compute_graph['type'] == 'numeric'
+        ].index.tolist()
+    elif isinstance(nodes, str) or not isinstance(nodes, Iterable):
+        raise ValueError(f"Unrecognized node mode: {nodes}. Use 'auto' or a list of node ids.")
+    else:
+        start_nodes = nodes
+    invertible_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
+    new_network = network.copy()
+
+    uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
+
+    # we pick the shortest path for each node
+    paths = {n: min(invertible_paths[n], key=len) for n in start_nodes}
+
+    for start_n, path in paths.items():
+        # we start by replacing the start node by the first node of the path
+        new_network.compute_graph.loc[start_n, 'type'] = inverse_dict[
+            new_network.compute_graph.loc[start_n, 'type']
+        ]
+        prev = start_n
+
+        for i, (node_id, slot) in enumerate(path[1:]):
+            n_type = new_network.compute_graph.loc[node_id, 'type']
+
+            if n_type == 'output':  # special case when we reach the output
+                assert i == len(path) - 2, 'output node should be the last node in the path'
+                # we add an input node
+                nid = uidGen()
+                in_n = GraphComputeNode(nid, 'input', None, None)
+                in_n.output_to = [(prev, 0)]
+                in_n.input_from = []
+                in_n.extra = {'input_from_output': slot}
+                new_network.compute_graph = new_network.compute_graph.append(
+                    pd.DataFrame([in_n.toDict()]).set_index('id')
+                )
+
+                break
+
+            # General case, create a new node and prepend to prev
+            original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
+            nid = uidGen()
+            new_n = GraphComputeNode(
+                nid,
+                inverse_dict[n_type],
+                # get same cdg input / output as original node
+                original_node.cdg_input,
+                original_node.cdg_output,
+            )
+            new_n.output_to = [(prev, 0)]
+            # inverse node always have only one input and one output
+            # but we need to store the original output slot id in the extra field
+            # so that we can use it when converting aggregation nodes for example
+            # (where we convert a single input / multi output node to a single input / single output nodes
+            # but we need to know which path, i.e slot, to use)
+            new_n.extra = {
+                'original_output_slot': slot,
+                'is_inverse_of': node_id,
+            }
+            # set prev input_from to new nodes
+            new_network.compute_graph.loc[prev, 'input_from'] = [(nid, 0)]
+            new_network.compute_graph = new_network.compute_graph.append(
+                pd.DataFrame([new_n.toDict()]).set_index('id')
+            )
+
+            prev = nid
+
+    new_network.cleanup()
+
+    return new_network
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────

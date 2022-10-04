@@ -65,30 +65,32 @@ recipe_name = st.sidebar.selectbox("Recipe", recipes)
 recipe_name = recipes[0]
 
 network = bc.Network(lib, recipe_name, dbconn)
-ut.h2(f'Recipe {recipe_name}')
-ut.drawComputeGraph(network.compute_graph, cdg=network.central_dogma_graph)
+# ut.h2(f'Recipe {recipe_name}')
+# ut.drawComputeGraph(network.compute_graph, cdg=network.central_dogma_graph)
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-model = bc.ComputeGraphModel(network)
-model.build()
+# model = bc.ComputeGraphModel(network)
+# model.build()
 
-rng_key = jax.random.PRNGKey(0)
-params = model.init(rng_key)
-print(params)
-model(params, [], rng_key)
+# rng_key = jax.random.PRNGKey(0)
+# params = model.init(rng_key)
+# model(params, [], rng_key)
+
+# def sum_model(params, inputs, rng_key):
+    # return jnp.sum(model(params, inputs, rng_key))
+
+# jit(model)(params, [], rng_key)
+
+# g = grad(sum_model)(params, [], rng_key)
+# print(g)
 
 
-def sum_model(params, inputs, rng_key):
-    return jnp.sum(model(params, inputs, rng_key))
+inv_network = bc.inverter(network)
+ut.h2(f'With inverse path prepended')
+ut.drawComputeGraph(inv_network.compute_graph, cdg=inv_network.central_dogma_graph)
 
 
-jit(model)(params, [], rng_key)
-
-g = grad(sum_model)(params, [], rng_key)
-print(g)
-
-# TODO: check why empty_tc_rate and hEF1a_tc_rate have a gradient of 0. Probably because of the quantization. But I don't think we want that.
-# also they have the same init value which is very weird.
+inv_network.compute_graph
 
 

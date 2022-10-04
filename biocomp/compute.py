@@ -1,15 +1,8 @@
-import pandas as pd
-from scipy.signal.filter_design import EPSILON
-from . import utils as ut
-import numpy as np
 from .library import PartsLibrary as PartsLibrary
 import jax
-from jax import jit, vmap
-from jax import tree_util as pytree
 from jax.tree_util import Partial as partial
 import jax.numpy as jnp
-from time import time
-import optax
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                      --     Compute Nodes     --
@@ -28,7 +21,7 @@ POSSIBLE_TL_RATES = jnp.array([1.0 / 2**n for n in range(5)] + [0.75, 0.9])
 POSSIBLE_TX_RATES = jnp.linspace(0.0, 1.0, num=21)
 
 
-def continuous_initializer(rng, n, minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
+def continuous_initializer(rng, n=1, minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
     def init():
         return jax.random.uniform(
             key=rng, shape=(n,), minval=minval, maxval=maxval, dtype=jnp.float32
@@ -36,13 +29,15 @@ def continuous_initializer(rng, n, minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_R
 
     return init
 
+
 def quantize(x, possible_values):
     if len(possible_values) == 0:
         return x
     if len(possible_values) == 1:
         return possible_values[0]
-    else :
+    else:
         return quantize_impl(x, possible_values)
+
 
 @partial(jax.custom_jvp, nondiff_argnums=(1,))
 def quantize_impl(x, arr):
@@ -71,7 +66,11 @@ def round_to_int_jvp(x, x_tang):
     return x, x_dot
 
 
+BC_EPSILON = 1e-12
+
 CNODE = {}
+INVERSE_CNODES = {}
+INVERSE_NODES_DICT = {}
 
 
 def compnode(f):
@@ -79,42 +78,71 @@ def compnode(f):
     return f
 
 
+def inv_compnode(fwd_name):
+    def inv(f):
+        INVERSE_CNODES[fwd_name] = f
+        INVERSE_NODES_DICT[fwd_name] = f.__name__
+        return f
+
+    return inv
+
+
 # nodes to write:
 # translation, transcription, sequestron_ERN, sequestron_RCB, source, numeric, aggregation
 
 
-@compnode
-def transcription(get_param, get_quantized, **_):
+# translation and transcription are the same, except for the parameters
+def _transform(get_param, get_quantized, rate_param_name, deg_param_name, **_):
     def apply(*values, rng_key):
         k0, k1 = jax.random.split(rng_key, 2)
-        t_rates = get_quantized(
-            "tc_rate",
-            get_param("tc_rate", init=continuous_initializer(k0, len(values))),
+        rates = get_quantized(
+            rate_param_name,
+            get_param(rate_param_name, init=continuous_initializer(k0, len(values))),
             mode='input_edges',
         )
-        assert len(t_rates) == len(values)
-        return jnp.dot(t_rates, jnp.array(values)) / get_param(
-            "rna_deg_rate", init=continuous_initializer(k1, 1), shared=True
+        assert len(rates) == len(values)
+        return jnp.dot(rates, jnp.array(values)) / get_param(
+            deg_param_name, init=continuous_initializer(k1), shared=True
         )
 
     return apply
+
+
+def _inverse_transform(get_param, get_quantized, rate_param_name, deg_param_name, **_):
+    def apply(value, rng_key):
+        # inverse can only work if there's only one input edge
+        k0, k1 = jax.random.split(rng_key, 2)
+
+        rate = get_quantized(
+            rate_param_name,
+            get_param(rate_param_name, init=continuous_initializer(k0)),
+            mode='output_edges',
+        )
+        deg = get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
+
+        return value * deg / rate
+
+    return apply
+
+
+@compnode
+def transcription(get_param, get_quantized, **_):
+    return _transform(get_param, get_quantized, 'tc_rate', 'rna_deg_rate')
+
+
+@inv_compnode(fwd_name='transcription')
+def inv_transcription(get_param, get_quantized, **_):
+    return _inverse_transform(get_param, get_quantized, 'tc_rate', 'rna_deg_rate')
 
 
 @compnode
 def translation(get_param, get_quantized, **_):
-    def apply(*values, rng_key):
-        k0, k1 = jax.random.split(rng_key, 2)
-        tl_rates = get_quantized(
-            "tl_rate",
-            get_param("tl_rate", init=continuous_initializer(k0, len(values))),
-            mode='input_edges',
-        )
-        assert len(tl_rates) == len(values)
-        return jnp.dot(tl_rates, jnp.array(values)) / get_param(
-            "prt_deg_rate", init=continuous_initializer(k1, 1), shared=True
-        )
+    return _transform(get_param, get_quantized, 'tl_rate', 'prt_deg_rate')
 
-    return apply
+
+@inv_compnode(fwd_name='translation')
+def inv_translation(get_param, get_quantized, **_):
+    return _inverse_transform(get_param, get_quantized, 'tl_rate', 'prt_deg_rate')
 
 
 @compnode
@@ -143,6 +171,15 @@ def source(get_param, get_quantized, n_outputs, **_):
     return apply
 
 
+# inverse of source is just a pass-through
+@inv_compnode(fwd_name='source')
+def inv_source(*_, **__):
+    def apply(value, **_):
+        return value
+
+    return apply
+
+
 @compnode
 def numeric(get_param, get_quantized, **_):
     def apply(rng_key):
@@ -151,21 +188,38 @@ def numeric(get_param, get_quantized, **_):
     return apply
 
 
+# inverse of numeric is just a pass-through
+@inv_compnode(fwd_name='numeric')
+def inv_numeric(*_, **__):
+    def apply(value, **_):
+        return value
+
+    return apply
+
+
 # aggregations split a single input in ratios (defined by parameters)
 @compnode
-def aggregation(get_param, get_quantized, n_outputs, ratios=None, **_):
-
-    initializer = (
-        continuous_initializer if ratios is None else lambda rng, n: lambda: jnp.array(ratios)
-    )
-
+def aggregation(get_param, get_quantized, n_outputs, **_):
     def apply(inp, rng_key):
-        ratios = get_param("ratios", init=initializer(rng_key, n_outputs))
-        assert len(ratios) == n_outputs
-        ratios = jnp.maximum(ratios, 0.0)
-        ratios += 1e-12
+        ratios = jnp.maximum(
+            get_param("ratios", init=continuous_initializer(rng_key, n_outputs)), BC_EPSILON
+        )
         ratios /= jnp.sum(ratios)
         return jnp.array(ratios) * inp
+
+    return apply
+
+
+@inv_compnode(fwd_name='aggregation')
+def inv_aggregation(get_param, get_quantized, n_ratios, use_ratio_n, **_):
+    assert use_ratio_n < n_ratios
+
+    def apply(inp, rng_key):
+        ratios = jnp.maximum(
+            get_param("ratios", init=continuous_initializer(rng_key, n_ratios)), BC_EPSILON
+        )
+        ratios /= jnp.sum(ratios)
+        return inp / ratios[use_ratio_n]
 
     return apply
 
@@ -259,7 +313,6 @@ class ComputeGraphModel:
     def __init__(self, network):
         self.network = network
         self.built = False
-
 
     def build(self):
         assert self.network is not None
