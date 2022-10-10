@@ -654,8 +654,8 @@ for i in range(20):
     print(alive.sum())
 
 
-%timeit jit(step)((alive, pos), None)[0][0].block_until_ready()
-%timeit n_steps(alive, pos, 100)[0].block_until_ready()
+# %timeit jit(step)((alive, pos), None)[0][0].block_until_ready()
+# %timeit n_steps(alive, pos, 100)[0].block_until_ready()
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -833,7 +833,7 @@ def n_steps(alive, pos, n):
     return final_state
 
 n_steps(alive, pos, 100)[0].block_until_ready()
-%timeit n_steps(alive, pos, 100)[0].block_until_ready()
+# %timeit n_steps(alive, pos, 100)[0].block_until_ready()
 ##
 # for i in range(1000):
     # alive, pos, attr, rep = step(alive, pos)
@@ -861,11 +861,11 @@ desired = jnp.floor(pos).astype(int)
 jit(update_data_ind)(alive, pos, desired)[0].block_until_ready()
 jit(update_data_noind)(alive, pos, desired)[0].block_until_ready()
 
-%timeit jit(update_data_noind)(alive, pos, desired)[0].block_until_ready()
-%timeit jit(update_data_ind)(alive, pos, desired)[0].block_until_ready()
+# %timeit jit(update_data_noind)(alive, pos, desired)[0].block_until_ready()
+# %timeit jit(update_data_ind)(alive, pos, desired)[0].block_until_ready()
 
 jit(step)((alive, pos), None)[0][0].block_until_ready()
-%timeit jit(step)((alive, pos), None)[0][0].block_until_ready()
+# %timeit jit(step)((alive, pos), None)[0][0].block_until_ready()
 
 
 

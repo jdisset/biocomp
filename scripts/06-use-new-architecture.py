@@ -65,8 +65,8 @@ recipe_name = st.sidebar.selectbox("Recipe", recipes)
 recipe_name = recipes[0]
 
 network = bc.Network(lib, recipe_name, dbconn)
-# ut.h2(f'Recipe {recipe_name}')
-# ut.drawComputeGraph(network.compute_graph, cdg=network.central_dogma_graph)
+ut.h2(f'Recipe {recipe_name}')
+ut.drawComputeGraph(network.compute_graph, cdg=network.central_dogma_graph)
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -86,9 +86,7 @@ network = bc.Network(lib, recipe_name, dbconn)
 # print(g)
 
 
-inv_network = bc.inverter(network)
-ut.h2(f'With inverse path prepended')
-ut.drawComputeGraph(inv_network.compute_graph, cdg=inv_network.central_dogma_graph)
-
-
+# inv_network = bc.inverter(network)
+# ut.h2(f'With inverse path prepended')
+# ut.drawComputeGraph(inv_network.compute_graph, cdg=inv_network.central_dogma_graph)
 
