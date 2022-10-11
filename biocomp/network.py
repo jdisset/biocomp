@@ -441,7 +441,8 @@ class Network:
             cdf.loc[[o[0] for o in newsource.output_to], 'input_from'] = [nid] * len(
                 newsource.output_to
             )
-            cdf = cdf.append(pd.DataFrame([newsource.toDict()]).set_index('id')).drop(v)
+            cdf = pd.concat([cdf, pd.DataFrame([newsource.toDict()]).set_index('id')]).drop(v)
+
             cdf.loc[nid, 'source_id'] = k
 
         # turn every input_from that's a single int into a list
@@ -475,7 +476,8 @@ class Network:
                 # For aggregations, we will store a dictionnary with the name of the aggregation and the ratio of each source
                 tmp = pd.DataFrame([newaggregation.toDict()]).set_index('id')
                 tmp['extra'] = [{'id': i, 'qtty': np.sum(r.ratio), 'ratios': r.ratio}]
-                cdf = cdf.append(tmp)
+                cdf = pd.concat([cdf, tmp])
+
             else:
                 # no need for an aggregation node if there is only one source
                 cdf.loc[cdf.source_id == r.source[0], 'extra'] = [{'qtty': np.sum(r.ratio)}]
@@ -567,7 +569,7 @@ class Network:
             if 'qtty' in r.extra:
                 extra['qtty'] = r.extra['qtty']
             tmp['extra'] = [extra]
-            cdf = cdf.append(tmp)
+            cdf = pd.concat([cdf, tmp])
             # don't forget to add the new node as input_from to the top node
             cdf.loc[i, 'input_from'] = [[nid]]
         return cdf
@@ -593,11 +595,6 @@ class Network:
         self.compute_graph = cdf
         self.cleanup()
 
-        # reconstruct all input_froms from the output_to:
-        for i, r in self.compute_graph.iterrows():
-            for p, o in enumerate(r.output_to):
-                self.compute_graph.loc[o[0], 'input_from'][o[1]] = (i, p)
-
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -607,6 +604,23 @@ class Network:
                 lambda x: str(x) if not pd.isnull(x) else None
             )
             self.compute_graph = self.compute_graph.replace({np.nan: None})
+            self.compute_graph.cdg_input = self.compute_graph.cdg_input.apply(
+                lambda x: [int(x)] if isinstance(x, int) else x
+            )
+
+            # reconstruct all input_froms from the output_to:
+
+            # first make sure input_from is of the right size
+            for i, r in self.compute_graph.iterrows():
+                output_to_me = self.compute_graph[
+                    self.compute_graph.output_to.apply(lambda x: i in [y[0] for y in x])
+                ]
+                self.compute_graph.loc[i, 'input_from'] = [None] * len(output_to_me)
+
+            # then fill it
+            for i, r in self.compute_graph.iterrows():
+                for p, o in enumerate(r.output_to):
+                    self.compute_graph.loc[o[0], 'input_from'][o[1]] = (i, p)
 
 
     def copy(self):
@@ -669,7 +683,7 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
     return paths
 
 
-def inverter(network: Network, nodes='auto', inverse_dict=INVERSE_NODES_DICT):
+def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=INVERSE_NODES_DICT):
     # inverse_dict: node_type -> inverse_node_type
     if nodes == 'auto':
         # we assume all numeric nodes should be linked to an inverted path
@@ -688,6 +702,7 @@ def inverter(network: Network, nodes='auto', inverse_dict=INVERSE_NODES_DICT):
     # we pick the shortest path for each node
     paths = {n: min(invertible_paths[n], key=len) for n in start_nodes}
 
+    inputpos = 0
     for start_n, path in paths.items():
         # we start by replacing the start node by the first node of the path
         new_network.compute_graph.loc[start_n, 'type'] = inverse_dict[
@@ -695,31 +710,36 @@ def inverter(network: Network, nodes='auto', inverse_dict=INVERSE_NODES_DICT):
         ]
         prev = start_n
 
-        for i, (node_id, slot) in enumerate(path[1:]):
-            n_type = new_network.compute_graph.loc[node_id, 'type']
+        for i, (node_id, slot) in enumerate(
+            path[1:]
+        ):  # slot is output_id for nodes, input_id for output
+            original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
+            n_type = original_node['type']
+            nid = uidGen()
 
             if n_type == 'output':  # special case when we reach the output
                 assert i == len(path) - 2, 'output node should be the last node in the path'
                 # we add an input node
-                nid = uidGen()
                 in_n = GraphComputeNode(nid, 'input', None, None)
                 in_n.output_to = [(prev, 0)]
                 in_n.input_from = []
-                in_n.extra = {'input_from_output': slot}
-                new_network.compute_graph = new_network.compute_graph.append(
-                    pd.DataFrame([in_n.toDict()]).set_index('id')
+                in_n.extra = {'input_from_output': slot, 'input_position': inputpos}
+                inputpos += 1
+                new_network.compute_graph = pd.concat(
+                    [new_network.compute_graph, pd.DataFrame([in_n.toDict()]).set_index('id')]
                 )
 
                 break
 
             # General case, create a new node and prepend to prev
-            original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
-            nid = uidGen()
+            cdg_in = new_network.compute_graph.loc[prev, 'cdg_output']
+            if isinstance(cdg_in, list):
+                cdg_in = cdg_in[slot]
             new_n = GraphComputeNode(
                 nid,
                 inverse_dict[n_type],
                 # get same cdg input / output as original node
-                original_node.cdg_input,
+                cdg_in,
                 original_node.cdg_output,
             )
             new_n.output_to = [(prev, 0)]
@@ -734,8 +754,8 @@ def inverter(network: Network, nodes='auto', inverse_dict=INVERSE_NODES_DICT):
             }
             # set prev input_from to new nodes
             new_network.compute_graph.loc[prev, 'input_from'] = [(nid, 0)]
-            new_network.compute_graph = new_network.compute_graph.append(
-                pd.DataFrame([new_n.toDict()]).set_index('id')
+            new_network.compute_graph = pd.concat(
+                [new_network.compute_graph, pd.DataFrame([new_n.toDict()]).set_index('id')]
             )
 
             prev = nid

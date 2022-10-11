@@ -69,7 +69,6 @@ def round_to_int_jvp(x, x_tang):
 BC_EPSILON = 1e-12
 
 CNODE = {}
-INVERSE_CNODES = {}
 INVERSE_NODES_DICT = {}
 
 
@@ -80,7 +79,7 @@ def compnode(f):
 
 def inv_compnode(fwd_name):
     def inv(f):
-        INVERSE_CNODES[fwd_name] = f
+        CNODE[f.__name__] = f
         INVERSE_NODES_DICT[fwd_name] = f.__name__
         return f
 
@@ -116,7 +115,7 @@ def _inverse_transform(get_param, get_quantized, rate_param_name, deg_param_name
         rate = get_quantized(
             rate_param_name,
             get_param(rate_param_name, init=continuous_initializer(k0)),
-            mode='output_edges',
+            mode='input_edges',
         )
         deg = get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
 
@@ -333,7 +332,7 @@ class ComputeGraphModel:
                 upstream_results = [results[inp[0]][inp[1]] for inp in node_row.input_from]
                 if node_row.type == 'input':
                     results[nid] = inputs[node_row.extra['input_position']]
-                    break
+                    continue
                 if node_row.type == 'output':
                     return jnp.array(upstream_results)
                 assert node_row.type in CNODE, f'Invalid node type {node_row.type}'
@@ -362,6 +361,8 @@ class ComputeGraphModel:
             # should never reach this point
             raise ValueError('Invalid compute graph, no output node found')
 
+
+
         def init(rng_key):
             params = {}
             n_inputs = len(
@@ -372,7 +373,16 @@ class ComputeGraphModel:
 
         self.apply = apply
         self.init = init
+        self.flat_batches = flat_batches
         self.built = True
+
+    def __repr__(self):
+        def list_network_inputs():
+            return [self.network.compute_graph[self.network.compute_graph['type'] == 'input']]
+        def list_network_outputs():
+            return [self.network.compute_graph[self.network.compute_graph['type'] == 'output']]
+        return f'ComputeGraphModel({list_network_inputs()} -> {list_network_outputs()})'
+
 
     def __call__(self, params, inputs, rng_key):
         assert self.built
@@ -396,6 +406,32 @@ class ComputeGraphModel:
             visited.update(independent)
             batches.append(independent)
         return batches
+
+    def get_output_proteins(self):
+        onode = self.network.compute_graph[self.network.compute_graph['type'] == 'output']
+        assert len(onode) == 1, f'Invalid number of output nodes: {len(onode)}'
+        # get onode.cdg_input, match it with the id in network.central_dogma_graph, and get the content
+        # (for each cdg_input)
+        return [
+            self.network.central_dogma_graph.loc[cdg_id]['content'][0]
+            for cdg_id in onode.iloc[0]['cdg_input']
+        ]
+
+    def get_input_from_output(self, output_arr):
+        # each input node has, in its extra, 'input_from_output' and 'input_position'
+        # we want to transform output_arr by reordering the columns 
+        mapping = {}
+        for _, row in self.network.compute_graph[self.network.compute_graph['type'] == 'input'].iterrows():
+            mapping[row.extra['input_position']] = row.extra['input_from_output']
+
+        assert set(mapping.keys()) == set(range(len(mapping.keys())))
+        assert len(mapping.keys()) == len(set(mapping.values()))
+        return output_arr[:, [mapping[i] for i in range(len(mapping))]]
+
+
+
+
+
 
 
 #                                                                            }}}

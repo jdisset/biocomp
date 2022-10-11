@@ -60,7 +60,13 @@ def __to_sql(obj, conn, lib):
         ),
     )
     for agg in obj['content']:
-        ratios = np.array([s['ratio'] for s in agg['sources']])
+        ratios = []
+        for s in agg['sources']:
+            if 'ratio' in s:
+                ratios.append(s['ratio'])
+            else:
+                ratios.append(1.0)
+        ratios = np.array(ratios)
         qtty = float(np.sum(ratios))
         c.execute(
             "INSERT INTO aggregations VALUES (?, ?, ?)",
@@ -110,12 +116,13 @@ def import_recipes_to_sql(recipe_files: list, conn, lib):
 def test_module():
     libpath = "./test_data/all_sheets.pickle"
     l = ut.load(libpath)
-    lib = PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types)
+    lib = PartsLibrary(
+        l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types
+    )
     recipe_path = "./test_data/recipe00.json5"
 
     conn = sqlite3.connect(":memory:")
     create_db(conn)
-
 
     def test_import_recipes_to_sql():
         import_recipes_to_sql([recipe_path], conn, lib)

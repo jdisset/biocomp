@@ -8,6 +8,8 @@ body {
   font-weight: 300;
 }
 
+.inverse-node .react-flow__handle-top,
+.inverse-node .react-flow__handle-bottom,
 .numeric-node .react-flow__handle-top,
 .numeric-node .react-flow__handle-bottom,
 .input-node .react-flow__handle-top,
@@ -206,4 +208,17 @@ body {
   border: 0.5px solid black;
   border-radius: 5px;
   font-size: 0.75em;
+}
+
+.inverse-node {
+  min-width: 100px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: white;
+  text-align: center;
+  border: 0.5px solid black;
+  border-radius: 5px;
+  font-size: 0.9em;
 }

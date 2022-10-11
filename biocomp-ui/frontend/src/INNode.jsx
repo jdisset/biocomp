@@ -28,12 +28,14 @@ function INNode(props) {
           fill="white"
         />
         <text clip-path="url(#clip_path)" transform="translate(569.89354 -1350.8)" fill="#322f30">
-          <tspan font-family="Roboto" font-size="18" font-weight="700" x="6" y="23">
-            {Util.zeroPad(props.data.is_input, 2)}
+          <tspan font-family="Roboto" font-size="8" font-weight="200" x="5" y="12">
+			  INPUT
+          </tspan>
+          <tspan font-family="Roboto" font-size="15" font-weight="500" x="12" y="35">
+			  {Util.zeroPad(props.data.extra.input_position, 1)}
           </tspan>
         </text>
       </svg>
-      {Util.displayCopyNumber(props.data)}
       <Handle
         type="source"
         position={Position.Bottom}

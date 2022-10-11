@@ -7,5 +7,5 @@ from .network import (
     Part as Part,
     TranscriptionUnit as TranscriptionUnit,
     transcription_unit_from_L1 as transcription_unit_from_L1,
-    inverter as  inverter,
+    inverted_network as  inverted_network,
 )

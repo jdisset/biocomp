@@ -12,6 +12,7 @@ import INNode from "./INNode.jsx";
 import OUTNode from "./OUTNode.jsx";
 import NUMNode from "./NUMNode.jsx";
 import CTENode from "./CTENode.jsx";
+import INVNode from "./INVNode.jsx";
 import ContentEdge from "./ContentEdge.jsx";
 
 import images from "./grnsymbols/*.png";
@@ -28,6 +29,7 @@ import Util from "./util.jsx";
 
 console.log("ComputeComponent.jsx loaded");
 
+
 const nodeTypes = {
   sequestron_ERN: SEQNode,
   sequestron_RECOMBINASE: SEQNode,
@@ -39,6 +41,11 @@ const nodeTypes = {
   aggregation: AGGNode,
   source: SRCNode,
   numeric: NUMNode,
+  inv_numeric: INVNode,
+  inv_source: INVNode,
+  inv_aggregation: INVNode,
+  inv_transcription: INVNode,
+  inv_translation: INVNode
 };
 
 const edgeTypes = {
