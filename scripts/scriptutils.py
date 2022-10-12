@@ -160,26 +160,31 @@ def drawComputeGraph(df, func=None, cdg=None, **kwargs):
         {'id': str(i), 'type': n.type, 'data': bc.ut.updated_dict(n.to_dict(), {'id': i})}
         for i, n in df.iterrows()
     ]
-    edges = [
-        {
-            'id': f'edge_{uidGen()}',
-            'source': str(i),
-            'sourceHandle': str(n_out + 1),
-            'target': str(o),
-            'targetHandle': str(h),
-            'data': {
-                'srcdata': df.loc[i].to_dict(),
-                'tgtdata': df.loc[o].to_dict(),
-                'srccdg': None
-                if (cdg is None or df.loc[o].cdg_input is None)
-                else cdg.loc[df.loc[o].cdg_input[h]].to_dict(),
-                'tgthandle': str(h),
-            },
-        }
-        for i, n in df.iterrows()
-        if n.output_to
-        for n_out, (o, h) in enumerate(n.output_to)
-    ]
+    edges = []
+    for i, n in df.iterrows():
+        if n.output_to: 
+            for n_out, (o, h) in enumerate(n.output_to):
+                srccdg = None
+                if cdg is not None:
+                    cdgin = df.loc[o].cdg_input
+                    if cdgin is not None and not isinstance(cdgin, str) and isinstance(cdgin, list):
+                        assert all([isinstance(x, int) for x in cdgin]), "cdg_input must be a list of integers"
+                        srccdg = cdg.loc[cdgin[h]].to_dict()
+                edge = {
+                    'id': f'edge_{uidGen()}',
+                    'source': str(i),
+                    'sourceHandle': str(n_out + 1),
+                    'target': str(o),
+                    'targetHandle': str(h),
+                    'data': {
+                        'srcdata': df.loc[i].to_dict(),
+                        'tgtdata': df.loc[o].to_dict(),
+                        'srccdg': srccdg,
+                        'tgthandle': str(h),
+                    },
+                }
+                edges.append(edge)
+
     if func is None:
         return computeGraph(make_json_compatible(nodes), make_json_compatible(edges), **kwargs)
     else:

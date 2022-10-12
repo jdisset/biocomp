@@ -622,7 +622,6 @@ class Network:
                 for p, o in enumerate(r.output_to):
                     self.compute_graph.loc[o[0], 'input_from'][o[1]] = (i, p)
 
-
     def copy(self):
         N = Network(self.lib, self.name, self.db, custom_outputs=self.custom_outputs, build=False)
         N.transcription_units = self.transcription_units.copy()
@@ -695,6 +694,7 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=INVERSE
     else:
         start_nodes = nodes
     invertible_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
+    print(invertible_paths)
     new_network = network.copy()
 
     uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
@@ -711,14 +711,15 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=INVERSE
         prev = start_n
 
         for i, (node_id, slot) in enumerate(
-            path[1:]
+            path
         ):  # slot is output_id for nodes, input_id for output
             original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
             n_type = original_node['type']
             nid = uidGen()
+            print(f"adding node {nid} of type {n_type}")
 
             if n_type == 'output':  # special case when we reach the output
-                assert i == len(path) - 2, 'output node should be the last node in the path'
+                assert i == len(path) - 1, 'output node should be the last node in the path'
                 # we add an input node
                 in_n = GraphComputeNode(nid, 'input', None, None)
                 in_n.output_to = [(prev, 0)]
@@ -728,20 +729,13 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=INVERSE
                 new_network.compute_graph = pd.concat(
                     [new_network.compute_graph, pd.DataFrame([in_n.toDict()]).set_index('id')]
                 )
-
                 break
 
             # General case, create a new node and prepend to prev
             cdg_in = new_network.compute_graph.loc[prev, 'cdg_output']
             if isinstance(cdg_in, list):
                 cdg_in = cdg_in[slot]
-            new_n = GraphComputeNode(
-                nid,
-                inverse_dict[n_type],
-                # get same cdg input / output as original node
-                cdg_in,
-                original_node.cdg_output,
-            )
+            new_n = GraphComputeNode(nid, inverse_dict[n_type], cdg_in, original_node.cdg_output)
             new_n.output_to = [(prev, 0)]
             # inverse node always have only one input and one output
             # but we need to store the original output slot id in the extra field
@@ -750,8 +744,10 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=INVERSE
             # but we need to know which path, i.e slot, to use)
             new_n.extra = {
                 'original_output_slot': slot,
+                'original_output_len': len(original_node['output_to']),
                 'is_inverse_of': node_id,
             }
+
             # set prev input_from to new nodes
             new_network.compute_graph.loc[prev, 'input_from'] = [(nid, 0)]
             new_network.compute_graph = pd.concat(

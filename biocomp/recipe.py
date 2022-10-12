@@ -106,8 +106,11 @@ def __to_sql(obj, conn, lib):
 def import_recipes_to_sql(recipe_files: list, conn, lib):
     # recipe files are json5 files
     for f in recipe_files:
-        xpdict = ut.load_json5(f)
-        __to_sql(xpdict, conn, lib)
+        try:
+            xpdict = ut.load_json5(f)
+            __to_sql(xpdict, conn, lib)
+        except Exception as e:
+            raise RuntimeError(f'Error while importing recipe {f}: {e}')
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────

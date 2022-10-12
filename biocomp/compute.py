@@ -210,15 +210,17 @@ def aggregation(get_param, get_quantized, n_outputs, **_):
 
 
 @inv_compnode(fwd_name='aggregation')
-def inv_aggregation(get_param, get_quantized, n_ratios, use_ratio_n, **_):
-    assert use_ratio_n < n_ratios
+def inv_aggregation(get_param, get_quantized, original_output_len, original_output_slot, **_):
+    assert original_output_len > 0
+    assert original_output_slot < original_output_len
 
     def apply(inp, rng_key):
         ratios = jnp.maximum(
-            get_param("ratios", init=continuous_initializer(rng_key, n_ratios)), BC_EPSILON
+            get_param("ratios", init=continuous_initializer(rng_key, original_output_len)),
+            BC_EPSILON,
         )
         ratios /= jnp.sum(ratios)
-        return inp / ratios[use_ratio_n]
+        return inp / ratios[original_output_slot]
 
     return apply
 
@@ -329,9 +331,15 @@ class ComputeGraphModel:
             keys = jax.random.split(rng_key, len(flat_batches))
             for nid, key in zip(flat_batches, keys):
                 node_row = self.network.compute_graph.loc[nid]
+                upstream_results = []
+                for inp_node, inp_slot in node_row.input_from:
+                    assert(inp_node in results)
+                    assert(inp_slot <= len(results[inp_node]))
+                    upstream_results.append(results[inp_node][inp_slot])
+
                 upstream_results = [results[inp[0]][inp[1]] for inp in node_row.input_from]
                 if node_row.type == 'input':
-                    results[nid] = inputs[node_row.extra['input_position']]
+                    results[nid] = jnp.array([inputs[node_row.extra['input_position']]])
                     continue
                 if node_row.type == 'output':
                     return jnp.array(upstream_results)
@@ -361,8 +369,6 @@ class ComputeGraphModel:
             # should never reach this point
             raise ValueError('Invalid compute graph, no output node found')
 
-
-
         def init(rng_key):
             params = {}
             n_inputs = len(
@@ -379,10 +385,11 @@ class ComputeGraphModel:
     def __repr__(self):
         def list_network_inputs():
             return [self.network.compute_graph[self.network.compute_graph['type'] == 'input']]
+
         def list_network_outputs():
             return [self.network.compute_graph[self.network.compute_graph['type'] == 'output']]
-        return f'ComputeGraphModel({list_network_inputs()} -> {list_network_outputs()})'
 
+        return f'ComputeGraphModel({list_network_inputs()} -> {list_network_outputs()})'
 
     def __call__(self, params, inputs, rng_key):
         assert self.built
@@ -419,19 +426,16 @@ class ComputeGraphModel:
 
     def get_input_from_output(self, output_arr):
         # each input node has, in its extra, 'input_from_output' and 'input_position'
-        # we want to transform output_arr by reordering the columns 
+        # we want to transform output_arr by reordering the columns
         mapping = {}
-        for _, row in self.network.compute_graph[self.network.compute_graph['type'] == 'input'].iterrows():
+        for _, row in self.network.compute_graph[
+            self.network.compute_graph['type'] == 'input'
+        ].iterrows():
             mapping[row.extra['input_position']] = row.extra['input_from_output']
 
         assert set(mapping.keys()) == set(range(len(mapping.keys())))
         assert len(mapping.keys()) == len(set(mapping.values()))
         return output_arr[:, [mapping[i] for i in range(len(mapping))]]
-
-
-
-
-
 
 
 #                                                                            }}}

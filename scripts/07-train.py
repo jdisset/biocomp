@@ -30,7 +30,7 @@ lib = ut.getLibFromGoogleSheet()
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                          --     load xp     --
-#···············································································
+# ···············································································
 
 base_path = Path("/Users/jeandisset/Dropbox (MIT)/Biocomp/")
 base_xp_path = base_path / "Experiments"
@@ -39,6 +39,7 @@ base_recipe_path = base_path / "Recipes"
 experiments = [x.name for x in base_xp_path.iterdir() if x.is_dir()]
 
 xp = experiments[0]
+xp
 xpfile = base_xp_path / xp / f"{xp}.xp.json5"
 
 
@@ -78,13 +79,14 @@ class XP:
 
 xp = XP(xpfile)
 
+xp
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     build models     --
-#···············································································
+# ···············································································
 # the goal is to load every sample file (and every corresponding recipe), generate the model from the recipe,
 # and train all the intrinsic parameters.
 
@@ -103,52 +105,45 @@ bc.import_recipes_to_sql(
 networks = {recipename: bc.Network(lib, recipename, dbconn) for recipename in unique_recipe_names}
 inv_networks = {k: bc.inverted_network(v) for k, v in networks.items()}
 
+# network = networks[recipe_names[0]]
+# inv_network = bc.inverted_network(network)
 
-selected_recipe = st.sidebar.selectbox("Select a recipe", list(networks.keys()))
-network = inv_networks[selected_recipe]
-ut.h2(f'Recipe {selected_recipe}')
-ut.drawComputeGraph(network.compute_graph, cdg=network.central_dogma_graph)
 
 
 models = [bc.ComputeGraphModel(inv_networks[r]) for r in recipe_names]
 for m in models:
     m.build()
 
+# recipe_names: ['CasE_CoTXall', 'NW-B+pGW0010', 'L2_pGW0042+CasE-R', 'L2all_pGW42+10']
+# n = networks['CasE_CoTXall']
+# inv_n = bc.inverted_network(n)
+# inv_n.compute_graph
+
+# selected_recipe = st.sidebar.selectbox("Select a recipe", list(networks.keys()))
+# network = inv_networks[selected_recipe]
+# ut.h2(f'Recipe {selected_recipe}')
+# ut.drawComputeGraph(network.compute_graph, cdg=network.central_dogma_graph)
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 
 ##
 
 # # load the data files
-# datafiles = [base_xp_path / xp.name / 'data'/ f"{s['name']}.{xp.name}.csv" for s in xp.samples]
-# df_data = [pd.read_csv(f) for f in tqdm(datafiles, "loading data files")]
+datafiles = [base_xp_path / xp.name / 'data'/ f"{s['name']}.{xp.name}.csv" for s in xp.samples]
+df_data = [pd.read_csv(f) for f in tqdm(datafiles, "loading data files")]
 
-# # we want to reorder data columns to match the model's output
-# out_prots = [model.get_output_proteins() for model in models]
-# out_channels = [[xp.color_names[k] for k in out_prot] for out_prot in out_prots]
+# we want to reorder data columns to match the model's output
+out_prots = [model.get_output_proteins() for model in models]
+out_channels = [[xp.color_names[k] for k in out_prot] for out_prot in out_prots]
 
-# Y = [jnp.array(d[channels]) for d, channels in zip(df_data, out_channels)]
-# X = [model.get_input_from_output(d) for model, d in zip(models, Y)]
+Y = [jnp.array(d[channels]) for d, channels in zip(df_data, out_channels)]
+X = [model.get_input_from_output(d) for model, d in zip(models, Y)]
 
-# model = models[0]
-# model.flat_batches
-# model.network.compute_graph
-# x = X[0]
-# rng_key = jax.random.PRNGKey(0)
-# params = model.init(rng_key)
+model = models[0]
+x = X[0]
+rng_key = jax.random.PRNGKey(0)
+params = model.init(rng_key)
 
-# model.network.compute_graph
-# params
-
-# WHY IS THERE NO INVERSE AGGREGATION?
-
-# models[0](X[0][0])
-
-
-
-
-
-
-
+model(params, x[0], rng_key)
