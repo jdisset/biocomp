@@ -331,12 +331,6 @@ class ComputeGraphModel:
             keys = jax.random.split(rng_key, len(flat_batches))
             for nid, key in zip(flat_batches, keys):
                 node_row = self.network.compute_graph.loc[nid]
-                upstream_results = []
-                for inp_node, inp_slot in node_row.input_from:
-                    assert(inp_node in results)
-                    assert(inp_slot <= len(results[inp_node]))
-                    upstream_results.append(results[inp_node][inp_slot])
-
                 upstream_results = [results[inp[0]][inp[1]] for inp in node_row.input_from]
                 if node_row.type == 'input':
                     results[nid] = jnp.array([inputs[node_row.extra['input_position']]])

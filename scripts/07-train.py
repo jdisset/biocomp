@@ -8,6 +8,7 @@ import streamlit as st
 
 st.set_page_config(layout='wide')
 
+from jax.tree_util import Partial as partial
 import jax
 import jax.numpy as jnp
 from jax import jit, vmap, grad, value_and_grad
@@ -18,9 +19,6 @@ import json5
 import sqlite3
 from tqdm import tqdm
 import pandas as pd
-
-from rich import print
-from pprint import pprint
 
 
 lib = ut.getLibFromGoogleSheet()
@@ -41,40 +39,6 @@ experiments = [x.name for x in base_xp_path.iterdir() if x.is_dir()]
 xp = experiments[0]
 xp
 xpfile = base_xp_path / xp / f"{xp}.xp.json5"
-
-
-class XP:
-    # an XP contains a set of samples.
-    # Each sample implements one recipe, and resulted in one data file.
-
-    def __init__(self, filename):
-        self.samples: dict
-        self.name: str
-        self.filename = filename
-        with open(filename) as f:
-            xpobj = json5.load(f)
-            for k, v in xpobj.items():
-                setattr(self, k, v)
-
-    def __str__(self):
-        # add borders:
-        res = '-' * 18 + f'  XP {self.name}  ' + '-' * 18 + '\n'
-        for k, v in self.__dict__.items():
-            if isinstance(v, dict):
-                res += f"* {k}:\n"
-                for kk, vv in v.items():
-                    res += f"    {kk}: {vv}\n"
-            elif isinstance(v, list):
-                res += f"* {k}:\n"
-                for vv in v:
-                    res += f"    {vv}\n"
-            else:
-                res += f"* {k}: {v}\n"
-
-        return res
-
-    def __repr__(self):
-        return self.__str__()
 
 
 xp = XP(xpfile)
@@ -109,7 +73,6 @@ inv_networks = {k: bc.inverted_network(v) for k, v in networks.items()}
 # inv_network = bc.inverted_network(network)
 
 
-
 models = [bc.ComputeGraphModel(inv_networks[r]) for r in recipe_names]
 for m in models:
     m.build()
@@ -127,11 +90,12 @@ for m in models:
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-
-##
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                         --     load data     --
+# ···············································································
 
 # # load the data files
-datafiles = [base_xp_path / xp.name / 'data'/ f"{s['name']}.{xp.name}.csv" for s in xp.samples]
+datafiles = [base_xp_path / xp.name / 'data' / f"{s['name']}.{xp.name}.csv" for s in xp.samples]
 df_data = [pd.read_csv(f) for f in tqdm(datafiles, "loading data files")]
 
 # we want to reorder data columns to match the model's output
@@ -141,9 +105,85 @@ out_channels = [[xp.color_names[k] for k in out_prot] for out_prot in out_prots]
 Y = [jnp.array(d[channels]) for d, channels in zip(df_data, out_channels)]
 X = [model.get_input_from_output(d) for model, d in zip(models, Y)]
 
-model = models[0]
-x = X[0]
-rng_key = jax.random.PRNGKey(0)
-params = model.init(rng_key)
 
-model(params, x[0], rng_key)
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+import optax
+import wandb as wb
+
+cfg = ut.ddict(
+    {
+        "learning_rate": 0.001,
+        "adam_w_decay": 0.01,
+        "clipping": 0.001,
+        "n_models": 10,
+        "initial_param_scaling": 0.01,
+        "epochs": 1000,
+        "log_rate": 50,
+        "rng_key": 1,
+    }
+)
+
+optimizer = optax.chain(
+    optax.adaptive_grad_clip(cfg['clipping']),
+    optax.adamw(learning_rate=cfg['learning_rate'], weight_decay=cfg['adam_w_decay']),
+)
+
+model = models[0]
+
+
+def loss_func(params, x, y, rng_key):
+    m = partial(model, params, rng_key=rng_key)
+    y_hat = vmap(m)(x).squeeze()
+    return jnp.sum(jnp.mean((y - y_hat) ** 2))
+
+
+@jit
+def training_step(params, x, y, opt_state, key):
+    loss, grads = jax.value_and_grad(loss_func)(params, x, y, key)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    params = optax.apply_updates(params, updates)
+    return params, opt_state, grads, loss
+
+
+def wandb_update(loss, params, iter_num):
+    wb.log({'loss': loss}, step=iter_num)
+    wb.log({'params': params}, step=iter_num)
+
+
+normalizer = 1.0
+
+x = X[0] / normalizer
+y = Y[0] / normalizer
+
+key = jax.random.PRNGKey(cfg['rng_key'])
+initkeys = jax.random.split(key, cfg['n_models'])
+params = [model.init(key) for key in initkeys]
+opt_states = [optimizer.init(p) for p in params]
+
+
+params_history = []
+loss_history = []
+
+
+# wb.init(config=cfg, project="biocomp_000", entity="jdisset", reinit=True)
+
+vmap_step = vmap(partial(training_step, x=x, y=y))
+
+epochkeys = jax.random.split(key, cfg['epochs'])
+for i, k in tqdm(enumerate(epochkeys), total=cfg['epochs']):
+    # params, opt_state, grads, loss = training_step(params, x, y, opt_state, key)
+    keys = jax.random.split(k, cfg['n_models'])
+    params, opt_state, grads, loss = vmap_step(params, opt_states, keys)
+    loss_history.append(loss)
+    params_history.append(params)
+    # if i == cfg['epochs'] or i % cfg['log_rate'] == 0 or i == 0:
+    # wandb_update(loss, params, i)
+
+
+import json
+
+# save params_history to a json file:
+with open('params_history.json', 'w') as f:
+    json.dump(params_history, f)

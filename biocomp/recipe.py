@@ -1,8 +1,18 @@
 from .library import PartsLibrary as PartsLibrary
 from . import utils as ut
+from .network import Network, inverted_network
+from .compute import ComputeGraphModel
+from pathlib import Path
 import numpy as np
+import pandas as pd
+from tqdm import tqdm
 import sqlite3
 import json
+import json5
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                            --     sql     --
+# ···············································································
 
 
 def create_db(conn):
@@ -113,6 +123,117 @@ def import_recipes_to_sql(recipe_files: list, conn, lib):
             raise RuntimeError(f'Error while importing recipe {f}: {e}')
 
 
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                         --     XP class     --
+# ···············································································
+
+
+class XP:
+    # Each sample in an Experiment implements one recipe, and resulted in one data file.
+    # The XP object stores all the recipes (in a sqlite database), and the corrsponding
+    # networks and inverted networks.
+
+    def __init__(self, xp_name, xp_path, recipe_path, lib, db_path=":memory:", inverse=True):
+        self.xp_path, self.recipe_path = Path(xp_path), Path(recipe_path)
+        self.samples: list  # [{name, recipe, notes}]
+        self.name: str
+        self.dbconn = None
+        self.color_names: dict
+
+        self.xpfile = xp_path / xp_name / f"{xp_name}.xp.json5"
+        with open(self.xpfile) as f:
+            xpobj = json5.load(f)
+            for k, v in xpobj.items():
+                setattr(self, k, v)
+
+        self.recipe_names = [s['recipe'] for s in self.samples]
+        unique_recipe_names = list(set(self.recipe_names))
+        dbconn = sqlite3.connect(db_path)
+        import_recipes_to_sql(
+            [recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], dbconn, lib
+        )
+        self.networks = {
+            recipename: Network(lib, recipename, dbconn) for recipename in unique_recipe_names
+        }
+        if inverse:
+            self.inv_networks = {k: inverted_network(v) for k, v in self.networks.items()}
+        else:
+            self.inv_networks = None
+
+    def get_models(self, inverse=True):
+        if inverse:
+            assert self.inv_networks is not None
+        nets = self.inv_networks if inverse else self.networks
+        models = {s['name']: ComputeGraphModel(nets[s['recipe']]) for s in self.samples}
+        for s, m in models.items():
+            try:
+                m.build()
+            except Exception as e:
+                msg = f'Error building {"inverse" if inverse else ""} model for sample {s}: {e}'
+                raise RuntimeError(msg)
+        return models
+
+    def get_raw_data(self):
+        datafiles = [
+            self.xp_path / self.name / 'data' / f"{s['name']}.{self.name}.csv" for s in self.samples
+        ]
+        df_data = {
+            s['name']: pd.read_csv(f)
+            for s, f in tqdm(
+                list(zip(self.samples, datafiles)), f"loading data files for {self.name}"
+            )
+        }
+        return df_data
+
+    def get_XY(self, model_dict):
+        """Returns a dict of {sample_name: (X, Y)} where Y is the reordered data (so that it matches the model's output)"""
+        assert self.inv_networks is not None
+        # we want to reorder data columns to match the model's output
+        df_data = self.get_raw_data()
+        out_prots = {sample: model.get_output_proteins() for sample, model in model_dict.items()}
+        out_channels = {
+            sample: [self.color_names[k] for k in out_prot]
+            for sample, out_prot in out_prots.items()
+        }
+        Y = {
+            sample: np.array(df_data[sample][out_channels[sample]]) for sample in model_dict.keys()
+        }
+        X = {
+            sample: model_dict[sample].get_input_from_output(Y[sample])
+            for sample in model_dict.keys()
+        }
+        return X, Y
+
+    def __str__(self):
+        # add borders:
+        res = '-' * 18 + f'  XP {self.name}  ' + '-' * 18 + '\n'
+        for k, v in self.__dict__.items():
+            if isinstance(v, dict):
+                res += f"* {k}:\n"
+                for kk, vv in v.items():
+                    res += f"    {kk}: {vv}\n"
+            elif isinstance(v, list):
+                res += f"* {k}:\n"
+                for vv in v:
+                    res += f"    {vv}\n"
+            else:
+                res += f"* {k}: {v}\n"
+
+        return res
+
+    def __repr__(self):
+        return self.__str__()
+
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                           --     tests     --
 # ···············································································
@@ -140,3 +261,4 @@ def test_module():
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+

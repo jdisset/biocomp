@@ -584,7 +584,8 @@ def print_xla(fun, *args):
     backend = jax.lib.xla_bridge.get_backend()
     e = backend.compile(c)
     option = xla_ext.HloPrintOptions.short_parsable()
-    console.print(e.hlo_modules()[0].to_string(option))
+    out = e.hlo_modules()[0].to_string(option)
+    print(out)
 
 
 
