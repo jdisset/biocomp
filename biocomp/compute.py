@@ -431,6 +431,47 @@ class ComputeGraphModel:
         assert len(mapping.keys()) == len(set(mapping.values()))
         return output_arr[:, [mapping[i] for i in range(len(mapping))]]
 
-
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+
+
+def test_inverse():
+    import numpy as np
+    params = {}
+    get_p = partial(get_param, params)
+
+    def no_quantize(_, values, **__):
+        return values
+
+    x = jnp.array([0.01, 0.2, 1.0, 100.0, 1000.0, 100000.0])
+
+    # transcription
+    rng_key = jax.random.PRNGKey(0)
+    tl = translation(partial(get_p, nodeid=1), no_quantize)
+    inv_tl = inv_translation(partial(get_p, nodeid=1), no_quantize)
+    y = np.array([tl(xx, rng_key=rng_key) for xx in x]).squeeze()
+    y_inv = np.array([inv_tl(yy, rng_key=rng_key) for yy in y]).squeeze()
+    assert (np.allclose(x, y_inv))
+
+
+    # translation
+    rng_key = jax.random.PRNGKey(0)
+    tl = transcription(partial(get_p, nodeid=2), no_quantize)
+    inv_tl = inv_transcription(partial(get_p, nodeid=2), no_quantize)
+    y = np.array([tl(xx, rng_key=rng_key) for xx in x]).squeeze()
+    y_inv = np.array([inv_tl(yy, rng_key=rng_key) for yy in y]).squeeze()
+    assert (np.allclose(x, y_inv))
+
+    # aggregation
+    rng_key = jax.random.PRNGKey(0)
+    tl = aggregation(partial(get_p, nodeid=3), no_quantize, n_outputs=2)
+    y = np.array([tl(xx, rng_key=rng_key) for xx in x]).squeeze()
+    inv_tl_0 = inv_aggregation(partial(get_p, nodeid=3), no_quantize, original_output_len=2, original_output_slot=0)
+    y_inv_0 = np.array([inv_tl_0(yy[0], rng_key=rng_key) for yy in y]).squeeze()
+    assert (np.allclose(x, y_inv_0))
+    inv_tl_1 = inv_aggregation(partial(get_p, nodeid=3), no_quantize, original_output_len=2, original_output_slot=1)
+    y_inv_1 = np.array([inv_tl_1(yy[1], rng_key=rng_key) for yy in y]).squeeze()
+    assert (np.allclose(x, y_inv_1))
+
+

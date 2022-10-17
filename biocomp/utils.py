@@ -211,7 +211,6 @@ def tree_append(t, e):
     return pytree.tree_unflatten(tt, [jnp.concatenate([a, jnp.array([b])]) for a, b in zip(fa, fb)])
 
 
-@jit
 def get_pytree(t, i):
     return pytree.tree_map(lambda x: x[i], t)
 
@@ -226,6 +225,9 @@ def get_pytree2(t, i, ts):
 
 def param_unstack(t, N):
     return [get_pytree(t, i) for i in range(N)]
+
+def get_params(param_tree, i):
+    return [jit(get_pytree, static_argnums=(1,))(t, i) for t in tqdm(param_tree)]
 
 
 def param_unstack2(t, N):

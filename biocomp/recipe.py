@@ -9,6 +9,7 @@ from tqdm import tqdm
 import sqlite3
 import json
 import json5
+from typing import Optional
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                            --     sql     --
@@ -141,6 +142,8 @@ class XP:
         self.xp_path, self.recipe_path = Path(xp_path), Path(recipe_path)
         self.samples: list  # [{name, recipe, notes}]
         self.name: str
+        self.networks: dict[str, Network]  # {sample_name: Network}
+        self.inv_networks: Optional[dict[str, Network]]  # {sample_name: Network}
         self.dbconn = None
         self.color_names: dict
 
@@ -164,10 +167,11 @@ class XP:
         else:
             self.inv_networks = None
 
-    def get_models(self, inverse=True):
+    def get_models(self, inverse=True) -> dict[str, ComputeGraphModel]:
         if inverse:
             assert self.inv_networks is not None
         nets = self.inv_networks if inverse else self.networks
+        assert nets
         models = {s['name']: ComputeGraphModel(nets[s['recipe']]) for s in self.samples}
         for s, m in models.items():
             try:
@@ -177,19 +181,18 @@ class XP:
                 raise RuntimeError(msg)
         return models
 
-    def get_raw_data(self):
+    def get_raw_data(self) -> dict[str, pd.DataFrame]:
         datafiles = [
             self.xp_path / self.name / 'data' / f"{s['name']}.{self.name}.csv" for s in self.samples
         ]
-        df_data = {
-            s['name']: pd.read_csv(f)
-            for s, f in tqdm(
-                list(zip(self.samples, datafiles)), f"loading data files for {self.name}"
-            )
-        }
+        df_data: dict[str, pd.DataFrame] = {}
+        for s, f in tqdm(list(zip(self.samples, datafiles)), f"loading data files for {self.name}"):
+            content = pd.read_csv(f)
+            assert isinstance(content, pd.DataFrame)  # otherwise type hints won't match
+            df_data[s['name']] = content
         return df_data
 
-    def get_XY(self, model_dict):
+    def get_XY(self, model_dict) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         """Returns a dict of {sample_name: (X, Y)} where Y is the reordered data (so that it matches the model's output)"""
         assert self.inv_networks is not None
         # we want to reorder data columns to match the model's output
@@ -222,12 +225,10 @@ class XP:
                     res += f"    {vv}\n"
             else:
                 res += f"* {k}: {v}\n"
-
         return res
 
     def __repr__(self):
         return self.__str__()
-
 
 
 #                                                                            }}}
@@ -261,4 +262,3 @@ def test_module():
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-

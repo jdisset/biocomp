@@ -590,7 +590,6 @@ def print_xla(fun, *args):
 
 
 
-
 def save(data, path, overwrite=False, suffix = '.pickle'):
    
     path = Path(path)
@@ -658,3 +657,4 @@ def hooked_scan(num_samples, on_update, call_rate=1):
         return wrapper
 
     return _hooked_scan
+
