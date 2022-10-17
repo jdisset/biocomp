@@ -98,11 +98,11 @@ def _transform(get_param, get_quantized, rate_param_name, deg_param_name, **_):
             rate_param_name,
             get_param(rate_param_name, init=continuous_initializer(k0, len(values))),
             mode='input_edges',
-        )
-        assert len(rates) == len(values)
-        return jnp.dot(rates, jnp.array(values)) / get_param(
-            deg_param_name, init=continuous_initializer(k1), shared=True
-        )
+        ).squeeze()
+        return (
+            jnp.dot(rates, jnp.array(values))
+            / get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
+        ).squeeze()
 
     return apply
 
@@ -116,10 +116,10 @@ def _inverse_transform(get_param, get_quantized, rate_param_name, deg_param_name
             rate_param_name,
             get_param(rate_param_name, init=continuous_initializer(k0)),
             mode='input_edges',
-        )
+        ).squeeze()
         deg = get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
 
-        return value * deg / rate
+        return (value * deg / rate).squeeze()
 
     return apply
 
@@ -304,7 +304,7 @@ def get_quantized(params, param_name, values, node_id, cdf, cdg, quantize_fun, m
     ), f'len(possible_names)={len(possible_names)} != len(values)={len(values)}'
 
     possible_values = [
-        jnp.array([get_param(params, n, lambda: val, shared=True) for n in names])
+        jnp.array([get_param(params, n, lambda: jnp.array([val]), shared=True) for n in names])
         for names, val in zip(possible_names, values)
     ]
     return jnp.array([quantize_fun(v, p) for v, p in zip(values, possible_values)])
@@ -338,11 +338,17 @@ class ComputeGraphModel:
                 if node_row.type == 'output':
                     return jnp.array(upstream_results)
                 assert node_row.type in CNODE, f'Invalid node type {node_row.type}'
-                get_p = partial(get_param, params, nodeid=nid)
+
+                # if it's an inverse node:
+                nodeid_for_getters = nid
+                if node_row.extra is not None and 'is_inverse_of' in node_row.extra:
+                    nodeid_for_getters = node_row.extra['is_inverse_of']
+
+                get_p = partial(get_param, params, nodeid=nodeid_for_getters)
                 get_q = partial(
                     get_quantized,
                     params,
-                    node_id=nid,
+                    node_id=nodeid_for_getters,
                     cdf=self.network.compute_graph,
                     cdg=self.network.central_dogma_graph,
                     quantize_fun=quantize,
@@ -431,13 +437,14 @@ class ComputeGraphModel:
         assert len(mapping.keys()) == len(set(mapping.values()))
         return output_arr[:, [mapping[i] for i in range(len(mapping))]]
 
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 
-
 def test_inverse():
     import numpy as np
+
     params = {}
     get_p = partial(get_param, params)
 
@@ -452,8 +459,7 @@ def test_inverse():
     inv_tl = inv_translation(partial(get_p, nodeid=1), no_quantize)
     y = np.array([tl(xx, rng_key=rng_key) for xx in x]).squeeze()
     y_inv = np.array([inv_tl(yy, rng_key=rng_key) for yy in y]).squeeze()
-    assert (np.allclose(x, y_inv))
-
+    assert np.allclose(x, y_inv)
 
     # translation
     rng_key = jax.random.PRNGKey(0)
@@ -461,17 +467,19 @@ def test_inverse():
     inv_tl = inv_transcription(partial(get_p, nodeid=2), no_quantize)
     y = np.array([tl(xx, rng_key=rng_key) for xx in x]).squeeze()
     y_inv = np.array([inv_tl(yy, rng_key=rng_key) for yy in y]).squeeze()
-    assert (np.allclose(x, y_inv))
+    assert np.allclose(x, y_inv)
 
     # aggregation
     rng_key = jax.random.PRNGKey(0)
     tl = aggregation(partial(get_p, nodeid=3), no_quantize, n_outputs=2)
     y = np.array([tl(xx, rng_key=rng_key) for xx in x]).squeeze()
-    inv_tl_0 = inv_aggregation(partial(get_p, nodeid=3), no_quantize, original_output_len=2, original_output_slot=0)
+    inv_tl_0 = inv_aggregation(
+        partial(get_p, nodeid=3), no_quantize, original_output_len=2, original_output_slot=0
+    )
     y_inv_0 = np.array([inv_tl_0(yy[0], rng_key=rng_key) for yy in y]).squeeze()
-    assert (np.allclose(x, y_inv_0))
-    inv_tl_1 = inv_aggregation(partial(get_p, nodeid=3), no_quantize, original_output_len=2, original_output_slot=1)
+    assert np.allclose(x, y_inv_0)
+    inv_tl_1 = inv_aggregation(
+        partial(get_p, nodeid=3), no_quantize, original_output_len=2, original_output_slot=1
+    )
     y_inv_1 = np.array([inv_tl_1(yy[1], rng_key=rng_key) for yy in y]).squeeze()
-    assert (np.allclose(x, y_inv_1))
-
-
+    assert np.allclose(x, y_inv_1)

@@ -428,11 +428,13 @@ cfg = {
 
 sample = 'CoTX-All'
 model = models[sample]
-x, y = X_balanced[sample], Y_balanced[sample]
+# x, y = X_balanced[sample], Y_balanced[sample]
+x, y = X[sample], Y[sample]
 
 params_hist, loss_hist = bc.train_single_model(model, x, y, cfg)
 
 ##
+
 
 from time import time
 
@@ -445,7 +447,8 @@ best_params = bu.get_params(params_hist, best_run)
 import matplotlib.pyplot as plt
 
 plt.figure(figsize=(8, 4))
-plt.plot(best_loss)
+# scale log
+plt.semilogy(best_loss, alpha=0.2, color='k')
 plt.xlabel('epoch')
 plt.ylabel('loss')
 plt.title('loss history')
@@ -458,33 +461,26 @@ df, bins = du.binstats(y, [xa, ya], za, nbins=nbins)
 du.heatmap(
     df,
     bins,
-    figscale=0.7,
+    figscale=1.0,
     axis_names=[out_proteins[xa], out_proteins[ya], out_proteins[za]],
-    title=f'{sample} predicted',
+    title=f'{sample} data',
 )
 
 
 bins.min()
 nsamples = 50000
-best_param = best_params[0]
+best_param = best_params[-1]
 
 rng = jax.random.PRNGKey(10)
 ypred = vmap(partial(model, best_param, rng_key=rng))(x).squeeze()
 
 d, b = du.binstats(ypred, [xa, ya], za, nbins=nbins)
 
-inp = x[0]
-out = model(best_param, inp, rng_key=rng).squeeze()
-inp
-out
-y[0]
-
-
 
 du.heatmap(
     d,
     b,
-    figscale=0.7,
+    figscale=1.0,
     axis_names=[out_proteins[xa], out_proteins[ya], out_proteins[za]],
     title=f'{sample} predicted',
 )
@@ -496,5 +492,43 @@ du.heatmap(
 
 
 # TODO: same scale for all plots
+
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                   --     testing simple models     --
+#···············································································
+dbpath = ":memory:"
+dbconn = sqlite3.connect(dbpath)
+bc.import_recipes_to_sql([f"../testrecipe.json5"], dbconn, lib)
+network = bc.Network(lib, "singlefluo", dbconn)
+inv_network = bc.inverted_network(network)
+
+model = bc.ComputeGraphModel(network)
+model.build()
+inv_model = bc.ComputeGraphModel(inv_network)
+inv_model.build()
+
+rng_key = jax.random.PRNGKey(1)
+params = model.init(rng_key)
+rng_key = jax.random.PRNGKey(2)
+inv_params = inv_model.init(rng_key)
+
+import json
+jparams = jax.tree_map(lambda x: x.tolist(), best_params[-1])
+json.dumps(jparams)
+
+
+inv_model(params, [20.0], rng_key=rng_key)
+ut.print_xla(jit(partial(inv_model, params = inv_params)), inputs = [20.0], rng_key=rng_key)
+inv_params
+
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+# TODO get better dynamic range for the heatmap. Fixed.
 
 
