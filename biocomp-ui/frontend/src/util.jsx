@@ -86,7 +86,12 @@ class Util {
               strokeWidth="5"
             />
 
-            <text transform="translate(0 1)" fill="black" dominantBaseline="middle" textAnchor="middle">
+            <text
+              transform="translate(0 1)"
+              fill="black"
+              dominantBaseline="middle"
+              textAnchor="middle"
+            >
               <tspan fontFamily="Roboto" fontSize="10" fontWeight="300" fill="black" x="0" y="0">
                 {cn.toFixed(1)}
               </tspan>
@@ -117,7 +122,14 @@ class Util {
       dagreGraph.setNode(node.id, { width: w, height: h });
     });
     edges.forEach((edge) => {
-      dagreGraph.setEdge(edge.source, edge.target);
+      var target = JSON.parse(edge.target);
+      if (Array.isArray(target)) {
+        target.forEach(function (item) {
+          dagreGraph.setEdge(edge.source, item);
+        });
+      } else {
+        dagreGraph.setEdge(edge.source, edge.target);
+      }
     });
     dagre.layout(dagreGraph);
     nodes.forEach((node) => {

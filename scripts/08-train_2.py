@@ -470,6 +470,8 @@ du.heatmap(
 bins.min()
 nsamples = 50000
 best_param = best_params[-1]
+# print as json, need to convert everything to list first using treemap
+print(json.dumps(jax.tree_map(lambda x: x.tolist(), best_param)))
 
 rng = jax.random.PRNGKey(10)
 ypred = vmap(partial(model, best_param, rng_key=rng))(x).squeeze()

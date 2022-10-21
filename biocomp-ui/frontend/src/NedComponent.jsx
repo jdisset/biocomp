@@ -15,8 +15,10 @@ class NedComponent extends StreamlitComponentBase {
     console.log(this.props);
     switch (this.props.args["output_type"]) {
       case "GRN":
+        console.log("GRN");
         return <GRNComponent data={this.props.args} />;
       case "COMPUTE":
+        console.log("COMPUTE");
         return <ComputeComponent data={this.props.args} />;
       case "DNA":
         let initexpanded = this.props.args.initexpanded | false;

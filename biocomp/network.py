@@ -6,6 +6,7 @@ from . import utils as ut
 from .compute import INVERSE_NODES_DICT as INVERSE_NODES_DICT
 from typing import Callable, List, Dict, Tuple, Iterable
 import copy
+import json
 
 
 part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF': 'tl_rate'}
@@ -177,7 +178,9 @@ class Network:
         c = self.db.cursor()
         # first let's check that there is a recipe with this name
         c.execute('SELECT * FROM recipes WHERE name=?', (self.name,))
-        assert c.fetchone() is not None, f'No recipe named {self.name} in database'
+        assert (
+            c.fetchone() is not None
+        ), f'No recipe named {self.name} in database {self.db}. Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
         c.execute(
             """SELECT TU FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
@@ -226,9 +229,11 @@ class Network:
     def __getPrt(self, tu: TranscriptionUnit):
         return self.__getDownstream(tu, transform='translated')
 
-    def __isOutputOf(self, cdg_input_node, compute_nodes):
-        res = [other for other in compute_nodes if cdg_input_node == other.cdg_output]
-        return res
+    def __isOutputedBy(
+        self, cdg_input_node: int, compute_nodes: List[GraphComputeNode]
+    ) -> List[GraphComputeNode]:
+        """returns a list of all the compute nodes that have cdg_input_node as output"""
+        return [n for n in compute_nodes if cdg_input_node == n.cdg_output]
 
     def __getNode(self, nodes, id):
         for node in nodes:
@@ -402,7 +407,9 @@ class Network:
 
     def __mergeSources(self, cdf, uidGen):
         assert self.central_dogma_graph is not None
+        # in the compute graph,
         # merge TUs that are from a same source into a single source node (aka plasmid)
+
         c = self.db.cursor()
         c.execute(
             """SELECT tis.source,tis.TU,position FROM TU_in_source tis, source_in_aggregation sia, aggregations a
@@ -421,16 +428,29 @@ class Network:
         tmpdf = pd.DataFrame(
             {'compute_id': cdf[cdf.type == 'source'].index, 'tuid': sources_tuids}
         ).set_index('compute_id')
+        # tmpdf is a mapping between the computegraph ids of every sources and their TUids
 
         cdf['source_id'] = None
         cdf['extra'] = None
 
         sources = {}  # plasmid name -> list of compute nodes ids
+
+        # tu_in_sources contains the list of TUs in each source, sorted by position
+
         for i, r in tu_in_sources.groupby('source').agg(list).iterrows():
-            # order matters.
-            group = []
+            # but you can have sources in the db that are not in the recipe
+            group = []  # group will contain the compute nodes ids of the TUs in the source
             for t in r['TU']:
-                group.append(tmpdf[tmpdf.tuid == t].index[0])
+                try:
+                    group.append(tmpdf[tmpdf.tuid == t].index[0])
+                except IndexError:
+                    msg = f'Error while merging sources. TU {t} not found in tmpdf.'
+                    msg += f'\n\ntmpdf: \n{tmpdf}'
+                    msg += f'\nsources_tuids: \n{sources_tuids}'
+                    msg += f'\ncentral dogma graph: \n{self.central_dogma_graph}'
+                    msg += f'\ncdf: \n{cdf}'
+                    raise Exception(msg)
+
             sources[i] = group
 
         for k, v in sources.items():
@@ -469,7 +489,18 @@ class Network:
                 nid = uidGen()
                 newaggregation = GraphComputeNode(nid, 'aggregation', None, r.source)
                 # find the compute node id through the source_id column
-                newaggregation.output_to = [(cdf[cdf.source_id == s].index[0], 0) for s in r.source]
+                try:
+                    newaggregation.output_to = [
+                        (cdf[cdf.source_id == s].index[0], 0) for s in r.source
+                    ]
+                except Exception as e:
+                    msg = f'Error while adding aggregation node {nid} to compute graph'
+                    msg += f' (recipe {self.name}, aggregation {i}, sources {r.source})'
+                    msg += f'\n{e}'
+                    msg += f'\n{cdf}'
+                    raise RuntimeError(msg)
+                # problem: some sources have no ids!!
+
                 # add the input_from to the cooresponding sources
                 for s in r.source:
                     cdf.loc[cdf.source_id == s, 'input_from'] = [[nid]]
@@ -490,21 +521,24 @@ class Network:
         assert isinstance(cdg, pd.DataFrame)
         newnodes = []
 
-        # we start building the compute graph from the output:
+        # we start building the compute graph by adding the output:
         output_gene_nodes = cdg[cdg.is_output]
-
         onode = GraphComputeNode(uidGen(), 'output', [], None)
         for i, r in output_gene_nodes.iterrows():
             onode.cdg_input += [i]
         newnodes.append(onode)
 
+        tu_in_sequestron = set()
         # then we add the sequestron nodes with an associated list of their cdg input nodes
         for _, r in self.lib.seqs.iterrows():
-            nlvl = cdg[cdg.type == r.negative_level]
+            # sequestrons have 2 input hubs, negative and positive
+            nlvl = cdg[cdg.type == r.negative_level]  # negative level (PRT, RNA, DNA)
             nparts = nlvl[nlvl.content.apply(lambda x: r.negative_part in x)]
-            plvl = cdg[cdg.type == r.positive_level]
+
+            plvl = cdg[cdg.type == r.positive_level]  # positive level (PRT, RNA, DNA)
             pparts = plvl[plvl.content.apply(lambda x: r.positive_part in x)]
-            olvl = cdg[cdg.type == r.output_level]
+
+            olvl = cdg[cdg.type == r.output_level]  # output level (PRT, RNA, DNA)
             oparts = olvl[olvl.content.apply(lambda x: ut.isSubset(r.output_part, x))]
             if len(nparts) > 0 and len(pparts) > 0 and len(oparts.index) > 0:
                 assert len(pparts) == 1
@@ -517,32 +551,55 @@ class Network:
                         int(oparts.index[0]),
                     )
                     newnodes.append(cnode)
-                except:
-                    print('nparts', nparts)
-                    print('pparts', nparts)
-                    print('olvl', olvl)
-                    print('oparts', nparts)
-                    print('outlevel', r.output_level)
-                    print('outpart', r.output_part)
+                    # useful to track which tus are in use
+                    tu_in_sequestron.update(oparts['tu_id'].iloc[0])
+                    tu_in_sequestron.update(nparts['tu_id'].iloc[0])
+                    tu_in_sequestron.update(pparts['tu_id'].iloc[0])
+                except Exception as e:
+                    msg = f'Error while building compute graph for recipe {self.name}:\n{e}'
+                    msg += f'Sequestron {r.type}.\nnparts: {nparts}, pparts: {pparts}, oparts: {oparts}'
+                    msg += f'\nolevel: {olvl}, oparts: {oparts}, outlevel: {r.output_level}, outpart: {r.output_part}'
+                    raise RuntimeError(msg)
 
-        # then for each input node, we need to go back up to the original transcription unit using translation
-        # and transcription nodes, making sure to connect it to relevant sequestron nodes along the way
         cg = []
 
-        # at first, each TU has a corresponding source, but we later merge sources (for TUs that are on a same plasmid)
+        # right now newnodes contains only the output node and the sequestron nodes
+        # we're now going to go upstream from these nodes, adding the relevant translation/transcription
+        # nodes until we reach the Transcription Units.
+
+        # Before that, let's also add dead-end paths if there are any.
+        # Dead-end paths start with a transcription unit and end with a gene that is not an output.
+        # They're practically useless (and we can optimize them out during computation) but they're still
+        # part of the graph (and merit being visualized).
+        # We add all proteins that are not outputs, and whose tu is not part of any sequestron.
+        deadend_nodes = cdg[ (cdg.is_output == False) & (cdg.type == 'PRT') & (cdg.tu_id.apply(lambda x: all([xx not in tu_in_sequestron for xx in x])))  ]
+        for i, r in deadend_nodes.iterrows():
+            cnode = GraphComputeNode(uidGen(), 'deadend', [i], None)
+            newnodes.append(cnode)
+
+        # At first, each TU also has a corresponding source node that we need to add,
+        # but we will merge sources later (for TUs that are on a same plasmid)
         while newnodes:
-            n = newnodes.pop()
+            n: GraphComputeNode = newnodes.pop()
             if n.type != 'source':
-                # for every gene input of this compute node
+                # for every cdg node that is an input of n
                 for i, n_inp in enumerate(n.cdg_input):
-                    others = self.__isOutputOf(n_inp, cg + newnodes)
+                    others = self.__isOutputedBy(
+                        n_inp, cg + newnodes
+                    )  # list of all other nodes that also output n_inp
                     for other in others:
-                        # set_list_item(n.input_from,i,other.id)
+                        # establish the connection between n and its parents
                         n.input_from += [other.id]
                         other.output_to += [(n.id, i)]
-                    if not others:
-                        gn = cdg.loc[n_inp]  # input gene
+                    if not others:  # if n_inp is not outputed by any node we have already created
+                        # then we go up the central dogma and create the matching upstream node
+                        gn = cdg.loc[
+                            n_inp
+                        ]  # the central dogma graph node that is being transformed by this compute node
                         nid = uidGen()
+                        # we just need to know what type of transform we have.
+                        # for example, if the input cdg node that our compute node expects is a protein,
+                        # that means that we need to add a translation node, etc...
                         ntype = {'PRT': 'translation', 'RNA': 'transcription', 'DNA': 'source'}[
                             gn.type
                         ]
@@ -566,7 +623,7 @@ class Network:
             extra = {
                 'role': 'copy_number',
             }
-            if 'qtty' in r.extra:
+            if r.extra is not None and 'qtty' in r.extra:
                 extra['qtty'] = r.extra['qtty']
             tmp['extra'] = [extra]
             cdf = pd.concat([cdf, tmp])
@@ -582,18 +639,44 @@ class Network:
         # build the graph of interacting nodes, without any optimization,
         # basically the dual of the central dogma graph:
         cg = self.__buildRawGraph(uidGen)
+
         # remove shortcuts and cycles:
         self.__removeShortcuts(cg, 0)
 
         # convert to dataframe
-        cdf = pd.DataFrame([n.toDict() for n in cg]).set_index('id').sort_index()
+        self.compute_graph = pd.DataFrame([n.toDict() for n in cg]).set_index('id').sort_index()
 
-        cdf = self.__mergeSources(cdf, uidGen)  # merge TUs with same source
-        cdf = self.__addAggregations(cdf, uidGen)  # add aggregation nodes
-        cdf = self.__addNumericNodes(cdf, uidGen)  # now add numeric nodes (constant or inuts)
+        # there should be the same number of sources in the cdf compute graph as DNA nodes in the cdg
+        nsources = len(self.compute_graph[self.compute_graph.type == 'source'])
+        ndna = len(self.central_dogma_graph[self.central_dogma_graph.type == 'DNA'])
+        if nsources != ndna:
+            dna_in_compute_graph = self.compute_graph[
+                self.compute_graph.type == 'source'
+            ].cdg_output.tolist()
 
-        self.compute_graph = cdf
+            extradna = []
+            for i, r in self.central_dogma_graph[self.central_dogma_graph.type == 'DNA'].iterrows():
+                if i not in dna_in_compute_graph:
+                    extradna += r.tu_id
+            msg = f'When building compute graph for recipe {self.name}, '
+            msg += f'found {nsources} DNA sources in the graph, but {ndna} DNA nodes total.'
+            msg += f'\nExtra DNA nodes: {extradna}'
+            raise RuntimeError(msg)  # }}}
+
+        self.compute_graph = self.__mergeSources(
+            self.compute_graph, uidGen
+        )  # merge TUs with same source
+
+        self.compute_graph = self.__addAggregations(
+            self.compute_graph, uidGen
+        )  # add aggregation nodes
+
+        self.compute_graph = self.__addNumericNodes(
+            self.compute_graph, uidGen
+        )  # now add numeric nodes (constant or inuts)
+
         self.cleanup()
+        self._sanity_check()
 
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
@@ -615,12 +698,44 @@ class Network:
                 output_to_me = self.compute_graph[
                     self.compute_graph.output_to.apply(lambda x: i in [y[0] for y in x])
                 ]
-                self.compute_graph.loc[i, 'input_from'] = [None] * len(output_to_me)
+                try:
+                    # self.compute_graph.loc[i, 'input_from'] = [None] * len(output_to_me)
+                    # to fix, we need to use at instead of loc
+                    self.compute_graph.at[i, 'input_from'] = [None] * len(output_to_me)
+                except Exception as e:
+                    msg = f'Error cleaning up compute graph: {e}\n'
+                    msg += f'Trying to construct input_froms of node {i} from upstream outputs.\n'
+                    msg += f'{r}'
+                    msg += f'\nDetected upstream outputs:\n{output_to_me}'
+                    raise RuntimeError(msg)
 
             # then fill it
             for i, r in self.compute_graph.iterrows():
                 for p, o in enumerate(r.output_to):
                     self.compute_graph.loc[o[0], 'input_from'][o[1]] = (i, p)
+
+        self._sanity_check()
+
+    def _sanity_check(self):
+        # check that all nodes have a unique id
+        if self.compute_graph is not None:
+            assert len(self.compute_graph.index) == len(
+                set(self.compute_graph.index)
+            ), 'compute graph has duplicate ids'
+
+            # every source node should have a source_id
+            for i, r in self.compute_graph[self.compute_graph.type == 'source'].iterrows():
+                if r.source_id is None:
+                    msg = (
+                        f'In compute graph for recipe {self.name}, source node {i} has no source_id'
+                    )
+                    msg += f'\n{self.compute_graph}'
+                    raise RuntimeError(msg)
+
+        if self.central_dogma_graph is not None:
+            assert len(self.central_dogma_graph.index) == len(
+                set(self.central_dogma_graph.index)
+            ), 'central dogma graph has duplicate ids'
 
     def copy(self):
         N = Network(self.lib, self.name, self.db, custom_outputs=self.custom_outputs, build=False)
@@ -694,7 +809,6 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=INVERSE
     else:
         start_nodes = nodes
     invertible_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
-    print(invertible_paths)
     new_network = network.copy()
 
     uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
@@ -716,7 +830,6 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=INVERSE
             original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
             n_type = original_node['type']
             nid = uidGen()
-            print(f"adding node {nid} of type {n_type}")
 
             if n_type == 'output':  # special case when we reach the output
                 assert i == len(path) - 1, 'output node should be the last node in the path'

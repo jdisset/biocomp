@@ -21,7 +21,8 @@ def create_db(conn):
     CREATE TABLE IF NOT EXISTS `recipes` (
         name TEXT PRIMARY KEY,
         description TEXT,
-        notes TEXT);
+        notes TEXT,
+        extra TEXT);
 
     CREATE TABLE IF NOT EXISTS `aggregations` (
         id INTEGER PRIMARY KEY,
@@ -55,19 +56,23 @@ def create_db(conn):
     c.executescript(sql)
 
 
-def __to_sql(obj, conn, lib):
+def __recipe_to_sql(obj, conn, lib):
     c = conn.cursor()
     create_db(conn)
     c.execute("SELECT name FROM recipes WHERE name = ?", (obj['name'],))
     if c.fetchone():
-        raise RuntimeError(f'Error while importing recipe {obj["name"]}: already in the database')
+        # already in db so we skip
+        return
 
+    extra = {k: v for k, v in obj.items() if k not in ['name', 'description', 'notes']}
+    extra_json = json.dumps(extra)
     c.execute(
-        "INSERT INTO recipes VALUES (?, ?, ?)",
+        "INSERT INTO recipes VALUES (?, ?, ?, ?)",
         (
             obj['name'],
             obj['description'] if 'description' in obj else None,
             obj['notes'] if 'notes' in obj else None,
+            extra_json if extra else None,
         ),
     )
     for agg in obj['content']:
@@ -118,10 +123,13 @@ def import_recipes_to_sql(recipe_files: list, conn, lib):
     # recipe files are json5 files
     for f in recipe_files:
         try:
-            xpdict = ut.load_json5(f)
-            __to_sql(xpdict, conn, lib)
+            recipe = ut.load_json5(f)
+            if not Path(f).name == f'{recipe["name"]}.recipe.json5':
+                msg = f'Recipe name vs file name mismatch (declared name: {recipe["name"]})'
+                raise RuntimeError(msg)
+            __recipe_to_sql(recipe, conn, lib)
         except Exception as e:
-            raise RuntimeError(f'Error while importing recipe {f}: {e}')
+            raise RuntimeError(f'Error loading recipe {f}: \n{e}')
 
 
 #                                                                            }}}
