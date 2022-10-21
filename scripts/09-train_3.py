@@ -17,8 +17,14 @@ from tqdm import tqdm
 import pandas as pd
 import numpy as np
 
-lib = ut.getLibFromGoogleSheet()
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
 
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                          --     get lib     --
+# ···············································································
+lib = ut.getLibFromGoogleSheet()
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -30,7 +36,5 @@ experiments = [x.name for x in xp_path.iterdir() if x.is_dir()]
 
 xps = {}
 
-for x in tqdm(experiments):
+for x in experiments:
     xps[x] = bc.XP(x, xp_path, recipe_path, lib)
-
-

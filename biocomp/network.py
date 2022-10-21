@@ -572,7 +572,11 @@ class Network:
         # They're practically useless (and we can optimize them out during computation) but they're still
         # part of the graph (and merit being visualized).
         # We add all proteins that are not outputs, and whose tu is not part of any sequestron.
-        deadend_nodes = cdg[ (cdg.is_output == False) & (cdg.type == 'PRT') & (cdg.tu_id.apply(lambda x: all([xx not in tu_in_sequestron for xx in x])))  ]
+        deadend_nodes = cdg[
+            (cdg.is_output == False)
+            & (cdg.type == 'PRT')
+            & (cdg.tu_id.apply(lambda x: all([xx not in tu_in_sequestron for xx in x])))
+        ]
         for i, r in deadend_nodes.iterrows():
             cnode = GraphComputeNode(uidGen(), 'deadend', [i], None)
             newnodes.append(cnode)
