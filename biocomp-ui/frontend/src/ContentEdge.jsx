@@ -53,6 +53,8 @@ export default function CustomEdge({
   }
 
   let foreignObject = "";
+	let simple = "";
+	let itemsAsText = "";
   if (data.srccdg && (data.srcdata.type == "transcription" || data.srcdata.type == "translation")) {
     const content = data.srccdg.content;
     const listItems = data.srccdg.content.map((e) => <li>{e}</li>);
@@ -71,7 +73,42 @@ export default function CustomEdge({
         </body>
       </foreignObject>
     );
+	  // simple is a concat of data.srccd.content separated by space
+	  simple = content.join(" ");
+
+  // now as svg, it'll just be a text element with white background
+	// and black text. We want to have a new line for each element
+	  // white background
+ itemsAsText = (
+	 <>
+	 <text
+		 x={edgeCenterX}
+		 y={edgeCenterY}
+		 textAnchor="middle"
+		 alignmentBaseline="central"
+		 stroke="white"
+		 strokeWidth="10"
+		 className="edgecontent-text">
+		 {data.srccdg.content.join(" + ")}
+	 </text>
+
+	 <text
+		 x={edgeCenterX}
+		 y={edgeCenterY}
+		 fontSize="10"
+		 textAnchor="middle"
+		 alignmentBaseline="central"
+		 className="edgecontent-text">
+		 {data.srccdg.content.join(" + ")}
+	 </text>
+	 </>
+ );
   }
+
+
+
+
+
 
   return (
     <>
@@ -82,7 +119,17 @@ export default function CustomEdge({
         d={edgePath}
         markerEnd={markerEnd}
       />
-      {foreignObject}
+		{itemsAsText}
     </>
   );
 }
+
+{/*<textPath*/}
+          {/*href={`#${id}`}*/}
+          {/*style={{ fontSize: "10px" }}*/}
+          {/*startOffset="50%"*/}
+          {/*textAnchor="middle"*/}
+        {/*>*/}
+			{/*{simple}*/}
+        {/*</textPath>*/}
+

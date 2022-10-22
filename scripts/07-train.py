@@ -151,10 +151,7 @@ def wandb_update(loss, params, iter_num):
     wb.log({'loss': loss}, step=iter_num)
     wb.log({'params': params}, step=iter_num)
 
-
-normalizer = 1.0
-
-x = X[0] / normalizer
+normalizer = 1.0 x = X[0] / normalizer
 y = Y[0] / normalizer
 
 key = jax.random.PRNGKey(cfg['rng_key'])

@@ -13,6 +13,7 @@ import OUTNode from "./OUTNode.jsx";
 import NUMNode from "./NUMNode.jsx";
 import CTENode from "./CTENode.jsx";
 import INVNode from "./INVNode.jsx";
+import DENDNode from "./DENDNode.jsx";
 import ContentEdge from "./ContentEdge.jsx";
 
 import images from "./grnsymbols/*.png";
@@ -29,7 +30,6 @@ import Util from "./util.jsx";
 
 console.log("ComputeComponent.jsx loaded");
 
-
 const nodeTypes = {
   sequestron_ERN: SEQNode,
   sequestron_RECOMBINASE: SEQNode,
@@ -41,11 +41,12 @@ const nodeTypes = {
   aggregation: AGGNode,
   source: SRCNode,
   numeric: NUMNode,
+  deadend: DENDNode,
   inv_numeric: INVNode,
   inv_source: INVNode,
   inv_aggregation: INVNode,
   inv_transcription: INVNode,
-  inv_translation: INVNode
+  inv_translation: INVNode,
 };
 
 const edgeTypes = {
@@ -53,7 +54,7 @@ const edgeTypes = {
 };
 
 const typeDim = {
-  sequestron_ERN: { width: 100, height: 70 },
+  sequestron_ERN: { width: 150, height: 70 },
   sequestron_RECOMBINASE: { width: 100, height: 70 },
   translation: { width: 40, height: 80 },
   transcription: { width: 40, height: 80 },

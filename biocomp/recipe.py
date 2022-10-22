@@ -10,7 +10,7 @@ import sqlite3
 import json
 import json5
 from typing import Optional
-
+import logging as log
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -141,6 +141,7 @@ def import_recipes_to_sql(recipe_files: list, conn, lib):
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     XP class     --
 # ···············································································
+from rich.progress import track
 
 
 class XP:
@@ -149,6 +150,7 @@ class XP:
     # networks and inverted networks.
 
     def __init__(self, xp_name, xp_path, recipe_path, lib, db_path=":memory:", inverse=True):
+        log.debug(f'Initializing XP {xp_name}')
         self.xp_path, self.recipe_path = Path(xp_path), Path(recipe_path)
         self.samples: list  # [{name, recipe, notes}]
         self.name: str
@@ -165,13 +167,18 @@ class XP:
 
         self.recipe_names = [s['recipe'] for s in self.samples]
         unique_recipe_names = list(set(self.recipe_names))
+        log.debug(f'Found {len(unique_recipe_names)} unique recipes')
         dbconn = sqlite3.connect(db_path)
         import_recipes_to_sql(
             [recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], dbconn, lib
         )
         self.networks = {
-            recipename: Network(lib, recipename, dbconn) for recipename in unique_recipe_names
+            recipename: Network(lib, recipename, dbconn)
+            for recipename in track(
+                unique_recipe_names, description=f'Building networks for xp {xp_name}'
+            )
         }
+        log.debug(f'Loaded {len(self.networks)} networks')
         if inverse:
             self.inv_networks = {k: inverted_network(v) for k, v in self.networks.items()}
         else:
@@ -182,10 +189,11 @@ class XP:
             assert self.inv_networks is not None
         nets = self.inv_networks if inverse else self.networks
         assert nets
-        models = {s['name']: ComputeGraphModel(nets[s['recipe']]) for s in self.samples}
-        for s, m in models.items():
+        models ={}
+        for s in track(self.samples, description='Building models'):
             try:
-                m.build()
+                models[s['name']] = ComputeGraphModel(nets[s['recipe']])
+                models[s['name']].build()
             except Exception as e:
                 msg = f'Error building {"inverse" if inverse else ""} model for sample {s}: {e}'
                 raise RuntimeError(msg)
@@ -196,7 +204,7 @@ class XP:
             self.xp_path / self.name / 'data' / f"{s['name']}.{self.name}.csv" for s in self.samples
         ]
         df_data: dict[str, pd.DataFrame] = {}
-        for s, f in tqdm(list(zip(self.samples, datafiles)), f"loading data files for {self.name}"):
+        for s, f in track(list(zip(self.samples, datafiles)), description=f"loading data files for {self.name}"):
             content = pd.read_csv(f)
             assert isinstance(content, pd.DataFrame)  # otherwise type hints won't match
             df_data[s['name']] = content

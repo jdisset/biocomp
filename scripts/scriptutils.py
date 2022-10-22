@@ -23,7 +23,9 @@ from rich import print as rprint
 import rich
 from rich.console import Console
 import jaxlib.xla_extension as xla_ext
+from rich.progress import track
 
+from typing import List
 
 
 class ddict(dict):
@@ -162,13 +164,15 @@ def drawComputeGraph(df, func=None, cdg=None, **kwargs):
     ]
     edges = []
     for i, n in df.iterrows():
-        if n.output_to: 
+        if n.output_to:
             for n_out, (o, h) in enumerate(n.output_to):
                 srccdg = None
                 if cdg is not None:
                     cdgin = df.loc[o].cdg_input
                     if cdgin is not None and not isinstance(cdgin, str) and isinstance(cdgin, list):
-                        assert all([isinstance(x, int) for x in cdgin]), "cdg_input must be a list of integers"
+                        assert all(
+                            [isinstance(x, int) for x in cdgin]
+                        ), "cdg_input must be a list of integers"
                         srccdg = cdg.loc[cdgin[h]].to_dict()
                 edge = {
                     'id': f'edge_{uidGen()}',
@@ -219,7 +223,7 @@ def getAllGoogleSheets(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
     workbook = gspread_client.open_by_key(key)
     sheets = workbook.worksheets()
     sheets_dict = {}
-    for sheet in sheets:
+    for sheet in track(sheets, description='Loading library sheets'):
         df = pd.DataFrame(sheet.get_all_records())
         df.set_index(df.columns[0], inplace=True)
         sheets_dict[sheet.title] = df
@@ -241,7 +245,9 @@ def listGoogleSpreadsheets(credentials=GOOGLE_APP_CREDENTIALS):
 
 def getLibFromGoogleSheet(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
     l = getAllGoogleSheets(key, credentials)
-    lib = bc.PartsLibrary(l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types)
+    lib = bc.PartsLibrary(
+        l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types
+    )
     return lib
 
 
@@ -270,12 +276,20 @@ def screenCaptures(
     height=1500,
     n_batches=1,
 ):
-    def param_extractor(**kwargs):
-        return {**kwargs}
 
-    params = [f(*a, func=param_extractor) for a in zip(*args)]
+    params = []
+
+    def param_extractor(**kwargs):
+        nonlocal params
+        r = {**kwargs}
+        params.append(r)
+
+    for a in zip(*args):
+        f(*a, func=param_extractor)
+
     pj = [urllib.parse.quote_plus(json.dumps(p)) for p in params]
     urls = ['file://' + str(module_path.resolve()) + '?args=' + p for p in pj]
+    # print(f'urls: {urls}')
 
     if filenames is not None:
         assert len(filenames) == len(params)
@@ -283,7 +297,7 @@ def screenCaptures(
     else:
         outpath = Path(out_dir_path)
         outpath.mkdir(parents=True, exist_ok=True)
-        outfiles = [str(outpath / f'{i}.png') for i in range(len(params))]
+        outfiles = [str(outpath / f'{i}.pdf') for i in range(len(params))]
 
     url_batches = make_batches(urls, n_batches)
     file_batches = make_batches(outfiles, n_batches)
@@ -293,9 +307,20 @@ def screenCaptures(
 
         async def take(url, outfile):
             page = await browser.newPage()
-            await page.setViewport({'width': width, 'height': height})
-            await page.goto(url)
-            await page.screenshot({'path': outfile})
+            await page.goto(url, {'waitUntil': 'networkidle0'})
+            await page.setViewport({'width': width, 'height': height + 50})
+            # await page.screenshot({'path': outfile+'.png', 'omitBackground': True, 'type': 'png', 'clip':{'x': 0, 'y': 0, 'width': width, 'height': height}})
+            # emulate screen
+            await page.emulateMedia('screen')
+            await page.pdf(
+                {
+                    'path': outfile,
+                    'width': width,
+                    'height': height,
+                    'pageRanges': '1',
+                    'printBackground': False,
+                }
+            )
             print('saved', outfile)
             await page.close()
 
@@ -313,6 +338,24 @@ def screenCaptures(
         pass
     end = time()
     print(f'Saved all screenshots in {end-start}s')
+
+
+def draw_network(net, *a, **kw):
+    drawComputeGraph(net.compute_graph, *a, cdg=net.central_dogma_graph, **kw)
+
+
+def plot_networks(nets: List[bc.Network], filenames):
+
+    H = 1000
+    W = 1000
+
+    screenCaptures(
+        partial(draw_network, height=H, width=W),
+        nets,
+        filenames=filenames,
+        height=H,
+        width=W,
+    )
 
 
 #                                                                            }}}
@@ -342,6 +385,7 @@ def screenCaptures_multi(
     params = [f(*a, func=param_extractor) for a in zip(*args)]
     pj = [urllib.parse.quote_plus(json.dumps(p)) for p in params]
     urls = ['file://' + str(module_path.resolve()) + '?args=' + p for p in pj]
+    print(f'urls: {urls}')
 
     if filenames is not None:
         assert len(filenames) == len(params)
@@ -578,6 +622,7 @@ def plotGrads(gradlist):
 def print_jaxpr(fun, *args, **kwargs):
     print(jax.make_jaxpr(fun)(*args, **kwargs))
 
+
 def print_xla(fun, *args, **kwargs):
     console = Console(highlighter=rich.highlighter.ReprHighlighter())
     c = jax.xla_computation(fun)(*args, **kwargs)
@@ -588,10 +633,8 @@ def print_xla(fun, *args, **kwargs):
     print(out)
 
 
+def save(data, path, overwrite=False, suffix='.pickle'):
 
-
-def save(data, path, overwrite=False, suffix = '.pickle'):
-   
     path = Path(path)
     if path.suffix != suffix:
         path = path.with_suffix(suffix)
@@ -605,7 +648,7 @@ def save(data, path, overwrite=False, suffix = '.pickle'):
         pickle.dump(data, file)
 
 
-def load(path, suffix = '.pickle'):
+def load(path, suffix='.pickle'):
     path = Path(path)
     if not path.is_file():
         raise ValueError(f'Not a file: {path}')
@@ -657,4 +700,3 @@ def hooked_scan(num_samples, on_update, call_rate=1):
         return wrapper
 
     return _hooked_scan
-
