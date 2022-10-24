@@ -260,6 +260,16 @@ def getLibFromGoogleSheet(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
 
 DEFAULT_COMPONENT_PATH = Path('../biocomp-ui/frontend/dist/static_index.html')
 
+browser=None
+async def get_global_browser():
+    global browser
+    if browser is None:
+        print('launching browser')
+        browser = await launch()
+    else:
+        print('browser already exists')
+    return browser
+
 
 def make_batches(L, n):
     perbatch = len(L) / n
@@ -303,15 +313,15 @@ def screenCaptures(
     file_batches = make_batches(outfiles, n_batches)
 
     async def main(urls, outfiles):
-        browser = await launch()
+        # browser = await launch()
+        browser = await get_global_browser()
 
         async def take(url, outfile):
             page = await browser.newPage()
             await page.goto(url, {'waitUntil': 'networkidle0'})
-            await page.setViewport({'width': width, 'height': height + 50})
+            await asyncio.sleep(0.1)
+            # await page.setViewport({'width': width, 'height': height + 50})
             # await page.screenshot({'path': outfile+'.png', 'omitBackground': True, 'type': 'png', 'clip':{'x': 0, 'y': 0, 'width': width, 'height': height}})
-            # emulate screen
-            await page.emulateMedia('screen')
             await page.pdf(
                 {
                     'path': outfile,
@@ -326,7 +336,7 @@ def screenCaptures(
 
         await asyncio.gather(*[take(*args) for args in zip(urls, outfiles)])
 
-        await browser.close()
+        # await browser.close()
 
     start = time()
     loop = asyncio.get_event_loop()
@@ -375,100 +385,6 @@ def plot_cdg(nets: List[bc.Network], filenames):
         height=H,
         width=W,
     )
-
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                   --     react screen captures     --
-# ···············································································
-import concurrent.futures
-
-
-def screenCaptures_multi(
-    f,
-    *args,
-    out_dir_path='./',
-    filenames=None,
-    module_path=DEFAULT_COMPONENT_PATH,
-    width=1500,
-    height=1500,
-    n_batches=8,
-):
-    # TODO: combine with multiprocessing (https://pymotw.com/3/asyncio/executors.html)
-
-    def param_extractor(**kwargs):
-        return {**kwargs}
-
-    params = [f(*a, func=param_extractor) for a in zip(*args)]
-    pj = [urllib.parse.quote_plus(json.dumps(p)) for p in params]
-    urls = ['file://' + str(module_path.resolve()) + '?args=' + p for p in pj]
-    print(f'urls: {urls}')
-
-    if filenames is not None:
-        assert len(filenames) == len(params)
-        outfiles = filenames
-    else:
-        outpath = Path(out_dir_path)
-        outpath.mkdir(parents=True, exist_ok=True)
-        outfiles = [str(outpath / f'{i}.png') for i in range(len(params))]
-
-    url_batches = make_batches(urls, n_batches)
-    file_batches = make_batches(outfiles, n_batches)
-
-    async def capture(urls, outfiles):
-        browser = await launch()
-
-        innerstart = time()
-
-        async def take(url, outfile):
-            print('running things')
-            page = await browser.newPage()
-            await page.setViewport({'width': width, 'height': height})
-            await page.goto(url)
-            await page.screenshot({'path': outfile})
-            print('saved', outfile)
-            await page.close()
-
-        await asyncio.gather(*[take(*args) for args in zip(urls, outfiles)])
-
-        await browser.close()
-        innerend = time()
-        return innerend - innerstart
-
-    async def run(corofn, *args):
-        loop = asyncio.new_event_loop()
-        try:
-            coro = corofn(*args)
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
-
-    async def main():
-        loop = asyncio.get_event_loop()
-        # executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(n_batches, 8))
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
-        futures = [
-            loop.run_in_executor(executor, run, capture, url, outfile)
-            for url, outfile in zip(url_batches, file_batches)
-        ]
-        # print(await asyncio.gather(*futures))
-        await asyncio.wait(futures)
-
-    start = time()
-    loop = asyncio.get_event_loop()
-    # loop.run_until_complete(capture(urls, outfiles))
-    loop.run_until_complete(main())
-    try:
-        loop.close()
-    except:
-        pass
-    end = time()
-    print(f'Saved all screenshots in {end-start}s')
-
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
