@@ -9,7 +9,7 @@ import copy
 import json
 
 
-part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF': 'tl_rate'}
+part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF_group': 'tl_rate'}
 parameter_to_default_part = {'tl_rate': 'empty_tc'}
 
 
@@ -144,11 +144,6 @@ class TranscriptionUnit:
 ## ─────────────────────────────────────────────────────────────────────────────
 
 
-class hashabledict(dict):
-    def __hash__(self):
-        # general idea is return hash(tuple(sorted(self.items())))
-        # but we need to turn the values (list in our case) into tuples
-        return hash(tuple(sorted((k, tuple(v)) for k, v in self.items())))
 
 
 def transcription_unit_from_L1(l1id, lib):
@@ -275,6 +270,10 @@ class Network:
     def __build_central_dogma_graph(self, custom_outputs=None):
         tu: List[dict] = []
         assert self.transcription_units is not None
+
+        def make_hashable(x):
+            return tuple(sorted((k, tuple(v)) for k, v in x.items()))
+
         for tuid, t in self.transcription_units.items():
             dna, dna_params = self.__getDna(t)
             rna, rna_params = self.__getRna(t)
@@ -284,13 +283,13 @@ class Network:
                     'name': tuid,
                     'DNA': dna,
                     'DNA_params': dna_params,
-                    'DNA_params_hashable': hashabledict(dna_params),
+                    'DNA_params_hashable': make_hashable(dna_params),
                     'RNA': rna,
                     'RNA_params': rna_params,
-                    'RNA_params_hashable': hashabledict(rna_params),
+                    'RNA_params_hashable': make_hashable(rna_params),
                     'PRT': prt,
                     'PRT_params': prt_params,
-                    'PRT_params_hashable': hashabledict(prt_params),
+                    'PRT_params_hashable': make_hashable(prt_params),
                 }
             )
         assert tu is not None
@@ -300,22 +299,25 @@ class Network:
         dna_df = pd.DataFrame({'tu_id': [[x] for x in cast(str, tudf['name'])], 'type': 'DNA'})
 
         def only_one_value_per_param(params: Dict[str, List[str]]) -> bool:
-            for _, parts in params.items():
-                if len(parts) > 1:
-                    return False
-            return True
+            return all(len(parts) <= 1 for _, parts in params.items())
 
         rna_tuids_noparams = list(
             tudf[tudf['RNA_params'].map(len) == 0].groupby(by='RNA').agg(list).name  # type: ignore
         )
 
-        rna_tuids_oneparamvalue = (
-            tudf[tudf['RNA_params'].map(len) > 0]
-            .groupby(by='RNA')
-            .filter(lambda x: only_one_value_per_param(x['RNA_params']))
-            .groupby(by=['RNA', 'RNA_params_hashable'])
-            .agg(list)
-        )
+        try:
+            rna_tuids_oneparamvalue = (
+                tudf[tudf['RNA_params'].map(len) > 0]
+                .groupby(by='RNA')
+                .filter(lambda x: only_one_value_per_param(x['RNA_params']))
+                .groupby(by=['RNA', 'RNA_params_hashable'])
+                .agg(list)
+            )
+        except Exception as e:
+            msg = f'Error while grouping RNA that have one params: {e}\n'
+            msg += f'tudf: \n{tudf}'
+            raise Exception(msg)
+
         rna_tuids_oneparamvalue = (
             [] if rna_tuids_oneparamvalue.empty else list(rna_tuids_oneparamvalue.name)
         )
@@ -354,18 +356,18 @@ class Network:
             cdg.loc[i, 'successor'] = []
             for ii, rr in cdg[cdg.type == 'RNA'].iterrows():
                 assert (
-                    len(r.tu_id) == 1,
-                    "a DNA node should have only one value in its tu_id list (1 DNA node per Transcription Unit)",
-                )
+                    len(r.tu_id) == 1
+                ), "a DNA node should have only one value in its tu_id list (1 DNA node per Transcription Unit)"
+
                 if r.tu_id[0] in rr.tu_id:  # if we have an RNA that has the same TU as the DNA
                     cdg.loc[i, 'successor'].append(ii)  # add the RNA to the DNA's successor
 
         # connect RNA to PRT through successor list
-        for i, r in cdg[cdg.type == 'RNA'].iterrows():  # for each RNA
-            cdg.loc[i, 'successor'] = []
-            for ii, rr in cdg[cdg.type == 'PRT'].iterrows():  # for each PRT
-                if set(rr.tu_id).issubset(set(r.tu_id)):
-                    cdg.loc[i, 'successor'].append(ii)  # add the PRT to the RNA's successor
+        for i_r, rna in cdg[cdg.type == 'RNA'].iterrows():  # for each RNA
+            cdg.loc[i_r, 'successor'] = []
+            for i_p, prt in cdg[cdg.type == 'PRT'].iterrows():  # for each PRT
+                if set(rna.tu_id).issubset(set(prt.tu_id)):
+                    cdg.loc[i_r, 'successor'].append(i_p)  # add the PRT to the RNA's successor
 
         # now deduce the predecessor lists
         cdg['predecessor'] = [list() for _ in range(len(cdg))]
@@ -596,6 +598,12 @@ class Network:
             n: GraphComputeNode = newnodes.pop()
             if n.type != 'source':
                 # for every cdg node that is an input of n
+                if n.cdg_input is None:
+                    msg = f'Error while building compute graph for recipe {self.name}:\n'
+                    msg += f'No cdg_input for node {n.id} of type {n.type}:\n{n}'
+                    msg += f'Content of its cdg_output node:\n{cdg.loc[n.cdg_output]}'
+                    msg += f'CDG:\n{cdg}'
+                    raise RuntimeError(msg)
                 for i, n_inp in enumerate(n.cdg_input):
                     others = self.__isOutputedBy(
                         n_inp, cg + newnodes

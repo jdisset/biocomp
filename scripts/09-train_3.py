@@ -63,9 +63,9 @@ base_path = Path("/Users/jeandisset/Dropbox (MIT)/Biocomp/")
 xp_path = base_path / "Experiments"
 recipe_path = base_path / "Recipes"
 
-# xps = get_xps(xp_path)
-# selected_experiment = list(xps.keys())[1]
-# xp = xps[selected_experiment]
+xps = get_xps(xp_path)
+selected_experiment = list(xps.keys())[0]
+xp = xps[selected_experiment]
 
 # charles xp:
 # - put csv in a data folder
@@ -74,17 +74,34 @@ recipe_path = base_path / "Recipes"
 # - L1 Phic31 has only eYFP?
 
 # all recipe paths:
-allrecipes = list(recipe_path.glob('**/*.json5'))
+# allrecipes = list(recipe_path.glob('**/*.json5'))
+# dbconn = sqlite3.connect(":memory:")
+# bc.import_recipes_to_sql(allrecipes, dbconn, lib)
 
-dbconn = sqlite3.connect(":memory:")
-bc.import_recipes_to_sql(allrecipes, dbconn, lib)
+# ut.plot_cdg([attNG], ['../__out/attNG_cdg.pdf'])
+# ut.plot_networks([attNG], ['../__out/attNG_network.pdf'])
+# ut.plot_networks([attNG]*3, ['../__out/attNG_network.pdf']*3)
 
-attNG = bc.Network(lib, 'attNG', dbconn)
+# let's plot all networks from the xp
 
+outfiles = [f'../__out/{xp.name}_{r}.pdf' for r, n in xp.networks.items()]
+ut.plot_networks(xp.networks.values(), outfiles)
 
-ut.plot_cdg([attNG], ['../__out/attNG_cdg.pdf'])
-ut.plot_networks([attNG], ['../__out/attNG_network.pdf'])
-ut.plot_networks([attNG]*3, ['../__out/attNG_network.pdf']*3)
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                          --     load data     --
+#···············································································
+ut.plot_networks(xp.networks, outfiles)
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                          --     load data     --
+#···············································································
+ut.plot_networks(xp.networks, 
 
 
 #                                                                            }}}
