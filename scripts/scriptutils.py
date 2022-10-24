@@ -128,15 +128,6 @@ else:
     _component_func = lambda: None
 
 
-def grnGraph(gdf, key=None, func=_component_func):
-    nodes = [{'id': f'{i}', 'type': n.type, 'data': n.to_dict()} for i, n in gdf.iterrows()]
-    edges = [
-        {'id': f'{i}', 'source': f'{i}', 'target': f'{n.successor}'}
-        for i, n in gdf.iterrows()
-        if n.successor
-    ]
-    tnodes = [bc.ut.updated_dict(n, {'data': {'id': n['id']}}) for n in nodes]
-    return func(nodes=tnodes, edges=edges, output_type='GRN', key=key)  # {{{}}}
 
 
 def computeGraph(nodes, edges, key=None, func=_component_func, **kwargs):
@@ -155,6 +146,15 @@ def dnaOutput(nodes, key=None, func=_component_func, **kwargs):
     tnodes = [bc.ut.updated_dict(n, {'data': {'id': n['id']}}) for n in nodes if n['type'] == 'DNA']
     return func(nodes=tnodes, output_type='DNA', key=key, **kwargs)
 
+def drawCentralDogmaGraph(gdf, key=None, func=_component_func):
+    nodes = [{'id': f'{i}', 'type': n.type, 'data': n.to_dict()} for i, n in gdf.iterrows()]
+    edges = [
+        {'id': f'{i}', 'source': f'{i}', 'target': f'{n.successor}'}
+        for i, n in gdf.iterrows()
+        if n.successor
+    ]
+    tnodes = [bc.ut.updated_dict(n, {'data': {'id': n['id']}}) for n in nodes]
+    return func(nodes=tnodes, edges=edges, output_type='GRN', key=key)  # {{{}}}
 
 def drawComputeGraph(df, func=None, cdg=None, **kwargs):
     uidGen = bc.ut.uniqueIdGenerator()
@@ -340,22 +340,42 @@ def screenCaptures(
     print(f'Saved all screenshots in {end-start}s')
 
 
-def draw_network(net, *a, **kw):
-    drawComputeGraph(net.compute_graph, *a, cdg=net.central_dogma_graph, **kw)
-
 
 def plot_networks(nets: List[bc.Network], filenames):
+    import nest_asyncio
+    nest_asyncio.apply()
 
     H = 1000
     W = 1000
 
+    def draw_network(net, *a, **kw):
+        drawComputeGraph(net.compute_graph, *a, height=H, width=W, cdg=net.central_dogma_graph, **kw)
+
     screenCaptures(
-        partial(draw_network, height=H, width=W),
+        draw_network,
         nets,
         filenames=filenames,
         height=H,
         width=W,
     )
+
+def plot_cdg(nets: List[bc.Network], filenames):
+    import nest_asyncio
+    nest_asyncio.apply()
+    H = 1000
+    W = 1000
+
+    def draw_cdg(net, *a, **kw):
+        drawCentralDogmaGraph(net.central_dogma_graph, *a, **kw)
+
+    screenCaptures(
+        draw_cdg,
+        nets,
+        filenames=filenames,
+        height=H,
+        width=W,
+    )
+
 
 
 #                                                                            }}}

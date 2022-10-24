@@ -35,12 +35,12 @@ logging.basicConfig(level=logging.DEBUG)
 # ···············································································
 
 
-# def get_lib():
-    # return ut.getLibFromGoogleSheet()
-# lib = get_lib()
-# ut.save(lib, '/tmp/lib.pickle')
+def get_lib():
+    return ut.getLibFromGoogleSheet()
+lib = get_lib()
+ut.save(lib, '/tmp/lib.pickle', overwrite=True)
 
-lib = ut.load('/tmp/lib.pickle')
+# lib = ut.load('/tmp/lib.pickle')
 
 
 #                                                                            }}}
@@ -63,9 +63,25 @@ base_path = Path("/Users/jeandisset/Dropbox (MIT)/Biocomp/")
 xp_path = base_path / "Experiments"
 recipe_path = base_path / "Recipes"
 
-xps = get_xps(xp_path)
-selected_experiment = list(xps.keys())[1]
-xp = xps[selected_experiment]
+# xps = get_xps(xp_path)
+# selected_experiment = list(xps.keys())[1]
+# xp = xps[selected_experiment]
+
+# charles xp:
+# - put csv in a data folder
+# - dots should be escaped in field names
+# - having parts named identical to L0s is weird and potentially confusing?
+
+# all recipe paths:
+allrecipes = list(recipe_path.glob('**/*.json5'))
+
+dbconn = sqlite3.connect(":memory:")
+bc.import_recipes_to_sql(allrecipes, dbconn, lib)
+
+attNG = bc.Network(lib, 'attNG', dbconn)
+attNG.central_dogma_graph
+
+# ut.plot_cdg([attNG], ['../__out/attNG_cdg.pdf'])
 
 
 #                                                                            }}}
@@ -115,28 +131,6 @@ statcol = 'count' if stat == 'count' else (z_axis, stat)
 
 for coords, value in df[statcol].items():
     Z[coords] = value
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

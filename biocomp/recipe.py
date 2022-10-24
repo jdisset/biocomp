@@ -161,9 +161,12 @@ class XP:
 
         self.xpfile = xp_path / xp_name / f"{xp_name}.xp.json5"
         with open(self.xpfile) as f:
-            xpobj = json5.load(f)
-            for k, v in xpobj.items():
-                setattr(self, k, v)
+            try:
+                xpobj = json5.load(f)
+                for k, v in xpobj.items():
+                    setattr(self, k, v)
+            except Exception as e:
+                raise RuntimeError(f'Error loading xp file {self.xpfile}: \n{e}')
 
         self.recipe_names = [s['recipe'] for s in self.samples]
         unique_recipe_names = list(set(self.recipe_names))
@@ -172,12 +175,13 @@ class XP:
         import_recipes_to_sql(
             [recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], dbconn, lib
         )
-        self.networks = {
-            recipename: Network(lib, recipename, dbconn)
-            for recipename in track(
-                unique_recipe_names, description=f'Building networks for xp {xp_name}'
-            )
-        }
+        self.networks = {}
+        for recipename in unique_recipe_names:
+            try:
+                self.networks[recipename] = Network(lib, recipename, dbconn)
+            except Exception as e:
+                raise RuntimeError(f'Error building network for recipe {recipename}: \n{e}')
+
         log.debug(f'Loaded {len(self.networks)} networks')
         if inverse:
             self.inv_networks = {k: inverted_network(v) for k, v in self.networks.items()}
@@ -189,7 +193,7 @@ class XP:
             assert self.inv_networks is not None
         nets = self.inv_networks if inverse else self.networks
         assert nets
-        models ={}
+        models = {}
         for s in track(self.samples, description='Building models'):
             try:
                 models[s['name']] = ComputeGraphModel(nets[s['recipe']])
@@ -204,7 +208,9 @@ class XP:
             self.xp_path / self.name / 'data' / f"{s['name']}.{self.name}.csv" for s in self.samples
         ]
         df_data: dict[str, pd.DataFrame] = {}
-        for s, f in track(list(zip(self.samples, datafiles)), description=f"loading data files for {self.name}"):
+        for s, f in track(
+            list(zip(self.samples, datafiles)), description=f"loading data files for {self.name}"
+        ):
             content = pd.read_csv(f)
             assert isinstance(content, pd.DataFrame)  # otherwise type hints won't match
             df_data[s['name']] = content

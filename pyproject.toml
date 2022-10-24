@@ -1,3 +1,8 @@
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[tool.pyright]
+reportMissingImports = true
+reportMissingTypeStubs = false
+typeCheckingMode = "off"

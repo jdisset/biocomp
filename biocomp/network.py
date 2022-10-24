@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from . import utils as ut
 from .compute import INVERSE_NODES_DICT as INVERSE_NODES_DICT
-from typing import Callable, List, Dict, Tuple, Iterable
+from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast
 import copy
 import json
 
@@ -167,10 +167,13 @@ def transcription_unit_from_L1(l1id, lib):
 class Network:
     def __init__(self, lib, recipe_name, recipe_db, custom_outputs=None, build=True):
         self.lib = lib
-        self.name = recipe_name
+        self.name:str = recipe_name
         self.db = recipe_db
         self.db.commit()
         self.custom_outputs = custom_outputs
+        self.transcription_units: Optional[Dict[str, TranscriptionUnit]] = None
+        self.compute_graph: Optional[pd.DataFrame] = None
+        self.central_dogma_graph: Optional[pd.DataFrame] = None
         if build:
             self.build()
 
@@ -191,7 +194,9 @@ class Network:
         }
         assert len(self.transcription_units) > 0, f'No transcription units in recipe {self.name}'
         self.__build_central_dogma_graph(self.custom_outputs)
-        self.__build_compute_graph()
+        print(f'Network {self.name} built with {len(self.transcription_units)} transcription units')
+        print(f'Central dogma graph: {self.central_dogma_graph}')
+        # self.__build_compute_graph()
 
     def is_built(self):
         return (
@@ -270,13 +275,13 @@ class Network:
     # ···············································································
 
     def __build_central_dogma_graph(self, custom_outputs=None):
-        tu = []
+        tu:List[dict] = []
+        assert self.transcription_units is not None
         for tuid, t in self.transcription_units.items():
             dna, dna_params = self.__getDna(t)
             rna, rna_params = self.__getRna(t)
             prt, prt_params = self.__getPrt(t)
-            tu.append(
-                {
+            tu.append({
                     'name': tuid,
                     'DNA': dna,
                     'DNA_params': dna_params,
@@ -286,14 +291,13 @@ class Network:
                     'RNA_params_hashable': hashabledict(rna_params),
                     'PRT': prt,
                     'PRT_params': prt_params,
-                    'PRT_params_hashable': hashabledict(prt_params),
-                }
-            )
-        assert len(tu) > 0
+                    'PRT_params_hashable': hashabledict(prt_params)
+                })
+        assert tu is not None
         tudf = pd.DataFrame(tu)
 
         # transcription units are never grouped
-        dna_df = pd.DataFrame({'tu_id': [[x] for x in tudf['name']], 'type': 'DNA'})
+        dna_df = pd.DataFrame({'tu_id': [[x] for x in cast(str,tudf['name'])], 'type': 'DNA'})
 
         def only_one_value_per_param(params: Dict[str, List[str]]) -> bool:
             for _, parts in params.items():
@@ -302,7 +306,7 @@ class Network:
             return True
 
         rna_tuids_noparams = list(
-            tudf[tudf['RNA_params'].map(len) == 0].groupby(by='RNA').agg(list).name
+            tudf[tudf['RNA_params'].map(len) == 0].groupby(by='RNA').agg(list).name # type: ignore
         )
 
         rna_tuids_oneparamvalue = (
@@ -703,8 +707,6 @@ class Network:
                     self.compute_graph.output_to.apply(lambda x: i in [y[0] for y in x])
                 ]
                 try:
-                    # self.compute_graph.loc[i, 'input_from'] = [None] * len(output_to_me)
-                    # to fix, we need to use at instead of loc
                     self.compute_graph.at[i, 'input_from'] = [None] * len(output_to_me)
                 except Exception as e:
                     msg = f'Error cleaning up compute graph: {e}\n'
@@ -716,7 +718,14 @@ class Network:
             # then fill it
             for i, r in self.compute_graph.iterrows():
                 for p, o in enumerate(r.output_to):
-                    self.compute_graph.loc[o[0], 'input_from'][o[1]] = (i, p)
+                    try:
+                        self.compute_graph.at[o[0], 'input_from'][o[1]] = (i, p)
+                    except Exception as e:
+                        msg = f'Error cleaning up compute graph: {e}\n'
+                        msg += f'currently processing {o}.\n'
+                        msg += f'\ninput node is:\n{r}'
+                        msg += f'\noutput node is:\n{self.compute_graph.loc[o[0]]}'
+                        raise RuntimeError(msg)
 
         self._sanity_check()
 
