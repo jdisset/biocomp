@@ -71,6 +71,7 @@ recipe_path = base_path / "Recipes"
 # - put csv in a data folder
 # - dots should be escaped in field names
 # - having parts named identical to L0s is weird and potentially confusing?
+# - L1 Phic31 has only eYFP?
 
 # all recipe paths:
 allrecipes = list(recipe_path.glob('**/*.json5'))
@@ -79,9 +80,11 @@ dbconn = sqlite3.connect(":memory:")
 bc.import_recipes_to_sql(allrecipes, dbconn, lib)
 
 attNG = bc.Network(lib, 'attNG', dbconn)
-attNG.central_dogma_graph
 
-# ut.plot_cdg([attNG], ['../__out/attNG_cdg.pdf'])
+
+ut.plot_cdg([attNG], ['../__out/attNG_cdg.pdf'])
+ut.plot_networks([attNG], ['../__out/attNG_network.pdf'])
+ut.plot_networks([attNG]*3, ['../__out/attNG_network.pdf']*3)
 
 
 #                                                                            }}}

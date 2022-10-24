@@ -167,7 +167,7 @@ def transcription_unit_from_L1(l1id, lib):
 class Network:
     def __init__(self, lib, recipe_name, recipe_db, custom_outputs=None, build=True):
         self.lib = lib
-        self.name:str = recipe_name
+        self.name: str = recipe_name
         self.db = recipe_db
         self.db.commit()
         self.custom_outputs = custom_outputs
@@ -194,9 +194,7 @@ class Network:
         }
         assert len(self.transcription_units) > 0, f'No transcription units in recipe {self.name}'
         self.__build_central_dogma_graph(self.custom_outputs)
-        print(f'Network {self.name} built with {len(self.transcription_units)} transcription units')
-        print(f'Central dogma graph: {self.central_dogma_graph}')
-        # self.__build_compute_graph()
+        self.__build_compute_graph()
 
     def is_built(self):
         return (
@@ -275,13 +273,14 @@ class Network:
     # ···············································································
 
     def __build_central_dogma_graph(self, custom_outputs=None):
-        tu:List[dict] = []
+        tu: List[dict] = []
         assert self.transcription_units is not None
         for tuid, t in self.transcription_units.items():
             dna, dna_params = self.__getDna(t)
             rna, rna_params = self.__getRna(t)
             prt, prt_params = self.__getPrt(t)
-            tu.append({
+            tu.append(
+                {
                     'name': tuid,
                     'DNA': dna,
                     'DNA_params': dna_params,
@@ -291,13 +290,14 @@ class Network:
                     'RNA_params_hashable': hashabledict(rna_params),
                     'PRT': prt,
                     'PRT_params': prt_params,
-                    'PRT_params_hashable': hashabledict(prt_params)
-                })
+                    'PRT_params_hashable': hashabledict(prt_params),
+                }
+            )
         assert tu is not None
         tudf = pd.DataFrame(tu)
 
         # transcription units are never grouped
-        dna_df = pd.DataFrame({'tu_id': [[x] for x in cast(str,tudf['name'])], 'type': 'DNA'})
+        dna_df = pd.DataFrame({'tu_id': [[x] for x in cast(str, tudf['name'])], 'type': 'DNA'})
 
         def only_one_value_per_param(params: Dict[str, List[str]]) -> bool:
             for _, parts in params.items():
@@ -306,7 +306,7 @@ class Network:
             return True
 
         rna_tuids_noparams = list(
-            tudf[tudf['RNA_params'].map(len) == 0].groupby(by='RNA').agg(list).name # type: ignore
+            tudf[tudf['RNA_params'].map(len) == 0].groupby(by='RNA').agg(list).name  # type: ignore
         )
 
         rna_tuids_oneparamvalue = (
@@ -349,20 +349,25 @@ class Network:
         cdg['predecessor'] = None
         cdg['successor'] = None
 
+        # connect DNA to RNA through successor list
         for i, r in cdg[cdg.type == 'DNA'].iterrows():
             cdg.loc[i, 'successor'] = []
             for ii, rr in cdg[cdg.type == 'RNA'].iterrows():
-                for tuid in r.tu_id:
-                    if tuid in rr.tu_id:
-                        cdg.loc[i, 'successor'].append(ii)
+                assert (
+                    len(r.tu_id) == 1,
+                    "a DNA node should have only one value in its tu_id list (1 DNA node per Transcription Unit)",
+                )
+                if r.tu_id[0] in rr.tu_id:  # if we have an RNA that has the same TU as the DNA
+                    cdg.loc[i, 'successor'].append(ii)  # add the RNA to the DNA's successor
 
-        for i, r in cdg[cdg.type == 'RNA'].iterrows():
+        # connect RNA to PRT through successor list
+        for i, r in cdg[cdg.type == 'RNA'].iterrows():  # for each RNA
             cdg.loc[i, 'successor'] = []
-            for ii, rr in cdg[cdg.type == 'PRT'].iterrows():
-                for tuid in r.tu_id:
-                    if tuid in rr.tu_id:
-                        cdg.loc[i, 'successor'].append(ii)
+            for ii, rr in cdg[cdg.type == 'PRT'].iterrows():  # for each PRT
+                if set(rr.tu_id).issubset(set(r.tu_id)):
+                    cdg.loc[i, 'successor'].append(ii)  # add the PRT to the RNA's successor
 
+        # now deduce the predecessor lists
         cdg['predecessor'] = [list() for _ in range(len(cdg))]
         for i, r in cdg.iterrows():
             if r.successor is not None:
