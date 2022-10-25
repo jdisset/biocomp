@@ -47,27 +47,30 @@ def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=None, b
         bin_axis = protein_names
     bin_axisid = [protein_names.index(p) for p in bin_axis]
     POWER_RANGE = 20
-    VMAX_EPSILON = 10.0**(-POWER_RANGE)
+    VMAX_EPSILON = 10.0 ** (-POWER_RANGE)
     vmin, vmax = data[:, bin_axisid].min(axis=0), data[:, bin_axisid].max(axis=0) + VMAX_EPSILON
     if bin_min is not None:
         vmin = max(vmin, bin_min)
     if bin_max is not None:
         vmax = min(vmax, bin_max)
     # we want to bin the data using logaritmic bins with a fixed resolution, not a specific number of bins
-    powers = 10.0**np.arange(-POWER_RANGE, POWER_RANGE, resolution)
+    powers = 10.0 ** np.arange(-POWER_RANGE, POWER_RANGE, resolution)
     first_bin = np.array([powers[powers < v].max() for v in vmin])
     last_bin = np.array([powers[powers > v].min() for v in vmax])
     nbins = np.ceil(np.log10(last_bin / first_bin) / resolution).astype(int)
-    bin_edges = [np.geomspace(first_bin[i], last_bin[i], nbins[i] + 1) for i in range(len(first_bin))]
+    bin_edges = [
+        np.geomspace(first_bin[i], last_bin[i], nbins[i] + 1) for i in range(len(first_bin))
+    ]
     coords = np.array([np.digitize(data[:, i], be) for i, be in zip(bin_axisid, bin_edges)]).T - 1
     df = pd.DataFrame(data, columns=protein_names)
     df['coord'] = [tuple(c) for c in coords]
     df2 = df.groupby('coord').agg(['mean']).reset_index()
-    df2['count'] = df.groupby('coord').size().values
     df2['indices'] = df.reset_index().groupby('coord').agg({'index': lambda x: list(x)}).values
+    df2['indices'] = df2['indices'].apply(lambda x: np.array(x, dtype=int))
+    df2['count'] = df2['indices'].apply(len)
 
     for i, p in enumerate(bin_axis):
-        df2[('coords',p)] = df2['coord'].apply(lambda x: x[i])
+        df2[('coords', p)] = df2['coord'].apply(lambda x: x[i])
     df2 = df2.drop('coord', axis=1, level=0)
     df2 = df2.set_index([('coords', p) for p in bin_axis])
 
@@ -88,10 +91,26 @@ def balance_per_bin(data, statdf, threshold_quantile=0.4, threshold_min=20) -> n
     balanced_indices = []
     for i, row in statdf.iterrows():
         balanced_indices.append(
-            np.random.choice(row['indices'], min(int(threshold), int(row['count'])), replace=False)
+            np.random.choice(
+                row['indices'][0], min(int(threshold), int(row['count'])), replace=False
+            )
         )
     balanced_data = data[np.concatenate(balanced_indices), :]
     return balanced_data
+
+
+def balance_each_dataset(models:dict[str, bc.ComputeGraphModel], Y:dict[str, np.ndarray]):
+    """balances each dataset individually (not across datasets but within each dataset,
+    so that each dataset aims for a similar number of samples per bin)"""
+    X_balanced, Y_balanced = {}, {}
+    for sample, model in models.items():
+        data = Y[sample]
+        out_proteins = model.get_output_proteins()
+        in_proteins = model.get_inverted_input_proteins()
+        stats, _ = binstats(data, out_proteins, in_proteins, resolution=0.5)
+        Y_balanced[sample] = balance_per_bin(data, stats, threshold_quantile=0.4, threshold_min=20)
+        X_balanced[sample] = model.get_input_from_output(Y_balanced[sample])
+    return X_balanced, Y_balanced
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -111,7 +130,20 @@ class MyFormatter(string.Formatter):
 fmt = MyFormatter()
 
 
-def heatmap(statdf, bins, stat_columns=['mean'], z_protein = None, lims = {}, figscale=1.0, count_threshold=2, cmap='YlGnBu', title=None, subtitle=None, filename=None, **kwargs):
+def heatmap(
+    statdf,
+    bins,
+    stat_columns=['mean'],
+    z_protein=None,
+    lims={},
+    figscale=1.0,
+    count_threshold=2,
+    cmap='YlGnBu',
+    title=None,
+    subtitle=None,
+    filename=None,
+    **kwargs,
+):
 
     from matplotlib.colors import LogNorm
 
@@ -125,16 +157,14 @@ def heatmap(statdf, bins, stat_columns=['mean'], z_protein = None, lims = {}, fi
 
     df = statdf[statdf['count'] >= count_threshold]
 
-
     xy_axis = [n[1] for n in df.index.names]
 
     if z_protein is None:
         z_axis = [c[0] for c in df.columns if c[1] and c[0] not in xy_axis]
-        assert(len(z_axis) == 1)
+        assert len(z_axis) == 1
         z_axis = z_axis[0]
     else:
         z_axis = z_protein
-
 
     for stat, ax in zip(stat_columns, axes):
         if stat == 'indices':
@@ -162,7 +192,10 @@ def heatmap(statdf, bins, stat_columns=['mean'], z_protein = None, lims = {}, fi
 
         im = ax.imshow(Z.T, origin='lower', norm=norm, cmap=cmap)
 
-        ax.set_title(stat)
+        if stat == 'count':
+            ax.set_title('count', fontsize=fontsize)
+        else:
+            ax.set_title(f'{z_axis} {stat}', fontsize=fontsize)
 
         ax.set_xlabel(xy_axis[0])
         ax.set_ylabel(xy_axis[1])
@@ -176,7 +209,7 @@ def heatmap(statdf, bins, stat_columns=['mean'], z_protein = None, lims = {}, fi
             ax.grid(which='minor', axis='both', linestyle='-', color='w', linewidth=grid_thickness)
         ax.tick_params(which='minor', bottom=False, left=False)
 
-        tick_freq = max(1, int(len(xbin) / 10))
+        tick_freq = max(1, int(len(xbin) / 7))
         ax.set_xticks(np.arange(len(xbin))[::tick_freq], minor=False)
         ax.set_yticks(np.arange(len(ybin))[::tick_freq], minor=False)
         xl = [f"{x:.0f}" if x < 100 else fmt.format("{:m}", x) for x in xbin[::tick_freq]]
@@ -199,6 +232,7 @@ def heatmap(statdf, bins, stat_columns=['mean'], z_protein = None, lims = {}, fi
             ]
         )
         from matplotlib.ticker import LogFormatterSciNotation
+
         cb_format = None
         if norm is not None:
             cb_format = LogFormatterSciNotation()
@@ -231,7 +265,14 @@ def heatmap(statdf, bins, stat_columns=['mean'], z_protein = None, lims = {}, fi
 
     title = title if title is not None else f'{z_axis} stats'
     # suptitle should be higher than default
-    fig.suptitle(title, fontsize=fontsize * 1.8, fontweight='light', fontstretch='expanded', fontname='Arial', y=0.99)
+    fig.suptitle(
+        title,
+        fontsize=fontsize * 1.8,
+        fontweight='light',
+        fontstretch='expanded',
+        fontname='Arial',
+        y=0.99,
+    )
 
     if subtitle:
         # increase figure height
@@ -252,135 +293,28 @@ def heatmap(statdf, bins, stat_columns=['mean'], z_protein = None, lims = {}, fi
 
     if filename:
         from matplotlib.transforms import Bbox
-        plt.savefig(filename, dpi=300, bbox_inches=Bbox([[0.5*figscale, 0], [figsize[0], figsize[1]]]))
+
+        plt.savefig(
+            filename, dpi=300, bbox_inches=Bbox([[0.5 * figscale, 0], [figsize[0], figsize[1]]])
+        )
 
     plt.show()
 
 
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                          --     archive     --
-#···············································································
-
-def heatmap_back(df, bins, axis_names=None, figscale=1.0, count_threshold=1, cmap='YlGnBu', title=None, subtitle=None, filename=None, **kwargs):
-
-    fontsize = 12 * figscale
-
-    nstats = len(df.columns) - (1 if 'indices' in df.columns else 0)
-    figsize = (figscale * 10 * nstats + (nstats - 1) * 4 * figscale, figscale * 10)
-    fig, axes = plt.subplots(1, nstats, figsize=figsize)
-
-    df = df[df['count'] >= count_threshold]
-
-    for stat, ax in zip(df.columns, axes):
-        if stat == 'indices':
-            continue
-        Z = np.full((np.shape(bins)[0],) * 2, np.nan)
-        # coords tuple is the index of the df
-        for coords, value in df[stat].items():
-            Z[coords] = value
-
-        # nans should be grey
-        cmap = plt.get_cmap(cmap)
-        cmap.set_bad(color='#EEEEEE')
-        vmin = 0 if stat == 'count' else None
-        im = ax.imshow(Z, origin='lower', vmin=vmin, cmap=cmap)
-        ax.set_title(stat)
-        if axis_names:
-            ax.set_xlabel(axis_names[0])
-            ax.set_ylabel(axis_names[1])
-
-        # add white grid lines to separate bins
-        ax.set_xticks(np.arange(len(bins[:, 0]) + 1) - 0.5, minor=True)
-        ax.set_yticks(np.arange(len(bins[:, 1]) + 1) - 0.5, minor=True)
-        grid_thickness = 60.0 * figscale / max(len(bins), 15)
-        if grid_thickness > 0.75:
-            grid_thickness = max(1.25, grid_thickness)
-            ax.grid(which='minor', axis='both', linestyle='-', color='w', linewidth=grid_thickness)
-        ax.tick_params(which='minor', bottom=False, left=False)
-
-        tick_freq = max(1, int(len(bins[:, 0]) / 10))
-        ax.set_xticks(np.arange(len(bins[:, 0]))[::tick_freq], minor=False)
-        ax.set_yticks(np.arange(len(bins[:, 1]))[::tick_freq], minor=False)
-        xl = [f"{x:.0f}" if x < 100 else fmt.format("{:m}", x) for x in bins[:, 0][::tick_freq]]
-        yl = [f"{x:.0f}" if x < 100 else fmt.format("{:m}", x) for x in bins[:, 1][::tick_freq]]
-        ax.set_xticklabels(xl, minor=False)
-        ax.set_yticklabels(yl, minor=False)
-
-        # remove border
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-
-        width = ax.get_position().width
-        height = ax.get_position().height
-        cax = fig.add_axes(
-            [
-                ax.get_position().x1 + 0.02 * figscale,
-                ax.get_position().y0 + height * 0.25,
-                0.017 * figscale,
-                height / 2,
-            ]
-        )
-        fig.colorbar(im, cax=cax)
-
-        # set all font sizes
-        ax.tick_params(labelsize=fontsize)
-        ax.title.set_fontsize(fontsize * 1.4)
-        ax.xaxis.label.set_fontsize(fontsize)
-        ax.yaxis.label.set_fontsize(fontsize)
-        cax.tick_params(labelsize=fontsize)
-        cax.yaxis.get_offset_text().set_fontsize(fontsize)
-
-        # change font to custom (roboto)
-        font = 'Roboto Mono Light for Powerline'
-        for item in (
-            [ax.xaxis.label, ax.yaxis.label]
-            + ax.get_xticklabels()
-            + ax.get_yticklabels()
-            + cax.get_xticklabels()
-            + cax.get_yticklabels()
-        ):
-            item.set_fontname(font)
-
-        cax.yaxis.get_offset_text().set_fontname(font)
-        ax.title.set_fontname('Arial')
-        # set font weight to not bold
-        ax.title.set_fontweight('light')
-        ax.title.set_fontstretch('expanded')
-
-    title = title if title is not None else f'{axis_names[2]} stats'
-    # suptitle should be higher than default
-    fig.suptitle(title, fontsize=fontsize * 1.8, fontweight='light', fontstretch='expanded', fontname='Arial', y=0.99)
-
-    if subtitle:
-        # increase figure height
-        # fig.set_figheight(fig.get_figheight() * 1.1)
-        # write smaller, below the title, italic, centered
-        fig.text(
-            0.5,
-            0.95,
-            subtitle,
-            fontsize=fontsize * 1.2,
-            fontweight='light',
-            fontstretch='expanded',
-            fontname='Arial',
-            horizontalalignment='center',
-            verticalalignment='top',
-            style='italic',
-        )
-
-    if filename:
-        from matplotlib.transforms import Bbox
-        plt.savefig(filename, dpi=300, bbox_inches=Bbox([[0.5*figscale, 0], [figsize[0], figsize[1]]]))
-
-    plt.show()
-
-
+# example usage
+# out_proteins = model.get_output_proteins()
+# in_proteins = model.get_inverted_input_proteins()
+# stats, bins = binstats(y, out_proteins, in_proteins, resolution=0.5)
+# heatmap(
+        # stats,
+        # bins,
+        # figscale=0.6,
+        # stat_columns=['mean','count'],
+        # z_protein='eYFP',
+        # lims={'mean': (1e3, 1e8)},
+        # title=f'{model.network.name}',
+        # subtitle=f'{len(y)} data points',
+    # )
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
-
