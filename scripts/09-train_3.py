@@ -38,7 +38,7 @@ logging.basicConfig(level=logging.DEBUG)
 def get_lib():
     return ut.getLibFromGoogleSheet()
 lib = get_lib()
-ut.save(lib, '/tmp/lib.pickle', overwrite=True)
+# ut.save(lib, '/tmp/lib.pickle', overwrite=True)
 
 # lib = ut.load('/tmp/lib.pickle')
 
@@ -89,93 +89,130 @@ xp = bc.XP(georgXP, xp_path, recipe_path, lib)
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+import optax
 
 models = xp.get_models()
 X, Y = xp.get_XY(models)
+X, Y = du.balance_each_dataset(models, Y)
+
+import wandb as wb
+
+cfg = {
+    "learning_rate": 0.005,
+    "adam_w_decay": 0.001,
+    "clipping": 0.001,
+    "n_replicates": 1,
+    "initial_param_scaling": 0.01,
+    "normalize_data": False,
+    "epochs": 10000,
+    "log_rate": 1,
+    "save_rate": 100,
+    "rng_key": 42131,
+}
 
 
-x = list(X.values())[0]
-y = list(Y.values())[0]
-model = list(models.values())[0]
+optimizer = optax.chain(
+    # optax.adaptive_grad_clip(cfg['clipping']),
+    optax.adamw(learning_rate=cfg['learning_rate'], weight_decay=cfg['adam_w_decay']),
+)
 
-out_proteins = model.get_output_proteins()
-in_proteins = model.get_inverted_input_proteins()
+key = jax.random.PRNGKey(cfg['rng_key'])
+ikeys = jax.random.split(key, len(models))
+params = {}
 
-za = out_proteins.index('eYFP')
-xa, ya = out_proteins.index('eBFP'), out_proteins.index('mKate')
-
-stats, bins = du.binstats(y, out_proteins, in_proteins, resolution=0.5)
-
-du.heatmap(
-        stats,
-        bins,
-        figscale=0.6,
-        stat_columns=['mean','count'],
-        z_protein='eYFP',
-        lims={'mean': (1e3, 1e8)},
-        axis_names=[out_proteins[xa], out_proteins[ya], out_proteins[za]],
-        title=f'{model.network.name}',
-        subtitle=f'{len(y)} data points',
-    )
+for s, m, k in zip(models.keys(), models.values(), ikeys):
+    params = m.init(k, pre_params=params, node_namespace=s)
 
 
-stat_columns = ['mean']
-nstats = len(stat_columns)
-df = stats[stats['count'] > 1]
+def mse_loss(y, y_hat):
+    return jnp.mean((y - y_hat)**2)
 
-xy_axis = [n[1] for n in df.index.names]
-z_axis = [c[0] for c in df.columns if c[1] and c[0] not in xy_axis][0]
-stat = stat_columns[0]
-Z = np.full((len(bins[xy_axis[0]]), len(bins[xy_axis[1]])), np.nan)
-statcol = 'count' if stat == 'count' else (z_axis, stat)
+loss_f = mse_loss
 
-for coords, value in df[statcol].items():
-    Z[coords] = value
+# jitted_models = {k: jit(v) for k, v in models.items()}
+
+def apply_model(params, x, key, name):
+    m = partial(models[name], params, node_namespace=name, rng_key=key)
+    return vmap(m)(x[name]).squeeze()
 
 
+@jit
+def loss_func(params, x, y, rng_key):
+    print('loss func')
+    nmodels = len(models)
+    ikeys = jax.random.split(rng_key, nmodels)
+    losses = 0
+    for sample, model, k in zip(models.keys(), models.values(), ikeys):
+        y_hat = apply_model(params, x, k, sample)
+        losses += loss_f(y[sample], y_hat)
+
+    return losses / nmodels
+
+def wandb_update(loss, params, iter_num):
+    wb.log({'loss': loss}, step=iter_num)
+    wb.log({'params': params}, step=iter_num)
+
+def logger_update(loss, params, iter_num):
+    wandb_update(loss, params, iter_num)
+    print(f'[{iter_num}/{cfg["epochs"]}] loss: {loss}')
 
 
+def training_step(params, opt_state, key, x, y):
+    loss, grads = jax.value_and_grad(loss_func)(params, x, y, key)
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    params = optax.apply_updates(params, updates)
+    return params, opt_state, grads, loss
 
-# now all the data, individually. We build a new X and Y, X_balanced and Y_balanced
-X_balanced = {}
-Y_balanced = {}
-nbins = 20
+opt_state = optimizer.init(params)
 
-for sample, model in models.items():
-    print('-' * 80)
-    data = np.array(Y[sample])
-    out_proteins = model.get_output_proteins()
-    za = out_proteins.index('eYFP')
-    xa, ya = out_proteins.index('eBFP'), out_proteins.index('mKate')
-    stats, bins = du.binstats(data, [xa, ya], za, nbins=nbins)
-    Y_bal = du.balance_per_bin(data, stats, threshold_quantile=0.4, threshold_min=20)
-    X_bal = model.get_input_from_output(Y_bal)
-    X_balanced[sample] = X_bal
-    Y_balanced[sample] = Y_bal
-    # plot heatmap
-    # before:
-    print(f'before: {sample}')
-    du.heatmap(
-        stats,
-        bins,
-        figscale=0.7,
-        axis_names=[out_proteins[xa], out_proteins[ya], out_proteins[za]],
-        title=f'{sample} unbalanced',
-        subtitle=f'{len(data)} points',
-        # filename=f'../__out/unbalanced_{sample}.png',
-    )
-    # after:
-    print(f'after: {sample}')
-    bdf, bbins = du.binstats(Y_bal, [xa, ya], za, nbins=nbins)
-    chg = np.mean(np.abs(bdf['mean'] - stats['mean'])) / np.std(stats['mean'])
+params_history = []
+loss_history = []
 
-    du.heatmap(
-        bdf,
-        bbins,
-        figscale=0.7,
-        axis_names=[out_proteins[xa], out_proteins[ya], out_proteins[za]],
-        title=f'{sample} balanced',
-        subtitle=f'{len(Y_bal)} points ({len(Y_bal)/len(data)*100:.1f}% of original) | changed bin means by {chg*100.0:.1f}% of std',
-        # filename=f'../__out/balanced_{sample}.png',
-    )
+
+def make_batches(X, Y, n_batches):
+    x_ = {s: np.array_split(X[s], n_batches) for s in X.keys()}
+    x_batches = [{s: x_[s][i] for s in x_.keys()} for i in range(n_batches)]
+    y_ = {s: np.array_split(Y[s], n_batches) for s in Y.keys()}
+    y_batches = [{s: y_[s][i] for s in y_.keys()} for i in range(n_batches)]
+    return x_batches, y_batches
+
+n_batches = 2
+x_batches, y_batches = make_batches(X, Y, n_batches)
+
+# step = jit(training_step)
+step = training_step
+
+from datetime import datetime
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+wb.init(config=cfg, project='georg_data_2', entity="jdisset", reinit=True)
+
+for i, k in enumerate(jax.random.split(key, cfg['epochs'])):
+    for x, y in tqdm(list(zip(x_batches, y_batches))):
+        params, opt_state, grads, loss = step(params, opt_state, k, x, y)
+    loss_history.append(loss)
+    params_history.append(params)
+    if i == cfg['epochs'] or i % cfg['log_rate'] == 0 or i == 0:
+        logger_update(loss, params, i)
+        if i == cfg['epochs'] or i % cfg['save_rate'] == 0 or i == 0:
+            ut.save(params_history, f'../__out/{xp.name}_{timestamp}_{i}_params.pkl', overwrite=True)
+            ut.save(loss_history, f'../__out/{xp.name}_{timestamp}_{i}_loss.pkl', overwrite=True)
+
+print('done')
+
+# params_history
+# TODO:
+# 1 - fix the very slow compilation of the training step. Right now it takes forever to compile (because of the for loop that has all the apply_model calls)
+# AND it recompiles for every different batch size. The batch size should be relatively easy to fix if we make sure that the batch size is the same for all samples. (not even sure that'll actually fix it)
+# then there has to be a better way to handle all the models jitting
+
+# 2 - need a way to switch implementations:
+# we want to be able to switch both which compute node is being used (sequestron_ERN_v1, v2, sequestron_ERN_affinity, etc) for a same layout AND also use different sequestrons entirely (that might actually have different input and output species)
+# there might be a way to do both with the same mechanism or similar mechanisms. 
+# something to enable/disable sequestrons from the lib, and a possible remapping/renaming of the sequestron_node. 
+# Ex: 
+# lib.disable_sequestron_type('sequestron_ERN') # or using a list of names to enable?
+# lib.enable_sequestron_type('sequestron_ERN_dna')
+# and then at the network (or model level? network is probably better), provide a node_remap dict to the build function. Ex: n = Network(..., node_remap={'sequestron_ERN': 'sequestron_ERN_v2'})
+
 

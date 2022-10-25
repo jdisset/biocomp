@@ -71,7 +71,7 @@ def train_single_model(model, X, Y, cfg, loss_f=mse_loss, wandb=None):
 
     for i, k in enumerate(jax.random.split(key, cfg['epochs'])):
         keys = jax.random.split(k, cfg['n_replicates'])
-        params, opt_state, grads, loss = step(params, opt_states, keys)
+        params, opt_state, grads, loss = step(params, opt_state, keys)
         loss_history.append(loss)
         params_history.append(params)
         if i == cfg['epochs'] or i % cfg['log_rate'] == 0 or i == 0:
