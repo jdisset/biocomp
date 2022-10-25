@@ -561,6 +561,8 @@ class Network:
                         [int(nparts.index[0]), int(pparts.index[0])],
                         int(oparts.index[0]),
                     )
+                    # we get a unique name for the  sequestron by concatenating the name of the negative and positive parts
+                    cnode.extra = {'seq_name': f'{r.type}::{r.negative_part}#{r.positive_part}'}
                     newnodes.append(cnode)
                     # useful to track which tus are in use
                     tu_in_sequestron.update(oparts['tu_id'].iloc[0])

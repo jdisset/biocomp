@@ -233,10 +233,15 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
 # ···············································································
 
 
-def get_param(params, name, init, shared=False, nodeid=None):
+def get_param(params, name, init, shared=False, nodeid=None, node_namespace=None):
     if not shared:
+        assert nodeid is not None
         params.setdefault('node', {})
-        pardict = params['node'].setdefault(nodeid, {})
+        if node_namespace is not None:
+            params['node'].setdefault(node_namespace, {})
+            pardict = params['node'][node_namespace].setdefault(nodeid, {})
+        else:
+            pardict = params['node'].setdefault(nodeid, {})
     else:
         params.setdefault('shared', {})
         pardict = params['shared']
@@ -322,7 +327,7 @@ class ComputeGraphModel:
         batches = self.__get_batch_sequence_of_nodes()
         flat_batches = [item for sublist in batches for item in sublist]
 
-        def apply(params, inputs, rng_key):
+        def apply(params, inputs, rng_key, node_namespace=None):
             assert len(inputs) == len(
                 self.network.compute_graph[self.network.compute_graph['type'] == 'input']
             )
@@ -344,7 +349,12 @@ class ComputeGraphModel:
                 if node_row.extra is not None and 'is_inverse_of' in node_row.extra:
                     nodeid_for_getters = node_row.extra['is_inverse_of']
 
-                get_p = partial(get_param, params, nodeid=nodeid_for_getters)
+                get_p = partial(
+                    get_param,
+                    params,
+                    nodeid=nodeid_for_getters,
+                    node_namespace=node_namespace,
+                )
                 get_q = partial(
                     get_quantized,
                     params,
@@ -369,12 +379,14 @@ class ComputeGraphModel:
             # should never reach this point
             raise ValueError('Invalid compute graph, no output node found')
 
-        def init(rng_key):
+        def init(rng_key, pre_params=None, node_namespace=None):
             params = {}
+            if pre_params is not None:
+                params = pre_params
             n_inputs = len(
                 self.network.compute_graph[self.network.compute_graph['type'] == 'input']
             )
-            apply(params, [jnp.array([1.0])] * n_inputs, rng_key)
+            apply(params, [jnp.array([1.0])] * n_inputs, rng_key, node_namespace=node_namespace)
             return params
 
         self.apply = apply
@@ -391,9 +403,9 @@ class ComputeGraphModel:
 
         return f'ComputeGraphModel({list_network_inputs()} -> {list_network_outputs()})'
 
-    def __call__(self, params, inputs, rng_key):
+    def __call__(self, *args, **kwargs):
         assert self.built
-        return self.apply(params, inputs, rng_key)
+        return self.apply(*args, **kwargs)
 
     def __get_batch_sequence_of_nodes(self):
         """Return a list of lists of compute nodes from the network,
@@ -446,8 +458,6 @@ class ComputeGraphModel:
         assert len(mapping.keys()) == len(set(mapping.values()))
 
         return mapping
-
-
 
 
 #                                                                            }}}

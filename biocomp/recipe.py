@@ -216,7 +216,7 @@ class XP:
             df_data[s['name']] = content
         return df_data
 
-    def get_XY(self, model_dict) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    def get_XY(self, model_dict:dict[str, ComputeGraphModel]) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         """Returns a dict of {sample_name: (X, Y)} where Y is the reordered data (so that it matches the model's output)"""
         assert self.inv_networks is not None
         # we want to reorder data columns to match the model's output
