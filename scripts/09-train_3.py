@@ -54,18 +54,17 @@ ut.save(lib, '/tmp/lib.pickle', overwrite=True)
 #···············································································
 
 
-def get_xps(xp_path):
-    xpnames = [x.name for x in xp_path.iterdir() if x.is_dir()]
-    return {x: bc.XP(x, xp_path, recipe_path, lib) for x in xpnames}
 
 
 base_path = Path("/Users/jeandisset/Dropbox (MIT)/Biocomp/")
 xp_path = base_path / "Experiments"
 recipe_path = base_path / "Recipes"
 
-xps = get_xps(xp_path)
-selected_experiment = list(xps.keys())[0]
-xp = xps[selected_experiment]
+xpnames = [x.name for x in xp_path.iterdir() if x.is_dir()]
+# xps = {x: bc.XP(x, xp_path, recipe_path, lib) for x in xpnames}
+
+georgXP = '20221012A_massCtrls'
+xp = bc.XP(georgXP, xp_path, recipe_path, lib)
 
 # charles xp:
 # - put csv in a data folder
@@ -84,31 +83,11 @@ xp = xps[selected_experiment]
 
 # let's plot all networks from the xp
 
-outfiles = [f'../__out/{xp.name}_{r}.pdf' for r, n in xp.networks.items()]
-ut.plot_networks(xp.networks.values(), outfiles)
+# outfiles = [f'../__out/{xp.name}_{r}.pdf' for r, n in xp.networks.items()]
+# ut.plot_networks(xp.networks.values(), outfiles)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                          --     load data     --
-#···············································································
-ut.plot_networks(xp.networks, outfiles)
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                          --     load data     --
-#···············································································
-ut.plot_networks(xp.networks, 
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-# ut.drawComputeGraph(network.compute_graph, cdg = network.central_dogma_graph)
-
 
 
 models = xp.get_models()
@@ -120,22 +99,23 @@ y = list(Y.values())[0]
 model = list(models.values())[0]
 
 out_proteins = model.get_output_proteins()
+in_proteins = model.get_inverted_input_proteins()
+
 za = out_proteins.index('eYFP')
 xa, ya = out_proteins.index('eBFP'), out_proteins.index('mKate')
 
-stats, bins = du.binstats(y, out_proteins)
-stats, bins = du.binstats(y, out_proteins, ['mKate', 'eBFP'], resolution=0.5)
-
+stats, bins = du.binstats(y, out_proteins, in_proteins, resolution=0.5)
 
 du.heatmap(
         stats,
         bins,
-        figscale=0.7,
+        figscale=0.6,
         stat_columns=['mean','count'],
+        z_protein='eYFP',
+        lims={'mean': (1e3, 1e8)},
         axis_names=[out_proteins[xa], out_proteins[ya], out_proteins[za]],
-        title=f'{model.network.name} unbalanced',
-        subtitle=f'{len(data)} points',
-        # filename=f'../__out/unbalanced_{sample}.png',
+        title=f'{model.network.name}',
+        subtitle=f'{len(y)} data points',
     )
 
 
@@ -151,22 +131,6 @@ statcol = 'count' if stat == 'count' else (z_axis, stat)
 
 for coords, value in df[statcol].items():
     Z[coords] = value
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

@@ -427,15 +427,27 @@ class ComputeGraphModel:
     def get_input_from_output(self, output_arr):
         # each input node has, in its extra, 'input_from_output' and 'input_position'
         # we want to transform output_arr by reordering the columns
+        mapping = self.get_inverted_input_positions()
+        return output_arr[:, [mapping[i] for i in range(len(mapping))]]
+
+    def get_inverted_input_proteins(self):
+        mapping = self.get_inverted_input_positions()
+        output_proteins = self.get_output_proteins()
+        assert len(mapping) <= len(output_proteins)
+        return [output_proteins[mapping[i]] for i in range(len(mapping))]
+
+    def get_inverted_input_positions(self):
         mapping = {}
         for _, row in self.network.compute_graph[
             self.network.compute_graph['type'] == 'input'
         ].iterrows():
             mapping[row.extra['input_position']] = row.extra['input_from_output']
-
         assert set(mapping.keys()) == set(range(len(mapping.keys())))
         assert len(mapping.keys()) == len(set(mapping.values()))
-        return output_arr[:, [mapping[i] for i in range(len(mapping))]]
+
+        return mapping
+
+
 
 
 #                                                                            }}}

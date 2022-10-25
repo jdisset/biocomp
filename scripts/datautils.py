@@ -40,18 +40,26 @@ def binstats_nbins(data, bin_columns, stat_column, nbins=20, log=True, stats=["m
     df.columns = stats + ['indices']
     return df, bins
 
-def binstats(data, protein_names, bin_axis=None, resolution=0.5):
+
+def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=None, bin_max=None):
+    """Calculate statistics (mean, count), for each bin in len(bin_axis) dimensions."""
     if bin_axis is None:
         bin_axis = protein_names
     bin_axisid = [protein_names.index(p) for p in bin_axis]
-    vmin, vmax = data[:, bin_axisid].min(axis=0), data[:, bin_axisid].max(axis=0)
+    POWER_RANGE = 20
+    VMAX_EPSILON = 10.0**(-POWER_RANGE)
+    vmin, vmax = data[:, bin_axisid].min(axis=0), data[:, bin_axisid].max(axis=0) + VMAX_EPSILON
+    if bin_min is not None:
+        vmin = max(vmin, bin_min)
+    if bin_max is not None:
+        vmax = min(vmax, bin_max)
     # we want to bin the data using logaritmic bins with a fixed resolution, not a specific number of bins
-    powers = 10.0**np.arange(-10, 16, resolution)
+    powers = 10.0**np.arange(-POWER_RANGE, POWER_RANGE, resolution)
     first_bin = np.array([powers[powers < v].max() for v in vmin])
     last_bin = np.array([powers[powers > v].min() for v in vmax])
     nbins = np.ceil(np.log10(last_bin / first_bin) / resolution).astype(int)
     bin_edges = [np.geomspace(first_bin[i], last_bin[i], nbins[i] + 1) for i in range(len(first_bin))]
-    coords = np.array([np.digitize(data[:, i], be) for i, be in zip(bin_axisid, bin_edges)]).T
+    coords = np.array([np.digitize(data[:, i], be) for i, be in zip(bin_axisid, bin_edges)]).T - 1
     df = pd.DataFrame(data, columns=protein_names)
     df['coord'] = [tuple(c) for c in coords]
     df2 = df.groupby('coord').agg(['mean']).reset_index()
@@ -65,29 +73,6 @@ def binstats(data, protein_names, bin_axis=None, resolution=0.5):
 
     bins = {p: be for p, be in zip(bin_axis, bin_edges)}
     return df2, bins
-
-
-
-
-
-    # vmin, vmax = data.min(axis=0), data.max(axis=0)
-    # # we want to bin the data using logaritmic bins with a fixed resolution, not a specific number of bins
-    # powers = 10.0**np.arange(-10, 10, resolution)
-    # first_bin = np.array([powers[powers< v].max() for v in vmin])
-    # last_bin = np.array([powers[powers> v].min() for v in vmax])
-    # nbins = np.ceil(np.log10(last_bin / first_bin) / resolution).astype(int)
-    # bin_edges = [np.geomspace(first_bin[i], last_bin[i], nbins[i] + 1) for i in range(len(first_bin))]
-    # coords = np.array([np.digitize(data[:, i], bin_edges[i]) for i in range(len(bin_edges))]).T
-    # df = pd.DataFrame(data, columns=out_proteins)
-    # df['coords'] = [tuple(c) for c in coords]
-    # df2 = df.groupby('coords').agg(['mean']).reset_index()
-    # df2['count'] = df.groupby('coords').size().values
-    # df2['indices'] = df.reset_index().groupby('coords').agg({'index': lambda x: list(x)}).values
-    # # make coords the index
-    # df2 = df2.set_index('coords')
-    # bins = {out_proteins[i]: bin_edges[i] for i in range(len(bin_edges))}
-    # return df2, bins
-
 
 
 #                                                                            }}}
@@ -126,7 +111,9 @@ class MyFormatter(string.Formatter):
 fmt = MyFormatter()
 
 
-def heatmap(statdf, bins, stat_columns=['mean'], figscale=1.0, count_threshold=1, cmap='YlGnBu', title=None, subtitle=None, filename=None, **kwargs):
+def heatmap(statdf, bins, stat_columns=['mean'], z_protein = None, lims = {}, figscale=1.0, count_threshold=2, cmap='YlGnBu', title=None, subtitle=None, filename=None, **kwargs):
+
+    from matplotlib.colors import LogNorm
 
     fontsize = 12 * figscale
 
@@ -136,16 +123,17 @@ def heatmap(statdf, bins, stat_columns=['mean'], figscale=1.0, count_threshold=1
     if nstats == 1:
         axes = [axes]
 
-    df = statdf[statdf['count'] > count_threshold]
+    df = statdf[statdf['count'] >= count_threshold]
 
-    # structure of statdf: coords, count, indices, and for each color: mean + other stats...
-    # it's a multiindex
-    # xy_axis should be a list of two strings, the names of the columns to use for the x and y axis
 
     xy_axis = [n[1] for n in df.index.names]
-    z_axis = [c[0] for c in df.columns if c[1] and c[0] not in xy_axis]
-    assert(len(z_axis) == 1)
-    z_axis = z_axis[0]
+
+    if z_protein is None:
+        z_axis = [c[0] for c in df.columns if c[1] and c[0] not in xy_axis]
+        assert(len(z_axis) == 1)
+        z_axis = z_axis[0]
+    else:
+        z_axis = z_protein
 
 
     for stat, ax in zip(stat_columns, axes):
@@ -163,7 +151,17 @@ def heatmap(statdf, bins, stat_columns=['mean'], figscale=1.0, count_threshold=1
         cmap = plt.get_cmap(cmap)
         cmap.set_bad(color='#EEEEEE')
         vmin = 0 if stat == 'count' else None
-        im = ax.imshow(Z.T, origin='lower', vmin=vmin, cmap=cmap)
+
+        norm = None
+        if stat != 'count':
+            if stat in lims:
+                vmin, vmax = lims[stat]
+            else:
+                vmin, vmax = np.nanmin(Z), np.nanmax(Z)
+            norm = LogNorm(vmin=vmin, vmax=vmax)
+
+        im = ax.imshow(Z.T, origin='lower', norm=norm, cmap=cmap)
+
         ax.set_title(stat)
 
         ax.set_xlabel(xy_axis[0])
@@ -200,7 +198,11 @@ def heatmap(statdf, bins, stat_columns=['mean'], figscale=1.0, count_threshold=1
                 height / 2,
             ]
         )
-        fig.colorbar(im, cax=cax)
+        from matplotlib.ticker import LogFormatterSciNotation
+        cb_format = None
+        if norm is not None:
+            cb_format = LogFormatterSciNotation()
+        fig.colorbar(im, cax=cax, format=cb_format)
 
         # set all font sizes
         ax.tick_params(labelsize=fontsize)
@@ -271,7 +273,7 @@ def heatmap_back(df, bins, axis_names=None, figscale=1.0, count_threshold=1, cma
     figsize = (figscale * 10 * nstats + (nstats - 1) * 4 * figscale, figscale * 10)
     fig, axes = plt.subplots(1, nstats, figsize=figsize)
 
-    df = df[df['count'] > count_threshold]
+    df = df[df['count'] >= count_threshold]
 
     for stat, ax in zip(df.columns, axes):
         if stat == 'indices':
