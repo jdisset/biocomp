@@ -92,6 +92,9 @@ function AGGNode(props) {
       >
         {circles}
         {lines}
+		<text x={total_width / 2} y={circleRadius * 2} text-anchor="middle" fill="black" font-size="8px" letterSpacing="0">
+			{props.data.id}
+		</text>
       </svg>
       {handles}
       <Handle type="target" position={Position.Top} style={{ top: 0, left: total_width / 2 }} />

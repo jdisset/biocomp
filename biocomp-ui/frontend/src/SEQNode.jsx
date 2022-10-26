@@ -7,7 +7,7 @@ const getShape = (name, props) => {
   if (name.normalize() === "ERN ".normalize()) {
     return (
       <ERNSeqShape
-        txt={name + zeroPad(props.data.id, 2)}
+        txt={name + zeroPad(props.id, 2)}
         leftcolor={theme.PRTcolor}
         rightcolor={theme.RNAcolor}
         outcolor={theme.RNAcolor}
@@ -16,7 +16,7 @@ const getShape = (name, props) => {
   } else {
     return (
       <RCBSeqShape
-        txt={name + zeroPad(props.data.id, 2)}
+        txt={name + zeroPad(props.id, 2)}
         leftcolor={theme.PRTcolor}
         rightcolor={theme.PRTcolor}
         outcolor={theme.DNAcolor}
