@@ -144,8 +144,6 @@ class TranscriptionUnit:
 ## ─────────────────────────────────────────────────────────────────────────────
 
 
-
-
 def transcription_unit_from_L1(l1id, lib):
     l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
     L0s = lib.L1s.loc[l1id][l0_cols].tolist()
@@ -160,7 +158,7 @@ def transcription_unit_from_L1(l1id, lib):
 
 # main class: a network of interacting transcription units
 class Network:
-    def __init__(self, lib, recipe_name, recipe_db, custom_outputs=None, build=True):
+    def __init__( self, lib, recipe_name, recipe_db, custom_outputs=None, build=True):
         self.lib = lib
         self.name: str = recipe_name
         self.db = recipe_db
@@ -442,7 +440,7 @@ class Network:
         # tmpdf is a mapping between the computegraph ids of every sources and their TUids
 
         cdf['source_id'] = None
-        cdf['extra'] = None
+        # cdf['extra'] = None
 
         sources = {}  # plasmid name -> list of compute nodes ids
 
@@ -540,8 +538,10 @@ class Network:
         newnodes.append(onode)
 
         tu_in_sequestron = set()
+
         # then we add the sequestron nodes with an associated list of their cdg input nodes
-        for _, r in self.lib.seqs.iterrows():
+        enabled_sequestrons = self.lib.get_enabled_sequestrons()
+        for _, r in enabled_sequestrons.iterrows():
             # sequestrons have 2 input hubs, negative and positive
             nlvl = cdg[cdg.type == r.negative_level]  # negative level (PRT, RNA, DNA)
             nparts = nlvl[nlvl.content.apply(lambda x: r.negative_part in x)]
@@ -654,7 +654,7 @@ class Network:
             cdf.loc[i, 'input_from'] = [[nid]]
         return cdf
 
-    def __build_compute_graph(self):
+    def __build_compute_graph(self) :
         assert self.central_dogma_graph is not None, 'central dogma graph not built yet'
 
         uidGen = ut.uniqueIdGenerator()
@@ -668,6 +668,7 @@ class Network:
 
         # convert to dataframe
         self.compute_graph = pd.DataFrame([n.toDict() for n in cg]).set_index('id').sort_index()
+
 
         # there should be the same number of sources in the cdf compute graph as DNA nodes in the cdg
         nsources = len(self.compute_graph[self.compute_graph.type == 'source'])
@@ -684,7 +685,7 @@ class Network:
             msg = f'When building compute graph for recipe {self.name}, '
             msg += f'found {nsources} DNA sources in the graph, but {ndna} DNA nodes total.'
             msg += f'\nExtra DNA nodes: {extradna}'
-            raise RuntimeError(msg)  # }}}
+            raise RuntimeError(msg)
 
         self.compute_graph = self.__mergeSources(
             self.compute_graph, uidGen

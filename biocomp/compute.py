@@ -153,6 +153,18 @@ def sequestron_ERN(get_param, get_quantized, **_):
 
 
 @compnode
+def ERN_with_affinity(get_param, get_quantized, seq_name, **_):
+    def apply(neg, pos, rng_key, **_):
+        param_name = f'{seq_name}::affinity'
+        affinity = get_param(
+            param_name, init=continuous_initializer(rng_key), shared=True
+        ).squeeze()
+        return jnp.maximum(pos - neg * affinity, 0.0)
+
+    return apply
+
+
+@compnode
 def sequestron_RCB(get_param, get_quantized, **_):
     EPSILON = 1e-12
 
@@ -198,11 +210,16 @@ def inv_numeric(*_, **__):
 
 # aggregations split a single input in ratios (defined by parameters)
 @compnode
-def aggregation(get_param, get_quantized, n_outputs, **_):
+def aggregation(get_param, get_quantized, n_outputs, **kwargs):
     def apply(inp, rng_key):
-        ratios = jnp.maximum(
-            get_param("ratios", init=continuous_initializer(rng_key, n_outputs)), BC_EPSILON
-        )
+
+        if 'ratios' in kwargs:
+            ratios = jnp.maximum(get_param("ratios", overwrite_with=jnp.array(kwargs['ratios'])), BC_EPSILON)
+        else:
+            ratios = jnp.maximum(get_param("ratios", init=continuous_initializer(rng_key, n_outputs)), BC_EPSILON)
+
+        assert ratios.shape == (n_outputs,)
+
         ratios /= jnp.sum(ratios)
         return jnp.array(ratios) * inp
 
@@ -233,7 +250,7 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
 # ···············································································
 
 
-def get_param(params, name, init, shared=False, nodeid=None, node_namespace=None):
+def get_param(params, name, init=None, overwrite_with=None, shared=False, nodeid=None, node_namespace=None):
     if not shared:
         assert nodeid is not None
         params.setdefault('node', {})
@@ -245,6 +262,12 @@ def get_param(params, name, init, shared=False, nodeid=None, node_namespace=None
     else:
         params.setdefault('shared', {})
         pardict = params['shared']
+
+    assert (init is None) != (overwrite_with is None)
+
+    if overwrite_with is not None:
+        pardict[name] = overwrite_with
+
     if name not in pardict:
         try:
             pardict[name] = init()
@@ -320,14 +343,18 @@ class ComputeGraphModel:
         self.network = network
         self.built = False
 
-    def build(self):
+    def build(self, node_remap=dict()):
         assert self.network is not None
         assert self.network.is_built()
+
+        # node_remap is a dictionnary that maps "vanilla" node types to
+        # new names. Useful to try different node implementations
+        # (e.g translation -> custom_translation_v2)
 
         batches = self.__get_batch_sequence_of_nodes()
         flat_batches = [item for sublist in batches for item in sublist]
 
-        def apply(params, inputs, rng_key, node_namespace=None):
+        def collect_all_results(params, inputs, rng_key, node_namespace=None):
             assert len(inputs) == len(
                 self.network.compute_graph[self.network.compute_graph['type'] == 'input']
             )
@@ -341,7 +368,7 @@ class ComputeGraphModel:
                     results[nid] = jnp.array([inputs[node_row.extra['input_position']]])
                     continue
                 if node_row.type == 'output':
-                    return jnp.array(upstream_results)
+                    return jnp.array(upstream_results), results
                 assert node_row.type in CNODE, f'Invalid node type {node_row.type}'
 
                 # if it's an inverse node:
@@ -369,15 +396,21 @@ class ComputeGraphModel:
                 }
                 if node_row.extra is not None:
                     extra_params.update(node_row.extra)
-                comp_node = CNODE[node_row.type](get_p, get_q, **extra_params)
+
+                fun_name = node_remap.get(node_row.type, node_row.type)
+                assert fun_name in CNODE, f'Invalid node type {fun_name}'
+
+                comp_node = CNODE[fun_name](get_p, get_q, **extra_params)
                 res = comp_node(*upstream_results, rng_key=key)
                 if extra_params['n_outputs'] == 1:
                     results[nid] = jnp.array([res])
                 else:
                     results[nid] = res
 
-            # should never reach this point
             raise ValueError('Invalid compute graph, no output node found')
+
+        def apply(*args, **kwargs):
+            return collect_all_results(*args, **kwargs)[0]
 
         def init(rng_key, pre_params=None, node_namespace=None):
             params = {}
@@ -390,6 +423,7 @@ class ComputeGraphModel:
             return params
 
         self.apply = apply
+        self.collect_all_results = collect_all_results
         self.init = init
         self.flat_batches = flat_batches
         self.built = True

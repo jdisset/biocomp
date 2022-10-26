@@ -14,6 +14,26 @@ class PartsLibrary:
         self.pc = pd.merge(parts, categories, left_on='category', right_index=True, how='left')
         self.seqs = self.sequestrons.merge(self.sequestron_types, left_on='type', right_index=True)
         self.seqs = ut.decode_json(self.seqs, ['output_part', 'output_category'])
+        self.seqs['enabled'] = True
+
+    def disable_all_sequestrons(self):
+        self.seqs['enabled'] = False
+
+    def enable_all_sequestrons(self):
+        self.seqs['enabled'] = True
+
+    def enable_sequestrons(self, sequestron_types):
+        self.seqs.loc[self.seqs.type.isin(sequestron_types), 'enabled'] = True
+
+    def disable_sequestrons(self, sequestron_types):
+        self.seqs.loc[self.seqs.type.isin(sequestron_types), 'enabled'] = False
+
+    def set_enabled_sequestrons(self, sequestron_types):
+        self.disable_all_sequestrons()
+        self.enable_sequestrons(sequestron_types)
+
+    def get_enabled_sequestrons(self):
+        return self.seqs[self.seqs.enabled]
 
     def addPart(self, part, category):
         self.parts.loc[part] = {'category': category}
@@ -36,9 +56,9 @@ class PartsLibrary:
 
     def __repr__(self):
         return f"""
-        Parts & categories: {self.pc},
+        Parts & categories: \n{self.pc}\n,
         ------------------------------------------
-        Sequestrons: \n{self.seqs}\n
+        Enabled sequestrons: \n{self.get_enabled_sequestrons()}\n
         ------------------------------------------
         L0s: \n{self.L0s}\n
         ------------------------------------------

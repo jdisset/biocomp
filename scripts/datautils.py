@@ -142,6 +142,7 @@ def heatmap(
     title=None,
     subtitle=None,
     filename=None,
+    show=True,
     **kwargs,
 ):
 
@@ -298,7 +299,10 @@ def heatmap(
             filename, dpi=300, bbox_inches=Bbox([[0.5 * figscale, 0], [figsize[0], figsize[1]]])
         )
 
-    plt.show()
+    if show:
+        plt.show()
+
+    return fig, axes
 
 
 # example usage

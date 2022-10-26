@@ -188,7 +188,7 @@ class XP:
         else:
             self.inv_networks = None
 
-    def get_models(self, inverse=True) -> dict[str, ComputeGraphModel]:
+    def get_models(self, inverse=True, node_remap=dict()) -> dict[str, ComputeGraphModel]:
         if inverse:
             assert self.inv_networks is not None
         nets = self.inv_networks if inverse else self.networks
@@ -197,7 +197,7 @@ class XP:
         for s in track(self.samples, description='Building models'):
             try:
                 models[s['name']] = ComputeGraphModel(nets[s['recipe']])
-                models[s['name']].build()
+                models[s['name']].build(node_remap=node_remap)
             except Exception as e:
                 msg = f'Error building {"inverse" if inverse else ""} model for sample {s}: {e}'
                 raise RuntimeError(msg)
