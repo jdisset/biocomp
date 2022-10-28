@@ -1,5 +1,9 @@
 # biocomp
 
+# TODO 
+
+### October 
+
 - [x] Complete the new version of the compute graph construction from new recipe file
     - [x] Implement TU representation with slots
 		- [x] distinguish btwnm parts and params slots
@@ -37,16 +41,55 @@
 	- [x] Move all the compg and cdg creation to the Recipe class, including the generate_model method.
 	- [ ] Make a separate train module, with a train function that takes a recipe and a dataset as input.
 
-- [ ] Data & training:
+- [x] Data & training:
 	- [x] Write specs for recipe, xp and data files
-	- [x] Get (toy) recipe
-	- [ ] Get (toy) data
-	- [ ] Add a way to specify params that are fixed vs trainable before traning,
+	- [x] Get recipe
+	- [x] Get data
+	- [x] Add a way to specify params that are fixed vs trainable before traning,
 		   and aggregate them in a transparent dictionnary that will be passed to the compute graph
 		   Probably should just split into 2 dictionnaries given to the train method (1st is differentiated against, 2nd is fixed).
 		   Then do a merge of the 2 before passing them to the CG. Q: will Jax be ok to compile that?
-	- [ ] Parse data file (start with Georg's?) and load into dataframe
-	- [ ] write training loop. Loss = L2 (fluo_out_from_full_gaph, fluo_out_measured)
+	- [x] Parse data file (start with Georg's?) and load into dataframe
+	- [x] write training loop. Loss = L2 (fluo_out_from_full_gaph, fluo_out_measured)
 
 - [ ] Write tests, especially to test compute graph consistency, especially cdf <-> compg
 
+
+### November
+
+- [ ] Cleaner / shorter train module that uses a more thorough 
+config dict (include node remaps and data rebalancing params)
+
+
+- [ ] Improve accuracy of xp training
+	- [ ] Try more complex transcription / translation equations
+	- [ ] Try ERN version that takes DNA - RNA instead of RNA - PRT
+	- [ ] Try different meta params (norm factor for example)
+	- [ ] Try switching ERN to dense NN
+
+- [ ] Write system to store shared parameters, together with network
+config (node remaps and list of enabled sequestrons). Need to be able 
+to load both.
+	- [ ] Cleanly save everything to wandb
+	- [ ] Write quick datautils (or train module) function to load 
+	from wandb with a run name
+
+- [ ] Test the circuit optimization/exploration mode (with a bandpass 
+or maybe just a simple decision boundary).
+	_Questions:_ should we force multiple coTX? Because the easiest 
+	for me is probably to just have one marker, and determine the 
+	ratio of each plasmid. But that might not be the experimentally 
+	ideal protocol...
+	- [ ] Write set of TUs + constraints to explore N-ERN 
+	configurations. Maybe with ERN affinity for now?
+	- [ ] Perform sensitivity analysis on each parameter (from all 
+	scopes)
+	- [ ] Write to output recipe
+
+- [ ] Train on Charles' uOrfs data when it's ready
+ 
+- [ ] Write recombinase based sequestron as a ternary node
+ 
+- [ ] Train on Charles' recombinase data
+
+- [ ] Add noise distribution to all compute nodes?
