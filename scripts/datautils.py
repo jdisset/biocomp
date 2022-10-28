@@ -176,7 +176,7 @@ def heatmap(
         # coords tuple is the index of the df
         statcol = 'count' if stat == 'count' else (z_axis, stat)
         for coords, value in df[statcol].items():
-            Z[coords] = value
+            Z[coords] = max(value, 1e-20)
 
         # nans should be grey
         cmap = plt.get_cmap(cmap)

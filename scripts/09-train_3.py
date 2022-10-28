@@ -93,6 +93,7 @@ import optax
 from matplotlib import pyplot as plt
 
 node_remap = {"sequestron_ERN": "ERN_with_affinity"}
+node_remap = {}
 
 models = xp.get_models(node_remap=node_remap)
 X, Y = xp.get_XY(models)
@@ -107,18 +108,19 @@ import pickle
 
 import wandb as wb
 
+seed = np.random.randint(0, 2 ** 32 - 1)
+
 cfg = {
-    "learning_rate": 0.01,
+    "learning_rate": 0.001,
     "adam_w_decay": 0.0001,
     "n_replicates": 1,
-    "initial_param_scaling": 0.01,
-    "normalize_data": False,
-    "epochs": 10000,
-    "log_rate": 1,
+    "epochs": 100000,
+    "log_rate": 10,
     "n_batches": 1,
-    "save_rate": 100,
-    "rng_key": 1421,
+    "save_rate": 1000,
+    "rng_key": seed,
     "norm_factor": 1e6,
+    "node_remap": node_remap,
 }
 
 norm_factor = cfg["norm_factor"]
@@ -252,22 +254,21 @@ from datetime import datetime
 
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-wb.init(config=cfg, project='georg_data_2', entity="jdisset", reinit=True)
+wb.init(config=cfg, project='georg_data_3', entity="jdisset", reinit=True)
 
 for i, k in enumerate(jax.random.split(key, cfg['epochs'])):
     for x, y in list(zip(x_batches, y_batches)):
         params, opt_state, grads, loss = step(params, opt_state, k, x, y)
-    loss_history.append(loss)
-    params_history.append(params)
     if i == cfg['epochs'] or i % cfg['log_rate'] == 0 or i == 0:
         logger_update(loss, params, i)
+        loss_history.append(loss)
+        params_history.append(params)
         if i == cfg['epochs'] or i % cfg['save_rate'] == 0 or i == 0:
-            ut.save(
-                params_history, f'../__out/{xp.name}_{timestamp}_{i}_params.pkl', overwrite=True
-            )
-            ut.save(loss_history, f'../__out/{xp.name}_{timestamp}_{i}_loss.pkl', overwrite=True)
+            ut.save(params, f'../__out/{xp.name}_{timestamp}_{i}_params.pkl', overwrite=True)
 
 print('done')
+ut.save( params_history, f'../__out/{xp.name}_{timestamp}_{i}_params_hist.pkl', overwrite=True)
+ut.save(loss_history, f'../__out/{xp.name}_{timestamp}_{i}_loss_hist.pkl', overwrite=True)
 
 # # open params:
 # params = ut.load('../__out/20221012A_massCtrls_20221026_024328_1800_params.pickle')
