@@ -212,7 +212,6 @@ def wandb_update(loss, params, iter_num):
 
 
 
-
 def logger_update(loss, params, iter_num):
     wandb_update(loss, params, iter_num)
     print(f'[{iter_num}/{cfg["epochs"]}] loss: {loss}')

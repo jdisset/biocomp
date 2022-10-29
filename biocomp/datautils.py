@@ -99,7 +99,13 @@ def balance_per_bin(data, statdf, threshold_quantile=0.4, threshold_min=20) -> n
     return balanced_data
 
 
-def balance_each_dataset(models:dict[str, bc.ComputeGraphModel], Y:dict[str, np.ndarray]):
+def balance_each_dataset(
+    models: dict[str, bc.ComputeGraphModel],
+    Y: dict[str, np.ndarray],
+    bin_resolution=0.5,
+    threshold_quantile=0.4,
+    threshold_min=20,
+):
     """balances each dataset individually (not across datasets but within each dataset,
     so that each dataset aims for a similar number of samples per bin)"""
     X_balanced, Y_balanced = {}, {}
@@ -107,8 +113,10 @@ def balance_each_dataset(models:dict[str, bc.ComputeGraphModel], Y:dict[str, np.
         data = Y[sample]
         out_proteins = model.get_output_proteins()
         in_proteins = model.get_inverted_input_proteins()
-        stats, _ = binstats(data, out_proteins, in_proteins, resolution=0.5)
-        Y_balanced[sample] = balance_per_bin(data, stats, threshold_quantile=0.4, threshold_min=20)
+        stats, _ = binstats(data, out_proteins, in_proteins, resolution=bin_resolution)
+        Y_balanced[sample] = balance_per_bin(
+            data, stats, threshold_quantile=threshold_quantile, threshold_min=threshold_min
+        )
         X_balanced[sample] = model.get_input_from_output(Y_balanced[sample])
     return X_balanced, Y_balanced
 
@@ -310,15 +318,44 @@ def heatmap(
 # in_proteins = model.get_inverted_input_proteins()
 # stats, bins = binstats(y, out_proteins, in_proteins, resolution=0.5)
 # heatmap(
-        # stats,
-        # bins,
-        # figscale=0.6,
-        # stat_columns=['mean','count'],
-        # z_protein='eYFP',
-        # lims={'mean': (1e3, 1e8)},
-        # title=f'{model.network.name}',
-        # subtitle=f'{len(y)} data points',
-    # )
+# stats,
+# bins,
+# figscale=0.6,
+# stat_columns=['mean','count'],
+# z_protein='eYFP',
+# lims={'mean': (1e3, 1e8)},
+# title=f'{model.network.name}',
+# subtitle=f'{len(y)} data points',
+# )
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+import pickle
+
+def save(data, path, overwrite=False, suffix='.pickle'):
+
+    path = Path(path)
+    if path.suffix != suffix:
+        path = path.with_suffix(suffix)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if overwrite:
+            path.unlink()
+        else:
+            raise RuntimeError(f'File {path} already exists.')
+    with open(path, 'wb') as file:
+        pickle.dump(data, file)
+
+
+def load(path, suffix='.pickle'):
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f'Not a file: {path}')
+    if path.suffix != suffix:
+        raise ValueError(f'Not a {suffix} file: {path}')
+    with open(path, 'rb') as file:
+        data = pickle.load(file)
+    return data
+
+
