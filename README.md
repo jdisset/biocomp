@@ -60,6 +60,7 @@
 - [ ] Cleaner / shorter train module that uses a more thorough 
 config dict (include node remaps and data rebalancing params)
 
+- [ ] Better batches with padding to get a unique across the whole dict
 
 - [ ] Improve accuracy of xp training
 	- [ ] Try more complex transcription / translation equations
