@@ -2,6 +2,7 @@
 wandb
 __pycache__/
 __*/
+training_results/
 *.py[cod]
 *$py.class
 *package-lock.json
