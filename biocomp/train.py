@@ -89,44 +89,56 @@ def train_single_model(model, X, Y, cfg, loss_f=mse_loss, wandb=None):
 ## ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_CFG = {
-    "learning_rate": 0.001,
+
+    "node_remap": {},
+
     "optimizer": "sgd",
+    "learning_rate": 0.001,
     "adam_w_decay": 0.0001,
-    "n_replicates": 1,
-    "epochs": 100000,
-    "log_rate": 10,
-    "n_batches": 1,
-    "plot_rate": 1000,
+    "loss_function": "mse",
+
     "rng_key": 42,
+
+    "epochs": 100000,
+    "n_replicates": 1,
+
+    "n_batches": 1,
     "norm_factor": 1e6,
     "balance_bin_resolution": 0.5,
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 20,
-    "loss_function": "mse",
-    "node_remap": {},
+
+    "log_rate": 100,
+    "plot_rate": 10000,
+    "save_rate": 10000,
 }
 
 DEFAULT_LOSS_FUNCTIONS = {
     "mse": mse_loss,
 }
 
+def train_xp(xp, config=DEFAULT_CFG, **kwargs):
+    cfg = {**DEFAULT_CFG, **config}
+    models = xp.get_models(node_remap=config['node_remap'])
+    _, Y = xp.get_XY(models)
+    return train_inverted_bunch(models, Y, config=config, **kwargs)
 
 def train_inverted_bunch(
     models,
-    X_raw,
     Y_raw,
     config=DEFAULT_CFG,
     loss_f=mse_loss,
-    wandb=None,
+    wandb_project=None,
     loss_dict=DEFAULT_LOSS_FUNCTIONS,
     save_path='./training_results/',
 ):
+    import rich
 
     cfg = {**DEFAULT_CFG, **config}
+    rich.print(f'Starting training with config: {cfg}')
 
     X, Y = du.balance_each_dataset(
         models,
-        X_raw,
         Y_raw,
         bin_resolution=cfg['balance_bin_resolution'],
         threshold_quantile=cfg['balance_threshold_quantile'],
@@ -223,6 +235,7 @@ def train_inverted_bunch(
             for sample, model in models.items():
                 y_hat = apply_model(params, X, jax.random.PRNGKey(0), sample)
                 out_proteins = model.get_output_proteins()
+                in_proteins = model.get_inverted_input_proteins()
                 stats_hat, bins_hat = du.binstats(y_hat, out_proteins, in_proteins, resolution=0.5)
                 fig_hat, ax_hat = du.heatmap(
                     stats_hat,
@@ -243,7 +256,8 @@ def train_inverted_bunch(
             log_plots()
 
     def logger_update(loss, params, iter_num):
-        wandb_update(loss, params, iter_num)
+        if wandb_project is not None:
+            wandb_update(loss, params, iter_num)
         print(f'[{iter_num}/{cfg["epochs"]}] loss: {loss}')
 
 
@@ -257,8 +271,8 @@ def train_inverted_bunch(
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    if wandb:
-        wb.init(config=cfg, project=wandb, entity="jdisset", reinit=True)
+    if wandb_project is not None:
+        wb.init(config=cfg, project=wandb_project, entity="jdisset", reinit=True)
     else:
         print('No wandb project specified.')
 
