@@ -21,12 +21,18 @@ POSSIBLE_TL_RATES = jnp.array([1.0 / 2**n for n in range(5)] + [0.75, 0.9])
 POSSIBLE_TX_RATES = jnp.linspace(0.0, 1.0, num=21)
 
 
-def continuous_initializer(rng, n=1, minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
+def continuous_initializer(rng, shape=(), minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
     def init():
-        return jax.random.uniform(
-            key=rng, shape=(n,), minval=minval, maxval=maxval, dtype=jnp.float32
+        res = jax.random.uniform(
+            key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32
         )
+        return res
 
+    return init
+
+def glorot_initializer(rng, shape):
+    def init():
+        return jax.nn.initializers.glorot_normal()(rng, shape)
     return init
 
 
@@ -37,7 +43,6 @@ def quantize(x, possible_values):
         return possible_values[0]
     else:
         return quantize_impl(x, possible_values)
-
 
 @partial(jax.custom_jvp, nondiff_argnums=(1,))
 def quantize_impl(x, arr):
@@ -68,80 +73,87 @@ def round_to_int_jvp(x, x_tang):
 
 BC_EPSILON = 1e-12
 
-CNODE = {}
+COMPUTE_NODES_DICT = {}
 INVERSE_NODES_DICT = {}
 
 
 def compnode(f):
-    CNODE[f.__name__] = f
+    COMPUTE_NODES_DICT[f.__name__] = f
     return f
 
 
 def inv_compnode(fwd_name):
     def inv(f):
-        CNODE[f.__name__] = f
+        COMPUTE_NODES_DICT[f.__name__] = f
         INVERSE_NODES_DICT[fwd_name] = f.__name__
         return f
 
     return inv
 
 
-# nodes to write:
-# translation, transcription, sequestron_ERN, sequestron_RCB, source, numeric, aggregation
-
 
 # translation and transcription are the same, except for the parameters
-def _transform(get_param, get_quantized, rate_param_name, deg_param_name, **_):
+def _transform(get_param, get_quantized, transform_name, deg_param_name, **_):
     def apply(*values, rng_key):
+        val = jnp.array(values)
         k0, k1 = jax.random.split(rng_key, 2)
+        rate_name = f'{transform_name}_rate'
         rates = get_quantized(
-            rate_param_name,
-            get_param(rate_param_name, init=continuous_initializer(k0, len(values))),
+            rate_name,
+            get_param(rate_name, init=continuous_initializer(k0, val.shape)),
             mode='input_edges',
-        ).squeeze()
-        return (
-            jnp.dot(rates, jnp.array(values))
-            / get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
-        ).squeeze()
+        )
+        deg_rate = get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
+        res = (jnp.dot(rates, val) / deg_rate)
+        # print(f'values: {values}')
+        # print(f'val: {val}')
+        # print(f'rates: {rates}')
+        # print(f'deg_rate: {deg_rate}')
+        # print(f'res: {res}')
+        return res
 
     return apply
 
 
-def _inverse_transform(get_param, get_quantized, rate_param_name, deg_param_name, **_):
+def _inverse_transform(get_param, get_quantized, transform_name, deg_param_name, **_):
     def apply(value, rng_key):
         # inverse can only work if there's only one input edge
+        assert (value.shape == ())
         k0, k1 = jax.random.split(rng_key, 2)
 
+        rate_name = f'{transform_name}_rate'
         rate = get_quantized(
-            rate_param_name,
-            get_param(rate_param_name, init=continuous_initializer(k0)),
+            rate_name,
+            get_param(rate_name, init=continuous_initializer(k0, (1,))),
             mode='input_edges',
-        ).squeeze()
+        )[0]
         deg = get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
 
-        return (value * deg / rate).squeeze()
+        res = (value * deg / rate)
+        return res
 
     return apply
+
+
 
 
 @compnode
 def transcription(get_param, get_quantized, **_):
-    return _transform(get_param, get_quantized, 'tc_rate', 'rna_deg_rate')
+    return _transform(get_param, get_quantized, 'tc', 'rna_deg_rate')
 
 
 @inv_compnode(fwd_name='transcription')
 def inv_transcription(get_param, get_quantized, **_):
-    return _inverse_transform(get_param, get_quantized, 'tc_rate', 'rna_deg_rate')
-
+    return _inverse_transform(get_param, get_quantized, 'tc', 'rna_deg_rate')
 
 @compnode
 def translation(get_param, get_quantized, **_):
-    return _transform(get_param, get_quantized, 'tl_rate', 'prt_deg_rate')
+    return _transform(get_param, get_quantized, 'tl', 'prt_deg_rate')
 
 
 @inv_compnode(fwd_name='translation')
 def inv_translation(get_param, get_quantized, **_):
-    return _inverse_transform(get_param, get_quantized, 'tl_rate', 'prt_deg_rate')
+    return _inverse_transform(get_param, get_quantized, 'tl', 'prt_deg_rate')
 
 
 @compnode
@@ -158,7 +170,7 @@ def ERN_with_affinity(get_param, get_quantized, seq_name, **_):
         param_name = f'{seq_name}::affinity'
         affinity = get_param(
             param_name, init=continuous_initializer(rng_key), shared=True
-        ).squeeze()
+        )
         return jnp.maximum(pos - neg * affinity, 0.0)
 
     return apply
@@ -194,7 +206,8 @@ def inv_source(*_, **__):
 @compnode
 def numeric(get_param, get_quantized, **_):
     def apply(rng_key):
-        return get_param("value", init=continuous_initializer(rng_key, 1))
+        res = get_param("value", init=continuous_initializer(rng_key))
+        return res
 
     return apply
 
@@ -216,7 +229,7 @@ def aggregation(get_param, get_quantized, n_outputs, **kwargs):
         if 'ratios' in kwargs:
             ratios = jnp.maximum(get_param("ratios", overwrite_with=jnp.array(kwargs['ratios'])), BC_EPSILON)
         else:
-            ratios = jnp.maximum(get_param("ratios", init=continuous_initializer(rng_key, n_outputs)), BC_EPSILON)
+            ratios = jnp.maximum(get_param("ratios", init=continuous_initializer(rng_key, (n_outputs,))), BC_EPSILON)
 
         assert ratios.shape == (n_outputs,)
 
@@ -233,7 +246,7 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
 
     def apply(inp, rng_key):
         ratios = jnp.maximum(
-            get_param("ratios", init=continuous_initializer(rng_key, original_output_len)),
+            get_param("ratios", init=continuous_initializer(rng_key, (original_output_len,))),
             BC_EPSILON,
         )
         ratios /= jnp.sum(ratios)
@@ -250,15 +263,15 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
 # ···············································································
 
 
-def get_param(params, name, init=None, overwrite_with=None, shared=False, nodeid=None, node_namespace=None):
+def get_param(params, name, init=None, overwrite_with=None, shared=False, node_id=None, node_namespace=None):
     if not shared:
-        assert nodeid is not None
+        assert node_id is not None
         params.setdefault('node', {})
         if node_namespace is not None:
             params['node'].setdefault(node_namespace, {})
-            pardict = params['node'][node_namespace].setdefault(nodeid, {})
+            pardict = params['node'][node_namespace].setdefault(node_id, {})
         else:
-            pardict = params['node'].setdefault(nodeid, {})
+            pardict = params['node'].setdefault(node_id, {})
     else:
         params.setdefault('shared', {})
         pardict = params['shared']
@@ -272,7 +285,7 @@ def get_param(params, name, init=None, overwrite_with=None, shared=False, nodeid
         try:
             pardict[name] = init()
         except Exception as e:
-            print(f'Error initializing param "{name}" from node {nodeid}: {e}')
+            print(f'Error initializing param "{name}" from node {node_id}: {e}')
             raise e
     return pardict[name]
 
@@ -332,10 +345,11 @@ def get_quantized(params, param_name, values, node_id, cdf, cdg, quantize_fun, m
     ), f'len(possible_names)={len(possible_names)} != len(values)={len(values)}'
 
     possible_values = [
-        jnp.array([get_param(params, n, lambda: jnp.array([val]), shared=True) for n in names])
+        jnp.array([get_param(params, n, lambda: val, shared=True) for n in names])
         for names, val in zip(possible_names, values)
     ]
-    return jnp.array([quantize_fun(v, p) for v, p in zip(values, possible_values)])
+    res = jnp.array([quantize_fun(v, p) for v, p in zip(values, possible_values)])
+    return res
 
 
 class ComputeGraphModel:
@@ -363,13 +377,22 @@ class ComputeGraphModel:
             keys = jax.random.split(rng_key, len(flat_batches))
             for nid, key in zip(flat_batches, keys):
                 node_row = self.network.compute_graph.loc[nid]
-                upstream_results = [results[inp[0]][inp[1]] for inp in node_row.input_from]
+                # upstream_results = [results[inp[0]][inp[1]] for inp in node_row.input_from]
+                upstream_results = []
+                for inp in node_row.input_from:
+                    if results[inp[0]].shape == ():
+                        assert inp[1] == 0
+                        upstream_results.append(results[inp[0]])
+                    else:
+                        upstream_results.append(results[inp[0]][inp[1]])
+
                 if node_row.type == 'input':
-                    results[nid] = jnp.array([inputs[node_row.extra['input_position']]])
+                    # results[nid] = jnp.array([inputs[node_row.extra['input_position']]])
+                    results[nid] = inputs[node_row.extra['input_position']]
                     continue
                 if node_row.type == 'output':
                     return jnp.array(upstream_results), results
-                assert node_row.type in CNODE, f'Invalid node type {node_row.type}'
+                assert node_row.type in COMPUTE_NODES_DICT, f'Invalid node type {node_row.type}'
 
                 # if it's an inverse node:
                 nodeid_for_getters = nid
@@ -379,9 +402,10 @@ class ComputeGraphModel:
                 get_p = partial(
                     get_param,
                     params,
-                    nodeid=nodeid_for_getters,
+                    node_id=nodeid_for_getters,
                     node_namespace=node_namespace,
                 )
+
                 get_q = partial(
                     get_quantized,
                     params,
@@ -390,6 +414,7 @@ class ComputeGraphModel:
                     cdg=self.network.central_dogma_graph,
                     quantize_fun=quantize,
                 )
+
                 extra_params = {
                     'n_outputs': len(self.network.compute_graph.loc[nid]['output_to']),
                     'n_inputs': len(self.network.compute_graph.loc[nid]['input_from']),
@@ -398,14 +423,16 @@ class ComputeGraphModel:
                     extra_params.update(node_row.extra)
 
                 fun_name = node_remap.get(node_row.type, node_row.type)
-                assert fun_name in CNODE, f'Invalid node type {fun_name}'
+                assert fun_name in COMPUTE_NODES_DICT, f'Invalid node type {fun_name}'
 
-                comp_node = CNODE[fun_name](get_p, get_q, **extra_params)
+                comp_node = COMPUTE_NODES_DICT[fun_name](get_p, get_q, **extra_params)
                 res = comp_node(*upstream_results, rng_key=key)
-                if extra_params['n_outputs'] == 1:
-                    results[nid] = jnp.array([res])
-                else:
-                    results[nid] = res
+                results[nid] = res
+
+                # if extra_params['n_outputs'] == 1:
+                    # results[nid] = jnp.array([res])
+                # else:
+                    # results[nid] = res
 
             raise ValueError('Invalid compute graph, no output node found')
 
