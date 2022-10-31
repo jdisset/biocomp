@@ -1,13 +1,8 @@
 import pandas as pd
 from time import time
-from jax import vmap, jit
 from pathlib import Path
-from pyppeteer import launch
-from jax import tree_util as pytree
-import jax.numpy as jnp
 import urllib.parse
 import sys
-import streamlit as st
 import gspread
 from functools import partial
 import asyncio
@@ -18,11 +13,9 @@ from types import SimpleNamespace
 import biocomp as bc
 import pickle
 from PIL import Image
-import copy
-from rich import print as rprint
+
 import rich
 from rich.console import Console
-import jaxlib.xla_extension as xla_ext
 from rich.progress import track
 
 from typing import List
@@ -31,8 +24,7 @@ from typing import List
 class ddict(dict):
     def __getattr__(*args):
         val = dict.get(*args)
-        return DotDict(val) if type(val) is dict else val
-
+        return ddict(val) if type(val) is dict else val
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
@@ -51,29 +43,26 @@ def is_interactive():
     except NameError:
         return False  # Probably standard Python interpreter
 
+# convenience loading functions with default paths
+DEFAULT_DATA_PATH = Path("/Users/jeandisset/Dropbox (MIT)/Biocomp/")
+DEFAULT_XP_PATH = DEFAULT_DATA_PATH / "Experiments"
+DEFAULT_RECIPE_PATH = DEFAULT_DATA_PATH / "Recipes"
+DEFAULT_LIB_PATH = Path("/Users/jeandisset/Code/Weiss/biocomp/__cache/lib.pickle")
 
-def np_converter(obj):
-    # print type:
-    print(type(obj))
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, np.bool_):
-        return bool(obj)
-    elif np.isnan(obj):
-        return None
+def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH):
+    xp = bc.XP(xpname, xp_path, recipe_path, lib)
+    return xp
 
+def list_xp(xp_path=DEFAULT_XP_PATH):
+    return [x.name for x in xp_path.iterdir() if x.is_dir()]
 
-def make_json_compatible(o):
-    return json.loads(json.dumps(o, default=np_converter))
-
+def load_lib(lib_path=DEFAULT_LIB_PATH):
+    return load(lib_path)
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{              --     Streamlit utils and components     --
 # ···············································································
+import streamlit as st
 from st_aggrid import AgGrid
 
 
@@ -286,6 +275,7 @@ def screenCaptures(
     height=1500,
     n_batches=1,
 ):
+    from pyppeteer import launch
 
     params = []
 
@@ -394,11 +384,7 @@ def plot_cdg(nets: List[bc.Network], filenames):
 # ···············································································
 
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap, LinearSegmentedColormap
-from pathos.pools import ProcessPool
 
-import jax
-from multiprocess import Process
 
 
 def plotBestLoss(best, others, title='', outfile=None, vmax=None):
@@ -418,6 +404,7 @@ def plotBestLoss(best, others, title='', outfile=None, vmax=None):
 
 
 def grid_map(F, xrange, yrange, meshres):
+    import jax
     XX, YY = np.meshgrid(
         np.linspace(xrange[0], xrange[1], meshres[0]),
         np.linspace(yrange[0], yrange[1], meshres[1]),
@@ -448,6 +435,8 @@ def plotModelOutput(
     outfile=None,
     title='',
 ):
+    from jax import tree_util as pytree
+    from matplotlib.colors import LinearSegmentedColormap
     flist = [[0.0, 0.493, 0.579], [0.896, 0.866, 0.806], [0.844, 0.1, 0.111]]
     teals = [
         [0.957, 0.913, 0.804],
@@ -511,6 +500,8 @@ def trainingMovie(
 
 
 def plotGrads(gradlist):
+    import jax
+    import jax.numpy as jnp
     vmax = 10
     agg = 100
     nbins = 82
@@ -531,7 +522,7 @@ def plotGrads(gradlist):
         h = jnp.histogram(a, bins=bins)[0]
         return h / jnp.max(h)
 
-    gradhist = vmap(jit(partial(hist, bins)))(s)
+    gradhist = jax.vmap(jax.jit(partial(hist, bins)))(s)
 
     labels_interval = 10
     binlabels = [f'{l:.1E}' for l in bins]
@@ -554,12 +545,18 @@ def plotGrads(gradlist):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                        --     jax prints     --
+#···············································································
 
 def print_jaxpr(fun, *args, **kwargs):
+    import jax
     print(jax.make_jaxpr(fun)(*args, **kwargs))
 
 
 def print_xla(fun, *args, **kwargs):
+    import jax
+    import jaxlib.xla_extension as xla_ext
     console = Console(highlighter=rich.highlighter.ReprHighlighter())
     c = jax.xla_computation(fun)(*args, **kwargs)
     backend = jax.lib.xla_bridge.get_backend()
@@ -567,8 +564,15 @@ def print_xla(fun, *args, **kwargs):
     option = xla_ext.HloPrintOptions.short_parsable()
     out = e.hlo_modules()[0].to_string(option)
     print(out)
+    return out
 
 
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                         --     load save     --
+#···············································································
 def save(data, path, overwrite=False, suffix='.pickle'):
 
     path = Path(path)
@@ -596,6 +600,7 @@ def load(path, suffix='.pickle'):
 
 
 def readimg(p, threshold=None, size=None):
+    import jax.numpy as jnp
     im = Image.open(p)
     if size is not None:
         im = im.resize(size)
@@ -605,11 +610,35 @@ def readimg(p, threshold=None, size=None):
     return im
 
 
-from jax import lax
-from jax.experimental import host_callback
+def np_converter(obj):
+    # print type:
+    print(type(obj))
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif np.isnan(obj):
+        return None
 
+
+def make_json_compatible(o):
+    return json.loads(json.dumps(o, default=np_converter))
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                   --      hooked_scan for jax     --
+#···············································································
 
 def hooked_scan(num_samples, on_update, call_rate=1):
+    import jax
+    from jax import lax
+    from jax.experimental import host_callback
     def update(args, transform):
         result, iternum = args
         carry, acc = result
@@ -636,3 +665,9 @@ def hooked_scan(num_samples, on_update, call_rate=1):
         return wrapper
 
     return _hooked_scan
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
