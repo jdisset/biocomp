@@ -12,11 +12,38 @@ import pickle
 import json5
 
 
-
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                    --     random misc stuff     --
 # ···············································································
+
+
+def at_path(d: dict, path, val=None, defaultinit=lambda: None):
+    for key in path[:-1]:
+        try:
+            d = d.setdefault(key, dict())
+        except AttributeError as e:
+            msg = (
+                f'Cannot set "{key}" at path {path}: {e}. Did you pass something other than a dict?'
+            )
+            raise AttributeError(msg)
+    if val is not None:
+        d[path[-1]] = val
+        d = d[path[-1]]
+    else:
+        d = d.setdefault(path[-1], defaultinit())
+    return d
+
+def apply_constraints(par, cons):
+    newpar = par.copy()
+    F = {'clip': jnp.clip}
+    for ctype in cons.keys():
+        assert ctype in F.keys(), f'constraint type {ctype} not implemented'
+        f = F[ctype]
+        for c in cons[ctype]:
+            x = at_path(newpar, c[0])
+            assert x is not None, f'path {c[0]} not found in parameters'
+            at_path(newpar, c[0], f(x, *c[1]))
+    return newpar
 
 
 def uniqueIdGenerator(start=0):
@@ -198,9 +225,6 @@ def progress_scan(num_samples, progress_type=TQDMProgress, message=None, print_r
     return _progress_bar_scan
 
 
-
-
-
 @jit
 def tree_shape(t):
     return pytree.tree_map(lambda x: x.shape, t)
@@ -228,6 +252,7 @@ def get_pytree2(t, i, ts):
 
 def param_unstack(t, N):
     return [get_pytree(t, i) for i in range(N)]
+
 
 def get_params(param_tree, i):
     return [jit(get_pytree, static_argnums=(1,))(t, i) for t in tqdm(param_tree)]

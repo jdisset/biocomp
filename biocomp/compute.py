@@ -259,32 +259,56 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
 
 
 def get_param(
-    params, name, init=None, overwrite_with=None, shared=False, node_id=None, node_namespace=None
+    params,
+    name,
+    init=None,
+    overwrite_with=None,
+    shared=False,
+    node_id=None,
+    node_namespace=None,
+    clip_to=None,
+    constraints=None,
 ):
+    assert isinstance(params, dict), f'params must be a dict, not {type(params)}'
+    assert constraints is None or isinstance(
+        constraints, dict
+    ), f'constraints must be a dict, not {type(constraints)}'
+
+    dpath = []
     if not shared:
         assert node_id is not None
-        params.setdefault('node', {})
+        dpath.append('node')
         if node_namespace is not None:
-            params['node'].setdefault(node_namespace, {})
-            pardict = params['node'][node_namespace].setdefault(node_id, {})
-        else:
-            pardict = params['node'].setdefault(node_id, {})
+            dpath.append(node_namespace)
+        dpath.append(node_id)
     else:
-        params.setdefault('shared', {})
-        pardict = params['shared']
+        dpath.append('shared')
+
+    dpath.append(name)
 
     assert (init is None) != (overwrite_with is None)
 
     if overwrite_with is not None:
-        pardict[name] = overwrite_with
+        ut.at_path(params, dpath, overwrite_with)
+        return overwrite_with
 
-    if name not in pardict:
+    if ut.at_path(params, dpath) is None:
         try:
-            pardict[name] = init()
+            r = ut.at_path(params, dpath, init())
+            if clip_to is not None:
+                assert (
+                    constraints is not None
+                ), 'clip_to requires to pass a constraints dict to get_param'
+                r = jnp.clip(r, *clip_to)
+                ut.at_path(params, dpath, r)
+                c = ut.at_path(constraints, ['clip'], defaultinit=list)
+                c.append((tuple(dpath), clip_to))
+                ut.at_path(constraints, ['clip'], c)
+
         except Exception as e:
             print(f'Error initializing param "{name}" from node {node_id}: {e}')
             raise e
-    return pardict[name]
+    return ut.at_path(params, dpath)
 
 
 def get_possible_parts(param_name, cdg_node_id, cdg):
@@ -425,10 +449,11 @@ class ComputeGraphModel:
             + 1
         )
         result_shape = (len(call_dicts), MAX_N_OUTPUTS)
+
         n_inputs = len(self.network.compute_graph[self.network.compute_graph['type'] == 'input'])
 
         # this will very likely be jitted
-        def collect_all_results(params, inputs, rng_key, node_namespace=None):
+        def collect_all_results(params, inputs, rng_key, node_namespace=None, constraints=None):
             assert len(inputs) == n_inputs, f'len(inputs)={len(inputs)} != n_inputs={n_inputs}'
 
             keys = jax.random.split(rng_key, len(flat_batches))
@@ -458,7 +483,9 @@ class ComputeGraphModel:
                 if n['type'] == 'output':
                     return jnp.array(upstream_results), results
 
-                get_p = partial(n['get_p'], params, node_namespace=node_namespace)
+                get_p = partial(
+                    n['get_p'], params, node_namespace=node_namespace, constraints=constraints
+                )
                 get_q = partial(n['get_q'], params)
                 comp_node = n['fun'](get_p, get_q, **n['extra_params'])
                 res = comp_node(*upstream_results, rng_key=key)
@@ -471,15 +498,20 @@ class ComputeGraphModel:
         def apply(*args, **kwargs):
             return collect_all_results(*args, **kwargs)[0]
 
-        def init(rng_key, pre_params=None, node_namespace=None):
-            params = {}
-            if pre_params is not None:
-                params = pre_params
+        def init(rng_key, pre_params=None, pre_constraints=None, node_namespace=None):
+            params = {} if pre_params is None else pre_params
+            constraints = {} if pre_constraints is None else pre_constraints
             n_inputs = len(
                 self.network.compute_graph[self.network.compute_graph['type'] == 'input']
             )
-            apply(params, [jnp.array([1.0])] * n_inputs, rng_key, node_namespace=node_namespace)
-            return params
+            apply(
+                params,
+                [jnp.array([1.0])] * n_inputs,
+                rng_key,
+                node_namespace=node_namespace,
+                constraints=constraints,
+            )
+            return params, constraints
 
         self.apply = apply
         self.collect_all_results = collect_all_results

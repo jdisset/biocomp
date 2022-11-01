@@ -17,6 +17,7 @@ import numpy as np
 from .recipe import XP, import_recipes_to_sql
 from .network import Network, inverted_network
 from . import datautils as du
+from . import utils as ut
 import wandb as wb
 import os
 
@@ -102,6 +103,8 @@ DEFAULT_CFG = {
     "epochs": 100000,
     "n_replicates": 1,
 
+    "compile_training": True,
+
     "n_batches": 1,
     "norm_factor": 1e6,
     "balance_bin_resolution": 0.5,
@@ -164,10 +167,12 @@ def train_inverted_bunch(
 
     key = jax.random.PRNGKey(cfg['rng_key'])
     ikeys = jax.random.split(key, len(models))
+
     params = {}
+    constraints = {}
 
     for s, m, k in zip(models.keys(), models.values(), ikeys):
-        params = m.init(k, pre_params=params, node_namespace=s)
+        params, constraints = m.init(k, pre_params=params, pre_constraints=constraints, node_namespace=s)
 
     def apply_model(params, x, key, name):
         m = partial(models[name], params, node_namespace=name, rng_key=key)
@@ -176,12 +181,13 @@ def train_inverted_bunch(
     def loss_func(params, x, y, rng_key):
         nmodels = len(models)
         ikeys = jax.random.split(rng_key, nmodels)
-        return jnp.array(
+        res = jnp.array(
             [
                 loss_f(apply_model(params, x, k, sample), y[sample])
                 for sample, k in zip(models.keys(), ikeys)
             ]
         ).mean()
+        return res
 
     def make_batches(X, Y, n_batches):
         x_ = {s: np.array_split(X[s], n_batches) for s in X.keys()}
@@ -194,7 +200,7 @@ def train_inverted_bunch(
 
 
     def training_step(params, opt_state, key, x, y):
-        print('compiling training step...')
+        # print('compiling training step...')
         loss, grads = jax.value_and_grad(loss_func)(params, x, y, key)
         updates, opt_state = optimizer.update(grads, opt_state, params)
 
@@ -202,6 +208,8 @@ def train_inverted_bunch(
         updates['node'] = jax.tree_map(lambda x: jnp.zeros_like(x), updates['node'])
 
         params = optax.apply_updates(params, updates)
+        params = ut.apply_constraints(params, constraints)
+
         return params, opt_state, grads, loss
 
     def wandb_update(loss, params, iter_num):
@@ -265,7 +273,6 @@ def train_inverted_bunch(
     params_history = []
     loss_history = []
 
-    step = jit(training_step)
 
     from datetime import datetime
 
@@ -287,7 +294,23 @@ def train_inverted_bunch(
             json.dump(cfg, f)
 
 
+
+    step = training_step
+
+    if cfg['compile_training']:
+        step = jit(step)
+        import time
+        print(f'Compiling training step...')
+        t0 = time.time()
+        lowered = step.lower(params, opt_state, k, x_batches[0], y_batches[0])
+        print(f'Lowered...')
+        compiled = lowered.compile()
+        t1 = time.time()
+        print(f'compilation time: {t1-t0:.2f}s')
+        step = compiled
+
     for i, k in enumerate(jax.random.split(key, cfg['epochs'])):
+
         for x, y in list(zip(x_batches, y_batches)):
             params, opt_state, grads, loss = step(params, opt_state, k, x, y)
 
