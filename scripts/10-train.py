@@ -28,14 +28,15 @@ p = model.init(jax.random.PRNGKey(cfg['rng_key']))
 
 inp = jnp.array([1.0, 2.0])
 model.apply(p, inp, rng_key=jax.random.PRNGKey(0))
+model.collect_all_results(p, inp, rng_key=jax.random.PRNGKey(0))
 
-# xla_2 = ut.print_xla(model.apply, p, jnp.array([1.0, 2.0]), rng_key=jax.random.PRNGKey(0))
-# nlines = len(xla_2.splitlines())
-# nlines
 
-lowered = jax.jit(model.apply).lower(p, inp, rng_key=jax.random.PRNGKey(0))
-nlines = lowered.as_text().count('\n')
-
+# lowered = jax.jit(model.apply).lower(p, inp, rng_key=jax.random.PRNGKey(0))
+# compiled = lowered.compile()
+# print(compiled.as_text())
+# compiled.cost_analysis()
+# compiled.memory_analysis()
+# compiled(p, inp, rng_key=jax.random.PRNGKey(0))
 
 # bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls")
 ##
