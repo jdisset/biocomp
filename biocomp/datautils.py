@@ -41,7 +41,7 @@ def binstats_nbins(data, bin_columns, stat_column, nbins=20, log=True, stats=["m
     return df, bins
 
 
-def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=None, bin_max=None):
+def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=1e-12, bin_max=None):
     """Calculate statistics (mean, count), for each bin in len(bin_axis) dimensions."""
     if bin_axis is None:
         bin_axis = protein_names
@@ -50,13 +50,21 @@ def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=None, b
     VMAX_EPSILON = 10.0 ** (-POWER_RANGE)
     vmin, vmax = data[:, bin_axisid].min(axis=0), data[:, bin_axisid].max(axis=0) + VMAX_EPSILON
     if bin_min is not None:
-        vmin = max(vmin, bin_min)
+        vmin = np.maximum(vmin, bin_min)
     if bin_max is not None:
-        vmax = min(vmax, bin_max)
+        vmax = np.minimum(vmax, bin_max)
     # we want to bin the data using logaritmic bins with a fixed resolution, not a specific number of bins
     powers = 10.0 ** np.arange(-POWER_RANGE, POWER_RANGE, resolution)
-    first_bin = np.array([powers[powers < v].max() for v in vmin])
-    last_bin = np.array([powers[powers > v].min() for v in vmax])
+
+    first_bin = []
+    for v in vmin:
+        first_bin.append(powers[np.searchsorted(powers, v, side='right')])
+    last_bin = []
+    for v in vmax:
+        last_bin.append(powers[np.searchsorted(powers, v, side='left')])
+    first_bin = np.array(first_bin)
+    last_bin = np.array(last_bin)
+
     nbins = np.ceil(np.log10(last_bin / first_bin) / resolution).astype(int)
     bin_edges = [
         np.geomspace(first_bin[i], last_bin[i], nbins[i] + 1) for i in range(len(first_bin))
