@@ -17,32 +17,6 @@ random.seed()
 lib = ut.load_lib()
 xp = ut.load_xp('20221012A_massCtrls', lib)
 
-
-# models = xp.get_models()
-
-# models = xp.get_models(node_remap=config['node_remap'])
-# # model is a dict. Let's get one
-# model = models.items().__iter__().__next__()[1]
-# cg = model.network.compute_graph
-# p = model.init(jax.random.PRNGKey(cfg['rng_key']))
-# inp = jnp.array([1.0, 2.0])
-# model.apply(p, inp, rng_key=jax.random.PRNGKey(0))
-# model.collect_all_results(p, inp, rng_key=jax.random.PRNGKey(0))
-
-
-# lowered = jax.jit(model.apply).lower(p, inp, rng_key=jax.random.PRNGKey(0))
-# compiled = lowered.compile()
-# print(compiled.as_text())
-# # print nb of lines
-# print(len(compiled.as_text().splitlines()))
-# compiled.cost_analysis()
-# compiled.memory_analysis()
-# %timeit compiled(p, inp, rng_key=jax.random.PRNGKey(0))
-
-# bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls")
-# a should contain integers increasing 10 by 10 in the first dimension, and 1 in the second dimension.
-# shape (30, 2)
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                        --     helpers   --
 # ···············································································
@@ -53,81 +27,16 @@ def glorot_initializer(rng_key, shape):
     return init
 
 
-params = {}
-get_p = partial(
-    bcc.get_param,
-    params,
-    node_id=1,
-)
-get_q = partial(
-    bcc.get_quantized,
-    params,
-    quantize_fun=bcc.quantize,
-    node_id=1,
-)
-
-
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
-
-def nn_dense(input_values, hidden_size, output_size, get_param, key, name):
-    k1, k2 = jax.random.split(key, 2)
-    input_size = input_values.shape[-1]
-    w1 = get_param(
-        f'{name}_w1', init=glorot_initializer(k1, (input_size, hidden_size)), shared=True
-    )
-    b1 = get_param(f'{name}_b1', init=lambda: jnp.zeros((hidden_size,)), shared=True)
-    w2 = get_param(
-        f'{name}_w2', init=glorot_initializer(k2, (hidden_size, output_size)), shared=True
-    )
-    b2 = get_param(f'{name}_b2', init=lambda: jnp.zeros((output_size,)), shared=True)
-    return jnp.dot(jax.nn.sigmoid(jnp.dot(input_values, w1) + b1), w2) + b2
-
-
-# y = nn_dense(jnp.array([1.0]), 2, get_p, jax.random.PRNGKey(1), 'test')
-
-
-def nn_dense_multilevel(input_values, hidden_size, output_size, depth, get_param, key, name):
-    # similar to n_dense, but instead of a single layer, we have a stack of layers (depth)
-    # each layer is a dense layer, but the input to each layer is the output of the previous layer
-    res = input_values
-    keys = jax.random.split(key, depth)
-    for i in range(depth - 1):
-        res = nn_dense(res, hidden_size, hidden_size, get_param, keys[i], f'{name}_{i}')
-    return nn_dense(res, hidden_size, output_size, get_param, keys[-1], f'{name}_{depth - 1}')
-
-
-# def transform_w_dense_layer(get_param, get_quantized, wsize, transform_name, deg_param_name, **_):
-# app = bcc._transform(get_param, get_quantized, transform_name, deg_param_name, **_)
-# def apply(*values, rng_key):
-# k1, k2 = jax.random.split(rng_key, 2)
-# res = app(*values, rng_key=k1)
-# return nn_dense(res, wsize, get_param, k2, transform_name)
-# return apply
-
-
-@bcc.compnode
-def ERN_nn_multi(get_param, get_quantized, seq_name, **_):
-    def apply(neg, pos, rng_key, **_):
-        param_name = f'{seq_name}::affinity'
-        affinity = get_param(param_name, init=continuous_initializer(rng_key), shared=True)
-        res = nn_dense_multilevel(
-            jnp.array([neg, pos]).squeeze(), 32, 1, 2, get_param, rng_key, seq_name
-        )
-        return jnp.squeeze(res) + affinity
-
-    return apply
-
-
-##
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                      --     hill transforms     --
+# ···············································································
 
 
 def transform_hill(get_param, get_quantized, transform_name, **_):
     def apply(*values, rng_key):
         keys = jax.random.split(rng_key, 4)
-
-        # "$$ [out] = V_{specie} (\\frac{[value]}{[value] + K_{A_{specie}}})^{n_{specie}} / (\\mu_{specie}) $$",
 
         val = jnp.array(values)
 
@@ -144,20 +53,22 @@ def transform_hill(get_param, get_quantized, transform_name, **_):
 
         # we compute the actual V_species as a weighted average of the V_species_raw
         # (which depend on input edges (i.e. which promoter or uORF is used))
-        V = jnp.average(V_raw, weights=val+bcc.BC_EPSILON)
+        V = jnp.average(V_raw, weights=val + bcc.BC_EPSILON)
 
         K_A = get_param(
             f'{transform_name}_K',
             init=bcc.continuous_initializer(keys[1]),
             shared=True,
-            clip_to=(0, None),
-        )
-        n = get_param(
-            f'{transform_name}_n',
-            init=bcc.continuous_initializer(keys[2]),
-            shared=True,
             clip_to=(bcc.BC_EPSILON, None),
         )
+
+        n = get_param(
+            f'{transform_name}_n',
+            init=bcc.continuous_initializer(keys[2], minval=0.25, maxval=3.0),
+            shared=True,
+            clip_to=(0.2, 4.0),
+        )
+
         mu = get_param(
             f'{transform_name}_mu',
             init=bcc.continuous_initializer(keys[3]),
@@ -165,9 +76,15 @@ def transform_hill(get_param, get_quantized, transform_name, **_):
             clip_to=(bcc.BC_EPSILON, None),
         )
 
-        value = jnp.sum(val)
+        value = jax.nn.relu(jnp.sum(val))
+        v_k = jnp.maximum(value + K_A, bcc.BC_EPSILON)
 
-        return V * (value / (value + K_A)) ** n / mu
+        v_over_vk = value / v_k
+
+        pown = jnp.power(v_over_vk, n)
+
+        res = V * pown / mu
+        return res
 
     return apply
 
@@ -176,10 +93,6 @@ def inverse_transform_hill(get_param, get_quantized, transform_name, **_):
     def apply(value, rng_key):
         keys = jax.random.split(rng_key, 4)
         assert value.shape == ()
-
-        # [out]^* = \\frac{\\alpha K_{A_{specie}}}{1 - \\alpha}
-        # where $\\alpha$ is:\n",
-        # \\alpha = \\sqrt[n_{specie}]{\\frac{[in]}{V_{specie}} (\\mu_{specie})}
 
         V_name = f'{transform_name}_rate'
         V = get_quantized(
@@ -196,14 +109,16 @@ def inverse_transform_hill(get_param, get_quantized, transform_name, **_):
             f'{transform_name}_K',
             init=bcc.continuous_initializer(keys[1]),
             shared=True,
-            clip_to=(0, None),
-        )
-        n = get_param(
-            f'{transform_name}_n',
-            init=bcc.continuous_initializer(keys[2]),
-            shared=True,
             clip_to=(bcc.BC_EPSILON, None),
         )
+
+        n = get_param(
+            f'{transform_name}_n',
+            init=bcc.continuous_initializer(keys[2], minval=0.25, maxval=3.0),
+            shared=True,
+            clip_to=(0.2, 4.0),
+        )
+
         mu = get_param(
             f'{transform_name}_mu',
             init=bcc.continuous_initializer(keys[3]),
@@ -211,20 +126,16 @@ def inverse_transform_hill(get_param, get_quantized, transform_name, **_):
             clip_to=(bcc.BC_EPSILON, None),
         )
 
-        alpha = jnp.power(value / V * mu, 1 / n)
-        return alpha * K_A / (1 - alpha)
+        alpha = jnp.power(jax.nn.relu(value) / V * mu, 1 / n)
+        res = alpha * K_A / jnp.maximum(1 - alpha, bcc.BC_EPSILON)
+        return res
 
     return apply
 
 
-# TODO: add bounds to the parameters
-
-# def get_qu(_, v, **__):
-# return v
-# f = transform_hill(get_p, get_qu, 'test')
-# inv_f = inverse_transform_hill(get_p, get_qu, 'test')
-# y = f(0.093000, rng_key=jax.random.PRNGKey(1))
-# inv_f(y, rng_key=jax.random.PRNGKey(1))
+# s = p['shared']
+# alp = jnp.power(2.0/s['empty_tc::tl_rate']*s['tl_mu'], 1.0/s['tl_n'])
+# alp * s['tl_K'] / jnp.maximum(1 - alp, bcc.BC_EPSILON)
 
 
 @bcc.compnode
@@ -247,18 +158,171 @@ def inverse_translation_hill(get_param, get_quantized, **_):
     return inverse_transform_hill(get_param, get_quantized, 'tl', **_)
 
 
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                    --     nn based transforms     --
+# ···············································································
+
+
+def nn_dense(input_values, output_size, get_param, key, name):
+    input_size = 1 if input_values.shape == () else input_values.shape[0]
+    # print(f'nn_dense: {name} {input_size} -> {output_size}')
+    # print(f'input_values: {input_values}')
+    w = get_param(
+        f'{name}_w', init=bcc.glorot_initializer(key, (input_size, output_size)), shared=True
+    )
+    b = get_param(f'{name}_b', init=lambda: jnp.zeros((output_size,)), shared=True)
+    res = jnp.dot(input_values, w) + b
+    # print(f'res: {res}')
+    return res.squeeze()
+
+
+def nn_dense_multilevel(input_values, hidden_s, output_s, depth, get_param, key, name, activation):
+    res = input_values
+    keys = jax.random.split(key, depth)
+    for i in range(depth - 1):
+        res = activation(nn_dense(res, hidden_s, get_param, keys[i], f'{name}_{i}'))
+    return nn_dense(res, output_s, get_param, keys[-1], f'{name}_{depth - 1}')
+
+
+# params = {}
+# get_p = partial(
+# bcc.get_param,
+# params,
+# constraints={},
+# node_id=1,
+# )
+
+# y = nn_dense(jnp.array([1.0]), 2, get_p, jax.random.PRNGKey(1), 'test')
+# yy = nn_dense_multilevel(jnp.array([1.0]), 2, 2, 2, get_p, jax.random.PRNGKey(1), 'test', jax.nn.relu)
+
+
+def transform_w_dense_layer(get_param, get_quantized, transform_name, wsize=32, depth=2, **_):
+    app = bcc._transform(get_param, get_quantized, transform_name, f'{transform_name}_deg', **_)
+
+    def apply(*values, rng_key):
+        k1, k2 = jax.random.split(rng_key, 2)
+        res = app(*values, rng_key=k1)
+        return jax.nn.sigmoid(
+            nn_dense_multilevel(res, wsize, 1, depth, get_param, k2, transform_name, jax.nn.relu)
+        )
+
+    return apply
+
+
+def inv_transform_w_dense_layer(get_param, get_quantized, transform_name, wsize=32, depth=2, **_):
+    app = bcc._inverse_transform(
+        get_param, get_quantized, transform_name, f'{transform_name}_deg', **_
+    )
+
+    def apply(value, rng_key):
+        k1, k2 = jax.random.split(rng_key, 2)
+        res = jax.nn.sigmoid(
+            nn_dense_multilevel(
+                value, wsize, 1, depth, get_param, k2, f'inv_{transform_name}', jax.nn.relu
+            )
+        )
+        return app(res, rng_key=k1)
+
+    return apply
+
+
+@bcc.compnode
+def transcription_nn(get_param, get_quantized, **_):
+    return transform_w_dense_layer(get_param, get_quantized, 'tc', **_)
+
+
+@bcc.inv_compnode(fwd_name='transcription_nn')
+def inverse_transcription_nn(get_param, get_quantized, **_):
+    return inv_transform_w_dense_layer(get_param, get_quantized, 'tc', **_)
+
+
+@bcc.compnode
+def translation_nn(get_param, get_quantized, **_):
+    return transform_w_dense_layer(get_param, get_quantized, 'tl', **_)
+
+
+@bcc.inv_compnode(fwd_name='translation_nn')
+def inverse_translation_nn(get_param, get_quantized, **_):
+    return inv_transform_w_dense_layer(get_param, get_quantized, 'tl', **_)
+
+
+@bcc.compnode
+def ERN_nn_multi(get_param, get_quantized, seq_name, **_):
+    def apply(neg, pos, rng_key, **_):
+        param_name = f'{seq_name}::affinity'
+        affinity = get_param(param_name, init=bcc.continuous_initializer(rng_key), shared=True)
+        res = nn_dense_multilevel(
+            jnp.array([neg, pos, affinity]).squeeze(), 32, 1, 2, get_param, rng_key, seq_name
+        )
+        return jax.nn.relu(jnp.squeeze(res))
+
+    return apply
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+
 cfg = {
     "learning_rate": 0.001,
     "compile_training": True,
     "node_remap": {
         "sequestron_ERN": "ERN_with_affinity",
-        "transcription": "transcription_hill",
-        "translation": "translation_hill",
+        "transcription": "transcription_nn",
+        "inv_transcription": "inverse_transcription_nn",
+        "translation": "translation_nn",
+        "inv_translation": "inverse_translation_nn",
     },
-    "rng_key": random.randint(0, 1e9),
+    "balance_bin_resolution": 0.5,
+    "balance_threshold_quantile": 0.4,
+    "balance_threshold_min": 40,
+    "n_batches": 64,
+    "rng_key": random.randint(0, 1e12),
 }
 
+# params = {}
+# get_p = partial(
+# bcc.get_param,
+# params,
+# constraints={},
+# node_id=1,
+# )
 
-bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls_v2")
+# def get_qu(_, v, **__):
+# return v
+
+# f = transform_hill(get_p, get_qu, 'test')
+# inv_f = inverse_transform_hill(get_p, get_qu, 'test')
+# params
+# y = f(-0.093000, rng_key=jax.random.PRNGKey(1))
+# inv_f(y, rng_key=jax.random.PRNGKey(1))
+
+# ftc = transcription_hill(get_p, get_qu)
+# inv_ftc = inverse_transcription_hill(get_p, get_qu)
+# ftl = translation_hill(get_p, get_qu)
+# inv_ftl = inverse_translation_hill(get_p, get_qu)
+
+# ytc = ftc(0.1093000, rng_key=jax.random.PRNGKey(1))
+# inv_ftc(ytc, rng_key=jax.random.PRNGKey(1))
+# ytl = ftl(0.093000, rng_key=jax.random.PRNGKey(1))
+# inv_ftl(ytl, rng_key=jax.random.PRNGKey(1))
+
+# models = xp.get_models(node_remap=cfg['node_remap'])
+# model = models.items().__iter__().__next__()[1]
+# p, c = model.init(jax.random.PRNGKey(cfg['rng_key']))
+
+# X, Y = xp.get_XY(models)
+
+# inp = jnp.array([1.0, 2.0])
+# model.collect_all_results(p, inp, rng_key=jax.random.PRNGKey(0))
+
+# model.network.name
+# ut.plot_networks([model.network], [f'../__out/{model.network.name}_dbg.pdf'])
+
+bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls_v4")
 # bc.train.train_xp(xp, cfg)
 
