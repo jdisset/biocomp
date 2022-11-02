@@ -2,6 +2,7 @@ import pandas as pd
 from time import time
 from pathlib import Path
 import urllib.parse
+from pyppeteer import launch
 import sys
 import gspread
 from functools import partial
@@ -275,7 +276,6 @@ def screenCaptures(
     height=1500,
     n_batches=1,
 ):
-    from pyppeteer import launch
 
     params = []
 
