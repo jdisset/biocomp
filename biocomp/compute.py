@@ -64,7 +64,7 @@ def round_to_int_jvp(x, x_tang):
     return x, x_dot
 
 
-BC_EPSILON = 1e-18
+BC_EPSILON = 1e-9
 BC_MAX_FLOAT = float('inf')
 
 COMPUTE_NODES_DICT = {}
@@ -390,9 +390,7 @@ class ComputeGraphModel:
         batches = self.__get_batch_sequence_of_nodes()
         flat_batches = [item for sublist in batches for item in sublist]
         call_dicts = []
-        input_mapping_to_res = {}
-        node_id_to_res = {}
-        for i, nid in enumerate(flat_batches):
+        for nid in flat_batches:
             call_d = {}
             node_row = self.network.compute_graph.loc[nid]
             # if it's an inverse node:
@@ -421,34 +419,16 @@ class ComputeGraphModel:
             call_d['get_q'] = get_q
             call_d['extra_params'] = extra_params
             call_d['type'] = node_row.type
-            # call_d['input_from'] = [(node_id_to_res[nn], out) for nn, out in node_row.input_from]
             call_d['input_from'] = node_row.input_from
             call_d['fun'] = None
             call_d['nid'] = nid
-            call_d['result_id'] = i
 
             fun_name = node_remap.get(node_row.type, node_row.type)
             if node_row.type not in ('input', 'output'):
                 assert fun_name in COMPUTE_NODES_DICT, f'Invalid node type {fun_name}'
                 call_d['fun'] = COMPUTE_NODES_DICT[fun_name]
-            elif node_row.type == 'input':
-                input_pos = extra_params['input_position']
-                input_mapping_to_res[input_pos] = i
 
             call_dicts.append(call_d)
-            node_id_to_res[nid] = i
-
-        MAX_N_OUTPUTS = (
-            max(
-                [
-                    max([t[1] for t in l])
-                    for l in self.network.compute_graph['input_from'].values
-                    if l
-                ]
-            )
-            + 1
-        )
-        result_shape = (len(call_dicts), MAX_N_OUTPUTS)
 
         n_inputs = len(self.network.compute_graph[self.network.compute_graph['type'] == 'input'])
 
@@ -460,11 +440,6 @@ class ComputeGraphModel:
 
             results = {}
 
-            # results = jnp.zeros(result_shape)
-            # for i in range(n_inputs):
-            # leninp = 1 if len(inputs[i].shape) == 0 else inputs[i].shape[0]
-            # results = results.at[input_mapping_to_res[i], :leninp].set(inputs[i])
-
             for (n, key) in zip(call_dicts, keys):
                 nid = n['nid']
 
@@ -472,7 +447,6 @@ class ComputeGraphModel:
                     results[nid] = inputs[n['extra_params']['input_position']]
                     continue
 
-                # upstream_results = results[tuple(zip(*n['input_from']))]
                 upstream_results = []
                 for inp in n['input_from']:
                     if len(results[inp[0]].shape) == 0:
@@ -489,8 +463,6 @@ class ComputeGraphModel:
                 get_q = partial(n['get_q'], params)
                 comp_node = n['fun'](get_p, get_q, **n['extra_params'])
                 res = comp_node(*upstream_results, rng_key=key)
-                res_len = 1 if len(res.shape) == 0 else res.shape[0]
-                # results = results.at[rid, :res_len].set(res)
                 results[nid] = res
 
             raise ValueError('Invalid compute graph, no output node found')
