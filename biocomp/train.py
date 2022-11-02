@@ -90,41 +90,36 @@ def train_single_model(model, X, Y, cfg, loss_f=mse_loss, wandb=None):
 ## ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_CFG = {
-
     "node_remap": {},
-
     "optimizer": "sgd",
     "learning_rate": 0.001,
     "adam_w_decay": 0.0001,
     "loss_function": "mse",
-
     "rng_key": 42,
-
-    "epochs": 100000,
+    "epochs": 10000,
     "n_replicates": 1,
-
     "compile_training": True,
-
-    "n_batches": 1,
+    "n_batches": 32,
     "norm_factor": 1e6,
     "balance_bin_resolution": 0.5,
     "balance_threshold_quantile": 0.4,
-    "balance_threshold_min": 20,
-
-    "log_rate": 100,
-    "plot_rate": 10000,
-    "save_rate": 10000,
+    "balance_threshold_min": 40,
+    "log_rate": 1,
+    "plot_rate": 100,
+    "save_rate": 100,
 }
 
 DEFAULT_LOSS_FUNCTIONS = {
     "mse": mse_loss,
 }
 
+
 def train_xp(xp, config=DEFAULT_CFG, **kwargs):
     cfg = {**DEFAULT_CFG, **config}
     models = xp.get_models(node_remap=config['node_remap'])
     _, Y = xp.get_XY(models)
     return train_inverted_bunch(models, Y, config=config, **kwargs)
+
 
 def train_inverted_bunch(
     models,
@@ -136,6 +131,7 @@ def train_inverted_bunch(
     save_path='./training_results/',
 ):
     import rich
+    from rich.progress import track
 
     cfg = {**DEFAULT_CFG, **config}
     rich.print(f'Starting training with config: {cfg}')
@@ -171,9 +167,14 @@ def train_inverted_bunch(
     params = {}
     constraints = {}
 
-    for s, m, k in zip(models.keys(), models.values(), ikeys):
-        params, constraints = m.init(k, pre_params=params, pre_constraints=constraints, node_namespace=s)
+    for s, m, k in track(
+        list(zip(models.keys(), models.values(), ikeys)), description='Initializing params'
+    ):
+        params, constraints = m.init(
+            k, pre_params=params, pre_constraints=constraints, node_namespace=s
+        )
 
+    @partial(jax.jit, static_argnums=(3,))
     def apply_model(params, x, key, name):
         m = partial(models[name], params, node_namespace=name, rng_key=key)
         return vmap(m)(x[name]).squeeze()
@@ -189,25 +190,38 @@ def train_inverted_bunch(
         ).mean()
         return res
 
-    def make_batches(X, Y, n_batches):
-        x_ = {s: np.array_split(X[s], n_batches) for s in X.keys()}
-        x_batches = [{s: x_[s][i] for s in x_.keys()} for i in range(n_batches)]
-        y_ = {s: np.array_split(Y[s], n_batches) for s in Y.keys()}
+    def split_array_uniform(arr, n_batches, rng_key):
+        n = len(arr)
+        batch_size = n // n_batches
+        a = jax.random.permutation(rng_key, arr)
+        return [a[i * batch_size : (i + 1) * batch_size] for i in range(n_batches)]
+
+    def make_batches(Y, n_batches, rng_key):
+        y_ = {s: split_array_uniform(Y[s], n_batches, rng_key) for s in Y.keys()}
         y_batches = [{s: y_[s][i] for s in y_.keys()} for i in range(n_batches)]
+        # get x_batches from y_batches
+        x_batches = []
+        for y_batch in y_batches:
+            x_batch = {}
+            for s in y_batch.keys():
+                x_batch[s] = models[s].get_input_from_output(y_batch[s])
+            x_batches.append(x_batch)
+
         return x_batches, y_batches
 
-    x_batches, y_batches = make_batches(X, Y, cfg['n_batches'])
-
+    print('Making batches')
+    x_batches, y_batches = make_batches(Y, cfg['n_batches'], key)
+    print('Batches done.')
 
     def training_step(params, opt_state, key, x, y):
         # print('compiling training step...')
         loss, grads = jax.value_and_grad(loss_func)(params, x, y, key)
-        updates, opt_state = optimizer.update(grads, opt_state, params)
+        updates, opt_state = jit(optimizer.update)(grads, opt_state, params)
 
         # don't update node parameters
         updates['node'] = jax.tree_map(lambda x: jnp.zeros_like(x), updates['node'])
 
-        params = optax.apply_updates(params, updates)
+        params = jit(optax.apply_updates)(params, updates)
         params = ut.apply_constraints(params, constraints)
 
         return params, opt_state, grads, loss
@@ -268,11 +282,10 @@ def train_inverted_bunch(
             wandb_update(loss, params, iter_num)
         print(f'[{iter_num}/{cfg["epochs"]}] loss: {loss}')
 
-
+    print('Initializing optimizer')
     opt_state = optimizer.init(params)
     params_history = []
     loss_history = []
-
 
     from datetime import datetime
 
@@ -293,8 +306,6 @@ def train_inverted_bunch(
         with open(save_path / 'config.json', 'w') as f:
             json.dump(cfg, f)
 
-
-
     step = training_step
 
     if cfg['compile_training']:
@@ -309,6 +320,8 @@ def train_inverted_bunch(
         print(f'compilation time: {t1-t0:.2f}s')
         step = compiled
 
+    loss = float('inf')
+    print('Training...')
     for i, k in enumerate(jax.random.split(key, cfg['epochs'])):
 
         for x, y in list(zip(x_batches, y_batches)):
@@ -322,5 +335,6 @@ def train_inverted_bunch(
             if i == cfg['epochs'] or i % cfg['save_rate'] == 0 or i == 0:
                 if save_path is not None:
                     du.save(params, f'{save_path}/params_{timestamp}_epoch-{i}.pkl', overwrite=True)
-                    du.save(loss_history, f'{save_path}/loss_history_{timestamp}.pkl', overwrite=True)
-
+                    du.save(
+                        loss_history, f'{save_path}/loss_history_{timestamp}.pkl', overwrite=True
+                    )
