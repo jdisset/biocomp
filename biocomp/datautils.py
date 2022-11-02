@@ -46,7 +46,7 @@ def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=1e-12, 
     if bin_axis is None:
         bin_axis = protein_names
     bin_axisid = [protein_names.index(p) for p in bin_axis]
-    POWER_RANGE = 20
+    POWER_RANGE = 30
     VMAX_EPSILON = 10.0 ** (-POWER_RANGE)
     vmin, vmax = data[:, bin_axisid].min(axis=0), data[:, bin_axisid].max(axis=0) + VMAX_EPSILON
     if bin_min is not None:
@@ -58,10 +58,10 @@ def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=1e-12, 
 
     first_bin = []
     for v in vmin:
-        first_bin.append(powers[np.searchsorted(powers, v, side='right')])
+        first_bin.append(powers[np.clip(np.searchsorted(powers, v, side='right'), 0, len(powers) - 1)])
     last_bin = []
     for v in vmax:
-        last_bin.append(powers[np.searchsorted(powers, v, side='left')])
+        last_bin.append(powers[np.clip(np.searchsorted(powers, v, side='right'), 0, len(powers) - 1)])
     first_bin = np.array(first_bin)
     last_bin = np.array(last_bin)
 
