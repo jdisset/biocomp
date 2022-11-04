@@ -30,38 +30,6 @@ import Util from "./util.jsx";
 
 console.log("ComputeComponent.jsx loaded");
 
-const nodeTypes = {
-  sequestron_ERN: SEQNode,
-  sequestron_RECOMBINASE: SEQNode,
-  translation: TLNode,
-  transcription: TCNode,
-  bias: CTENode,
-  in: INNode,
-  out: OUTNode,
-  aggregation: AGGNode,
-  source: SRCNode,
-  numeric: NUMNode,
-  deadend: DENDNode,
-  inv_numeric: INVNode,
-  inv_source: INVNode,
-  inv_aggregation: INVNode,
-  inv_transcription: INVNode,
-  inv_translation: INVNode,
-};
-
-const edgeTypes = {
-  content: ContentEdge,
-};
-
-const typeDim = {
-  sequestron_ERN: { width: 150, height: 70 },
-  sequestron_RECOMBINASE: { width: 100, height: 70 },
-  translation: { width: 40, height: 80 },
-  transcription: { width: 40, height: 80 },
-  bias: { width: 45, height: 40 },
-  output: { width: 20, height: 20 },
-};
-
 function getEdgeLabel(data) {
   return data.srccdg ? data.srccdg.content.join(", ") : "";
 }

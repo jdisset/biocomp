@@ -1,4 +1,5 @@
 import React, { ReactNode, useCallback } from "react";
+import Util from "./util.jsx";
 
 const theme = {
   INfill: "#FB8500",
@@ -77,10 +78,8 @@ function TShape(props) {
         d="M 599.7309 -1132.767 L 588.9309 -1123.2657 C 587.0425 -1121.6043 584.214 -1121.6043 582.3256 -1123.2657 L 571.5256 -1132.767 C 570.4466 -1133.7163 569.82825 -1135.084 569.82825 -1136.521 L 569.82825 -1155.8711 C 569.82825 -1157.3082 570.4466 -1158.6759 571.5256 -1159.6251 L 582.3256 -1169.1265 C 584.214 -1170.7878 587.0425 -1170.7878 588.9309 -1169.1265 L 599.7309 -1159.6251 C 600.8099 -1158.6759 601.42825 -1157.3082 601.42825 -1155.8711 L 601.42825 -1136.521 C 601.42825 -1135.084 600.8099 -1133.7163 599.7309 -1132.767 Z"
         fill="white"
       />
-		<text transform="translate(571 -1172.032)" fill="black" text-anchor="middle">
+      <text transform="translate(571 -1172.032)" fill="black" text-anchor="middle">
         <tspan fontFamily="Roboto" fontSize="8" fontWeight="400" x="14" y="30">
-
-
           {props.txt}
         </tspan>
       </text>
@@ -287,4 +286,28 @@ function RCBSeqShape(props) {
   );
 }
 
-export { Old_TLShape, TShape, RCBSeqShape, ERNSeqShape, theme };
+function generateArcs(nhandles = 1, radius = 28, center=30, arc_span = 35, spacing = 10) {
+  let arcs = [];
+  const total_span = nhandles * arc_span + (nhandles - 1) * spacing;
+  const start_angle = 180 - total_span / 2;
+  const end_angle = start_angle + total_span;
+  for (let i = 0; i < nhandles; i++) {
+    arcs.push(
+      <path
+        d={Util.describeArc(
+          center,
+          center,
+          radius,
+          start_angle + i * (arc_span + spacing),
+          start_angle + i * (arc_span + spacing) + arc_span
+        )}
+        stroke={theme.DNAcolor}
+        fill="none"
+        strokeWidth="4"
+      />
+    );
+  }
+  return arcs;
+}
+
+export { Old_TLShape, TShape, RCBSeqShape, ERNSeqShape, theme, generateArcs};

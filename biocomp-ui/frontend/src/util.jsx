@@ -15,6 +15,39 @@ const cmapcolors = colormap({
   format: "hex",
   alpha: 1,
 });
+
+const computeEdgeTypes = {
+  content: ContentEdge,
+};
+
+const computeNodeTypes = {
+  sequestron_ERN: SEQNode,
+  sequestron_RECOMBINASE: SEQNode,
+  translation: TLNode,
+  transcription: TCNode,
+  bias: CTENode,
+  in: INNode,
+  out: OUTNode,
+  aggregation: AGGNode,
+  source: SRCNode,
+  numeric: NUMNode,
+  deadend: DENDNode,
+  inv_numeric: INVNode,
+  inv_source: INVNode,
+  inv_aggregation: INVNode,
+  inv_transcription: INVNode,
+  inv_translation: INVNode,
+};
+
+const typeDim = {
+  sequestron_ERN: { width: 150, height: 70 },
+  sequestron_RECOMBINASE: { width: 100, height: 70 },
+  translation: { width: 40, height: 80 },
+  transcription: { width: 40, height: 80 },
+  bias: { width: 45, height: 40 },
+  output: { width: 20, height: 20 },
+};
+
 class Util {
   static cmap(x) {
     return cmapcolors[Math.max(0, Math.min(NCOLORS - 1, Math.floor(x * (NCOLORS - 1))))];
@@ -149,4 +182,4 @@ class Util {
     return { nodes, edges };
   };
 }
-export default Util;
+export {Util as default, computeNodeTypes, computeEdgeTypes, typeDim};

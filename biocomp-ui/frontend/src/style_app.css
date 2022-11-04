@@ -1,0 +1,56 @@
+/* left menu */
+#menu {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 300px;
+  height: 100%;
+  background-color: #f5f5f5;
+  border-right: 1px solid #e3e3e3;
+  overflow: auto;
+  display: flex;
+
+  flex-direction: column;
+  justify-content: left;
+  align-items: center;
+
+  /* hide scrollbar */
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none;
+}
+
+.plasmid {
+  width: 190px;
+  height: 100px;
+  background-color: #fff;
+  margin: 10px;
+  padding: 10px;
+  /*box-shadow: 0px 4px 4px rgba(0, 0, 0, 0.25);*/
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: row;
+  /* center vertically */
+  align-items: center;
+}
+ /* shadow on hover */
+.plasmid:hover {
+  box-shadow: 0px 4px 4px rgba(0, 0, 0, 0.25);
+}
+
+.plasmid > h2 {
+	/* roboto */
+	font-family: 'Roboto', sans-serif;
+	font-size: 1.0em;
+	/* not bold */
+	font-weight: 400;
+
+	color: #999;
+	margin: 0;
+	padding: 0;
+	margin-left: 20px;
+}
+.plasmid > svg {
+}
+	
+

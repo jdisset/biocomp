@@ -11,32 +11,9 @@ function SRCNode(props) {
   const circle_radius = 28;
   const center = circle_radius + 2;
 
-  function generateArcs(arc_span = 35, spacing = 10, radius = circle_radius) {
-    let arcs = [];
-    const nhandles = props.data.output_to.length;
-    const total_span = nhandles * arc_span + (nhandles - 1) * spacing;
-    const start_angle = 180 - total_span / 2;
-    const end_angle = start_angle + total_span;
-    for (let i = 0; i < nhandles; i++) {
-      arcs.push(
-        <path
-          d={Util.describeArc(
-            center,
-            center,
-            radius,
-            start_angle + i * (arc_span + spacing),
-            start_angle + i * (arc_span + spacing) + arc_span
-          )}
-          stroke={theme.DNAcolor}
-          fill="none"
-          strokeWidth="4"
-        />
-      );
-    }
-    return arcs;
-  }
 
-  let arcs = generateArcs();
+  const nhandles = props.data.output_to.length;
+  let arcs = generateArcs(nhandles, circle_radius, center);
 
   const handle_padding = 1;
   function generateHandles(arc_span = 35, spacing = 10, radius = circle_radius) {
@@ -64,6 +41,7 @@ function SRCNode(props) {
 
   return (
     <div className="input-node">
+
       <svg
         width={(circle_radius + 2) * 2}
         height={(circle_radius + 2) * 2}
