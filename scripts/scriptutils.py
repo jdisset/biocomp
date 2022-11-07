@@ -549,12 +549,15 @@ def plotGrads(gradlist):
 # {{{                        --     jax prints     --
 #···············································································
 
-def print_jaxpr(fun, *args, **kwargs):
+
+def get_jaxpr(fun, *args, **kwargs):
     import jax
-    print(jax.make_jaxpr(fun)(*args, **kwargs))
+    return jax.make_jaxpr(fun)(*args, **kwargs)
 
+def print_jaxpr(fun, *args, **kwargs):
+    get_jaxpr(fun, *args, **kwargs).pretty_print()
 
-def print_xla(fun, *args, **kwargs):
+def get_xla(fun, *args, **kwargs):
     import jax
     import jaxlib.xla_extension as xla_ext
     console = Console(highlighter=rich.highlighter.ReprHighlighter())
@@ -563,9 +566,10 @@ def print_xla(fun, *args, **kwargs):
     e = backend.compile(c)
     option = xla_ext.HloPrintOptions.short_parsable()
     out = e.hlo_modules()[0].to_string(option)
-    print(out)
     return out
 
+def print_xla(fun, *args, **kwargs):
+    print(get_xla(fun, *args, **kwargs))
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
