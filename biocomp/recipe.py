@@ -197,7 +197,7 @@ class XP:
         for s in track(self.samples, description='Building models'):
             try:
                 models[s['name']] = ComputeGraphModel(nets[s['recipe']])
-                models[s['name']].build(node_remap=node_remap)
+                models[s['name']].build(node_remap=node_remap, node_namespace=s['name'])
             except Exception as e:
                 msg = f'Error building {"inverse" if inverse else ""} model for sample {s}: {e}'
                 raise RuntimeError(msg)

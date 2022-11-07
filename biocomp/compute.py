@@ -13,9 +13,12 @@ from . import utils as ut
 DEFAULT_MIN_RATE = 0.0
 DEFAULT_MAX_RATE = 10.0
 
+
 def continuous_initializer(rng, shape=(), minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
     def init():
-        res = jax.random.uniform(key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32)
+        res = jax.random.uniform(
+            key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32
+        )
         return res
 
     return init
@@ -111,7 +114,7 @@ def _transform(get_param, get_quantized, transform_name, deg_param_name, **_):
 def _inverse_transform(get_param, get_quantized, transform_name, deg_param_name, **_):
     def apply(value, rng_key):
         # inverse can only work if there's only one input edge
-        assert value.shape == ()
+        assert value.shape == (), f'Expected scalar value, got {value.shape}'
         k0, k1 = jax.random.split(rng_key, 2)
 
         rate_name = f'{transform_name}_rate'
@@ -191,6 +194,14 @@ def deadend(*_, **__):
 
     return apply
 
+@compnode
+def output(*_, **__):
+    def apply(*value, **_):
+        return jnp.array(value)
+
+    return apply
+
+
 
 # inverse of source is just a pass-through
 @inv_compnode(fwd_name='source')
@@ -268,6 +279,7 @@ def get_param(
     node_namespace=None,
     clip_to=None,
     constraints=None,
+    read_only=True,
 ):
     assert isinstance(params, dict), f'params must be a dict, not {type(params)}'
     assert constraints is None or isinstance(
@@ -288,11 +300,12 @@ def get_param(
 
     assert (init is None) != (overwrite_with is None)
 
-    if overwrite_with is not None:
+    if overwrite_with is not None and read_only is False:
         ut.at_path(params, dpath, overwrite_with)
         return overwrite_with
 
     if ut.at_path(params, dpath) is None:
+        assert read_only is False
         try:
             r = ut.at_path(params, dpath, init())
             if clip_to is not None:
@@ -324,7 +337,9 @@ def get_possible_parts(param_name, cdg_node_id, cdg):
     return available_params[param_name]
 
 
-def get_quantized(params, param_name, values, node_id, cdf, cdg, quantize_fun, mode='input_edges'):
+def get_quantized(
+    get_param, param_name, values, node_id, cdf, cdg, quantize_fun, mode='input_edges'
+):
     """Return a quantized version of the parameter, conditioned on the
     relevant species (either input or output cdg nodes). mode can be 'input' or 'output'."""
     # We are selecting possible values for a parameter depending on which path, or edge, they come from.
@@ -366,7 +381,7 @@ def get_quantized(params, param_name, values, node_id, cdf, cdg, quantize_fun, m
     ), f'len(possible_names)={len(possible_names)} != len(values)={len(values)}'
 
     possible_values = [
-        jnp.array([get_param(params, n, lambda: val, shared=True) for n in names])
+        jnp.array([get_param(n, lambda: val, shared=True) for n in names])
         for names, val in zip(possible_names, values)
     ]
     res = jnp.array([quantize_fun(v, p) for v, p in zip(values, possible_values)])
@@ -376,9 +391,13 @@ def get_quantized(params, param_name, values, node_id, cdf, cdg, quantize_fun, m
 class ComputeGraphModel:
     def __init__(self, network):
         self.network = network
+        self.n_inputs = len(
+            self.network.compute_graph[self.network.compute_graph['type'] == 'input']
+        )
         self.built = False
 
-    def build(self, node_remap=dict()):
+    def build(self, node_remap=dict(), node_namespace=None):
+        self.node_namespace = node_namespace
         assert self.network is not None
         assert self.network.is_built()
 
@@ -390,7 +409,9 @@ class ComputeGraphModel:
         batches = self.__get_batch_sequence_of_nodes()
         flat_batches = [item for sublist in batches for item in sublist]
         call_dicts = []
-        for nid in flat_batches:
+        output_node = None
+        nid_to_call_dict = dict()
+        for i, nid in enumerate(flat_batches):
             call_d = {}
             node_row = self.network.compute_graph.loc[nid]
             # if it's an inverse node:
@@ -422,19 +443,55 @@ class ComputeGraphModel:
             call_d['input_from'] = node_row.input_from
             call_d['fun'] = None
             call_d['nid'] = nid
+            nid_to_call_dict[nid] = i
 
             fun_name = node_remap.get(node_row.type, node_row.type)
-            if node_row.type not in ('input', 'output'):
+            if node_row.type not in ('input'):
                 assert fun_name in COMPUTE_NODES_DICT, f'Invalid node type {fun_name}'
                 call_d['fun'] = COMPUTE_NODES_DICT[fun_name]
+            if node_row.type == 'output':
+                output_node = nid 
 
             call_dicts.append(call_d)
 
-        n_inputs = len(self.network.compute_graph[self.network.compute_graph['type'] == 'input'])
+        def recursive_eval(params, inputs, rng_key, read_only=True, constraints=None):
 
-        # this will very likely be jitted
-        def collect_all_results(params, inputs, rng_key, node_namespace=None, constraints=None):
-            assert len(inputs) == n_inputs, f'len(inputs)={len(inputs)} != n_inputs={n_inputs}'
+            def evalnode(n, key):
+                if n['type'] == 'input':
+                    return inputs[n['extra_params']['input_position']]
+
+                get_p = partial(
+                        n['get_p'],
+                        params,
+                        node_namespace=self.node_namespace,
+                        constraints=constraints,
+                        read_only=read_only,
+                    )
+                get_q = partial(n['get_q'], get_p)
+
+                assert callable(n['fun'])
+                comp = n['fun'](get_p, get_q, **n['extra_params'])
+
+                upstream_results = []
+                n_inp = len(n['input_from'])
+                keys = jax.random.split(key, n_inp)
+                for inp, k in zip(n['input_from'], keys):
+                    res = evalnode(call_dicts[nid_to_call_dict[inp[0]]], k)
+                    if len(res.shape) == 0:
+                        upstream_results.append(res)
+                    else:
+                        upstream_results.append(res[inp[1]])
+
+                return comp(*upstream_results, rng_key=key)
+
+            assert(output_node is not None)
+            return evalnode(call_dicts[nid_to_call_dict[output_node]], rng_key)
+
+
+        def collect_all_results(params, inputs, rng_key, read_only=True, constraints=None):
+            assert (
+                len(inputs) == self.n_inputs
+            ), f'len(inputs)={len(inputs)} != n_inputs={self.n_inputs}'
 
             keys = jax.random.split(rng_key, len(flat_batches))
 
@@ -454,39 +511,42 @@ class ComputeGraphModel:
                     else:
                         upstream_results.append(results[inp[0]][inp[1]])
 
-                if n['type'] == 'output':
-                    return jnp.array(upstream_results), results
 
                 get_p = partial(
-                    n['get_p'], params, node_namespace=node_namespace, constraints=constraints
+                    n['get_p'],
+                    params,
+                    node_namespace=self.node_namespace,
+                    constraints=constraints,
+                    read_only=read_only,
                 )
-                get_q = partial(n['get_q'], params)
+                get_q = partial(n['get_q'], get_p)
                 comp_node = n['fun'](get_p, get_q, **n['extra_params'])
                 res = comp_node(*upstream_results, rng_key=key)
                 results[nid] = res
+
+                if n['type'] == 'output':
+                    return res, results
 
             raise ValueError('Invalid compute graph, no output node found')
 
         def apply(*args, **kwargs):
             return collect_all_results(*args, **kwargs)[0]
 
-        def init(rng_key, pre_params=None, pre_constraints=None, node_namespace=None):
+        def init(rng_key, pre_params=None, pre_constraints=None):
             params = {} if pre_params is None else pre_params
             constraints = {} if pre_constraints is None else pre_constraints
-            n_inputs = len(
-                self.network.compute_graph[self.network.compute_graph['type'] == 'input']
-            )
             apply(
                 params,
-                [jnp.array([1.0])] * n_inputs,
+                [jnp.array([1.0])] * self.n_inputs,
                 rng_key,
-                node_namespace=node_namespace,
                 constraints=constraints,
+                read_only=False,
             )
             return params, constraints
 
         self.apply = apply
         self.collect_all_results = collect_all_results
+        self.recursive_eval = recursive_eval
         self.init = init
         self.flat_batches = flat_batches
         self.built = True
@@ -602,3 +662,250 @@ def test_inverse():
     )
     y_inv_1 = np.array([inv_tl_1(yy[1], rng_key=rng_key) for yy in y]).squeeze()
     assert np.allclose(x, y_inv_1)
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{            --    archive when trying pure array version      --
+# ···············································································
+
+# def build_array(self, node_remap=dict()):
+# assert self.network is not None
+# assert self.network.is_built()
+
+# # node_remap is a dictionnary that maps "vanilla" node types to
+# # new names. Useful to try different node implementations
+# # (e.g translation -> custom_translation_v2)
+
+# # let's do everything we can before collect_all_results to avoid long compile times
+# batches = self.__get_batch_sequence_of_nodes()
+# flat_batches = [item for sublist in batches for item in sublist]
+# call_dicts = []
+# input_mapping_to_res = {}
+# node_id_to_res = {}
+# for i, nid in enumerate(flat_batches):
+# call_d = {}
+# node_row = self.network.compute_graph.loc[nid]
+# # if it's an inverse node:
+# nodeid_for_getters = nid
+# if node_row.extra is not None and 'is_inverse_of' in node_row.extra:
+# nodeid_for_getters = node_row.extra['is_inverse_of']
+# get_p = partial(
+# get_param,
+# node_id=nodeid_for_getters,
+# )
+# get_q = partial(
+# get_quantized,
+# node_id=nodeid_for_getters,
+# cdf=self.network.compute_graph,
+# cdg=self.network.central_dogma_graph,
+# quantize_fun=quantize,
+# )
+# extra_params = {
+# 'n_outputs': len(self.network.compute_graph.loc[nid]['output_to']),
+# 'n_inputs': len(self.network.compute_graph.loc[nid]['input_from']),
+# }
+# if node_row.extra is not None:
+# extra_params.update(node_row.extra)
+
+# call_d['get_p'] = get_p
+# call_d['get_q'] = get_q
+# call_d['extra_params'] = extra_params
+# call_d['type'] = node_row.type
+# call_d['input_from'] = [(node_id_to_res[nn], out) for nn, out in node_row.input_from]
+# call_d['fun'] = None
+# # call_d['nid'] = nid
+# call_d['result_id'] = i
+
+# fun_name = node_remap.get(node_row.type, node_row.type)
+# if node_row.type not in ('input', 'output'):
+# assert fun_name in COMPUTE_NODES_DICT, f'Invalid node type {fun_name}'
+# call_d['fun'] = COMPUTE_NODES_DICT[fun_name]
+# elif node_row.type == 'input':
+# input_pos = extra_params['input_position']
+# input_mapping_to_res[input_pos] = i
+
+# call_dicts.append(call_d)
+# node_id_to_res[nid] = i
+
+
+# MAX_N_OUTPUTS=max([max([t[1] for t in l]) for l in self.network.compute_graph['input_from'].values if l]) + 1
+# result_shape = (len(call_dicts),MAX_N_OUTPUTS)
+
+
+# # this will very likely be jitted
+# def collect_all_results(params, inputs, rng_key, constraints=None):
+# assert len(inputs) == self.n_inputs, f'len(inputs)={len(inputs)} != n_inputs={self.n_inputs}'
+
+# results = jnp.zeros(result_shape)
+# keys = jax.random.split(rng_key, len(flat_batches))
+
+# for i in range(self.n_inputs):
+# leninp = 1 if len(inputs[i].shape) == 0 else inputs[i].shape[0]
+# results = results.at[input_mapping_to_res[i], :leninp].set(inputs[i])
+
+# for (n, key) in zip(call_dicts, keys):
+# rid = n['result_id']
+
+# upstream_results = results[tuple(zip(*n['input_from']))]
+
+# if n['type'] == 'output':
+# return jnp.array(upstream_results), results
+
+# if n['fun'] is None:
+# continue
+
+# get_p = partial(
+# n['get_p'], params, node_namespace=self.node_namespace, constraints=constraints
+# )
+# get_q = partial(n['get_q'], params)
+# comp_node = n['fun'](get_p, get_q, **n['extra_params'])
+# res = comp_node(*upstream_results, rng_key=key)
+# res_len = 1 if len(res.shape) == 0 else res.shape[0]
+# results = results.at[rid, :res_len].set(res)
+
+# raise ValueError('Invalid compute graph, no output node found')
+
+# def apply(*args, **kwargs):
+# return collect_all_results(*args, **kwargs)[0]
+
+# def init(rng_key, pre_params=None, pre_constraints=None):
+# params = {} if pre_params is None else pre_params
+# constraints = {} if pre_constraints is None else pre_constraints
+# n_inputs = len(
+# self.network.compute_graph[self.network.compute_graph['type'] == 'input']
+# )
+# apply(
+# params,
+# [jnp.array([1.0])] * n_inputs,
+# rng_key,
+# node_namespace=self.node_namespace,
+# constraints=constraints,
+# )
+# return params, constraints
+
+# self.apply = apply
+# self.collect_all_results = collect_all_results
+# self.init = init
+# self.flat_batches = flat_batches
+# self.built = True
+
+
+# def build(self, node_remap=dict()):
+# assert self.network is not None
+# assert self.network.is_built()
+
+# # node_remap is a dictionnary that maps "vanilla" node types to
+# # new names. Useful to try different node implementations
+# # (e.g translation -> custom_translation_v2)
+
+# # let's do everything we can before collect_all_results to avoid long compile times
+# batches = self.__get_batch_sequence_of_nodes()
+# flat_batches = [item for sublist in batches for item in sublist]
+# call_dicts = []
+# input_mapping_to_res = {}
+# node_id_to_res = {}
+# for i, nid in enumerate(flat_batches):
+# call_d = {}
+# node_row = self.network.compute_graph.loc[nid]
+# # if it's an inverse node:
+# nodeid_for_getters = nid
+# if node_row.extra is not None and 'is_inverse_of' in node_row.extra:
+# nodeid_for_getters = node_row.extra['is_inverse_of']
+# get_p = partial(
+# get_param,
+# node_id=nodeid_for_getters,
+# )
+# get_q = partial(
+# get_quantized,
+# node_id=nodeid_for_getters,
+# cdf=self.network.compute_graph,
+# cdg=self.network.central_dogma_graph,
+# quantize_fun=quantize,
+# )
+# extra_params = {
+# 'n_outputs': len(self.network.compute_graph.loc[nid]['output_to']),
+# 'n_inputs': len(self.network.compute_graph.loc[nid]['input_from']),
+# }
+# if node_row.extra is not None:
+# extra_params.update(node_row.extra)
+
+# call_d['get_p'] = get_p
+# call_d['get_q'] = get_q
+# call_d['extra_params'] = extra_params
+# call_d['type'] = node_row.type
+# call_d['input_from'] = [(node_id_to_res[nn], out) for nn, out in node_row.input_from]
+# call_d['fun'] = None
+# # call_d['nid'] = nid
+# call_d['result_id'] = i
+
+# fun_name = node_remap.get(node_row.type, node_row.type)
+# if node_row.type not in ('input', 'output'):
+# assert fun_name in COMPUTE_NODES_DICT, f'Invalid node type {fun_name}'
+# call_d['fun'] = COMPUTE_NODES_DICT[fun_name]
+# elif node_row.type == 'input':
+# input_pos = extra_params['input_position']
+# input_mapping_to_res[input_pos] = i
+
+# call_dicts.append(call_d)
+# node_id_to_res[nid] = i
+
+
+# MAX_N_OUTPUTS=max([max([t[1] for t in l]) for l in self.network.compute_graph['input_from'].values if l]) + 1
+# result_shape = (len(call_dicts),MAX_N_OUTPUTS)
+
+# n_inputs = len(self.network.compute_graph[self.network.compute_graph['type'] == 'input'])
+
+
+# # this will very likely be jitted
+# def collect_all_results(params, inputs, rng_key, node_namespace=None):
+# assert len(inputs) == n_inputs, f'len(inputs)={len(inputs)} != n_inputs={n_inputs}'
+
+# results = jnp.zeros(result_shape)
+# keys = jax.random.split(rng_key, len(flat_batches))
+
+# for i in range(n_inputs):
+# leninp = 1 if len(inputs[i].shape) == 0 else inputs[i].shape[0]
+# results = results.at[input_mapping_to_res[i], :leninp].set(inputs[i])
+
+# for (n, key) in zip(call_dicts, keys):
+# rid = n['result_id']
+
+# upstream_results = results[tuple(zip(*n['input_from']))]
+
+# if n['type'] == 'output':
+# return jnp.array(upstream_results), results
+
+# if n['fun'] is None:
+# continue
+
+# get_p = partial(n['get_p'], params, node_namespace=node_namespace)
+# get_q = partial(n['get_q'], params)
+# comp_node = n['fun'](get_p, get_q, **n['extra_params'])
+# res = comp_node(*upstream_results, rng_key=key)
+# res_len = 1 if len(res.shape) == 0 else res.shape[0]
+# results = results.at[rid, :res_len].set(res)
+
+# raise ValueError('Invalid compute graph, no output node found')
+
+# def apply(*args, **kwargs):
+# return collect_all_results(*args, **kwargs)[0]
+
+# def init(rng_key, pre_params=None, node_namespace=None):
+# params = {}
+# if pre_params is not None:
+# params = pre_params
+# n_inputs = len(
+# self.network.compute_graph[self.network.compute_graph['type'] == 'input']
+# )
+# apply(params, [jnp.array([1.0])] * n_inputs, rng_key, node_namespace=node_namespace)
+# return params
+
+# self.apply = apply
+# self.collect_all_results = collect_all_results
+# self.init = init
+# self.flat_batches = flat_batches
+# self.built = True
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────

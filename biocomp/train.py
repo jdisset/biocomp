@@ -170,13 +170,11 @@ def train_inverted_bunch(
     for s, m, k in track(
         list(zip(models.keys(), models.values(), ikeys)), description='Initializing params'
     ):
-        params, constraints = m.init(
-            k, pre_params=params, pre_constraints=constraints, node_namespace=s
-        )
+        params, constraints = m.init(k, pre_params=params, pre_constraints=constraints)
 
     @partial(jax.jit, static_argnums=(3,))
     def apply_model(params, x, key, name):
-        m = partial(models[name], params, node_namespace=name, rng_key=key)
+        m = partial(models[name], params, rng_key=key)
         return vmap(m)(x[name]).squeeze()
 
     def loss_func(params, x, y, rng_key):
@@ -311,6 +309,7 @@ def train_inverted_bunch(
     if cfg['compile_training']:
         step = jit(step)
         import time
+
         print(f'Compiling training step...')
         t0 = time.time()
         lowered = step.lower(params, opt_state, k, x_batches[0], y_batches[0])
