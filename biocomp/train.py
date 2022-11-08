@@ -205,10 +205,27 @@ def train_inverted_bunch(
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                       --     training step     --
     # ···············································································
+    def split_params(params, static_paths):
+        """Split params into static and dynamic parts."""
+        # any path that is not in static_paths is dynamic
+        dynamic = params.copy()
+        static = {}
+        for path in static_paths:
+            ut.at_path(static, path, ut.at_path(dynamic, path))
+            ut.delete_path(dynamic, path)
 
-    def loss_func(params, X, Y, rng_key):
+        return dynamic, static
+
+    def assemble_params(dynamic, static):
+        """Assemble params from static and dynamic parts."""
+        res = ut.updated_dict(dynamic, static)
+        return res
+
+    def loss_func(dynamic, static, X, Y, rng_key):
         assert len(X) == nmodels, f"Expected {nmodels} models, got {X.shape}"
         assert len(Y) == nmodels
+        params = assemble_params(dynamic, static)
+
         K = jax.random.split(rng_key, nmodels)
 
         res = jnp.array(
@@ -221,14 +238,13 @@ def train_inverted_bunch(
         return res
 
     def training_step(params, opt_state, key, x, y):
-        loss, grads = jax.value_and_grad(loss_func)(params, x, y, key)
-        updates, opt_state = jit(optimizer.update)(grads, opt_state, params)
+        dynamic, static = split_params(params, [['node']])
+        loss, grads = jax.value_and_grad(loss_func)(dynamic, static, x, y, key)
+        updates, opt_state = optimizer.update(grads, opt_state, dynamic)
 
-        # don't update node parameters
-        updates['node'] = jax.tree_map(lambda x: jnp.zeros_like(x), updates['node'])
-
-        params = jit(optax.apply_updates)(params, updates)
-        params = ut.apply_constraints(params, constraints)
+        dynamic = optax.apply_updates(dynamic, updates)
+        dynamic = ut.apply_constraints(dynamic, constraints)
+        params = assemble_params(dynamic, static)
 
         return params, opt_state, grads, loss
 
@@ -297,7 +313,8 @@ def train_inverted_bunch(
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
 
-    opt_state = optimizer.init(params)
+    dynamic, _ = split_params(params, [['node']])
+    opt_state = optimizer.init(dynamic)
     params_history = []
     loss_history = []
 

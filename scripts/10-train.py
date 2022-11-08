@@ -255,32 +255,30 @@ def ERN_nn_multi(get_param, get_quantized, seq_name, **_):
 @bcc.compnode
 def output_nn(get_param, get_quantized, **_):
     def apply(*value, rng_key, **_):
-        res = nn_dense_multilevel(
-            jnp.array([neg, pos, affinity]).squeeze(), 8, 1, 2, get_param, rng_key, 'out', jax.nn.relu
-        )
-        return jnp.array(value)
+        res = jnp.array([nn_dense_multilevel(x.squeeze(), 8, 1, 2, get_param, rng_key, 'out', jax.nn.relu) for x in value])
         return jax.nn.relu(jnp.squeeze(res))
-
     return apply
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 
 
 cfg = {
-    "learning_rate": 0.001,
+    "learning_rate": 0.01,
     "compile_training": True,
     "node_remap": {
         "sequestron_ERN": "ERN_with_affinity",
-        # "transcription": "transcription_nn",
-        # "inv_transcription": "inverse_transcription_nn",
-        # "translation": "translation_nn",
-        # "inv_translation": "inverse_translation_nn",
+        "transcription": "transcription_nn",
+        "inv_transcription": "inverse_transcription_nn",
+        "translation": "translation_nn",
+        "inv_translation": "inverse_translation_nn",
+        "output": "output_nn",
     },
     "balance_bin_resolution": 0.5,
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 40,
-    "batch_size": 256,
+    "batch_size": 128,
     "rng_key": random.randint(0, 1e12),
 }
 
@@ -323,7 +321,7 @@ cfg = {
 # model.network.name
 # ut.plot_networks([model.network], [f'../__out/{model.network.name}_dbg.pdf'])
 
-# bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls_v4")
-bc.train.train_xp(xp, cfg)
+bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls_v5")
+# bc.train.train_xp(xp, cfg)
 
 

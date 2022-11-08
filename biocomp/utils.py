@@ -33,6 +33,10 @@ def at_path(d: dict, path, val=None, defaultinit=lambda: None):
         d = d.setdefault(path[-1], defaultinit())
     return d
 
+def delete_path(d, path):
+    for key in path[:-1]:
+        d = d[key]
+    del d[path[-1]]
 
 def apply_constraints(par, cons):
     newpar = par.copy()

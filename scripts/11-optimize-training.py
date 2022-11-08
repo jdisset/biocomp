@@ -354,7 +354,7 @@ print('res = ', step_c(params, allx)[0])
 
 # models = xp.get_models()
 
-N = 17
+N = 7
 F = [partial(m, rng_key=jax.random.PRNGKey(0)) for s, m in models.items()][:N]
 
 XX = list(X.values())[:N]
@@ -362,7 +362,6 @@ shortest = min([len(x) for x in X.values()])
 shortest = 3
 
 tX = [x[:shortest] for x in X.values()]
-tX
 X_truncated = {s:x for s, x in zip(X.keys(), tX)}
 
 XX = jnp.array(jnp.concatenate(tX, axis=1))
@@ -413,7 +412,7 @@ def loss_func(params, x):
 # loss_f(params, XX)
 
 XX = X_truncated
-step = jit(value_and_grad(loss_func))
+step = jit(loss_func)
 
 print(f'Compiling training step...')
 t0 = time.time()
@@ -461,3 +460,38 @@ b.shape
 
 
 np.all(c == b)
+##
+
+params
+
+from typing import List
+
+def split_params(params, static_paths: List[List[str]]):
+    """Split params into static and dynamic parts."""
+    # any path that is not in static_paths is dynamic
+
+    dynamic = params.copy()
+    static = {}
+
+    for path in static_paths:
+        bu.at_path(static, path, bu.at_path(dynamic, path))
+        bu.delete_path(dynamic, path)
+
+    return dynamic, static
+
+d, s = split_params(params, [['node','36+10']])
+d
+s
+
+def assemble_params(dynamic, static):
+    """Assemble params from static and dynamic parts."""
+    res = bu.updated_dict(dynamic, static)
+    return res
+
+d
+s
+ap = assemble_params(d, s)
+
+ap == params
+
+
