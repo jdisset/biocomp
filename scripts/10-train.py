@@ -245,13 +245,23 @@ def ERN_nn_multi(get_param, get_quantized, seq_name, **_):
         param_name = f'{seq_name}::affinity'
         affinity = get_param(param_name, init=bcc.continuous_initializer(rng_key), shared=True)
         res = nn_dense_multilevel(
-            jnp.array([neg, pos, affinity]).squeeze(), 32, 1, 2, get_param, rng_key, seq_name
+            jnp.array([neg, pos, affinity]).squeeze(), 32, 1, 2, get_param, rng_key, seq_name, jax.nn.relu
         )
         return jax.nn.relu(jnp.squeeze(res))
 
     return apply
 
 
+@bcc.compnode
+def output_nn(get_param, get_quantized, **_):
+    def apply(*value, rng_key, **_):
+        res = nn_dense_multilevel(
+            jnp.array([neg, pos, affinity]).squeeze(), 8, 1, 2, get_param, rng_key, 'out', jax.nn.relu
+        )
+        return jnp.array(value)
+        return jax.nn.relu(jnp.squeeze(res))
+
+    return apply
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
