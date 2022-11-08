@@ -189,32 +189,46 @@ def nn_dense_multilevel(input_values, hidden_s, output_s, depth, get_param, key,
 # yy = nn_dense_multilevel(jnp.array([1.0]), 2, 2, 2, get_p, jax.random.PRNGKey(1), 'test', jax.nn.relu)
 
 
-def transform_w_dense_layer(get_param, get_quantized, transform_name, wsize=32, depth=2, **_):
-    app = bcc._transform(get_param, get_quantized, transform_name, f'{transform_name}_deg', **_)
+def transform_w_dense_layer(get_param, get_quantized, transform_name, wsize=128, depth=2, **_):
+    app = bcc._transform(get_param, get_quantized, transform_name, **_)
 
     def apply(*values, rng_key):
         k1, k2 = jax.random.split(rng_key, 2)
         res = app(*values, rng_key=k1)
-        return jax.nn.sigmoid(
+        return jax.nn.relu(
             nn_dense_multilevel(res, wsize, 1, depth, get_param, k2, transform_name, jax.nn.relu)
         )
 
     return apply
 
 
-def inv_transform_w_dense_layer(get_param, get_quantized, transform_name, wsize=32, depth=2, **_):
-    app = bcc._inverse_transform(
-        get_param, get_quantized, transform_name, f'{transform_name}_deg', **_
-    )
-
+def inv_transform_w_dense_layer(get_param, get_quantized, transform_name, wsize=128, depth=2, **_):
     def apply(value, rng_key):
-        k1, k2 = jax.random.split(rng_key, 2)
+        k0, k1, k2 = jax.random.split(rng_key, 3)
+
+        rate_name = f'{transform_name}_rate'
+        deg_param_name = f'{transform_name}_deg'
+
+        rate = get_quantized(
+            rate_name,
+            get_param(rate_name, init=bcc.continuous_initializer(k0, (1,))),
+            mode='input_edges',
+        )[0]
+        deg = get_param(deg_param_name, init=bcc.continuous_initializer(k1), shared=True)
+
         res = jax.nn.sigmoid(
             nn_dense_multilevel(
-                value, wsize, 1, depth, get_param, k2, f'inv_{transform_name}', jax.nn.relu
+                jnp.array([value, rate, deg]).squeeze(),
+                wsize,
+                1,
+                depth,
+                get_param,
+                k2,
+                f'inv_{transform_name}',
+                jax.nn.relu,
             )
         )
-        return app(res, rng_key=k1)
+        return jax.nn.relu(res)
 
     return apply
 
@@ -245,7 +259,14 @@ def ERN_nn_multi(get_param, get_quantized, seq_name, **_):
         param_name = f'{seq_name}::affinity'
         affinity = get_param(param_name, init=bcc.continuous_initializer(rng_key), shared=True)
         res = nn_dense_multilevel(
-            jnp.array([neg, pos, affinity]).squeeze(), 32, 1, 2, get_param, rng_key, seq_name, jax.nn.relu
+            jnp.array([neg, pos, affinity]).squeeze(),
+            256,
+            1,
+            3,
+            get_param,
+            rng_key,
+            seq_name,
+            jax.nn.relu,
         )
         return jax.nn.relu(jnp.squeeze(res))
 
@@ -255,20 +276,26 @@ def ERN_nn_multi(get_param, get_quantized, seq_name, **_):
 @bcc.compnode
 def output_nn(get_param, get_quantized, **_):
     def apply(*value, rng_key, **_):
-        res = jnp.array([nn_dense_multilevel(x.squeeze(), 8, 1, 2, get_param, rng_key, 'out', jax.nn.relu) for x in value])
+        res = jnp.array(
+            [
+                nn_dense_multilevel(x.squeeze(), 128, 1, 2, get_param, rng_key, 'out', jax.nn.relu)
+                for x in value
+            ]
+        )
         return jax.nn.relu(jnp.squeeze(res))
+
     return apply
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 
 cfg = {
     "learning_rate": 0.01,
     "compile_training": True,
     "node_remap": {
-        "sequestron_ERN": "ERN_with_affinity",
+        "sequestron_ERN": "ERN_nn_multi",
         "transcription": "transcription_nn",
         "inv_transcription": "inverse_transcription_nn",
         "translation": "translation_nn",
@@ -278,7 +305,7 @@ cfg = {
     "balance_bin_resolution": 0.5,
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 40,
-    "batch_size": 128,
+    "batch_size": 1024,
     "rng_key": random.randint(0, 1e12),
 }
 
@@ -321,7 +348,5 @@ cfg = {
 # model.network.name
 # ut.plot_networks([model.network], [f'../__out/{model.network.name}_dbg.pdf'])
 
-bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls_v5")
+bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls_v6")
 # bc.train.train_xp(xp, cfg)
-
-

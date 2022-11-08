@@ -262,42 +262,41 @@ def train_inverted_bunch(
         wb.log({'shared_params': params['shared']}, step=iter_num)
 
         def log_plots():
-            if iter_num == 0:
-                gtruth = []
-                pred = []
-                for sample, f in jitted_models.items():
-                    model = models[sample]
-                    y_hat = f(params, X['sample'])
-                    out_proteins = model.get_output_proteins()
-                    in_proteins = model.get_inverted_input_proteins()
-                    stats, bins = du.binstats(Y[sample], out_proteins, in_proteins, resolution=0.5)
-                    stats_hat, bins_hat = du.binstats(
-                        y_hat, out_proteins, in_proteins, resolution=0.5
-                    )
-                    fig, _ = du.heatmap(
-                        stats,
-                        bins,
-                        figscale=0.6,
-                        stat_columns=['mean'],
-                        z_protein=(set(out_proteins) - set(in_proteins)).pop(),
-                        lims={'mean': (1e-5, 100)},
-                        title=f'{model.network.name} ground truth',
-                        subtitle=f'{len(y)} data points',
-                        show=False,
-                    )
-                    gtruth.append(wb.Image(fig, caption=f'{model.network.name} ground truth'))
-                    fig_hat, _ = du.heatmap(
-                        stats_hat,
-                        bins_hat,
-                        figscale=0.6,
-                        stat_columns=['mean'],
-                        z_protein=(set(out_proteins) - set(in_proteins)).pop(),
-                        lims={'mean': (1e-5, 100)},
-                        title=f'{model.network.name} predicted',
-                        subtitle=f'{len(y)} data points',
-                        show=False,
-                    )
-                    pred.append(wb.Image(fig_hat, caption=f'{model.network.name} predicted'))
+            gtruth = []
+            pred = []
+            for sample, f in jitted_models.items():
+                model = models[sample]
+                y_hat = f(params, X[sample])
+                out_proteins = model.get_output_proteins()
+                in_proteins = model.get_inverted_input_proteins()
+                stats, bins = du.binstats(Y[sample], out_proteins, in_proteins, resolution=0.5)
+                stats_hat, bins_hat = du.binstats(
+                    y_hat, out_proteins, in_proteins, resolution=0.5
+                )
+                fig, _ = du.heatmap(
+                    stats,
+                    bins,
+                    figscale=0.6,
+                    stat_columns=['mean'],
+                    z_protein=(set(out_proteins) - set(in_proteins)).pop(),
+                    lims={'mean': (1e-5, 100)},
+                    title=f'{model.network.name} ground truth',
+                    subtitle=f'{len(y)} data points',
+                    show=False,
+                )
+                gtruth.append(wb.Image(fig, caption=f'{model.network.name} ground truth'))
+                fig_hat, _ = du.heatmap(
+                    stats_hat,
+                    bins_hat,
+                    figscale=0.6,
+                    stat_columns=['mean'],
+                    z_protein=(set(out_proteins) - set(in_proteins)).pop(),
+                    lims={'mean': (1e-5, 100)},
+                    title=f'{model.network.name} predicted',
+                    subtitle=f'{len(y)} data points',
+                    show=False,
+                )
+                pred.append(wb.Image(fig_hat, caption=f'{model.network.name} predicted'))
 
             wb.log({'ground_truth': gtruth}, step=iter_num)
             wb.log({'predictions': pred}, step=iter_num)

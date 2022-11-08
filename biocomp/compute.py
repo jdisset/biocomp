@@ -89,11 +89,14 @@ def inv_compnode(fwd_name):
 
 
 # translation and transcription are the same, except for the parameters
-def _transform(get_param, get_quantized, transform_name, deg_param_name, **_):
+def _transform(get_param, get_quantized, transform_name, **_):
     def apply(*values, rng_key):
         val = jnp.array(values)
         k0, k1 = jax.random.split(rng_key, 2)
+
         rate_name = f'{transform_name}_rate'
+        deg_param_name = f'{transform_name}_deg'
+
         rates = get_quantized(
             rate_name,
             get_param(rate_name, init=continuous_initializer(k0, val.shape)),
@@ -111,13 +114,15 @@ def _transform(get_param, get_quantized, transform_name, deg_param_name, **_):
     return apply
 
 
-def _inverse_transform(get_param, get_quantized, transform_name, deg_param_name, **_):
+def _inverse_transform(get_param, get_quantized, transform_name,  **_):
     def apply(value, rng_key):
         # inverse can only work if there's only one input edge
         assert value.shape == (), f'Expected scalar value, got {value.shape}'
         k0, k1 = jax.random.split(rng_key, 2)
 
         rate_name = f'{transform_name}_rate'
+        deg_param_name = f'{transform_name}_deg'
+
         rate = get_quantized(
             rate_name,
             get_param(rate_name, init=continuous_initializer(k0, (1,))),
@@ -133,22 +138,22 @@ def _inverse_transform(get_param, get_quantized, transform_name, deg_param_name,
 
 @compnode
 def transcription(get_param, get_quantized, **_):
-    return _transform(get_param, get_quantized, 'tc', 'rna_deg_rate')
+    return _transform(get_param, get_quantized, 'tc')
 
 
 @inv_compnode(fwd_name='transcription')
 def inv_transcription(get_param, get_quantized, **_):
-    return _inverse_transform(get_param, get_quantized, 'tc', 'rna_deg_rate')
+    return _inverse_transform(get_param, get_quantized, 'tc')
 
 
 @compnode
 def translation(get_param, get_quantized, **_):
-    return _transform(get_param, get_quantized, 'tl', 'prt_deg_rate')
+    return _transform(get_param, get_quantized, 'tl')
 
 
 @inv_compnode(fwd_name='translation')
 def inv_translation(get_param, get_quantized, **_):
-    return _inverse_transform(get_param, get_quantized, 'tl', 'prt_deg_rate')
+    return _inverse_transform(get_param, get_quantized, 'tl')
 
 
 @compnode

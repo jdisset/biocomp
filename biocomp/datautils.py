@@ -70,6 +70,8 @@ def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=1e-12, 
     last_bin = np.array(last_bin)
 
     nbins = np.ceil(np.log10(last_bin / first_bin) / resolution).astype(int)
+    #TODO: check why I have to do this???:
+    nbins = np.maximum(nbins, 1)
     bin_edges = [
         np.geomspace(first_bin[i], last_bin[i], nbins[i] + 1) for i in range(len(first_bin))
     ]
