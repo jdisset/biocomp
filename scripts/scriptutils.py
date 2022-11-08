@@ -44,12 +44,26 @@ def is_interactive():
     except NameError:
         return False  # Probably standard Python interpreter
 
-# convenience loading functions with default paths
+
+
 DEFAULT_DATA_PATH = Path("/Users/jeandisset/Dropbox (MIT)/Biocomp/")
 DEFAULT_XP_PATH = DEFAULT_DATA_PATH / "Experiments"
 DEFAULT_RECIPE_PATH = DEFAULT_DATA_PATH / "Recipes"
 DEFAULT_LIB_PATH = Path("/Users/jeandisset/Code/Weiss/biocomp/__cache/lib.pickle")
 
+# we check if there is a file named ~/.biocomp.json
+# if so, we load it and use the paths defined there
+# otherwise, we use the default paths defined above
+GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
+if GLOBAL_CONFIG_PATH.exists():
+    with open(GLOBAL_CONFIG_PATH) as f:
+        config = json.load(f)
+        DEFAULT_XP_PATH = Path(config.get('xp_path', DEFAULT_XP_PATH))
+        DEFAULT_RECIPE_PATH = Path(config.get('recipe_path', DEFAULT_RECIPE_PATH))
+        DEFAULT_LIB_PATH = Path(config.get('lib_path', DEFAULT_LIB_PATH))
+
+
+# convenience loading functions with default paths
 def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH):
     xp = bc.XP(xpname, xp_path, recipe_path, lib)
     return xp
