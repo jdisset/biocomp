@@ -33,6 +33,7 @@ def at_path(d: dict, path, val=None, defaultinit=lambda: None):
         d = d.setdefault(path[-1], defaultinit())
     return d
 
+
 def apply_constraints(par, cons):
     newpar = par.copy()
     F = {'clip': jnp.clip}
@@ -302,3 +303,76 @@ def tree_unstack(tree):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+import time
+from rich import status
+from rich.live import Live
+
+s = status.Status("Hello, [bold magenta]World[/bold magenta]!", spinner="dots")
+s.start()
+s.update("Loading...")
+s.update("Loading [bold green]done[/bold green]!")
+s.stop()
+
+
+class Timer:
+    def __init__(self, name, console=None):
+        self.console = console
+        self.name = name
+        self.laps = []
+        self.end_time = []
+
+    def start(self, with_spinner=False):
+        self.start_time = time.time()
+        if with_spinner:
+            assert(self.console is not None)
+            stat = f"{self.name}..." if not isinstance(with_spinner, str) else with_spinner
+            self.spinner = self.console.status(stat, spinner="dots")
+            self.spinner.start()
+
+    def lap(self):
+        self.end_time.append(time.time() - self.start_time)
+
+    def stop(self):
+        self.lap()
+        if hasattr(self, "spinner"):
+            self.spinner.stop()
+
+    def stop_print(self):
+        self.stop()
+        msg = f"{self.name} took {self.end_time[-1]:.2f} seconds"
+        if self.console is not None:
+            self.console.print(msg)
+        else:
+            print(msg)
+
+
+class TimeStore:
+    def __init__(self, console=None):
+        self.console = console
+        self.timers = {}
+
+    def start(self, name, with_spinner=False):
+        if name not in self.timers:
+            self.timers[name] = Timer(name, self.console)
+        self.timers[name].start(with_spinner=with_spinner)
+        return self.timers[name]
+
+    def lap(self, name):
+        self.timers[name].lap()
+
+    def stop_print(self, name):
+        if isinstance(name, str):
+            assert(name in self.timers)
+            self.timers[name].stop_print()
+        else:
+            assert(isinstance(name, Timer))
+            name.stop_print()
+
+    def stop_all(self):
+        for name in self.starts:
+            self.lap(name)
+
+    def print_all(self):
+        for name in self.times:
+            print(f"{name}: {self.times[name][-1]}")

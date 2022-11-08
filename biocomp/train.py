@@ -24,13 +24,16 @@ import os
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+
+def mse_loss(y, y_hat, n_outputs=None):
+    if n_outputs is None:
+        n_outputs = y.shape[1]
+    return jnp.mean((y[:, :n_outputs] - y_hat[:, :n_outputs]) ** 2)
+
+
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{           --      training of a single model from data     --
 # ···············································································
-
-
-def mse_loss(y, y_hat):
-    return jnp.mean((y - y_hat) ** 2)
 
 
 def wandb_update(loss, params, iter_num):
@@ -99,7 +102,7 @@ DEFAULT_CFG = {
     "epochs": 10000,
     "n_replicates": 1,
     "compile_training": True,
-    "n_batches": 32,
+    "batch_size": 128,  # per whole batch, i.e the sum of each xp's batch size
     "norm_factor": 1e6,
     "balance_bin_resolution": 0.5,
     "balance_threshold_quantile": 0.4,
@@ -130,11 +133,21 @@ def train_inverted_bunch(
     loss_dict=DEFAULT_LOSS_FUNCTIONS,
     save_path='./training_results/',
 ):
-    import rich
+    import matplotlib.pyplot as plt
+    from rich.console import Console
     from rich.progress import track
 
+    console = Console()
+
     cfg = {**DEFAULT_CFG, **config}
-    rich.print(f'Starting training with config: {cfg}')
+    rng_key = jax.random.PRNGKey(cfg['rng_key'])
+
+    console.print(f'Starting training with config: {cfg}')
+
+    times = ut.TimeStore(console)
+    ppt = times.start('Preprocessing')
+
+    t = times.start('Balancing data', True)
 
     X, Y = du.balance_each_dataset(
         models,
@@ -147,6 +160,17 @@ def train_inverted_bunch(
     norm_factor = cfg["norm_factor"]
     X = jax.tree_map(lambda x: x / norm_factor, X)
     Y = jax.tree_map(lambda x: x / norm_factor, Y)
+
+    t.stop_print()
+
+    t = times.start('Generating batches', True)
+    individual_batch_sizes = cfg['batch_size'] // len(models)
+    x_batches, y_batches = du.make_batches_uniform_sampling(
+        Y, individual_batch_sizes, rng_key, models
+    )
+    t.stop_print()
+
+    console.print(f'x_batches shape: {x_batches.shape}, y_batches shape: {y_batches.shape}')
 
     optimizers = {
         'sgd': optax.sgd(learning_rate=cfg['learning_rate']),
@@ -167,52 +191,36 @@ def train_inverted_bunch(
     params = {}
     constraints = {}
 
+    t = times.start('Initializing parameters', False)
     for s, m, k in track(
         list(zip(models.keys(), models.values(), ikeys)), description='Initializing params'
     ):
         params, constraints = m.init(k, pre_params=params, pre_constraints=constraints)
+    t.stop_print()
 
-    @partial(jax.jit, static_argnums=(3,))
-    def apply_model(params, x, key, name):
-        m = partial(models[name], params, rng_key=key)
-        return vmap(m)(x[name]).squeeze()
+    F = list(models.values())
+    nmodels = len(F)
+    n_outputs = [y.shape[1] for y in Y.values()]
 
-    def loss_func(params, x, y, rng_key):
-        nmodels = len(models)
-        ikeys = jax.random.split(rng_key, nmodels)
+    ## ───────────────────────────────────── ▼ ─────────────────────────────────────
+    # {{{                       --     training step     --
+    # ···············································································
+
+    def loss_func(params, X, Y, rng_key):
+        assert len(X) == nmodels, f"Expected {nmodels} models, got {X.shape}"
+        assert len(Y) == nmodels
+        K = jax.random.split(rng_key, nmodels)
+
         res = jnp.array(
             [
-                loss_f(apply_model(params, x, k, sample), y[sample])
-                for sample, k in zip(models.keys(), ikeys)
+                loss_f(vmap(partial(f, params, rng_key=k))(x), y, n_out)
+                for f, x, y, k, n_out in zip(F, X, Y, K, n_outputs)
             ]
         ).mean()
+
         return res
 
-    def split_array_uniform(arr, n_batches, rng_key):
-        n = len(arr)
-        batch_size = n // n_batches
-        a = jax.random.permutation(rng_key, arr)
-        return [a[i * batch_size : (i + 1) * batch_size] for i in range(n_batches)]
-
-    def make_batches(Y, n_batches, rng_key):
-        y_ = {s: split_array_uniform(Y[s], n_batches, rng_key) for s in Y.keys()}
-        y_batches = [{s: y_[s][i] for s in y_.keys()} for i in range(n_batches)]
-        # get x_batches from y_batches
-        x_batches = []
-        for y_batch in y_batches:
-            x_batch = {}
-            for s in y_batch.keys():
-                x_batch[s] = models[s].get_input_from_output(y_batch[s])
-            x_batches.append(x_batch)
-
-        return x_batches, y_batches
-
-    print('Making batches')
-    x_batches, y_batches = make_batches(Y, cfg['n_batches'], key)
-    print('Batches done.')
-
     def training_step(params, opt_state, key, x, y):
-        # print('compiling training step...')
         loss, grads = jax.value_and_grad(loss_func)(params, x, y, key)
         updates, opt_state = jit(optimizer.update)(grads, opt_state, params)
 
@@ -224,6 +232,15 @@ def train_inverted_bunch(
 
         return params, opt_state, grads, loss
 
+    #                                                                            }}}
+    ## ─────────────────────────────────────────────────────────────────────────────
+
+    ## ───────────────────────────────────── ▼ ─────────────────────────────────────
+    # {{{                      --     logging methods     --
+    # ···············································································
+
+    jitted_models = {s: jit(vmap(partial(m, jax.random.PRNGKey(0)))) for s, m in models.items()}
+
     def wandb_update(loss, params, iter_num):
         wb.log({'loss': loss}, step=iter_num)
         wb.log({'shared_params': params['shared']}, step=iter_num)
@@ -231,12 +248,16 @@ def train_inverted_bunch(
         def log_plots():
             if iter_num == 0:
                 gtruth = []
-                for sample, model in models.items():
-                    y_hat = apply_model(params, X, jax.random.PRNGKey(0), sample)
+                pred = []
+                for sample, model in jitted_models.items():
+                    y_hat = f(params, X['sample'])
                     out_proteins = model.get_output_proteins()
                     in_proteins = model.get_inverted_input_proteins()
                     stats, bins = du.binstats(Y[sample], out_proteins, in_proteins, resolution=0.5)
-                    fig, ax = du.heatmap(
+                    stats_hat, bins_hat = du.binstats(
+                        y_hat, out_proteins, in_proteins, resolution=0.5
+                    )
+                    fig, _ = du.heatmap(
                         stats,
                         bins,
                         figscale=0.6,
@@ -248,29 +269,22 @@ def train_inverted_bunch(
                         show=False,
                     )
                     gtruth.append(wb.Image(fig, caption=f'{model.network.name} ground truth'))
+                    fig_hat, _ = du.heatmap(
+                        stats_hat,
+                        bins_hat,
+                        figscale=0.6,
+                        stat_columns=['mean'],
+                        z_protein=(set(out_proteins) - set(in_proteins)).pop(),
+                        lims={'mean': (1e-5, 100)},
+                        title=f'{model.network.name} predicted',
+                        subtitle=f'{len(y)} data points',
+                        show=False,
+                    )
+                    pred.append(wb.Image(fig_hat, caption=f'{model.network.name} predicted'))
 
-                wb.log({'ground_truth': gtruth}, step=iter_num)
-
-            pred = []
-            for sample, model in models.items():
-                y_hat = apply_model(params, X, jax.random.PRNGKey(0), sample)
-                out_proteins = model.get_output_proteins()
-                in_proteins = model.get_inverted_input_proteins()
-                stats_hat, bins_hat = du.binstats(y_hat, out_proteins, in_proteins, resolution=0.5)
-                fig_hat, ax_hat = du.heatmap(
-                    stats_hat,
-                    bins_hat,
-                    figscale=0.6,
-                    stat_columns=['mean'],
-                    z_protein=(set(out_proteins) - set(in_proteins)).pop(),
-                    lims={'mean': (1e-5, 100)},
-                    title=f'{model.network.name} predicted',
-                    subtitle=f'{len(y)} data points',
-                    show=False,
-                )
-                pred.append(wb.Image(fig_hat, caption=f'{model.network.name} predicted'))
-
+            wb.log({'ground_truth': gtruth}, step=iter_num)
             wb.log({'predictions': pred}, step=iter_num)
+            plt.close('all')
 
         if iter_num == cfg['epochs'] or iter_num % cfg['plot_rate'] == 0 or iter_num == 0:
             log_plots()
@@ -280,7 +294,9 @@ def train_inverted_bunch(
             wandb_update(loss, params, iter_num)
         print(f'[{iter_num}/{cfg["epochs"]}] loss: {loss}')
 
-    print('Initializing optimizer')
+    #                                                                            }}}
+    ## ─────────────────────────────────────────────────────────────────────────────
+
     opt_state = optimizer.init(params)
     params_history = []
     loss_history = []
@@ -290,17 +306,18 @@ def train_inverted_bunch(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if wandb_project is not None:
+        t = times.start('Initializing wandb', True)
         wb.init(config=cfg, project=wandb_project, entity="jdisset", reinit=True)
+        t.stop_print()
     else:
-        print('No wandb project specified.')
+        console.print('No wandb project specified.')
 
     if save_path is None:
-        print('Not saving results.')
+        console.print('Not saving results.')
     else:
         save_path = Path(save_path) / timestamp
-        print(f'Saving results to {save_path}')
+        console.print(f'Saving results to {save_path}')
         save_path.mkdir(parents=True, exist_ok=True)
-        # save config:
         with open(save_path / 'config.json', 'w') as f:
             json.dump(cfg, f)
 
@@ -308,28 +325,25 @@ def train_inverted_bunch(
 
     if cfg['compile_training']:
         step = jit(step)
-        import time
-
-        print(f'Compiling training step...')
-        t0 = time.time()
+        t = times.start('Compiling training step', True)
         lowered = step.lower(params, opt_state, k, x_batches[0], y_batches[0])
-        print(f'Lowered...')
+        console.print(f'Lowered...')
         compiled = lowered.compile()
-        t1 = time.time()
-        print(f'compilation time: {t1-t0:.2f}s')
         step = compiled
+        t.stop_print()
 
     loss = float('inf')
-    print('Training...')
+    ppt.stop_print()
+    console.print('Training...')
+
     for i, k in enumerate(jax.random.split(key, cfg['epochs'])):
 
-        for x, y in list(zip(x_batches, y_batches)):
+        for x, y in track(list(zip(x_batches, y_batches)), description=f'Epoch {i}'):
             params, opt_state, grads, loss = step(params, opt_state, k, x, y)
 
         if i == cfg['epochs'] or i % cfg['log_rate'] == 0 or i == 0:
             loss_history.append(loss)
             params_history.append(params)
-
             logger_update(loss, params, i)
             if i == cfg['epochs'] or i % cfg['save_rate'] == 0 or i == 0:
                 if save_path is not None:

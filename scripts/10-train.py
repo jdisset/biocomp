@@ -272,15 +272,15 @@ cfg = {
     "compile_training": True,
     "node_remap": {
         "sequestron_ERN": "ERN_with_affinity",
-        "transcription": "transcription_nn",
-        "inv_transcription": "inverse_transcription_nn",
-        "translation": "translation_nn",
-        "inv_translation": "inverse_translation_nn",
+        # "transcription": "transcription_nn",
+        # "inv_transcription": "inverse_transcription_nn",
+        # "translation": "translation_nn",
+        # "inv_translation": "inverse_translation_nn",
     },
     "balance_bin_resolution": 0.5,
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 40,
-    "n_batches": 64,
+    "batch_size": 256,
     "rng_key": random.randint(0, 1e12),
 }
 
@@ -323,6 +323,7 @@ cfg = {
 # model.network.name
 # ut.plot_networks([model.network], [f'../__out/{model.network.name}_dbg.pdf'])
 
-bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls_v4")
-# bc.train.train_xp(xp, cfg)
+# bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls_v4")
+bc.train.train_xp(xp, cfg)
+
 

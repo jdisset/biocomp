@@ -394,6 +394,7 @@ class ComputeGraphModel:
         self.n_inputs = len(
             self.network.compute_graph[self.network.compute_graph['type'] == 'input']
         )
+
         self.built = False
 
     def build(self, node_remap=dict(), node_namespace=None):

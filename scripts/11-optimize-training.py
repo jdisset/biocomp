@@ -356,18 +356,46 @@ print('res = ', step_c(params, allx)[0])
 
 N = 17
 F = [partial(m, rng_key=jax.random.PRNGKey(0)) for s, m in models.items()][:N]
+
 XX = list(X.values())[:N]
 shortest = min([len(x) for x in X.values()])
-shortest = 32
+shortest = 3
+
 tX = [x[:shortest] for x in X.values()]
+tX
 X_truncated = {s:x for s, x in zip(X.keys(), tX)}
+
 XX = jnp.array(jnp.concatenate(tX, axis=1))
+tX[0].shape
+
+rng_key = jax.random.PRNGKey(0)
+jax.random.choice(jax.random.PRNGKey(0), tX[0], (100,))
+
 n_inputs = [m.n_inputs for m in models.values()]
 input_indices = [np.arange(n) + i for i, n in zip(np.cumsum([0] + n_inputs), n_inputs)]
 XX = XX[:, input_indices]
 XX = np.transpose(XX, (1, 0, 2))
+
 XX.shape
 
+total_size = 30
+
+ylist = [jax.random.choice(rng_key, x, (total_size,)) for x in Y.values()]
+n_outputs = max([y.shape[1] for y in ylist])
+n_outputs = 4
+
+# add 0 padding to the end of the arrays to make them all the same size
+ylist_p = jnp.array([np.pad(y, ((0, 0), (0, n_outputs - y.shape[1]))) for y in ylist])
+
+batch_size = 6
+n_batches = total_size // batch_size
+
+ylist_p.shape
+
+ylist_batches = jnp.array(jnp.split(ylist_p[:, :n_batches * batch_size], n_batches, axis=1))
+ylist_batches.shape
+
+ylist_batches.shape
 
 def loss_f(params, X):
     return jnp.array([vmap(partial(f, params))(x).mean() for f, x in zip(F, X)]).mean()
@@ -406,3 +434,30 @@ print('res = ', step_c(params, XX))
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+import rich
+
+from rich import status
+s = rich.status.Status("Hello, [bold magenta]World[/bold magenta]!", spinner="dots")
+s.start()
+s.update("Loading...")
+s.update("Loading [bold green]done[/bold green]!")
+s.stop()
+
+
+a = np.arange(120).reshape(5, 12, 2)
+a.shape # (5, 12, 2)
+
+nb = 3
+b = np.array(np.split(a, nb, axis=1))
+b.shape
+
+# the equivalent of the above using reshape is
+c = np.reshape(a, (nb, a.shape[0], a.shape[1] // nb, a.shape[2]))
+c
+b
+c.shape
+b.shape
+
+
+np.all(c == b)

@@ -3,6 +3,7 @@
 # ···············································································
 import jax
 import jax.numpy as jnp
+from jax.tree_util import Partial as partial
 import numpy as np
 import pandas as pd
 import biocomp as bc
@@ -17,7 +18,6 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     binstats     --
@@ -58,10 +58,14 @@ def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=1e-12, 
 
     first_bin = []
     for v in vmin:
-        first_bin.append(powers[np.clip(np.searchsorted(powers, v, side='right'), 0, len(powers) - 1)])
+        first_bin.append(
+            powers[np.clip(np.searchsorted(powers, v, side='right'), 0, len(powers) - 1)]
+        )
     last_bin = []
     for v in vmax:
-        last_bin.append(powers[np.clip(np.searchsorted(powers, v, side='right'), 0, len(powers) - 1)])
+        last_bin.append(
+            powers[np.clip(np.searchsorted(powers, v, side='right'), 0, len(powers) - 1)]
+        )
     first_bin = np.array(first_bin)
     last_bin = np.array(last_bin)
 
@@ -88,6 +92,10 @@ def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=1e-12, 
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{               --     balancing individual dataset     --
+# ···············································································
 
 
 def balance_per_bin(data, statdf, threshold_quantile=0.4, threshold_min=20) -> np.ndarray:
@@ -127,6 +135,10 @@ def balance_each_dataset(
         )
         X_balanced[sample] = model.get_input_from_output(Y_balanced[sample])
     return X_balanced, Y_balanced
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -339,7 +351,11 @@ def heatmap(
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                      --     data load/save     --
+# ···············································································
 import pickle
+
 
 def save(data, path, overwrite=False, suffix='.pickle'):
 
@@ -367,3 +383,61 @@ def load(path, suffix='.pickle'):
     return data
 
 
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+def split_array_uniform(arr, n_batches, rng_key):
+    n = len(arr)
+    batch_size = n // n_batches
+    a = jax.random.permutation(rng_key, arr)
+    return [a[i * batch_size : (i + 1) * batch_size] for i in range(n_batches)]
+
+
+def split_array_to_len(arr, l, rng_key):
+    a = jax.random.permutation(rng_key, arr)
+    return [a[i * l : (i + 1) * l] for i in range(len(arr) // l)]
+
+
+def make_batches_dict(Y, n_batches, rng_key, models):
+    y_ = {s: split_array_uniform(Y[s], n_batches, rng_key) for s in Y.keys()}
+    y_batches = [{s: y_[s][i] for s in y_.keys()} for i in range(n_batches)]
+    # get x_batches from y_batches
+    x_batches = []
+    for y_batch in y_batches:
+        x_batch = {}
+        for s in y_batch.keys():
+            x_batch[s] = models[s].get_input_from_output(y_batch[s])
+        x_batches.append(x_batch)
+    return x_batches, y_batches
+
+
+def make_batches_uniform_sampling(Y, batch_size, rng_key, models, total_size=None):
+    """Split data into batches of equal size, for a dict of sample:array.
+    Each array might not have the same size originally, but the batches will
+    have the same size and there will be the same amount of batches for Each
+    sample in the end. To do so, we randomly sample from the arrays to get the
+    same size for each batch.
+
+    batch_size: int, the size of each batch (per sample)
+    """
+
+    if total_size is None:  # use the largest array as target total size
+        total_size = max([len(x) for x in Y.values()])
+
+    n_batches = total_size // batch_size
+
+    ylist = [jax.random.choice(rng_key, jnp.array(x), (total_size,)) for x in Y.values()]
+    xlist = [models[s].get_input_from_output(ylist[i]) for i, s in enumerate(Y.keys())]
+
+    n_outputs = max([y.shape[1] for y in ylist])
+    n_inputs = max([x.shape[1] for x in xlist])
+
+    # add 0 pad
+    y_p = jnp.array([np.pad(y, ((0, 0), (0, n_outputs - y.shape[1]))) for y in ylist])
+    x_p = jnp.array([np.pad(x, ((0, 0), (0, n_inputs - x.shape[1]))) for x in xlist])
+
+    y_batches = jnp.array(np.split(y_p[:, :n_batches * batch_size], n_batches, axis=1))
+    x_batches = jnp.array(np.split(x_p[:, :n_batches * batch_size], n_batches, axis=1))
+
+    return x_batches, y_batches
