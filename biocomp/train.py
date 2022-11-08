@@ -255,7 +255,7 @@ def train_inverted_bunch(
     # {{{                      --     logging methods     --
     # ···············································································
 
-    jitted_models = {s: jit(vmap(partial(m, jax.random.PRNGKey(0)))) for s, m in models.items()}
+    jitted_models = {s: jit(jax.vmap(partial(m, rng_key=jax.random.PRNGKey(0)), in_axes=(None, 0))) for s, m in models.items()}
 
     def wandb_update(loss, params, iter_num):
         wb.log({'loss': loss}, step=iter_num)
@@ -265,7 +265,8 @@ def train_inverted_bunch(
             if iter_num == 0:
                 gtruth = []
                 pred = []
-                for sample, model in jitted_models.items():
+                for sample, f in jitted_models.items():
+                    model = models[sample]
                     y_hat = f(params, X['sample'])
                     out_proteins = model.get_output_proteins()
                     in_proteins = model.get_inverted_input_proteins()

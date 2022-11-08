@@ -430,6 +430,10 @@ print(f'jaxpr size: {nlines} lines')
 
 print('res = ', step_c(params, XX))
 
+##
+X['40+10'].shape
+sample = '40+10'
+jitted_models[sample](params, X[sample]).shape
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -458,6 +462,7 @@ b
 c.shape
 b.shape
 
+jax.devices('cpu')
 
 np.all(c == b)
 ##
