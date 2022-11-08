@@ -1,12 +1,7 @@
 from jax.config import config as jax_config
 
-# jax_config.update("jax_debug_nans", True)
-
 import biocomp as bc
 import biocomp.compute as bcc
-import numpy as np
-from functools import partial
-import biocomp.utils as bu
 import scriptutils as ut
 import jax
 import jax.numpy as jnp
@@ -131,11 +126,6 @@ def inverse_transform_hill(get_param, get_quantized, transform_name, **_):
         return res
 
     return apply
-
-
-# s = p['shared']
-# alp = jnp.power(2.0/s['empty_tc::tl_rate']*s['tl_mu'], 1.0/s['tl_n'])
-# alp * s['tl_K'] / jnp.maximum(1 - alp, bcc.BC_EPSILON)
 
 
 @bcc.compnode
