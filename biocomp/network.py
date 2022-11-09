@@ -17,30 +17,24 @@ parameter_to_default_part = {'tl_rate': 'empty_tc'}
 # {{{                       --     base classes     --
 # ···············································································
 class Slot:
-    def __init__(self, f):
-        self.resolve_function = f
-        self.part = None  # list means multiple parts that should map to a single parameter. Otherwise single string
+    def __init__(self, lib, part):
+        self.part = part
         self.maps_to_parameter = None
-        self.is_resolved = False
-
-    def resolve(self, lib, *args, **kwargs):
-        if not self.is_resolved:
-            self.part = self.resolve_function(lib, *args, **kwargs)
-            if self.part == [] or self.part == [None]:
-                self.part = None
-            if isinstance(self.part, list):
-                mapped = [self.__mapped_parameter(lib, p) for p in self.part if p is not None]
-                if len(mapped) != 1:
-                    raise ValueError(f'{self.part} maps to {len(mapped)} parameters ({mapped})')
-                self.maps_to_parameter = mapped[0]
-            else:
-                self.maps_to_parameter = self.__mapped_parameter(lib, self.part)
-            if self.maps_to_parameter is not None and not isinstance(self.part, list):
-                self.part = [self.part]
-            self.is_resolved = True
+        if self.part == [] or self.part == [None]:
+            self.part = None
+        if isinstance(self.part, list):
+            mapped = list(
+                set([self.__mapped_parameter(lib, p) for p in self.part if p is not None])
+            )
+            if len(mapped) != 1:
+                raise ValueError(f'{self.part} maps to {len(mapped)} parameters ({mapped})')
+            self.maps_to_parameter = mapped[0]
+        else:
+            self.maps_to_parameter = self.__mapped_parameter(lib, self.part)
+        if self.maps_to_parameter is not None and not isinstance(self.part, list):
+            self.part = [self.part]
 
     def __mapped_parameter(self, lib, part_name):
-
         if part_name is not None:
             if part_name in lib.pc.index:
                 category = lib.pc.loc[part_name, 'category']
@@ -51,20 +45,12 @@ class Slot:
         return None
 
     def __repr__(self):
-        if self.is_resolved:
-            if self.maps_to_parameter is None:
-                if self.part is None:
-                    return '<empty slot>'
-                else:
-                    return f'<{self.part}>'
-            return f'<{self.part} -> {self.maps_to_parameter}>'
-        else:
-            return f'<slot(unresolved, {self.resolve_function})>'
-
-
-# util for a slot that resolves to a single part
-def Part(name):
-    return Slot(lambda *_, **__: name)
+        if self.maps_to_parameter is None:
+            if self.part is None:
+                return '<empty slot>'
+            else:
+                return f'<{self.part}>'
+        return f'<{self.part} -> {self.maps_to_parameter}>'
 
 
 class GraphComputeNode:
@@ -109,25 +95,10 @@ class TranscriptionUnit:
         self.name = ''
         self.slots = slots
         self.params = {}
-        self.is_resolved = False
-
-    def resolve_all_slots(self, lib, random_seed=1, random_order=True):
-        rdm = jax.random.PRNGKey(random_seed)
-        allrdm = jax.random.split(rdm, len(self.slots))
-        order = list(range(len(self.slots)))
-        if random_order:
-            order = jax.random.permutation(rdm, len(self.slots))
-        for i, r in zip(order, allrdm):
-            if not self.slots[i].is_resolved:
-                self.slots[i].resolve(lib, l1=self, rdm_key=r)
-
         self.__get_parameters()
-
-        assert all(s.is_resolved for s in self.slots)
 
     def __get_parameters(self):
         for s in self.slots:
-            assert s.is_resolved
             if s.maps_to_parameter is not None:
                 assert s.maps_to_parameter not in self.params
                 self.params[s.maps_to_parameter] = s.part
@@ -138,6 +109,59 @@ class TranscriptionUnit:
 
     def __repr__(self):
         return f'L1({self.slots})'
+
+
+# def resolve(self, lib, *args, **kwargs):
+# if not self.is_resolved:
+# self.part = self.resolve_function(lib, *args, **kwargs)
+# if self.part == [] or self.part == [None]:
+# self.part = None
+# if isinstance(self.part, list):
+# mapped = list(set([self.__mapped_parameter(lib, p) for p in self.part if p is not None]))
+# if len(mapped) != 1:
+# raise ValueError(f'{self.part} maps to {len(mapped)} parameters ({mapped})')
+# self.maps_to_parameter = mapped[0]
+# else:
+# self.maps_to_parameter = self.__mapped_parameter(lib, self.part)
+# if self.maps_to_parameter is not None and not isinstance(self.part, list):
+# self.part = [self.part]
+# self.is_resolved = True
+
+
+class TranscriptionUnitGenerator:
+    def __init__(self, part_generators):
+        self.name = ''
+        self.part_generators = part_generators
+
+    def generate_all(self, lib, order=None, *args, **kwargs):
+        if order is None:
+            order = list(range(len(self.part_generators)))
+
+        # for each slot, generate all possible parts.
+        # but a slot needs the parts from all previous slots to be generated
+        # so we need to do this in order
+        def _next(slots, i):
+            if i == len(order):
+                yield slots
+            else:
+                g = self.part_generators[order[i]]
+                possile_parts = g(lib, slots, *args, **kwargs)
+                for p in possile_parts:
+                    yield from _next(slots + [Slot(lib, p)], i + 1)
+
+        return _next([], 0)
+
+
+    # def generate_random(self, lib, random_seed=1, random_order=True):
+    # rdm = jax.random.PRNGKey(random_seed)
+    # allrdm = jax.random.split(rdm, len(self.slots))
+    # order = list(range(len(self.slots)))
+    # if random_order:
+    # order = jax.random.permutation(rdm, len(self.slots))
+    # for i, r in zip(order, allrdm):
+    # if not self.slots[i].is_resolved:
+    # self.slots[i].resolve(lib, l1=self, rdm_key=r)
+    # assert all(s.is_resolved for s in self.slots)
 
 
 #                                                                            }}}
@@ -151,14 +175,13 @@ def transcription_unit_from_L1(l1id, lib):
     parts = []
     for l in L0s:
         parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
-    tu = TranscriptionUnit([Part(p) for p in parts])
-    tu.resolve_all_slots(lib)
+    tu = TranscriptionUnit([Slot(lib, p) for p in parts])
     return tu
 
 
 # main class: a network of interacting transcription units
 class Network:
-    def __init__( self, lib, recipe_name, recipe_db, custom_outputs=None, build=True):
+    def __init__(self, lib, recipe_name, recipe_db, custom_outputs=None, build=True):
         self.lib = lib
         self.name: str = recipe_name
         self.db = recipe_db
@@ -202,7 +225,6 @@ class Network:
     def __getDna(self, tu: TranscriptionUnit) -> Tuple[List[str], Dict[str, List[str]]]:
         content = []
         for s in tu.slots:
-            assert s.is_resolved
             if s.maps_to_parameter is None:
                 content.append(s.part)
         return content, tu.params
@@ -654,7 +676,7 @@ class Network:
             cdf.loc[i, 'input_from'] = [[nid]]
         return cdf
 
-    def __build_compute_graph(self) :
+    def __build_compute_graph(self):
         assert self.central_dogma_graph is not None, 'central dogma graph not built yet'
 
         uidGen = ut.uniqueIdGenerator()
@@ -668,7 +690,6 @@ class Network:
 
         # convert to dataframe
         self.compute_graph = pd.DataFrame([n.toDict() for n in cg]).set_index('id').sort_index()
-
 
         # there should be the same number of sources in the cdf compute graph as DNA nodes in the cdg
         nsources = len(self.compute_graph[self.compute_graph.type == 'source'])
