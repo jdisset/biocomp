@@ -58,7 +58,7 @@ def create_db(conn):
     c.executescript(sql)
 
 
-def __recipe_to_sql(obj, conn, lib):
+def recipe_to_sql(obj, conn, lib):
     c = conn.cursor()
     create_db(conn)
     c.execute("SELECT name FROM recipes WHERE name = ?", (obj['name'],))
@@ -129,10 +129,17 @@ def import_recipes_to_sql(recipe_files: list, conn, lib):
             if not Path(f).name == f'{recipe["name"]}.recipe.json5':
                 msg = f'Recipe name vs file name mismatch (declared name: {recipe["name"]})'
                 raise RuntimeError(msg)
-            __recipe_to_sql(recipe, conn, lib)
+            recipe_to_sql(recipe, conn, lib)
         except Exception as e:
             raise RuntimeError(f'Error loading recipe {f}: \n{e}')
 
+
+def network_from_recipe(recipe, lib, db_path=':memory:'):
+    dbconn = sqlite3.connect(db_path)
+    recipe_to_sql(recipe, dbconn, lib)
+    assert(recipe['name'] in [r[0] for r in dbconn.execute("SELECT name FROM recipes").fetchall()])
+    n = Network(lib, recipe['name'], dbconn)
+    return n
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
