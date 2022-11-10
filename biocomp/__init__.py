@@ -14,5 +14,6 @@ from .network import (
     inverted_network as inverted_network,
 )
 from . import network as network
+from . import recipe as recipe
 
 from .train import train_single_model as train_single_model
