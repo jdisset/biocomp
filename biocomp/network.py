@@ -3,7 +3,7 @@ import jax
 import numpy as np
 import pandas as pd
 from . import utils as ut
-from .compute import INVERSE_NODES_DICT as INVERSE_NODES_DICT
+from .nodes import INVERSE_NODES_DICT as INVERSE_NODES_DICT
 from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast
 import copy
 import json
@@ -11,6 +11,44 @@ import json
 
 part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF_group': 'tl_rate'}
 parameter_to_default_part = {'tl_rate': 'empty_tc'}
+
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                   --     general network utils     --
+#···············································································
+
+def fuse_consecutive(cg: pd.DataFrame, types_to_fuse: Tuple[str, str], new_type: str):
+    """ Fuse 2 consecutive nodes in a graph when they are of the types specified in types_to_fuse"""
+    assert len(types_to_fuse) == 2
+    has_fused = True
+    while has_fused:
+        has_fused = False
+        for first_id, first in cg[cg['type'] == types_to_fuse[0]].iterrows():
+            second = [o[0] for o in first['output_to'] if cg.loc[o[0]]['type'] == types_to_fuse[1]]
+            if len(second) > 0:
+                second = cg.loc[second[0]]
+                new_node = first.copy()
+                new_node.update(
+                    {
+                        'type': new_type,
+                        'output_to': second['output_to'],
+                        'cdg_output': second['cdg_output'],
+                        'extra': {
+                            p: second['extra'][p] for p in second['extra'] if p.count('input') == 0
+                        }.update(
+                            {p: first['extra'][p] for p in first['extra'] if p.count('output') == 0}
+                        ),
+                    }
+                )
+                cg.loc[first_id] = new_node
+                cg.drop(second.name, inplace=True)
+                has_fused = True
+                break
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -164,6 +202,8 @@ class TranscriptionUnitGenerator:
     # assert all(s.is_resolved for s in self.slots)
 
 
+
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -211,6 +251,18 @@ class Network:
         assert len(self.transcription_units) > 0, f'No transcription units in recipe {self.name}'
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
+
+    def set_inputs(self, input_ids):
+        assert(self.is_built())
+        for i, inp_id in enumerate(input_ids):
+            self.compute_graph.loc[inp_id, 'type'] = 'input'
+            self.compute_graph.loc[inp_id, 'extra'].update({'input_position': i})
+
+    def set_numeric_as_input(self):
+        assert(self.is_built())
+        numeric_nodes = list(self.compute_graph.loc[self.compute_graph['type'] == 'numeric'].index)
+        self.set_inputs(numeric_nodes)
+
 
     def is_built(self):
         return (
@@ -926,3 +978,5 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=INVERSE
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+
