@@ -13,5 +13,6 @@ from .network import (
     transcription_unit_from_L1 as transcription_unit_from_L1,
     inverted_network as inverted_network,
 )
+from . import network as network
 
 from .train import train_single_model as train_single_model
