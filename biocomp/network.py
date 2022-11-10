@@ -42,6 +42,9 @@ def fuse_consecutive(cg: pd.DataFrame, types_to_fuse: Tuple[str, str], new_type:
                     }
                 )
                 cg.loc[first_id] = new_node
+                # then we also need to update the input_from of the nodes that were connected to second
+                for i, to in enumerate(second['output_to']):
+                    cg.loc[to[0]]['input_from'][to[1]] = (first_id, i)
                 cg.drop(second.name, inplace=True)
                 has_fused = True
                 break
