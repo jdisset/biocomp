@@ -1,10 +1,10 @@
 import React from "react";
 import axios from "axios";
-import SRCNode from "./SRCNode";
+import SRCNode from "../SRCNode";
 import { useState, useEffect, useRef, useCallback } from "react";
-import { generateArcs } from "./shapes.jsx";
-import Util from "./util.jsx";
-import "./style_app.css";
+import { generateArcs } from "../shapes.jsx";
+import Util from "../util.jsx";
+import "./style.css";
 import ReactFlow, {
   ReactFlowProvider,
   addEdge,

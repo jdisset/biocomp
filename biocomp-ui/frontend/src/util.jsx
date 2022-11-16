@@ -1,6 +1,19 @@
 import dagre from "dagre";
 import html2canvas from "html2canvas";
 import React from "react";
+import SEQNode from "./SEQNode.jsx";
+import AGGNode from "./AGGNode.jsx";
+import SRCNode from "./SRCNode.jsx";
+import TLNode from "./TLNode.jsx";
+import TCNode from "./TCNode.jsx";
+import INNode from "./INNode.jsx";
+import OUTNode from "./OUTNode.jsx";
+import NUMNode from "./NUMNode.jsx";
+import CTENode from "./CTENode.jsx";
+import INVNode from "./INVNode.jsx";
+import DENDNode from "./DENDNode.jsx";
+import ContentEdge from "./ContentEdge.jsx";
+
 
 let colormap = require("colormap");
 const NCOLORS = 100;
@@ -16,9 +29,6 @@ const cmapcolors = colormap({
   alpha: 1,
 });
 
-const computeEdgeTypes = {
-  content: ContentEdge,
-};
 
 const computeNodeTypes = {
   sequestron_ERN: SEQNode,
@@ -182,4 +192,4 @@ class Util {
     return { nodes, edges };
   };
 }
-export {Util as default, computeNodeTypes, computeEdgeTypes, typeDim};
+export {Util as default, computeNodeTypes, typeDim};
