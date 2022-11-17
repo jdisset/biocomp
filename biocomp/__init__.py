@@ -15,5 +15,5 @@ from .network import (
 )
 from . import network as network
 from . import recipe as recipe
-
-from .train import train_single_model as train_single_model
+from . import train as train
+from . import nodes as nodes

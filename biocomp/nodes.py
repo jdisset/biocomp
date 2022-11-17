@@ -66,19 +66,19 @@ def round_to_int_jvp(x, x_tang):
 BC_EPSILON = 1e-9
 BC_MAX_FLOAT = float('inf')
 
-COMPUTE_NODES_DICT = {}
-INVERSE_NODES_DICT = {}
+DEFAULT_COMPUTE_NODES_DICT = {}
+DEFAULT_INVERSE_NODES_DICT = {}
 
 
 def compnode(f):
-    COMPUTE_NODES_DICT[f.__name__] = f
+    DEFAULT_COMPUTE_NODES_DICT[f.__name__] = f
     return f
 
 
 def inv_compnode(fwd_name):
     def inv(f):
-        COMPUTE_NODES_DICT[f.__name__] = f
-        INVERSE_NODES_DICT[fwd_name] = f.__name__
+        DEFAULT_COMPUTE_NODES_DICT[f.__name__] = f
+        DEFAULT_INVERSE_NODES_DICT[fwd_name] = f.__name__
         return f
 
     return inv
@@ -273,7 +273,7 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                    --     nn based nodes --
+# {{{                    --     nn based --
 # ···············································································
 
 
@@ -340,27 +340,21 @@ def inv_transform_w_dense_layer(get_param, get_quantized, transform_name, wsize=
     return apply
 
 
-@compnode
 def transcription_nn(get_param, get_quantized, **_):
     return transform_w_dense_layer(get_param, get_quantized, 'tc', **_)
 
 
-@inv_compnode(fwd_name='transcription_nn')
 def inverse_transcription_nn(get_param, get_quantized, **_):
     return inv_transform_w_dense_layer(get_param, get_quantized, 'tc', **_)
 
 
-@compnode
 def translation_nn(get_param, get_quantized, **_):
     return transform_w_dense_layer(get_param, get_quantized, 'tl', **_)
 
-
-@inv_compnode(fwd_name='translation_nn')
 def inverse_translation_nn(get_param, get_quantized, **_):
     return inv_transform_w_dense_layer(get_param, get_quantized, 'tl', **_)
 
 
-@compnode
 def ERN_nn_multi(get_param, get_quantized, seq_name, **_):
     def apply(neg, pos, rng_key, **_):
         param_name = f'{seq_name}::affinity'
@@ -380,7 +374,6 @@ def ERN_nn_multi(get_param, get_quantized, seq_name, **_):
     return apply
 
 
-@compnode
 def output_nn(get_param, get_quantized, **_):
     def apply(*value, rng_key, **_):
         res = jnp.array(
@@ -389,7 +382,7 @@ def output_nn(get_param, get_quantized, **_):
                 for x in value
             ]
         )
-        return jax.nn.relu(jnp.squeeze(res))
+        return jax.nn.relu(res)
 
     return apply
 

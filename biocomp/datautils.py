@@ -414,26 +414,31 @@ def make_batches_dict(Y, n_batches, rng_key, models):
     return x_batches, y_batches
 
 
-def make_batches_uniform_sampling(Y, batch_size, rng_key, models, total_size=None):
-    """Split data into batches of equal size, for a dict of sample:array.
+
+def make_batches_uniform_sampling(Y:list[np.ndarray], batch_size:int, rng_key, models:list[bc.ComputeGraphModel], total_size=None):
+    """Split data into batches of equal size, for a list of arrays (one per sample).
     Each array might not have the same size originally, but the batches will
     have the same size and there will be the same amount of batches for Each
     sample in the end. To do so, we randomly sample from the arrays to get the
     same size for each batch.
 
     batch_size: int, the size of each batch (per sample)
+    total_size: batch_size * n_batches. If None, it uses the largest array size.
+
+    returns: x_batches, y_batches. Dimensions are (n_batches, n_models, batch_size, n_features)
+
     """
 
     if total_size is None:  # use the largest array as target total size
-        total_size = max([len(x) for x in Y.values()])
+        total_size = max(len(y) for y in Y)
 
     n_batches = total_size // batch_size
 
-    ylist = [jax.random.choice(rng_key, jnp.array(x), (total_size,)) for x in Y.values()]
-    xlist = [models[s].get_input_from_output(ylist[i]) for i, s in enumerate(Y.keys())]
+    ylist = [jax.random.choice(rng_key, jnp.array(y), (total_size,)) for y in Y]
+    xlist = [m.get_input_from_output(ylist[i]) for i, m in enumerate(models)]
 
-    n_outputs = max([y.shape[1] for y in ylist])
-    n_inputs = max([x.shape[1] for x in xlist])
+    n_outputs = max(y.shape[1] for y in ylist)
+    n_inputs = max(x.shape[1] for x in xlist)
 
     # add 0 pad
     y_p = jnp.array([np.pad(y, ((0, 0), (0, n_outputs - y.shape[1]))) for y in ylist])
@@ -441,5 +446,8 @@ def make_batches_uniform_sampling(Y, batch_size, rng_key, models, total_size=Non
 
     y_batches = jnp.array(np.split(y_p[:, :n_batches * batch_size], n_batches, axis=1))
     x_batches = jnp.array(np.split(x_p[:, :n_batches * batch_size], n_batches, axis=1))
+
+    assert y_batches.shape == (n_batches, len(Y), batch_size, n_outputs)
+    assert x_batches.shape == (n_batches, len(Y), batch_size, n_inputs)
 
     return x_batches, y_batches

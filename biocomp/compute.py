@@ -5,6 +5,7 @@ import jax.numpy as jnp
 from . import utils as ut
 
 from . import nodes as nd
+from typing import List, Dict, Tuple, Union, Optional, Callable, Any
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -141,20 +142,22 @@ def get_quantized(
 class ComputeGraphModel:
     def __init__(self, network):
         self.network = network
-        self.n_inputs = len(
-            self.network.compute_graph[self.network.compute_graph['type'] == 'input']
-        )
-
+        cg = self.network.compute_graph
+        assert len(cg[cg['type'] == 'output']) == 1, 'The graph must have exactly one output node'
+        self.n_inputs = len(cg[cg['type'] == 'input'])
+        self.n_outputs = len(cg[cg['type'] == 'output'].input_from[0])
         self.built = False
 
-    def build(self, node_remap=dict(), node_namespace=None):
+    def build(
+        self,
+        node_impl: Dict[str, Callable] = nd.DEFAULT_COMPUTE_NODES_DICT,
+        node_namespace: Optional[str] = None,
+    ):
         self.node_namespace = node_namespace
         assert self.network is not None
         assert self.network.is_built()
-
-        # node_remap is a dictionnary that maps "vanilla" node types to
-        # new names. Useful to try different node implementations
-        # (e.g translation -> custom_translation_v2)
+        assert isinstance(node_impl, dict)
+        cg = self.network.compute_graph
 
         # let's do everything we can before collect_all_results to avoid long compile times
         batches = self.__get_batch_sequence_of_nodes()
@@ -164,7 +167,7 @@ class ComputeGraphModel:
         nid_to_call_dict = dict()
         for i, nid in enumerate(flat_batches):
             call_d = {}
-            node_row = self.network.compute_graph.loc[nid]
+            node_row = cg.loc[nid]
             # if it's an inverse node:
             nodeid_for_getters = nid
             if node_row.extra is not None and 'is_inverse_of' in node_row.extra:
@@ -176,13 +179,13 @@ class ComputeGraphModel:
             get_q = partial(
                 get_quantized,
                 node_id=nodeid_for_getters,
-                cdf=self.network.compute_graph,
+                cdf=cg,
                 cdg=self.network.central_dogma_graph,
                 quantize_fun=nd.quantize,
             )
             extra_params = {
-                'n_outputs': len(self.network.compute_graph.loc[nid]['output_to']),
-                'n_inputs': len(self.network.compute_graph.loc[nid]['input_from']),
+                'n_outputs': len(cg.loc[nid]['output_to']),
+                'n_inputs': len(cg.loc[nid]['input_from']),
             }
             if node_row.extra is not None:
                 extra_params.update(node_row.extra)
@@ -196,10 +199,9 @@ class ComputeGraphModel:
             call_d['nid'] = nid
             nid_to_call_dict[nid] = i
 
-            fun_name = node_remap.get(node_row.type, node_row.type)
             if node_row.type not in ('input'):
-                assert fun_name in nd.COMPUTE_NODES_DICT, f'Unimplemented node type {fun_name}'
-                call_d['fun'] = nd.COMPUTE_NODES_DICT[fun_name]
+                assert node_row.type in node_impl, f'Unimplemented node type {node_row.type}'
+                call_d['fun'] = node_impl[node_row.type]
             if node_row.type == 'output':
                 output_node = nid
 
@@ -237,7 +239,9 @@ class ComputeGraphModel:
             assert output_node is not None
             return evalnode(call_dicts[nid_to_call_dict[output_node]], rng_key)
 
-        def collect_all_results(params, inputs, rng_key, read_only=True, constraints=None):
+        def collect_all_results(
+            params: dict, inputs: jnp.ndarray, rng_key, read_only=True, constraints=None
+        ) -> tuple[jnp.ndarray, dict[int, jnp.ndarray]]:
             assert (
                 len(inputs) == self.n_inputs
             ), f'len(inputs)={len(inputs)} != n_inputs={self.n_inputs}'

@@ -3,7 +3,6 @@ import jax
 import numpy as np
 import pandas as pd
 from . import utils as ut
-from .nodes import INVERSE_NODES_DICT as INVERSE_NODES_DICT
 from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast
 import copy
 import json
@@ -715,6 +714,7 @@ class Network:
         # we add 1 numeric node per source or aggregation that's "at the top",
         # i.e its input_from is empty.
         topnodes = cdf[cdf.input_from.apply(len) == 0]
+        # print(f'Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}')
         for i, r in topnodes.iterrows():
             nid = uidGen()
             newnode = GraphComputeNode(nid, 'numeric', None, 1)
@@ -901,8 +901,15 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
 
     return paths
 
+DEFAULT_INVERSE_DICT = {
+    "translation": "inv_translation",
+    "transcription": "inv_transcription",
+    "numeric": "inv_numeric",
+    "aggregation": "inv_aggregation",
+    "source": "inv_source",
+}
 
-def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=INVERSE_NODES_DICT):
+def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=DEFAULT_INVERSE_DICT):
     # inverse_dict: node_type -> inverse_node_type
     if nodes == 'auto':
         # we assume all numeric nodes should be linked to an inverted path
@@ -922,6 +929,9 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=INVERSE
     paths = {n: min(invertible_paths[n], key=len) for n in start_nodes}
 
     inputpos = 0
+
+    print(f'nodes: {start_nodes}')
+
     for start_n, path in paths.items():
         # we start by replacing the start node by the first node of the path
         new_network.compute_graph.loc[start_n, 'type'] = inverse_dict[
