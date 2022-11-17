@@ -53,90 +53,134 @@ def create_db(conn):
         FOREIGN KEY (aggregation) REFERENCES aggregations(id),
         FOREIGN KEY (source) REFERENCES sources(name),
         PRIMARY KEY(aggregation, source));
+
+    CREATE TABLE IF NOT EXISTS `XPs` (
+        name TEXT PRIMARY KEY,
+        flow_date TEXT,
+        transfection_date TEXT,
+        extra TEXT);
+
+    CREATE TABLE IF NOT EXISTS `recipe_in_XP` (
+        XP TEXT,
+        recipe TEXT,
+        sample_name TEXT,
+        sample_notes TEXT,
+        FOREIGN KEY (XP) REFERENCES XPs(id),
+        FOREIGN KEY (recipe) REFERENCES recipes(name),
+        PRIMARY KEY(XP, recipe));
+
     """
     c = conn.cursor()
     c.executescript(sql)
 
 
-def recipe_to_sql(obj, conn, lib):
+def recipes_to_sql(recipes:list, conn, lib):
     c = conn.cursor()
     create_db(conn)
-    c.execute("SELECT name FROM recipes WHERE name = ?", (obj['name'],))
-    if c.fetchone():
-        # already in db so we skip
-        return
+    for obj in recipes:
+        c.execute("SELECT name FROM recipes WHERE name = ?", (obj['name'],))
+        if c.fetchone():
+            # already in db so we skip
+            return
 
-    extra = {k: v for k, v in obj.items() if k not in ['name', 'description', 'notes']}
-    extra_json = json.dumps(extra)
-    c.execute(
-        "INSERT INTO recipes VALUES (?, ?, ?, ?)",
-        (
-            obj['name'],
-            obj['description'] if 'description' in obj else None,
-            obj['notes'] if 'notes' in obj else None,
-            extra_json if extra else None,
-        ),
-    )
-    for agg in obj['content']:
-        ratios = []
-        for s in agg['sources']:
-            if 'ratio' in s:
-                ratios.append(s['ratio'])
-            else:
-                ratios.append(1.0)
-        ratios = np.array(ratios)
-        qtty = float(np.sum(ratios))
+        extra = {k: v for k, v in obj.items() if k not in ['name', 'description', 'notes']}
+        extra_json = json.dumps(extra)
         c.execute(
-            "INSERT INTO aggregations VALUES (?, ?, ?)",
-            (None, obj['name'], agg['notes'] if 'notes' in agg else None),
+            "INSERT INTO recipes VALUES (?, ?, ?, ?)",
+            (
+                obj['name'],
+                obj['description'] if 'description' in obj else None,
+                obj['notes'] if 'notes' in obj else None,
+                extra_json if extra else None,
+            ),
         )
-        aggregation_id = c.lastrowid
-        ratios = ratios / qtty
-        for (r, s) in zip(ratios, agg['sources']):
-            type = None
-            l1ids = []
-            if s['plasmid'] in lib.L1s.index:
-                type = 1
-                l1ids = [lib.L1s.loc[s['plasmid']].name]
-            elif s['plasmid'] in lib.L2s.index:
-                type = 2
-                slot_cols = [f'slot_{i}' for i in range(1, 7)]
-                l1ids = [s for s in lib.L2s.loc[s['plasmid']][slot_cols].tolist() if s]
-            if type is None:
-                raise RuntimeError(
-                    f'Error while importing recipe {obj["name"]}: unknown plasmid {s["plasmid"]}'
-                )
-            c.execute("SELECT name FROM sources WHERE name = ?", (s['plasmid'],))
-            if not c.fetchone():
-                c.execute("INSERT INTO sources VALUES (?, ?)", (s['plasmid'], type))
-                for i, l1id in enumerate(l1ids):
-                    c.execute("INSERT INTO TU_in_source VALUES (?, ?, ?)", (s['plasmid'], l1id, i))
-            # we put in "extra" everything other than ratio, plasmid and notes. Serialized to json.
-            extra = {k: v for k, v in s.items() if k not in ['ratio', 'plasmid', 'notes']}
-            extra_json = json.dumps(extra)
+        for agg in obj['content']:
+            ratios = []
+            for s in agg['sources']:
+                if 'ratio' in s:
+                    ratios.append(s['ratio'])
+                else:
+                    ratios.append(1.0)
+            ratios = np.array(ratios)
+            qtty = float(np.sum(ratios))
             c.execute(
-                "INSERT INTO source_in_aggregation VALUES (?, ?, ?, ?, ?)",
-                (aggregation_id, s['plasmid'], r, s['notes'] if 'notes' in s else None, extra_json),
+                "INSERT INTO aggregations VALUES (?, ?, ?)",
+                (None, obj['name'], agg['notes'] if 'notes' in agg else None),
+            )
+            aggregation_id = c.lastrowid
+            ratios = ratios / qtty
+            for (r, s) in zip(ratios, agg['sources']):
+                type = None
+                l1ids = []
+                if s['plasmid'] in lib.L1s.index:
+                    type = 1
+                    l1ids = [lib.L1s.loc[s['plasmid']].name]
+                elif s['plasmid'] in lib.L2s.index:
+                    type = 2
+                    slot_cols = [f'slot_{i}' for i in range(1, 7)]
+                    l1ids = [s for s in lib.L2s.loc[s['plasmid']][slot_cols].tolist() if s]
+                if type is None:
+                    raise RuntimeError(
+                        f'Error while importing recipe {obj["name"]}: unknown plasmid {s["plasmid"]}'
+                    )
+                c.execute("SELECT name FROM sources WHERE name = ?", (s['plasmid'],))
+                if not c.fetchone():
+                    c.execute("INSERT INTO sources VALUES (?, ?)", (s['plasmid'], type))
+                    for i, l1id in enumerate(l1ids):
+                        c.execute("INSERT INTO TU_in_source VALUES (?, ?, ?)", (s['plasmid'], l1id, i))
+                # we put in "extra" everything other than ratio, plasmid and notes. Serialized to json.
+                extra = {k: v for k, v in s.items() if k not in ['ratio', 'plasmid', 'notes']}
+                extra_json = json.dumps(extra)
+                c.execute(
+                    "INSERT INTO source_in_aggregation VALUES (?, ?, ?, ?, ?)",
+                    (aggregation_id, s['plasmid'], r, s['notes'] if 'notes' in s else None, extra_json),
+                )
+    conn.commit()
+
+def xp_to_sql(xps:list, conn):
+    c = conn.cursor()
+    create_db(conn)
+    for obj in xps:
+        c.execute("SELECT name FROM XPs WHERE name = ?", (obj['name'],))
+        if c.fetchone():
+            # already in db so we skip
+            return
+        c.execute(
+            "INSERT INTO XPs VALUES (?, ?, ?, ?)",
+            (
+                obj['name'],
+                obj['flow_date'] if 'flow_date' in obj else None,
+                obj['transfection_date'] if 'transfection_date' in obj else None,
+                json.dumps({k: v for k, v in obj.items() if k not in ['name', 'flow_date', 'transfection_date']}),
+            ),
+        )
+        for s in obj['samples']:
+            c.execute(
+                "INSERT INTO recipe_in_XP VALUES (?, ?, ?, ?)",
+                (obj['name'], s['recipe'], s['name'], s['notes'] if 'notes' in s else None),
             )
     conn.commit()
 
 
+
 def import_recipes_to_sql(recipe_files: list, conn, lib):
     # recipe files are json5 files
+    recipes = []
     for f in recipe_files:
         try:
             recipe = ut.load_json5(f)
             if not Path(f).name == f'{recipe["name"]}.recipe.json5':
                 msg = f'Recipe name vs file name mismatch (declared name: {recipe["name"]})'
                 raise RuntimeError(msg)
-            recipe_to_sql(recipe, conn, lib)
+            recipes.append(recipe)
         except Exception as e:
             raise RuntimeError(f'Error loading recipe {f}: \n{e}')
+        recipes_to_sql(recipes, conn, lib)
 
 
 def network_from_recipe(recipe, lib, db_path=':memory:'):
     dbconn = sqlite3.connect(db_path)
-    recipe_to_sql(recipe, dbconn, lib)
+    recipes_to_sql([recipe], dbconn, lib)
     assert(recipe['name'] in [r[0] for r in dbconn.execute("SELECT name FROM recipes").fetchall()])
     n = Network(lib, recipe['name'], dbconn)
     return n
@@ -170,6 +214,7 @@ class XP:
         with open(self.xpfile) as f:
             try:
                 xpobj = json5.load(f)
+                xp_to_sql(xpobj, db_path)
                 for k, v in xpobj.items():
                     setattr(self, k, v)
             except Exception as e:
@@ -195,7 +240,7 @@ class XP:
         else:
             self.inv_networks = None
 
-    def get_models(self, inverse=True, node_remap=dict()) -> dict[str, ComputeGraphModel]:
+    def get_models(self, inverse=True, node_impl=dict()) -> dict[str, ComputeGraphModel]:
         if inverse:
             assert self.inv_networks is not None
         nets = self.inv_networks if inverse else self.networks
@@ -204,7 +249,7 @@ class XP:
         for s in track(self.samples, description='Building models'):
             try:
                 models[s['name']] = ComputeGraphModel(nets[s['recipe']])
-                models[s['name']].build(node_remap=node_remap, node_namespace=s['name'])
+                models[s['name']].build(node_impl=node_impl, node_namespace=s['name'])
             except Exception as e:
                 msg = f'Error building {"inverse" if inverse else ""} model for sample {s}: {e}'
                 raise RuntimeError(msg)
