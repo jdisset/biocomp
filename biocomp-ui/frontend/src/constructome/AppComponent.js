@@ -178,6 +178,17 @@ function RecipeRow({ recipe, handleClick }) {
   );
 }
 
+function Graph({ graph }) {
+	if (graph === null || graph === undefined) {
+		return;
+	}
+	return(
+          <ReactFlowProvider>
+            <ComputeComponent data={graph} />
+          </ReactFlowProvider>
+	);
+}
+
 function AppComponent() {
   const [xpList, setXpList] = useState([]);
   const [recipeList, setRecipeList] = useState([]);
@@ -235,6 +246,7 @@ function AppComponent() {
   };
   const selectRecipe = (name) => {
     selectItem(name, recipeList, setRecipeList, filterXps);
+      setGraph(null);
     axios.get("http://localhost:4321/network/" + name).then((response) => {
       console.log(response.data);
       setGraph(response.data);
@@ -261,9 +273,7 @@ function AppComponent() {
           )}
         </Box>
         <Box id="graph" className="mainlist">
-          <ReactFlowProvider>
-            <ComputeComponent data={graph} />
-          </ReactFlowProvider>
+			<Graph graph={graph} />
         </Box>
       </Flex>
     </Flex>
