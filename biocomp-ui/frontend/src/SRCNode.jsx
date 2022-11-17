@@ -1,6 +1,6 @@
 import React, { ReactNode, useCallback } from "react";
 import { Handle, Position } from "react-flow-renderer";
-import { theme } from "./shapes.jsx";
+import { theme, generateArcs } from "./shapes.jsx";
 import Util from "./util.jsx";
 
 function hasCopyNumber(data) {

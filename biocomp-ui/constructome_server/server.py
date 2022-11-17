@@ -2,6 +2,7 @@
 # {{{                      --     import and load     --
 # ···············································································
 import sys
+import urllib
 
 sys.path.append('../../scripts/')
 from flask_cors import CORS
@@ -9,6 +10,7 @@ from flask import Flask, request
 from pathlib import Path
 import pandas as pd
 import json
+from flask_cors import CORS, cross_origin
 
 import sqlite3
 import biocomp as bc
@@ -34,6 +36,8 @@ xp_path = ut.DEFAULT_XP_PATH
 xpnames = [x.name for x in xp_path.iterdir() if x.is_dir()]
 xpobjs = [json5.load(open(xp_path / xpname / f"{xpname}.xp.json5")) for xpname in tqdm(xpnames)]
 bc.recipe.xp_to_sql(xpobjs, base_conn)
+
+
 
 # saving all recipes to db
 recipe_path = ut.DEFAULT_RECIPE_PATH
@@ -95,7 +99,18 @@ sql_schema = """
 
     """
 
-##
+
+## 
+
+def get_parts(l1id):
+    # l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
+    l0_cols = ["5'UTR", "gene", "3'UTR"]
+    L0s = lib.L1s.loc[l1id][l0_cols].tolist()
+    part_cols = [f'part_{i}' for i in range(1, 7)]
+    parts = []
+    for l in L0s:
+        parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
+    return parts
 
 
 def get_tus(source_id):
@@ -104,15 +119,16 @@ def get_tus(source_id):
         f"SELECT TU, position FROM TU_in_source WHERE source = ?", conn, params=(source_id,)
     )
     conn.close()
-    return tus.to_dict(orient='records')
+    res = tus.to_dict(orient='records')
+    for r in res:
+        r['parts'] = get_parts(r['TU'])
+    return res
 
 
 def get_sources(agg_id):
     conn = sqlite3.connect(dbpath)
     sources = pd.read_sql_query(
-        f"SELECT source, ratio, notes, extra FROM source_in_aggregation WHERE aggregation = ?",
-        conn,
-        params=(agg_id,),
+        f"SELECT sia.*, s.type FROM source_in_aggregation AS sia, sources AS s WHERE aggregation = ? AND s.name = sia.source", conn, params=(agg_id,)
     )
     # parse extra (it's a json string)
     sources['extra'] = sources['extra'].apply(lambda x: json.loads(x))
@@ -139,9 +155,22 @@ def get_recipe(recipe_name):
     recipe['aggregations'] = [get_aggregations(recipe_name)]
     # parse extra (it's a json string)
     recipe['extra'] = recipe['extra'].apply(lambda x: json.loads(x))
+    res = recipe.to_dict(orient='records')[0]
+    # we also want to include the list of xp that have this recipe in their samples
+    xps = pd.read_sql_query(
+        "SELECT XP FROM recipe_in_XP WHERE recipe = ?", conn, params=(recipe_name,)
+    )
+    xplist = xps['XP'].to_list()
+    res['xps'] = xplist
     conn.close()
-    return recipe.to_dict(orient='records')[0]
+    return {'data': res}
 
+def has_sample_data(xp_name, sample_name):
+    # data should be in xp_path/xp_name/data/xpname.samplename.csv
+    data_path = xp_path / xp_name / 'data'
+    if not data_path.exists():
+        return False
+    return (data_path / f"{sample_name}.{xp_name}.csv").exists()
 
 def get_xp(xp_name):
 
@@ -161,7 +190,33 @@ def get_xp(xp_name):
     # also, we want extra to be expanded so that all its fields are in the top level
     res.update(res['extra'])
     del res['extra']
-    return res
+
+    for s in res['samples']:
+        s['has_data'] = has_sample_data(xp_name, s['name'])
+
+    return {'data': res}
+
+
+##
+get_recipe(recipenames[5].split('.')[0])
+
+def build_network(recipe_name):
+    dbconn = sqlite3.connect(dbpath)
+    n = bc.Network(lib, recipe_name, dbconn)
+    return n
+
+def get_network_json(net):
+    params = None
+    def param_extractor(**kwargs):
+        nonlocal params
+        params = {**kwargs}
+    ut.drawComputeGraph(net.compute_graph, cdg=net.central_dogma_graph, func=param_extractor)
+    return json.dumps(params)
+
+
+net = build_network(recipenames[5].split('.')[0])
+
+get_network_json(net)
 
 
 #                                                                            }}}
@@ -169,9 +224,8 @@ def get_xp(xp_name):
 
 
 app = Flask(__name__)
-app.config['CORS_HEADERS'] = 'Content-Type'
 CORS(app, resources={r"/*": {"origins": "*"}})
-
+app.config['CORS_HEADERS'] = 'Content-Type'
 
 @app.route('/')
 def index():
@@ -195,7 +249,7 @@ def _xp(xp_name):
     xp = get_xp(xp_name)
     return json.dumps(xp)
 
-@app.route('/xp')
+@app.route('/xps')
 def _xps():
     conn = sqlite3.connect(dbpath)
     xpnames = pd.read_sql_query("SELECT name FROM XPs", conn)
@@ -209,7 +263,7 @@ def _recipe(recipe_name):
     recipe = get_recipe(recipe_name)
     return json.dumps(recipe)
 
-@app.route('/recipe')
+@app.route('/recipes')
 def _recipes():
     conn = sqlite3.connect(dbpath)
     recipenames = pd.read_sql_query("SELECT name FROM recipes", conn)
@@ -217,6 +271,12 @@ def _recipes():
     recipes = [get_recipe(recipe_name) for recipe_name in recipenames['name']]
     return json.dumps(recipes)
 
+@app.route('/network/<recipe_name>')
+def _network(recipe_name):
+    net = build_network(recipe_name)
+    return get_network_json(net)
+
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port="4321", debug=True, use_reloader=True)
+    app.run(host="0.0.0.0", port="4321")
+    # app.run(host="0.0.0.0", port="4321", debug=True, use_reloader=True)

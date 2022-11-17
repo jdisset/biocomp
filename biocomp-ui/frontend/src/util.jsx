@@ -148,14 +148,14 @@ class Util {
   static zeroPad = (num, places) => String(num).padStart(places, "0");
 
   static getLayoutedElements = (
+	  dagreGraph,
     nodes,
     edges,
     nodeWidth = 150,
     nodeHeight = 270,
     dimensionsDict = {},
-    direction = "TB"
+	  direction = "TB",
   ) => {
-    const dagreGraph = new dagre.graphlib.Graph();
     dagreGraph.setDefaultEdgeLabel(() => ({}));
     const isHorizontal = direction === "LR";
     dagreGraph.setGraph({ rankdir: direction });
