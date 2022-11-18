@@ -1,85 +1,35 @@
-import React from "react";
+/*──────────────────────────────▼     imports     ▼───────────────────────────────*/
+
 import axios from "axios";
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import Util from "../util.jsx";
 import "./style.css";
 import ReactFlow, { ReactFlowProvider } from "reactflow";
-import {
-  Flex,
-  Spacer,
-  Center,
-  Box,
-  Square,
-  Text,
-  Heading,
-  Stack,
-  StackDivider,
-  Card,
-  CardHeader,
-  CardBody,
-  CardFooter,
-} from "@chakra-ui/react";
 import Fuse from "fuse.js";
-
+import RecursiveDict from "./RecursiveDictComponent.jsx";
 import ComputeComponent from "../ComputeComponent.jsx";
 import "../style.css";
+import styled from "styled-components";
 
-function RecursiveDict({ dict }) {
-  if (dict === null || dict === undefined) {
-    return;
-  }
+/*════════════════════════════════════════════════════════════════════════════════*/
 
-  return (
-    <ul className={Array.isArray(dict) ? "array" : "dict"}>
-      {Object.keys(dict).map((key) => {
-        if (
-          key === "samples" ||
-          dict[key] === null ||
-          dict[key] === undefined ||
-          dict[key] === "" ||
-          dict[key].length === 0 ||
-          (typeof dict[key] === "object" && Object.keys(dict[key]).length === 0)
-        ) {
-          return;
-        }
-        if (typeof dict[key] === "boolean") {
-          return (
-            <li key={key}>
-              <b>{key}</b>: {dict[key].toString()}
-            </li>
-          );
-        }
-        if (typeof dict[key] === "object") {
-          if (Array.isArray(dict)) {
-            return (
-              <li key={key}>
-                <RecursiveDict dict={dict[key]} />
-              </li>
-            );
-          }
-          return (
-            <li key={key}>
-              <h3>{key}</h3> <RecursiveDict dict={dict[key]} />
-            </li>
-          );
-        } else {
-          return (
-            <li key={key}>
-              <h3>{key}</h3> {dict[key]}
-            </li>
-          );
-        }
-      })}
-    </ul>
-  );
-}
+/*───────────────────────▼    base styled components     ▼────────────────────────*/
+
+const Flex = styled.div`
+  display: flex;
+`;
+
+const Main = styled.div`
+  display: flex;
+  flex-direction: column;
+`;
+
+/*════════════════════════════════════════════════════════════════════════════════*/
+
+/*───────────────────────────────▼     XpRow     ▼────────────────────────────────*/
 
 function XpRow({ xp, handleClick }) {
   const sel = xp.selected ? "selected" : "";
-  // data status can be either "ok", "missing" or "partial"
-  // ok means all the xp.samples.has_data are true
-  // missing means all the xp.samples.has_data are false
-  // partial means some are true and some are false
   var hasdata = 0;
   xp.data.samples.forEach((sample) => {
     if (sample.has_data) {
@@ -92,20 +42,58 @@ function XpRow({ xp, handleClick }) {
   } else if (hasdata < xp.data.samples.length) {
     datastatus = "partial";
   }
-
   return (
     <li className={"selectable expandable " + sel} onClick={() => handleClick(xp.data.name)}>
       <Flex>
         <h2>{xp.data.name}</h2> <span className="tag date">{xp.data.flow_date}</span>
         <span className={"tag data_status " + datastatus}>{datastatus}</span>
       </Flex>
-
       <div className="expandableContent">
         <RecursiveDict dict={xp.data} />
       </div>
     </li>
   );
 }
+
+/*════════════════════════════════════════════════════════════════════════════════*/
+
+/*─────────────────────────────▼     RecipeRow     ▼──────────────────────────────*/
+
+function RecipeRow({ recipe, handleClick }) {
+  const sel = recipe.selected ? "selected" : "";
+  return (
+    <li
+      className={"expandable selectable " + sel}
+      onClick={() => handleClick(recipe.data.name)}
+      key={recipe.data.name}
+    >
+      <h2>{recipe.data.name}</h2>
+      <div className="expandableContent recipe">
+        <p className="recipe_description">{recipe.data.description}</p>
+        {recipe.data.aggregations.map((agg) => {
+          return (
+            <div className="aggregation" key={agg.name}>
+              {agg.sources.map((cotx) => {
+                return (
+                  <Plasmid
+                    name={cotx.source}
+                    tus={cotx.tus}
+                    ratio={agg.sources.length > 1 ? cotx.ratio : null}
+                    key={cotx.source}
+                  />
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+    </li>
+  );
+}
+
+/*════════════════════════════════════════════════════════════════════════════════*/
+
+/*────────────────────────────▼     TU & Plasmid     ▼────────────────────────────*/
 
 function TU({ name, parts }) {
   return (
@@ -146,48 +134,24 @@ function Plasmid({ name, tus, ratio }) {
   );
 }
 
-function RecipeRow({ recipe, handleClick }) {
-  const sel = recipe.selected ? "selected" : "";
+/*════════════════════════════════════════════════════════════════════════════════*/
+
+/*───────────────────────────────▼     Graph     ▼────────────────────────────────*/
+
+function Graph({ graph }) {
+  if (graph === null || graph === undefined) {
+    return;
+  }
   return (
-    <li
-      className={"expandable selectable " + sel}
-      onClick={() => handleClick(recipe.data.name)}
-      key={recipe.data.name}
-    >
-      <h2>{recipe.data.name}</h2>
-      <div className="expandableContent recipe">
-        <Text className="recipe_description">{recipe.data.description}</Text>
-        {recipe.data.aggregations.map((agg) => {
-          return (
-            <div className="aggregation" key={agg.name}>
-              {agg.sources.map((cotx) => {
-                return (
-                  <Plasmid
-                    name={cotx.source}
-                    tus={cotx.tus}
-                    ratio={agg.sources.length > 1 ? cotx.ratio : null}
-                    key={cotx.source}
-                  />
-                );
-              })}
-            </div>
-          );
-        })}
-      </div>
-    </li>
+    <ReactFlowProvider>
+      <ComputeComponent data={graph} />
+    </ReactFlowProvider>
   );
 }
 
-function Graph({ graph }) {
-	if (graph === null || graph === undefined) {
-		return;
-	}
-	return(
-          <ReactFlowProvider>
-            <ComputeComponent data={graph} />
-          </ReactFlowProvider>
-	);
-}
+/*════════════════════════════════════════════════════════════════════════════════*/
+
+/*────────────────────────────────▼     App     ▼─────────────────────────────────*/
 
 function AppComponent() {
   const [xpList, setXpList] = useState([]);
@@ -246,38 +210,48 @@ function AppComponent() {
   };
   const selectRecipe = (name) => {
     selectItem(name, recipeList, setRecipeList, filterXps);
-      setGraph(null);
+    setGraph(null);
     axios.get("http://localhost:4321/network/" + name).then((response) => {
-      console.log(response.data);
       setGraph(response.data);
-      console.log("graph", graph);
     });
   };
 
   return (
-    <Flex direction="column" h="100vh">
-      <Box w="100%" className="header">
+    <Main>
+      <div className="header">
         <h1>The Constructome Browser</h1>
-      </Box>
+      </div>
       <Flex>
-        <Box id="xplist" className="mainlist">
-          {xpList.map((xp) =>
-            xp.keep ? <XpRow xp={xp} handleClick={selectXp} key={xp.data.name} /> : null
-          )}
-        </Box>
-        <Box id="recipelist" className="mainlist">
-          {recipeList.map((recipe) =>
-            recipe.keep ? (
-              <RecipeRow recipe={recipe} handleClick={selectRecipe} key={recipe.data.name} />
-            ) : null
-          )}
-        </Box>
-        <Box id="graph" className="mainlist">
-			<Graph graph={graph} />
-        </Box>
+        <div id="xplist" className="mainlist">
+          <h2 className="boxtitle">Experiments</h2>
+          <div className="boxcontent">
+            {xpList.map((xp) =>
+              xp.keep ? <XpRow xp={xp} handleClick={selectXp} key={xp.data.name} /> : null
+            )}
+          </div>
+        </div>
+        <div id="recipelist" className="mainlist">
+          <h2 className="boxtitle">Recipes</h2>
+          <div className="boxcontent">
+            {recipeList.map((recipe) =>
+              recipe.keep ? (
+                <RecipeRow recipe={recipe} handleClick={selectRecipe} key={recipe.data.name} />
+              ) : null
+            )}
+          </div>
+        </div>
+        <div id="graph" className="mainlist">
+          <Graph graph={graph} />
+        </div>
       </Flex>
-    </Flex>
+    </Main>
   );
 }
 
+
+/*════════════════════════════════════════════════════════════════════════════════*/
+
 export default AppComponent;
+
+
+

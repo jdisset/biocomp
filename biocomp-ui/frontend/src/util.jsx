@@ -14,7 +14,6 @@ import INVNode from "./INVNode.jsx";
 import DENDNode from "./DENDNode.jsx";
 import ContentEdge from "./ContentEdge.jsx";
 
-
 let colormap = require("colormap");
 const NCOLORS = 100;
 const cmapcolors = colormap({
@@ -28,7 +27,6 @@ const cmapcolors = colormap({
   format: "hex",
   alpha: 1,
 });
-
 
 const computeNodeTypes = {
   sequestron_ERN: SEQNode,
@@ -62,27 +60,6 @@ class Util {
   static cmap(x) {
     return cmapcolors[Math.max(0, Math.min(NCOLORS - 1, Math.floor(x * (NCOLORS - 1))))];
   }
-
-  static screenCap = (fname) => {
-    html2canvas(document.body, { scale: 2.5 }).then((canvas) => {
-      const image = canvas.toDataURL("image/png", 1.0);
-      this.downloadImage(image, fname);
-    });
-  };
-
-  static downloadImage = (blob, fileName) => {
-    const fakeLink = window.document.createElement("a");
-    fakeLink.style = "display:none;";
-    fakeLink.download = fileName;
-
-    fakeLink.href = blob;
-
-    document.body.appendChild(fakeLink);
-    fakeLink.click();
-    document.body.removeChild(fakeLink);
-
-    fakeLink.remove();
-  };
 
   static describeArc = (x, y, r, sAng, eAng) => {
     var M = Math;
@@ -148,13 +125,13 @@ class Util {
   static zeroPad = (num, places) => String(num).padStart(places, "0");
 
   static getLayoutedElements = (
-	  dagreGraph,
+    dagreGraph,
     nodes,
     edges,
     nodeWidth = 150,
     nodeHeight = 270,
     dimensionsDict = {},
-	  direction = "TB",
+    direction = "TB"
   ) => {
     dagreGraph.setDefaultEdgeLabel(() => ({}));
     const isHorizontal = direction === "LR";
@@ -191,5 +168,6 @@ class Util {
     });
     return { nodes, edges };
   };
+
 }
-export {Util as default, computeNodeTypes, typeDim};
+export { Util as default, computeNodeTypes, typeDim };
