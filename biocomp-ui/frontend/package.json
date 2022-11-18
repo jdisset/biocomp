@@ -21,7 +21,8 @@
     "reactflow": "latest",
     "regenerator-runtime": "latest",
     "shapes": "latest",
-    "streamlit-component-lib": "latest"
+    "streamlit-component-lib": "latest",
+    "styled-components": "^5.3.6"
   },
   "devDependencies": {
     "typescript": "latest"
