@@ -47,6 +47,7 @@ def mse_loss(y, y_hat, n_outputs=None):
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                      --     default config     --
 # ···············································································
+
 DEFAULT_CFG = {
     "optimizer": "adam",
     "learning_rate": 0.001,
@@ -67,6 +68,7 @@ DEFAULT_CFG = {
     "save_rate": 100,
     "static_params": [['node']],
 }
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -121,6 +123,37 @@ def prep_data(models, Y_raw, cfg=DEFAULT_CFG):
     X = jax.tree_map(lambda x: x / norm_factor, X)
     Y = jax.tree_map(lambda x: x / norm_factor, Y)
     return X, Y
+
+
+def batch(X, Y, batch_size, n_batches=None):
+    n = X.shape[0]
+    if n_batches is None:
+        n_batches = n // batch_size
+    # using sampling with replacement
+    for i in range(n_batches):
+        idx = np.random.choice(n, size=batch_size, replace=True)
+        yield X[idx], Y[idx]
+
+@jax.jit
+def unstack_tree(t):
+    n = jax.tree_leaves(t)[0].shape[0]
+    return [jax.tree_map(lambda x: x[i], t) for i in range(n)]
+
+def get_best_params(history, smooth_window=10):
+    # find the lowest loss time point (and which replicate)
+    loss_arr = np.array(history['loss'])
+    # loss_arr dimensions: (n_epochs, n_replicates)
+    # lets smooth each replicate's loss over 10 points. Make sure to pad the
+    # beginning and end with the first and last values, respectively.
+    loss_smooth = np.array([
+        np.convolve(loss_arr[:, i], np.ones(smooth_window), mode='same')
+        for i in range(loss_arr.shape[1])
+    ])
+    assert loss_smooth.shape == loss_arr.shape
+    id_min = np.unravel_index(np.argmin(loss_smooth), loss_smooth.shape)
+    p = unstack_tree(history['params'][id_min[0]])[id_min[1]]
+    return p, id_min
+
 
 
 #                                                                            }}}
@@ -205,6 +238,18 @@ def save_log(loss, params, iter_num, cfg, save_path=None, loss_history=None, **_
         du.save(loss_history, f'{save_path}/loss_history.pkl', overwrite=True)
 
 
+def log_w_replicates(history, epoch, cfg, **_):
+    loss = history['loss'][-1]
+    losses = {
+        'mean': jnp.mean(loss),
+        'std': jnp.std(loss),
+        'min': jnp.min(loss),
+        'max': jnp.max(loss),
+    }
+    print(
+        f'epoch: {epoch}, loss: \n - mean: {losses["mean"]:.3f}, std: {losses["std"]:.3f}, min: {losses["min"]:.3f}, max: {losses["max"]:.3f}'
+    )
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -245,6 +290,9 @@ def train_xp(xp, config=DEFAULT_CFG, **kwargs):
 ## ─────────────────────────────────────────────────────────────────────────────
 
 
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{               --     train models (no replicates)     --
+#···············································································
 def train_models(
     models: list[ComputeGraphModel],
     x_batches: np.ndarray,
@@ -328,6 +376,7 @@ def train_models(
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
 
+
     if loggers is None:
         loggers = {}
 
@@ -348,3 +397,66 @@ def train_models(
                 l(loss, params, i, cfg, loss_history=loss_history, params_history=params_history)
 
     return params_history, loss_history, grad_history, opt_history
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{          --     train single model but with replicates     --
+#···············································································
+def train_model(model, x, y, config, loggers=None):
+    cfg = {**DEFAULT_CFG, **config}
+    loggers = loggers or {}
+    optimizer = optax.adamw(learning_rate=cfg['learning_rate'], weight_decay=cfg['adam_w_decay'])
+    key = jax.random.PRNGKey(cfg['rng_key'])
+    repl_keys = jax.random.split(key, cfg['n_replicates'])
+    params, constraints = jax.vmap(model.init)(repl_keys)
+
+    history = {
+        'params': [params],
+        'opt': [optimizer.init(params)],
+        'grad': [],
+        'loss': [],
+    }
+
+    def training_step(params, opt_states, x, y):
+        def loss_func(params, x, y):
+            y_hat = jax.vmap(partial(model, params, rng_key=key))(x)
+            return jnp.mean((y - y_hat) ** 2)
+
+        loss, grads = jax.vmap(jax.value_and_grad(loss_func), in_axes=(0, None, None))(params, x, y)
+        updates, opt_states = optimizer.update(grads, opt_states, params)
+        params = optax.apply_updates(params, updates)
+        res = {
+            'params': params,
+            'loss': loss,
+            'grad': grads,
+            'opt': opt_states,
+        }
+        return res
+
+    step = jax.jit(training_step)
+
+    print('Beginning training')
+
+    n_batches = cfg.get('n_batches', x.shape[0] // cfg['batch_size'])
+
+    for i, k in enumerate(jax.random.split(key, cfg['epochs']), 1):
+
+        for x_batch, y_batch in batch(x, y, cfg['batch_size'], n_batches):
+            updt = step(history['params'][-1], history['opt'][-1], x_batch, y_batch)
+            history = {k: v + [updt[k]] for k, v in history.items()}
+
+        for t, l in loggers.items():
+            if i % t == 0 or i == cfg['epochs']:
+                l(history, i, cfg)
+    return history
+
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+

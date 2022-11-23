@@ -12,13 +12,13 @@ part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF_group': 'tl_rate'}
 parameter_to_default_part = {'tl_rate': 'empty_tc'}
 
 
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                   --     general network utils     --
-#···············································································
+# ···············································································
+
 
 def fuse_consecutive(cg: pd.DataFrame, types_to_fuse: Tuple[str, str], new_type: str):
-    """ Fuse 2 consecutive nodes in a graph when they are of the types specified in types_to_fuse"""
+    """Fuse 2 consecutive nodes in a graph when they are of the types specified in types_to_fuse"""
     assert len(types_to_fuse) == 2
     has_fused = True
     while has_fused:
@@ -47,10 +47,10 @@ def fuse_consecutive(cg: pd.DataFrame, types_to_fuse: Tuple[str, str], new_type:
                 cg.drop(second.name, inplace=True)
                 has_fused = True
                 break
+
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
-
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -191,7 +191,6 @@ class TranscriptionUnitGenerator:
 
         return _next([], 0)
 
-
     # def generate_random(self, lib, random_seed=1, random_order=True):
     # rdm = jax.random.PRNGKey(random_seed)
     # allrdm = jax.random.split(rdm, len(self.slots))
@@ -202,8 +201,6 @@ class TranscriptionUnitGenerator:
     # if not self.slots[i].is_resolved:
     # self.slots[i].resolve(lib, l1=self, rdm_key=r)
     # assert all(s.is_resolved for s in self.slots)
-
-
 
 
 #                                                                            }}}
@@ -226,22 +223,29 @@ class Network:
     def __init__(self, lib, recipe_name, recipe_db, custom_outputs=None, build=True):
         self.lib = lib
         self.name: str = recipe_name
-        self.db = recipe_db
-        self.db.commit()
         self.custom_outputs = custom_outputs
         self.transcription_units: Optional[Dict[str, TranscriptionUnit]] = None
         self.compute_graph: Optional[pd.DataFrame] = None
         self.central_dogma_graph: Optional[pd.DataFrame] = None
+        self.aggregations: Optional[pd.DataFrame] = None
+        self.tu_inputs: Optional[pd.DataFrame] = None
+        self.db = recipe_db
+        if recipe_db is not None:
+            self.db.commit()
+            self.__build_from_db()
         if build:
             self.build()
 
-    def build(self):
+    def __build_from_db(self):
+        assert self.db is not None
         c = self.db.cursor()
         # first let's check that there is a recipe with this name
         c.execute('SELECT * FROM recipes WHERE name=?', (self.name,))
         assert (
             c.fetchone() is not None
         ), f'No recipe named {self.name} in database {self.db}. Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
+
+        # get the transcription units
         c.execute(
             """SELECT TU FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
@@ -250,21 +254,81 @@ class Network:
         self.transcription_units = {
             tu[0]: transcription_unit_from_L1(tu[0], self.lib) for tu in c.fetchall()
         }
+
+        # then get the sources
+        c.execute(
+            """SELECT tis.source,tis.TU,position FROM TU_in_source tis, source_in_aggregation sia, aggregations a
+           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
+            (self.name,),
+        )
+        tu_in_sources = pd.DataFrame(
+            [t for t in c.fetchall()], columns=['source', 'TU', 'position']
+        )
+        tu_in_sources.sort_values(by='position', inplace=True)
+        self.tu_in_sources = tu_in_sources
+
+        # finally get the aggregations
+        c.execute(
+            """SELECT a.id, sia.source, sia.ratio FROM aggregations a, source_in_aggregation sia
+            WHERE a.id = sia.aggregation AND a.recipe = ?""",
+            (self.name,),
+        )
+        # adding the aggregation nodes
+        aggregations = (
+            pd.DataFrame([t for t in c.fetchall()], columns=['id', 'source', 'ratio'])
+            .groupby('id')
+            .agg(list)
+        )
+        self.aggregations = aggregations
+
+    @classmethod
+    def from_dict(cls, lib, name, transcription_units, sources, aggregations, build=True):
+        n = cls(lib, name, None, build=False)
+
+        # transcription_units = {TU_name : TU}
+        n.transcription_units = transcription_units
+
+        # sources =  {source_name: [TU1, TU2, TU3, ...], ...}
+        n.tu_in_sources = pd.DataFrame(
+            [
+                {'source': s, 'TU': t, 'position': i}
+                for s, tuids in sources.items()
+                for i, t in enumerate(tuids)
+            ]
+        )
+        n.tu_in_sources.sort_values(by='position', inplace=True)
+
+        # aggregations = [[source1, source2, source3, ...], ...]
+        assert n.aggregations is None
+        n.aggregations = (
+            pd.DataFrame(
+                [{'id': i, 'source': s, 'ratio': 1} for i, a in enumerate(aggregations) for s in a]
+            )
+            .groupby('id')
+            .agg(list)
+        )
+
+        if build:
+            n.__build_central_dogma_graph()
+            n.__build_compute_graph()
+        return n
+
+    def build(self):
+
         assert len(self.transcription_units) > 0, f'No transcription units in recipe {self.name}'
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
 
     def set_inputs(self, input_ids):
-        assert(self.is_built())
+        assert self.is_built()
         for i, inp_id in enumerate(input_ids):
             self.compute_graph.loc[inp_id, 'type'] = 'input'
             self.compute_graph.loc[inp_id, 'extra'].update({'input_position': i})
 
     def set_numeric_as_input(self):
-        assert(self.is_built())
+        assert self.is_built()
         numeric_nodes = list(self.compute_graph.loc[self.compute_graph['type'] == 'numeric'].index)
         self.set_inputs(numeric_nodes)
-
 
     def is_built(self):
         return (
@@ -495,17 +559,6 @@ class Network:
         # in the compute graph,
         # merge TUs that are from a same source into a single source node (aka plasmid)
 
-        c = self.db.cursor()
-        c.execute(
-            """SELECT tis.source,tis.TU,position FROM TU_in_source tis, source_in_aggregation sia, aggregations a
-           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
-            (self.name,),
-        )
-        tu_in_sources = pd.DataFrame(
-            [t for t in c.fetchall()], columns=['source', 'TU', 'position']
-        )
-        tu_in_sources.sort_values(by='position', inplace=True)
-
         sources_tuids = self.central_dogma_graph.loc[
             cdf[cdf.type == 'source'].cdg_output
         ].tu_id.apply(lambda x: x[0])
@@ -521,8 +574,9 @@ class Network:
         sources = {}  # plasmid name -> list of compute nodes ids
 
         # tu_in_sources contains the list of TUs in each source, sorted by position
+        assert self.tu_in_sources is not None
 
-        for i, r in tu_in_sources.groupby('source').agg(list).iterrows():
+        for i, r in self.tu_in_sources.groupby('source').agg(list).iterrows():
             # but you can have sources in the db that are not in the recipe
             group = []  # group will contain the compute nodes ids of the TUs in the source
             for t in r['TU']:
@@ -555,21 +609,8 @@ class Network:
         return cdf
 
     def __addAggregations(self, cdf, uidGen):
-        c = self.db.cursor()
-        c.execute(
-            """SELECT a.id, a.recipe, sia.source, sia.ratio FROM aggregations a, source_in_aggregation sia
-            WHERE a.id = sia.aggregation AND a.recipe = ?""",
-            (self.name,),
-        )
-
-        # adding the aggregation nodes
-        aggregations = (
-            pd.DataFrame([t for t in c.fetchall()], columns=['id', 'recipe', 'source', 'ratio'])
-            .groupby('id')
-            .agg(list)
-        )
-
-        for i, r in aggregations.iterrows():
+        assert self.aggregations is not None
+        for i, r in self.aggregations.iterrows():
             if len(r.source) > 1:
                 nid = uidGen()
                 newaggregation = GraphComputeNode(nid, 'aggregation', None, r.source)
@@ -843,10 +884,13 @@ class Network:
             ), 'central dogma graph has duplicate ids'
 
     def copy(self):
-        N = Network(self.lib, self.name, self.db, custom_outputs=self.custom_outputs, build=False)
+        N = Network(self.lib, self.name, None, custom_outputs=self.custom_outputs, build=False)
+        N.db = self.db
         N.transcription_units = self.transcription_units.copy()
         N.central_dogma_graph = self.central_dogma_graph.copy()
         N.compute_graph = self.compute_graph.copy()
+        N.tu_in_sources = self.tu_in_sources.copy()
+        N.aggregations = self.aggregations.copy()
         return N
 
 
@@ -901,6 +945,7 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
 
     return paths
 
+
 DEFAULT_INVERSE_DICT = {
     "translation": "inv_translation",
     "transcription": "inv_transcription",
@@ -908,6 +953,7 @@ DEFAULT_INVERSE_DICT = {
     "aggregation": "inv_aggregation",
     "source": "inv_source",
 }
+
 
 def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=DEFAULT_INVERSE_DICT):
     # inverse_dict: node_type -> inverse_node_type
@@ -991,5 +1037,3 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=DEFAULT
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
-

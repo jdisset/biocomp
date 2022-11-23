@@ -6,10 +6,11 @@ from . import utils as ut
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                           --     utils     --
-#···············································································
+# ···············································································
 
 DEFAULT_MIN_RATE = 0.0
 DEFAULT_MAX_RATE = 10.0
+
 
 def continuous_initializer(rng, shape=(), minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
     def init():
@@ -117,7 +118,7 @@ def _transform(get_param, get_quantized, transform_name, **_):
     return apply
 
 
-def _inverse_transform(get_param, get_quantized, transform_name,  **_):
+def _inverse_transform(get_param, get_quantized, transform_name, **_):
     def apply(value, rng_key):
         # inverse can only work if there's only one input edge
         assert value.shape == (), f'Expected scalar value, got {value.shape}'
@@ -202,13 +203,13 @@ def deadend(*_, **__):
 
     return apply
 
+
 @compnode
 def output(*_, **__):
     def apply(*value, **_):
         return jnp.array(value)
 
     return apply
-
 
 
 # inverse of source is just a pass-through
@@ -244,7 +245,9 @@ def aggregation(get_param, get_quantized, n_outputs, **kwargs):
     def apply(inp, rng_key):
 
         if 'ratios' in kwargs:
-            ratios = get_param("ratios", overwrite_with=jnp.array(kwargs['ratios']))
+            ratios = get_param(
+                "ratios", overwrite_with=jnp.array(kwargs['ratios'], dtype=jnp.float32)
+            )
         else:
             ratios = get_param("ratios", init=continuous_initializer(rng_key, (n_outputs,)))
 
@@ -279,9 +282,7 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
 
 def nn_dense(input_values, output_size, get_param, key, name):
     input_size = 1 if input_values.shape == () else input_values.shape[0]
-    w = get_param(
-        f'{name}_w', init=glorot_initializer(key, (input_size, output_size)), shared=True
-    )
+    w = get_param(f'{name}_w', init=glorot_initializer(key, (input_size, output_size)), shared=True)
     b = get_param(f'{name}_b', init=lambda: jnp.zeros((output_size,)), shared=True)
     res = jnp.dot(input_values, w) + b
     return res.squeeze()
@@ -293,7 +294,6 @@ def nn_dense_multilevel(input_values, hidden_s, output_s, depth, get_param, key,
     for i in range(depth - 1):
         res = activation(nn_dense(res, hidden_s, get_param, keys[i], f'{name}_{i}'))
     return nn_dense(res, output_s, get_param, keys[-1], f'{name}_{depth - 1}')
-
 
 
 def transform_w_dense_layer(get_param, get_quantized, transform_name, wsize=128, depth=2, **_):
@@ -350,6 +350,7 @@ def inverse_transcription_nn(get_param, get_quantized, **_):
 
 def translation_nn(get_param, get_quantized, **_):
     return transform_w_dense_layer(get_param, get_quantized, 'tl', **_)
+
 
 def inverse_translation_nn(get_param, get_quantized, **_):
     return inv_transform_w_dense_layer(get_param, get_quantized, 'tl', **_)

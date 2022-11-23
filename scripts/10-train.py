@@ -1,5 +1,3 @@
-from jax.config import config as jax_config
-
 import biocomp as bc
 import biocomp.compute as bcc
 import scriptutils as ut
@@ -348,5 +346,5 @@ cfg = {
 # model.network.name
 # ut.plot_networks([model.network], [f'../__out/{model.network.name}_dbg.pdf'])
 
-bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls_v6")
-# bc.train.train_xp(xp, cfg)
+# bc.train.train_xp(xp, cfg, wandb_project="biocomp_20221012A_massCtrls_v6")
+bc.train.train_xp(xp, cfg)

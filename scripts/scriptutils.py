@@ -26,6 +26,7 @@ class ddict(dict):
     def __getattr__(*args):
         val = dict.get(*args)
         return ddict(val) if type(val) is dict else val
+
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
@@ -45,7 +46,6 @@ def is_interactive():
         return False  # Probably standard Python interpreter
 
 
-
 DEFAULT_DATA_PATH = Path("/Users/jeandisset/Dropbox (MIT)/Biocomp/")
 DEFAULT_XP_PATH = DEFAULT_DATA_PATH / "Experiments"
 DEFAULT_RECIPE_PATH = DEFAULT_DATA_PATH / "Recipes"
@@ -62,17 +62,30 @@ if GLOBAL_CONFIG_PATH.exists():
         DEFAULT_RECIPE_PATH = Path(config.get('recipe_path', DEFAULT_RECIPE_PATH))
         DEFAULT_LIB_PATH = Path(config.get('lib_path', DEFAULT_LIB_PATH))
 
+# we also check the environment variables to see if they define the paths 
+# if so, we use them in priority
+
+import os
+if 'BIOCOMP_XP_PATH' in os.environ:
+    DEFAULT_XP_PATH = Path(os.environ['BIOCOMP_XP_PATH'])
+if 'BIOCOMP_RECIPE_PATH' in os.environ:
+    DEFAULT_RECIPE_PATH = Path(os.environ['BIOCOMP_RECIPE_PATH'])
+if 'BIOCOMP_LIB_PATH' in os.environ:
+    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_LIB_PATH'])
 
 # convenience loading functions with default paths
 def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH):
     xp = bc.XP(xpname, xp_path, recipe_path, lib)
     return xp
 
+
 def list_xp(xp_path=DEFAULT_XP_PATH):
     return [x.name for x in xp_path.iterdir() if x.is_dir()]
 
+
 def load_lib(lib_path=DEFAULT_LIB_PATH):
     return load(lib_path)
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{              --     Streamlit utils and components     --
@@ -132,8 +145,6 @@ else:
     _component_func = lambda: None
 
 
-
-
 def computeGraph(nodes, edges, key=None, func=_component_func, **kwargs):
     def filterType(n):
         if n['type'] == 'input':
@@ -150,6 +161,7 @@ def dnaOutput(nodes, key=None, func=_component_func, **kwargs):
     tnodes = [bc.ut.updated_dict(n, {'data': {'id': n['id']}}) for n in nodes if n['type'] == 'DNA']
     return func(nodes=tnodes, output_type='DNA', key=key, **kwargs)
 
+
 def drawCentralDogmaGraph(gdf, key=None, func=_component_func):
     nodes = [{'id': f'{i}', 'type': n.type, 'data': n.to_dict()} for i, n in gdf.iterrows()]
     edges = [
@@ -159,6 +171,7 @@ def drawCentralDogmaGraph(gdf, key=None, func=_component_func):
     ]
     tnodes = [bc.ut.updated_dict(n, {'data': {'id': n['id']}}) for n in nodes]
     return func(nodes=tnodes, edges=edges, output_type='GRN', key=key)  # {{{}}}
+
 
 def drawComputeGraph(df, func=None, cdg=None, **kwargs):
     uidGen = bc.ut.uniqueIdGenerator()
@@ -264,7 +277,9 @@ def getLibFromGoogleSheet(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
 
 DEFAULT_COMPONENT_PATH = Path('../biocomp-ui/frontend/dist/static_index.html')
 
-browser=None
+browser = None
+
+
 async def get_global_browser():
     global browser
     if browser is None:
@@ -325,16 +340,29 @@ def screenCaptures(
             await page.goto(url, {'waitUntil': 'networkidle0'})
             await asyncio.sleep(0.1)
             # await page.setViewport({'width': width, 'height': height + 50})
-            # await page.screenshot({'path': outfile+'.png', 'omitBackground': True, 'type': 'png', 'clip':{'x': 0, 'y': 0, 'width': width, 'height': height}})
-            await page.pdf(
-                {
-                    'path': outfile,
-                    'width': width,
-                    'height': height,
-                    'pageRanges': '1',
-                    'printBackground': False,
-                }
-            )
+
+            # test if outfile ends with .pdf or .png
+            if outfile.endswith('.png'):
+                await page.screenshot(
+                    {
+                        'path': outfile,
+                        'omitBackground': True,
+                        'type': 'png',
+                        'clip': {'x': 0, 'y': 0, 'width': width, 'height': height},
+                    }
+                )
+            elif outfile.endswith('.pdf'):
+                await page.pdf(
+                    {
+                        'path': outfile,
+                        'width': width,
+                        'height': height,
+                        'pageRanges': '1',
+                        'printBackground': False,
+                    }
+                )
+            else:
+                raise ValueError(f'screenshot filename must end with .pdf or .png')
             print('saved', outfile)
             await page.close()
 
@@ -354,16 +382,24 @@ def screenCaptures(
     print(f'Saved all screenshots in {end-start}s')
 
 
-
-def plot_networks(nets: List[bc.Network], filenames):
+def plot_networks(nets: List[bc.Network], filenames=None):
     import nest_asyncio
+
     nest_asyncio.apply()
 
     H = 1000
     W = 1000
 
     def draw_network(net, *a, **kw):
-        drawComputeGraph(net.compute_graph, *a, height=H, width=W, cdg=net.central_dogma_graph, **kw)
+        drawComputeGraph(
+            net.compute_graph, *a, height=H, width=W, cdg=net.central_dogma_graph, **kw
+        )
+
+    show = False
+    if filenames is None:
+        show = True
+        import tempfile
+        filenames = [tempfile.mktemp(suffix='.png') for _ in nets]
 
     screenCaptures(
         draw_network,
@@ -373,8 +409,29 @@ def plot_networks(nets: List[bc.Network], filenames):
         width=W,
     )
 
+    if show:
+        import matplotlib.pyplot as plt
+        import matplotlib.image as mpimg
+
+        for f, n in zip(filenames, nets):
+            img = mpimg.imread(f)
+            # we want no border, nothing other than the image
+            fig = plt.figure(frameon=False)
+            fig.set_size_inches(7, 10)
+            ax = plt.Axes(fig, [0.0, 0.0, 1.0, 1.0])
+            ax.set_axis_off()
+            fig.add_axes(ax)
+            ax.imshow(img)
+            ax.text(0.90, 0.95, n.name, horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+            fig.patch.set_facecolor('white')
+            ax.patch.set_facecolor('white')
+            plt.show()
+
+
+
 def plot_cdg(nets: List[bc.Network], filenames):
     import nest_asyncio
+
     nest_asyncio.apply()
     H = 1000
     W = 1000
@@ -390,6 +447,7 @@ def plot_cdg(nets: List[bc.Network], filenames):
         width=W,
     )
 
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -398,7 +456,6 @@ def plot_cdg(nets: List[bc.Network], filenames):
 # ···············································································
 
 import matplotlib.pyplot as plt
-
 
 
 def plotBestLoss(best, others, title='', outfile=None, vmax=None):
@@ -419,6 +476,7 @@ def plotBestLoss(best, others, title='', outfile=None, vmax=None):
 
 def grid_map(F, xrange, yrange, meshres):
     import jax
+
     XX, YY = np.meshgrid(
         np.linspace(xrange[0], xrange[1], meshres[0]),
         np.linspace(yrange[0], yrange[1], meshres[1]),
@@ -451,6 +509,7 @@ def plotModelOutput(
 ):
     from jax import tree_util as pytree
     from matplotlib.colors import LinearSegmentedColormap
+
     flist = [[0.0, 0.493, 0.579], [0.896, 0.866, 0.806], [0.844, 0.1, 0.111]]
     teals = [
         [0.957, 0.913, 0.804],
@@ -516,6 +575,7 @@ def trainingMovie(
 def plotGrads(gradlist):
     import jax
     import jax.numpy as jnp
+
     vmax = 10
     agg = 100
     nbins = 82
@@ -561,19 +621,23 @@ def plotGrads(gradlist):
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                        --     jax prints     --
-#···············································································
+# ···············································································
 
 
 def get_jaxpr(fun, *args, **kwargs):
     import jax
+
     return jax.make_jaxpr(fun)(*args, **kwargs)
+
 
 def print_jaxpr(fun, *args, **kwargs):
     get_jaxpr(fun, *args, **kwargs).pretty_print()
 
+
 def get_xla(fun, *args, **kwargs):
     import jax
     import jaxlib.xla_extension as xla_ext
+
     console = Console(highlighter=rich.highlighter.ReprHighlighter())
     c = jax.xla_computation(fun)(*args, **kwargs)
     backend = jax.lib.xla_bridge.get_backend()
@@ -582,15 +646,17 @@ def get_xla(fun, *args, **kwargs):
     out = e.hlo_modules()[0].to_string(option)
     return out
 
+
 def print_xla(fun, *args, **kwargs):
     print(get_xla(fun, *args, **kwargs))
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     load save     --
-#···············································································
+# ···············································································
 def save(data, path, overwrite=False, suffix='.pickle'):
 
     path = Path(path)
@@ -619,6 +685,7 @@ def load(path, suffix='.pickle'):
 
 def readimg(p, threshold=None, size=None):
     import jax.numpy as jnp
+
     im = Image.open(p)
     if size is not None:
         im = im.resize(size)
@@ -629,8 +696,6 @@ def readimg(p, threshold=None, size=None):
 
 
 def np_converter(obj):
-    # print type:
-    print(type(obj))
     if isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
@@ -646,17 +711,20 @@ def np_converter(obj):
 def make_json_compatible(o):
     return json.loads(json.dumps(o, default=np_converter))
 
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                   --      hooked_scan for jax     --
-#···············································································
+# ···············································································
+
 
 def hooked_scan(num_samples, on_update, call_rate=1):
     import jax
     from jax import lax
     from jax.experimental import host_callback
+
     def update(args, transform):
         result, iternum = args
         carry, acc = result
@@ -687,5 +755,3 @@ def hooked_scan(num_samples, on_update, call_rate=1):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
-
