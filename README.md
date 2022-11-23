@@ -57,10 +57,10 @@
 
 ### November
 
-- [ ] Cleaner / shorter train module that uses a more thorough 
+- [x] Cleaner / shorter train module that uses a more thorough 
 config dict (include node remaps and data rebalancing params)
 
-- [ ] Better batches with padding to get a unique across the whole dict
+- [x] Better batches with padding to get a unique across the whole dict
 
 - [ ] Improve accuracy of xp training
 	- [ ] Try more complex transcription / translation equations
@@ -93,4 +93,4 @@ or maybe just a simple decision boundary).
  
 - [ ] Train on Charles' recombinase data
 
-- [ ] Add noise distribution to all compute nodes?
+- [ ] Add noise distribution to all compute nodes? 

@@ -151,9 +151,9 @@ function Graph({ graph }) {
 
 /*════════════════════════════════════════════════════════════════════════════════*/
 
-/*──────────────────────────────▼     OldApp     ▼────────────────────────────────*/
+/*────────────────────────────────▼     App     ▼─────────────────────────────────*/
 
-function OldAppComponent() {
+function AppComponent() {
   const [xpList, setXpList] = useState([]);
   const [recipeList, setRecipeList] = useState([]);
   const [graph, setGraph] = useState(null);
@@ -251,83 +251,9 @@ function OldAppComponent() {
 
 /*════════════════════════════════════════════════════════════════════════════════*/
 
-/*────────────────────────────────▼     App     ▼─────────────────────────────────*/
-
-function NewAppComponent() {
-  const [xpList, setXpList] = useState([]);
-  const [recipeList, setRecipeList] = useState([]);
-  const [graph, setGraph] = useState(null);
-
-  useEffect(() => {
-    axios.get("http://localhost:4321/xps").then((response) => {
-      response.data.forEach((xp) => {
-        xp.selected = false;
-        xp.keep = true;
-      });
-      setXpList(response.data);
-    });
-    axios.get("http://localhost:4321/recipes").then((response) => {
-      response.data.forEach((recipe) => {
-        recipe.selected = false;
-        recipe.keep = true;
-      });
-      setRecipeList(response.data);
-    });
-  }, []);
 
 
-  const selectXp = (name) => {
-    selectItem(name, xpList, setXpList, filterRecipes);
-  };
-  const selectRecipe = (name) => {
-    selectItem(name, recipeList, setRecipeList, filterXps);
-    setGraph(null);
-    axios.get("http://localhost:4321/network/" + name).then((response) => {
-      setGraph(response.data);
-    });
-  };
-
-  return (
-    <Main>
-      <div className="header">
-        <h1>The Constructome Browser</h1>
-      </div>
-      <Flex>
-        <div id="xplist" className="mainlist">
-          <h2 className="boxtitle">Experiments</h2>
-          <div className="boxcontent">
-            {xpList.map((xp) =>
-              xp.keep ? <XpRow xp={xp} handleClick={selectXp} key={xp.data.name} /> : null
-            )}
-          </div>
-        </div>
-        <div id="recipelist" className="mainlist">
-          <h2 className="boxtitle">Recipes</h2>
-          <div className="boxcontent">
-            {recipeList.map((recipe) =>
-              recipe.keep ? (
-                <RecipeRow recipe={recipe} handleClick={selectRecipe} key={recipe.data.name} />
-              ) : null
-            )}
-          </div>
-        </div>
-        <div id="graph" className="mainlist">
-          <Graph graph={graph} />
-        </div>
-      </Flex>
-    </Main>
-  );
-}
-
-
-/*════════════════════════════════════════════════════════════════════════════════*/
-
-
-export default NewAppComponent;
-
-
-
-/*────────────────────────────────▼     TODO     ▼────────────────────────────────*/
+export default AppComponent;
 
 //TODO
 // We have a few highly hierarchical (nested) data structures:
@@ -337,12 +263,10 @@ export default NewAppComponent;
 // [ ] L1
 // [ ] TU/L0
 // [ ] Part
-//
 // They should all match with a component, + maybe some wrappers such as:
 // [ ] Plasmid
 // [ ] Each of these components should have a short "tag" version and an expanded version.
 // [ ] Color coding for each of these components types
-//
 //
 // List system:
 // All of these elements should be available to display in a list. By default, the XP and Recipe lists
@@ -350,10 +274,6 @@ export default NewAppComponent;
 // When clicking on the list name, the list is expanded and a new column is dislayed 
 // (i.e a new list added to the list of displayed lists).
 // [ ] List component with title and content (and filtering?)
-//
-// [ ] Each list has a setter state.
-// [ ] We do everything client side for now, so we can just asl /xps and /recipes and /L2s etc. and get all the data.
-// Later
 //
 //
 // Search & filter:
@@ -371,7 +291,3 @@ export default NewAppComponent;
 // When typing in search, all the lists are being filtered in real time for all the elements returned 
 // by the search (with a logical OR). Someone can then pin an element to the filter bar by selecting it 
 // in one of the lists, or by clicking on the search result dropdown.
-
-
-/*════════════════════════════════════════════════════════════════════════════════*/
-

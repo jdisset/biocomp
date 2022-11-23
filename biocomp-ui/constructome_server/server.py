@@ -257,7 +257,6 @@ def _xps():
     xps = [get_xp(xp_name) for xp_name in xpnames['name']]
     return json.dumps(xps)
 
-
 @app.route('/recipe/<recipe_name>')
 def _recipe(recipe_name):
     recipe = get_recipe(recipe_name)
