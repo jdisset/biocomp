@@ -411,26 +411,37 @@ def train_models(
 def train_model(model, x, y, config, loggers=None):
     cfg = {**DEFAULT_CFG, **config}
     loggers = loggers or {}
-    optimizer = optax.adamw(learning_rate=cfg['learning_rate'], weight_decay=cfg['adam_w_decay'])
+    optimizer = optax.sgd(learning_rate=cfg['learning_rate'])
     key = jax.random.PRNGKey(cfg['rng_key'])
     repl_keys = jax.random.split(key, cfg['n_replicates'])
+
     params, constraints = jax.vmap(model.init)(repl_keys)
+    dynamic, _ = split_params(params, cfg['static_params'])
+    opt_states = optimizer.init(dynamic)
 
     history = {
         'params': [params],
-        'opt': [optimizer.init(params)],
+        'opt': [opt_states],
         'grad': [],
         'loss': [],
     }
 
+
     def training_step(params, opt_states, x, y):
-        def loss_func(params, x, y):
+        def loss_func(dynamic, static, x, y):
+            params = assemble_params(dynamic, static)
             y_hat = jax.vmap(partial(model, params, rng_key=key))(x)
             return jnp.mean((y - y_hat) ** 2)
 
-        loss, grads = jax.vmap(jax.value_and_grad(loss_func), in_axes=(0, None, None))(params, x, y)
-        updates, opt_states = optimizer.update(grads, opt_states, params)
-        params = optax.apply_updates(params, updates)
+        dynamic, static = split_params(params, cfg['static_params'])
+
+        loss, grads = jax.vmap(jax.value_and_grad(loss_func), in_axes=(0, 0, None, None))(dynamic, static, x, y)
+        updates, opt_states = optimizer.update(grads, opt_states, dynamic)
+
+        dynamic = optax.apply_updates(dynamic, updates)
+        # dynamic = ut.apply_constraints(dynamic, constraints)
+        params = assemble_params(dynamic, static)
+
         res = {
             'params': params,
             'loss': loss,
