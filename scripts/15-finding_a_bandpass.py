@@ -50,20 +50,30 @@ def P(name):
 # 'Csy4+uOrfs': bc.TranscriptionUnit([P('hEF1a'), P('Csy4'), P(any_uorf(lib)[0])]),
 
 uorfs = any_uorf(lib)[0]
+
+# tus = {
+    # 'Csy4_rec+CasE': bc.TranscriptionUnit([P('hEF1a'), P('Csy4_rec'), P('CasE'), P(uorfs)]),
+    # 'Csy4': bc.TranscriptionUnit([P('hEF1a'), P('Csy4'), P(uorfs)]),
+    # 'CasE_rec+PgU': bc.TranscriptionUnit([P('hEF1a'), P('CasE_rec'), P('PgU'), P(uorfs)]),
+    # 'PgU+NeonGreen': bc.TranscriptionUnit([P('hEF1a'), P('PgU_rec3p'), P('NeonGreen'), P(uorfs)]),
+# }
+
 tus = {
-    'Csy4_rec+CasE': bc.TranscriptionUnit([P('hEF1a'), P('Csy4_rec'), P('CasE'), P(uorfs)]),
-    'Csy4': bc.TranscriptionUnit([P('hEF1a'), P('Csy4'), P(uorfs)]),
-    'CasE_rec+PgU': bc.TranscriptionUnit([P('hEF1a'), P('CasE_rec'), P('PgU'), P(uorfs)]),
-    'PgU+NeonGreen': bc.TranscriptionUnit([P('hEF1a'), P('PgU_rec3p'), P('NeonGreen'), P(uorfs)]),
+    'Csy4_case5': bc.TranscriptionUnit([P('hEF1a'), P('CasE_rec'), P('Csy4')]),
+    'Csy4_pgu3': bc.TranscriptionUnit([P('hEF1a'), P('Csy4'), P('PgU_rec3p')]),
+    'CasE': bc.TranscriptionUnit([P('hEF1a'), P('CasE')]),
+    'PgU': bc.TranscriptionUnit([P('hEF1a'), P('PgU')]),
+    'out': bc.TranscriptionUnit([P('hEF1a'),P('Csy4_rec'), P('NeonGreen')]),
 }
-# sources = {tu_name: [tu_name] for tu_name, tu in tus.items()}
-# aggregations = [[source_name] for source_name in sources.keys()]
-# n = bc.Network.from_dict(lib, 'name', tus, sources, aggregations)
-# ut.plot_networks([n])
+
+
+sources = {tu_name: [tu_name] for tu_name, tu in tus.items()}
+aggregations = [[source_name] for source_name in sources.keys()]
+n = bc.Network.from_dict(lib, '', tus, sources, aggregations)
+ut.plot_networks([n])
+
 
 biases = {
-    'CasE_bias': bc.TranscriptionUnit([P('hEF1a'), P('CasE'), P(uorfs)]),
-    'PgU_bias': bc.TranscriptionUnit([P('hEF1a'), P('PgU'), P(uorfs)]),
     'NeonGreen_bias': bc.TranscriptionUnit([P('hEF1a'), P('NeonGreen'), P(uorfs)]),
 }
 
@@ -144,7 +154,7 @@ for inp_0, inp_1, rest in tqdm(groups):
 
 print(f'Generated {len(networks)} networks')
 
-# ut.plot_networks(networks, [f'../__out/{n.name}.pdf' for n in networks])
+ut.plot_networks(networks, [f'../__out/{n.name}.pdf' for n in networks])
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                     --     load target data     --

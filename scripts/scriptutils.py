@@ -417,7 +417,7 @@ def plot_networks(nets: List[bc.Network], filenames=None):
             img = mpimg.imread(f)
             # we want no border, nothing other than the image
             fig = plt.figure(frameon=False)
-            fig.set_size_inches(7, 10)
+            fig.set_size_inches(12, 15)
             ax = plt.Axes(fig, [0.0, 0.0, 1.0, 1.0])
             ax.set_axis_off()
             fig.add_axes(ax)
