@@ -182,22 +182,22 @@ def history_summary(model, history):
     ax[1].set_title('Predicted')
     # save fig
     plt.savefig(f'../__out/{model.network.name}_{bestloss:.3f}.pdf')
-    plt.show()
+    # plt.show()
 
     # save params
     with open(f'../__out/{model.network.name}_{bestloss:.3f}.pkl', 'wb') as f:
         pickle.dump(best_params, f)
 
     # plot target scatter from x, y with crosses instead of circles
-    plt.scatter(x[:, 0], x[:, 1], c=y, marker='x', cmap='Blues')
-    plt.show()
-
+    # plt.scatter(x[:, 0], x[:, 1], c=y, marker='x', cmap='Blues')
+    # plt.show()
 
 config = {
     'epochs': 500,
     'n_replicates': 10,
     'learning_rate': 0.001,
     'batch_size': 128,
+    'rng_key': np.random.randint(0, 1000000),
 }
 loggers = {10: bc.train.log_w_replicates}
 
@@ -209,7 +209,7 @@ node_impls = dict(
 )
 
 histories = []
-for i, net in enumerate(networks[:1]):
+for i, net in enumerate(networks):
     model = bc.ComputeGraphModel(net)
     model.build(node_impl=node_impls)
     # params, constraints = model.init(jax.random.PRNGKey(0))
