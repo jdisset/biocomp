@@ -148,8 +148,10 @@ def get_best_params(history, smooth_window=10):
     loss_smooth = np.array([
         np.convolve(loss_arr[:, i], np.ones(smooth_window), mode='same')
         for i in range(loss_arr.shape[1])
-    ])
-    assert loss_smooth.shape == loss_arr.shape
+    ]).T
+    print(f'loss_smooth.shape: {loss_smooth.shape}')
+    print(f'loss_arr.shape: {loss_arr.shape}')
+    # assert loss_smooth.shape == loss_arr.shape
     id_min = np.unravel_index(np.argmin(loss_smooth), loss_smooth.shape)
     p = unstack_tree(history['params'][id_min[0]])[id_min[1]]
     return p, id_min

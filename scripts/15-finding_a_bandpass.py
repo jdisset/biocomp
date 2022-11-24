@@ -181,11 +181,11 @@ def history_summary(model, history):
     ax[1].scatter(x[:, 0], x[:, 1], c=yhat, marker='x', cmap='Blues')
     ax[1].set_title('Predicted')
     # save fig
-    plt.savefig(f'../__out/{model.name}_{bestloss:.3f}.pdf')
+    plt.savefig(f'../__out/{model.network.name}_{bestloss:.3f}.pdf')
     plt.show()
 
     # save params
-    with open(f'../__out/{model.name}_{bestloss:.3f}.pkl', 'wb') as f:
+    with open(f'../__out/{model.network.name}_{bestloss:.3f}.pkl', 'wb') as f:
         pickle.dump(best_params, f)
 
     # plot target scatter from x, y with crosses instead of circles
