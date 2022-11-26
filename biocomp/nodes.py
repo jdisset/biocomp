@@ -107,6 +107,7 @@ def _transform(get_param, get_quantized, transform_name, **_):
             mode='input_edges',
         )
         deg_rate = get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
+        # print(t'Calling {transform_name} with rates {rates} and deg_rate {deg_rate} and rng_key {rng_key}')
         res = jnp.dot(rates, val) / deg_rate
         # print(f'values: {values}')
         # print(f'val: {val}')
@@ -367,7 +368,7 @@ def ERN_nn_multi(get_param, get_quantized, seq_name, **_):
             3,
             get_param,
             rng_key,
-            seq_name,
+            'ERN',
             jax.nn.relu,
         )
         return jax.nn.relu(jnp.squeeze(res))

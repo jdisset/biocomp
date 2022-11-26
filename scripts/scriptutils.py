@@ -62,10 +62,11 @@ if GLOBAL_CONFIG_PATH.exists():
         DEFAULT_RECIPE_PATH = Path(config.get('recipe_path', DEFAULT_RECIPE_PATH))
         DEFAULT_LIB_PATH = Path(config.get('lib_path', DEFAULT_LIB_PATH))
 
-# we also check the environment variables to see if they define the paths 
+# we also check the environment variables to see if they define the paths
 # if so, we use them in priority
 
 import os
+
 if 'BIOCOMP_XP_PATH' in os.environ:
     DEFAULT_XP_PATH = Path(os.environ['BIOCOMP_XP_PATH'])
 if 'BIOCOMP_RECIPE_PATH' in os.environ:
@@ -86,6 +87,21 @@ def list_xp(xp_path=DEFAULT_XP_PATH):
 def load_lib(lib_path=DEFAULT_LIB_PATH):
     return load(lib_path)
 
+
+from matplotlib.colors import LinearSegmentedColormap
+
+TEALS_CMAP = LinearSegmentedColormap.from_list(
+    "teals",
+    [
+        [0.957, 0.913, 0.804],
+        [0.613, 0.745, 0.734],
+        [0.465, 0.672, 0.635],
+        [0.272, 0.507, 0.535],
+        [0.01, 0.1, 0.15],
+    ],
+)
+
+DEFAULT_CMAP = TEALS_CMAP
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{              --     Streamlit utils and components     --
@@ -399,6 +415,7 @@ def plot_networks(nets: List[bc.Network], filenames=None):
     if filenames is None:
         show = True
         import tempfile
+
         filenames = [tempfile.mktemp(suffix='.png') for _ in nets]
 
     screenCaptures(
@@ -422,11 +439,17 @@ def plot_networks(nets: List[bc.Network], filenames=None):
             ax.set_axis_off()
             fig.add_axes(ax)
             ax.imshow(img)
-            ax.text(0.90, 0.95, n.name, horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+            ax.text(
+                0.90,
+                0.95,
+                n.name,
+                horizontalalignment='center',
+                verticalalignment='center',
+                transform=ax.transAxes,
+            )
             fig.patch.set_facecolor('white')
             ax.patch.set_facecolor('white')
             plt.show()
-
 
 
 def plot_cdg(nets: List[bc.Network], filenames):
@@ -508,17 +531,10 @@ def plotModelOutput(
     title='',
 ):
     from jax import tree_util as pytree
-    from matplotlib.colors import LinearSegmentedColormap
 
     flist = [[0.0, 0.493, 0.579], [0.896, 0.866, 0.806], [0.844, 0.1, 0.111]]
-    teals = [
-        [0.957, 0.913, 0.804],
-        [0.613, 0.745, 0.734],
-        [0.465, 0.672, 0.635],
-        [0.272, 0.507, 0.535],
-        [0.01, 0.1, 0.15],
-    ]
-    cmap = LinearSegmentedColormap.from_list("", teals)
+
+    cmap = DEFAULT_CMAP
     plt.rcParams["axes.grid"] = False
 
     fig, a = plt.subplots(1, 1, figsize=figsize)
@@ -614,6 +630,163 @@ def plotGrads(gradlist):
 # import nest_asyncio
 # nest_asyncio.apply()
 # ut.screenCaptures(partial(ut.drawComputeGraph, height=2000), compg_history[::10], out_dir_path='../__out/test', height=2000, width=1500)
+
+
+def plot_node(
+    ntype,
+    params,
+    model,
+    vlim=[0.0, 10.0],
+    n_samples=200,
+    figsize=(12, 7),
+    n_inputs=1,
+    cmap=DEFAULT_CMAP,
+    mode='heatmap',
+    extra_args=None,
+):
+    import jax
+    import jax.numpy as jnp
+
+    quantized_per_type = model.get_quantized_parameters_per_node_type(params)
+
+    def get_q(__, v, **_):
+        return v
+
+    def get_p(param_name, shared=False, index={}, **_):
+        if shared:
+            return params['shared'][param_name]
+        else:
+            val: dict(str, jnp.array) = quantized_per_type[ntype][param_name]
+            val = [val[k] for k in sorted(val.keys())]
+            return val[index[param_name]]
+
+    counter_max = {k: len(v) for k, v in quantized_per_type[ntype].items()}
+    counter_val = {k: 0 for k in counter_max.keys()}
+    counter_order = list(counter_max.keys())
+    n_combinations = np.prod(list(counter_max.values()))
+
+    if n_inputs == 1:
+        X = np.linspace(vlim[0], vlim[1], n_samples).reshape(-1, 1)
+    elif n_inputs == 2:
+        x = np.linspace(vlim[0], vlim[1], n_samples)
+        X = np.array(np.meshgrid(x, x)).T.reshape(-1, 2)
+
+    else:
+        raise NotImplementedError()
+    print('X shape:', X.shape)
+
+    if n_inputs == 1:
+        # simple plots, on the same figure
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        ax.set_xlabel('input')
+        ax.set_ylabel('output')
+        ax.set_xlim(vlim)
+        ax.set_ylim(vlim)
+
+    elif n_inputs == 2:
+        # we will have a grid of n_combinations heatmaps
+        n_rows = int(np.ceil(np.sqrt(n_combinations)))
+        n_cols = int(np.ceil(n_combinations / n_rows))
+        fig, ax = plt.subplots(n_rows, n_cols, figsize=figsize)
+        ax = np.array(ax).flatten()
+        img = []
+
+    fig.suptitle(f'{ntype} node')
+    if extra_args is not None:
+        fig.text(0.5, 0.92, extra_args, ha='center', fontsize=10)
+    ax_idx = 0
+
+    while True:
+
+        def vf(x):
+            f = model.node_impl[ntype](partial(get_p, index=counter_val), get_q, **extra_args)
+            return f(*x, rng_key=jax.random.PRNGKey(0))
+
+        Y = jax.vmap(vf)(X)
+
+        values = [
+            sorted(quantized_per_type[ntype][pname].keys())[counter_val[pname]]
+            for pname in counter_order
+        ]
+        label = f'''{", ".join([f"{pname}={v.split('::')[0]}" for pname, v in zip(counter_order, values)])}'''
+
+        if n_inputs == 1:
+            ax.plot(X, Y, label=label)
+        else:
+            if mode == 'heatmap':
+                Y = Y.reshape(n_samples, n_samples)
+                img.append(
+                    ax[ax_idx].pcolormesh(
+                        X[:, 0].reshape(n_samples, n_samples),
+                        X[:, 1].reshape(n_samples, n_samples),
+                        Y,
+                        cmap=cmap,
+                    )
+                )
+                # label the axes
+                ax[ax_idx].set_xlabel('input 1')
+                ax[ax_idx].set_ylabel('input 2')
+                ax[ax_idx].set_title(label)
+                ax[ax_idx].set_aspect('equal')
+            elif mode == '3d':
+                ax[ax_idx].remove()
+                ax[ax_idx] = fig.add_subplot(n_rows, n_cols, ax_idx + 1, projection='3d')
+                # then plot
+                Y = Y.reshape(n_samples, n_samples)
+                img.append(
+                    ax[ax_idx].plot_surface(
+                        X[:, 0].reshape(n_samples, n_samples),
+                        X[:, 1].reshape(n_samples, n_samples),
+                        Y,
+                        cmap=cmap,
+                        edgecolor='k',
+                        linewidth=0.1,
+                    )
+                )
+                # label the axes
+                ax[ax_idx].set_xlabel('input 1')
+                ax[ax_idx].set_ylabel('input 2')
+                ax[ax_idx].set_zlabel('output')
+                ax[ax_idx].set_title(label)
+            else:
+                raise NotImplementedError()
+
+            ax_idx += 1
+
+        # increment counter until we reach the max for each parameter
+        # starting from first parameter
+        for i in range(len(counter_order)):
+            counter_val[counter_order[i]] += 1
+            if counter_val[counter_order[i]] < counter_max[counter_order[i]]:
+                break
+            else:
+                counter_val[counter_order[i]] = 0
+        if all([v == 0 for v in counter_val.values()]):
+            break
+
+    if n_inputs == 1:
+        ax.legend()
+
+    if n_inputs == 2:
+        for i in range(ax_idx, len(ax)):
+            ax[i].axis('off')
+        # also use the same colorbar for all heatmaps, with the same range
+        if mode == 'heatmap':
+            vmin = np.min([i.get_array().min() for i in img])
+            vmax = np.max([i.get_array().max() for i in img])
+            for i in img:
+                i.set_clim(vmin, vmax)
+            fig.colorbar(img[0], ax=ax, shrink=0.6)
+        else:  # 3d
+            # we want to have the same zlim for all plots
+            zlim = np.array([ax[i].get_zlim() for i in range(ax_idx)])
+            zlim = np.array([zlim[:, 0].min(), zlim[:, 1].max()])
+            for i in range(ax_idx):
+                ax[i].set_zlim(zlim)
+            # also add a colorbar (somewhere that is not on top of the plots)
+            fig.colorbar(img[0], ax=ax, shrink=0.6)
+
+    return fig, ax
 
 
 #                                                                            }}}

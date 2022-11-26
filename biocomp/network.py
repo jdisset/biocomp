@@ -236,6 +236,32 @@ class Network:
         if build:
             self.build()
 
+
+
+    ## ───────────────────────────────────── ▼ ─────────────────────────────────────
+    # {{{                  --     public tools & utils    --
+    #···············································································
+    
+    def get_compute_types(self):
+        node_dict = self.compute_graph.groupby('type').apply(lambda x: x.index.to_list()).to_dict()
+        return node_dict
+
+    # def get_compute_types_and_extra(self):
+        # gb = self.compute_graph.groupby('type')
+        # # extra is a dict, so we need to json it
+        # gb = gb['extra'].apply(lambda x: x.apply(partial(json.dumps, default=np_converter)).tolist())
+        # gb = gb.apply(lambda x: list(set(x)))
+        # # we want to build a dict of {type: {extra: [indices]}}
+        # # but we have a series of {extra: [indices]}
+        # # so we need to build a dict for each extra
+        # gb = gb.apply(lambda x: {e: i for e, i in zip(x, gb.index)})
+        # return gb.to_dict()
+
+    #                                                                            }}}
+    ## ─────────────────────────────────────────────────────────────────────────────
+
+
+
     def __build_from_db(self):
         assert self.db is not None
         c = self.db.cursor()

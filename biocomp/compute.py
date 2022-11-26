@@ -80,7 +80,16 @@ def get_possible_parts(param_name, cdg_node_id, cdg):
 
 
 def get_quantized(
-    get_param, param_name, values, node_id, cdf, cdg, quantize_fun, mode='input_edges'
+    get_param,
+    param_name,
+    values,
+    node_id,
+    cdf,
+    cdg,
+    quantize_fun,
+    rng_key,
+    mode='input_edges',
+    logto=None,
 ):
     """Return a quantized version of the parameter, conditioned on the
     relevant species (either input or output cdg nodes). mode can be 'input' or 'output'."""
@@ -123,9 +132,21 @@ def get_quantized(
     ), f'len(possible_names)={len(possible_names)} != len(values)={len(values)}'
 
     possible_values = [
-        jnp.array([get_param(n, lambda: val, shared=True) for n in names])
-        for names, val in zip(possible_names, values)
+        jnp.array(
+            [
+                get_param(n, nd.continuous_initializer(k, val.shape), shared=True)
+                for n, k in zip(names, jax.random.split(kk, len(names)))
+            ]
+        )
+        for names, val, kk in zip(possible_names, values, jax.random.split(rng_key, len(values)))
     ]
+
+    if logto is not None:
+        if node_id in logto:
+            logto[node_id].add(param_name)
+        else:
+            logto[node_id] = {param_name}
+
     res = jnp.array([quantize_fun(v, p) for v, p in zip(values, possible_values)])
     return res
 
@@ -157,6 +178,8 @@ class ComputeGraphModel:
         assert self.network is not None
         assert self.network.is_built()
         assert isinstance(node_impl, dict)
+        self.node_impl = node_impl
+
         cg = self.network.compute_graph
 
         # let's do everything we can before collect_all_results to avoid long compile times
@@ -200,8 +223,8 @@ class ComputeGraphModel:
             nid_to_call_dict[nid] = i
 
             if node_row.type not in ('input'):
-                assert node_row.type in node_impl, f'Unimplemented node type {node_row.type}'
-                call_d['fun'] = node_impl[node_row.type]
+                assert node_row.type in self.node_impl, f'Unimplemented node type {node_row.type}'
+                call_d['fun'] = self.node_impl[node_row.type]
             if node_row.type == 'output':
                 output_node = nid
 
@@ -271,7 +294,7 @@ class ComputeGraphModel:
                     constraints=constraints,
                     read_only=read_only,
                 )
-                get_q = partial(n['get_q'], get_p)
+                get_q = partial(n['get_q'], get_p, rng_key=key)
                 comp_node = n['fun'](get_p, get_q, **n['extra_params'])
                 res = comp_node(*upstream_results, rng_key=key)
                 results[nid] = res
@@ -368,6 +391,38 @@ class ComputeGraphModel:
         assert len(mapping.keys()) == len(set(mapping.values()))
 
         return mapping
+
+    def get_quantized_parameters_per_node_type(self, params):
+        """Returns a dictionary with node types as keys and a list of quantized parameters used by that node type as values.
+        When a parameter is quantized, the key to each value is the name of the quantized value (i.e '1x_uORF').
+        When a parameter is not quantized, we record all of the values for this param in use in the network, and the key
+        is the id of the node that uses this parameter with the specific given value.
+        """
+        node_dict = self.network.get_compute_types()
+        params_per_type = {k: dict() for k in node_dict.keys()}
+        for node_type, node_ids in node_dict.items():
+            for node_id in node_ids:
+                if node_id in params['node'].keys():
+                    for pname, v in params['node'][node_id].items():
+                        if pname in params_per_type[node_type].keys():
+                            params_per_type[node_type][pname].update({node_id: v})
+                        else:
+                            params_per_type[node_type][pname] = {node_id: v}
+        res = {}
+        shared = params['shared']
+        for ntype, pdict in params_per_type.items():  # pdict is dict(str,dict(int,np.ndarray))
+            res[ntype] = {}
+            # check if we have some quantization values for the parameters
+            # a quantization value has a key of the form vname::param_name
+            # we want to collect all the quantization values for the parameters of this node type
+            for pname in pdict:
+                matching = {k: v for k, v in shared.items() if k.endswith(f'::{pname}')}
+                if len(matching) > 0:
+                    res[ntype][pname] = matching
+                else:
+                    res[ntype][pname] = params_per_type[ntype][pname]
+        res
+        return res
 
 
 #                                                                            }}}
