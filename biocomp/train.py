@@ -38,6 +38,7 @@ import os
 def mse_loss(y, y_hat, n_outputs=None):
     if n_outputs is None:
         n_outputs = y.shape[1]
+    assert y_hat.ndim == 2 and y.ndim == 2
     return jnp.mean((y[:, :n_outputs] - y_hat[:, :n_outputs]) ** 2)
 
 
@@ -136,25 +137,17 @@ def batch(X, Y, batch_size, n_batches=None):
 
 @jax.jit
 def unstack_tree(t):
-    n = jax.tree_leaves(t)[0].shape[0]
+    n = jax.tree_util.tree_leaves(t)[0].shape[0]
     return [jax.tree_map(lambda x: x[i], t) for i in range(n)]
 
 def get_best_params(history, smooth_window=10):
     # find the lowest loss time point (and which replicate)
-    loss_arr = np.array(history['loss'])
-    # loss_arr dimensions: (n_epochs, n_replicates)
-    # lets smooth each replicate's loss over 10 points. Make sure to pad the
-    # beginning and end with the first and last values, respectively.
-    loss_smooth = np.array([
-        np.convolve(loss_arr[:, i], np.ones(smooth_window), mode='same')
-        for i in range(loss_arr.shape[1])
-    ]).T
-    print(f'loss_smooth.shape: {loss_smooth.shape}')
-    print(f'loss_arr.shape: {loss_arr.shape}')
-    # assert loss_smooth.shape == loss_arr.shape
-    id_min = np.unravel_index(np.argmin(loss_smooth), loss_smooth.shape)
-    p = unstack_tree(history['params'][id_min[0]])[id_min[1]]
-    return p, id_min
+    loss = np.array(history['loss'])
+    from scipy.ndimage import gaussian_filter1d
+    loss_smooth = gaussian_filter1d(loss, sigma=smooth_window, axis=0)
+    best_t, best_replicate = np.unravel_index(loss_smooth.argmin(), loss_smooth.shape)
+    p = unstack_tree(history['params'][best_t])[best_replicate]
+    return p, (best_t, best_replicate)
 
 
 
@@ -431,6 +424,7 @@ def train_model(model, x, y, config, loggers=None):
         def loss_func(dynamic, static, x, y):
             params = assemble_params(dynamic, static)
             y_hat = jax.vmap(partial(model, params, rng_key=key))(x)
+            assert y_hat.shape == y.shape
             return jnp.mean((y - y_hat) ** 2)
 
         dynamic, static = split_params(params, cfg['static_params'])
