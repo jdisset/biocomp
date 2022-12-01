@@ -242,7 +242,7 @@ def inv_numeric(*_, **__):
 
 # aggregations split a single input in ratios (defined by parameters)
 @compnode
-def aggregation(get_param, get_quantized, n_outputs, **kwargs):
+def aggregation(get_param, get_quantized, n_outputs, normalize=False, **kwargs):
     def apply(inp, rng_key):
 
         if 'ratios' in kwargs:
@@ -254,7 +254,7 @@ def aggregation(get_param, get_quantized, n_outputs, **kwargs):
 
         assert ratios.shape == (n_outputs,)
 
-        ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
+        # ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
         return jnp.array(ratios) * inp
 
     return apply
@@ -267,7 +267,7 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
 
     def apply(inp, rng_key):
         ratios = get_param("ratios", init=continuous_initializer(rng_key, (original_output_len,)))
-        ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
+        # ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
         return inp / ratios[original_output_slot]
 
     return apply
