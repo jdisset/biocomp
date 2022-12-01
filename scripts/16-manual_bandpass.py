@@ -46,13 +46,13 @@ def any_uorf(lib, *_, **__):
 uorfs = any_uorf(lib)[0]
 
 tus = {
-    'Csy4#1': bc.TranscriptionUnit([P('hEF1a'), P('Csy4')]),
-    'Csy4#2': bc.TranscriptionUnit([P('hEF1a'), P('Csy4')]),
-    'PgU#1': bc.TranscriptionUnit([P('hEF1a'), P('CasE_rec'), P('PgU')]),
-    'PgU#2': bc.TranscriptionUnit([P('hEF1a'), P('CasE_rec'), P('PgU')]),
-    'B_bias': bc.TranscriptionUnit([P('hEF1a'), P('Csy4_rec'), P('PgU')]),
+    'Csy4#1': bc.TranscriptionUnit([P('hEF1a'), P('Csy4'),P(uorfs)]),
+    'Csy4#2': bc.TranscriptionUnit([P('hEF1a'), P('Csy4'), P(uorfs)]),
+    'PgU#1': bc.TranscriptionUnit([P('hEF1a'), P('CasE_rec'), P('PgU'),P(uorfs)]),
+    'PgU#2': bc.TranscriptionUnit([P('hEF1a'), P('CasE_rec'), P('PgU'),P(uorfs)]),
+    'B_bias': bc.TranscriptionUnit([P('hEF1a'), P('Csy4_rec'), P('PgU'),P(uorfs)]),
     'A_bias': bc.TranscriptionUnit([P('hEF1a'), P('CasE'), P(uorfs)]),
-    'out': bc.TranscriptionUnit([P('hEF1a'), P('PgU_rec'), P('NeonGreen')]),
+    'out': bc.TranscriptionUnit([P('hEF1a'), P('PgU_rec'), P('NeonGreen'),P(uorfs)]),
 }
 
 sources = {tu_name: [tu_name] for tu_name, tu in tus.items()}
@@ -65,7 +65,7 @@ inputs = (
 )
 n.set_inputs(inputs)
 
-ut.plot_networks([n])
+ut.plot_networks([n], ['/Users/jeandisset/Desktop/16-manual_bandpass_uorfs.pdf'])
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ model.build(
         **bc.nodes.DEFAULT_COMPUTE_NODES_DICT,
         **{
             'translation': partial(bc.nodes.translation_nn, depth=1),
-            'sequestron_ERN': partial(bc.nodes.ERN_nn_multi,depth=5),
+            'sequestron_ERN': partial(bc.nodes.ERN_nn_multi,depth=3),
         },
     }
 )
@@ -112,7 +112,8 @@ params, constraints = model.init(rng)
 # find all the extra values for sequestron_ERN in model.network.compute_graph
 extra = model.network.compute_graph[model.network.compute_graph.type == 'sequestron_ERN'].extra.to_list()
 
+# [ut.plot_node('sequestron_ERN', params, model, vlim=(-10, 100), n_inputs=2, mode='3d', extra_args=ex) for ex in extra]
+ut.plot_node('translation', params, model)
 
-[ut.plot_node('sequestron_ERN', params, model, vlim=(-10, 100), n_inputs=2, mode='3d', extra_args=ex) for ex in extra]
-
+# FREE THE RATIOS
 

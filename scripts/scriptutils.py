@@ -196,6 +196,7 @@ def drawComputeGraph(df, func=None, cdg=None, **kwargs):
         for i, n in df.iterrows()
     ]
     edges = []
+    has_output_values = "output_values" in df.columns
     for i, n in df.iterrows():
         if n.output_to:
             for n_out, (o, h) in enumerate(n.output_to):
@@ -218,6 +219,7 @@ def drawComputeGraph(df, func=None, cdg=None, **kwargs):
                         'tgtdata': df.loc[o].to_dict(),
                         'srccdg': srccdg,
                         'tgthandle': str(h),
+                        'outputValue': n.output_values[n_out] if has_output_values else '',
                     },
                 }
                 edges.append(edge)
@@ -398,13 +400,10 @@ def screenCaptures(
     print(f'Saved all screenshots in {end-start}s')
 
 
-def plot_networks(nets: List[bc.Network], filenames=None):
+def plot_networks(nets: List[bc.Network], filenames=None, H=1500, W=1500):
     import nest_asyncio
 
     nest_asyncio.apply()
-
-    H = 1000
-    W = 1000
 
     def draw_network(net, *a, **kw):
         drawComputeGraph(
@@ -429,7 +428,6 @@ def plot_networks(nets: List[bc.Network], filenames=None):
     if show:
         import matplotlib.pyplot as plt
         import matplotlib.image as mpimg
-
         for f, n in zip(filenames, nets):
             img = mpimg.imread(f)
             # we want no border, nothing other than the image
@@ -450,6 +448,7 @@ def plot_networks(nets: List[bc.Network], filenames=None):
             fig.patch.set_facecolor('white')
             ax.patch.set_facecolor('white')
             plt.show()
+
 
 
 def plot_cdg(nets: List[bc.Network], filenames):
@@ -699,7 +698,10 @@ def plot_node(
     while True:
 
         def vf(x):
-            f = model.node_impl[ntype](partial(get_p, index=counter_val), get_q, **extra_args)
+            if extra_args is not None:
+                f = model.node_impl[ntype](partial(get_p, index=counter_val), get_q, **extra_args)
+            else:
+                f = model.node_impl[ntype](partial(get_p, index=counter_val), get_q)
             return f(*x, rng_key=jax.random.PRNGKey(0))
 
         Y = jax.vmap(vf)(X)
