@@ -16,4 +16,5 @@ from .network import (
 from . import network as network
 from . import recipe as recipe
 from . import train as train
+from . import evo as evo
 from . import nodes as nodes

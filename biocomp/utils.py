@@ -10,6 +10,7 @@ from jax import tree_util as pytree
 import jax.numpy as jnp
 import pickle
 import json5
+import numpy as np
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -307,6 +308,58 @@ def tree_unstack(tree):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                     --     parameters utils     --
+#···············································································
+
+def split_params(params, static_paths):
+    """Split params into static and dynamic parts."""
+    # any path that is not in static_paths is dynamic
+    dynamic = params.copy()
+    static = {}
+    for path in static_paths:
+        at_path(static, path, at_path(dynamic, path))
+        delete_path(dynamic, path)
+    return dynamic, static
+
+
+def assemble_params(dynamic, static):
+    """Assemble params from static and dynamic parts."""
+    res = updated_dict(dynamic, static)
+    return res
+
+def flatten_params(params):
+    """Flatten params into a single vector, 
+    and also returns a descriptor that can be used
+    to unflatten them."""
+    leaves, treedef = jax.tree_util.tree_flatten(params)
+    flat_leaves = [l.flatten() for l in leaves]
+    shapes = [l.shape for l in leaves]
+    flat_params = jnp.concatenate(flat_leaves)
+    descriptor = (shapes, treedef)
+    return flat_params, descriptor
+
+def unflatten_params(flat_params, pdescriptor):
+    """Unflatten params from a single vector and a descriptor."""
+    shapes, treedef = pdescriptor
+    # splits = jnp.cumsum(jnp.array([jnp.prod(jnp.array(s)) for s in shapes]), dtype=jnp.int32)
+    splits = np.cumsum([np.prod(s) for s in shapes], dtype=np.int32)
+    leaves = []
+    start = 0
+    for sp, sh in zip(splits, shapes):
+        leaves.append(flat_params[start:sp].reshape(sh))
+        start = sp
+    params = jax.tree_util.tree_unflatten(treedef, leaves)
+    return params
+
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
 
 import time
 from rich import status

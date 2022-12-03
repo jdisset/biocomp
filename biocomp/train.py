@@ -94,24 +94,6 @@ def serialize_partial_or_function(field):
         return field
 
 
-def split_params(params, static_paths):
-    """Split params into static and dynamic parts."""
-    # any path that is not in static_paths is dynamic
-    dynamic = params.copy()
-    static = {}
-    for path in static_paths:
-        ut.at_path(static, path, ut.at_path(dynamic, path))
-        ut.delete_path(dynamic, path)
-
-    return dynamic, static
-
-
-def assemble_params(dynamic, static):
-    """Assemble params from static and dynamic parts."""
-    res = ut.updated_dict(dynamic, static)
-    return res
-
-
 def prep_data(models, Y_raw, cfg=DEFAULT_CFG):
     X, Y = du.balance_each_dataset(
         models,
@@ -409,7 +391,7 @@ def train_model(model, x, y, config, loggers=None):
     repl_keys = jax.random.split(key, cfg['n_replicates'])
 
     params, constraints = jax.vmap(model.init)(repl_keys)
-    dynamic, _ = split_params(params, cfg['static_params'])
+    dynamic, _ = ut.split_params(params, cfg['static_params'])
     opt_states = optimizer.init(dynamic)
 
     history = {
@@ -422,19 +404,19 @@ def train_model(model, x, y, config, loggers=None):
 
     def training_step(params, opt_states, x, y):
         def loss_func(dynamic, static, x, y):
-            params = assemble_params(dynamic, static)
+            params = ut.assemble_params(dynamic, static)
             y_hat = jax.vmap(partial(model, params, rng_key=key))(x)
             assert y_hat.shape == y.shape
             return jnp.mean((y - y_hat) ** 2)
 
-        dynamic, static = split_params(params, cfg['static_params'])
+        dynamic, static = ut.split_params(params, cfg['static_params'])
 
         loss, grads = jax.vmap(jax.value_and_grad(loss_func), in_axes=(0, 0, None, None))(dynamic, static, x, y)
         updates, opt_states = optimizer.update(grads, opt_states, dynamic)
 
         dynamic = optax.apply_updates(dynamic, updates)
         # dynamic = ut.apply_constraints(dynamic, constraints)
-        params = assemble_params(dynamic, static)
+        params = ut.assemble_params(dynamic, static)
 
         res = {
             'params': params,
@@ -462,8 +444,11 @@ def train_model(model, x, y, config, loggers=None):
     return history
 
 
-
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+
+
+
 
 
