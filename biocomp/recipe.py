@@ -175,7 +175,7 @@ def import_recipes_to_sql(recipe_files: list, conn, lib):
             recipes.append(recipe)
         except Exception as e:
             raise RuntimeError(f'Error loading recipe {f}: \n{e}')
-        recipes_to_sql(recipes, conn, lib)
+    recipes_to_sql(recipes, conn, lib)
 
 
 def network_from_recipe(recipe, lib, db_path=':memory:'):
@@ -207,14 +207,14 @@ class XP:
         self.name: str
         self.networks: dict[str, Network]  # {sample_name: Network}
         self.inv_networks: Optional[dict[str, Network]]  # {sample_name: Network}
-        self.dbconn = None
+        self.dbconn = sqlite3.connect(db_path)
         self.color_names: dict
 
         self.xpfile = xp_path / xp_name / f"{xp_name}.xp.json5"
         with open(self.xpfile) as f:
             try:
                 xpobj = json5.load(f)
-                xp_to_sql(xpobj, db_path)
+                xp_to_sql([xpobj], self.dbconn)
                 for k, v in xpobj.items():
                     setattr(self, k, v)
             except Exception as e:
@@ -223,14 +223,13 @@ class XP:
         self.recipe_names = [s['recipe'] for s in self.samples]
         unique_recipe_names = list(set(self.recipe_names))
         log.debug(f'Found {len(unique_recipe_names)} unique recipes')
-        dbconn = sqlite3.connect(db_path)
         import_recipes_to_sql(
-            [recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], dbconn, lib
+            [recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], self.dbconn, lib
         )
         self.networks = {}
         for recipename in unique_recipe_names:
             try:
-                self.networks[recipename] = Network(lib, recipename, dbconn)
+                self.networks[recipename] = Network(lib, recipename, self.dbconn)
             except Exception as e:
                 raise RuntimeError(f'Error building network for recipe {recipename}: \n{e}')
 

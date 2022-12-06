@@ -213,7 +213,15 @@ def transcription_unit_from_L1(l1id, lib):
     part_cols = [f'part_{i}' for i in range(1, 7)]
     parts = []
     for l in L0s:
-        parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
+        try:
+            parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
+        except Exception as e:
+            msg = f'Error in L0 {l} of L1 {l1id}: {e}'
+            msg += f'\npart_cols: {part_cols}'
+            msg += f'\nlib.L0s[{l}]: {lib.L0s.loc[l]}'
+            msg += f'\nlib.L0s: {lib.L0s}'
+
+            raise RuntimeError(msg)
     tu = TranscriptionUnit([Slot(lib, p) for p in parts])
     return tu
 

@@ -61,6 +61,7 @@ def optimize_model(model, params, x, y, config=DEFAULT_CFG, loggers=None):
         samples, state = strategy.ask(rng_gen, state, es_params)
         fitnesses, params = vm_fitness(samples)
         state = strategy.tell(samples, fitnesses, state, es_params)
+
         history['fitnesses'].append(fitnesses)
 
         f_argmin = jnp.argmin(fitnesses)

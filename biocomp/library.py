@@ -11,10 +11,19 @@ class PartsLibrary:
         self.categories = categories
         self.sequestrons = sequestrons
         self.sequestron_types = sequestron_types
+
+        # make sure that L0s, L1s, L2s, parts have a unique index (remove duplicates)
+        self.L0s = self.L0s[~self.L0s.index.duplicated(keep='first')]
+        self.L1s = self.L1s[~self.L1s.index.duplicated(keep='first')]
+        self.L2s = self.L2s[~self.L2s.index.duplicated(keep='first')]
+        self.parts = self.parts[~self.parts.index.duplicated(keep='first')]
+
         self.pc = pd.merge(parts, categories, left_on='category', right_index=True, how='left')
         self.seqs = self.sequestrons.merge(self.sequestron_types, left_on='type', right_index=True)
         self.seqs = ut.decode_json(self.seqs, ['output_part', 'output_category'])
         self.seqs['enabled'] = True
+
+
 
     def disable_all_sequestrons(self):
         self.seqs['enabled'] = False
