@@ -345,7 +345,10 @@ class ComputeGraphModel:
         but each sublist must be computed in order."""
         visited = set()
         batches = []
+        print(f'get_batch_sequence_of_nodes: {self.network.compute_graph}')
         while len(visited) < len(self.network.compute_graph):
+            print(f'visited={visited}')
+            print(f'batches={batches}')
             independent = [
                 i
                 for i, row in self.network.compute_graph.iterrows()

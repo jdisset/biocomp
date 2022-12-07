@@ -165,7 +165,12 @@ def inv_translation(get_param, get_quantized, **_):
 def sequestron_ERN(get_param, get_quantized, **_):
     def apply(neg, pos, **_):
         return jnp.maximum(pos - neg, 0.0)
+    return apply
 
+@compnode
+def sequestron_ERN3p(get_param, get_quantized, **_):
+    def apply(neg, pos, **_):
+        return jnp.maximum(pos - neg, 0.0)
     return apply
 
 

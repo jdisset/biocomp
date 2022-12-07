@@ -66,24 +66,37 @@ tus = {
     'A_bias': bc.TranscriptionUnit([P('hEF1a'), P('CasE')]),
     'out': bc.TranscriptionUnit([P('hEF1a'), P('PgU_rec'), P('NeonGreen')]),
 }
+aggregations = [['Csy4#1', 'PgU#1'], ['Csy4#2', 'PgU#2'], ['B_bias'], ['A_bias'], ['out']]
+
+tus = {
+    'Csy4rec#1': bc.TranscriptionUnit([P('hEF1a'), P('Csy4_rec'), P('CasE')]),
+    'Csy4#2': bc.TranscriptionUnit([P('hEF1a'), P('Csy4')]),
+    'PgUrec#2': bc.TranscriptionUnit([P('hEF1a'), P('PgU_rec'), P('CasE')]),
+    'PgU#1': bc.TranscriptionUnit([P('hEF1a'), P('PgU')]),
+    'PgUrec_bias': bc.TranscriptionUnit([P('hEF1a'), P('PgU_rec'), P('CasE')]),
+    'B_bias': bc.TranscriptionUnit([P('hEF1a'), P('PgU')]),
+    'A_bias': bc.TranscriptionUnit([P('hEF1a'), P('Csy4')]),
+    'out': bc.TranscriptionUnit([P('hEF1a'), P('CasE_rec'), P('NeonGreen')]),
+}
+# aggregations = [['Csy4rec#1', 'PgU#1'], ['Csy4#2', 'PgUrec#2'], ['out'], ['A_bias'], ['B_bias']]
+aggregations = [['Csy4rec#1', 'PgU#1'], ['Csy4#2', 'PgUrec#2'], ['out', 'A_bias', 'B_bias', 'PgUrec_bias']]
+# aggregations = [['Csy4rec#1', 'PgU#1'], ['Csy4#2', 'PgUrec#2'], ['out']]
 
 sources = {tu_name: [tu_name] for tu_name, tu in tus.items()}
 
 networks = []
-aggregations = [['Csy4#1', 'PgU#1'], ['Csy4#2', 'PgU#2'], ['B_bias'], ['A_bias'], ['out']]
+
 n = bc.Network.from_dict(lib, 'v1', tus, sources, aggregations)
-n2 = n.copy()
-n2.name = 'v2'
+n2 = bc.Network.from_dict(lib, 'v2', tus, sources, aggregations)
 inputs = (
     n.compute_graph[n.compute_graph.type == 'aggregation']
     .input_from.apply(lambda x: x[0][0])
     .to_list()
 )
-n.set_inputs(inputs)
-networks.append(n)
-n2.set_inputs(reversed(inputs))
-networks.append(n2)
-
+n.set_inputs([inputs[0],inputs[1]])
+n2.set_inputs([inputs[1],inputs[0]])
+# n2.set_inputs(list(reversed(inputs)))
+networks = [n, n2]
 
 print(f'Generated {len(networks)} networks')
 
@@ -93,9 +106,9 @@ import datetime
 
 dirname = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
-os.makedirs(f'../__out/{dirname}', exist_ok=True)
+# os.makedirs(f'../__out/{dirname}', exist_ok=True)
 
-ut.plot_networks(networks, [f'../__out/{dirname}/{n.name}.pdf' for n in networks])
+# ut.plot_networks(networks, [f'../__out/{dirname}/{n.name}.pdf' for n in networks])
 ut.plot_networks(networks)
 
 
@@ -105,7 +118,7 @@ ut.plot_networks(networks)
 # {{{                     --     load target data     --
 # ···············································································
 
-img = plt.imread('../data/bandpass_dec.png')
+img = plt.imread('../data/bandpass_inc.png')
 target = img[:, :, 0]
 target = target[:, ::-1]
 
@@ -130,7 +143,7 @@ plt.show()
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                           --     model     --
 #···············································································
-net = networks[0]
+net = networks[1]
 model = bc.ComputeGraphModel(net)
 model.build()
 params, constraints = model.init(jax.random.PRNGKey(np.random.randint(0, 1000000)))
@@ -164,12 +177,14 @@ def loss_fn(params, x, y):
     yhat = vm(params, x, jax.random.PRNGKey(0))
     return jnp.mean((yhat - y) ** 2)
 
-def fitness_fn(flat_params, x, y, reg=0.001):
+def fitness_fn(flat_params, x, y, reg=0.001, neg_reg=100.0):
     p = unflatten_params(flat_params, pdef)
     l = loss_fn(p, x, y)
     # we want to add a penalty that encourages 
     # parameters in flat_params to be close to one
     penalty = reg * jnp.mean((flat_params - 1) ** 2)
+    # let's also penalize negative values
+    penalty += neg_reg * jnp.mean(jnp.where(flat_params < 0, flat_params, 0)**2)
     return l + penalty
 
 def plot_fitnesses(fitnesses):
@@ -214,12 +229,12 @@ vm_fitness = jax.jit(jax.vmap(fitness_fn, in_axes=(0, None, None)))
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                           --     CMAES     --
 #···············································································
-rng = jax.random.PRNGKey(2)
-strategy = CMA_ES(popsize=100, num_dims=flat_params.shape[0])
+rng = jax.random.PRNGKey(3)
+strategy = CMA_ES(popsize=500, num_dims=flat_params.shape[0])
 es_params = strategy.default_params.replace(init_min=0, init_max=1)
 state = strategy.initialize(rng, es_params)
 
-num_generations = 500
+num_generations = 400
 fitnesses = []
 
 for t in tqdm(list(range(num_generations))):

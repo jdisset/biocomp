@@ -245,7 +245,6 @@ class Network:
             self.build()
 
 
-
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                  --     public tools & utils    --
     #···············································································
@@ -281,17 +280,18 @@ class Network:
 
         # get the transcription units
         c.execute(
-            """SELECT TU FROM TU_in_source tis, source_in_aggregation sia, aggregations a
+            """SELECT TU, TU || '_' || aggregation as name FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
             (self.name,),
         )
         self.transcription_units = {
-            tu[0]: transcription_unit_from_L1(tu[0], self.lib) for tu in c.fetchall()
+            tu[1]: transcription_unit_from_L1(tu[0], self.lib) for i, tu in enumerate(c.fetchall())
         }
 
         # then get the sources
         c.execute(
-            """SELECT tis.source,tis.TU,position FROM TU_in_source tis, source_in_aggregation sia, aggregations a
+            """SELECT tis.source || '_' || aggregation as source, TU || '_' || aggregation as TU, position
+            FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
             (self.name,),
         )
@@ -303,7 +303,7 @@ class Network:
 
         # finally get the aggregations
         c.execute(
-            """SELECT a.id, sia.source, sia.ratio FROM aggregations a, source_in_aggregation sia
+            """SELECT a.id, sia.source || '_' || aggregation, sia.ratio FROM aggregations a, source_in_aggregation sia
             WHERE a.id = sia.aggregation AND a.recipe = ?""",
             (self.name,),
         )
@@ -355,6 +355,8 @@ class Network:
 
     def set_inputs(self, input_ids):
         assert self.is_built()
+        print('setting inputs')
+        print(input_ids)
         for i, inp_id in enumerate(input_ids):
             self.compute_graph.loc[inp_id, 'type'] = 'input'
             self.compute_graph.loc[inp_id, 'extra'].update({'input_position': i})
@@ -656,6 +658,7 @@ class Network:
                 except Exception as e:
                     msg = f'Error while adding aggregation node {nid} to compute graph'
                     msg += f' (recipe {self.name}, aggregation {i}, sources {r.source})'
+                    msg += f'\n\naggregations: \n{self.aggregations}\n'
                     msg += f'\n{e}'
                     msg += f'\n{cdf}'
                     raise RuntimeError(msg)
@@ -990,6 +993,7 @@ DEFAULT_INVERSE_DICT = {
 
 
 def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=DEFAULT_INVERSE_DICT):
+    print(f'Inverting network {network.name}')
     # inverse_dict: node_type -> inverse_node_type
     if nodes == 'auto':
         # we assume all numeric nodes should be linked to an inverted path
@@ -1000,6 +1004,7 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=DEFAULT
         raise ValueError(f"Unrecognized node mode: {nodes}. Use 'auto' or a list of node ids.")
     else:
         start_nodes = nodes
+    print('start nodes:', start_nodes)
     invertible_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
     new_network = network.copy()
 

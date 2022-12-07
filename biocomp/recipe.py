@@ -166,9 +166,12 @@ def xp_to_sql(xps:list, conn):
 def import_recipes_to_sql(recipe_files: list, conn, lib):
     # recipe files are json5 files
     recipes = []
-    for f in recipe_files:
+    
+    from tqdm import tqdm
+    for f in tqdm(recipe_files):
         try:
             recipe = ut.load_json5(f)
+            print(f'Importing recipe {recipe["name"]}')
             if not Path(f).name == f'{recipe["name"]}.recipe.json5':
                 msg = f'Recipe name vs file name mismatch (declared name: {recipe["name"]})'
                 raise RuntimeError(msg)
@@ -214,6 +217,7 @@ class XP:
         with open(self.xpfile) as f:
             try:
                 xpobj = json5.load(f)
+                print(xpobj)
                 xp_to_sql([xpobj], self.dbconn)
                 for k, v in xpobj.items():
                     setattr(self, k, v)
@@ -229,7 +233,9 @@ class XP:
         self.networks = {}
         for recipename in unique_recipe_names:
             try:
+                print(f'trying to build recipe {recipename}')
                 self.networks[recipename] = Network(lib, recipename, self.dbconn)
+                print(f'built recipe {recipename}')
             except Exception as e:
                 raise RuntimeError(f'Error building network for recipe {recipename}: \n{e}')
 
@@ -245,8 +251,10 @@ class XP:
         nets = self.inv_networks if inverse else self.networks
         assert nets
         models = {}
-        for s in track(self.samples, description='Building models'):
+        # for s in track(self.samples, description='Building models'):
+        for s in self.samples:
             try:
+                print(f'Building model for sample {s["name"]}')
                 models[s['name']] = ComputeGraphModel(nets[s['recipe']])
                 models[s['name']].build(node_impl=node_impl, node_namespace=s['name'])
             except Exception as e:
