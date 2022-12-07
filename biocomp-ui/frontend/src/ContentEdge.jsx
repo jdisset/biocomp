@@ -106,7 +106,7 @@ export default function CustomEdge({
 
   // outputValue might have beed passed (as a string)
   let outputValue = "";
-  if (data.outputValue !== undefined && data.outputValue !== '') {
+  if (data.outputValue !== undefined && data.outputValue !== '' && data.outputValue !== null) {
     outputValue = (
       <>
         <text
