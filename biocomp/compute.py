@@ -61,8 +61,8 @@ def get_param(
                 ut.at_path(constraints, ['clip'], c)
 
         except Exception as e:
-            print(f'Error initializing param "{name}" from node {node_id}: {e}')
-            raise e
+            msg = f'Error initializing param "{name}" from node {node_id}: {e}'
+            raise RuntimeError(msg)
     return ut.at_path(params, dpath)
 
 
@@ -345,10 +345,7 @@ class ComputeGraphModel:
         but each sublist must be computed in order."""
         visited = set()
         batches = []
-        print(f'get_batch_sequence_of_nodes: {self.network.compute_graph}')
         while len(visited) < len(self.network.compute_graph):
-            print(f'visited={visited}')
-            print(f'batches={batches}')
             independent = [
                 i
                 for i, row in self.network.compute_graph.iterrows()

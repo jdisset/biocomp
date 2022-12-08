@@ -17,7 +17,6 @@ import logging as log
 # {{{                            --     sql     --
 # ···············································································
 
-
 def create_db(conn):
     sql = """
     CREATE TABLE IF NOT EXISTS `recipes` (
@@ -168,10 +167,10 @@ def import_recipes_to_sql(recipe_files: list, conn, lib):
     recipes = []
     
     from tqdm import tqdm
-    for f in tqdm(recipe_files):
+    for f in tqdm(recipe_files, desc='Importing recipes'):
         try:
             recipe = ut.load_json5(f)
-            print(f'Importing recipe {recipe["name"]}')
+            ut.debug(f'Importing recipe {recipe["name"]}')
             if not Path(f).name == f'{recipe["name"]}.recipe.json5':
                 msg = f'Recipe name vs file name mismatch (declared name: {recipe["name"]})'
                 raise RuntimeError(msg)
@@ -190,7 +189,6 @@ def network_from_recipe(recipe, lib, db_path=':memory:'):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     XP class     --
@@ -217,7 +215,6 @@ class XP:
         with open(self.xpfile) as f:
             try:
                 xpobj = json5.load(f)
-                print(xpobj)
                 xp_to_sql([xpobj], self.dbconn)
                 for k, v in xpobj.items():
                     setattr(self, k, v)
@@ -233,9 +230,8 @@ class XP:
         self.networks = {}
         for recipename in unique_recipe_names:
             try:
-                print(f'trying to build recipe {recipename}')
+                log.debug(f'building recipe {recipename}')
                 self.networks[recipename] = Network(lib, recipename, self.dbconn)
-                print(f'built recipe {recipename}')
             except Exception as e:
                 raise RuntimeError(f'Error building network for recipe {recipename}: \n{e}')
 
@@ -254,7 +250,7 @@ class XP:
         # for s in track(self.samples, description='Building models'):
         for s in self.samples:
             try:
-                print(f'Building model for sample {s["name"]}')
+                ut.debug(f'Building model for sample {s["name"]}')
                 models[s['name']] = ComputeGraphModel(nets[s['recipe']])
                 models[s['name']].build(node_impl=node_impl, node_namespace=s['name'])
             except Exception as e:
@@ -267,8 +263,8 @@ class XP:
             self.xp_path / self.name / 'data' / f"{s['name']}.{self.name}.csv" for s in self.samples
         ]
         df_data: dict[str, pd.DataFrame] = {}
-        for s, f in track(
-            list(zip(self.samples, datafiles)), description=f"loading data files for {self.name}"
+        for s, f in tqdm(
+            list(zip(self.samples, datafiles)), desc=f"loading data files for {self.name}"
         ):
             content = pd.read_csv(f)
             assert isinstance(content, pd.DataFrame)  # otherwise type hints won't match
@@ -294,6 +290,9 @@ class XP:
         }
         return X, Y
 
+    def get_Y(self, *args, **kwargs):
+        return self.get_XY(*args, **kwargs)[1]
+
     def __str__(self):
         # add borders:
         res = '-' * 18 + f'  XP {self.name}  ' + '-' * 18 + '\n'
@@ -316,7 +315,6 @@ class XP:
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                           --     tests     --
@@ -345,3 +343,4 @@ def test_module():
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+

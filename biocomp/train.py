@@ -94,7 +94,9 @@ def serialize_partial_or_function(field):
         return field
 
 
-def prep_data(models, Y_raw, cfg=DEFAULT_CFG):
+def preprocess_data(models, Y_raw, cfg=DEFAULT_CFG):
+    """Rebalancing + normalization of data for training."""
+    # rebalances so that the number of samples in each bin is roughly the same
     X, Y = du.balance_each_dataset(
         models,
         Y_raw,
@@ -102,6 +104,7 @@ def prep_data(models, Y_raw, cfg=DEFAULT_CFG):
         threshold_quantile=cfg['balance_threshold_quantile'],
         threshold_min=cfg['balance_threshold_min'],
     )
+    # normalize to get data in a reasonable range
     norm_factor = cfg["norm_factor"]
     X = jax.tree_map(lambda x: x / norm_factor, X)
     Y = jax.tree_map(lambda x: x / norm_factor, Y)
@@ -109,6 +112,7 @@ def prep_data(models, Y_raw, cfg=DEFAULT_CFG):
 
 
 def batch(X, Y, batch_size, n_batches=None):
+    """Yields batches of data from X and Y."""
     n = X.shape[0]
     if n_batches is None:
         n_batches = n // batch_size
@@ -117,20 +121,22 @@ def batch(X, Y, batch_size, n_batches=None):
         idx = np.random.choice(n, size=batch_size, replace=True)
         yield X[idx], Y[idx]
 
+
 @jax.jit
 def unstack_tree(t):
     n = jax.tree_util.tree_leaves(t)[0].shape[0]
     return [jax.tree_map(lambda x: x[i], t) for i in range(n)]
 
+
 def get_best_params(history, smooth_window=10):
     # find the lowest loss time point (and which replicate)
     loss = np.array(history['loss'])
     from scipy.ndimage import gaussian_filter1d
+
     loss_smooth = gaussian_filter1d(loss, sigma=smooth_window, axis=0)
     best_t, best_replicate = np.unravel_index(loss_smooth.argmin(), loss_smooth.shape)
     p = unstack_tree(history['params'][best_t])[best_replicate]
     return p, (best_t, best_replicate)
-
 
 
 #                                                                            }}}
@@ -196,21 +202,21 @@ def wandb_log(loss, params, iter_num, cfg, **_):
         log_plots()
 
 
-def console_log(loss, params, epoch, cfg, **_):
+def console_log(history, epoch, cfg, **_):
+    loss = history['loss'][-1]
     print(f'[{epoch}/{cfg["epochs"]}] loss: {loss:.5f}')
 
-
-def save_log(loss, params, iter_num, cfg, save_path=None, loss_history=None, **_):
+def console_log(history, epoch, cfg, save_path=None, loss_history=None, **_):
     save_path = cfg.get('save_path', save_path)
     assert save_path is not None, 'save_path must be specified'
 
-    if iter_num == 0:
+    if epoch== 0:
         print(f'Saving results to {save_path}')
         save_path.mkdir(parents=True, exist_ok=True)
         with open(save_path / 'config.json', 'w') as f:
             json.dump(cfg, f)
 
-    du.save(params, f'{save_path}/params_epoch-{iter_num}.pkl', overwrite=True)
+    du.save(history['param'][-1], f'{save_path}/params_epoch-{epoch}.pkl', overwrite=True)
     if loss_history is not None:
         du.save(loss_history, f'{save_path}/loss_history.pkl', overwrite=True)
 
@@ -227,6 +233,7 @@ def log_w_replicates(history, epoch, cfg, **_):
         f'epoch: {epoch}, loss: \n - mean: {losses["mean"]:.3f}, std: {losses["std"]:.3f}, min: {losses["min"]:.3f}, max: {losses["max"]:.3f}'
     )
 
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -236,40 +243,28 @@ def log_w_replicates(history, epoch, cfg, **_):
 
 
 def train_xp(xp, config=DEFAULT_CFG, **kwargs):
-    console = Console()
     cfg = {**DEFAULT_CFG, **config}
-    # ser = json.dumps(config, indent=4, default=serialize_partial_or_function)
+
     rng_key = jax.random.PRNGKey(cfg['rng_key'])
 
-    console.print(f'Starting training with config: {cfg}')
-    times = ut.TimeStore(console)
-
     models = xp.get_models(node_impl=config['node_impl'])
-
     _, Y = xp.get_XY(models)
+    X, Y = preprocess_data(models, Y, cfg)
 
-    t = times.start('Balancing data', True)
-    X, Y = prep_data(models, Y, cfg)
-    t.stop_print()
-
-    t = times.start('Generating batches', True)
     individual_batch_sizes = cfg['batch_size'] // len(models)
     x_batches, y_batches = du.make_batches_uniform_sampling(
-        Y, individual_batch_sizes, rng_key, models
+        Y.values(), individual_batch_sizes, rng_key, models.values()
     )
-    t.stop_print()
-    console.print(f'x_batches shape: {x_batches.shape}, y_batches shape: {y_batches.shape}')
 
-    return train_models(models, Y, config=config, **kwargs)
+    return train_models(models, x_batches, y_batches, config=config, **kwargs)
 
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{               --     train models (no replicates)     --
-#···············································································
+# ···············································································
 def train_models(
     models: list[ComputeGraphModel],
     x_batches: np.ndarray,
@@ -301,9 +296,15 @@ def train_models(
     for m, k in zip(models, ikeys):
         params, constraints = m.init(k, pre_params=params, pre_constraints=constraints)
 
-    dynamic, _ = split_params(params, cfg['static_params'])
+    dynamic, _ = ut.split_params(params, cfg['static_params'])
     opt_state = optimizer.init(dynamic)
-    params_history, loss_history, grad_history, opt_history, loss = [], [], [], [], float('inf')
+
+    history = {
+        'params': [],
+        'opt': [],
+        'grad': [],
+        'loss': [],
+    }
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                       --     training step     --
@@ -313,13 +314,13 @@ def train_models(
         nmodels = len(models)
         assert len(X) == nmodels, f"Expected {nmodels} models, got {X.shape}"
         assert len(Y) == nmodels
-        params = assemble_params(dynamic, static)
+        params = ut.assemble_params(dynamic, static)
 
         K = jax.random.split(rng_key, nmodels)
 
         res = jnp.array(
             [
-                loss_f(vmap(partial(m, params, rng_key=k))(x), y, m.n_outputs)
+                loss_f(vmap(partial(m, params, rng_key=k))(x[:,:m.n_inputs]), y, m.n_outputs)
                 for m, x, y, k in zip(models, X, Y, K)
             ]
         ).mean()
@@ -327,21 +328,27 @@ def train_models(
         return res
 
     def training_step(params, opt_state, key, x, y):
-        dynamic, static = split_params(params, [['node']])
+        dynamic, static = ut.split_params(params, [['node']])
         loss, grads = jax.value_and_grad(loss_func)(dynamic, static, x, y, key)
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
 
         dynamic = optax.apply_updates(dynamic, updates)
         dynamic = ut.apply_constraints(dynamic, constraints)
-        params = assemble_params(dynamic, static)
+        params = ut.assemble_params(dynamic, static)
 
-        return params, opt_state, grads, loss
+        res = {
+            'params': params,
+            'loss': loss,
+            'grad': grads,
+            'opt': opt_state,
+        }
+        return res
+
 
     step = training_step
 
     if cfg['compile_training']:
         import time
-
         print('Compiling training step')
         t0 = time.time()
         step = jit(step)
@@ -353,36 +360,28 @@ def train_models(
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
 
-
     if loggers is None:
         loggers = {}
 
-    for l in loggers.values():
-        l(loss, params, 0, cfg)
-
     print('Beginning training')
     for i, k in enumerate(jax.random.split(key, cfg['epochs']), 1):
-        for x, y in zip(x_batches, y_batches):
-            params, opt_state, grads, loss = step(params, opt_state, k, x, y)
-            loss_history.append(loss)
-            params_history.append(params)
-            grad_history.append(grads)
-            opt_history.append(opt_state)
-
+        for x, y in tqdm(zip(x_batches, y_batches), total=len(x_batches), desc=f'Epoch {i}'):
+            updt = step(params, opt_state, k, x, y)
+            params, opt_state = updt['params'], updt['opt']
+        history = {k: v + [updt[k]] for k, v in history.items()}
         for t, l in loggers.items():
             if i % t == 0 or i == cfg['epochs']:
-                l(loss, params, i, cfg, loss_history=loss_history, params_history=params_history)
+                l(history, i, cfg)
 
-    return params_history, loss_history, grad_history, opt_history
+    return history
 
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{          --     train single model but with replicates     --
-#···············································································
+# ···············································································
 def train_model(model, x, y, config, loggers=None):
     cfg = {**DEFAULT_CFG, **config}
     loggers = loggers or {}
@@ -401,7 +400,6 @@ def train_model(model, x, y, config, loggers=None):
         'loss': [],
     }
 
-
     def training_step(params, opt_states, x, y):
         def loss_func(dynamic, static, x, y):
             params = ut.assemble_params(dynamic, static)
@@ -411,7 +409,9 @@ def train_model(model, x, y, config, loggers=None):
 
         dynamic, static = ut.split_params(params, cfg['static_params'])
 
-        loss, grads = jax.vmap(jax.value_and_grad(loss_func), in_axes=(0, 0, None, None))(dynamic, static, x, y)
+        loss, grads = jax.vmap(jax.value_and_grad(loss_func), in_axes=(0, 0, None, None))(
+            dynamic, static, x, y
+        )
         updates, opt_states = optimizer.update(grads, opt_states, dynamic)
 
         dynamic = optax.apply_updates(dynamic, updates)
@@ -446,9 +446,3 @@ def train_model(model, x, y, config, loggers=None):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
-
-
-
-
-

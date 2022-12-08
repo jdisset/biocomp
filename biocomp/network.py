@@ -355,8 +355,7 @@ class Network:
 
     def set_inputs(self, input_ids):
         assert self.is_built()
-        print('setting inputs')
-        print(input_ids)
+        ut.debug(f'setting inputs to {input_ids}')
         for i, inp_id in enumerate(input_ids):
             self.compute_graph.loc[inp_id, 'type'] = 'input'
             self.compute_graph.loc[inp_id, 'extra'].update({'input_position': i})
@@ -792,7 +791,7 @@ class Network:
         # we add 1 numeric node per source or aggregation that's "at the top",
         # i.e its input_from is empty.
         topnodes = cdf[cdf.input_from.apply(len) == 0]
-        # print(f'Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}')
+        ut.debug(f'Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}')
         for i, r in topnodes.iterrows():
             nid = uidGen()
             newnode = GraphComputeNode(nid, 'numeric', None, 1)
@@ -993,7 +992,7 @@ DEFAULT_INVERSE_DICT = {
 
 
 def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=DEFAULT_INVERSE_DICT):
-    print(f'Inverting network {network.name}')
+    ut.debug(f'Inverting network {network.name}')
     # inverse_dict: node_type -> inverse_node_type
     if nodes == 'auto':
         # we assume all numeric nodes should be linked to an inverted path
@@ -1004,7 +1003,6 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=DEFAULT
         raise ValueError(f"Unrecognized node mode: {nodes}. Use 'auto' or a list of node ids.")
     else:
         start_nodes = nodes
-    print('start nodes:', start_nodes)
     invertible_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
     new_network = network.copy()
 
@@ -1014,8 +1012,6 @@ def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=DEFAULT
     paths = {n: min(invertible_paths[n], key=len) for n in start_nodes}
 
     inputpos = 0
-
-    print(f'nodes: {start_nodes}')
 
     for start_n, path in paths.items():
         # we start by replacing the start node by the first node of the path

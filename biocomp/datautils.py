@@ -127,7 +127,7 @@ def balance_each_dataset(
     """balances each dataset individually (not across datasets but within each dataset,
     so that each dataset aims for a similar number of samples per bin)"""
     X_balanced, Y_balanced = {}, {}
-    for sample, model in models.items():
+    for sample, model in tqdm(models.items(), desc='balancing datasets'):
         data = Y[sample]
         out_proteins = model.get_output_proteins()
         in_proteins = model.get_inverted_input_proteins()
@@ -434,7 +434,7 @@ def make_batches_uniform_sampling(Y:list[np.ndarray], batch_size:int, rng_key, m
 
     n_batches = total_size // batch_size
 
-    ylist = [jax.random.choice(rng_key, jnp.array(y), (total_size,)) for y in Y]
+    ylist = [jax.random.choice(rng_key, jnp.array(y), (total_size,)) for y in tqdm(Y)]
     xlist = [m.get_input_from_output(ylist[i]) for i, m in enumerate(models)]
 
     n_outputs = max(y.shape[1] for y in ylist)

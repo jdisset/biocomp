@@ -11,6 +11,18 @@ import jax.numpy as jnp
 import pickle
 import json5
 import numpy as np
+import logging
+
+logger = logging.getLogger('biocomp')
+
+def warn(*args, **kwargs):
+    logger.warning(*args, **kwargs)
+
+def info(*args, **kwargs):
+    logger.info(*args, **kwargs)
+
+def debug(*args, **kwargs):
+    logger.debug(*args, **kwargs)
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────

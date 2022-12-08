@@ -22,11 +22,10 @@ def glorot_initializer(rng_key, shape):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                      --     hill transforms     --
 # ···············································································
-
-
 def transform_hill(get_param, get_quantized, transform_name, **_):
     def apply(*values, rng_key):
         keys = jax.random.split(rng_key, 4)
@@ -144,8 +143,6 @@ def inverse_transcription_hill(get_param, get_quantized, **_):
 @bcc.inv_compnode(fwd_name='translation_hill')
 def inverse_translation_hill(get_param, get_quantized, **_):
     return inverse_transform_hill(get_param, get_quantized, 'tl', **_)
-
-
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
