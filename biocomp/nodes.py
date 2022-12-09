@@ -38,6 +38,7 @@ def quantize(x, possible_values):
         return quantize_impl(x, possible_values)
 
 
+#TODO: work in N dimensions
 @partial(jax.custom_jvp, nondiff_argnums=(1,))
 def quantize_impl(x, arr):
     return arr[jnp.argmin(jnp.abs(arr - x))]
@@ -106,6 +107,7 @@ def _transform(get_param, get_quantized, transform_name, **_):
             get_param(rate_name, init=continuous_initializer(k0, val.shape)),
             mode='input_edges',
         )
+
         deg_rate = get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
         # print(t'Calling {transform_name} with rates {rates} and deg_rate {deg_rate} and rng_key {rng_key}')
         res = jnp.dot(rates, val) / deg_rate

@@ -80,6 +80,11 @@ DEFAULT_CFG = {
 # we need to be able to serialize partials and functions.
 
 
+def params_to_numpy(params):
+    # use tree_map to convert all the jax arrays to numpy arrays
+    return jax.tree_map(lambda x: x if isinstance(x, float) else np.array(x), params)
+
+
 def serialize_partial_or_function(field):
     if isinstance(field, partial):
         return {
@@ -147,27 +152,40 @@ def get_best_params(history, smooth_window=10):
 # ···············································································
 
 
-def wandb_log(loss, params, iter_num, cfg, **_):
+def wandb_log_epoch(history, epoch, cfg, project=None, **_):
+    loss = history['loss'][-1]
+    params = history['params'][-1]
 
-    wb.log({'loss': loss}, step=iter_num)
-    wb.log({'shared_params': params['shared']}, step=iter_num)
+    if epoch == 0 and project is not None:
+        wb.init(config=cfg, project=project, entity="jdisset", reinit=False)
 
-    # jitted_models = {
-    # s: jit(jax.vmap(partial(m, rng_key=jax.random.PRNGKey(0)), in_axes=(None, 0)))
-    # for s, m in models.items()
-    # }
+    wb.log({'loss': loss}, step=epoch)
+    wb.log({'shared_params': params['shared']}, step=epoch)
 
-    wb.init(config=cfg, project=wandb_project, entity="jdisset", reinit=True)
+
+def wandb_log_plot(history, epoch, cfg,  models, X, Y, project=None,**_):
+
+    if epoch == 0 and project is not None:
+        wb.init(config=cfg, project=project, entity="jdisset", reinit=False)
+
+    params = history['params'][-1]
+
+    jitted_models = {
+        s: jit(jax.vmap(partial(m, rng_key=jax.random.PRNGKey(0)), in_axes=(None, 0)))
+        for s, m in models.items()
+    }
 
     def log_plots():
         gtruth = []
         pred = []
         for sample, f in jitted_models.items():
             model = models[sample]
-            y_hat = f(params, x[sample])
+            x = X[sample]
+            y = Y[sample]
+            y_hat = f(params, X[sample])
             out_proteins = model.get_output_proteins()
             in_proteins = model.get_inverted_input_proteins()
-            stats, bins = du.binstats(Y[sample], out_proteins, in_proteins, resolution=0.5)
+            stats, bins = du.binstats(y, out_proteins, in_proteins, resolution=0.5)
             stats_hat, bins_hat = du.binstats(y_hat, out_proteins, in_proteins, resolution=0.5)
             fig, _ = du.heatmap(
                 stats,
@@ -194,23 +212,21 @@ def wandb_log(loss, params, iter_num, cfg, **_):
             )
             pred.append(wb.Image(fig_hat, caption=f'{model.network.name} predicted'))
 
-        wb.log({'ground_truth': gtruth}, step=iter_num)
-        wb.log({'predictions': pred}, step=iter_num)
+        wb.log({'ground_truth': gtruth}, step=epoch)
+        wb.log({'predictions': pred}, step=epoch)
         plt.close('all')
-
-    if iter_num == cfg['epochs'] or iter_num % cfg['plot_rate'] == 0 or iter_num == 0:
-        log_plots()
 
 
 def console_log(history, epoch, cfg, **_):
     loss = history['loss'][-1]
     print(f'[{epoch}/{cfg["epochs"]}] loss: {loss:.5f}')
 
-def console_log(history, epoch, cfg, save_path=None, loss_history=None, **_):
+
+def manual_save(history, epoch, cfg, save_path=None, loss_history=None, **_):
     save_path = cfg.get('save_path', save_path)
     assert save_path is not None, 'save_path must be specified'
 
-    if epoch== 0:
+    if epoch == 0:
         print(f'Saving results to {save_path}')
         save_path.mkdir(parents=True, exist_ok=True)
         with open(save_path / 'config.json', 'w') as f:
@@ -219,7 +235,6 @@ def console_log(history, epoch, cfg, save_path=None, loss_history=None, **_):
     du.save(history['param'][-1], f'{save_path}/params_epoch-{epoch}.pkl', overwrite=True)
     if loss_history is not None:
         du.save(loss_history, f'{save_path}/loss_history.pkl', overwrite=True)
-
 
 def log_w_replicates(history, epoch, cfg, **_):
     loss = history['loss'][-1]
@@ -232,7 +247,6 @@ def log_w_replicates(history, epoch, cfg, **_):
     print(
         f'epoch: {epoch}, loss: \n - mean: {losses["mean"]:.3f}, std: {losses["std"]:.3f}, min: {losses["min"]:.3f}, max: {losses["max"]:.3f}'
     )
-
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -300,10 +314,10 @@ def train_models(
     opt_state = optimizer.init(dynamic)
 
     history = {
-        'params': [],
-        'opt': [],
-        'grad': [],
-        'loss': [],
+        'params': [params],
+        'opt': [opt_state],
+        'grad': [None],
+        'loss': [float('inf')],
     }
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -320,7 +334,7 @@ def train_models(
 
         res = jnp.array(
             [
-                loss_f(vmap(partial(m, params, rng_key=k))(x[:,:m.n_inputs]), y, m.n_outputs)
+                loss_f(vmap(partial(m, params, rng_key=k))(x[:, : m.n_inputs]), y, m.n_outputs)
                 for m, x, y, k in zip(models, X, Y, K)
             ]
         ).mean()
@@ -344,11 +358,11 @@ def train_models(
         }
         return res
 
-
     step = training_step
 
     if cfg['compile_training']:
         import time
+
         print('Compiling training step')
         t0 = time.time()
         step = jit(step)
@@ -363,12 +377,19 @@ def train_models(
     if loggers is None:
         loggers = {}
 
+    print('Initial logger calls')
+    for _, l in loggers.items():
+        l(history, 0, cfg)
+
     print('Beginning training')
     for i, k in enumerate(jax.random.split(key, cfg['epochs']), 1):
         for x, y in tqdm(zip(x_batches, y_batches), total=len(x_batches), desc=f'Epoch {i}'):
             updt = step(params, opt_state, k, x, y)
             params, opt_state = updt['params'], updt['opt']
+
         history = {k: v + [updt[k]] for k, v in history.items()}
+        history['params'][-1] = params_to_numpy(history['params'][-1])
+
         for t, l in loggers.items():
             if i % t == 0 or i == cfg['epochs']:
                 l(history, i, cfg)

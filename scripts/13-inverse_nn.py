@@ -52,7 +52,6 @@ def inv_fused_nn(get_param, get_quantized, wsize=64, depth=2, **_):
     def apply(value, rng_key):
         k0, k1, k2 = jax.random.split(rng_key, 3)
         return value
-
     return apply
 
 
