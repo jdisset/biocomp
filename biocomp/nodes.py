@@ -9,7 +9,7 @@ from . import utils as ut
 # ···············································································
 
 DEFAULT_MIN_RATE = 0.0
-DEFAULT_MAX_RATE = 10.0
+DEFAULT_MAX_RATE = 1.0
 
 
 def continuous_initializer(rng, shape=(), minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):

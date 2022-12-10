@@ -41,11 +41,11 @@ def binstats_nbins(data, bin_columns, stat_column, nbins=20, log=True, stats=["m
     return df, bins
 
 
-def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=1e-12, bin_max=None):
-    """Calculate statistics (mean, count), for each bin in len(bin_axis) dimensions."""
-    if bin_axis is None:
-        bin_axis = protein_names
-    bin_axisid = [protein_names.index(p) for p in bin_axis]
+def binstats(data, output_protein_names, bin_proteins=None, resolution=0.5, bin_min=1e-12, bin_max=None):
+    """Calculate statistics (mean, count), for each bin in len(bin_proteins) dimensions."""
+    if bin_proteins is None:
+        bin_proteins = output_protein_names
+    bin_axisid = [output_protein_names.index(p) for p in bin_proteins]
     POWER_RANGE = 30
     VMAX_EPSILON = 10.0 ** (-POWER_RANGE)
     vmin, vmax = data[:, bin_axisid].min(axis=0), data[:, bin_axisid].max(axis=0) + VMAX_EPSILON
@@ -76,19 +76,19 @@ def binstats(data, protein_names, bin_axis=None, resolution=0.5, bin_min=1e-12, 
         np.geomspace(first_bin[i], last_bin[i], nbins[i] + 1) for i in range(len(first_bin))
     ]
     coords = np.array([np.digitize(data[:, i], be) for i, be in zip(bin_axisid, bin_edges)]).T - 1
-    df = pd.DataFrame(data, columns=protein_names)
+    df = pd.DataFrame(data, columns=output_protein_names)
     df['coord'] = [tuple(c) for c in coords]
     df2 = df.groupby('coord').agg(['mean']).reset_index()
     df2['indices'] = df.reset_index().groupby('coord').agg({'index': lambda x: list(x)}).values
     df2['indices'] = df2['indices'].apply(lambda x: np.array(x, dtype=int))
     df2['count'] = df2['indices'].apply(len)
 
-    for i, p in enumerate(bin_axis):
+    for i, p in enumerate(bin_proteins):
         df2[('coords', p)] = df2['coord'].apply(lambda x: x[i])
     df2 = df2.drop('coord', axis=1, level=0)
-    df2 = df2.set_index([('coords', p) for p in bin_axis])
+    df2 = df2.set_index([('coords', p) for p in bin_proteins])
 
-    bins = {p: be for p, be in zip(bin_axis, bin_edges)}
+    bins = {p: be for p, be in zip(bin_proteins, bin_edges)}
     return df2, bins
 
 
@@ -159,6 +159,79 @@ class MyFormatter(string.Formatter):
 
 fmt = MyFormatter()
 
+def model_parallel_coords(model, y, n_samples=500, cmap='Spectral_r', title=None):
+    import matplotlib.colors as colors
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    out_proteins = model.get_output_proteins()
+    in_proteins = model.get_inverted_input_proteins()
+    stats, bins = binstats(y, out_proteins, resolution=0.25)
+    prot_diff = set(out_proteins) - set(in_proteins)
+
+    # the plot will have one coordinate (vertical line) per out_protein.
+    # each line is taken from stats (the mean of the bin)
+    # stats is a dataframe with columns [('protein_name', 'mean'), ...]
+    mean_values = jnp.array([stats[p]['mean'].values for p in out_proteins]).T
+    choice = jax.random.choice(
+        jax.random.PRNGKey(0), mean_values.shape[0], shape=(n_samples,), replace=True
+    )
+    mean_values = mean_values[choice]
+    maxval = 10e4
+    minval = 1e-4
+
+    # 1 subplot per prot_diff
+    fig, axes = plt.subplots(len(prot_diff), 1, figsize=(10, 9*len(prot_diff)))
+
+    if len(prot_diff) == 1:
+        axes = [axes]
+
+    for z_prot, ax in zip(prot_diff, axes):
+        z_values = stats[z_prot]['mean'].values[choice]
+
+        # x axis should be each protein name (we display a vertical line for each protein)
+        ax.set_xticks(range(len(out_proteins)))
+        ax.set_xticklabels(out_proteins, rotation=40)
+        ax.vlines(range(len(out_proteins)), 0, maxval*2, alpha=0.2, color='black')
+
+        # y axis should be the mean value of the bin
+        ax.set_yscale('log')
+        cmap = plt.get_cmap(cmap)
+        norm = colors.LogNorm(vmin=minval, vmax=maxval)
+        clrs = [cmap(norm(z)) for z in z_values]
+
+        for i, (x, c) in enumerate(zip(mean_values, clrs)):
+            ax.plot(x, color=c, alpha=0.25, linewidth=2)
+
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        fig.colorbar(sm, cax=cax, orientation='vertical', label=z_prot)
+
+        ax.set_ylim(minval, maxval*2)
+        ax.set_title(f'{model.network.name if title is None else title}')
+
+    return fig, axes
+
+
+def model_heatmap(model, y, resolution=0.5):
+    out_proteins = model.get_output_proteins()
+    in_proteins = model.get_inverted_input_proteins()
+    stats, bins = binstats(y, out_proteins, in_proteins, resolution=resolution)
+    z_prot = set(out_proteins) - set(in_proteins)
+    fig, ax = heatmap(
+        stats,
+        bins,
+        figscale=0.6,
+        stat_columns=['mean'],
+        z_protein=z_prot.pop(),
+        lims={'mean': (1e0, 1e8)},
+        title=f'{model.network.name} data',
+        subtitle=f'{len(y)} data points',
+        show=False,
+    )
+    return fig, ax
 
 def heatmap(
     statdf,

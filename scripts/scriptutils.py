@@ -400,7 +400,7 @@ def screenCaptures(
     print(f'Saved all screenshots in {end-start}s')
 
 
-def plot_networks(nets: List[bc.Network], filenames=None, H=1500, W=1500):
+def plot_networks(nets: List[bc.Network], filenames=None, H=1000, W=1000, outputs=None, figsize=(10, 10), show=False):
     import nest_asyncio
 
     nest_asyncio.apply()
@@ -410,12 +410,22 @@ def plot_networks(nets: List[bc.Network], filenames=None, H=1500, W=1500):
             net.compute_graph, *a, height=H, width=W, cdg=net.central_dogma_graph, **kw
         )
 
-    show = False
     if filenames is None:
         show = True
         import tempfile
-
         filenames = [tempfile.mktemp(suffix='.png') for _ in nets]
+
+    if outputs is not None:
+        assert(len(outputs) == len(nets))
+        # make a copy of all nets:
+        nets = [net.copy() for net in nets]
+        for net, output in zip(nets, outputs):
+            # output is a dict (node_id -> output)
+            net.compute_graph['output_values'] = None
+            for node_id, o in output.items():
+                outp = o if o.ndim > 0 else [o]
+                net.compute_graph['output_values'][node_id] = np.array(outp)
+
 
     screenCaptures(
         draw_network,
@@ -432,7 +442,7 @@ def plot_networks(nets: List[bc.Network], filenames=None, H=1500, W=1500):
             img = mpimg.imread(f)
             # we want no border, nothing other than the image
             fig = plt.figure(frameon=False)
-            fig.set_size_inches(12, 15)
+            fig.set_size_inches(figsize)
             ax = plt.Axes(fig, [0.0, 0.0, 1.0, 1.0])
             ax.set_axis_off()
             fig.add_axes(ax)

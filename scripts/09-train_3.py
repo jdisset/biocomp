@@ -274,6 +274,7 @@ ut.save(loss_history, f'../__out/{xp.name}_{timestamp}_{i}_loss_hist.pkl', overw
 
 # ##
 # params = params[-1]
+
 # for sample, model in models.items():
     # y_hat = apply_model(params, X, jax.random.PRNGKey(0), sample)
     # out_proteins = model.get_output_proteins()

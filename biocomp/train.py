@@ -302,23 +302,36 @@ def train_models(
     loss_f = cfg['loss_function']
     assert callable(loss_f), f"loss_f must be callable, not {type(loss_f)}"
 
+
+    ## ───────────────────────────────────── ▼ ─────────────────────────────────────
+    # {{{                           --     init     --
+    #···············································································
+
+    def init(key):
+        ikeys = jax.random.split(key, len(models))
+        print('Initializing parameters')
+        params, constraints = {}, {}
+        for m, k in zip(models, ikeys):
+            params, constraints = m.init(k, pre_params=params, pre_constraints=constraints)
+
+        dynamic, _ = ut.split_params(params, cfg['static_params'])
+        opt_state = optimizer.init(dynamic)
+
+        history = {
+            'params': [params],
+            'opt': [opt_state],
+            'grad': [None],
+            'loss': [float('inf')],
+            'magnitude': [None],
+        }
+
+        return params, constraints, opt_state, history
+
+    #                                                                            }}}
+    ## ─────────────────────────────────────────────────────────────────────────────
+
     key = jax.random.PRNGKey(cfg['rng_key'])
-    ikeys = jax.random.split(key, len(models))
-    params, constraints = {}, {}
-
-    print('Initializing parameters')
-    for m, k in zip(models, ikeys):
-        params, constraints = m.init(k, pre_params=params, pre_constraints=constraints)
-
-    dynamic, _ = ut.split_params(params, cfg['static_params'])
-    opt_state = optimizer.init(dynamic)
-
-    history = {
-        'params': [params],
-        'opt': [opt_state],
-        'grad': [None],
-        'loss': [float('inf')],
-    }
+    params, constraints, opt_state, history = init(key)
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                       --     training step     --
@@ -341,10 +354,17 @@ def train_models(
 
         return res
 
+    def flatten_tree(g):
+        leaves = jax.tree_util.tree_leaves(g)
+        return jnp.concatenate([l.flatten() for l in leaves])
+
     def training_step(params, opt_state, key, x, y):
         dynamic, static = ut.split_params(params, [['node']])
         loss, grads = jax.value_and_grad(loss_func)(dynamic, static, x, y, key)
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
+
+        updt = flatten_tree(updates)
+        magnitude = jnp.linalg.norm(updt)
 
         dynamic = optax.apply_updates(dynamic, updates)
         dynamic = ut.apply_constraints(dynamic, constraints)
@@ -355,6 +375,7 @@ def train_models(
             'loss': loss,
             'grad': grads,
             'opt': opt_state,
+            'magnitude': magnitude,
         }
         return res
 
@@ -362,11 +383,10 @@ def train_models(
 
     if cfg['compile_training']:
         import time
-
         print('Compiling training step')
         t0 = time.time()
         step = jit(step)
-        lowered = step.lower(params, opt_state, k, x_batches[0], y_batches[0])
+        lowered = step.lower(params, opt_state, key, x_batches[0], y_batches[0])
         compiled = lowered.compile()
         step = compiled
         print(f'Compiled in {time.time() - t0:.2f}s')
@@ -382,10 +402,27 @@ def train_models(
         l(history, 0, cfg)
 
     print('Beginning training')
-    for i, k in enumerate(jax.random.split(key, cfg['epochs']), 1):
-        for x, y in tqdm(zip(x_batches, y_batches), total=len(x_batches), desc=f'Epoch {i}'):
+    for i, epoch_key in enumerate(jax.random.split(key, cfg['epochs']), 1):
+        batch_keys = jax.random.split(epoch_key, len(x_batches))
+        magnitudes = []
+        for x, y, k in tqdm(zip(x_batches, y_batches, batch_keys), total=len(x_batches), desc=f'Epoch {i}'):
             updt = step(params, opt_state, k, x, y)
             params, opt_state = updt['params'], updt['opt']
+            magnitudes.append(updt['magnitude'])
+            avgmag = jnp.mean(jnp.array(magnitudes))
+
+            if  avgmag > 1e6:
+                print('Gradient exploded. Aborting training')
+                return history
+            elif avgmag < 1e-12:
+                if i > 1:
+                    print('Gradient vanished. Aborting training')
+                    return history
+                else:
+                    print('Null gradient when starting. Reinitializing.')
+                    params, constraints, opt_state, history = init(k)
+                    magnitudes = []
+
 
         history = {k: v + [updt[k]] for k, v in history.items()}
         history['params'][-1] = params_to_numpy(history['params'][-1])
