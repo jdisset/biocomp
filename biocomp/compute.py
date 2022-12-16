@@ -340,7 +340,7 @@ class ComputeGraphModel:
         return self.apply(*args, **kwargs)
 
     def __get_batch_sequence_of_nodes(self):
-        """Return a list of lists of compute nodes from the network,
+        """Returns a list of lists of compute nodes from the network,
         where each node of a sublist can be computed independently of the others,
         but each sublist must be computed in order."""
         visited = set()
@@ -360,33 +360,41 @@ class ComputeGraphModel:
         return batches
 
     def get_output_proteins(self):
+        """Returns the names of the proteins that are outputs of the network"""
         onode = self.network.compute_graph[self.network.compute_graph['type'] == 'output']
         assert len(onode) == 1, f'Invalid number of output nodes: {len(onode)}'
-        # get onode.cdg_input, match it with the id in network.central_dogma_graph, and get the content
-        # (for each cdg_input)
         return [
             self.network.central_dogma_graph.loc[cdg_id]['content'][0]
             for cdg_id in onode.iloc[0]['cdg_input']
         ]
 
     def get_input_from_output(self, output_arr):
-        # each input node has, in its extra, 'input_from_output' and 'input_position'
-        # we want to transform output_arr by reordering the columns
+        """Givem an array of output values, returns the columns that are inputs of the inverted network,
+        properly ordered by input number"""
+        # In inverted networks, each input node has,
+        # in its extra, 'input_from_output' and 'input_position' (which get_inverted_input_positions uses)
+        # We want to transform output_arr by reordering the columns accordingly
         mapping = self.get_inverted_input_positions()
         return output_arr[:, [mapping[i] for i in range(len(mapping))]]
 
     def get_inverted_input_proteins(self):
+        """Returns the names of the proteins that are inputs of the inverted network, ordered"""
         mapping = self.get_inverted_input_positions()
         output_proteins = self.get_output_proteins()
         assert len(mapping) <= len(output_proteins)
         return [output_proteins[mapping[i]] for i in range(len(mapping))]
 
     def get_inverted_input_positions(self):
-        mapping = {}
-        for _, row in self.network.compute_graph[
-            self.network.compute_graph['type'] == 'input'
-        ].iterrows():
+        """Returns a mapping from input position to output position"""
+        mapping = {}  # input number -> output position
+        inputs = self.network.compute_graph[self.network.compute_graph['type'] == 'input']
+        assert len(inputs) == self.n_inputs
+        for _, row in inputs.iterrows():
+            assert 'input_position' in row.extra
+            assert 'input_from_output' in row.extra
+            assert row.extra['input_position'] not in mapping
             mapping[row.extra['input_position']] = row.extra['input_from_output']
+
         assert set(mapping.keys()) == set(range(len(mapping.keys())))
         assert len(mapping.keys()) == len(set(mapping.values()))
 

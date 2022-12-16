@@ -645,7 +645,8 @@ def plot_node(
     ntype,
     params,
     model,
-    vlim=[0.0, 10.0],
+    xlim=[0.0, 10.0],
+    ylim=[0.0, 10.0],
     n_samples=200,
     figsize=(12, 7),
     n_inputs=1,
@@ -675,9 +676,9 @@ def plot_node(
     n_combinations = np.prod(list(counter_max.values()))
 
     if n_inputs == 1:
-        X = np.linspace(vlim[0], vlim[1], n_samples).reshape(-1, 1)
+        X = np.linspace(xlim[0], xlim[1], n_samples).reshape(-1, 1)
     elif n_inputs == 2:
-        x = np.linspace(vlim[0], vlim[1], n_samples)
+        x = np.linspace(xlim[0], xlim[1], n_samples)
         X = np.array(np.meshgrid(x, x)).T.reshape(-1, 2)
 
     else:
@@ -689,8 +690,8 @@ def plot_node(
         fig, ax = plt.subplots(1, 1, figsize=figsize)
         ax.set_xlabel('input')
         ax.set_ylabel('output')
-        ax.set_xlim(vlim)
-        ax.set_ylim(vlim)
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
 
     elif n_inputs == 2:
         # we will have a grid of n_combinations heatmaps

@@ -155,10 +155,8 @@ def get_best_params(history, smooth_window=10):
 def wandb_log_epoch(history, epoch, cfg, project=None, **_):
     loss = history['loss'][-1]
     params = history['params'][-1]
-
     if epoch == 0 and project is not None:
         wb.init(config=cfg, project=project, entity="jdisset", reinit=False)
-
     wb.log({'loss': loss}, step=epoch)
     wb.log({'shared_params': params['shared']}, step=epoch)
 
