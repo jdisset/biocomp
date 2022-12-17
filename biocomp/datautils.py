@@ -350,8 +350,6 @@ def heatmap(
         cax.tick_params(labelsize=fontsize)
         cax.yaxis.get_offset_text().set_fontsize(fontsize)
 
-        # change font to custom (roboto)
-        font = 'Roboto Mono Light for Powerline'
         for item in (
             [ax.xaxis.label, ax.yaxis.label]
             + ax.get_xticklabels()
@@ -361,14 +359,17 @@ def heatmap(
         ):
             item.set_fontname(font)
 
-        cax.yaxis.get_offset_text().set_fontname(font)
+        font = 'Roboto Mono Light for Powerline'
+        if font in plt.rcParams['font.family']:
+            cax.yaxis.get_offset_text().set_fontname(font)
+
         ax.title.set_fontname('Arial')
-        # set font weight to not bold
         ax.title.set_fontweight('light')
         ax.title.set_fontstretch('expanded')
 
     title = title if title is not None else f'{z_axis} stats'
     # suptitle should be higher than default
+
     fig.suptitle(
         title,
         fontsize=fontsize * 1.8,

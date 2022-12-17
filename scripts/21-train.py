@@ -83,9 +83,9 @@ cfg = {
     "adam_w_decay": 0.0001,
     "rng_key": np.random.randint(0, 2**32),
     # "rng_key": 11325,
-    "epochs": 500,
+    "epochs": 5,
     "compile_training": True,
-    "batch_size": 300,
+    "batch_size": 2,
     "norm_factor": 1e6,
     "balance_bin_resolution": 0.5,
     "balance_threshold_quantile": 0.4,
@@ -107,12 +107,17 @@ xp = ut.load_xp('E20221124A_ERNbandpassV2', lib)
 rng = jax.random.PRNGKey(cfg['rng_key'])
 models = xp.get_models(node_impl=cfg['node_impl'])
 
+NMODELS = 4
+models = {k: v for k, v in list(models.items())[:NMODELS]}
+
 X, Y = bc.train.preprocess_data(models, xp.get_Y(models), cfg)
-batch_size = cfg['batch_size'] // len(models)
+batch_size = cfg['batch_size']
 x_batches, y_batches = du.make_batches_uniform_sampling(
     Y.values(), batch_size, rng, models.values()
 )
 
+# reduce x_batches to only 100
+x_batches = x_batches[:100]
 
 
 #                                                                            }}}
@@ -188,3 +193,5 @@ print('done')
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+plt.rcParams['font.family']
