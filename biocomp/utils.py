@@ -326,6 +326,22 @@ def tree_unstack(tree):
 # {{{                     --     parameters utils     --
 #···············································································
 
+DEFAULT_MIN_RATE = 0.0
+DEFAULT_MAX_RATE = 1.0
+
+def continuous_initializer(rng, shape=(), minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
+    def init():
+        res = jax.random.uniform(
+            key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32
+        )
+        return res
+    return init
+
+def glorot_initializer(rng, shape):
+    def init():
+        return jax.nn.initializers.glorot_normal()(rng, shape)
+    return init
+
 def split_params(params, static_paths):
     """Split params into static and dynamic parts."""
     # any path that is not in static_paths is dynamic
@@ -370,6 +386,7 @@ def unflatten_params(flat_params, pdescriptor):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
 
 
 

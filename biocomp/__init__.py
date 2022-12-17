@@ -18,5 +18,6 @@ from . import recipe as recipe
 from . import train as train
 from . import evo as evo
 from . import nodes as nodes
+from . import nn_nodes as nn
 
 from .utils import logger as logger

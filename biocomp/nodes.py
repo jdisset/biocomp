@@ -8,27 +8,6 @@ from . import utils as ut
 # {{{                           --     utils     --
 # ···············································································
 
-DEFAULT_MIN_RATE = 0.0
-DEFAULT_MAX_RATE = 1.0
-
-
-def continuous_initializer(rng, shape=(), minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
-    def init():
-        res = jax.random.uniform(
-            key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32
-        )
-        return res
-
-    return init
-
-
-def glorot_initializer(rng, shape):
-    def init():
-        return jax.nn.initializers.glorot_normal()(rng, shape)
-
-    return init
-
-
 def quantize(x, possible_values):
     if len(possible_values) == 0:
         return x
@@ -104,11 +83,11 @@ def _transform(get_param, get_quantized, transform_name, **_):
 
         rates = get_quantized(
             rate_name,
-            get_param(rate_name, init=continuous_initializer(k0, val.shape)),
+            get_param(rate_name, init=ut.continuous_initializer(k0, val.shape)),
             mode='input_edges',
         )
 
-        deg_rate = get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
+        deg_rate = get_param(deg_param_name, init=ut.continuous_initializer(k1), shared=True)
         # print(t'Calling {transform_name} with rates {rates} and deg_rate {deg_rate} and rng_key {rng_key}')
         res = jnp.dot(rates, val) / deg_rate
         # print(f'values: {values}')
@@ -132,10 +111,10 @@ def _inverse_transform(get_param, get_quantized, transform_name, **_):
 
         rate = get_quantized(
             rate_name,
-            get_param(rate_name, init=continuous_initializer(k0, (1,))),
+            get_param(rate_name, init=ut.continuous_initializer(k0, (1,))),
             mode='input_edges',
         )[0]
-        deg = get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
+        deg = get_param(deg_param_name, init=ut.continuous_initializer(k1), shared=True)
 
         res = value * deg / rate
         return res
@@ -180,7 +159,7 @@ def sequestron_ERN3p(get_param, get_quantized, **_):
 def ERN_with_affinity(get_param, get_quantized, seq_name, **_):
     def apply(neg, pos, rng_key, **_):
         param_name = f'{seq_name}::affinity'
-        affinity = get_param(param_name, init=continuous_initializer(rng_key), shared=True)
+        affinity = get_param(param_name, init=ut.continuous_initializer(rng_key), shared=True)
         return jnp.maximum(pos - neg * affinity, 0.0)
 
     return apply
@@ -232,7 +211,7 @@ def inv_source(*_, **__):
 @compnode
 def numeric(get_param, get_quantized, **_):
     def apply(rng_key):
-        res = get_param("value", init=continuous_initializer(rng_key))
+        res = get_param("value", init=ut.continuous_initializer(rng_key))
         return res
 
     return apply
@@ -257,7 +236,7 @@ def aggregation(get_param, get_quantized, n_outputs, normalize=False, **kwargs):
                 "ratios", overwrite_with=jnp.array(kwargs['ratios'], dtype=jnp.float32)
             )
         else:
-            ratios = get_param("ratios", init=continuous_initializer(rng_key, (n_outputs,)))
+            ratios = get_param("ratios", init=ut.continuous_initializer(rng_key, (n_outputs,)))
 
         assert ratios.shape == (n_outputs,)
 
@@ -273,7 +252,7 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
     assert original_output_slot < original_output_len
 
     def apply(inp, rng_key):
-        ratios = get_param("ratios", init=continuous_initializer(rng_key, (original_output_len,)))
+        ratios = get_param("ratios", init=ut.continuous_initializer(rng_key, (original_output_len,)))
         # ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
         return inp / ratios[original_output_slot]
 
@@ -283,118 +262,3 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                    --     nn based --
-# ···············································································
-
-
-def nn_dense(input_values, output_size, get_param, key, name):
-    input_size = 1 if input_values.shape == () else input_values.shape[0]
-    w = get_param(f'{name}_w', init=glorot_initializer(key, (input_size, output_size)), shared=True)
-    b = get_param(f'{name}_b', init=lambda: jnp.zeros((output_size,)), shared=True)
-    res = jnp.dot(input_values, w) + b
-    return res.squeeze()
-
-
-def nn_dense_multilevel(input_values, hidden_s, output_s, depth, get_param, key, name, activation):
-    res = input_values
-    keys = jax.random.split(key, depth)
-    for i in range(depth - 1):
-        res = activation(nn_dense(res, hidden_s, get_param, keys[i], f'{name}_{i}'))
-    return nn_dense(res, output_s, get_param, keys[-1], f'{name}_{depth - 1}')
-
-
-def transform_w_dense_layer(get_param, get_quantized, transform_name, wsize=128, depth=2, **_):
-    app = _transform(get_param, get_quantized, transform_name, **_)
-
-    def apply(*values, rng_key):
-        k1, k2 = jax.random.split(rng_key, 2)
-        res = app(*values, rng_key=k1)
-        return jax.nn.relu(
-            nn_dense_multilevel(res, wsize, 1, depth, get_param, k2, transform_name, jax.nn.relu)
-        )
-
-    return apply
-
-
-def inv_transform_w_dense_layer(get_param, get_quantized, transform_name, wsize=128, depth=2, **_):
-    def apply(value, rng_key):
-        k0, k1, k2 = jax.random.split(rng_key, 3)
-
-        rate_name = f'{transform_name}_rate'
-        deg_param_name = f'{transform_name}_deg'
-
-        rate = get_quantized(
-            rate_name,
-            get_param(rate_name, init=continuous_initializer(k0, (1,))),
-            mode='input_edges',
-        )[0]
-        deg = get_param(deg_param_name, init=continuous_initializer(k1), shared=True)
-
-        res = jax.nn.sigmoid(
-            nn_dense_multilevel(
-                jnp.array([value, rate, deg]).squeeze(),
-                wsize,
-                1,
-                depth,
-                get_param,
-                k2,
-                f'inv_{transform_name}',
-                jax.nn.relu,
-            )
-        )
-        return jax.nn.relu(res)
-
-    return apply
-
-
-def transcription_nn(get_param, get_quantized, **_):
-    return transform_w_dense_layer(get_param, get_quantized, 'tc', **_)
-
-
-def inverse_transcription_nn(get_param, get_quantized, **_):
-    return inv_transform_w_dense_layer(get_param, get_quantized, 'tc', **_)
-
-
-def translation_nn(get_param, get_quantized, **_):
-    return transform_w_dense_layer(get_param, get_quantized, 'tl', **_)
-
-
-def inverse_translation_nn(get_param, get_quantized, **_):
-    return inv_transform_w_dense_layer(get_param, get_quantized, 'tl', **_)
-
-
-def ERN_nn_multi(get_param, get_quantized, seq_name, **_):
-    def apply(neg, pos, rng_key, **_):
-        param_name = f'{seq_name}::affinity'
-        affinity = get_param(param_name, init=continuous_initializer(rng_key), shared=True)
-        res = nn_dense_multilevel(
-            jnp.array([neg, pos, affinity]).squeeze(),
-            256,
-            1,
-            3,
-            get_param,
-            rng_key,
-            'ERN',
-            jax.nn.relu,
-        )
-        return jax.nn.relu(jnp.squeeze(res))
-
-    return apply
-
-
-def output_nn(get_param, get_quantized, **_):
-    def apply(*value, rng_key, **_):
-        res = jnp.array(
-            [
-                nn_dense_multilevel(x.squeeze(), 128, 1, 2, get_param, rng_key, 'out', jax.nn.relu)
-                for x in value
-            ]
-        )
-        return jax.nn.relu(res)
-
-    return apply
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────

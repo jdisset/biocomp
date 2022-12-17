@@ -432,27 +432,24 @@ def heatmap(
 import pickle
 
 
-def save(data, path, overwrite=False, suffix='.pickle'):
-
+def save(data, path, overwrite=False, rename_if_exists=True):
     path = Path(path)
-    if path.suffix != suffix:
-        path = path.with_suffix(suffix)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         if overwrite:
             path.unlink()
+        elif rename_if_exists:
+            path = path.with_name(path.stem + '_' + path.suffix)
         else:
             raise RuntimeError(f'File {path} already exists.')
     with open(path, 'wb') as file:
         pickle.dump(data, file)
 
 
-def load(path, suffix='.pickle'):
+def load(path):
     path = Path(path)
     if not path.is_file():
         raise ValueError(f'Not a file: {path}')
-    if path.suffix != suffix:
-        raise ValueError(f'Not a {suffix} file: {path}')
     with open(path, 'rb') as file:
         data = pickle.load(file)
     return data

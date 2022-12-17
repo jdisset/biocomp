@@ -207,7 +207,7 @@ cfg = {
     "learning_rate": 0.001,
     "adam_w_decay": 0.0001,
     # "rng_key": np.random.randint(0, 2**32),
-    "rng_key": 13025,
+    "rng_key": 130625,
     "epochs": 500,
     "compile_training": True,
     "batch_size": 300,
@@ -220,6 +220,7 @@ cfg = {
 
 lib = ut.load_lib()
 rng = jax.random.PRNGKey(cfg['rng_key'])
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -234,6 +235,7 @@ models = xp.get_models(node_impl=cfg['node_impl'])
 # models = {k: v for k, v in list(models.items())[:NMODELS]}
 
 X, Y = bc.train.preprocess_data(models, xp.get_Y(models), cfg)
+X
 batch_size = cfg['batch_size'] // len(models)
 x_batches, y_batches = du.make_batches_uniform_sampling(
     Y.values(), batch_size, rng, models.values()
@@ -242,8 +244,8 @@ x_batches, y_batches = du.make_batches_uniform_sampling(
 # reduce x_batches to only 100
 # x_batches = x_batches[:10]
 
-ut.plot_networks([m.network for m in models.values()], H=800, W=500, figsize=(5, 8))
-ut.plot_networks([m.network for m in models.values()])  # , H=800, W=500, figsize=(5, 8))
+# ut.plot_networks([m.network for m in models.values()], H=800, W=500, figsize=(5, 8))
+# ut.plot_networks([m.network for m in models.values()])  # , H=800, W=500, figsize=(5, 8))
 # ut.plot_networks([m.network for m in models.values()], [f'{save_path}/{name}.png' for name in models.keys()])
 # plot_models_data(models, Y)
 
@@ -258,7 +260,6 @@ import wandb as wb
 project = 'bp_train_00'
 
 wb.init(config=cfg, project=project, entity="jdisset", reinit=True)
-
 
 def wandb_plot_pred(history, epoch, cfg, models, X, Y, project=None, **_):
     if epoch == 0 and project is not None:
@@ -283,14 +284,12 @@ def wandb_plot_pred(history, epoch, cfg, models, X, Y, project=None, **_):
 
     wb.log({'prediction': pred}, step=epoch)
 
-
 def wandb_log_epoch(history, epoch, cfg, **_):
     loss = float(history['loss'][-1])
     params = history['params'][-1]
     wb.log({'loss': loss}, step=epoch)
     wb.log({'shared_params': params['shared']}, step=epoch)
     wb.log({'params': params}, step=epoch)
-
 
 loggers = {
     1: bc.train.console_log,
@@ -537,8 +536,11 @@ n.set_numeric_as_input()
 # ut.plot_networks([n, inv])
 
 # random samples in [0,10]
-nsamples = 30000
-dna = jax.random.uniform(rng, (nsamples, 2), minval=0, maxval=10)
+nsamples = 2000
+dna_0 = jax.random.uniform(rng, (nsamples, 2), minval=0, maxval=10)
+dna_1 = jax.random.uniform(rng, (nsamples, 2), minval=0.5, maxval=4)
+dna_2 = jax.random.uniform(rng, (nsamples, 2), minval=0.5, maxval=3)
+dna = jnp.concatenate([dna_0, dna_1, dna_2])
 # actually we want a logarithmic distribution (the closer to 0, the more likely)
 # dna = np.random.lognormal(0, 1, size=(nsamples, 2))
 
@@ -613,19 +615,20 @@ y = jnp.array([out[p] for p in minv.get_output_proteins()]).T
 assert jnp.all(jnp.array([out['mKate'], out['eBFP']]).T == minv.get_input_from_output(y))
 X = jnp.array([dna, minv.get_input_from_output(y)])
 Y = jnp.array([y, y])
-selected = (1,2)
+
+selected = (0,2)
 models = models[selected[0]:selected[1]]
 X = X[selected[0]:selected[1]]
 Y = Y[selected[0]:selected[1]]
 
 n_models = len(models)
-x_batches, y_batches = get_batches(X, Y, batch_size=100)
+x_batches, y_batches = get_batches(X, Y, batch_size=64)
 
 loggers = {
     1: bc.train.console_log,
 }
 
-cfg['epochs'] = 10
+cfg['epochs'] = 50
 train_history = bc.train.train_models(models, x_batches, y_batches, cfg, loggers)
 
 
@@ -716,6 +719,9 @@ Y_pred = vmap(m, in_axes=(None, 0, None))(best_params, X[0], rng)
 # plot_all_heatmaps(X[0], Y_pred, 'predictions', orient='h', outputnames=m.get_output_proteins())
 error = jnp.abs(Y_pred - Y[0])
 plot_all_heatmaps(X[0], error, 'error', orient='h', outputnames=m.get_output_proteins())
+
+du.model_heatmap(models[1], Y[1])
+
 
 plot_predictions_2d(m, best_params, X[0], Y[0])
 plot_predictions_2d(minv, best_params, X[1], Y[1], 'inverse predictions (should be y=x)')

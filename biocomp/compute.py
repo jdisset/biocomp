@@ -134,7 +134,7 @@ def get_quantized(
     possible_values = [
         jnp.array(
             [
-                get_param(n, nd.continuous_initializer(k, val.shape), shared=True)
+                get_param(n, ut.continuous_initializer(k, val.shape), shared=True)
                 for n, k in zip(names, jax.random.split(kk, len(names)))
             ]
         )
