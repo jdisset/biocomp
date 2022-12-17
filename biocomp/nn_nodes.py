@@ -109,10 +109,10 @@ def transform_nn(
 
 
 def sequestron_ERN(
-    get_param, get_quantized, seq_name, affinity_dim=1, wsize=128, depth=3, out_dim=1, **_
+    get_param, get_quantized, seq_name, affinity_dim=1, wsize=128, depth=3, out_dim=1, subtype='5p', **_
 ):
     def apply(neg, pos, rng_key, **_):
-        param_name = f'{seq_name}::affinity'
+        param_name = f'{seq_name}::affinity_{subtype}'
         affinity = get_param(
             param_name, init=ut.continuous_initializer(rng_key, (affinity_dim,)), shared=True
         )
@@ -123,11 +123,10 @@ def sequestron_ERN(
             depth,
             get_param,
             rng_key,
-            'ERN',
+            f'ERN_{subtype}',
             DEFAULT_ACTIVATION,
         )
         return DEFAULT_ACTIVATION(jnp.squeeze(res))
-
     return apply
 
 
@@ -136,6 +135,8 @@ translation = partial(transform_nn, transform_name='tl')
 inv_transcription = partial(transform_nn, transform_name='tc', tr_namespace='inv_')
 inv_translation = partial(transform_nn, transform_name='tl', tr_namespace='inv_')
 
+ERN5p = partial(sequestron_ERN, subtype='5p')
+ERN3p = partial(sequestron_ERN, subtype='3p')
 
 def output(get_param, get_quantized, **_):
     def apply(*value, rng_key, **_):

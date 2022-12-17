@@ -74,7 +74,8 @@ node_impl = dict(
             inner_depth=I_DEPTH,
             inner_out=I_OUT,
         ),
-        'sequestron_ERN': partial(bc.nn.sequestron_ERN, wsize=ERN_SIZE, depth=ERN_DEPTH),
+        'sequestron_ERN': partial(bc.nn.ERN5p, wsize=ERN_SIZE, depth=ERN_DEPTH),
+        'sequestron_ERN3p': partial(bc.nn.ERN3p, wsize=ERN_SIZE, depth=ERN_DEPTH),
     },
 )
 cfg = {
@@ -83,10 +84,10 @@ cfg = {
     "adam_w_decay": 0.0001,
     "rng_key": np.random.randint(0, 2**32),
     # "rng_key": 11325,
-    "epochs": 500,
+    "epochs": 5,
     "compile_training": True,
-    "batch_size": 7,
-    "norm_factor": 1e6,
+    "batch_size": 8,
+    "norm_factor": 1e7,
     "balance_bin_resolution": 0.5,
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 40,
@@ -133,7 +134,6 @@ project = 'bp_train_00'
 wb.init(config=cfg, project=project, entity="jdisset", reinit=True)
 print(f"About to train {len(models)} models. wb run {wb.run.name}")
 
-
 def models_data_fig(models, Y):
     for sample, model in models.items():
         out_proteins = model.get_output_proteins()
@@ -149,6 +149,26 @@ def models_data_fig(models, Y):
         yield sample, model, fig, ax
 
 
+# we take random samples to plot
+nsubsamples = 1000
+# X_subsamples = {k: jax.random.choice(rng, v, (nsubsamples,)) for k, v in X.items()}
+# let's make it so that we can also take the same samples for Y:
+
+zero_rng = jax.random.PRNGKey(0)
+indices = {k: jax.random.choice(zero_rng, v.shape[0], (nsubsamples,)) for k, v in X.items()}
+X_samples = {k: v[indices[k]] for k, v in X.items()}
+Y_samples = {k: v[indices[k]] for k, v in Y.items()}
+# maxvals = {k: v.max() for k, v in X.items()}
+# minvals = {k: v.min() for k, v in X.items()}
+
+jitted_models = {
+    s: jit(jax.vmap(partial(m, rng_key=zero_rng), in_axes=(None, 0)))
+    for s, m in models.items()
+}
+
+for sample, model, fig, ax in models_data_fig(models, Y):
+    pass
+
 def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x_batches), **_):
     if epoch == 0:
         gtruth = []
@@ -160,11 +180,8 @@ def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x
     if epoch_history is None:
         return
 
+    print(f'Logging predictions for epoch {epoch}')
     params = bu.get_pytree(epoch_history['params'], nbatches-1)
-    jitted_models = {
-        s: jit(jax.vmap(partial(m, rng_key=jax.random.PRNGKey(0)), in_axes=(None, 0)))
-        for s, m in models.items()
-    }
     Y_pred = {s: jitted_models[s](params, X[s]) for s in models}
     pred = []
     for sample, model, fig, ax in models_data_fig(models, Y_pred):
@@ -172,35 +189,36 @@ def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x
         plt.close(fig)
 
     wb.log({'prediction': pred})
-
+    print('Done logging predictions')
 
 def wandb_log_epoch(epoch, cfg, epoch_history=None, nbatches=len(x_batches), **_):
     if epoch_history is not None:
-        losses = jnp.array(epoch_history['loss'])
+        print(f"Logging epoch {epoch}")
+        losses = np.array(epoch_history['loss'])
         param_list = bu.param_unstack(epoch_history['params'],len(x_batches))
         for loss, params in zip(losses, param_list):
             wb.log({'loss': loss})
             wb.log({'shared_params': params['shared']})
             wb.log({'params': params})
-
+        del param_list
+        del losses
+        print(f"Done")
 
 def console_log(epoch, cfg, epoch_history=None, **_):
     if epoch_history is not None:
-        loss = jnp.array(epoch_history['loss'])
-        avg = jnp.mean(loss)
-        std = jnp.std(loss)
+        loss = np.array(epoch_history['loss'])
+        avg = np.mean(loss)
+        std = np.std(loss)
         lmin, lmax = jnp.min(loss), jnp.max(loss)
         print(f'[{epoch}/{cfg["epochs"]}] loss: {avg:.3f} ± {std:.3f} [min {lmin:.3f}, max {lmax:.3f}]')
-
 
 loggers = [
     (1, console_log),
     (1, wandb_log_epoch),
-    (1, partial(wandb_plot_pred, models=models, X=X, Y=Y)),
+    (10, partial(wandb_plot_pred, models=models, X=X_samples, Y=Y_samples)),
 ]
 
 train_history = bc.train.train_models(models.values(), x_batches, y_batches, cfg, loggers)
-
 
 print('done')
 

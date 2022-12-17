@@ -180,8 +180,8 @@ def model_parallel_coords(model, y, n_samples=500, cmap='Spectral_r', title=None
         jax.random.PRNGKey(0), mean_values.shape[0], shape=(n_samples,), replace=True
     )
     mean_values = mean_values[choice]
-    maxval = 10e4
-    minval = 1e-4
+    maxval = 10e3
+    minval = 1e-5
 
     # 1 subplot per prot_diff
     fig, axes = plt.subplots(len(prot_diff), 1, figsize=(10, 9 * len(prot_diff)))
@@ -229,7 +229,7 @@ def model_heatmap(model, y, resolution=0.5):
         figscale=0.6,
         stat_columns=['mean'],
         z_protein=z_prot.pop(),
-        lims={'mean': (1e0, 1e8)},
+        lims={'mean': (1e-3, 1e3)},
         title=f'{model.network.name} data',
         subtitle=f'{len(y)} data points',
         show=False,
@@ -366,7 +366,8 @@ def heatmap(
             ):
                 item.set_fontname(font)
 
-        ax.title.set_fontname('Arial')
+        # if 'Arial'  in plt.rcParams['font.family']:
+            # ax.title.set_fontname('Arial')
         ax.title.set_fontweight('light')
         ax.title.set_fontstretch('expanded')
 
@@ -378,7 +379,7 @@ def heatmap(
         fontsize=fontsize * 1.8,
         fontweight='light',
         fontstretch='expanded',
-        fontname='Arial',
+        # fontname='Arial',
         y=0.99,
     )
 
@@ -393,7 +394,7 @@ def heatmap(
             fontsize=fontsize * 1.2,
             fontweight='light',
             fontstretch='expanded',
-            fontname='Arial',
+            # fontname='Arial',
             horizontalalignment='center',
             verticalalignment='top',
             style='italic',

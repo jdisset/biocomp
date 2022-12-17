@@ -380,14 +380,14 @@ def train_models(
         params, opt_state = updt['params'], updt['opt']
         return (params, opt_state), updt
 
-    def epoch_step(epoch_key):
+    def epoch_step(start_params, start_opt_state, epoch_key):
         batch_keys = jax.random.split(epoch_key, nbatches)
-        _, epoch_history = jax.lax.scan(
+        (final_params, final_opt_state), epoch_history = jax.lax.scan(
             scannable_step,
-            (params, opt_state),
+            (start_params, start_opt_state),
             (jnp.arange(len(x_batches)), x_batches, y_batches, batch_keys),
         )
-        return epoch_history
+        return final_params, final_opt_state, epoch_history
 
     step = epoch_step
 
@@ -396,7 +396,7 @@ def train_models(
         print('Compiling training step')
         t0 = time.time()
         step = jit(step)
-        lowered = step.lower(key)
+        lowered = step.lower(params, opt_state, key)
         compiled = lowered.compile()
         step = compiled
         print(f'Compiled in {time.time() - t0:.2f}s')
@@ -414,10 +414,12 @@ def train_models(
     print('Beginning training')
 
     for i, epoch_key in enumerate(jax.random.split(key, cfg['epochs']), 1):
-        epoch_history = step(epoch_key)
+        params, opt_state, epoch_history = step(params, opt_state, epoch_key)
+
         for t, l in loggers:
             if i % t == 0 or i == cfg['epochs']:
                 l(i, cfg, epoch_history=epoch_history, nbatches=nbatches)
+
 
     return epoch_history
 
