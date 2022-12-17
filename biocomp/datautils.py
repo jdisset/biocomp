@@ -41,7 +41,9 @@ def binstats_nbins(data, bin_columns, stat_column, nbins=20, log=True, stats=["m
     return df, bins
 
 
-def binstats(data, output_protein_names, bin_proteins=None, resolution=0.5, bin_min=1e-12, bin_max=None):
+def binstats(
+    data, output_protein_names, bin_proteins=None, resolution=0.5, bin_min=1e-12, bin_max=None
+):
     """Calculate statistics (mean, count), for each bin in len(bin_proteins) dimensions."""
     if bin_proteins is None:
         bin_proteins = output_protein_names
@@ -70,7 +72,7 @@ def binstats(data, output_protein_names, bin_proteins=None, resolution=0.5, bin_
     last_bin = np.array(last_bin)
 
     nbins = np.ceil(np.log10(last_bin / first_bin) / resolution).astype(int)
-    #TODO: check why I have to do this???:
+    # TODO: check why I have to do this???:
     nbins = np.maximum(nbins, 1)
     bin_edges = [
         np.geomspace(first_bin[i], last_bin[i], nbins[i] + 1) for i in range(len(first_bin))
@@ -159,6 +161,7 @@ class MyFormatter(string.Formatter):
 
 fmt = MyFormatter()
 
+
 def model_parallel_coords(model, y, n_samples=500, cmap='Spectral_r', title=None):
     import matplotlib.colors as colors
     import matplotlib.pyplot as plt
@@ -181,7 +184,7 @@ def model_parallel_coords(model, y, n_samples=500, cmap='Spectral_r', title=None
     minval = 1e-4
 
     # 1 subplot per prot_diff
-    fig, axes = plt.subplots(len(prot_diff), 1, figsize=(10, 9*len(prot_diff)))
+    fig, axes = plt.subplots(len(prot_diff), 1, figsize=(10, 9 * len(prot_diff)))
 
     if len(prot_diff) == 1:
         axes = [axes]
@@ -192,7 +195,7 @@ def model_parallel_coords(model, y, n_samples=500, cmap='Spectral_r', title=None
         # x axis should be each protein name (we display a vertical line for each protein)
         ax.set_xticks(range(len(out_proteins)))
         ax.set_xticklabels(out_proteins, rotation=40)
-        ax.vlines(range(len(out_proteins)), 0, maxval*2, alpha=0.2, color='black')
+        ax.vlines(range(len(out_proteins)), 0, maxval * 2, alpha=0.2, color='black')
 
         # y axis should be the mean value of the bin
         ax.set_yscale('log')
@@ -209,7 +212,7 @@ def model_parallel_coords(model, y, n_samples=500, cmap='Spectral_r', title=None
         cax = divider.append_axes('right', size='5%', pad=0.05)
         fig.colorbar(sm, cax=cax, orientation='vertical', label=z_prot)
 
-        ax.set_ylim(minval, maxval*2)
+        ax.set_ylim(minval, maxval * 2)
         ax.set_title(f'{model.network.name if title is None else title}')
 
     return fig, axes
@@ -232,6 +235,7 @@ def model_heatmap(model, y, resolution=0.5):
         show=False,
     )
     return fig, ax
+
 
 def heatmap(
     statdf,
@@ -350,18 +354,17 @@ def heatmap(
         cax.tick_params(labelsize=fontsize)
         cax.yaxis.get_offset_text().set_fontsize(fontsize)
 
-        for item in (
-            [ax.xaxis.label, ax.yaxis.label]
-            + ax.get_xticklabels()
-            + ax.get_yticklabels()
-            + cax.get_xticklabels()
-            + cax.get_yticklabels()
-        ):
-            item.set_fontname(font)
-
         font = 'Roboto Mono Light for Powerline'
         if font in plt.rcParams['font.family']:
             cax.yaxis.get_offset_text().set_fontname(font)
+            for item in (
+                [ax.xaxis.label, ax.yaxis.label]
+                + ax.get_xticklabels()
+                + ax.get_yticklabels()
+                + cax.get_xticklabels()
+                + cax.get_yticklabels()
+            ):
+                item.set_fontname(font)
 
         ax.title.set_fontname('Arial')
         ax.title.set_fontweight('light')
@@ -485,8 +488,13 @@ def make_batches_dict(Y, n_batches, rng_key, models):
     return x_batches, y_batches
 
 
-
-def make_batches_uniform_sampling(Y:list[np.ndarray], batch_size:int, rng_key, models:list[bc.ComputeGraphModel], total_size=None):
+def make_batches_uniform_sampling(
+    Y: list[np.ndarray],
+    batch_size: int,
+    rng_key,
+    models: list[bc.ComputeGraphModel],
+    total_size=None,
+):
     """Split data into batches of equal size, for a list of arrays (one per sample).
     Each array might not have the same size originally, but the batches will
     have the same size and there will be the same amount of batches for Each
@@ -515,8 +523,8 @@ def make_batches_uniform_sampling(Y:list[np.ndarray], batch_size:int, rng_key, m
     y_p = jnp.array([np.pad(y, ((0, 0), (0, n_outputs - y.shape[1]))) for y in ylist])
     x_p = jnp.array([np.pad(x, ((0, 0), (0, n_inputs - x.shape[1]))) for x in xlist])
 
-    y_batches = jnp.array(np.split(y_p[:, :n_batches * batch_size], n_batches, axis=1))
-    x_batches = jnp.array(np.split(x_p[:, :n_batches * batch_size], n_batches, axis=1))
+    y_batches = jnp.array(np.split(y_p[:, : n_batches * batch_size], n_batches, axis=1))
+    x_batches = jnp.array(np.split(x_p[:, : n_batches * batch_size], n_batches, axis=1))
 
     assert y_batches.shape == (n_batches, len(Y), batch_size, n_outputs)
     assert x_batches.shape == (n_batches, len(Y), batch_size, n_inputs)

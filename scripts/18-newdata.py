@@ -157,7 +157,6 @@ def batch(X, Y, batch_size):
         y_batch = Y[:, i * batch_size : (i + 1) * batch_size, :]
         yield x_batch, y_batch
 
-
 def get_batches(X, Y, batch_size):
     # return all the batches at once
     x_batches = []
@@ -727,7 +726,6 @@ plot_predictions_2d(m, best_params, X[0], Y[0])
 plot_predictions_2d(minv, best_params, X[1], Y[1], 'inverse predictions (should be y=x)')
 
 r, d = vmap(m.collect_all_results, in_axes=(None, 0, None))(best_params, X[0], rng)
-
 ngout = r[:, 0]
 
 # scatter case vs rna (X[0][:,0] vs X[0][:,1]), color by 'ngout'

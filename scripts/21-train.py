@@ -83,9 +83,9 @@ cfg = {
     "adam_w_decay": 0.0001,
     "rng_key": np.random.randint(0, 2**32),
     # "rng_key": 11325,
-    "epochs": 5,
+    "epochs": 500,
     "compile_training": True,
-    "batch_size": 2,
+    "batch_size": 7,
     "norm_factor": 1e6,
     "balance_bin_resolution": 0.5,
     "balance_threshold_quantile": 0.4,
@@ -107,8 +107,8 @@ xp = ut.load_xp('E20221124A_ERNbandpassV2', lib)
 rng = jax.random.PRNGKey(cfg['rng_key'])
 models = xp.get_models(node_impl=cfg['node_impl'])
 
-NMODELS = 4
-models = {k: v for k, v in list(models.items())[:NMODELS]}
+# NMODELS = 1
+# models = {k: v for k, v in list(models.items())[:NMODELS]}
 
 X, Y = bc.train.preprocess_data(models, xp.get_Y(models), cfg)
 batch_size = cfg['batch_size']
@@ -116,8 +116,8 @@ x_batches, y_batches = du.make_batches_uniform_sampling(
     Y.values(), batch_size, rng, models.values()
 )
 
-# reduce x_batches to only 100
-x_batches = x_batches[:100]
+# x_batches = x_batches[:3]
+# y_batches = y_batches[:3]
 
 
 #                                                                            }}}
@@ -131,6 +131,8 @@ import wandb as wb
 project = 'bp_train_00'
 
 wb.init(config=cfg, project=project, entity="jdisset", reinit=True)
+print(f"About to train {len(models)} models. wb run {wb.run.name}")
+
 
 def models_data_fig(models, Y):
     for sample, model in models.items():
@@ -147,51 +149,60 @@ def models_data_fig(models, Y):
         yield sample, model, fig, ax
 
 
-def wandb_plot_pred(history, epoch, cfg, models, X, Y, **_):
+def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x_batches), **_):
     if epoch == 0:
         gtruth = []
         for sample, model, fig, ax in models_data_fig(models, Y):
             gtruth.append(wb.Image(fig, caption=f'{model.network.name} ground truth'))
             plt.close(fig)
-        wb.log({'ground truth': gtruth}, step=epoch)
+        wb.log({'ground truth': gtruth})
 
-    params = history['params'][-1]
+    if epoch_history is None:
+        return
+
+    params = bu.get_pytree(epoch_history['params'], nbatches-1)
     jitted_models = {
         s: jit(jax.vmap(partial(m, rng_key=jax.random.PRNGKey(0)), in_axes=(None, 0)))
         for s, m in models.items()
     }
-
     Y_pred = {s: jitted_models[s](params, X[s]) for s in models}
-
     pred = []
     for sample, model, fig, ax in models_data_fig(models, Y_pred):
         pred.append(wb.Image(fig, caption=f'{model.network.name} predicted'))
         plt.close(fig)
 
-    wb.log({'prediction': pred}, step=epoch)
+    wb.log({'prediction': pred})
 
 
-def wandb_log_epoch(history, epoch, cfg, **_):
-    loss = float(history['loss'][-1])
-    params = history['params'][-1]
-    wb.log({'loss': loss}, step=epoch)
-    wb.log({'shared_params': params['shared']}, step=epoch)
-    wb.log({'params': params}, step=epoch)
+def wandb_log_epoch(epoch, cfg, epoch_history=None, nbatches=len(x_batches), **_):
+    if epoch_history is not None:
+        losses = jnp.array(epoch_history['loss'])
+        param_list = bu.param_unstack(epoch_history['params'],len(x_batches))
+        for loss, params in zip(losses, param_list):
+            wb.log({'loss': loss})
+            wb.log({'shared_params': params['shared']})
+            wb.log({'params': params})
 
 
-loggers = {
-    1: bc.train.console_log,
-    1: wandb_log_epoch,
-    1: partial(wandb_plot_pred, models=models, X=X, Y=Y),
-}
+def console_log(epoch, cfg, epoch_history=None, **_):
+    if epoch_history is not None:
+        loss = jnp.array(epoch_history['loss'])
+        avg = jnp.mean(loss)
+        std = jnp.std(loss)
+        lmin, lmax = jnp.min(loss), jnp.max(loss)
+        print(f'[{epoch}/{cfg["epochs"]}] loss: {avg:.3f} ± {std:.3f} [min {lmin:.3f}, max {lmax:.3f}]')
+
+
+loggers = [
+    (1, console_log),
+    (1, wandb_log_epoch),
+    (1, partial(wandb_plot_pred, models=models, X=X, Y=Y)),
+]
 
 train_history = bc.train.train_models(models.values(), x_batches, y_batches, cfg, loggers)
-wb.log({'train_history': train_history})
-du.save(train_history, 'train_history.pkl')
-print('done')
 
+
+print('done')
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
-plt.rcParams['font.family']

@@ -161,7 +161,7 @@ def wandb_log_epoch(history, epoch, cfg, project=None, **_):
     wb.log({'shared_params': params['shared']}, step=epoch)
 
 
-def wandb_log_plot(history, epoch, cfg,  models, X, Y, project=None,**_):
+def wandb_log_plot(history, epoch, cfg, models, X, Y, project=None, **_):
 
     if epoch == 0 and project is not None:
         wb.init(config=cfg, project=project, entity="jdisset", reinit=False)
@@ -234,6 +234,7 @@ def manual_save(history, epoch, cfg, save_path=None, loss_history=None, **_):
     if loss_history is not None:
         du.save(loss_history, f'{save_path}/loss_history.pkl', overwrite=True)
 
+
 def log_w_replicates(history, epoch, cfg, **_):
     loss = history['loss'][-1]
     losses = {
@@ -245,6 +246,7 @@ def log_w_replicates(history, epoch, cfg, **_):
     print(
         f'epoch: {epoch}, loss: \n - mean: {losses["mean"]:.3f}, std: {losses["std"]:.3f}, min: {losses["min"]:.3f}, max: {losses["max"]:.3f}'
     )
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -282,7 +284,7 @@ def train_models(
     x_batches: np.ndarray,
     y_batches: np.ndarray,
     config: dict = DEFAULT_CFG,
-    loggers: dict[int, Callable] = None,
+    loggers: tuple[int, Callable] = None,
 ):
 
     cfg = {**DEFAULT_CFG, **config}
@@ -300,10 +302,9 @@ def train_models(
     loss_f = cfg['loss_function']
     assert callable(loss_f), f"loss_f must be callable, not {type(loss_f)}"
 
-
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                           --     init     --
-    #···············································································
+    # ···············································································
 
     def init(key):
         ikeys = jax.random.split(key, len(models))
@@ -315,21 +316,13 @@ def train_models(
         dynamic, _ = ut.split_params(params, cfg['static_params'])
         opt_state = optimizer.init(dynamic)
 
-        history = {
-            'params': [params],
-            'opt': [opt_state],
-            'grad': [None],
-            'loss': [float('inf')],
-            'magnitude': [None],
-        }
-
-        return params, constraints, opt_state, history
+        return params, constraints, opt_state
 
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
 
     key = jax.random.PRNGKey(cfg['rng_key'])
-    params, constraints, opt_state, history = init(key)
+    params, constraints, opt_state = init(key)
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                       --     training step     --
@@ -377,14 +370,33 @@ def train_models(
         }
         return res
 
-    step = training_step
+    nbatches = len(x_batches)
+
+    @ut.progress_scan(nbatches, message='Training model')
+    def scannable_step(carry, i_x_y_k):
+        params, opt_state = carry
+        i, x, y, k = i_x_y_k
+        updt = training_step(params, opt_state, k, x, y)
+        params, opt_state = updt['params'], updt['opt']
+        return (params, opt_state), updt
+
+    def epoch_step(epoch_key):
+        batch_keys = jax.random.split(epoch_key, nbatches)
+        _, epoch_history = jax.lax.scan(
+            scannable_step,
+            (params, opt_state),
+            (jnp.arange(len(x_batches)), x_batches, y_batches, batch_keys),
+        )
+        return epoch_history
+
+    step = epoch_step
 
     if cfg['compile_training']:
         import time
         print('Compiling training step')
         t0 = time.time()
         step = jit(step)
-        lowered = step.lower(params, opt_state, key, x_batches[0], y_batches[0])
+        lowered = step.lower(key)
         compiled = lowered.compile()
         step = compiled
         print(f'Compiled in {time.time() - t0:.2f}s')
@@ -393,43 +405,21 @@ def train_models(
     ## ─────────────────────────────────────────────────────────────────────────────
 
     if loggers is None:
-        loggers = {}
+        loggers = []
 
     print('Initial logger calls')
-    for _, l in loggers.items():
-        l(history, 0, cfg)
+    for _, l in loggers:
+        l(0, cfg)
 
     print('Beginning training')
+
     for i, epoch_key in enumerate(jax.random.split(key, cfg['epochs']), 1):
-        batch_keys = jax.random.split(epoch_key, len(x_batches))
-        magnitudes = []
-        for x, y, k in tqdm(zip(x_batches, y_batches, batch_keys), total=len(x_batches), desc=f'Epoch {i}'):
-            updt = step(params, opt_state, k, x, y)
-            params, opt_state = updt['params'], updt['opt']
-            magnitudes.append(updt['magnitude'])
-            avgmag = jnp.mean(jnp.array(magnitudes))
-
-            if  avgmag > 1e6:
-                print('Gradient exploded. Aborting training')
-                return history
-            elif avgmag < 1e-12:
-                if i > 1:
-                    print('Gradient vanished. Aborting training')
-                    return history
-                else:
-                    print('Null gradient when starting. Reinitializing.')
-                    params, constraints, opt_state, history = init(k)
-                    magnitudes = []
-
-
-        history = {k: v + [updt[k]] for k, v in history.items()}
-        history['params'][-1] = params_to_numpy(history['params'][-1])
-
-        for t, l in loggers.items():
+        epoch_history = step(epoch_key)
+        for t, l in loggers:
             if i % t == 0 or i == cfg['epochs']:
-                l(history, i, cfg)
+                l(i, cfg, epoch_history=epoch_history, nbatches=nbatches)
 
-    return history
+    return epoch_history
 
 
 #                                                                            }}}

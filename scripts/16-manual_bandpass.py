@@ -111,7 +111,6 @@ params, constraints = model.init(rng)
 
 # find all the extra values for sequestron_ERN in model.network.compute_graph
 extra = model.network.compute_graph[model.network.compute_graph.type == 'sequestron_ERN'].extra.to_list()
-
 # [ut.plot_node('sequestron_ERN', params, model, vlim=(-10, 100), n_inputs=2, mode='3d', extra_args=ex) for ex in extra]
 ut.plot_node('translation', params, model)
 

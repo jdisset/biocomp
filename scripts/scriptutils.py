@@ -14,37 +14,22 @@ from types import SimpleNamespace
 import biocomp as bc
 import pickle
 from PIL import Image
-
+import biocomp.datautils as du
 import rich
 from rich.console import Console
 from rich.progress import track
-
 from typing import List
-
 
 class ddict(dict):
     def __getattr__(*args):
         val = dict.get(*args)
         return ddict(val) if type(val) is dict else val
-
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
-
 def is_interactive():
-    try:
-        shell = get_ipython().__class__.__name__
-        if shell == 'ZMQInteractiveShell':
-            return True  # Jupyter notebook or qtconsole
-        elif shell == 'TerminalInteractiveShell':
-            return True  # Terminal running IPython
-        if not hasattr(sys, 'ps1'):
-            return True
-        else:
-            return False  # Other type (?)
-    except NameError:
-        return False  # Probably standard Python interpreter
-
+    import matplotlib as mpl
+    return mpl.is_interactive()
 
 DEFAULT_DATA_PATH = Path("/Users/jeandisset/Dropbox (MIT)/Biocomp/")
 DEFAULT_XP_PATH = DEFAULT_DATA_PATH / "Experiments"
@@ -85,7 +70,7 @@ def list_xp(xp_path=DEFAULT_XP_PATH):
 
 
 def load_lib(lib_path=DEFAULT_LIB_PATH):
-    return load(lib_path)
+    return du.load(lib_path)
 
 
 from matplotlib.colors import LinearSegmentedColormap
