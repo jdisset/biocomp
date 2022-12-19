@@ -333,17 +333,28 @@ def train_models(
         assert len(X) == nmodels, f"Expected {nmodels} models, got {X.shape}"
         assert len(Y) == nmodels
         params = ut.assemble_params(dynamic, static)
-
         K = jax.random.split(rng_key, nmodels)
-
         res = jnp.array(
             [
                 loss_f(vmap(partial(m, params, rng_key=k))(x[:, : m.n_inputs]), y, m.n_outputs)
                 for m, x, y, k in zip(models, X, Y, K)
             ]
         ).mean()
-
         return res
+
+    # def model_loss(m, params, x, y, k):
+        # return loss_f(vmap(partial(m, params, rng_key=k))(x[:, : m.n_inputs]), y, m.n_outputs)
+    # mlosses = [partial(model_loss, m) for m in models]
+
+    # def loss_func(dynamic, static, X, Y, rng_key): # using jax.lax.map
+        # nmodels = len(models)
+        # assert len(X) == nmodels, f"Expected {nmodels} models, got {X.shape}"
+        # assert len(Y) == nmodels
+        # params = ut.assemble_params(dynamic, static)
+        # K = jax.random.split(rng_key, nmodels)
+        # vmap_functions = vmap(lambda i,p,x,y,k: jax.lax.switch(i, mlosses, p,x,y,k), in_axes=(0, None, 0, 0, 0))
+        # res = jnp.array(vmap_functions(jnp.arange(nmodels), params, X, Y, K)).mean()
+        # return res
 
     def flatten_tree(g):
         leaves = jax.tree_util.tree_leaves(g)
