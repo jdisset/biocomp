@@ -3,13 +3,17 @@ wandb
 __pycache__/
 __*/
 training_results/
+logs/
+.parcel-cache/
+*.pkl
+
 *.py[cod]
 *$py.class
 *package-lock.json
 *.pickle
 # C extensions
 *.so
-logs/
+
 
 # Distribution / packaging
 .Python
