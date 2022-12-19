@@ -9,6 +9,7 @@ training_results/
 *.pickle
 # C extensions
 *.so
+logs/
 
 # Distribution / packaging
 .Python

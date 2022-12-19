@@ -33,8 +33,8 @@ T_SIZE = 64
 T_DEPTH = 3
 I_SIZE = 64
 I_DEPTH = 2
-I_OUT = 16
-ERN_SIZE = 64
+I_OUT = 8
+ERN_SIZE = 128
 ERN_DEPTH = 3
 MEFL_SIZE = 64
 MEFL_DEPTH = 3
@@ -82,9 +82,9 @@ cfg = {
     "optimizer": "adam",
     "learning_rate": 0.0001,
     "adam_w_decay": 0.0001,
-    "rng_key": np.random.randint(0, 2**32),
+    "rng_key": np.random.randint(0, 2 ** 32),
     # "rng_key": 11325,
-    "epochs": 5,
+    "epochs": 200,
     "compile_training": True,
     "batch_size": 8,
     "norm_factor": 1e7,
@@ -92,6 +92,7 @@ cfg = {
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 40,
     "node_impl": node_impl,
+    "nmodels":5,
 }
 
 lib = ut.load_lib()
@@ -108,17 +109,24 @@ xp = ut.load_xp('E20221124A_ERNbandpassV2', lib)
 rng = jax.random.PRNGKey(cfg['rng_key'])
 models = xp.get_models(node_impl=cfg['node_impl'])
 
-# NMODELS = 1
-# models = {k: v for k, v in list(models.items())[:NMODELS]}
+
+def pick_n_random_models(n, models):
+    # select n models from models (which is a dict of modelname -> model)
+    keys = list(models.keys())
+    np.random.shuffle(keys)
+    return {k: models[k] for k in keys[:n]}
+
+
+models = pick_n_random_models(cfg['nmodels'], models)
+
+print(f'Picked models: {list(models.keys())}')
+
 
 X, Y = bc.train.preprocess_data(models, xp.get_Y(models), cfg)
 batch_size = cfg['batch_size']
 x_batches, y_batches = du.make_batches_uniform_sampling(
     Y.values(), batch_size, rng, models.values()
 )
-
-# x_batches = x_batches[:3]
-# y_batches = y_batches[:3]
 
 
 #                                                                            }}}
@@ -129,10 +137,14 @@ x_batches, y_batches = du.make_batches_uniform_sampling(
 # ···············································································
 import wandb as wb
 
-project = 'bp_train_00'
+project = 'bp_train_subset_00'
+# project = None
 
-wb.init(config=cfg, project=project, entity="jdisset", reinit=True)
-print(f"About to train {len(models)} models. wb run {wb.run.name}")
+if project is not None:
+    wb.init(config=cfg, project=project, entity="jdisset", reinit=True)
+
+print(f"About to train {len(models)} models.")
+
 
 def models_data_fig(models, Y):
     for sample, model in models.items():
@@ -158,16 +170,11 @@ zero_rng = jax.random.PRNGKey(0)
 indices = {k: jax.random.choice(zero_rng, v.shape[0], (nsubsamples,)) for k, v in X.items()}
 X_samples = {k: v[indices[k]] for k, v in X.items()}
 Y_samples = {k: v[indices[k]] for k, v in Y.items()}
-# maxvals = {k: v.max() for k, v in X.items()}
-# minvals = {k: v.min() for k, v in X.items()}
 
 jitted_models = {
-    s: jit(jax.vmap(partial(m, rng_key=zero_rng), in_axes=(None, 0)))
-    for s, m in models.items()
+    s: jit(jax.vmap(partial(m, rng_key=zero_rng), in_axes=(None, 0))) for s, m in models.items()
 }
 
-for sample, model, fig, ax in models_data_fig(models, Y):
-    pass
 
 def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x_batches), **_):
     if epoch == 0:
@@ -181,7 +188,7 @@ def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x
         return
 
     print(f'Logging predictions for epoch {epoch}')
-    params = bu.get_pytree(epoch_history['params'], nbatches-1)
+    params = bu.get_pytree(epoch_history['params'], nbatches - 1)
     Y_pred = {s: jitted_models[s](params, X[s]) for s in models}
     pred = []
     for sample, model, fig, ax in models_data_fig(models, Y_pred):
@@ -191,18 +198,17 @@ def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x
     wb.log({'prediction': pred})
     print('Done logging predictions')
 
+
 def wandb_log_epoch(epoch, cfg, epoch_history=None, nbatches=len(x_batches), **_):
     if epoch_history is not None:
         print(f"Logging epoch {epoch}")
         losses = np.array(epoch_history['loss'])
-        param_list = bu.param_unstack(epoch_history['params'],len(x_batches))
-        for loss, params in zip(losses, param_list):
-            wb.log({'loss': loss})
-            wb.log({'shared_params': params['shared']})
-            wb.log({'params': params})
-        del param_list
+        for loss in losses:
+            wb.log({'loss': loss}, commit=False)
+        wb.log({'loss': losses[-1]}, commit=True)
         del losses
         print(f"Done")
+
 
 def console_log(epoch, cfg, epoch_history=None, **_):
     if epoch_history is not None:
@@ -210,13 +216,32 @@ def console_log(epoch, cfg, epoch_history=None, **_):
         avg = np.mean(loss)
         std = np.std(loss)
         lmin, lmax = jnp.min(loss), jnp.max(loss)
-        print(f'[{epoch}/{cfg["epochs"]}] loss: {avg:.3f} ± {std:.3f} [min {lmin:.3f}, max {lmax:.3f}]')
+        print(
+            f'[{epoch}/{cfg["epochs"]}] loss: {avg:.3f} ± {std:.3f} [min {lmin:.3f}, max {lmax:.3f}]'
+        )
 
-loggers = [
-    (1, console_log),
-    (1, wandb_log_epoch),
-    (10, partial(wandb_plot_pred, models=models, X=X_samples, Y=Y_samples)),
-]
+
+save_dir = '../__out' if project is None else f'../__out/{wb.run.name}'
+
+
+def local_save(epoch, cfg, epoch_history=None, **_):
+    if epoch_history is not None and epoch <= 5:
+        print(f"Saving epoch {epoch} to disk")
+        du.save(epoch_history, f'{save_dir}/epoch_{epoch}.pkl')
+        print(f"Done")
+
+
+if project is not None:
+    loggers = [
+        (1, console_log),
+        (1, wandb_log_epoch),
+        (1, local_save),
+        (10, partial(wandb_plot_pred, models=models, X=X_samples, Y=Y_samples)),
+    ]
+else:
+    loggers = [
+        (1, console_log),
+    ]
 
 train_history = bc.train.train_models(models.values(), x_batches, y_batches, cfg, loggers)
 
