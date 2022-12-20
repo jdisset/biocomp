@@ -10,7 +10,7 @@ DEFAULT_ACTIVATION = jax.nn.leaky_relu
 def dense_layer(input_values, output_size, get_param, key, name):
     input_size = 1 if input_values.shape == () else input_values.shape[0]
     w = get_param(
-        f'{name}_w', init=ut.glorot_initializer(key, (input_size, output_size)), shared=True
+        f'{name}_w', init=ut.he_initializer(key, (input_size, output_size)), shared=True
     )
     b = get_param(f'{name}_b', init=lambda: jnp.zeros((output_size,)), shared=True)
     res = jnp.dot(input_values, w) + b

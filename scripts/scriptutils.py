@@ -643,6 +643,7 @@ def plot_node(
     import jax.numpy as jnp
 
     quantized_per_type = model.get_quantized_parameters_per_node_type(params)
+    print(quantized_per_type)
 
     def get_q(__, v, **_):
         return v

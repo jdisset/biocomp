@@ -154,7 +154,6 @@ def get_quantized(
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                  --     ComputeGraphModel class     --
 # ···············································································
@@ -397,7 +396,6 @@ class ComputeGraphModel:
 
         assert set(mapping.keys()) == set(range(len(mapping.keys())))
         assert len(mapping.keys()) == len(set(mapping.values()))
-
         return mapping
 
     def get_quantized_parameters_per_node_type(self, params):
@@ -408,10 +406,13 @@ class ComputeGraphModel:
         """
         node_dict = self.network.get_compute_types()
         params_per_type = {k: dict() for k in node_dict.keys()}
+        pnode = params['node']
+        if self.node_namespace is not None:
+            pnode = pnode[self.node_namespace]
         for node_type, node_ids in node_dict.items():
             for node_id in node_ids:
-                if node_id in params['node'].keys():
-                    for pname, v in params['node'][node_id].items():
+                if node_id in pnode.keys():
+                    for pname, v in pnode[node_id].items():
                         if pname in params_per_type[node_type].keys():
                             params_per_type[node_type][pname].update({node_id: v})
                         else:
@@ -432,6 +433,6 @@ class ComputeGraphModel:
         res
         return res
 
-
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+

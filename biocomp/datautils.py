@@ -42,9 +42,16 @@ def binstats_nbins(data, bin_columns, stat_column, nbins=20, log=True, stats=["m
 
 
 def binstats(
-    data, output_protein_names, bin_proteins=None, resolution=0.5, bin_min=1e-12, bin_max=None
+    data,
+    output_protein_names,
+    bin_proteins=None,
+    resolution=0.5,
+    bin_min=1e-12,
+    bin_max=None,
+    force_minmax=False,
 ):
     """Calculate statistics (mean, count), for each bin in len(bin_proteins) dimensions."""
+    # force minmax willl make sure the bins start at bin_min and end at bin_max. Otherwise bin_min/max is used as a upper/lower bound
     if bin_proteins is None:
         bin_proteins = output_protein_names
     bin_axisid = [output_protein_names.index(p) for p in bin_proteins]
@@ -52,9 +59,15 @@ def binstats(
     VMAX_EPSILON = 10.0 ** (-POWER_RANGE)
     vmin, vmax = data[:, bin_axisid].min(axis=0), data[:, bin_axisid].max(axis=0) + VMAX_EPSILON
     if bin_min is not None:
-        vmin = np.maximum(vmin, bin_min)
+        if force_minmax:
+            vmin = np.ones_like(vmin) * bin_min
+        else:
+            vmin = np.maximum(vmin, bin_min)
     if bin_max is not None:
-        vmax = np.minimum(vmax, bin_max)
+        if force_minmax:
+            vmax = np.ones_like(vmax) * bin_max
+        else:
+            vmax = np.minimum(vmax, bin_max)
     # we want to bin the data using logaritmic bins with a fixed resolution, not a specific number of bins
     powers = 10.0 ** np.arange(-POWER_RANGE, POWER_RANGE, resolution)
 
@@ -162,7 +175,9 @@ class MyFormatter(string.Formatter):
 fmt = MyFormatter()
 
 
-def model_parallel_coords(model, y, n_samples=500, cmap='Spectral_r', title=None):
+def model_parallel_coords(
+    model, y, n_samples=500, cmap='Spectral_r', title=None, maxval=1e3, minval=1e-5
+):
     import matplotlib.colors as colors
     import matplotlib.pyplot as plt
     from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -180,8 +195,6 @@ def model_parallel_coords(model, y, n_samples=500, cmap='Spectral_r', title=None
         jax.random.PRNGKey(0), mean_values.shape[0], shape=(n_samples,), replace=True
     )
     mean_values = mean_values[choice]
-    maxval = 10e3
-    minval = 1e-5
 
     # 1 subplot per prot_diff
     fig, axes = plt.subplots(len(prot_diff), 1, figsize=(10, 9 * len(prot_diff)))
@@ -218,7 +231,113 @@ def model_parallel_coords(model, y, n_samples=500, cmap='Spectral_r', title=None
     return fig, axes
 
 
-def model_heatmap(model, y, resolution=0.5):
+def model_heatmap(
+    model,
+    ydata,
+    inner_resolution=0.5,
+    outer_resolution=1,
+    base_size=10,
+    mincount=300,
+    z_prot=None,
+    lims=(1e-4, 1e2),
+    title=None,
+):
+    """can be used to plot heatmaps for a model with up to 4 inputs"""
+    out_proteins = model.get_output_proteins()
+    in_proteins = model.get_inverted_input_proteins()
+    if z_prot is None:
+        z_prot = set(out_proteins) - set(in_proteins)
+        z_prot = list(z_prot)[0]
+
+    # we have more than 2 in_proteins: we will plot an array of heatmaps
+    # for 3 in_proteins, we will have only one axis of groups
+    # for 4 in_proteins, we will have 2 axes of groups
+
+    import itertools
+
+    n_in_proteins = len(in_proteins)
+    axes_proteins = in_proteins[: n_in_proteins - 2]
+    ax_stats = [
+        binstats(ydata, out_proteins, bin_proteins=[axp], resolution=outer_resolution)
+        for axp in axes_proteins
+    ]
+    group_indices = [s[s['count'] > mincount]['indices'] for s, _ in ax_stats]
+    group_mean = [
+        s[s['count'] > mincount][(axp, 'mean')] for axp, (s, _) in zip(axes_proteins, ax_stats)
+    ]
+
+    axes_len = [len(g) for g in group_mean]
+    n_axes = len(axes_len)
+
+    if n_axes == 1:
+        fig, axes = plt.subplots(axes_len[0], 1, figsize=(base_size, base_size * axes_len[0]))
+        axes = axes.flatten()
+    elif n_axes == 2:
+        fig, axes = plt.subplots(
+            axes_len[0], axes_len[1], figsize=(base_size * axes_len[1], base_size * axes_len[0])
+        )
+        axes = axes.flatten()
+    elif n_axes == 0:
+        fig, axes = plt.subplots(1, 1, figsize=(base_size, base_size))
+        axes = [axes]
+    else:
+        raise ValueError(f'Cannot plot {n_axes} axes')
+
+    bin_prots = set(in_proteins) - set(axes_proteins)
+
+    ax_prot_ranges = dict()
+    for i, (ax, indices, mean) in enumerate(
+        zip(axes, itertools.product(*group_indices), itertools.product(*group_mean))
+    ):
+        data = ydata[indices]
+        ax_prot_ranges[i] = [
+            (data[:, out_proteins.index(p)].min(), data[:, out_proteins.index(p)].max())
+            for p in axes_proteins
+        ]
+        ax_stats, ax_bins = binstats(
+            data,
+            out_proteins,
+            bin_proteins=bin_prots,
+            resolution=inner_resolution,
+            bin_min=1e-5,
+            bin_max=1e3,
+            force_minmax=True,
+        )
+        heatmap(
+            ax_stats,
+            ax_bins,
+            axes=[ax],
+            stat_columns=['mean'],
+            z_protein=z_prot,
+            lims={'mean': lims},
+            show=False,
+            count_threshold=4,
+        )
+        # remove axis labels except for the last row and first column
+        if n_axes == 1 and i < axes_len[0] - 1:
+            ax.set_xlabel('')
+        elif n_axes == 2:
+            if i % axes_len[1] != 0:
+                ax.set_ylabel('')
+            if i // axes_len[1] != axes_len[0] - 1:
+                ax.set_xlabel('')
+
+        axtitle = ''
+        if n_axes > 0:
+            axtitle = f'{axes_proteins[0]}={mean[0]:.2f}'
+        if n_axes == 2:
+            axtitle += f', {axes_proteins[1]}={mean[1]:.2f}'
+        ax.set_title(axtitle)
+
+    if title is None:
+        title = f'Heatmap for {z_prot}'
+
+    fig.suptitle(title)
+
+    return fig, axes
+
+
+def model_heatmap_old(model, y, resolution=0.5):
     out_proteins = model.get_output_proteins()
     in_proteins = model.get_inverted_input_proteins()
     stats, bins = binstats(y, out_proteins, in_proteins, resolution=resolution)
@@ -240,6 +359,8 @@ def model_heatmap(model, y, resolution=0.5):
 def heatmap(
     statdf,
     bins,
+    fig=None,
+    axes=None,
     stat_columns=['mean'],
     z_protein=None,
     lims={},
@@ -259,9 +380,15 @@ def heatmap(
 
     nstats = len(stat_columns)
     figsize = (figscale * 10 * nstats + (nstats - 1) * 4 * figscale, figscale * 10)
-    fig, axes = plt.subplots(1, nstats, figsize=figsize)
-    if nstats == 1:
-        axes = [axes]
+    assert len(axes) == nstats
+
+    if axes is None:
+        assert fig is None
+        fig, axes = plt.subplots(1, nstats, figsize=figsize)
+        if nstats == 1:
+            axes = [axes]
+    else:
+        assert len(axes) == nstats
 
     df = statdf[statdf['count'] >= count_threshold]
 
@@ -311,17 +438,19 @@ def heatmap(
         # add white grid lines to separate bins
         ax.set_xticks(np.arange(len(xbin) + 1) - 0.5, minor=True)
         ax.set_yticks(np.arange(len(ybin) + 1) - 0.5, minor=True)
-        grid_thickness = 60.0 * figscale / max(len(bins), 15)
+        grid_thickness = 50.0 * figscale / max(len(bins), 15)
         if grid_thickness > 0.75:
-            grid_thickness = max(1.25, grid_thickness)
+            grid_thickness = max(1.00, grid_thickness)
             ax.grid(which='minor', axis='both', linestyle='-', color='w', linewidth=grid_thickness)
         ax.tick_params(which='minor', bottom=False, left=False)
 
         tick_freq = max(1, int(len(xbin) / 7))
         ax.set_xticks(np.arange(len(xbin))[::tick_freq], minor=False)
         ax.set_yticks(np.arange(len(ybin))[::tick_freq], minor=False)
-        xl = [f"{x:.0f}" if x < 100 else fmt.format("{:m}", x) for x in xbin[::tick_freq]]
-        yl = [f"{x:.0f}" if x < 100 else fmt.format("{:m}", x) for x in ybin[::tick_freq]]
+        # xl = [f"{x:.0f}" if x < 100 else fmt.format("{:m}", x) for x in xbin[::tick_freq]]
+        # yl = [f"{x:.0f}" if x < 100 else fmt.format("{:m}", x) for x in ybin[::tick_freq]]
+        xl = [fmt.format("{:m}", x) for x in xbin[::tick_freq]]
+        yl = [fmt.format("{:m}", x) for x in ybin[::tick_freq]]
         ax.set_xticklabels(xl, minor=False)
         ax.set_yticklabels(yl, minor=False)
 
@@ -329,61 +458,62 @@ def heatmap(
         for spine in ax.spines.values():
             spine.set_visible(False)
 
-        width = ax.get_position().width
-        height = ax.get_position().height
-        cax = fig.add_axes(
-            [
-                ax.get_position().x1 + 0.02 * figscale,
-                ax.get_position().y0 + height * 0.25,
-                0.017 * figscale,
-                height / 2,
-            ]
-        )
-        from matplotlib.ticker import LogFormatterSciNotation
+        if fig is not None:
+            width = ax.get_position().width
+            height = ax.get_position().height
+            cax = fig.add_axes(
+                [
+                    ax.get_position().x1 + 0.02 * figscale,
+                    ax.get_position().y0 + height * 0.25,
+                    0.017 * figscale,
+                    height / 2,
+                ]
+            )
+            from matplotlib.ticker import LogFormatterSciNotation
 
-        cb_format = None
-        if norm is not None:
-            cb_format = LogFormatterSciNotation()
-        fig.colorbar(im, cax=cax, format=cb_format)
+            cb_format = None
+            if norm is not None:
+                cb_format = LogFormatterSciNotation()
+            fig.colorbar(im, cax=cax, format=cb_format)
+            cax.tick_params(labelsize=fontsize)
+            cax.yaxis.get_offset_text().set_fontsize(fontsize)
+            font = 'Roboto Mono Light for Powerline'
+            if font in plt.rcParams['font.family']:
+                cax.yaxis.get_offset_text().set_fontname(font)
+                for item in (
+                    [ax.xaxis.label, ax.yaxis.label]
+                    + ax.get_xticklabels()
+                    + ax.get_yticklabels()
+                    + cax.get_xticklabels()
+                    + cax.get_yticklabels()
+                ):
+                    item.set_fontname(font)
 
         # set all font sizes
         ax.tick_params(labelsize=fontsize)
         ax.title.set_fontsize(fontsize * 1.4)
         ax.xaxis.label.set_fontsize(fontsize)
         ax.yaxis.label.set_fontsize(fontsize)
-        cax.tick_params(labelsize=fontsize)
-        cax.yaxis.get_offset_text().set_fontsize(fontsize)
-
-        font = 'Roboto Mono Light for Powerline'
-        if font in plt.rcParams['font.family']:
-            cax.yaxis.get_offset_text().set_fontname(font)
-            for item in (
-                [ax.xaxis.label, ax.yaxis.label]
-                + ax.get_xticklabels()
-                + ax.get_yticklabels()
-                + cax.get_xticklabels()
-                + cax.get_yticklabels()
-            ):
-                item.set_fontname(font)
 
         # if 'Arial'  in plt.rcParams['font.family']:
-            # ax.title.set_fontname('Arial')
+        # ax.title.set_fontname('Arial')
         ax.title.set_fontweight('light')
         ax.title.set_fontstretch('expanded')
 
     title = title if title is not None else f'{z_axis} stats'
     # suptitle should be higher than default
 
-    fig.suptitle(
-        title,
-        fontsize=fontsize * 1.8,
-        fontweight='light',
-        fontstretch='expanded',
-        # fontname='Arial',
-        y=0.99,
-    )
+    if fig is not None:
+        fig.suptitle(
+            title,
+            fontsize=fontsize * 1.8,
+            fontweight='light',
+            fontstretch='expanded',
+            # fontname='Arial',
+            y=0.99,
+        )
 
-    if subtitle:
+    if subtitle and fig is not None:
         # increase figure height
         # fig.set_figheight(fig.get_figheight() * 1.1)
         # write smaller, below the title, italic, centered

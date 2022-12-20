@@ -1,5 +1,5 @@
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                          --     imports     --
+# {{{                          --     imports     -
 # ···············································································
 import biocomp as bc
 import matplotlib.pyplot as plt
@@ -84,7 +84,7 @@ cfg = {
     "adam_w_decay": 0.0001,
     "rng_key": np.random.randint(0, 2 ** 32),
     # "rng_key": 11325,
-    "epochs": 200,
+    "epochs": 1000,
     "compile_training": True,
     "batch_size": 8,
     "norm_factor": 1e7,
@@ -92,7 +92,7 @@ cfg = {
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 40,
     "node_impl": node_impl,
-    "nmodels":5,
+    "nmodels":28,
 }
 
 lib = ut.load_lib()
@@ -128,6 +128,50 @@ x_batches, y_batches = du.make_batches_uniform_sampling(
     Y.values(), batch_size, rng, models.values()
 )
 
+# x_batches = x_batches[:100]
+# y_batches = y_batches[:100]
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                        --     stat tools     --
+#···············································································
+def models_data_fig(models, Y):
+    for sample, model in models.items():
+        out_proteins = model.get_output_proteins()
+        in_proteins = model.get_inverted_input_proteins()
+        z_prot = set(out_proteins) - set(in_proteins)
+        if len(out_proteins) >= 4 and len(out_proteins)<=5:
+            fig, ax = du.model_heatmap(model, Y[sample])
+        else:
+            fig, ax = du.model_parallel_coords(model, Y[sample])
+        yield sample, model, fig, ax
+
+@partial(jit, static_argnums=(1,))
+def compstats(v, smooth_win=1):
+        medians = vmap(jnp.median)(v)
+        mins = vmap(jnp.min)(v)
+        maxs = vmap(jnp.max)(v)
+        p20s = vmap(lambda x: jnp.percentile(x, 20))(v)
+        p80s = vmap(lambda x: jnp.percentile(x, 80))(v)
+        if smooth_win > 1:
+            medians = jnp.convolve(medians, jnp.ones(smooth_win) / smooth_win, mode='same')
+            p80s = jnp.convolve(p80s, jnp.ones(smooth_win) / smooth_win, mode='same')
+            p20s = jnp.convolve(p20s, jnp.ones(smooth_win) / smooth_win, mode='same')
+            maxs = jnp.convolve(maxs, jnp.ones(smooth_win) / smooth_win, mode='same')
+            mins = jnp.convolve(mins, jnp.ones(smooth_win) / smooth_win, mode='same')
+        return medians, p20s, p80s, mins, maxs
+
+
+def get_epoch_stats(epoch_data, smooth_win=1):
+    stats = {'grad':{}, 'params':{}}
+    for k, v in epoch_data['grad']['shared'].items():
+        stats['grad'][k] = compstats(v)
+    for k, v in epoch_data['params']['shared'].items():
+        stats['params'][k] = compstats(v)
+    return stats
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -137,7 +181,7 @@ x_batches, y_batches = du.make_batches_uniform_sampling(
 # ···············································································
 import wandb as wb
 
-project = 'bp_train_subset_00'
+project = 'bp_train_full_02'
 # project = None
 
 if project is not None:
@@ -146,35 +190,35 @@ if project is not None:
 print(f"About to train {len(models)} models.")
 
 
-def models_data_fig(models, Y):
-    for sample, model in models.items():
-        out_proteins = model.get_output_proteins()
-        in_proteins = model.get_inverted_input_proteins()
-        z_prot = set(out_proteins) - set(in_proteins)
-        # print(f'{sample}: {in_proteins} -> {out_proteins} [diff:{z_prot}]')
-        if len(z_prot) == 1 and len(in_proteins) == 2:
-            fig, ax = du.model_heatmap(model, Y[sample])
-            plt.show()
-        else:
-            fig, ax = du.model_parallel_coords(model, Y[sample])
-            plt.show()
-        yield sample, model, fig, ax
-
-
 # we take random samples to plot
-nsubsamples = 1000
+# nsubsamples = 1000
 # X_subsamples = {k: jax.random.choice(rng, v, (nsubsamples,)) for k, v in X.items()}
 # let's make it so that we can also take the same samples for Y:
 
 zero_rng = jax.random.PRNGKey(0)
-indices = {k: jax.random.choice(zero_rng, v.shape[0], (nsubsamples,)) for k, v in X.items()}
-X_samples = {k: v[indices[k]] for k, v in X.items()}
-Y_samples = {k: v[indices[k]] for k, v in Y.items()}
+
+# indices = {k: jax.random.choice(zero_rng, v.shape[0], (nsubsamples,)) for k, v in X.items()}
+# X_samples = {k: v[indices[k]] for k, v in X.items()}
+# Y_samples = {k: v[indices[k]] for k, v in Y.items()}
 
 jitted_models = {
     s: jit(jax.vmap(partial(m, rng_key=zero_rng), in_axes=(None, 0))) for s, m in models.items()
 }
 
+import time
+
+save_dir = '../__out' if project is None else f'../__out/{wb.run.name}'
+def local_save(epoch, cfg, epoch_history=None, **_):
+    if epoch_history is None:
+        return
+    t0 = time.time()
+    print(f"Saving epoch {epoch} to disk")
+    if epoch <= 2:
+        du.save(epoch_history, f'{save_dir}/epoch_{epoch}_full.pkl')
+        print(f"Done")
+    stats = get_epoch_stats(epoch_history)
+    du.save(stats, f'{save_dir}/epoch_{epoch}_stats.pkl')
+    print(f"Done in {time.time() - t0:.2f}s")
 
 def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x_batches), **_):
     if epoch == 0:
@@ -187,27 +231,40 @@ def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x
     if epoch_history is None:
         return
 
+    t0 = time.time()
     print(f'Logging predictions for epoch {epoch}')
     params = bu.get_pytree(epoch_history['params'], nbatches - 1)
     Y_pred = {s: jitted_models[s](params, X[s]) for s in models}
     pred = []
-    for sample, model, fig, ax in models_data_fig(models, Y_pred):
-        pred.append(wb.Image(fig, caption=f'{model.network.name} predicted'))
-        plt.close(fig)
+    try:
+        for sample, model, fig, ax in models_data_fig(models, Y_pred):
+            pred.append(wb.Image(fig, caption=f'{model.network.name} predicted'))
+            plt.close(fig)
+    except Exception as e:
+        print(e)
+        print("Failed to plot predictions")
 
     wb.log({'prediction': pred})
-    print('Done logging predictions')
+    print(f'Done logging predictions for epoch {epoch} in {time.time() - t0:.2f}s')
 
 
 def wandb_log_epoch(epoch, cfg, epoch_history=None, nbatches=len(x_batches), **_):
     if epoch_history is not None:
-        print(f"Logging epoch {epoch}")
+        print(f"Logging epoch {epoch} to wandb")
+        # measure time now:
+        t0 = time.time()
         losses = np.array(epoch_history['loss'])
         for loss in losses:
-            wb.log({'loss': loss}, commit=False)
-        wb.log({'loss': losses[-1]}, commit=True)
+            wb.log({'loss': loss})
         del losses
         print(f"Done")
+        stats = du.load(f'{save_dir}/epoch_{epoch}_stats.pkl')
+        for k, v in stats['grad'].items():
+            wb.log({f'grad/{k}': v})
+        for k, v in stats['params'].items():
+            wb.log({f'params/{k}': v})
+        print(f"Logging epoch {epoch} to wandb took {time.time() - t0:.2f}s")
+
 
 
 def console_log(epoch, cfg, epoch_history=None, **_):
@@ -221,22 +278,12 @@ def console_log(epoch, cfg, epoch_history=None, **_):
         )
 
 
-save_dir = '../__out' if project is None else f'../__out/{wb.run.name}'
-
-
-def local_save(epoch, cfg, epoch_history=None, **_):
-    if epoch_history is not None and epoch <= 5:
-        print(f"Saving epoch {epoch} to disk")
-        du.save(epoch_history, f'{save_dir}/epoch_{epoch}.pkl')
-        print(f"Done")
-
-
 if project is not None:
     loggers = [
         (1, console_log),
-        (1, wandb_log_epoch),
         (1, local_save),
-        (10, partial(wandb_plot_pred, models=models, X=X_samples, Y=Y_samples)),
+        (1, wandb_log_epoch),
+        (10, partial(wandb_plot_pred, models=models, X=X, Y=Y)),
     ]
 else:
     loggers = [

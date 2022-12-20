@@ -292,6 +292,12 @@ def glorot_initializer(rng, shape):
         return jax.nn.initializers.glorot_normal()(rng, shape)
     return init
 
+def he_initializer(rng, shape):
+    def init():
+        return jax.nn.initializers.he_uniform()(rng, shape)
+    return init
+
+
 def split_params(params, static_paths):
     """Split params into static and dynamic parts."""
     # any path that is not in static_paths is dynamic
