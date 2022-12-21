@@ -188,6 +188,7 @@ import wandb as wb
 
 project = 'bp_train_full_02'
 # project = None
+log_grads_and_params_to_wandb = False
 
 if project is not None:
     wb.init(config=cfg, project=project, entity="jdisset", reinit=True)
@@ -265,12 +266,12 @@ def wandb_log_epoch(epoch, cfg, epoch_history=None, nbatches=len(x_batches), **_
         for loss in losses:
             wb.log({'loss': loss})
         del losses
-        print(f"Done")
-        stats = du.load(f'{save_dir}/epoch_{epoch}_stats.pkl')
-        for k, v in stats['grad'].items():
-            wb.log({f'grad/{k}': v})
-        for k, v in stats['params'].items():
-            wb.log({f'params/{k}': v})
+        if log_grads_and_params_to_wandb:
+            stats = du.load(f'{save_dir}/epoch_{epoch}_stats.pkl')
+            for k, v in stats['grad'].items():
+                wb.log({f'grad/{k}': v})
+            for k, v in stats['params'].items():
+                wb.log({f'params/{k}': v})
         print(f"Logging epoch {epoch} to wandb took {time.time() - t0:.2f}s")
 
 
