@@ -299,8 +299,8 @@ def model_heatmap(
             out_proteins,
             bin_proteins=bin_prots,
             resolution=inner_resolution,
-            bin_min=1e-5,
-            bin_max=1e3,
+            bin_min=lims[0],
+            bin_max=lims[1],
             force_minmax=True,
         )
         heatmap(

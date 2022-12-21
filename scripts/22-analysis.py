@@ -92,7 +92,7 @@ cfg = {
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 40,
     "node_impl": node_impl,
-    # "nmodels": 1,
+    "nmodels": 28,
 }
 
 lib = ut.load_lib()
@@ -117,7 +117,7 @@ def pick_n_random_models(n, models):
     return {k: models[k] for k in keys[:n]}
 
 
-models = pick_n_random_models(cfg['nmodels'], models)
+models = pick_n_random_models(cfg['nmodels'], all_models)
 
 print(f'Picked models: {list(models.keys())}')
 
@@ -131,6 +131,126 @@ x_batches, y_batches = du.make_batches_uniform_sampling(
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                    --     some safety checks     --
+# ···············································································
+
+# let's first verify that all inverted inputs are correctly mapped
+# let's do that in 2 ways:
+# - first from data and annotation of input/output only
+# - second let's build the models with the default nodes, which are perfectly invertible,
+# and then check that the inverted inputs are correctly mapped
+
+
+def check_model(m, x, y):
+    outp = m.get_output_proteins()  # name of output proteins
+    inp = m.get_inverted_input_proteins()  # name of input proteins
+    in_pos = m.get_inverted_input_positions()
+    # in_pos contains input_pos -> output_pos
+    assert len(inp) == len(in_pos)
+    assert len(inp) == len(set(inp))
+    for iname in inp:
+        assert iname in outp
+
+    for ipos, outpos in in_pos.items():
+        assert inp[ipos] == outp[outpos]
+        assert np.all(x[:, ipos] == y[:, outpos])
+
+    mdef = bc.ComputeGraphModel(m.network)
+    mdef.build(bc.nodes.DEFAULT_COMPUTE_NODES_DICT)
+    zerorng = jax.random.PRNGKey(0)
+    p, _ = mdef.init(zerorng)
+    vmapped = jit(jax.vmap(mdef, in_axes=(None, 0, None)))
+    ydef = vmapped(p, x, zerorng)
+    # ut.plot_networks([mdef.network])
+    for ipos, outpos in in_pos.items():
+        assert np.allclose(x[:, ipos], ydef[:, outpos])
+
+
+for k, m in tqdm(models.items()):
+    check_model(m, X[k], Y[k])
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                    --     generate and learn     --
+# ···············································································
+# let's now generate synthetic data using the default nodes with random parameters
+# and see if we can find them back easily
+
+cfg['node_impl']=bc.nodes.DEFAULT_COMPUTE_NODES_DICT
+models = xp.get_models(node_impl=cfg['node_impl'])
+fwd_models = xp.get_models(
+    node_impl=cfg['node_impl'], inverse=False, numeric_inputs=True
+)
+
+zerorng = jax.random.PRNGKey(0)
+ikeys = jax.random.split(zerorng, len(models))
+params, constraints = {}, {}
+for (s, m), r in zip(fwd_models.items(), ikeys):
+    params, constraints = m.init(r, pre_params=params, pre_constraints=constraints)
+
+
+generator_params = params
+
+nsamples = 100000
+Xsynth = {}
+Ysynth = {}
+for (s, m), r in tqdm(zip(fwd_models.items(), ikeys)):
+    Xsynth[s] = jax.random.uniform(r, (nsamples, m.n_inputs), minval=0, maxval=10)
+    # Xsynth[s] = jax.random.normal(r, (nsamples, m.n_inputs)) * 0.1 + 0.5
+    # use a lognormal distribution
+    # Xsynth[s] = jax.random.lognormal(r, (nsamples, m.n_inputs), 0, 0.1)
+    # Xsynth[s] = np.random.lognormal(0, 0.5, (nsamples, m.n_inputs))
+    vmapped = jit(jax.vmap(m, in_axes=(None, 0, None)))
+    Ysynth[s] = vmapped(generator_params, Xsynth[s], r)
+
+
+##
+cfg["norm_factor"]=1
+cfg["balance_bin_resolution"]=0.2
+X, Y = bc.train.preprocess_data(models, Ysynth, cfg)
+batch_size = 12
+x_batches, y_batches = du.make_batches_uniform_sampling(
+    Y.values(), batch_size, rng, models.values()
+)
+
+##
+
+s,m = list(models.items())[2]
+du.model_heatmap(m, Ysynth[s], inner_resolution=0.2, lims=(1e-4,1e2))
+# ut.plot_networks([m.network])
+Y[s].shape
+
+##
+
+
+def console_log(epoch, cfg, epoch_history=None, **_):
+    if epoch_history is not None:
+        loss = np.array(epoch_history['loss'])
+        avg = np.mean(loss)
+        std = np.std(loss)
+        lmin, lmax = jnp.min(loss), jnp.max(loss)
+        print(
+            f'[{epoch}/{cfg["epochs"]}] loss: {avg:.3f} ± {std:.3f} [min {lmin:.3f}, max {lmax:.3f}]'
+        )
+
+
+loggers = [
+    (1, console_log),
+]
+
+cfg['epochs'] = 20
+train_history = bc.train.train_models(models.values(), x_batches, y_batches, cfg, loggers)
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                      --      load run saves     --
@@ -213,16 +333,19 @@ def get_epoch_stats(epoch_data, smooth_win=1):
             maxs = jnp.convolve(maxs, jnp.ones(smooth_win) / smooth_win, mode='same')
             mins = jnp.convolve(mins, jnp.ones(smooth_win) / smooth_win, mode='same')
         return medians, p20s, p80s, mins, maxs
+
     g = d['grad']['shared']
     p = d['params']['shared']
-    stats = {'grad':{}, 'params':{}}
+    stats = {'grad': {}, 'params': {}}
     for k, v in g.items():
         stats['grad'][k] = comp(v)
     for k, v in p.items():
         stats['params'][k] = comp(v)
     return stats
 
+
 stats = get_epoch_stats(v)
+
 
 def plot_epoch(v, title, smooth_win=1):
     fig, ax = plt.subplots()
@@ -264,13 +387,13 @@ for i, (k, v) in enumerate(p.items()):
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{               --     training with only one sample     --
-#···············································································
+# ···············································································
 
 # models = pick_n_random_models(1, all_models)
 # print(f'Picked models: {list(models.keys())}')
 
 selected = ['104+102R+102I']
-models={k: v for k, v in all_models.items() if k in selected}
+models = {k: v for k, v in all_models.items() if k in selected}
 
 ut.plot_networks([m.network for m in models.values()], H=2000)
 
@@ -302,7 +425,6 @@ du.model_heatmap(m, ydata, outer_resolution=1)
 ##
 
 
-
 def console_log(epoch, cfg, epoch_history=None, **_):
     if epoch_history is not None:
         loss = np.array(epoch_history['loss'])
@@ -313,9 +435,10 @@ def console_log(epoch, cfg, epoch_history=None, **_):
             f'[{epoch}/{cfg["epochs"]}] loss: {avg:.3f} ± {std:.3f} [min {lmin:.3f}, max {lmax:.3f}]'
         )
 
+
 loggers = [
-        (1, console_log),
-    ]
+    (1, console_log),
+]
 
 cfg['epochs'] = 1
 # train_history = bc.train.train_models(models.values(), x, y, cfg, loggers)
@@ -323,7 +446,11 @@ cfg['epochs'] = 1
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-params = bu.get_pytree(train_history['params'], len(x_batches)-1)
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                        --     more plots     --
+# ···············································································
+
+params = bu.get_pytree(train_history['params'], len(x_batches) - 1)
 
 p, c = m.init(jax.random.PRNGKey(0))
 params['node'] = p['node']
@@ -332,12 +459,16 @@ ut.plot_node('translation', params, m)
 ut.plot_node('transcription', params, m)
 
 extra = m.network.compute_graph[m.network.compute_graph.type == 'sequestron_ERN'].extra.to_list()
-[ut.plot_node('sequestron_ERN', params, m, xlim=(-100, 10), n_inputs=2, mode='3d', extra_args=ex) for ex in extra]
+[
+    ut.plot_node('sequestron_ERN', params, m, xlim=(-100, 10), n_inputs=2, mode='3d', extra_args=ex)
+    for ex in extra
+]
 
 
 ##
 # let's plot y points in a 2d space using a PCA:
 import sklearn.decomposition
+
 # we only keep the last dimension (of size nfeatures) of y and flatten the rest
 ydata = y_batches.reshape(-1, y_batches.shape[-1])
 xdata = x_batches.reshape(-1, x_batches.shape[-1])
@@ -374,7 +505,6 @@ ax.set_ylabel('count')
 ax.set_title('L2 error distribution')
 
 
-
 ##
 ydata = y_batches.reshape(-1, y_batches.shape[-1])
 xdata = x_batches.reshape(-1, x_batches.shape[-1])
@@ -382,3 +512,5 @@ ypred = vmap(m, in_axes=(None, 0, None))(params, xdata, jax.random.PRNGKey(0))
 du.model_heatmap(m, ypred, outer_resolution=1)
 
 
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────

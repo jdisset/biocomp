@@ -241,11 +241,14 @@ class XP:
         else:
             self.inv_networks = None
 
-    def get_models(self, inverse=True, node_impl=dict()) -> dict[str, ComputeGraphModel]:
+    def get_models(self, inverse=True, node_impl=dict(), numeric_inputs=False) -> dict[str, ComputeGraphModel]:
         if inverse:
             assert self.inv_networks is not None
         nets = self.inv_networks if inverse else self.networks
         assert nets
+        if numeric_inputs and not inverse:
+            for net in nets.values():
+                net.set_numeric_as_input()
         models = {}
         # for s in track(self.samples, description='Building models'):
         for s in self.samples:
