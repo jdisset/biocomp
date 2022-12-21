@@ -247,6 +247,56 @@ loggers = [
 cfg['epochs'] = 20
 train_history = bc.train.train_models(models.values(), x_batches, y_batches, cfg, loggers)
 
+##
+
+ps = train_history['params']
+p = bu.get_pytree(ps, len(x_batches)-1)
+p
+generator_params
+
+train_history['loss']
+##
+
+loss_f = bc.train.mse_loss
+def loss_func(params, X, Y, rng_key):
+    nmodels = len(models)
+    assert len(X) == nmodels, f"Expected {nmodels} models, got {X.shape}"
+    assert len(Y) == nmodels
+    K = jax.random.split(rng_key, nmodels)
+    res = jnp.array(
+        [
+            loss_f(vmap(partial(m, params, rng_key=k))(x[:, : m.n_inputs]), y, m.n_outputs)
+            for m, x, y, k in zip(models.values(), X, Y, K)
+        ]
+    ).mean()
+    return res
+
+loss_func(p, x_batches[0], y_batches[0], jax.random.PRNGKey(0))
+
+# BIG ERROR RIGHT THERE!?
+loss_func(generator_params, x_batches[0], y_batches[0], jax.random.PRNGKey(0)) # WHY IS THIS NOT ZERO???????????????????????????????
+
+##
+def mse(y, yhat):
+    return jnp.mean((y - yhat) ** 2)
+
+k, m = list(models.items())[10]
+for k, m in tqdm(models.items()):
+    r = vmap(m, in_axes=(None, 0, None))(generator_params, X[k], jax.random.PRNGKey(0))
+    assert np.allclose(r, Y[k], atol=1e-4, rtol=1e-4)
+    l = bc.train.mse_loss(r, Y[k])
+    sq = (r - Y[k])**2
+    # get coordinates of max:
+    i = np.unravel_index(np.argmax(sq), sq.shape)
+    sq.shape
+    r.shape
+    r[i[0]]
+    Y[k][i[0]]
+    ut.plot_networks([m.network])
+    m.get_output_proteins()
+    mse(r, Y[k])
+
+    m.n_outputs
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────

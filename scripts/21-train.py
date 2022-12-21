@@ -82,7 +82,7 @@ cfg = {
     "optimizer": "adam",
     "learning_rate": 0.0001,
     "adam_w_decay": 0.0001,
-    "rng_key": np.random.randint(0, 2 ** 32),
+    "rng_key": np.random.randint(0, 2**32),
     # "rng_key": 11325,
     "epochs": 1000,
     "compile_training": True,
@@ -92,7 +92,7 @@ cfg = {
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 40,
     "node_impl": node_impl,
-    "nmodels":28,
+    "nmodels": 28,
 }
 
 lib = ut.load_lib()
@@ -109,24 +109,27 @@ xp = ut.load_xp('E20221124A_ERNbandpassV2', lib)
 rng = jax.random.PRNGKey(cfg['rng_key'])
 models = xp.get_models(node_impl=cfg['node_impl'])
 
-
 def pick_n_random_models(n, models):
     # select n models from models (which is a dict of modelname -> model)
     keys = list(models.keys())
     np.random.shuffle(keys)
     return {k: models[k] for k in keys[:n]}
 
-
 models = pick_n_random_models(cfg['nmodels'], models)
 
 print(f'Picked models: {list(models.keys())}')
 
-
 X, Y = bc.train.preprocess_data(models, xp.get_Y(models), cfg)
 batch_size = cfg['batch_size']
-x_batches, y_batches = du.make_batches_uniform_sampling(
-    Y.values(), batch_size, rng, models.values()
-)
+
+
+models_list = []
+Y_list = []
+for k, m in models.items():
+    models_list.append(m)
+    Y_list.append(Y[k])
+
+x_batches, y_batches = du.make_batches_uniform_sampling(Y_list, batch_size, rng, models_list)
 
 # x_batches = x_batches[:100]
 # y_batches = y_batches[:100]
@@ -137,41 +140,43 @@ x_batches, y_batches = du.make_batches_uniform_sampling(
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                        --     stat tools     --
-#···············································································
+# ···············································································
 def models_data_fig(models, Y):
     for sample, model in models.items():
         out_proteins = model.get_output_proteins()
         in_proteins = model.get_inverted_input_proteins()
         z_prot = set(out_proteins) - set(in_proteins)
-        if len(out_proteins) >= 4 and len(out_proteins)<=5:
+        if len(out_proteins) >= 4 and len(out_proteins) <= 5:
             fig, ax = du.model_heatmap(model, Y[sample])
         else:
             fig, ax = du.model_parallel_coords(model, Y[sample])
         yield sample, model, fig, ax
 
+
 @partial(jit, static_argnums=(1,))
 def compstats(v, smooth_win=1):
-        medians = vmap(jnp.median)(v)
-        mins = vmap(jnp.min)(v)
-        maxs = vmap(jnp.max)(v)
-        p20s = vmap(lambda x: jnp.percentile(x, 20))(v)
-        p80s = vmap(lambda x: jnp.percentile(x, 80))(v)
-        if smooth_win > 1:
-            medians = jnp.convolve(medians, jnp.ones(smooth_win) / smooth_win, mode='same')
-            p80s = jnp.convolve(p80s, jnp.ones(smooth_win) / smooth_win, mode='same')
-            p20s = jnp.convolve(p20s, jnp.ones(smooth_win) / smooth_win, mode='same')
-            maxs = jnp.convolve(maxs, jnp.ones(smooth_win) / smooth_win, mode='same')
-            mins = jnp.convolve(mins, jnp.ones(smooth_win) / smooth_win, mode='same')
-        return medians, p20s, p80s, mins, maxs
+    medians = vmap(jnp.median)(v)
+    mins = vmap(jnp.min)(v)
+    maxs = vmap(jnp.max)(v)
+    p20s = vmap(lambda x: jnp.percentile(x, 20))(v)
+    p80s = vmap(lambda x: jnp.percentile(x, 80))(v)
+    if smooth_win > 1:
+        medians = jnp.convolve(medians, jnp.ones(smooth_win) / smooth_win, mode='same')
+        p80s = jnp.convolve(p80s, jnp.ones(smooth_win) / smooth_win, mode='same')
+        p20s = jnp.convolve(p20s, jnp.ones(smooth_win) / smooth_win, mode='same')
+        maxs = jnp.convolve(maxs, jnp.ones(smooth_win) / smooth_win, mode='same')
+        mins = jnp.convolve(mins, jnp.ones(smooth_win) / smooth_win, mode='same')
+    return medians, p20s, p80s, mins, maxs
 
 
 def get_epoch_stats(epoch_data, smooth_win=1):
-    stats = {'grad':{}, 'params':{}}
+    stats = {'grad': {}, 'params': {}}
     for k, v in epoch_data['grad']['shared'].items():
         stats['grad'][k] = compstats(v)
     for k, v in epoch_data['params']['shared'].items():
         stats['params'][k] = compstats(v)
     return stats
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -208,6 +213,8 @@ jitted_models = {
 import time
 
 save_dir = '../__out' if project is None else f'../__out/{wb.run.name}'
+
+
 def local_save(epoch, cfg, epoch_history=None, **_):
     if epoch_history is None:
         return
@@ -219,6 +226,7 @@ def local_save(epoch, cfg, epoch_history=None, **_):
     stats = get_epoch_stats(epoch_history)
     du.save(stats, f'{save_dir}/epoch_{epoch}_stats.pkl')
     print(f"Done in {time.time() - t0:.2f}s")
+
 
 def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x_batches), **_):
     if epoch == 0:
@@ -266,7 +274,6 @@ def wandb_log_epoch(epoch, cfg, epoch_history=None, nbatches=len(x_batches), **_
         print(f"Logging epoch {epoch} to wandb took {time.time() - t0:.2f}s")
 
 
-
 def console_log(epoch, cfg, epoch_history=None, **_):
     if epoch_history is not None:
         loss = np.array(epoch_history['loss'])
@@ -290,7 +297,7 @@ else:
         (1, console_log),
     ]
 
-train_history = bc.train.train_models(models.values(), x_batches, y_batches, cfg, loggers)
+train_history = bc.train.train_models(models_list, x_batches, y_batches, cfg, loggers)
 
 print('done')
 

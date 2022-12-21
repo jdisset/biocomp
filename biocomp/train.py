@@ -266,11 +266,18 @@ def train_xp(xp, config=DEFAULT_CFG, **kwargs):
     X, Y = preprocess_data(models, Y, cfg)
 
     individual_batch_sizes = cfg['batch_size'] // len(models)
+
+    model_values = []
+    Y_values = []
+    for k, m in models.items():
+        model_values.append(m)
+        Y_values.append(Y[k])
+
     x_batches, y_batches = du.make_batches_uniform_sampling(
-        Y.values(), individual_batch_sizes, rng_key, models.values()
+        Y_values, individual_batch_sizes, rng_key, model_values
     )
 
-    return train_models(models, x_batches, y_batches, config=config, **kwargs)
+    return train_models(model_values, x_batches, y_batches, config=config, **kwargs)
 
 
 #                                                                            }}}
