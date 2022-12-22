@@ -29,12 +29,12 @@ plt.rcParams['figure.dpi'] = 200
 # {{{                          --     config     --
 # ···············································································
 
-T_SIZE = 64
+T_SIZE = 32
 T_DEPTH = 3
-I_SIZE = 64
+I_SIZE = 32
 I_DEPTH = 2
-I_OUT = 8
-ERN_SIZE = 128
+I_OUT = 4
+ERN_SIZE = 64
 ERN_DEPTH = 3
 MEFL_SIZE = 64
 MEFL_DEPTH = 3
@@ -132,9 +132,10 @@ xp = ut.load_xp('E20221124A_ERNbandpassV2', lib)
 # and see if we can find them back easily
 
 rng = jax.random.PRNGKey(cfg['rng_key'])
-cfg['node_impl'] = bc.nodes.DEFAULT_COMPUTE_NODES_DICT
+# cfg['node_impl'] = bc.nodes.DEFAULT_COMPUTE_NODES_DICT
+
 models = xp.get_models(node_impl=cfg['node_impl'])
-fwd_models = xp.get_models(node_impl=cfg['node_impl'], inverse=False, numeric_inputs=True)
+fwd_models = xp.get_models(node_impl=bc.nodes.DEFAULT_COMPUTE_NODES_DICT, inverse=False, numeric_inputs=True)
 
 zerorng = jax.random.PRNGKey(0)
 ikeys = jax.random.split(zerorng, len(models))
@@ -167,10 +168,6 @@ Y_values = []
 for k, m in models.items():
     model_values.append(m)
     Y_values.append(Y[k])
-
-# x_batches, y_batches = du.make_batches_uniform_sampling(
-# Y.values(), batch_size, rng, models.values()
-# )
 
 x_batches, y_batches = du.make_batches_uniform_sampling(Y_values, batch_size, rng, model_values)
 
@@ -252,7 +249,7 @@ loggers = [
     (1, console_log),
 ]
 
-cfg['epochs'] = 20
+cfg['epochs'] = 10
 train_history = bc.train.train_models(model_values, x_batches, y_batches, cfg, loggers)
 
 #                                                                            }}}
@@ -323,7 +320,7 @@ loss_func(
 
 
 params = generator_params
-# params = best_params
+params = best_params
 
 
 def mse(y, yhat):
@@ -331,6 +328,40 @@ def mse(y, yhat):
 
 
 k, m = list(models.items())[10]
+
+ut.plot_node('transcription', generator_params, m)
+ut.plot_node('transcription', best_params, m)
+ut.plot_node('translation', generator_params, m)
+ut.plot_node('translation', best_params, m)
+
+best_params['shared']
+generator_params['shared']
+
+#hmmmm the node plots don't look right. 
+# Actually I think it's normal that the transcription nodes don't have
+# to have the same slope. The translation nodes should be the same though.
+# since the ERN is a relu, you can scale both inputs by whtever 
+
+ut.plot_networks([m.network])
+# extra = m.network.compute_graph[m.network.compute_graph.type == 'sequestron_ERN'].extra.to_list()
+ut.plot_node('sequestron_ERN', best_params, m, xlim=(-10, 100), n_inputs=2, mode='3d')
+best_params['node'][k]
+generator_params['node'][k]
+
+X[k][0]
+# get index of first element of Y[k][:, 0] that is > 1.0
+ex_id = jnp.where(Y[k][:, 0] > 1.0)[0][0]
+Y[k][ex_id]
+xx = X[k][ex_id]
+
+_,rb = m.collect_all_results(best_params, xx, rng_key=jax.random.PRNGKey(0))
+ut.plot_networks([m.network], outputs=[rb], W=1000, H=2000)
+
+_,rg = m.collect_all_results(generator_params, xx, rng_key=jax.random.PRNGKey(0))
+ut.plot_networks([m.network], outputs=[rg], W=1000, H=2000)
+
+Xsynth[k].shape
+
 total_loss = 0
 for k, m in models.items():
     yhat = vmap(m, in_axes=(None, 0, None))(params, X[k], jax.random.PRNGKey(0))
@@ -339,7 +370,6 @@ for k, m in models.items():
     maxerr = jnp.max(sqerr, axis=0)
     print(f'{k}: {l:.5f} (maxerr: {maxerr})')
     total_loss += l
-
 print(f'total loss: {total_loss:.5f}, avg: {total_loss/len(models):.5f}')
 
 ##

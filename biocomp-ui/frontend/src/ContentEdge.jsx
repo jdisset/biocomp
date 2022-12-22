@@ -53,6 +53,38 @@ export default function CustomEdge({
   }
 
   let foreignObject = "";
+  let outputValue = "";
+  // outputValue might have beed passed (as a string)
+  if (data.outputValue !== undefined && data.outputValue !== "" && data.outputValue !== null) {
+    outputValue = (
+      <>
+        <text
+          x={edgeCenterX}
+          y={edgeCenterY}
+          textAnchor="start"
+          alignmentBaseline="central"
+          stroke="white"
+          strokeWidth="10"
+          className="edgecontent-text"
+        >
+          {parseFloat(data.outputValue).toExponential(2)}
+        </text>
+
+        <text
+          x={edgeCenterX}
+          y={edgeCenterY}
+          fontSize="10"
+          textAnchor="start"
+          alignmentBaseline="central"
+          className="edgecontent-text"
+          fontWeight="bold"
+        >
+          {parseFloat(data.outputValue).toExponential(2)}
+        </text>
+      </>
+    );
+  }
+
   let itemsAsText = "";
   if (data.srccdg && (data.srcdata.type == "transcription" || data.srcdata.type == "translation")) {
     const content = data.srccdg.content;
@@ -76,65 +108,34 @@ export default function CustomEdge({
     // now as svg, it'll just be a text element with white background
     // and black text. We want to have a new line for each element
     // white background
-    itemsAsText = (
-      <>
-        <text
-          x={edgeCenterX}
-          y={edgeCenterY}
-          textAnchor="middle"
-          alignmentBaseline="central"
-          stroke="white"
-          strokeWidth="10"
-          className="edgecontent-text"
-        >
-          {content.join(" + ")}
-        </text>
+    if (outputValue == "") {
+      itemsAsText = (
+        <>
+          <text
+            x={edgeCenterX}
+            y={edgeCenterY}
+            textAnchor="middle"
+            alignmentBaseline="central"
+            stroke="white"
+            strokeWidth="10"
+            className="edgecontent-text"
+          >
+            {content.join(" + ")}
+          </text>
 
-        <text
-          x={edgeCenterX}
-          y={edgeCenterY}
-          fontSize="10"
-          textAnchor="middle"
-          alignmentBaseline="central"
-          className="edgecontent-text"
-        >
-          {content.join(" + ")}
-        </text>
-      </>
-    );
-  }
-
-  // outputValue might have beed passed (as a string)
-  let outputValue = "";
-  if (data.outputValue !== undefined && data.outputValue !== '' && data.outputValue !== null) {
-    outputValue = (
-      <>
-        <text
-          x={edgeCenterX}
-          y={edgeCenterY}
-          textAnchor="start"
-          alignmentBaseline="central"
-          stroke="white"
-          strokeWidth="10"
-          className="edgecontent-text"
-        >
-          {data.outputValue}
-        </text>
-
-        <text
-          x={edgeCenterX}
-          y={edgeCenterY}
-          fontSize="10"
-          textAnchor="start"
-          alignmentBaseline="central"
-          className="edgecontent-text"
-          fontWeight="bold"
-			// we want to use 2 decimal places
-        >
-			{parseFloat(data.outputValue).toFixed(2)}
-        </text>
-      </>
-    );
+          <text
+            x={edgeCenterX}
+            y={edgeCenterY}
+            fontSize="10"
+            textAnchor="middle"
+            alignmentBaseline="central"
+            className="edgecontent-text"
+          >
+            {content.join(" + ")}
+          </text>
+        </>
+      );
+    }
   }
 
   return (
