@@ -81,7 +81,6 @@ node_impl = dict(
 cfg = {
     "optimizer": "adam",
     "learning_rate": 0.0001,
-    "adam_w_decay": 0.0001,
     "rng_key": np.random.randint(0, 2**32),
     # "rng_key": 11325,
     "epochs": 1000,
@@ -186,7 +185,7 @@ def get_epoch_stats(epoch_data, smooth_win=1):
 # ···············································································
 import wandb as wb
 
-project = 'bp_train_full_02'
+project = 'bp_train_full_03'
 # project = None
 log_grads_and_params_to_wandb = False
 
@@ -195,17 +194,8 @@ if project is not None:
 
 print(f"About to train {len(models)} models.")
 
-
-# we take random samples to plot
-# nsubsamples = 1000
-# X_subsamples = {k: jax.random.choice(rng, v, (nsubsamples,)) for k, v in X.items()}
-# let's make it so that we can also take the same samples for Y:
-
 zero_rng = jax.random.PRNGKey(0)
 
-# indices = {k: jax.random.choice(zero_rng, v.shape[0], (nsubsamples,)) for k, v in X.items()}
-# X_samples = {k: v[indices[k]] for k, v in X.items()}
-# Y_samples = {k: v[indices[k]] for k, v in Y.items()}
 
 jitted_models = {
     s: jit(jax.vmap(partial(m, rng_key=zero_rng), in_axes=(None, 0))) for s, m in models.items()
