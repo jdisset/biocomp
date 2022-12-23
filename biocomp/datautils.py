@@ -270,7 +270,7 @@ def model_heatmap(
     n_axes = len(axes_len)
 
     if n_axes == 1:
-        fig, axes = plt.subplots(axes_len[0], 1, figsize=(base_size, base_size * axes_len[0]))
+        fig, axes = plt.subplots(1, axes_len[0], figsize=(base_size * axes_len[0],base_size))
         axes = axes.flatten()
     elif n_axes == 2:
         fig, axes = plt.subplots(

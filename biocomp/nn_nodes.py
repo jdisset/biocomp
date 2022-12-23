@@ -148,7 +148,7 @@ def output(get_param, get_quantized, **_):
                 for x in value
             ]
         )
-        return DEFAULT_ACTIVATION(res)
+        return res
 
     return apply
 

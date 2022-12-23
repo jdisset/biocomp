@@ -300,6 +300,7 @@ def train_models(
         'sgd': optax.sgd(learning_rate=cfg['learning_rate']),
         'adam': optax.adam(learning_rate=cfg['learning_rate']),
         'adamw': optax.adamw(learning_rate=cfg['learning_rate'], weight_decay=cfg['adam_w_decay']),
+        'amsgrad': optax.amsgrad(learning_rate=cfg['learning_rate']),
     }
     assert (
         cfg['optimizer'] in optimizers.keys()

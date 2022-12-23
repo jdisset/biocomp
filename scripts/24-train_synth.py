@@ -32,11 +32,11 @@ plt.rcParams['figure.dpi'] = 200
 T_SIZE = 32
 T_DEPTH = 3
 I_SIZE = 32
-I_DEPTH = 2
+I_DEPTH = 3
 I_OUT = 4
-ERN_SIZE = 64
-ERN_DEPTH = 3
-MEFL_SIZE = 64
+ERN_SIZE = 32
+ERN_DEPTH = 4
+MEFL_SIZE = 32
 MEFL_DEPTH = 3
 node_impl = dict(
     bc.nodes.DEFAULT_COMPUTE_NODES_DICT,
@@ -78,16 +78,21 @@ node_impl = dict(
         'sequestron_ERN3p': partial(bc.nn.ERN3p, wsize=ERN_SIZE, depth=ERN_DEPTH),
     },
 )
+
+# node_impl = bc.nodes.DEFAULT_COMPUTE_NODES_DICT
+
 cfg = {
-    "optimizer": "adam",
+    # "optimizer": "adam",
+    "optimizer": "amsgrad",
     "learning_rate": 3e-4,
     "rng_key": np.random.randint(0, 2**32),
     # "rng_key": 11325,
-    "epochs": 200,
+    "epochs": 500,
     "compile_training": True,
-    "batch_size": 8,
-    "norm_factor": 1,
-    "balance_bin_resolution": 0.2,
+    "batch_size": 4,
+    # "norm_factor": 1,
+    "norm_factor": 1e7,
+    "balance_bin_resolution": 0.25,
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 40,
     "node_impl": node_impl,
@@ -108,29 +113,32 @@ xp = ut.load_xp('E20221124A_ERNbandpassV2', lib)
 rng = jax.random.PRNGKey(cfg['rng_key'])
 
 models = xp.get_models(node_impl=cfg['node_impl'])
-fwd_models = xp.get_models(node_impl=bc.nodes.DEFAULT_COMPUTE_NODES_DICT, inverse=False, numeric_inputs=True)
+# fwd_models = xp.get_models(node_impl=bc.nodes.DEFAULT_COMPUTE_NODES_DICT, inverse=False, numeric_inputs=True)
 
-zerorng = jax.random.PRNGKey(0)
-ikeys = jax.random.split(rng, len(models))
-params, constraints = {}, {}
-for (s, m), r in zip(fwd_models.items(), ikeys):
-    params, constraints = m.init(r, pre_params=params, pre_constraints=constraints)
+# zerorng = jax.random.PRNGKey(0)
+# ikeys = jax.random.split(rng, len(models))
+# params, constraints = {}, {}
+# for (s, m), r in zip(fwd_models.items(), ikeys):
+    # params, constraints = m.init(r, pre_params=params, pre_constraints=constraints)
 
-generator_params = params
+# generator_params = params
 
-print(f'generating synthetic data with shared params: {generator_params["shared"]}')
+# print(f'generating synthetic data with shared params: {generator_params["shared"]}')
 
-nsamples = 30000
-Xsynth = {}
-Ysynth = {}
-for (s, m), r in tqdm(zip(fwd_models.items(), ikeys)):
-    Xsynth[s] = jax.random.uniform(r, (nsamples, m.n_inputs), minval=0, maxval=10)
-    vmapped = jit(jax.vmap(m, in_axes=(None, 0, None)))
-    Ysynth[s] = vmapped(generator_params, Xsynth[s], r)
+# nsamples = 30000
+# Xsynth = {}
+# Ysynth = {}
+# for (s, m), r in tqdm(zip(fwd_models.items(), ikeys)):
+    # Xsynth[s] = jax.random.uniform(r, (nsamples, m.n_inputs), minval=0, maxval=10)
+    # vmapped = jit(jax.vmap(m, in_axes=(None, 0, None)))
+    # Ysynth[s] = vmapped(generator_params, Xsynth[s], r)
 
-cfg["norm_factor"] = 1
-cfg["balance_bin_resolution"] = 0.2
-X, Y = bc.train.preprocess_data(models, Ysynth, cfg)
+# cfg["norm_factor"] = 1
+# cfg["balance_bin_resolution"] = 0.2
+# X, Y = bc.train.preprocess_data(models, Ysynth, cfg)
+
+X, Y = xp.get_XY(models)
+X, Y = bc.train.preprocess_data(models, Y, cfg)
 
 models_list= []
 Y_list = []
@@ -192,7 +200,8 @@ def get_epoch_stats(epoch_data, smooth_win=1):
 # ···············································································
 import wandb as wb
 
-project = 'train_synth_00'
+# project = 'train_synth_00'
+project = 'train_bandpassgeorg_00'
 log_grads_and_params_to_wandb = False
 
 if project is not None:
@@ -221,7 +230,7 @@ def local_save(epoch, cfg, epoch_history=None, **_):
         print(f"Done")
     stats = get_epoch_stats(epoch_history)
     du.save(stats, f'{save_dir}/epoch_{epoch}_stats.pkl')
-    du.save(generator_params, f'{save_dir}/generator_params.pkl')
+    # du.save(generator_params, f'{save_dir}/generator_params.pkl')
     print(f"Done in {time.time() - t0:.2f}s")
 
 
@@ -256,7 +265,7 @@ def wandb_plot_pred(epoch, cfg, models, X, Y, epoch_history=None, nbatches=len(x
 def wandb_log_epoch(epoch, cfg, epoch_history=None, nbatches=len(x_batches), **_):
     if epoch == 0:
         wb.log({'config': cfg})
-        wb.log({'generator_params': generator_params})
+        # wb.log({'generator_params': generator_params})
 
     if epoch_history is None:
         return
