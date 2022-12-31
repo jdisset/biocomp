@@ -17,31 +17,34 @@ def quantize(x, possible_values):
         return quantize_impl(x, possible_values)
 
 
-#TODO: work in N dimensions
-@partial(jax.custom_jvp, nondiff_argnums=(1,))
 def quantize_impl(x, arr):
-    return arr[jnp.argmin(jnp.abs(arr - x))]
-
-
-# we define the derivative of the quantize function as if it was just the identity function (x -> x)
-@quantize_impl.defjvp
-def quantize_impl_jvp(_, x, x_tang):
-    (x,) = x
-    (x_dot,) = x_tang
-    return x, x_dot
-
+    zero = x - jax.lax.stop_gradient(x) # for straight-through gradient
+    return zero + jax.lax.stop_gradient(arr[jnp.argmin(jnp.abs(arr - x))])
 
 @jax.custom_jvp
 def round_to_int(x):
-    return jnp.round(x)
+    zero = x - jax.lax.stop_gradient(x) # for straight-through gradient
+    return zero + jax.lax.stop_gradient(jnp.round(x))
+
+#TODO: 
+# could also use some kind of softmin to make things 2 way differentiable 
+# between both the quantizee and quantizers I guess. Not useful for now though
+# as we'll only use it either with only one quantize value (when learning from data)
+# or with fixed quantization values already (in compilation mode)
 
 
-# we define the derivative of the quantize function as if it was just the identity function (x -> x)
-@round_to_int.defjvp
-def round_to_int_jvp(x, x_tang):
-    (x,) = x
-    (x_dot,) = x_tang
-    return x, x_dot
+# old version without stop_gradient
+# @partial(jax.custom_jvp, nondiff_argnums=(1,))
+# def quantize_impl(x, arr):
+# return arr[jnp.argmin(jnp.abs(arr - x))]
+# # we define the derivative of the quantize function as if it was just the identity function (x -> x)
+# @quantize_impl.defjvp
+# def quantize_impl_jvp(_, x, x_tang):
+# (x,) = x
+# (x_dot,) = x_tang
+# return x, x_dot
+
+
 
 
 BC_EPSILON = 1e-9

@@ -1,6 +1,7 @@
 import json
 import copy
 
+import time
 from jax.experimental import host_callback
 from pathlib import Path
 from tqdm import tqdm
@@ -13,6 +14,9 @@ import json5
 import numpy as np
 import logging
 
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                       --     logging utils     --
+#···············································································
 logger = logging.getLogger('biocomp')
 
 def warn(*args, **kwargs):
@@ -24,6 +28,8 @@ def info(*args, **kwargs):
 def debug(*args, **kwargs):
     logger.debug(*args, **kwargs)
 
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                    --     random misc stuff     --
@@ -247,7 +253,6 @@ def progress_scan(num_samples, progress_type=TQDMProgress, message=None, print_r
 def tree_shape(t):
     return pytree.tree_map(lambda x: x.shape, t)
 
-
 @jit
 def tree_append(t, e):
     fa, tt = pytree.tree_flatten(t)
@@ -255,22 +260,20 @@ def tree_append(t, e):
     assert te == tt
     return pytree.tree_unflatten(tt, [jnp.concatenate([a, jnp.array([b])]) for a, b in zip(fa, fb)])
 
-
-def get_pytree(t, i):
+def tree_get(t, i):
     return pytree.tree_map(lambda x: x[i], t)
 
+@jax.jit
+def tree_unstack(t):
+    """Unstack a tree of arrays into a list of trees of arrays"""
+    N = jax.tree_util.tree_leaves(t)[0].shape[0]
+    return [tree_get(t, i) for i in range(N)]
 
-def param_unstack(t, N):
-    return [get_pytree(t, i) for i in range(N)]
 
-
-def get_params(param_tree, i):
-    return [jit(get_pytree, static_argnums=(1,))(t, i) for t in tqdm(param_tree)]
 
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                     --     parameters utils     --
@@ -338,24 +341,21 @@ def unflatten_params(flat_params, pdescriptor):
     params = jax.tree_util.tree_unflatten(treedef, leaves)
     return params
 
+@jax.jit
+def get_params(param_tree, i):
+    return [jit(tree_get, static_argnums=(1,))(t, i) for t in tqdm(param_tree)]
 
+
+def params_to_numpy(params):
+    # use tree_map to convert all the jax arrays to numpy arrays
+    return jax.tree_map(lambda x: x if isinstance(x, float) else np.array(x), params)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-
-
-
-import time
-from rich import status
-from rich.live import Live
-
-s = status.Status("Hello, [bold magenta]World[/bold magenta]!", spinner="dots")
-s.start()
-s.update("Loading...")
-s.update("Loading [bold green]done[/bold green]!")
-s.stop()
-
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                        --     time utils     --
+#···············································································
 
 class Timer:
     def __init__(self, name, console=None):
@@ -418,3 +418,7 @@ class TimeStore:
     def print_all(self):
         for name in self.times:
             print(f"{name}: {self.times[name][-1]}")
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+

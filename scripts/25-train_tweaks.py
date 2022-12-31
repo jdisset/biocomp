@@ -106,14 +106,10 @@ rng = jax.random.PRNGKey(cfg['rng_key'])
 
 xp = ut.load_xp('E20221124A_ERNbandpassV2', lib)
 models = xp.get_models(node_impl=cfg['node_impl'])
-
 raw_X, raw_Y = xp.get_XY(models)
 
-# let's make a version where we remove all the unique output_proteins
 
-k, m = list(models.items())[0]
-du.model_heatmap(m, raw_Y[k])
+data_man = du.DataManager(raw_X, raw_Y, models)
 
+data_man.preprocess(rng, cfg)
 
-plt.plot([1,2,3,4])
-plt.show()

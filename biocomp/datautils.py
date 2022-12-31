@@ -11,10 +11,168 @@ import scriptutils as ut
 from pathlib import Path
 import json5
 import json
-import sqlite3
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                       --     data manager     --
+# ···············································································
+
+
+def check_model(m, x, y):
+    # simple sanity checks for the model
+    outp = m.get_output_proteins()  # name of output proteins
+    inp = m.get_inverted_input_proteins()  # name of input proteins
+    in_pos = m.get_inverted_input_positions()
+    assert len(inp) == len(in_pos)
+    assert len(inp) == len(set(inp))
+    for iname in inp:
+        assert iname in outp
+    for ipos, outpos in in_pos.items():
+        assert inp[ipos] == outp[outpos]
+        assert np.all(x[:, ipos] == y[:, outpos])
+    mdef = bc.ComputeGraphModel(m.network)
+    mdef.build(bc.nodes.DEFAULT_COMPUTE_NODES_DICT)
+    zerorng = jax.random.PRNGKey(0)
+    p, _ = mdef.init(zerorng)
+    vmapped = jax.jit(jax.vmap(mdef, in_axes=(None, 0, None)))
+    ydef = vmapped(p, x, zerorng)
+    for ipos, outpos in in_pos.items():
+        assert np.allclose(x[:, ipos], ydef[:, outpos])
+
+def basic_data_checks(X,Y,models):
+        # basic checks
+        assert set(X.keys()) == set(Y.keys()), 'X and Y must have the same keys'
+        assert set(X.keys()) == set(models.keys()), 'data and models must have the same keys'
+
+        for k, v in X.items():
+            assert v.shape[0] == Y[k].shape[0], f"shape mismatch for key {k}"
+            assert v.shape[1] == models[k].n_inputs, f"input shape mismatch for key {k}"
+            assert Y[k].shape[1] == models[k].n_outputs, f"output shape mismatch for key {k}"
+
+def advanced_data_checks(X,Y,models):
+    for k, m in tqdm(models.items()):
+        check_model(m, X[k], Y[k])
+
+
+def shuffled_data(X, Y, models, rng_key):
+    """shuffles each sample's data"""
+    basic_data_checks(X, Y, models)
+    new_order = {}
+    keys = jax.random.split(rng_key, len(X))
+    for sample, key in zip(X.keys(), keys):
+        new_order[sample] = jax.random.permutation(key, X[sample].shape[0])
+    Xout, Yout = {}, {}
+    for sample in X.keys():
+        Xout[sample] = X[sample][new_order[sample]]
+        Yout[sample] = Y[sample][new_order[sample]]
+
+    return Xout, Yout
+
+def test_train_split(X, Y, models, rng_key, test_size=0.8):
+    """get a random split train/test. Returns (Xtrain, Xtest, Ytrain, Ytest)"""
+    basic_data_checks(X, Y, models)
+    Xshuf, Yshuf = shuffled_data(X, Y, models, rng_key)
+    # same is doable using jax.tree_map:
+    X_train, X_test = jax.tree_map(
+        lambda x: x[: int(x.shape[0] * test_size)], Xshuf
+    ), jax.tree_map(lambda x: x[int(x.shape[0] * test_size) :], Xshuf)
+    Y_train, Y_test = jax.tree_map(
+        lambda x: x[: int(x.shape[0] * test_size)], Yshuf
+    ), jax.tree_map(lambda x: x[int(x.shape[0] * test_size) :], Yshuf)
+    return (X_train, Y_train), (X_test, Y_test)
+
+
+
+class DataManager:
+    def __init__(self, X: dict, Y: dict, models: dict, enable_checks=True):
+        self.X = X
+        self.Y = Y
+        self.models = models
+        self.enable_checks = enable_checks
+
+        basic_data_checks(X, Y, models)
+
+        if self.enable_checks:
+            advanced_data_checks(X, Y, models)
+            self.N_TEST = 100
+
+    
+    def normalize(self, factor):
+        # for now, let's just scale the data
+        # we can add more later
+        self.X = jax.tree_map(lambda x: x / factor, self.X)
+        self.Y = jax.tree_map(lambda x: x / factor, self.Y)
+        basic_data_checks(self.X, self.Y, self.models)
+        if self.enable_checks:
+            advanced_data_checks(self.X, self.Y, self.models)
+        return self.X, self.Y
+
+    def consolidated(raw_X, raw_Y, rng_key):
+        keys = list(raw_X.keys())
+        # all sets don't necessary have the same shape, so we want to:
+        # - pad with zeros to the right on the feature axis
+        # - fill with random samples (from the same set of course) on the sample axis
+        # first, let's get the max shape
+        max_shape_x = (0, 0)
+        max_shape_y = (0, 0)
+        for k in keys:
+            max_shape_x = max(max_shape_x, raw_X[k].shape)
+            max_shape_y = max(max_shape_y, raw_Y[k].shape)
+        assert max_shape_x[0] == max_shape_y[0]
+        # now, let's pad and fill
+        X = {}
+        Y = {}
+        for k in keys:
+            X[k] = np.zeros(max_shape_x)
+            Y[k] = np.zeros(max_shape_y)
+            assert raw_X[k].shape[0] == raw_Y[k].shape[0]
+            rng_key, subkey = jax.random.split(rng_key)
+            # indices contains all the indices of the samples in the set, in a loop
+            # until we have enough samples to fill the set
+            shuff_range = jax.random.permutation(rng_key, raw_X[k].shape[0])
+            indices = np.tile(shuff_range, max_shape_x[0] // raw_X[k].shape[0] + 1)[
+                : max_shape_x[0]
+            ]
+            indices = jax.random.permutation(subkey, indices)
+            X[k][: raw_X[k].shape[0], : raw_X[k].shape[1]] = raw_X[k][indices]
+            Y[k][: raw_Y[k].shape[0], : raw_Y[k].shape[1]] = raw_Y[k][indices]
+        return X, Y
+
+
+    def preprocess(self, rng_key, cfg):
+        XX, YY = balance_each_dataset(
+            self.models,
+            self.Y,
+            rng_key,
+            bin_resolution=cfg['balance_bin_resolution'],
+            threshold_quantile=cfg['balance_threshold_quantile'],
+            threshold_min=cfg['balance_threshold_min'],
+        )
+
+        basic_data_checks(XX, YY, self.models)
+        if self.enable_checks:
+            advanced_data_checks(XX, YY, self.models)
+            # let's also pick n random samples for each YY and check
+            # - that they can be found in the original Y
+            # - that the matching X is the same
+            for k, v in YY.items():
+                indices = jax.random.choice(rng_key, v.shape[0], (self.N_TEST,))
+                assert np.all(jax.vmap(jnp.all)(v[indices] == self.Y[k]))
+                assert np.all(jax.vmap(jnp.all)(XX[k][indices] == self.X[k]))
+
+        self.X = XX
+        self.Y = YY
+        self.normalize(cfg['normalize_factor'])
+
+
+    def postscale(self, data, factor):
+        return jax.tree_map(lambda x: x * factor, data)
+
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -115,29 +273,42 @@ def binstats(
 # ···············································································
 
 
-def balance_per_bin(data, statdf, threshold_quantile=0.4, threshold_min=20) -> np.ndarray:
+def balance_per_bin(
+    data, statdf, rng_key, threshold_quantile=0.4, threshold_min=20, replacement=True
+) -> np.ndarray:
     assert 'count' in statdf.columns
     assert 'indices' in statdf.columns
     threshold = max(
-        np.quantile(statdf[statdf['count'] > 0]['count'], threshold_quantile), threshold_min
+        jnp.quantile(statdf[statdf['count'] > 0]['count'].values, threshold_quantile), threshold_min
     )
     balanced_indices = []
     for i, row in statdf.iterrows():
+        # each row describes a bin with:
+        # - count: number of datapoints in the bin
+        # - indices: indices of datapoints in the bin
+        n = min(int(threshold), int(row['count']))
+        if replacement:
+            n = int(row['count'])
         balanced_indices.append(
-            np.random.choice(
-                row['indices'][0], min(int(threshold), int(row['count'])), replace=False
+            jax.random.choice(
+                rng_key,
+                row['indices'][0],
+                shape=(n,),
+                replace=replacement,
             )
         )
-    balanced_data = data[np.concatenate(balanced_indices), :]
+    balanced_data = data[jnp.concatenate(balanced_indices), :]
     return balanced_data
 
 
 def balance_each_dataset(
     models: dict[str, bc.ComputeGraphModel],
     Y: dict[str, np.ndarray],
+    rng_key,
     bin_resolution=0.5,
     threshold_quantile=0.4,
     threshold_min=20,
+    replacement=True,
 ):
     """balances each dataset individually (not across datasets but within each dataset,
     so that each dataset aims for a similar number of samples per bin)"""
@@ -147,8 +318,14 @@ def balance_each_dataset(
         out_proteins = model.get_output_proteins()
         in_proteins = model.get_inverted_input_proteins()
         stats, _ = binstats(data, out_proteins, in_proteins, resolution=bin_resolution)
+        rng_key, subkey = jax.random.split(rng_key)
         Y_balanced[sample] = balance_per_bin(
-            data, stats, threshold_quantile=threshold_quantile, threshold_min=threshold_min
+            data,
+            stats,
+            subkey,
+            threshold_quantile=threshold_quantile,
+            threshold_min=threshold_min,
+            replacement=replacement,
         )
         X_balanced[sample] = model.get_input_from_output(Y_balanced[sample])
     return X_balanced, Y_balanced
@@ -156,7 +333,6 @@ def balance_each_dataset(
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     plot heatmap     --
@@ -270,7 +446,7 @@ def model_heatmap(
     n_axes = len(axes_len)
 
     if n_axes == 1:
-        fig, axes = plt.subplots(1, axes_len[0], figsize=(base_size * axes_len[0],base_size))
+        fig, axes = plt.subplots(1, axes_len[0], figsize=(base_size * axes_len[0], base_size))
         axes = axes.flatten()
     elif n_axes == 2:
         fig, axes = plt.subplots(
@@ -593,6 +769,10 @@ def load(path):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                         --     batches     --
+# ···············································································
+
 
 def split_array_uniform(arr, n_batches, rng_key):
     n = len(arr)
@@ -620,10 +800,10 @@ def make_batches_dict(Y, n_batches, rng_key, models):
 
 
 def make_batches_uniform_sampling(
+    X: list[np.ndarray],
     Y: list[np.ndarray],
     batch_size: int,
     rng_key,
-    models: list[bc.ComputeGraphModel],
     total_size=None,
 ):
     """Split data into batches of equal size, for a list of arrays (one per sample).
@@ -661,3 +841,18 @@ def make_batches_uniform_sampling(
     assert x_batches.shape == (n_batches, len(Y), batch_size, n_inputs)
 
     return x_batches, y_batches
+
+
+def batch(X, Y, batch_size, n_batches=None):
+    """Yields batches of data from X and Y."""
+    n = X.shape[0]
+    if n_batches is None:
+        n_batches = n // batch_size
+    # using sampling with replacement
+    for i in range(n_batches):
+        idx = np.random.choice(n, size=batch_size, replace=True)
+        yield X[idx], Y[idx]
+
+
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────

@@ -7,20 +7,14 @@ from datetime import datetime
 import jax.numpy as jnp
 from jax import jit, vmap, grad, value_and_grad
 from pathlib import Path
-import json5
+from jax.tree_util import Partial as partial
 import json
-import sqlite3
 from tqdm import tqdm
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable
 import pandas as pd
 import optax
 import matplotlib.pyplot as plt
-from rich.console import Console
-from rich.progress import track
-
 import numpy as np
-from .recipe import XP, import_recipes_to_sql
-from .network import Network, inverted_network
 from . import datautils as du
 from . import utils as ut
 from .compute import ComputeGraphModel
@@ -50,7 +44,7 @@ def mse_loss(y, y_hat, n_outputs=None):
 # ···············································································
 
 DEFAULT_CFG = {
-    "optimizer": "adam",
+    "optimizer": "amsgrad",
     "learning_rate": 0.001,
     "adam_w_decay": 0.0001,
     "loss_function": mse_loss,
@@ -59,7 +53,7 @@ DEFAULT_CFG = {
     "n_replicates": 1,
     "compile_training": True,
     "batch_size": 128,  # per whole batch, i.e the sum of each xp's batch size
-    "norm_factor": 1e6,
+    "norm_factor": 1e7,
     "balance_bin_resolution": 0.5,
     "balance_threshold_quantile": 0.4,
     "balance_threshold_min": 40,
@@ -69,80 +63,6 @@ DEFAULT_CFG = {
     "save_rate": 100,
     "static_params": [['node']],
 }
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                           --     utils   --
-# ···············································································
-# to serialize the node functions used into a savable config,
-# we need to be able to serialize partials and functions.
-
-
-def params_to_numpy(params):
-    # use tree_map to convert all the jax arrays to numpy arrays
-    return jax.tree_map(lambda x: x if isinstance(x, float) else np.array(x), params)
-
-
-def serialize_partial_or_function(field):
-    if isinstance(field, partial):
-        return {
-            'function': field.func.__name__,
-            'kwargs': field.keywords,
-        }
-    elif callable(field):
-        return {
-            'function': field.__name__,
-        }
-    else:
-        return field
-
-
-def preprocess_data(models, Y_raw, cfg=DEFAULT_CFG):
-    """Rebalancing + normalization of data for training."""
-    # rebalances so that the number of samples in each bin is roughly the same
-    X, Y = du.balance_each_dataset(
-        models,
-        Y_raw,
-        bin_resolution=cfg['balance_bin_resolution'],
-        threshold_quantile=cfg['balance_threshold_quantile'],
-        threshold_min=cfg['balance_threshold_min'],
-    )
-    # normalize to get data in a reasonable range
-    norm_factor = cfg["norm_factor"]
-    X = jax.tree_map(lambda x: x / norm_factor, X)
-    Y = jax.tree_map(lambda x: x / norm_factor, Y)
-    return X, Y
-
-
-def batch(X, Y, batch_size, n_batches=None):
-    """Yields batches of data from X and Y."""
-    n = X.shape[0]
-    if n_batches is None:
-        n_batches = n // batch_size
-    # using sampling with replacement
-    for i in range(n_batches):
-        idx = np.random.choice(n, size=batch_size, replace=True)
-        yield X[idx], Y[idx]
-
-
-@jax.jit
-def unstack_tree(t):
-    n = jax.tree_util.tree_leaves(t)[0].shape[0]
-    return [jax.tree_map(lambda x: x[i], t) for i in range(n)]
-
-
-def get_best_params(history, smooth_window=10):
-    # find the lowest loss time point (and which replicate)
-    loss = np.array(history['loss'])
-    from scipy.ndimage import gaussian_filter1d
-
-    loss_smooth = gaussian_filter1d(loss, sigma=smooth_window, axis=0)
-    best_t, best_replicate = np.unravel_index(loss_smooth.argmin(), loss_smooth.shape)
-    p = unstack_tree(history['params'][best_t])[best_replicate]
-    return p, (best_t, best_replicate)
-
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -256,28 +176,30 @@ def log_w_replicates(history, epoch, cfg, **_):
 # ···············································································
 
 
-def train_xp(xp, config=DEFAULT_CFG, **kwargs):
-    cfg = {**DEFAULT_CFG, **config}
+# def train_xp(xp, config=DEFAULT_CFG, **kwargs):
+    # cfg = {**DEFAULT_CFG, **config}
 
-    rng_key = jax.random.PRNGKey(cfg['rng_key'])
+    # rng_key = jax.random.PRNGKey(cfg['rng_key'])
 
-    models = xp.get_models(node_impl=config['node_impl'])
-    _, Y = xp.get_XY(models)
-    X, Y = preprocess_data(models, Y, cfg)
+    # models = xp.get_models(node_impl=config['node_impl'])
+    # data = du.DataManager(xp.get_XY(models))
 
-    individual_batch_sizes = cfg['batch_size'] // len(models)
 
-    model_values = []
-    Y_values = []
-    for k, m in models.items():
-        model_values.append(m)
-        Y_values.append(Y[k])
+    # X, Y = preprocess_data(models, Y, cfg)
 
-    x_batches, y_batches = du.make_batches_uniform_sampling(
-        Y_values, individual_batch_sizes, rng_key, model_values
-    )
+    # individual_batch_sizes = cfg['batch_size'] // len(models)
 
-    return train_models(model_values, x_batches, y_batches, config=config, **kwargs)
+    # model_values = []
+    # Y_values = []
+    # for k, m in models.items():
+        # model_values.append(m)
+        # Y_values.append(Y[k])
+
+    # x_batches, y_batches = du.make_batches_uniform_sampling(
+        # Y_values, individual_batch_sizes, rng_key, model_values
+    # )
+
+    # return train_models(model_values, x_batches, y_batches, config=config, **kwargs)
 
 
 #                                                                            }}}
@@ -370,7 +292,7 @@ def train_models(
 
     def training_step(params, opt_state, key, x, y):
         dynamic, static = ut.split_params(params, [['node']])
-        loss, grads = jax.value_and_grad(loss_func)(dynamic, static, x, y, key)
+        loss, grads = value_and_grad(loss_func)(dynamic, static, x, y, key)
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
 
         updt = flatten_tree(updates)

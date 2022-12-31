@@ -197,11 +197,9 @@ def check_model(m, x, y):
     assert len(inp) == len(set(inp))
     for iname in inp:
         assert iname in outp
-
     for ipos, outpos in in_pos.items():
         assert inp[ipos] == outp[outpos]
         assert np.all(x[:, ipos] == y[:, outpos])
-
     mdef = bc.ComputeGraphModel(m.network)
     mdef.build(bc.nodes.DEFAULT_COMPUTE_NODES_DICT)
     zerorng = jax.random.PRNGKey(0)
