@@ -47,16 +47,16 @@ def generate_probability_distribution_jax(n_samples, n_blobs, rng, ndim=2):
 
 
 # Set the number of samples to generate for each blob
-n_samples = 3000
+n_samples = 5000
 
 # Set the number of blobs to generate
-n_blobs = 30
+n_blobs = 20
 
-key = jax.random.PRNGKey(9021)
+key = jax.random.PRNGKey(123921)
 rng = key
 # Generate the probability distribution
 ndim = 2
-S = generate_probability_distribution_jax(n_samples, n_blobs, key, ndim=ndim) / 20.0
+S = generate_probability_distribution_jax(n_samples, n_blobs, key, ndim=ndim)
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -79,7 +79,12 @@ def nd_digitize(x, grid):
     return jnp.stack([jnp.digitize(x[i], grid[i]) for i in range(x.shape[0])], axis=0)
 
 
-SHARPNESS = 20.0
+SHARPNESS = 100
+
+import ott
+import ott.tools
+
+softranks = jax.jit(ott.tools.soft_sort.ranks)
 
 
 @jit
@@ -96,6 +101,10 @@ def jcdf_m(x, S):
 
 # differentiable version. Returns the product
 def jcdf(x, S, sharpness=SHARPNESS):
+    smin, smax = S.min(axis=0), S.max(axis=0)
+    S = (S - smin) / (smax - smin)
+    x = (x - smin) / (smax - smin)
+
     def lt_diff(s, x):
         return jnp.prod(heavyside(x - s, sharpness=sharpness))
 
@@ -103,10 +112,19 @@ def jcdf(x, S, sharpness=SHARPNESS):
 
 
 def jcdf_nd(x, S, sharpness=SHARPNESS):
+    # normalize x so that sharpness has constant meaning
+    smin, smax = S.min(axis=0), S.max(axis=0)
+    S = (S - smin) / (smax - smin)
+    x = (x - smin) / (smax - smin)
+
     def lt_diff(s, x):
         return heavyside(x - s, sharpness=sharpness)
 
     return jnp.mean(jax.vmap(lt_diff, in_axes=(0, None))(S, x), axis=0)
+
+
+def jcdf_nd_ott(x, S):
+    return softranks(S, x, axis=0) / S.shape[0]
 
 
 def jcdf_ax(x, S, axis, sharpness=SHARPNESS):
@@ -119,14 +137,18 @@ def jcdf_ax(x, S, axis, sharpness=SHARPNESS):
 vjcdf = jit(vmap(jcdf, in_axes=(0, None)))
 vjcdf_ax = jit(vmap(jcdf_ax, in_axes=(0, None, None)))
 vjcdf_nd = jit(vmap(jcdf_nd, in_axes=(0, None)))
+vjcdf_nd_ott = jit(vmap(jcdf_nd_ott, in_axes=(0, None)))
 vjcdf_m = jit(vmap(jcdf_m, in_axes=(0, None)))
 grad_vjcdf = jit(vmap(grad(jcdf), in_axes=(0, None)))
 
 
+# vjcdf_nd_ott(x, S)
+
 kde = gaussian_kde(S.T, bw_method='silverman')
 
 if ndim == 2:
-    x = jnp.linspace(-1, 1, 128)
+    # x = jnp.linspace(-1, 1, 128)
+    x = jnp.linspace(S.min() - 1, S.max() + 1, 128)
     y = x
     Xgrid, Ygrid = np.meshgrid(x, y)
     xy = np.vstack([Xgrid.ravel(), Ygrid.ravel()]).T
@@ -236,75 +258,73 @@ else:
 
     x = jnp.linspace(S.min() - 1, S.max() + 1, 200)
     kde_eval = kde.evaluate(x)
-    cdf = vjcdf(x, S)
-    cdf_grad = grad_vjcdf(x, S)
+    cdf = vjcdf_nd(x, S)
+    diff = jnp.diff(cdf, axis=0)
+    # cdf_grad = grad_vjcdf(x, S)
     fig, ax = plt.subplots(3, 1, figsize=(5, 15))
     ax[0].plot(x, kde_eval)
     ax[0].set_title('kde density')
     ax[1].plot(x, cdf)
     ax[1].set_title('ecdf')
-    ax[2].plot(x, cdf_grad)
-    ax[2].set_title('grad')
+    ax[2].plot(x[:-1], diff)
+    ax[2].set_title('diff')
     plt.show()
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                        --     other plot     --
+# {{{                         --     quantiles     --
 # ···············································································
+S.shape
 
-s = S.T
-# Estimate the density using gaussian_kde
-kde = gaussian_kde(s)
-
-# Generate a fixed 100x100 grid of points between (-1,-1) and (1,1)
-x, y = np.mgrid[-1:1:100j, -1:1:100j]
-positions = np.vstack([x.ravel(), y.ravel()])
-
-# Evaluate the density at each point on the grid
-density = kde.evaluate(positions)
-
-# Reshape the density array to the same shape as the grid
-density = density.reshape(x.shape)
-
-# Plot the estimated PDF
-fig, ax = plt.subplots()
-ax.pcolormesh(x, y, density)
-ax.set_title("PDF estimate")
-
-# Compute the CDF along each dimension using the cumulative sum function
-cdf_x = np.cumsum(density, axis=0)
-cdf_y = np.cumsum(density, axis=1)
-
-cdf = np.cumsum(cdf_x, axis=1)
-
-# Plot the CDF
-fig, ax = plt.subplots()
-ax.pcolormesh(x, y, cdf_x)
-ax.set_title("CDF (x dimension)")
-
-fig, ax = plt.subplots()
-ax.pcolormesh(x, y, cdf_y)
-ax.set_title("CDF (y dimension)")
+S_sorted = jnp.sort(S, axis=0).squeeze()
+S_sorted
+ranks = jnp.arange(S.shape[0]) / S.shape[0]
+S_sorted.shape
+ranks.shape
 
 
-fig, ax = plt.subplots()
-ax.pcolormesh(x, y, cdf)
-ax.set_title("CDF (x+y dimension)")
+def Q(q):
+    # q is a quantile
+    # returns the value of S at q
+    # 
+    return vmap(jnp.interp, in_axes=(1, None, 1))(q, ranks, S_sorted)
 
 
-pdf_x = np.diff(cdf, axis=0, prepend=0)
-pdf = np.diff(pdf_x, axis=1, prepend=0)
+x = jnp.linspace(0, 1, 200)
+Xgrid, Ygrid = np.meshgrid(x, x)
+xy = np.vstack([Xgrid.ravel(), Ygrid.ravel()]).T
+qq = Q(xy).T
+qq_x = qq[:, 0].reshape(Xgrid.shape)
+qq_y = qq[:, 1].reshape(Xgrid.shape)
 
-# Plot the final PDF
-fig, ax = plt.subplots()
-ax.pcolormesh(x, y, pdf)
-ax.set_title("PDF (x+y dimension)")
+qq_full = qq_x * qq_y
+
+fig, ax = plt.subplots(2, 1, figsize=(5, 10))
+ax[0].imshow(
+    qq_x,
+    origin='lower',
+    extent=[0, 1, 0, 1],
+    cmap='inferno',
+    vmin=0,
+)
+ax[0].set_title('qq_x')
+ax[1].imshow(
+    qq_y,
+    origin='lower',
+    extent=[0, 1, 0, 1],
+    cmap='inferno',
+    vmin=0,
+)
+ax[1].set_title('qq_y')
+
+plt.show()
 
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                           --     train     --
@@ -331,19 +351,35 @@ def dense_layer(input_values, output_size, get_param, key, name):
         raise ValueError(msg) from e
 
 
+n = 1000
+S.shape
+ys = jax.random.choice(key, S, shape=(n,), replace=True)
+
 Y = S
+# Y = data
+# S.shape
 X = jnp.zeros_like(Y)
 
-H_SIZE = 64
-N_LAYERS = 12
+H_SIZE = 128
+N_LAYERS = 8
 
 
 def uniform_cdf(x):
     return jnp.prod(jnp.maximum(0, jnp.minimum(1, x)), axis=0)
 
 
-# activation = jax.nn.relu
 activation = jax.nn.leaky_relu
+
+# def model(params, z, key):
+# k0, k1, k2, k3, kn = jax.random.split(key, 5)
+# get_p = partial(get_param, params=params)
+# # we go from z to H_size to output_shape
+# x = dense_layer(z, H_SIZE, get_p, k0, 'dense0')
+# x = activation(x)
+# for i in range(N_LAYERS - 1):
+# x = dense_layer(x, H_SIZE, get_p, k1, f'dense{i+1}')
+# x = activation(x)
+# return dense_layer(x, Y.shape[1], get_p, k3, 'dense_out')
 
 
 def model(params, z, key):
@@ -355,42 +391,66 @@ def model(params, z, key):
     for i in range(N_LAYERS - 1):
         x = dense_layer(x, H_SIZE, get_p, k1, f'dense{i+1}')
         x = activation(x)
-    return dense_layer(x, S.shape[1], get_p, k3, 'dense_out')
+        x = jnp.concatenate([x.flatten(), z])
+    return dense_layer(x, Y.shape[1], get_p, k3, 'dense_out')
 
 
 params = {}
-rng_key = jax.random.PRNGKey(121)
+rng_key = jax.random.PRNGKey(142)
 model(params, jnp.zeros(Y.shape[1]), key)
 
-# opt = optax.amsgrad(learning_rate=1e-4)
+# opt = optax.amsgrad(learning_rate=3e-4)
+opt = optax.adam(learning_rate=3e-4)
 
-schedule = optax.linear_schedule(1e-3, 1e-5, 5000)
-opt = optax.chain(
-    optax.adam(learning_rate=schedule),
-)
+# schedule = optax.linear_schedule(1e-3, 1e-5, 2000)
+# opt = optax.chain(
+# optax.adam(learning_rate=schedule),
+# )
 
+# n = 100
+# ys = jax.random.choice(key, Y, shape=(n,), replace=True)
+# cdf = vjcdf_nd_sh(pred, ys, sh)
 
 vmodel = vmap(model, in_axes=(None, 0, 0))
-vjcdf_sh = jit(vmap(jcdf, in_axes=(0, None, None)))
-vjcdf_ax_sh = jit(vmap(jcdf_ax, in_axes=(0, None, None, None)))
 vjcdf_nd_sh = jit(vmap(jcdf_nd, in_axes=(0, None, None)))
+vjcdf_sh = jit(vmap(jcdf, in_axes=(0, None, None)))
 
-
-def softmax(x):
-    return jnp.exp(x) / jnp.sum(jnp.exp(x), axis=0)
-
-
-def softmin(x):
-    return jnp.log(jnp.exp(x) / jnp.sum(jnp.exp(x), axis=0))
-
+sh = 10.0
 
 def loss_fn(params, sh, y, key):
     zs = jax.random.uniform(key, (y.shape[0], y.shape[1]), minval=0, maxval=1)
     pred = vmodel(params, zs, jax.random.split(key, y.shape[0]))
 
-    cdf = vjcdf_nd_sh(pred, S, sh)
-    # return jnp.mean(jnp.abs(cdf - zs))
-    return jnp.mean((cdf - zs)**2)
+
+
+    # maybe add more zs. Reproject?
+    # Let's say:
+    # u = 2x+3y
+    # v = 5x-2y
+    # I know F(x,y), the original cdf.
+    # Solve the equations defining u and v for x and y in terms of u and v:
+    # x = (2u - 3v)/9
+    # y = (5v - 2u)/7
+    # G(u,v) = F((2u - 3v)/9, (5v - 2u)/7)
+    x, y = zs
+
+
+    cdfnd = vjcdf_nd_sh(pred, Y, 100.0)
+    nderror = jnp.sqrt(jnp.mean((cdfnd - zs) ** 2))
+
+    # cdf = vjcdf_sh(pred, Y, 500.0)
+    cdf = vjcdf(pred, Y)
+    zprod = jnp.prod(zs, axis=1)
+    cdf_error = jnp.mean((cdf - zprod) ** 2)
+
+    quantiles = Q(zs).T
+    q_error = jnp.sqrt(jnp.mean((quantiles - pred) ** 2)) * cdferror
+
+    # return qerror + comp_cdf_error
+    # return comp_cdf_error
+
+    # return q_error * jnp.max(jnp.array([0.1, 1.0 - sh])) + cdf_error * sh + cdferror * sh
+    return nderror + cdf_error + q_error
 
 
 opt_state = opt.init(params)
@@ -404,17 +464,17 @@ def update(params, opt_state, sh, y, key):
     return params, opt_state, loss
 
 
-n_epochs = 100
-batch_size = 64
-n_batches = S.shape[0] // batch_size
-# We need split to result in an equal division
+n_epochs = 50
+batch_size = 32
+n_batches = Y.shape[0] // batch_size
 xbatches = jnp.split(X[: n_batches * batch_size], n_batches)
 ybatches = jnp.split(Y[: n_batches * batch_size], n_batches)
 y = ybatches[0]
 x = xbatches[0]
 
-sharpness_range = (0, 100.0)
-# sharpness_range = (10.0, 50.0)
+
+# sharpness_range = (1, 1000.0)
+sharpness_range = (0.0001, 2.0)
 
 losses = []
 for epoch in range(n_epochs):
@@ -428,19 +488,13 @@ for epoch in range(n_epochs):
 
 plt.semilogy(losses)
 
-# generate lots of samples from the learned distribution
+
 n_gen_samples = 10000
 subkeys = jax.random.split(rng_key, n_gen_samples)
 vm = vmap(model, in_axes=(None, 0, 0))
-
-zs = jax.random.uniform(key, (n_gen_samples, S.shape[1]), minval=0, maxval=1)
+zs = jax.random.uniform(key, (n_gen_samples, Y.shape[1]), minval=0, maxval=1)
 gen_samples = vm(params, zs, subkeys)
-
 kde_gen = gaussian_kde(gen_samples.T, bw_method='silverman')
-# we plot side by side:
-# row 0: target distribution, learned distribution
-# row 1: target cdf, learned cdf
-
 
 if ndim == 1:
     x = jnp.linspace(Y.min() - 1, Y.max() + 1, 500)
@@ -464,47 +518,74 @@ else:
     y = jnp.linspace(Y[:, 1].min(), Y[:, 1].max(), 200)
     Xgrid, Ygrid = np.meshgrid(x, y)
     xy = np.vstack([Xgrid.ravel(), Ygrid.ravel()])
+
+    diffmin = -0.05
+    diffmax = 0.05
+
+    fig, ax = plt.subplots(5, 3, figsize=(9, 15))
+
     Ztarget = kde.evaluate(xy).reshape(Xgrid.shape)
     Zlearned = kde_gen.evaluate(xy).reshape(Xgrid.shape)
-    fig, ax = plt.subplots(3, 2, figsize=(10, 15))
+    Zdiff = Zlearned - Ztarget
     ax[0, 0].pcolormesh(Xgrid, Ygrid, Ztarget, cmap='inferno')
     ax[0, 0].set_title('Target distribution')
     ax[0, 1].pcolormesh(Xgrid, Ygrid, Zlearned, cmap='inferno')
     ax[0, 1].set_title('Learned distribution')
+    ax[0, 2].pcolormesh(Xgrid, Ygrid, Zdiff, cmap='jet')
+    ax[0, 2].set_title('Difference')
+
+    cdf_target_xy = vjcdf_nd(xy.T, Y)
+    cdf_target_x = cdf_target_xy[:, 0].reshape(Xgrid.shape)
+    cdf_target_y = cdf_target_xy[:, 1].reshape(Xgrid.shape)
+
+    cdf_learned_xy = vjcdf_nd(xy.T, gen_samples)
+    cdf_learned_x = cdf_learned_xy[:, 0].reshape(Xgrid.shape)
+    cdf_learned_y = cdf_learned_xy[:, 1].reshape(Xgrid.shape)
+
+    xdiff = cdf_learned_x - cdf_target_x
+    ydiff = cdf_learned_y - cdf_target_y
+
+    ax[1, 0].pcolormesh(Xgrid, Ygrid, cdf_target_x, cmap='inferno')
+    ax[1, 0].set_title('Target cdf x')
+    ax[1, 1].pcolormesh(Xgrid, Ygrid, cdf_learned_x, cmap='inferno')
+    ax[1, 1].set_title('Learned cdf x')
+    ax[1, 2].pcolormesh(Xgrid, Ygrid, xdiff, cmap='jet', vmin=diffmin, vmax=diffmax)
+    ax[1, 2].set_title('Difference x')
+
+    ax[2, 0].pcolormesh(Xgrid, Ygrid, cdf_target_y, cmap='inferno')
+    ax[2, 0].set_title('Target cdf y')
+    ax[2, 1].pcolormesh(Xgrid, Ygrid, cdf_learned_y, cmap='inferno')
+    ax[2, 1].set_title('Learned cdf y')
+    ax[2, 2].pcolormesh(Xgrid, Ygrid, ydiff, cmap='jet', vmin=diffmin, vmax=diffmax)
+    ax[2, 2].set_title('Difference y')
+
     cdf_target = vjcdf(xy.T, Y).reshape(Xgrid.shape)
     cdf_learned = vjcdf(xy.T, gen_samples).reshape(Xgrid.shape)
-
-    ax[1, 0].pcolormesh(Xgrid, Ygrid, cdf_target, cmap='inferno')
-    ax[1, 0].set_title('Target cdf')
-    ax[1, 1].pcolormesh(Xgrid, Ygrid, cdf_learned, cmap='inferno')
-    ax[1, 1].set_title('Learned cdf')
-
-    diff1 = jnp.diff(cdf_target, axis=1)
-    pdf_x = jnp.diff(diff1, axis=0)
-    ax[2, 0].imshow(
-        pdf_x,
-        origin='lower',
-        cmap='inferno',
-        vmin=0,
+    ax[3, 0].pcolormesh(Xgrid, Ygrid, cdf_target, cmap='inferno', vmin=0, vmax=1)
+    ax[3, 0].set_title('Target cdf')
+    ax[3, 1].pcolormesh(Xgrid, Ygrid, cdf_learned, cmap='inferno')
+    ax[3, 1].set_title('Learned cdf')
+    ax[3, 2].pcolormesh(
+        Xgrid, Ygrid, cdf_learned - cdf_target, cmap='jet', vmin=diffmin, vmax=diffmax
     )
-    ax[2, 0].set_title('target pdf reconstructed')
+    ax[3, 2].set_title('Difference')
 
-    diff1 = jnp.diff(cdf_learned, axis=1)
-    pdf_x = jnp.diff(diff1, axis=0)
-    ax[2, 1].imshow(
-        pdf_x,
-        origin='lower',
-        cmap='inferno',
-        vmin=0,
+    recons_cdf_target = cdf_target_x * cdf_target_y
+    recons_cdf_learned = cdf_learned_x * cdf_learned_y
+
+    ax[4, 0].pcolormesh(Xgrid, Ygrid, recons_cdf_target, cmap='inferno', vmin=0, vmax=1)
+    ax[4, 0].set_title('Target cdf')
+    ax[4, 1].pcolormesh(Xgrid, Ygrid, recons_cdf_learned, cmap='inferno')
+    ax[4, 1].set_title('Learned cdf')
+    ax[4, 2].pcolormesh(
+        Xgrid, Ygrid, recons_cdf_learned - recons_cdf_target, cmap='jet', vmin=diffmin, vmax=diffmax
     )
-    ax[2, 1].set_title('learned pdf reconstructed')
+    ax[4, 2].set_title('Difference')
 
     plt.show()
 
-
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     quad func     --
@@ -559,5 +640,84 @@ quad.defvjp(quad_fwd, quad_bwd)
 # llhpred = 1.0 - kde.evaluate(pred.T)
 # llhz = 1.0 - kde.evaluate((zs.T-0.5) * 5.0)
 # error += jnp.mean((llhpred - llhz) ** 2)
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                          --     mnist
+# ···············································································
+
+import mnist
+
+
+data = mnist.train_images()
+labels = mnist.train_labels()
+data = data.astype(np.float32)
+data = data / 255.0
+# get all the zeros
+select = 4
+data = data[labels == select]
+
+for d in data[:10]:
+    fig, ax = plt.subplots(figsize=(3, 3))
+    ax.imshow(d, cmap='gray')
+    plt.show()
+
+
+# flatten all the images
+data = data.reshape(data.shape[0], -1)
+# get the first image
+d = data[0]
+d.shape
+ndim = 784
+
+# # generate samples from the learned distribution
+# n_gen_samples = 10
+# subkeys = jax.random.split(rng_key, n_gen_samples)
+# vm = vmap(model, in_axes=(None, 0, 0))
+# zs = jax.random.uniform(key, (n_gen_samples, Y.shape[1]), minval=0, maxval=1)
+# zs = jax.random.uniform(key, (n_gen_samples, ), minval=0, maxval=1)
+# zs = jnp.tile(zs, (Y.shape[1], 1)).T
+
+# zs = jnp.linspace(0, 1, n_gen_samples)
+# zs = jnp.tile(zs, (Y.shape[1], 1)).T
+
+# gen_samples = vm(params, zs, subkeys)
+
+# # they're mnists. Let's plot the samples:
+# fig, axs = plt.subplots(1, n_gen_samples, figsize=(n_gen_samples, 1))
+# for i in range(n_gen_samples):
+# axs[i].imshow(gen_samples[i].reshape(28, 28), cmap='gray')
+# axs[i].axis('off')
+
+# plt.show()
+
+
+diff1 = jnp.diff(cdf_target, axis=1)
+    pdf_x_target = jnp.diff(diff1, axis=0)
+    ax[4, 0].imshow(
+        pdf_x_target,
+        origin='lower',
+        cmap='inferno',
+        vmin=0,
+    )
+    ax[4, 0].set_title('target pdf reconstructed')
+
+    diff1 = jnp.diff(cdf_learned, axis=1)
+    pdf_x_learned = jnp.diff(diff1, axis=0)
+    ax[4, 1].imshow(
+        pdf_x_learned,
+        origin='lower',
+        cmap='inferno',
+        vmin=0,
+    )
+    ax[4, 1].set_title('learned pdf reconstructed')
+
+    ax[4, 2].imshow(
+        pdf_x_learned - pdf_x_target, origin='lower', cmap='jet', vmin=diffmin, vmax=diffmax
+    )
+    ax[4, 2].set_title('Difference')
+
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
