@@ -50,7 +50,7 @@ def generate_probability_distribution_jax(n_samples, n_blobs, rng, ndim=2):
 n_samples = 5000
 
 # Set the number of blobs to generate
-n_blobs = 20
+n_blobs = 4
 
 key = jax.random.PRNGKey(123921)
 rng = key
@@ -71,13 +71,11 @@ import scipy.stats
 kde = gaussian_kde(S.T, bw_method='silverman')
 # kde_sc = scipy.stats.gaussian_kde(S.T, bw_method='silverman')
 
-
 def nd_digitize(x, grid):
     x = jnp.asarray(x)
     assert x.ndim == 1
     grid = jnp.asarray(grid)
     return jnp.stack([jnp.digitize(x[i], grid[i]) for i in range(x.shape[0])], axis=0)
-
 
 SHARPNESS = 100
 
@@ -86,6 +84,16 @@ import ott.tools
 
 softranks = jax.jit(ott.tools.soft_sort.ranks)
 
+def rotate2d(x, theta):
+    c, s = jnp.cos(theta), jnp.sin(theta)
+    R = jnp.array([[c, -s], [s, c]])
+    return jnp.dot(x, R)
+
+theta = jnp.pi / 4
+S_rot = rotate2d(S, theta)
+
+S_back = rotate2d(S_rot, -theta)
+jnp.allclose(S_back, S, atol=1e-4)
 
 @jit
 def heavyside(x, sharpness=SHARPNESS):
@@ -158,9 +166,8 @@ if ndim == 2:
     cdf_m = vjcdf_m(xy, S).reshape(Xgrid.shape)
     cdf = vjcdf(xy, S).reshape(Xgrid.shape)
 
-    fig, ax = plt.subplots(3, 3, figsize=(30, 30))
-    ax = ax.flatten()
-    ax[0].imshow(
+    fig, ax = plt.subplots(3, 3, figsize=(12, 12))
+    ax[0,0].imshow(
         cdf_m,
         origin='lower',
         extent=[x.min(), x.max(), y.min(), y.max()],
@@ -168,9 +175,9 @@ if ndim == 2:
         vmin=0,
         vmax=1,
     )
-    ax[0].set_title('true ecdf')
+    ax[0,0].set_title('true ecdf')
 
-    ax[1].imshow(
+    ax[0,1].imshow(
         cdf,
         origin='lower',
         extent=[x.min(), x.max(), y.min(), y.max()],
@@ -178,79 +185,72 @@ if ndim == 2:
         vmin=0,
         vmax=1,
     )
-    ax[1].set_title('differentiable ecdf')
+    ax[0,1].set_title('differentiable ecdf')
 
-    im = ax[2].imshow(
+    im = ax[0,2].imshow(
         kde_eval, origin='lower', extent=[x.min(), x.max(), y.min(), y.max()], cmap='inferno'
     )
-    ax[2].set_title('kde')
+    ax[0,2].set_title('kde')
 
     cdf_grad_x = grad_vjcdf(xy, S)[:, 0].reshape(Xgrid.shape)
     cdf_grad_y = grad_vjcdf(xy, S)[:, 1].reshape(Xgrid.shape)
-    ax[3].imshow(
+    cdf_grad_u = grad_vjcdf(xy, S_rot)[:, 0].reshape(Xgrid.shape)
+    ax[1,0].imshow(
         cdf_grad_x,
         origin='lower',
         extent=[x.min(), x.max(), y.min(), y.max()],
         cmap='inferno',
-        vmin=0,
-        vmax=1,
     )
-    ax[3].set_title('cdf grad x')
+    ax[1,0].set_title('cdf grad x')
 
-    ax[4].imshow(
+    ax[1,1].imshow(
         cdf_grad_y,
         origin='lower',
         extent=[x.min(), x.max(), y.min(), y.max()],
         cmap='inferno',
-        vmin=0,
-        vmax=1,
     )
-    ax[4].set_title('cdf grad y')
+    ax[1,1].set_title('cdf grad y')
 
-    # pdf_x = np.diff(cdf_grad_x, axis=0, prepend=1.0)
-
-    # mirror first column
-    # prepcdf = np.concatenate((cdf_grad_x[:, 0:1], cdf_grad_x), axis=1)
-    diff1 = jnp.diff(cdf, axis=1)
-    pdf_x = jnp.diff(diff1, axis=0)
-    # pdf_y = np.diff(cdf_grad_y, axis=1, prepend=1.0)
-    ax[5].imshow(
-        pdf_x,
+    ax[1,2].imshow(
+        cdf_grad_u,
         origin='lower',
         extent=[x.min(), x.max(), y.min(), y.max()],
         cmap='inferno',
-        vmin=0,
     )
-    ax[5].set_title('pdf reconstructed')
+    ax[1,2].set_title('cdf grad u')
+
+    # pdf_x = np.diff(cdf_grad_x, axis=0, prepend=1.0)
+
 
     cdf_x = vjcdf_ax(xy, S, 0).reshape(Xgrid.shape)
     cdf_y = vjcdf_ax(xy, S, 1).reshape(Xgrid.shape)
-    ax[6].imshow(
+    cdf_u = vjcdf_ax(xy, S_rot, 0).reshape(Xgrid.shape)
+    ax[2,0].imshow(
         cdf_x,
         origin='lower',
         extent=[x.min(), x.max(), y.min(), y.max()],
         cmap='inferno',
         vmin=0,
     )
-    ax[6].set_title('cdf x')
+    ax[2,0].set_title('cdf x')
 
-    ax[7].imshow(
+    ax[2,1].imshow(
         cdf_y,
         origin='lower',
         extent=[x.min(), x.max(), y.min(), y.max()],
         cmap='inferno',
         vmin=0,
     )
-    ax[7].set_title('cdf y')
+    ax[2,1].set_title('cdf y')
 
-    cdf_xy = vjcdf_nd(xy, S)[:, 1].reshape(Xgrid.shape)
-    ax[8].imshow(
-        cdf_xy,
+    ax[2,2].imshow(
+        cdf_u,
         origin='lower',
         extent=[x.min(), x.max(), y.min(), y.max()],
         cmap='inferno',
         vmin=0,
     )
+    ax[2,2].set_title('cdf u')
 
     plt.show()
 
@@ -276,20 +276,57 @@ else:
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     quantiles     --
 # ···············································································
-S.shape
-
-S_sorted = jnp.sort(S, axis=0).squeeze()
-S_sorted
-ranks = jnp.arange(S.shape[0]) / S.shape[0]
-S_sorted.shape
-ranks.shape
 
 
-def Q(q):
-    # q is a quantile
-    # returns the value of S at q
-    # 
-    return vmap(jnp.interp, in_axes=(1, None, 1))(q, ranks, S_sorted)
+
+# def Q(q):
+    # # q is a quantile
+    # # returns the value of S at q
+    # return vmap(jnp.interp, in_axes=(1, None, 1))(q, ranks, S_sorted)
+
+
+Sx = S[:, 0]
+Sy = S[:, 1]
+Su = 2.0*Sx + 2.0*Sy
+# rotation matrix for theta
+Srotx = Srot[:, 0]
+Sroty = Srot[:, 1]
+
+
+def Q(q, arr):
+    # get quantile directly using jnp
+    return jnp.quantile(arr, q)
+    # q = jnp.asarray(q)
+    # arr_sorted = jnp.sort(arr)
+    # ranks = jnp.arange(arr.shape[0]) / arr.shape[0]
+    # return jnp.interp(q, ranks, arr_sorted)
+
+qx = Q(0.5, Sx)
+qy = Q(0.5, Sy)
+qrx = Q(0.5, Srotx)
+
+qrx
+invrot = jnp.array([[jnp.cos(theta), jnp.sin(theta)], [-jnp.sin(theta), jnp.cos(theta)]])
+
+rotated_qx_qy = jnp.dot(jnp.array([qx, qy]), invrot)
+rotated_qx_qy
+
+2*qx + 3*qy
+
+x = jnp.linspace(0, 1, 200)
+fig, ax = plt.subplots(4, 1, figsize=(5, 20))
+ax[0].plot(x, Q(x, Sx))
+ax[0].set_title('Qx')
+ax[1].plot(x, Q(x, Sy))
+ax[1].set_title('Qy')
+ax[2].plot(x, Q(x, Su))
+ax[2].set_title('Qu')
+ax[3].plot(x, 2*Q(x, Sx) + 3*Q(x, Sy))
+ax[3].set_title('2Qx + 3Qy')
+plt.show()
+
+
+
 
 
 x = jnp.linspace(0, 1, 200)
@@ -299,25 +336,26 @@ qq = Q(xy).T
 qq_x = qq[:, 0].reshape(Xgrid.shape)
 qq_y = qq[:, 1].reshape(Xgrid.shape)
 
-qq_full = qq_x * qq_y
 
-fig, ax = plt.subplots(2, 1, figsize=(5, 10))
-ax[0].imshow(
+fig, ax = plt.subplots(3, 2, figsize=(8, 8))
+ax[0, 0].imshow(
     qq_x,
     origin='lower',
     extent=[0, 1, 0, 1],
     cmap='inferno',
     vmin=0,
 )
-ax[0].set_title('qq_x')
-ax[1].imshow(
+ax[0, 0].set_title('qq_x')
+ax[0, 1].imshow(
     qq_y,
     origin='lower',
     extent=[0, 1, 0, 1],
     cmap='inferno',
     vmin=0,
 )
-ax[1].set_title('qq_y')
+ax[0, 1].set_title('qq_y')
+
+
 
 plt.show()
 
@@ -351,17 +389,11 @@ def dense_layer(input_values, output_size, get_param, key, name):
         raise ValueError(msg) from e
 
 
-n = 1000
-S.shape
-ys = jax.random.choice(key, S, shape=(n,), replace=True)
-
 Y = S
-# Y = data
-# S.shape
 X = jnp.zeros_like(Y)
 
-H_SIZE = 128
-N_LAYERS = 8
+H_SIZE = 256
+N_LAYERS = 6
 
 
 def uniform_cdf(x):
@@ -391,13 +423,10 @@ def model(params, z, key):
     for i in range(N_LAYERS - 1):
         x = dense_layer(x, H_SIZE, get_p, k1, f'dense{i+1}')
         x = activation(x)
-        x = jnp.concatenate([x.flatten(), z])
+        # x = jnp.concatenate([x.flatten(), z])
     return dense_layer(x, Y.shape[1], get_p, k3, 'dense_out')
 
 
-params = {}
-rng_key = jax.random.PRNGKey(142)
-model(params, jnp.zeros(Y.shape[1]), key)
 
 # opt = optax.amsgrad(learning_rate=3e-4)
 opt = optax.adam(learning_rate=3e-4)
@@ -407,20 +436,36 @@ opt = optax.adam(learning_rate=3e-4)
 # optax.adam(learning_rate=schedule),
 # )
 
-# n = 100
-# ys = jax.random.choice(key, Y, shape=(n,), replace=True)
-# cdf = vjcdf_nd_sh(pred, ys, sh)
+n_rotations = 9
+zsize = Y.shape[1] * n_rotations
+
+angles = jnp.linspace(0, jnp.pi, n_rotations, endpoint=False)
 
 vmodel = vmap(model, in_axes=(None, 0, 0))
-vjcdf_nd_sh = jit(vmap(jcdf_nd, in_axes=(0, None, None)))
+vjcdf_nd_sh = vmap(jcdf_nd, in_axes=(0, None, None))
 vjcdf_sh = jit(vmap(jcdf, in_axes=(0, None, None)))
 
 sh = 10.0
 
-def loss_fn(params, sh, y, key):
-    zs = jax.random.uniform(key, (y.shape[0], y.shape[1]), minval=0, maxval=1)
-    pred = vmodel(params, zs, jax.random.split(key, y.shape[0]))
+params = {}
+rng_key = jax.random.PRNGKey(1424)
+model(params, jnp.zeros(zsize), key)
 
+n_gen_samples = 10000
+zs = jax.random.uniform(key, (n_gen_samples, zsize), minval=0, maxval=1)
+# zs = jax.random.uniform(key, (n_gen_samples, 1), minval=0, maxval=1)
+# zs = jnp.tile(zs, (1, zsize))
+
+Yrotated = jnp.stack([rotate2d(Y, a) for a in angles])
+
+
+def loss_fn(params, sh, y, key):
+
+    zs = jax.random.uniform(key, (y.shape[0], zsize), minval=0, maxval=1)
+    pred = vmodel(params, zs, jax.random.split(key, y.shape[0]))
+    rotated_preds = jnp.stack([rotate2d(pred, a) for a in angles])
+
+    # pred_rotated = jnp.dot(S, rotm)
 
 
     # maybe add more zs. Reproject?
@@ -432,25 +477,30 @@ def loss_fn(params, sh, y, key):
     # x = (2u - 3v)/9
     # y = (5v - 2u)/7
     # G(u,v) = F((2u - 3v)/9, (5v - 2u)/7)
-    x, y = zs
+    # x, y = zs
 
 
-    cdfnd = vjcdf_nd_sh(pred, Y, 100.0)
-    nderror = jnp.sqrt(jnp.mean((cdfnd - zs) ** 2))
+    # cdfnd_xy = vjcdf_nd_sh(pred, Y, sh)
+    # cdfnd_r = vjcdf_nd_sh(pred_transformed, Yr, sh)
 
-    # cdf = vjcdf_sh(pred, Y, 500.0)
-    cdf = vjcdf(pred, Y)
-    zprod = jnp.prod(zs, axis=1)
-    cdf_error = jnp.mean((cdf - zprod) ** 2)
+    cdf_all = jnp.hstack(vmap(vjcdf_nd_sh, in_axes=(0, 0, None))(rotated_preds, Yrotated, sh))
+    nderror = jnp.sqrt(jnp.mean((cdf_all - zs) ** 2))
 
-    quantiles = Q(zs).T
-    q_error = jnp.sqrt(jnp.mean((quantiles - pred) ** 2)) * cdferror
+    # # cdf = vjcdf_sh(pred, Y, 500.0)
+    # cdf = vjcdf(pred, Y)
+    # zprod = jnp.prod(zs, axis=1)
+    # cdf_error = jnp.mean((cdf - zprod) ** 2)
+
+    # quantiles = Q(z1).T
+    # q_error = jnp.sqrt(jnp.mean((quantiles - pred) ** 2)) * cdferror
+    # quantiles_p = Q_rp(z2).T
+    # q_error_p = jnp.sqrt(jnp.mean((quantiles_p - pred) ** 2)) * cdferror
 
     # return qerror + comp_cdf_error
     # return comp_cdf_error
 
     # return q_error * jnp.max(jnp.array([0.1, 1.0 - sh])) + cdf_error * sh + cdferror * sh
-    return nderror + cdf_error + q_error
+    return  nderror
 
 
 opt_state = opt.init(params)
@@ -464,17 +514,17 @@ def update(params, opt_state, sh, y, key):
     return params, opt_state, loss
 
 
-n_epochs = 50
-batch_size = 32
+n_epochs = 5
+batch_size = 64
 n_batches = Y.shape[0] // batch_size
 xbatches = jnp.split(X[: n_batches * batch_size], n_batches)
 ybatches = jnp.split(Y[: n_batches * batch_size], n_batches)
+
 y = ybatches[0]
 x = xbatches[0]
 
-
 # sharpness_range = (1, 1000.0)
-sharpness_range = (0.0001, 2.0)
+sharpness_range = (0.0, 100.0)
 
 losses = []
 for epoch in range(n_epochs):
@@ -489,10 +539,8 @@ for epoch in range(n_epochs):
 plt.semilogy(losses)
 
 
-n_gen_samples = 10000
 subkeys = jax.random.split(rng_key, n_gen_samples)
 vm = vmap(model, in_axes=(None, 0, 0))
-zs = jax.random.uniform(key, (n_gen_samples, Y.shape[1]), minval=0, maxval=1)
 gen_samples = vm(params, zs, subkeys)
 kde_gen = gaussian_kde(gen_samples.T, bw_method='silverman')
 
@@ -718,6 +766,19 @@ diff1 = jnp.diff(cdf_target, axis=1)
     )
     ax[4, 2].set_title('Difference')
 
+    # mirror first column
+    # prepcdf = np.concatenate((cdf_grad_x[:, 0:1], cdf_grad_x), axis=1)
+    diff1 = jnp.diff(cdf, axis=1)
+    pdf_x = jnp.diff(diff1, axis=0)
+    # pdf_y = np.diff(cdf_grad_y, axis=1, prepend=1.0)
+    ax[5].imshow(
+        pdf_x,
+        origin='lower',
+        extent=[x.min(), x.max(), y.min(), y.max()],
+        cmap='inferno',
+        vmin=0,
+    )
+    ax[5].set_title('pdf reconstructed')
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
