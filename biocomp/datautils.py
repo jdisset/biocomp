@@ -43,17 +43,19 @@ def check_model(m, x, y):
     for ipos, outpos in in_pos.items():
         assert np.allclose(x[:, ipos], ydef[:, outpos])
 
-def basic_data_checks(X,Y,models):
-        # basic checks
-        assert set(X.keys()) == set(Y.keys()), 'X and Y must have the same keys'
-        assert set(X.keys()) == set(models.keys()), 'data and models must have the same keys'
 
-        for k, v in X.items():
-            assert v.shape[0] == Y[k].shape[0], f"shape mismatch for key {k}"
-            assert v.shape[1] == models[k].n_inputs, f"input shape mismatch for key {k}"
-            assert Y[k].shape[1] == models[k].n_outputs, f"output shape mismatch for key {k}"
+def basic_data_checks(X, Y, models):
+    # basic checks
+    assert set(X.keys()) == set(Y.keys()), 'X and Y must have the same keys'
+    assert set(X.keys()) == set(models.keys()), 'data and models must have the same keys'
 
-def advanced_data_checks(X,Y,models):
+    for k, v in X.items():
+        assert v.shape[0] == Y[k].shape[0], f"shape mismatch for key {k}"
+        assert v.shape[1] == models[k].n_inputs, f"input shape mismatch for key {k}"
+        assert Y[k].shape[1] == models[k].n_outputs, f"output shape mismatch for key {k}"
+
+
+def advanced_data_checks(X, Y, models):
     for k, m in tqdm(models.items()):
         check_model(m, X[k], Y[k])
 
@@ -72,19 +74,19 @@ def shuffled_data(X, Y, models, rng_key):
 
     return Xout, Yout
 
+
 def test_train_split(X, Y, models, rng_key, test_size=0.8):
     """get a random split train/test. Returns (Xtrain, Xtest, Ytrain, Ytest)"""
     basic_data_checks(X, Y, models)
     Xshuf, Yshuf = shuffled_data(X, Y, models, rng_key)
     # same is doable using jax.tree_map:
-    X_train, X_test = jax.tree_map(
-        lambda x: x[: int(x.shape[0] * test_size)], Xshuf
-    ), jax.tree_map(lambda x: x[int(x.shape[0] * test_size) :], Xshuf)
-    Y_train, Y_test = jax.tree_map(
-        lambda x: x[: int(x.shape[0] * test_size)], Yshuf
-    ), jax.tree_map(lambda x: x[int(x.shape[0] * test_size) :], Yshuf)
+    X_train, X_test = jax.tree_map(lambda x: x[: int(x.shape[0] * test_size)], Xshuf), jax.tree_map(
+        lambda x: x[int(x.shape[0] * test_size) :], Xshuf
+    )
+    Y_train, Y_test = jax.tree_map(lambda x: x[: int(x.shape[0] * test_size)], Yshuf), jax.tree_map(
+        lambda x: x[int(x.shape[0] * test_size) :], Yshuf
+    )
     return (X_train, Y_train), (X_test, Y_test)
-
 
 
 class DataManager:
@@ -100,7 +102,6 @@ class DataManager:
             advanced_data_checks(X, Y, models)
             self.N_TEST = 100
 
-    
     def normalize(self, factor):
         # for now, let's just scale the data
         # we can add more later
@@ -142,7 +143,6 @@ class DataManager:
             Y[k][: raw_Y[k].shape[0], : raw_Y[k].shape[1]] = raw_Y[k][indices]
         return X, Y
 
-
     def preprocess(self, rng_key, cfg):
         XX, YY = balance_each_dataset(
             self.models,
@@ -168,10 +168,8 @@ class DataManager:
         self.Y = YY
         self.normalize(cfg['normalize_factor'])
 
-
     def postscale(self, data, factor):
         return jax.tree_map(lambda x: x * factor, data)
-
 
 
 #                                                                            }}}
@@ -199,6 +197,34 @@ def binstats_nbins(data, bin_columns, stat_column, nbins=20, log=True, stats=["m
     return df, bins
 
 
+DUTILS_BINNING_POWER_RANGE = 30
+DUTILS_BINNING_VMAX_EPSILON = 10.0 ** (-DUTILS_BINNING_POWER_RANGE)
+
+
+def mk_log_grid(vmin, vmax, resolution):
+    """
+    Generate logarithmically spaced bins with a specified resolution, between vmin and vmax
+    Returns A list of arrays of bin edges, one per dimension.
+    """
+    vmin, vmax = np.asarray(vmin), np.asarray(vmax)
+    assert vmin.shape == vmax.shape
+    if vmin.ndim == 0:
+        vmin, vmax = vmin[None], vmax[None]
+    powers = 10.0 ** np.arange(-DUTILS_BINNING_POWER_RANGE, DUTILS_BINNING_POWER_RANGE, resolution)
+    first_bin = np.array(
+        [powers[np.clip(np.searchsorted(powers, v) - 1, 0, len(powers) - 1)] for v in vmin]
+    )
+    last_bin = np.array(
+        [powers[np.clip(np.searchsorted(powers, v), 0, len(powers) - 1)] for v in vmax]
+    )
+    nbins = np.ceil(np.log10(last_bin / first_bin) / resolution).astype(int)
+    nbins = np.maximum(nbins, 1)
+    bin_edges = [
+        np.geomspace(first_bin[i], last_bin[i], nbins[i] + 1) for i in range(len(first_bin))
+    ]
+    return bin_edges
+
+
 def binstats(
     data,
     output_protein_names,
@@ -208,14 +234,40 @@ def binstats(
     bin_max=None,
     force_minmax=False,
 ):
-    """Calculate statistics (mean, count), for each bin in len(bin_proteins) dimensions."""
-    # force minmax willl make sure the bins start at bin_min and end at bin_max. Otherwise bin_min/max is used as a upper/lower bound
+    """
+    Calculate statistics (mean and count) for bins in multi-dimensional space.
+
+    Parameters
+    ----------
+    data : array-like
+        The data to be binned.
+    output_protein_names : list of str
+        The names of the features in the input data.
+    bin_proteins : list of str, optional
+        The names of the features to use for binning.
+    resolution : float, optional
+        The resolution of the bins, expressed as the number of decades per bin.
+    bin_min : float, optional
+        The minimum value for the bins.
+    bin_max : float, optional
+        The maximum value for the bins.
+    force_minmax : bool, optional
+        If `True`, the bins will always start at `bin_min` and end at `bin_max`.
+
+    Returns
+    -------
+    df2 : DataFrame
+        A DataFrame containing the binned data, with columns for the mean and count of each bin and rows indexed by the bin coordinates.
+    bins : dict
+        A dictionary containing the bin edges for each feature used for binning.
+    """
     if bin_proteins is None:
         bin_proteins = output_protein_names
     bin_axisid = [output_protein_names.index(p) for p in bin_proteins]
-    POWER_RANGE = 30
-    VMAX_EPSILON = 10.0 ** (-POWER_RANGE)
-    vmin, vmax = data[:, bin_axisid].min(axis=0), data[:, bin_axisid].max(axis=0) + VMAX_EPSILON
+    vmin, vmax = (
+        data[:, bin_axisid].min(axis=0),
+        data[:, bin_axisid].max(axis=0) + DUTILS_BINNING_VMAX_EPSILON,
+    )
     if bin_min is not None:
         if force_minmax:
             vmin = np.ones_like(vmin) * bin_min
@@ -226,28 +278,8 @@ def binstats(
             vmax = np.ones_like(vmax) * bin_max
         else:
             vmax = np.minimum(vmax, bin_max)
-    # we want to bin the data using logaritmic bins with a fixed resolution, not a specific number of bins
-    powers = 10.0 ** np.arange(-POWER_RANGE, POWER_RANGE, resolution)
 
-    first_bin = []
-    for v in vmin:
-        first_bin.append(
-            powers[np.clip(np.searchsorted(powers, v, side='right'), 0, len(powers) - 1)]
-        )
-    last_bin = []
-    for v in vmax:
-        last_bin.append(
-            powers[np.clip(np.searchsorted(powers, v, side='right'), 0, len(powers) - 1)]
-        )
-    first_bin = np.array(first_bin)
-    last_bin = np.array(last_bin)
-
-    nbins = np.ceil(np.log10(last_bin / first_bin) / resolution).astype(int)
-    # TODO: check why I have to do this???:
-    nbins = np.maximum(nbins, 1)
-    bin_edges = [
-        np.geomspace(first_bin[i], last_bin[i], nbins[i] + 1) for i in range(len(first_bin))
-    ]
+    bin_edges = mk_log_grid(vmin, vmax, resolution)
     coords = np.array([np.digitize(data[:, i], be) for i, be in zip(bin_axisid, bin_edges)]).T - 1
     df = pd.DataFrame(data, columns=output_protein_names)
     df['coord'] = [tuple(c) for c in coords]
@@ -255,7 +287,6 @@ def binstats(
     df2['indices'] = df.reset_index().groupby('coord').agg({'index': lambda x: list(x)}).values
     df2['indices'] = df2['indices'].apply(lambda x: np.array(x, dtype=int))
     df2['count'] = df2['indices'].apply(len)
-
     for i, p in enumerate(bin_proteins):
         df2[('coords', p)] = df2['coord'].apply(lambda x: x[i])
     df2 = df2.drop('coord', axis=1, level=0)
@@ -282,21 +313,20 @@ def balance_per_bin(
         jnp.quantile(statdf[statdf['count'] > 0]['count'].values, threshold_quantile), threshold_min
     )
     balanced_indices = []
-    for i, row in statdf.iterrows():
+    for i, row in tqdm(statdf.iterrows()):
         # each row describes a bin with:
         # - count: number of datapoints in the bin
         # - indices: indices of datapoints in the bin
         n = min(int(threshold), int(row['count']))
-        if replacement:
-            n = int(row['count'])
-        balanced_indices.append(
-            jax.random.choice(
+        # if replacement:
+            # n = int(threshold)
+        choice = jax.random.choice(
                 rng_key,
                 row['indices'][0],
                 shape=(n,),
                 replace=replacement,
             )
-        )
+        balanced_indices.append(choice)
     balanced_data = data[jnp.concatenate(balanced_indices), :]
     return balanced_data
 

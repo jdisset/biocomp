@@ -55,7 +55,7 @@ n_blobs = 4
 key = jax.random.PRNGKey(123921)
 rng = key
 # Generate the probability distribution
-ndim = 2
+ndim = 1
 S = generate_probability_distribution_jax(n_samples, n_blobs, key, ndim=ndim)
 
 #                                                                            }}}
@@ -82,18 +82,18 @@ SHARPNESS = 100
 import ott
 import ott.tools
 
-softranks = jax.jit(ott.tools.soft_sort.ranks)
+# softranks = jax.jit(ott.tools.soft_sort.ranks)
 
 def rotate2d(x, theta):
     c, s = jnp.cos(theta), jnp.sin(theta)
     R = jnp.array([[c, -s], [s, c]])
     return jnp.dot(x, R)
 
-theta = jnp.pi / 4
-S_rot = rotate2d(S, theta)
+# theta = jnp.pi / 4
+# S_rot = rotate2d(S, theta)
 
-S_back = rotate2d(S_rot, -theta)
-jnp.allclose(S_back, S, atol=1e-4)
+# S_back = rotate2d(S_rot, -theta)
+# jnp.allclose(S_back, S, atol=1e-4)
 
 @jit
 def heavyside(x, sharpness=SHARPNESS):
@@ -285,12 +285,12 @@ else:
     # return vmap(jnp.interp, in_axes=(1, None, 1))(q, ranks, S_sorted)
 
 
-Sx = S[:, 0]
-Sy = S[:, 1]
-Su = 2.0*Sx + 2.0*Sy
-# rotation matrix for theta
-Srotx = Srot[:, 0]
-Sroty = Srot[:, 1]
+# Sx = S[:, 0]
+# Sy = S[:, 1]
+# Su = 2.0*Sx + 2.0*Sy
+# # rotation matrix for theta
+# Srotx = Srot[:, 0]
+# Sroty = Srot[:, 1]
 
 
 def Q(q, arr):
@@ -301,63 +301,63 @@ def Q(q, arr):
     # ranks = jnp.arange(arr.shape[0]) / arr.shape[0]
     # return jnp.interp(q, ranks, arr_sorted)
 
-qx = Q(0.5, Sx)
-qy = Q(0.5, Sy)
-qrx = Q(0.5, Srotx)
+# qx = Q(0.5, Sx)
+# qy = Q(0.5, Sy)
+# qrx = Q(0.5, Srotx)
 
-qrx
-invrot = jnp.array([[jnp.cos(theta), jnp.sin(theta)], [-jnp.sin(theta), jnp.cos(theta)]])
+# qrx
+# invrot = jnp.array([[jnp.cos(theta), jnp.sin(theta)], [-jnp.sin(theta), jnp.cos(theta)]])
 
-rotated_qx_qy = jnp.dot(jnp.array([qx, qy]), invrot)
-rotated_qx_qy
+# rotated_qx_qy = jnp.dot(jnp.array([qx, qy]), invrot)
+# rotated_qx_qy
 
-2*qx + 3*qy
+# 2*qx + 3*qy
 
-x = jnp.linspace(0, 1, 200)
-fig, ax = plt.subplots(4, 1, figsize=(5, 20))
-ax[0].plot(x, Q(x, Sx))
-ax[0].set_title('Qx')
-ax[1].plot(x, Q(x, Sy))
-ax[1].set_title('Qy')
-ax[2].plot(x, Q(x, Su))
-ax[2].set_title('Qu')
-ax[3].plot(x, 2*Q(x, Sx) + 3*Q(x, Sy))
-ax[3].set_title('2Qx + 3Qy')
-plt.show()
-
-
+# x = jnp.linspace(0, 1, 200)
+# fig, ax = plt.subplots(4, 1, figsize=(5, 20))
+# ax[0].plot(x, Q(x, Sx))
+# ax[0].set_title('Qx')
+# ax[1].plot(x, Q(x, Sy))
+# ax[1].set_title('Qy')
+# ax[2].plot(x, Q(x, Su))
+# ax[2].set_title('Qu')
+# ax[3].plot(x, 2*Q(x, Sx) + 3*Q(x, Sy))
+# ax[3].set_title('2Qx + 3Qy')
+# plt.show()
 
 
 
-x = jnp.linspace(0, 1, 200)
-Xgrid, Ygrid = np.meshgrid(x, x)
-xy = np.vstack([Xgrid.ravel(), Ygrid.ravel()]).T
-qq = Q(xy).T
-qq_x = qq[:, 0].reshape(Xgrid.shape)
-qq_y = qq[:, 1].reshape(Xgrid.shape)
 
 
-fig, ax = plt.subplots(3, 2, figsize=(8, 8))
-ax[0, 0].imshow(
-    qq_x,
-    origin='lower',
-    extent=[0, 1, 0, 1],
-    cmap='inferno',
-    vmin=0,
-)
-ax[0, 0].set_title('qq_x')
-ax[0, 1].imshow(
-    qq_y,
-    origin='lower',
-    extent=[0, 1, 0, 1],
-    cmap='inferno',
-    vmin=0,
-)
-ax[0, 1].set_title('qq_y')
+# x = jnp.linspace(0, 1, 200)
+# Xgrid, Ygrid = np.meshgrid(x, x)
+# xy = np.vstack([Xgrid.ravel(), Ygrid.ravel()]).T
+# qq = Q(xy).T
+# qq_x = qq[:, 0].reshape(Xgrid.shape)
+# qq_y = qq[:, 1].reshape(Xgrid.shape)
+
+
+# fig, ax = plt.subplots(3, 2, figsize=(8, 8))
+# ax[0, 0].imshow(
+    # qq_x,
+    # origin='lower',
+    # extent=[0, 1, 0, 1],
+    # cmap='inferno',
+    # vmin=0,
+# )
+# ax[0, 0].set_title('qq_x')
+# ax[0, 1].imshow(
+    # qq_y,
+    # origin='lower',
+    # extent=[0, 1, 0, 1],
+    # cmap='inferno',
+    # vmin=0,
+# )
+# ax[0, 1].set_title('qq_y')
 
 
 
-plt.show()
+# plt.show()
 
 
 #                                                                            }}}

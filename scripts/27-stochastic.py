@@ -37,29 +37,31 @@ def mkfig(rows, cols, size=(6, 6)):
 # ···············································································
 def generate_probability_distribution_jax(n_samples, n_blobs, rng, ndim=2):
     X = jnp.empty((0, ndim))
-    weights = jax.random.uniform(rng, (n_blobs,), minval=1, maxval=4)
+    weights = jax.random.uniform(rng, (n_blobs,), minval=1, maxval=3)
     weights /= weights.sum()
     lens = (weights * n_samples).astype(int)
     keys = jax.random.split(rng, n_blobs)
 
     for l, k in zip(lens, keys):
-        k0, k1, k2 = jax.random.split(k, 3)
-        mean = jax.random.uniform(k0, (ndim,), minval=-2, maxval=2) * 60
-        covariance = jax.random.normal(k1, (ndim, ndim)) * 0.75 + 1.0
-        covariance = jnp.eye(ndim) * (jax.random.uniform(k1) * 100.0 + jnp.abs(covariance))
-        samples = jax.random.multivariate_normal(k2, mean, covariance, shape=(l,))
+        k, k0, k1, k2 = jax.random.split(k, 4)
+        mean = jax.random.uniform(k0, (ndim,), minval=-2, maxval=2) * 40
+        sigma = jax.random.uniform(k1, (ndim,), minval=-2, maxval=2) * 10
+        # covariance = jax.random.normal(k1, (ndim, ndim)) * 0.75 + 1.0
+        # covariance = jnp.eye(ndim) * (jax.random.uniform(k2, (ndim)) * 10.0 + jnp.abs(covariance))
+        # samples = jax.random.multivariate_normal(k2, mean, covariance, shape=(l,))
+        samples = jax.random.normal(k2, (l, ndim)) * sigma + mean
         X = jnp.concatenate((X, samples), axis=0)
 
     return X
 
 
 # Set the number of samples to generate for each blob
-n_samples = 5000
-n_blobs = 40
-seed = 123921
+n_samples = 1000
+n_blobs = 8
+seed = 12
 key = jax.random.PRNGKey(seed)
 
-ndim = 2
+ndim = 1
 S = generate_probability_distribution_jax(n_samples, n_blobs, key, ndim=ndim) / 100.0
 
 kde = gaussian_kde(S.T, bw_method='silverman')
@@ -68,12 +70,19 @@ resolution = 200
 dmin, dmax = -2, 2
 
 x = jnp.linspace(dmin, dmax, resolution)
-xy = jnp.vstack(map(jnp.ravel, jnp.meshgrid(x, x))).T
-pdf = kde(xy.T).reshape(resolution, resolution)
-fig, ax = mkfig(1, 1)
-ax.pcolormesh(x, x, pdf, cmap='inferno')
-ax.set_title(f'KDE for S ({n_samples} samples, {n_blobs} blobs, seed={seed})')
-plt.show()
+if ndim == 2:
+    xy = jnp.vstack(map(jnp.ravel, jnp.meshgrid(x, x))).T
+    pdf = kde(xy.T).reshape(resolution, resolution)
+    fig, ax = mkfig(1, 1)
+    ax.pcolormesh(x, x, pdf, cmap='inferno')
+    ax.set_title(f'KDE for S ({n_samples} samples, {n_blobs} blobs, seed={seed})')
+    plt.show()
+else:
+    kde_eval = kde.evaluate(x)
+    fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+    ax.plot(x, kde_eval)
+    ax.set_title('kde density')
+    plt.show()
 
 
 
@@ -86,7 +95,7 @@ plt.show()
 
 # generate random unit vectors to project onto
 _, key = jax.random.split(key, 2)
-n_proj = 8
+n_proj = 1
 
 def rotate2d(x, theta):
     c, s = jnp.cos(theta), jnp.sin(theta)
@@ -100,12 +109,12 @@ def rotate2d(x, theta):
 # scales = jax.random.uniform(key, (n_proj, ndim), minval=0.1, maxval=10.0)
 # pvecs = pvecs * scales
 
-pvecs = vmap(rotate2d, in_axes=(None, 0))(jnp.array([0,1]), jnp.linspace(0, jnp.pi, n_proj, endpoint=False))
+pvecs = vmap(rotate2d, in_axes=(None, 0))(jnp.array([0,1]), jnp.linspace(0, jnp.pi/2, n_proj, endpoint=True))
 
 translations = jax.random.uniform(key, (n_proj,), minval=-10, maxval=10)
 translations = 0
 
-# pvecs = jnp.array([[1,0], [0,1]])
+pvecs = jnp.array([[1]])
 
 S_proj = jnp.dot(S, pvecs.T) + translations
 all_kdes = [gaussian_kde(S_proj[:, i].T) for i in range(n_proj)]
@@ -140,7 +149,6 @@ def Q(s, z):
 
 # all_quantiles = vmap(Q, in_axes=(1, 1))(S_proj, zs_proj)
 
-unit_hypercube_samples = jax.random.uniform(key, (10000, S.shape[1]), minval=-1, maxval=1)
 # scatter the samples
 fig, ax = mkfig(1, 1)
 ax.scatter(unit_hypercube_samples[:, 0], unit_hypercube_samples[:, 1], s=0.5)
@@ -148,13 +156,13 @@ ax.set_ylim(-1,2)
 ax.set_xlim(-1,2)
 ax.set_title('Samples from the unit hypercube')
 
+unit_hypercube_samples = jax.random.uniform(key, (50000, S.shape[1]), minval=-1, maxval=1)
 Hproj = jnp.dot(unit_hypercube_samples, pvecs.T) + translations
 
 def cdf(S, x):
     def lt(s, x):
         return jnp.all(s <= x)
     return jnp.mean(jax.vmap(lt, in_axes=(0, None))(S, x))
-
 
 SHARPNESS = 100
 @jit
@@ -198,8 +206,8 @@ for pvec, h in zip(pvecs, Hproj.T):
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                           --     model    --
 #···············································································
-H_SIZE = 1024
-N_LAYERS = 12
+H_SIZE = 400
+N_LAYERS = 8
 
 def get_param(name, init, params, shared=False):
     if name not in params:
@@ -245,33 +253,39 @@ vm = vmap(model, in_axes=(None, 0, None))
 
 Y=S
 Y_proj = jnp.dot(Y, pvecs.T) + translations
-N = 200 # batch size, basically
+N = 100 # batch size, basically
 
+zsize = Y.shape[1]
+zsize = pvecs.shape[0]
 
 params = {}
 rng_key = jax.random.PRNGKey(1424)
 
-model(params, jnp.zeros(Y.shape[1]), rng_key)
+model(params, jnp.zeros(zsize), rng_key)
 
-opt = optax.adam(learning_rate=3e-4)
+opt = optax.adam(learning_rate=1e-4)
 opt_state = opt.init(params)
 
 
 def loss_fn(params, key):
     zs = jax.random.uniform(key, (N, Y.shape[1]), minval=-1, maxval=1)
     zproj = jnp.dot(zs, pvecs.T) + translations
-    yhat = vm(params, zs, key)
-    # yhat = vm(params, zproj, key)
+    # yhat = vm(params, zs, key)
+    yhat = vm(params, zproj, key)
     yproj = jnp.dot(yhat, pvecs.T) + translations
     z_cdf = vmap(vcdf_d, in_axes=(1,1))(Hproj, zproj).T
     all_quantiles = vmap(Q, in_axes=(1, 1))(Y_proj, z_cdf)
 
-    # neg_log_likelihood = -jnp.log(kde.evaluate(yhat.T))
-    likelihood = kde.evaluate(yhat.T)
+    # # neg_log_likelihood = -jnp.log(kde.evaluate(yhat.T))
+    # likelihood = kde.evaluate(yhat.T)
+    # maxl = likelihood.max()
+    # likelihood = likelihood / (maxl + 1e-12)
 
     err = jnp.sqrt(jnp.sum((all_quantiles.T - yproj)**2, axis=1))
 
-    return jnp.mean(err * ((-jnp.log(likelihood + 1e-9) + 1.0)*0.3))
+    # return jnp.mean(err * ((-jnp.log(likelihood + 1e-9) + 1.0)*0.3))
+    # return jnp.mean(err) + jnp.mean(-jnp.log(likelihood + 1e-9))*0.2
+    return jnp.mean(err)
 
 @jit
 def update(params, opt_state, key):
@@ -280,8 +294,7 @@ def update(params, opt_state, key):
     params = optax.apply_updates(params, updates)
     return params, opt_state, loss
 
-
-n_epochs = 70
+n_epochs = 100
 
 losses = []
 for epoch in range(n_epochs):
@@ -293,20 +306,32 @@ for epoch in range(n_epochs):
 
 plt.semilogy(losses)
 
+##
+
 n_gen_samples = 1000
-zs = jax.random.uniform(key, (n_gen_samples, Y.shape[1]), minval=-1, maxval=1)
-gen_samples = vm(params,  zs, key)
+zs = jax.random.uniform(key, (N, Y.shape[1]), minval=-1, maxval=1)
+zproj = jnp.dot(zs, pvecs.T) + translations
+gen_samples = vm(params, zproj, key)
 kde_gen = gaussian_kde(gen_samples.T, bw_method='silverman')
 x = jnp.linspace(dmin, dmax, resolution)
-xy = jnp.vstack(map(jnp.ravel, jnp.meshgrid(x, x))).T
-pdf_gen = kde_gen(xy.T).reshape(resolution, resolution)
-pdf_orig = kde(xy.T).reshape(resolution, resolution)
-fig, ax = mkfig(2, 1)
-ax[0].pcolormesh(x, x, pdf_orig, cmap='inferno')
-ax[0].set_title(f'KDE for target distribution')
-ax[1].pcolormesh(x, x, pdf_gen, cmap='inferno')
-ax[1].set_title(f'KDE for generated distribution')
+
+# xy = jnp.vstack(map(jnp.ravel, jnp.meshgrid(x, x))).T
+# pdf_gen = kde_gen(xy.T).reshape(resolution, resolution)
+# pdf_orig = kde(xy.T).reshape(resolution, resolution)
+# fig, ax = mkfig(2, 1)
+# ax[0].pcolormesh(x, x, pdf_orig, cmap='inferno')
+# ax[0].set_title(f'KDE for target distribution')
+# ax[1].pcolormesh(x, x, pdf_gen, cmap='inferno')
+# ax[1].set_title(f'KDE for generated distribution')
+# plt.show()
+
+
+kde_eval = kde_gen.evaluate(x)
+fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+ax.plot(x, kde_eval)
+ax.set_title('kde density')
 plt.show()
+
 
 
 #                                                                            }}}
