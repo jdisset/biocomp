@@ -414,14 +414,14 @@ ax.legend()
 #                             LEARNING THE ERN XP
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
 
-# We probably don't need the neighborhood + weighted quantile thingy. I think just using
+# We don't need the neighborhood + weighted quantile thingy. I think just using
 # the quantile loss (and making the quantile a parameter of the network that we can then
 # sample uniformly) should be enough and should be more flexible than the neighborhood approach
-
 # Let's start by building a simple NN that takes X and Z and outputs Y
+
 ### {{{                           --     model     --
-H_SIZE = 512
-N_LAYERS = 6
+H_SIZE = 128
+N_LAYERS = 4
 activation = jax.nn.leaky_relu
 
 
@@ -447,20 +447,22 @@ vern = vmap(ERN_model, in_axes=(None, 0, 0, None))  # JULES!!!!
 rng_key = jax.random.PRNGKey(42)
 zsize = Yrebalanced.shape[1]
 
-
-# y_true = YY[:10]
-# x = XX[:10]
-
-
 def quantile_loss(e, q):
-    return jnp.maximum(q * e, (q - 1.0) * e)
+    return jnp.where(e > 0, q * e, (q - 1.0) * e)
+
+
+def huber_quantile_loss(e, q, delta=.1):
+    return jnp.where(jnp.abs(e) <= delta, 0.5 * e**2, delta * (jnp.abs(e) - 0.5 * delta)) * jnp.where(
+        e < 0, q, (1.0 - q)
+    )
 
 
 def loss_fn(params, x, y_true, key):
     z = jax.random.uniform(key, shape=(y_true.shape[0], zsize))
     y_pred = vern(params, x, z, key)
     e = y_true - y_pred
-    vq = vmap(quantile_loss, in_axes=(1, 1))
+    # vq = vmap(quantile_loss, in_axes=(1, 1))
+    vq = vmap(huber_quantile_loss, in_axes=(1, 1))
     err = vq(e, z).T
     return jnp.mean(err)
 
@@ -476,11 +478,11 @@ def update(params, opt_state, x, y, key):
 params = {}
 key = rng_key
 ERN_model(params, jnp.zeros(Xrebalanced.shape[1]), jnp.zeros(Yrebalanced.shape[1]), rng_key)
-opt = optax.adam(learning_rate=1e-6)
+opt = optax.adam(learning_rate=1e-5)
 opt_state = opt.init(params)
 
-n_epochs = 6000
-batch_size = 300
+n_epochs = 1000
+batch_size = 128
 
 losses = []
 key = rng_key
@@ -509,22 +511,49 @@ ax.set_yscale('log')
 ### {{{                         --     evaluate     --
 
 # evaluate on a grid
-res = 150
+res = 200
 x = jnp.linspace(0, 3, res)
 xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
-n_z_per_x = 100
+n_z_per_x = 5
 xx = np.tile(xygrid, (n_z_per_x, 1, 1))
 z = jax.random.uniform(rng_key, shape=(xx.shape[0], xx.shape[1], zsize))
 vvern = jit(vmap(vern, in_axes=(None, 0, 0, None)))
 out = vvern(params, xx, z, rng_key)
 
+# # plot all the out poins, per xx[0, :, 0]
+# fig, ax = mkfig(1, 1)
+# for i in range(n_z_per_x):
+    # ax.scatter(xx[0, :, 1], out[i, :, 0], s=10, alpha=0.01, edgecolors='none', color='red')
+# ax.set_xlabel('input (eBFP)')
+# ax.set_ylabel('output (eBFP)')
+
 ##
-# plot all the out poins, per xx[0, :, 0]
+# as violin plots:
+x = jnp.linspace(0, 3, 15)
+n_variations = 200
+def eval_variation(key):
+    subkey, key = jax.random.split(key)
+    z = jax.random.uniform(key, shape=(x.shape[0], zsize))
+    y = jax.random.uniform(subkey, shape=(x.shape[0],))
+    xy = jnp.hstack([x[:, None], y[:, None]])
+    return vern(params, xy, z, key)[:,2]
+allkeys = jax.random.split(rng_key, n_variations)
+outvar = vmap(eval_variation)(allkeys).T
+outvar
+
 fig, ax = mkfig(1, 1)
-for i in range(n_z_per_x):
-    ax.scatter(xx[0, :, 1], out[i, :, 0], s=10, alpha=0.01, edgecolors='none', color='red')
-ax.set_xlabel('input (eBFP)')
-ax.set_ylabel('output (eBFP)')
+parts = ax.violinplot(
+    outvar, 
+    positions=x, 
+    showextrema=True,
+    showmedians=False,
+    showmeans=False,
+    widths=0.25,
+)
+du.style_violin(parts)
+du.remove_topright_spines(ax)
+ax.set_xlabel('input (mKate)')
+ax.set_ylabel('output (mKate)')
 
 ##
 out_mean = out.mean(axis=0)
@@ -547,23 +576,19 @@ fig.tight_layout()
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ### {{{             --     plot real data using neighborhood     --
 from scipy.spatial import cKDTree
 
 tree = cKDTree(X)
 
 
-x = xygrid
-y = Y[:, output_id['eYFP']]
-
+# x = xygrid
+# y = Y[:, output_id['eYFP']]
 
 def get_knn_mean(x, y, knn=100, min_points=20):
     distances, indices = tree.query(x, k=knn, distance_upper_bound=0.2)
     mask = distances == np.inf
     nb_points = (~mask).sum(axis=1)
-    nb_points
-    # plt.plot(np.sort(nb_points))
     # weights = 1 / distances
     gausspdf = (
         lambda x, mu, sigma: 1
@@ -589,7 +614,7 @@ xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
 fig, ax = mkfig(1, 1)
 ax.set_aspect('equal')
 
-knn=100
+knn = 100
 
 # cmap with grey when nan
 cmap = plt.get_cmap('YlGnBu')
@@ -607,7 +632,7 @@ ax.contour(
     xygrid[:, input_id['eBFP']].reshape(res, res),
     avg.reshape(res, res),
     levels=4,
-    colors='black',
+    # colors='black',
     linewidths=0.25,
 )
 ax.set_xlabel('mKate')
@@ -628,4 +653,19 @@ fig.tight_layout()
 fig.suptitle(f'Original data\nmean YFP output\n(20<k<{knn} n neighbors average)')
 
 
+##
+
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+skey = jax.random.PRNGKey(4)
+zz = jax.random.uniform(skey, shape=Y.shape, minval=0.1, maxval=0.1)
+min_out = vern(params, X, zz, rng_key)
+zz = jax.random.uniform(skey, shape=Y.shape, minval=0.9, maxval=0.9)
+max_out = vern(params, X, zz, rng_key)
+
+# du.smooth_heatmap(X, out[:, output_id['eYFP']])
+ax = du.smooth_heatmap(X, np.abs(max_out[:, output_id['eYFP']] - min_out[:, output_id['eYFP']]))
+title = 'Range of YFP output between 0.1 and 0.9 quantile'
+ax.set_title(title)

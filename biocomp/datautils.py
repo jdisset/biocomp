@@ -319,13 +319,13 @@ def balance_per_bin(
         # - indices: indices of datapoints in the bin
         n = min(int(threshold), int(row['count']))
         # if replacement:
-            # n = int(threshold)
+        # n = int(threshold)
         choice = jax.random.choice(
-                rng_key,
-                row['indices'][0],
-                shape=(n,),
-                replace=replacement,
-            )
+            rng_key,
+            row['indices'][0],
+            shape=(n,),
+            replace=replacement,
+        )
         balanced_indices.append(choice)
     balanced_data = data[jnp.concatenate(balanced_indices), :]
     return balanced_data
@@ -886,3 +886,102 @@ def batch(X, Y, batch_size, n_batches=None):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+
+### {{{                    --     neighboorhood plots     --
+def mkfig(rows, cols, size=(6, 6)):
+    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]))
+    return fig, ax
+
+
+from scipy.spatial import cKDTree
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+
+def get_knn_mean(x, y, tree, knn=100, min_points=20):
+    distances, indices = tree.query(x, k=knn, distance_upper_bound=0.2)
+    mask = distances == np.inf
+    nb_points = (~mask).sum(axis=1)
+    # weights = 1 / distances
+    gausspdf = (
+        lambda x, mu, sigma: 1
+        / (sigma * np.sqrt(2 * np.pi))
+        * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+    )
+    weights = gausspdf(distances, 0, 0.1)
+    indices[mask] = 0
+    weights[mask] = 0
+    weights[nb_points < min_points, :] = np.nan
+    avg = np.average(y[indices], axis=1, weights=weights)
+    return avg
+
+
+def smooth_heatmap(logX, logY, xlims=(0, 3), res=200, knn=100, min_points=10, ax=None):
+    if ax is None:
+        fig, ax = mkfig(1, 1)
+    tree = cKDTree(logX)
+
+    x = jnp.linspace(xlims[0], xlims[1], res)
+    xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
+    avg = get_knn_mean(xygrid, logY, knn=knn, min_points=min_points, tree=tree)
+
+    cmap = plt.get_cmap('YlGnBu')
+    cmap.set_bad(color='#EEEEEE')
+    XX = xygrid[:, 0].reshape(res, res)
+    YY = xygrid[:, 1].reshape(res, res)
+
+    ax.set_aspect('equal')
+    im = ax.pcolormesh(
+        XX,
+        YY,
+        avg.reshape(res, res),
+        cmap=cmap,
+    )
+    # add contour
+    ax.contour(
+        XX,
+        YY,
+        avg.reshape(res, res),
+        levels=4,
+        linewidths=0.25,
+    )
+    ax.set_xlabel('mKate')
+    ax.set_ylabel('eBFP')
+    loglabels = 10**x - 1
+    tickfreq = res // 5
+    ax.set_xticks(x[::tickfreq])
+    ax.set_xticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
+    ax.set_yticks(x[::tickfreq])
+    ax.set_yticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
+    # add colorbar to ax
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.05)
+    cbar = plt.colorbar(im, cax=cax)
+
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    return ax
+
+def remove_spines(ax):
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+def remove_topright_spines(ax):
+    for spine in ['top', 'right']:
+        ax.spines[spine].set_visible(False)
+
+def style_violin(parts):
+    for pc in parts['bodies']:
+        pc.set_facecolor('k')
+        pc.set_edgecolor('k')
+        pc.set_linewidth(1)
+    parts['cbars'].set_linewidth(0)
+    parts['cmaxes'].set_color('black')
+    parts['cmaxes'].set_linewidth(0.5)
+    parts['cmins'].set_color('black')
+    parts['cmins'].set_linewidth(0.5)
+
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
