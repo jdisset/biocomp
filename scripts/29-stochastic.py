@@ -403,9 +403,7 @@ zsize = Y.shape[1]
 params = {}
 rng_key = jax.random.PRNGKey(1424)
 key = rng_key
-
 model(params, jnp.zeros(zsize), rng_key)
-
 opt = optax.amsgrad(learning_rate=5e-4)
 opt_state = opt.init(params)
 

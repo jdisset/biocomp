@@ -517,7 +517,7 @@ def model_heatmap(
             z_protein=z_prot,
             lims={'mean': lims},
             show=False,
-            count_threshold=4,
+            count_threshold=2,
         )
         # remove axis labels except for the last row and first column
         if n_axes == 1 and i < axes_len[0] - 1:

@@ -90,7 +90,8 @@ cfg = {
 
 ### {{{                         --     load data     --
 lib = ut.load_lib()
-xp = ut.load_xp('E20221124A_ERNbandpassV2', lib)
+# xp = ut.load_xp('E20221124A_ERNbandpassV2', lib)
+xp = ut.load_xp('20220501-GW-l1vsl2', lib)
 rng = jax.random.PRNGKey(cfg['rng_key'])
 models = xp.get_models(node_impl=cfg['node_impl'])
 X_raw, Y_raw = xp.get_XY(models)
@@ -158,11 +159,12 @@ def plot_over_2d(
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                 --     select a model to work on     --
-modelname = '(1:5; 100+73)+100i'  # it's a simple 2d -> 1d ERN
+# modelname = '(1:5; 100+73)+100i'
+modelname = 'L2all_pGW42+10'
 model = models[modelname]
 X_r, Y_r = X_raw[modelname], Y_raw[modelname]
 
-ut.plot_networks([model.network], ['/Users/jeandisset/Desktop/model.pdf'])
+ut.plot_networks([model.network], ['/Users/jeandisset/Desktop/model_l2.pdf'])
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -175,6 +177,8 @@ ut.plot_networks([model.network], ['/Users/jeandisset/Desktop/model.pdf'])
 def rescale(X, norm_factor):
     return np.log10(1.0 + (X / norm_factor))
 
+
+cfg['norm_factor'] = 1e3
 
 X = rescale(X_r, cfg['norm_factor'])
 Y = rescale(Y_r, cfg['norm_factor'])
@@ -285,6 +289,7 @@ fig.tight_layout()
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{     --     model definition to fit normal distributions     --
+
 H_SIZE = 32
 N_LAYERS = 4
 
@@ -415,8 +420,8 @@ ax.legend()
 
 # Let's start by building a simple NN that takes X and Z and outputs Y
 ### {{{                           --     model     --
-H_SIZE = 256
-N_LAYERS = 5
+H_SIZE = 512
+N_LAYERS = 6
 activation = jax.nn.leaky_relu
 
 
@@ -446,8 +451,10 @@ zsize = Yrebalanced.shape[1]
 # y_true = YY[:10]
 # x = XX[:10]
 
+
 def quantile_loss(e, q):
     return jnp.maximum(q * e, (q - 1.0) * e)
+
 
 def loss_fn(params, x, y_true, key):
     z = jax.random.uniform(key, shape=(y_true.shape[0], zsize))
@@ -469,11 +476,11 @@ def update(params, opt_state, x, y, key):
 params = {}
 key = rng_key
 ERN_model(params, jnp.zeros(Xrebalanced.shape[1]), jnp.zeros(Yrebalanced.shape[1]), rng_key)
-opt = optax.adam(learning_rate=1e-5)
+opt = optax.adam(learning_rate=1e-6)
 opt_state = opt.init(params)
 
-n_epochs = 200
-batch_size = 500
+n_epochs = 6000
+batch_size = 300
 
 losses = []
 key = rng_key
@@ -499,14 +506,14 @@ ax.set_yscale('log')
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ### {{{                         --     evaluate     --
 
 # evaluate on a grid
-x = jnp.linspace(0, 3, 200)
+res = 150
+x = jnp.linspace(0, 3, res)
 xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
 n_z_per_x = 100
-xx = np.tile(xygrid, (n_z_per_x,1,1))
+xx = np.tile(xygrid, (n_z_per_x, 1, 1))
 z = jax.random.uniform(rng_key, shape=(xx.shape[0], xx.shape[1], zsize))
 vvern = jit(vmap(vern, in_axes=(None, 0, 0, None)))
 out = vvern(params, xx, z, rng_key)
@@ -515,28 +522,110 @@ out = vvern(params, xx, z, rng_key)
 # plot all the out poins, per xx[0, :, 0]
 fig, ax = mkfig(1, 1)
 for i in range(n_z_per_x):
-    ax.scatter(xx[0, :, 0], out[i, :, 0], s=5, alpha=0.1, edgecolors='none', color='red')
-ax.set_xlabel('input')
-ax.set_ylabel('output')
+    ax.scatter(xx[0, :, 1], out[i, :, 0], s=10, alpha=0.01, edgecolors='none', color='red')
+ax.set_xlabel('input (eBFP)')
+ax.set_ylabel('output (eBFP)')
 
 ##
 out_mean = out.mean(axis=0)
 # plot the mean value
 fig, ax = mkfig(1, 1)
 # use pcolormesh to get a nice color map
-im = ax.pcolormesh(xx[0, :, 0].reshape(200, 200), xx[0, :, 1].reshape(200, 200), out_mean[:, 0].reshape(200, 200))
+ax.set_aspect('equal')
+im = ax.pcolormesh(
+    xx[0, :, 0].reshape(res, res),
+    xx[0, :, 1].reshape(res, res),
+    out_mean[:, 1].reshape(res, res),
+    cmap='YlGnBu',
+)
 fig.colorbar(im, ax=ax)
-ax.set_xlabel('x')
-ax.set_ylabel('y')
-##
-
-Y_linspace = (1.0 + 10**Yrebalanced) * 1e6
-
-du.model_heatmap(model, Y_linspace)
+ax.set_xlabel('mKate')
+ax.set_ylabel('eBFP')
+fig.suptitle(f'mean YFP output ({n_z_per_x} samples per input)')
+fig.tight_layout()
 
 
+##────────────────────────────────────────────────────────────────────────────}}}
 
 
+### {{{             --     plot real data using neighborhood     --
+from scipy.spatial import cKDTree
+
+tree = cKDTree(X)
+
+
+x = xygrid
+y = Y[:, output_id['eYFP']]
+
+
+def get_knn_mean(x, y, knn=100, min_points=20):
+    distances, indices = tree.query(x, k=knn, distance_upper_bound=0.2)
+    mask = distances == np.inf
+    nb_points = (~mask).sum(axis=1)
+    nb_points
+    # plt.plot(np.sort(nb_points))
+    # weights = 1 / distances
+    gausspdf = (
+        lambda x, mu, sigma: 1
+        / (sigma * np.sqrt(2 * np.pi))
+        * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+    )
+    weights = gausspdf(distances, 0, 0.1)
+    indices[mask] = 0
+    weights[mask] = 0
+    weights[nb_points < min_points, :] = np.nan
+    avg = np.average(y[indices], axis=1, weights=weights)
+    return avg
+
+
+output_names = model.get_output_proteins()
+input_names = model.get_inverted_input_proteins()
+output_id = {name: i for i, name in enumerate(output_names)}
+input_id = {name: i for i, name in enumerate(input_names)}
+
+res = 150
+x = jnp.linspace(0, 3, res)
+xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
+fig, ax = mkfig(1, 1)
+ax.set_aspect('equal')
+
+knn=100
+
+# cmap with grey when nan
+cmap = plt.get_cmap('YlGnBu')
+cmap.set_bad(color='#EEEEEE')
+avg = get_knn_mean(xygrid, Y[:, output_id['eYFP']], knn)
+im = ax.pcolormesh(
+    xygrid[:, input_id['mKate']].reshape(res, res),
+    xygrid[:, input_id['eBFP']].reshape(res, res),
+    avg.reshape(res, res),
+    cmap=cmap,
+)
+# add contour
+ax.contour(
+    xygrid[:, input_id['mKate']].reshape(res, res),
+    xygrid[:, input_id['eBFP']].reshape(res, res),
+    avg.reshape(res, res),
+    levels=4,
+    colors='black',
+    linewidths=0.25,
+)
+ax.set_xlabel('mKate')
+ax.set_ylabel('eBFP')
+loglabels = 10**x - 1
+tickfreq = res // 5
+ax.set_xticks(x[::tickfreq])
+ax.set_xticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
+ax.set_yticks(x[::tickfreq])
+ax.set_yticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
+fig.colorbar(im, ax=ax, shrink=0.5)
+# remove border
+for spine in ax.spines.values():
+    spine.set_visible(False)
+
+
+fig.tight_layout()
+fig.suptitle(f'Original data\nmean YFP output\n(20<k<{knn} n neighbors average)')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
