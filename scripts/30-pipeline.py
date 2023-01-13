@@ -1,3 +1,6 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#                                     SETUP 
+# ───────────────────────────────────── ▼ ─────────────────────────────────────
 ### {{{                          --     imports     --
 import biocomp as bc
 import matplotlib.pyplot as plt
@@ -18,7 +21,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import matplotlib.pyplot as plt
 
 plt.rcParams['figure.figsize'] = [10.0, 10.0]
-plt.rcParams['figure.dpi'] = 200
+plt.rcParams['figure.dpi'] = 300
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                          --     config     --
@@ -169,7 +172,7 @@ ut.plot_networks([model.network], ['/Users/jeandisset/Desktop/model_l2.pdf'])
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 # ─────────────────────────────────────────────────────────────────────────────
-#                                  PREPROCESSING
+#                                 PREPROCESSING
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
 ### {{{            --     rescale and move to log space     --
 
@@ -447,14 +450,15 @@ vern = vmap(ERN_model, in_axes=(None, 0, 0, None))  # JULES!!!!
 rng_key = jax.random.PRNGKey(42)
 zsize = Yrebalanced.shape[1]
 
+
 def quantile_loss(e, q):
     return jnp.where(e > 0, q * e, (q - 1.0) * e)
 
 
-def huber_quantile_loss(e, q, delta=.1):
-    return jnp.where(jnp.abs(e) <= delta, 0.5 * e**2, delta * (jnp.abs(e) - 0.5 * delta)) * jnp.where(
-        e < 0, q, (1.0 - q)
-    )
+def huber_quantile_loss(e, q, delta=0.1):
+    return jnp.where(
+        jnp.abs(e) <= delta, 0.5 * e**2, delta * (jnp.abs(e) - 0.5 * delta)
+    ) * jnp.where(e < 0, q, (1.0 - q))
 
 
 def loss_fn(params, x, y_true, key):
@@ -523,7 +527,7 @@ out = vvern(params, xx, z, rng_key)
 # # plot all the out poins, per xx[0, :, 0]
 # fig, ax = mkfig(1, 1)
 # for i in range(n_z_per_x):
-    # ax.scatter(xx[0, :, 1], out[i, :, 0], s=10, alpha=0.01, edgecolors='none', color='red')
+# ax.scatter(xx[0, :, 1], out[i, :, 0], s=10, alpha=0.01, edgecolors='none', color='red')
 # ax.set_xlabel('input (eBFP)')
 # ax.set_ylabel('output (eBFP)')
 
@@ -531,20 +535,24 @@ out = vvern(params, xx, z, rng_key)
 # as violin plots:
 x = jnp.linspace(0, 3, 15)
 n_variations = 200
+
+
 def eval_variation(key):
     subkey, key = jax.random.split(key)
     z = jax.random.uniform(key, shape=(x.shape[0], zsize))
     y = jax.random.uniform(subkey, shape=(x.shape[0],))
     xy = jnp.hstack([x[:, None], y[:, None]])
-    return vern(params, xy, z, key)[:,2]
+    return vern(params, xy, z, key)[:, 2]
+
+
 allkeys = jax.random.split(rng_key, n_variations)
 outvar = vmap(eval_variation)(allkeys).T
 outvar
 
 fig, ax = mkfig(1, 1)
 parts = ax.violinplot(
-    outvar, 
-    positions=x, 
+    outvar,
+    positions=x,
     showextrema=True,
     showmedians=False,
     showmeans=False,
@@ -577,95 +585,72 @@ fig.tight_layout()
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{             --     plot real data using neighborhood     --
-from scipy.spatial import cKDTree
-
-tree = cKDTree(X)
-
-
-# x = xygrid
-# y = Y[:, output_id['eYFP']]
-
-def get_knn_mean(x, y, knn=100, min_points=20):
-    distances, indices = tree.query(x, k=knn, distance_upper_bound=0.2)
-    mask = distances == np.inf
-    nb_points = (~mask).sum(axis=1)
-    # weights = 1 / distances
-    gausspdf = (
-        lambda x, mu, sigma: 1
-        / (sigma * np.sqrt(2 * np.pi))
-        * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-    )
-    weights = gausspdf(distances, 0, 0.1)
-    indices[mask] = 0
-    weights[mask] = 0
-    weights[nb_points < min_points, :] = np.nan
-    avg = np.average(y[indices], axis=1, weights=weights)
-    return avg
-
 
 output_names = model.get_output_proteins()
 input_names = model.get_inverted_input_proteins()
 output_id = {name: i for i, name in enumerate(output_names)}
 input_id = {name: i for i, name in enumerate(input_names)}
 
-res = 150
-x = jnp.linspace(0, 3, res)
-xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
-fig, ax = mkfig(1, 1)
-ax.set_aspect('equal')
+import matplotlib.transforms as mtransforms
 
-knn = 100
+y = Y[:, output_id['eYFP']]
 
-# cmap with grey when nan
-cmap = plt.get_cmap('YlGnBu')
-cmap.set_bad(color='#EEEEEE')
-avg = get_knn_mean(xygrid, Y[:, output_id['eYFP']], knn)
-im = ax.pcolormesh(
-    xygrid[:, input_id['mKate']].reshape(res, res),
-    xygrid[:, input_id['eBFP']].reshape(res, res),
-    avg.reshape(res, res),
-    cmap=cmap,
-)
-# add contour
-ax.contour(
-    xygrid[:, input_id['mKate']].reshape(res, res),
-    xygrid[:, input_id['eBFP']].reshape(res, res),
-    avg.reshape(res, res),
-    levels=4,
-    # colors='black',
-    linewidths=0.25,
-)
-ax.set_xlabel('mKate')
-ax.set_ylabel('eBFP')
-loglabels = 10**x - 1
-tickfreq = res // 5
-ax.set_xticks(x[::tickfreq])
-ax.set_xticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
-ax.set_yticks(x[::tickfreq])
-ax.set_yticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
-fig.colorbar(im, ax=ax, shrink=0.5)
-# remove border
-for spine in ax.spines.values():
-    spine.set_visible(False)
+qu = 0.1
+ax = du.smooth_heatmap(X,y, method='quantile', qu=qu)
 
 
-fig.tight_layout()
-fig.suptitle(f'Original data\nmean YFP output\n(20<k<{knn} n neighbors average)')
+# playing with transforms:
+# overlap = 0.2
+# w = 200
+# tr = mtransforms.Affine2D().scale(0.5, 0.75).skew_deg(0, 20)
+# # .skew_deg(0, 20).translate(w * (1 - overlap) * 0, 0)
+# # ax.set_transform(tr)
+# # ax.get_children()[0].set_transform(tr + ax.transData)
+# # ax.get_children()[1].set_transform(tr + ax.transData)
+# for c in ax.get_children():
+    # c.set_transform(tr + ax.transData)
+# # remove colorbar
+# ax.figure.delaxes(ax.figure.axes[1])
+# ax.set_xticks([])
+# ax.set_yticks([])
 
 
 ##
+quantiles = np.linspace(0.1,0.9,9)
+allZ = [du.get_knn_smooth(X,y,method='quantile', qu=i)[0] for i in tqdm(quantiles)]
+allZ = np.array(allZ)
+##
 
+du.timelapse_persp(allZ,'Original data, smoothed quantiles', [f'q={i:.1f}' for i in quantiles])
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+### {{{                 --     plotting predicted range     --
 skey = jax.random.PRNGKey(4)
 zz = jax.random.uniform(skey, shape=Y.shape, minval=0.1, maxval=0.1)
 min_out = vern(params, X, zz, rng_key)
 zz = jax.random.uniform(skey, shape=Y.shape, minval=0.9, maxval=0.9)
 max_out = vern(params, X, zz, rng_key)
-
 # du.smooth_heatmap(X, out[:, output_id['eYFP']])
 ax = du.smooth_heatmap(X, np.abs(max_out[:, output_id['eYFP']] - min_out[:, output_id['eYFP']]))
 title = 'Range of YFP output between 0.1 and 0.9 quantile'
 ax.set_title(title)
+
+##
+quantiles = np.linspace(0.1,0.9,9)
+zzz = jnp.ones(Y.shape)
+yyy = [vern(params, X, zzz*i, rng_key)[:, output_id['eYFP']] for i in tqdm(quantiles)]
+##
+allZ = [du.get_knn_smooth(X,y)[0] for y,i in tqdm(zip(yyy, quantiles))]
+allZ = np.array(allZ)
+##
+du.timelapse_persp(allZ,'Generated data, smoothed quantiles', [f'q={i:.1f}' for i in quantiles])
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#                   LEARNING THE ERN XP WITH THE REAL MODEL
+# ───────────────────────────────────── ▼ ─────────────────────────────────────
+
+

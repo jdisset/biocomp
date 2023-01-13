@@ -8,7 +8,6 @@ from . import nodes as nd
 from typing import List, Dict, Tuple, Union, Optional, Callable, Any
 
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                  --     Params and quantization     --
 # ···············································································
 def get_param(
@@ -91,7 +90,7 @@ def get_quantized(
     mode='input_edges',
     logto=None,
 ):
-    """Return a quantized version of the parameter, conditioned on the
+    """Return a *quantized* version of the parameter, conditioned on the
     relevant species (either input or output cdg nodes). mode can be 'input' or 'output'."""
     # We are selecting possible values for a parameter depending on which path, or edge, they come from.
     # The edges of the compute graph are basically nodes in the central dogma graph,
@@ -125,6 +124,7 @@ def get_quantized(
             \n central dogma graph:
             \n{cdg}"""
         )
+
     # concat part names with param_name
     possible_names = [[f'{part}::{param_name}' for part in parts] for parts in possible_parts]
     assert len(possible_names) == len(
@@ -152,9 +152,7 @@ def get_quantized(
 
 
 #                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                  --     ComputeGraphModel class     --
 # ···············································································
 
@@ -173,6 +171,9 @@ class ComputeGraphModel:
         node_impl: Dict[str, Callable] = nd.DEFAULT_COMPUTE_NODES_DICT,
         node_namespace: Optional[str] = None,
     ):
+        """Builds the model, i.e. creates a list of functions to be called in sequence
+        (together with the necesary information to call them) according to the compute graph"""
+
         self.node_namespace = node_namespace
         assert self.network is not None
         assert self.network.is_built()
@@ -181,23 +182,34 @@ class ComputeGraphModel:
 
         cg = self.network.compute_graph
 
-        # let's do everything we can before collect_all_results to avoid long compile times
+        # we'll build the list of call_dicts
+        # a call dict is a dictionary that contains the relevant information in
+        # order to actually call a node function
+
         batches = self.__get_batch_sequence_of_nodes()
+        # each sublist in batches contains independent nodes that can be safely called in parallel
+        # however we are not parallelizing the calls, so we can flatten the list and be sure
+        # that the dependency order is respected (upstream nodes will always be called before downstream ones)
         flat_batches = [item for sublist in batches for item in sublist]
         call_dicts = []
-        output_node = None
-        nid_to_call_dict = dict()
-        for i, nid in enumerate(flat_batches):
+        for nid in flat_batches:
             call_d = {}
             node_row = cg.loc[nid]
-            # if it's an inverse node:
+
+            # if it's an inverse node, we need to get the id of the node that it's inverting
             nodeid_for_getters = nid
             if node_row.extra is not None and 'is_inverse_of' in node_row.extra:
                 nodeid_for_getters = node_row.extra['is_inverse_of']
+
+            # a node needs a method to access the parameters.
+            # we simply preset the general purpose get_param on the correct nodeid
             get_p = partial(
                 get_param,
                 node_id=nodeid_for_getters,
             )
+            # same with get_quantized
+            # we preset the node id, the central dogma graph and the compute graph
+            # as well as the actual quantize function
             get_q = partial(
                 get_quantized,
                 node_id=nodeid_for_getters,
@@ -205,6 +217,10 @@ class ComputeGraphModel:
                 cdg=self.network.central_dogma_graph,
                 quantize_fun=nd.quantize,
             )
+
+            # extra_params will be passed to the node function
+            # n_outputs and n_inputs are always passed
+            # + any specific thing that the network builder has added
             extra_params = {
                 'n_outputs': len(cg.loc[nid]['output_to']),
                 'n_inputs': len(cg.loc[nid]['input_from']),
@@ -212,58 +228,32 @@ class ComputeGraphModel:
             if node_row.extra is not None:
                 extra_params.update(node_row.extra)
 
-            call_d['get_p'] = get_p
-            call_d['get_q'] = get_q
-            call_d['extra_params'] = extra_params
+            call_d['get_p'] = get_p  # a node needs a method to access the parameters
+            call_d['get_q'] = get_q  # and a method for quantization
+            call_d['extra_params'] = extra_params  # these will be appended to the node call
             call_d['type'] = node_row.type
-            call_d['input_from'] = node_row.input_from
-            call_d['fun'] = None
-            call_d['nid'] = nid
-            nid_to_call_dict[nid] = i
+            call_d['input_from'] = node_row.input_from  # upstream node(s) we are taking input from
+            call_d['fun'] = None  # the actual function to call (set later)
+            call_d['nid'] = nid  # this node's id, important to store the output
 
             if node_row.type not in ('input'):
                 assert node_row.type in self.node_impl, f'Unimplemented node type {node_row.type}'
-                call_d['fun'] = self.node_impl[node_row.type]
-            if node_row.type == 'output':
-                output_node = nid
+                call_d['fun'] = self.node_impl[node_row.type]  # the actual function to call
 
             call_dicts.append(call_d)
 
-        def recursive_eval(params, inputs, rng_key, read_only=True, constraints=None):
-            def evalnode(n, key):
-                if n['type'] == 'input':
-                    return inputs[n['extra_params']['input_position']]
-
-                get_p = partial(
-                    n['get_p'],
-                    params,
-                    node_namespace=self.node_namespace,
-                    constraints=constraints,
-                    read_only=read_only,
-                )
-                get_q = partial(n['get_q'], get_p)
-
-                assert callable(n['fun'])
-                comp = n['fun'](get_p, get_q, **n['extra_params'])
-
-                upstream_results = []
-                n_inp = len(n['input_from'])
-                keys = jax.random.split(key, n_inp)
-                for inp, k in zip(n['input_from'], keys):
-                    res = evalnode(call_dicts[nid_to_call_dict[inp[0]]], k)
-                    if len(res.shape) == 0:
-                        upstream_results.append(res)
-                    else:
-                        upstream_results.append(res[inp[1]])
-
-                return comp(*upstream_results, rng_key=key)
-
-            assert output_node is not None
-            return evalnode(call_dicts[nid_to_call_dict[output_node]], rng_key)
-
         def collect_all_results(
-            params: dict, inputs: jnp.ndarray, rng_key, read_only=True, constraints=None
+            params: dict, inputs: jnp.ndarray, rng_key, quantiles=None, read_only=True, constraints=None
         ) -> tuple[jnp.ndarray, dict[int, jnp.ndarray]]:
+            """
+            params: the parameters
+            inputs: the inputs to the network
+            quantiles: array of quantiles we want to estimate (1 per output)
+
+            Executes and collects all the results of the nodes in the compute graph.
+            This method basically just calls the nodes in call_dicts, in order, populating
+            the result dictionnary with each node's output and feeding the output of each
+            upstream node as input to the next downstream one."""
             assert (
                 len(inputs) == self.n_inputs
             ), f'len(inputs)={len(inputs)} != n_inputs={self.n_inputs}'
@@ -293,8 +283,15 @@ class ComputeGraphModel:
                     constraints=constraints,
                     read_only=read_only,
                 )
+
+                qtl = None
+                if quantiles is not None:
+                    pick_quantile = n['extra_params'].get('quantile_variable_id', [])
+                    if len(pick_quantile) > 0:
+                        qtl = quantiles[jnp.array(pick_quantile)]
+
                 get_q = partial(n['get_q'], get_p, rng_key=key)
-                comp_node = n['fun'](get_p, get_q, **n['extra_params'])
+                comp_node = n['fun'](get_p, get_q, z=qtl, **n['extra_params'])
                 res = comp_node(*upstream_results, rng_key=key)
                 results[nid] = res
 
@@ -304,6 +301,7 @@ class ComputeGraphModel:
             raise ValueError('Invalid compute graph, no output node found')
 
         def apply(*args, **kwargs):
+            """Executes the model. It simply calls collect_all_results and only returns the final output"""
             return collect_all_results(*args, **kwargs)[0]
 
         def init(rng_key, pre_params=None, pre_constraints=None):
@@ -313,6 +311,7 @@ class ComputeGraphModel:
                 params,
                 [jnp.array([1.0])] * self.n_inputs,
                 rng_key,
+                quantiles=[jnp.array([1.0])] * self.n_outputs,
                 constraints=constraints,
                 read_only=False,
             )
@@ -320,7 +319,6 @@ class ComputeGraphModel:
 
         self.apply = apply
         self.collect_all_results = collect_all_results
-        self.recursive_eval = recursive_eval
         self.init = init
         self.flat_batches = flat_batches
         self.built = True
@@ -433,6 +431,5 @@ class ComputeGraphModel:
         res
         return res
 
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
 
+#                                                                            }}}

@@ -896,6 +896,9 @@ class Network:
                         msg += f'\noutput node is:\n{self.compute_graph.loc[o[0]]}'
                         raise RuntimeError(msg)
 
+            # make sure the proper quantile variable is assigned to each node
+            self._assign_quantile_variable()
+
         self._sanity_check()
 
     def _sanity_check(self):
@@ -928,6 +931,53 @@ class Network:
         N.tu_in_sources = self.tu_in_sources.copy()
         N.aggregations = self.aggregations.copy()
         return N
+
+    def _assign_quantile_variable(self):
+        """
+        Assigns the correct quantile variable to each node of the compute graph.
+        Proceeds by propagating from the output towards the upstream nodes.
+        Inverted nodes are assigned the same quantile as their forward node.
+        If a node is linked is not linked to a non-inverted one, has only one output
+        but is linked downstream to paths that lead to multiple outputs, 
+        quantile_variable_id is set to [None].
+        """
+        cg = self.compute_graph
+        def propagate_upstream(node, quantile_id, output_id):
+            node['extra'].setdefault('quantile_variable_id', [])
+            if node['extra'].get('is_inverse_of', None) is not None:
+                node['extra']['quantile_variable_id'] = cg.loc[node['extra']['is_inverse_of']]['extra'].get(
+                    'quantile_variable_id', []
+                )
+            else:
+                if len(node['extra']['quantile_variable_id']) <= output_id:
+                    # append -1 until the right size
+                    node['extra']['quantile_variable_id'].extend(
+                        [-1] * (output_id - len(node['extra']['quantile_variable_id']) + 1)
+                    )
+                if node['extra']['quantile_variable_id'][output_id] == -1:
+                    node['extra']['quantile_variable_id'][output_id] = quantile_id
+                else:
+                    # another node already set the quantile var!
+                    # It means we found a node with a single output but linked to multiple downstream
+                    # paths. We could append the quantile var but the order would be random. I prefer
+                    # to remove the footgun entirely and just not add a quantile variable for this node.
+                    # At the time I'm writing this the only case that would happen are for the numeric nodes
+                    # or the inputs. They definitely don't need the quantile var.
+                    # We change the existing value to None for this special case.
+                    node['extra']['quantile_variable_id'][output_id] = None
+
+            if node.input_from:
+                for nid, oid in node.input_from:
+                    propagate_upstream(cg.loc[nid], quantile_id, oid)
+
+        # first let's remove all "quantile_variable_id" from the extra column:
+        for _, node in cg.iterrows():
+            node['extra'].pop('quantile_variable_id', None)
+
+        output_node = cg[cg.type == 'output'].iloc[0]
+        for i, (nid, oid) in enumerate(output_node.input_from):
+            propagate_upstream(cg.loc[nid], i, oid)
+
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
