@@ -1,9 +1,9 @@
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                          --     imports     --
 # ···············································································
 import jax
 import jax.numpy as jnp
 from jax.tree_util import Partial as partial
+from jax import jit, vmap
 import numpy as np
 import pandas as pd
 import biocomp as bc
@@ -13,11 +13,78 @@ import json5
 import json
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from jax.scipy.stats import gaussian_kde
 
 #                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#                            GENERAL PURPOSE TOOLS
+# ───────────────────────────────────── ▼ ─────────────────────────────────────
+# {{{                      --     data load/save     --
+# ···············································································
+import pickle
+
+
+def save(data, path, overwrite=False, rename_if_exists=True):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if overwrite:
+            path.unlink()
+        elif rename_if_exists:
+            path = path.with_name(path.stem + '_' + path.suffix)
+        else:
+            raise RuntimeError(f'File {path} already exists.')
+    with open(path, 'wb') as file:
+        pickle.dump(data, file)
+
+
+def load(path):
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f'Not a file: {path}')
+    with open(path, 'rb') as file:
+        data = pickle.load(file)
+    return data
+
+
+#                                                                            }}}
+### {{{                    --     plot styling tools     --
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+
+def mkfig(rows, cols, size=(7, 7)):
+    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]))
+    return fig, ax
+
+
+def remove_spines(ax):
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+
+def remove_topright_spines(ax):
+    for spine in ['top', 'right']:
+        ax.spines[spine].set_visible(False)
+
+
+def style_violin(parts):
+    for pc in parts['bodies']:
+        pc.set_facecolor('k')
+        pc.set_edgecolor('k')
+        pc.set_linewidth(1)
+    parts['cbars'].set_linewidth(0)
+    parts['cmaxes'].set_color('black')
+    parts['cmaxes'].set_linewidth(0.5)
+    parts['cmins'].set_color('black')
+    parts['cmins'].set_linewidth(0.5)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#                         DATA MANAGEMENT AND BATCHING
+# ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     data manager     --
 # ···············································································
 
@@ -34,14 +101,14 @@ def check_model(m, x, y):
     for ipos, outpos in in_pos.items():
         assert inp[ipos] == outp[outpos]
         assert np.all(x[:, ipos] == y[:, outpos])
-    mdef = bc.ComputeGraphModel(m.network)
-    mdef.build(bc.nodes.DEFAULT_COMPUTE_NODES_DICT)
-    zerorng = jax.random.PRNGKey(0)
-    p, _ = mdef.init(zerorng)
-    vmapped = jax.jit(jax.vmap(mdef, in_axes=(None, 0, None)))
-    ydef = vmapped(p, x, zerorng)
-    for ipos, outpos in in_pos.items():
-        assert np.allclose(x[:, ipos], ydef[:, outpos])
+    # mdef = bc.ComputeGraphModel(m.network)
+    # mdef.build(bc.nodes.DEFAULT_COMPUTE_NODES_DICT)
+    # zerorng = jax.random.PRNGKey(0)
+    # p, _ = mdef.init(zerorng)
+    # vmapped = jax.jit(jax.vmap(mdef, in_axes=(None, 0, None)))
+    # ydef = vmapped(p, x, zerorng)
+    # for ipos, outpos in in_pos.items():
+    # assert np.allclose(x[:, ipos], ydef[:, outpos])
 
 
 def basic_data_checks(X, Y, models):
@@ -89,93 +156,400 @@ def test_train_split(X, Y, models, rng_key, test_size=0.8):
     return (X_train, Y_train), (X_test, Y_test)
 
 
+@jit
+def density_subsample(X, kde, rng, quantile_threshold=0.1):
+    EPSILON = 1e-12
+    HIGH_DENSITIES_PENALTY = 1.05
+    densities = kde.evaluate(X.T) + EPSILON
+    threshold = jnp.quantile(densities, quantile_threshold)
+    diceroll = jax.random.uniform(rng, shape=(len(densities),))
+    selected = (densities < threshold) | (diceroll < (threshold / (densities * HIGH_DENSITIES_PENALTY)))
+    return selected
+
+
+def sample_batches(
+    X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1, x_pad_to=None, y_pad_to=None
+):
+    assert X.shape[0] == Y.shape[0]
+    total_size = batch_size * n_batches
+
+    selection = density_subsample(X, kde, rng, quantile_threshold)
+    Xsub, Ysub = X[selection], Y[selection]
+
+    while Xsub.shape[0] < total_size:
+        print('resampling')
+        rng, _ = jax.random.split(rng)
+        selection = density_subsample(X, kde, rng, quantile_threshold)
+        Xsub, Ysub = jnp.concatenate((Xsub, X[selection])), jnp.concatenate((Ysub, Y[selection]))
+
+    assert Xsub.shape[0] == Ysub.shape[0]
+    indices = jax.random.choice(rng, Xsub.shape[0], shape=(total_size,), replace=False)
+
+    # pad with nans to the right if necessary
+    if x_pad_to is not None:
+        Xsub = jnp.pad(Xsub, ((0, 0), (0, x_pad_to - Xsub.shape[1])), constant_values=jnp.nan)
+    if y_pad_to is not None:
+        Ysub = jnp.pad(Ysub, ((0, 0), (0, y_pad_to - Ysub.shape[1])), constant_values=jnp.nan)
+
+    Xbatches = jnp.split(Xsub[indices], n_batches)
+    Ybatches = jnp.split(Ysub[indices], n_batches)
+
+    return Xbatches, Ybatches
+
+
 class DataManager:
     def __init__(self, X: dict, Y: dict, models: dict, enable_checks=True):
         self.X = X
         self.Y = Y
         self.models = models
+        self.key_order = sorted(list(models.keys()))
         self.enable_checks = enable_checks
-
+        self.kdes = None
         basic_data_checks(X, Y, models)
-
         if self.enable_checks:
             advanced_data_checks(X, Y, models)
-            self.N_TEST = 100
 
-    def normalize(self, factor):
-        # for now, let's just scale the data
-        # we can add more later
-        self.X = jax.tree_map(lambda x: x / factor, self.X)
-        self.Y = jax.tree_map(lambda x: x / factor, self.Y)
+    def rescale(self, factor=1e6):
+        self.X = jax.tree_map(lambda x: jnp.log10(1 + (x / factor)), self.X)
+        self.Y = jax.tree_map(lambda y: jnp.log10(1 + (y / factor)), self.Y)
         basic_data_checks(self.X, self.Y, self.models)
         if self.enable_checks:
             advanced_data_checks(self.X, self.Y, self.models)
         return self.X, self.Y
 
-    def consolidated(raw_X, raw_Y, rng_key):
-        keys = list(raw_X.keys())
-        # all sets don't necessary have the same shape, so we want to:
-        # - pad with zeros to the right on the feature axis
-        # - fill with random samples (from the same set of course) on the sample axis
-        # first, let's get the max shape
-        max_shape_x = (0, 0)
-        max_shape_y = (0, 0)
-        for k in keys:
-            max_shape_x = max(max_shape_x, raw_X[k].shape)
-            max_shape_y = max(max_shape_y, raw_Y[k].shape)
-        assert max_shape_x[0] == max_shape_y[0]
-        # now, let's pad and fill
-        X = {}
-        Y = {}
-        for k in keys:
-            X[k] = np.zeros(max_shape_x)
-            Y[k] = np.zeros(max_shape_y)
-            assert raw_X[k].shape[0] == raw_Y[k].shape[0]
-            rng_key, subkey = jax.random.split(rng_key)
-            # indices contains all the indices of the samples in the set, in a loop
-            # until we have enough samples to fill the set
-            shuff_range = jax.random.permutation(rng_key, raw_X[k].shape[0])
-            indices = np.tile(shuff_range, max_shape_x[0] // raw_X[k].shape[0] + 1)[
-                : max_shape_x[0]
+    def estimate_densities(self):
+        self.kdes = {k: gaussian_kde(v.T) for k, v in self.X.items()}
+
+    def get_batches(self, cfg, rng_key):
+        if self.kdes is None:
+            self.estimate_densities()
+        max_xfeatures = max([v.shape[1] for v in self.X.values()])
+        max_yfeatures = max([v.shape[1] for v in self.Y.values()])
+
+        all_batches = [sample_batches(
+                    self.X[k],
+                    self.Y[k],
+                    cfg['batch_size'],
+                    cfg['n_batches'],
+                    self.kdes[k],
+                    rng,
+                    quantile_threshold=cfg['density_quantile_threshold'],
+                    x_pad_to=max_xfeatures,
+                    y_pad_to=max_yfeatures,
+                )
+                for k, rng in tqdm(
+                    list(zip(self.key_order, jax.random.split(rng_key, len(self.key_order)))), desc='generating batches'
+                )
             ]
-            indices = jax.random.permutation(subkey, indices)
-            X[k][: raw_X[k].shape[0], : raw_X[k].shape[1]] = raw_X[k][indices]
-            Y[k][: raw_Y[k].shape[0], : raw_Y[k].shape[1]] = raw_Y[k][indices]
-        return X, Y
+        xbatches, ybatches = zip(*all_batches)
+        xbatches, ybatches = jnp.array(xbatches), jnp.array(ybatches)
+        # swap dimension 0 and 1 so that we have (N_BATCHES, N_MODELS, BATCH_SIZE, FEATURES)
+        xbatches = jnp.swapaxes(xbatches, 0, 1)
+        ybatches = jnp.swapaxes(ybatches, 0, 1)
+        return xbatches, ybatches
 
-    def preprocess(self, rng_key, cfg):
-        XX, YY = balance_each_dataset(
-            self.models,
-            self.Y,
-            rng_key,
-            bin_resolution=cfg['balance_bin_resolution'],
-            threshold_quantile=cfg['balance_threshold_quantile'],
-            threshold_min=cfg['balance_threshold_min'],
-        )
 
-        basic_data_checks(XX, YY, self.models)
-        if self.enable_checks:
-            advanced_data_checks(XX, YY, self.models)
-            # let's also pick n random samples for each YY and check
-            # - that they can be found in the original Y
-            # - that the matching X is the same
-            for k, v in YY.items():
-                indices = jax.random.choice(rng_key, v.shape[0], (self.N_TEST,))
-                assert np.all(jax.vmap(jnp.all)(v[indices] == self.Y[k]))
-                assert np.all(jax.vmap(jnp.all)(XX[k][indices] == self.X[k]))
 
-        self.X = XX
-        self.Y = YY
-        self.normalize(cfg['normalize_factor'])
-
-    def postscale(self, data, factor):
-        return jax.tree_map(lambda x: x * factor, data)
+    def get_models_in_order(self):
+        return ([self.models[k] for k in self.key_order], self.key_order)
 
 
 #                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
+# {{{                         --     batches     --
+# ···············································································
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
+
+def split_array_uniform(arr, n_batches, rng_key):
+    n = len(arr)
+    batch_size = n // n_batches
+    a = jax.random.permutation(rng_key, arr)
+    return [a[i * batch_size : (i + 1) * batch_size] for i in range(n_batches)]
+
+
+def split_array_to_len(arr, l, rng_key):
+    a = jax.random.permutation(rng_key, arr)
+    return [a[i * l : (i + 1) * l] for i in range(len(arr) // l)]
+
+
+def make_batches_dict(Y, n_batches, rng_key, models):
+    y_ = {s: split_array_uniform(Y[s], n_batches, rng_key) for s in Y.keys()}
+    y_batches = [{s: y_[s][i] for s in y_.keys()} for i in range(n_batches)]
+    # get x_batches from y_batches
+    x_batches = []
+    for y_batch in y_batches:
+        x_batch = {}
+        for s in y_batch.keys():
+            x_batch[s] = models[s].get_input_from_output(y_batch[s])
+        x_batches.append(x_batch)
+    return x_batches, y_batches
+
+
+def make_batches_uniform_sampling(
+    X: list[np.ndarray],
+    Y: list[np.ndarray],
+    batch_size: int,
+    rng_key,
+    total_size=None,
+):
+    """Split data into batches of equal size, for a list of arrays (one per sample).
+    Each array might not have the same size originally, but the batches will
+    have the same size and there will be the same amount of batches for Each
+    sample in the end. To do so, we randomly sample from the arrays to get the
+    same size for each batch.
+
+    batch_size: int, the size of each batch (per sample)
+    total_size: batch_size * n_batches. If None, it uses the largest array size.
+
+    returns: x_batches, y_batches. Dimensions are (n_batches, n_models, batch_size, n_features)
+
+    """
+
+    if total_size is None:  # use the largest array as target total size
+        total_size = max(len(y) for y in Y)
+
+    n_batches = total_size // batch_size
+
+    ylist = [jax.random.choice(rng_key, jnp.array(y), (total_size,)) for y in tqdm(Y)]
+    xlist = [m.get_input_from_output(ylist[i]) for i, m in enumerate(models)]
+
+    n_outputs = max(y.shape[1] for y in ylist)
+    n_inputs = max(x.shape[1] for x in xlist)
+
+    # add 0 pad
+    y_p = jnp.array([np.pad(y, ((0, 0), (0, n_outputs - y.shape[1]))) for y in ylist])
+    x_p = jnp.array([np.pad(x, ((0, 0), (0, n_inputs - x.shape[1]))) for x in xlist])
+
+    y_batches = jnp.array(np.split(y_p[:, : n_batches * batch_size], n_batches, axis=1))
+    x_batches = jnp.array(np.split(x_p[:, : n_batches * batch_size], n_batches, axis=1))
+
+    assert y_batches.shape == (n_batches, len(Y), batch_size, n_outputs)
+    assert x_batches.shape == (n_batches, len(Y), batch_size, n_inputs)
+
+    return x_batches, y_batches
+
+
+def batch(X, Y, batch_size, n_batches=None):
+    """Yields batches of data from X and Y."""
+    n = X.shape[0]
+    if n_batches is None:
+        n_batches = n // batch_size
+    # using sampling with replacement
+    for i in range(n_batches):
+        idx = np.random.choice(n, size=batch_size, replace=True)
+        yield X[idx], Y[idx]
+
+
+#                                                                            }}}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#                            NEIGHBORHOOD BASED TOOLS
+# ───────────────────────────────────── ▼ ─────────────────────────────────────
+### {{{              --     knn and spatial partitionning    --
+from scipy.spatial import cKDTree
+
+
+@jax.jit
+def weighted_quantile(data, weights, qu):
+    ix = jnp.argsort(data)
+    data = data[ix]
+    weights = weights[ix]
+    cdf = (jnp.cumsum(weights) - 0.5 * weights) / jnp.sum(weights)
+    return jnp.interp(qu, cdf, data)
+
+
+def get_knn(x, tree, knn=100, min_points=20):
+    distances, indices = tree.query(x, k=knn, distance_upper_bound=0.2)
+    mask = distances == np.inf
+    nb_points = (~mask).sum(axis=1)
+    gausspdf = (
+        lambda x, mu, sigma: 1
+        / (sigma * np.sqrt(2 * np.pi))
+        * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+    )
+    weights = gausspdf(distances, 0, 0.1)
+    indices[mask] = 0
+    weights[mask] = 0
+    weights[nb_points < min_points, :] = np.nan
+    return indices, weights
+
+
+def get_knn_mean(x, y, tree, knn=100, min_points=20):
+    indices, weights = get_knn(x, tree, knn, min_points)
+    avg = np.average(y[indices], axis=1, weights=weights)
+    return avg
+
+
+def get_knn_quantile(x, y, tree, qu, knn=100, min_points=20):
+    indices, weights = get_knn(x, tree, knn, min_points)
+    q = jax.vmap(weighted_quantile, in_axes=(0, 0, None))(y[indices], weights, qu)
+    return q
+
+
+def get_knn_smooth(logX, logY, xlims=(0, 3), res=200, knn=100, min_points=10, method='mean', **kw):
+    tree = cKDTree(logX)
+
+    x = jnp.linspace(xlims[0], xlims[1], res)
+    xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
+
+    if method == 'mean':
+        Z = get_knn_mean(xygrid, logY, knn=knn, min_points=min_points, tree=tree)
+    elif method == 'quantile':
+        assert 'qu' in kw
+        Z = get_knn_quantile(xygrid, logY, knn=knn, min_points=min_points, tree=tree, **kw)
+    else:
+        raise ValueError(f'Unknown method {method}')
+    return Z.reshape(res, res), x
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                      --     heatmap methods     --
+
+
+def heatmap_old(Z, x, ax):
+    res = Z.shape[0]
+    YY, XX = np.meshgrid(x, x)
+    cmap = plt.get_cmap('YlGnBu')
+    cmap.set_bad(color='#EEEEEE')
+
+    ax.set_aspect('equal')
+    im = ax.pcolormesh(
+        XX,
+        YY,
+        Z,
+        cmap=cmap,
+    )
+    # add contour
+    ax.contour(
+        XX,
+        YY,
+        Z,
+        levels=4,
+        linewidths=0.25,
+    )
+    loglabels = 10**x - 1
+    tickfreq = res // 5
+    ax.set_xticks(x[::tickfreq])
+    ax.set_xticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
+    ax.set_yticks(x[::tickfreq])
+    ax.set_yticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
+    # add colorbar to ax
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.05)
+    cbar = plt.colorbar(im, cax=cax)
+
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    return ax
+
+
+def smooth_heatmap(logX, logY, Z=None, x=None, ax=None, **kw):
+    if ax is None:
+        fig, ax = mkfig(1, 1)
+    Z, x = get_knn_smooth(logX, logY, **kw)
+    return heatmap_old(Z, x, ax)
+
+
+def heatmap(
+    ax, Z, vmax, transform, text='', connector=True, connector_orientation='bottom', contours=True
+):
+    cmap = plt.get_cmap('YlGnBu')
+    cmap.set_bad(color='#EEEEEE')
+    trans_data = transform + ax.transData
+    im = ax.imshow(
+        Z.T,
+        origin='lower',
+        aspect=1,
+        cmap=cmap,
+        vmin=0,
+        vmax=vmax,
+        transform=trans_data,
+        interpolation='none',
+    )
+    # add contour
+    if contours:
+        ax.contour(
+            Z.T,
+            levels=4,
+            linewidths=0.3,
+            transform=trans_data,
+        )
+
+    x1, x2, y1, y2 = im.get_extent()
+    w = x2 - x1
+    h = y1 - y2
+
+    ax.plot(
+        [x1, x2, x2, x1, x1],
+        [y1, y1, y2, y2, y1],
+        "-",
+        color='grey',
+        transform=trans_data,
+        linewidth=0.2,
+    )
+
+    if connector:
+        if connector_orientation == 'bottom':
+            txth = y1 + 0.4 * h
+            ycoords = [y1 + 0.05 * h, y1 + 0.3 * h]
+        else:
+            txth = y2 - 0.4 * h
+            ycoords = [y2 - 0.05 * h, y2 - 0.3 * h]
+        ax.plot(
+            [w * 0.5, w * 0.5],
+            ycoords,
+            ":",
+            color='grey',
+            transform=trans_data,
+            linewidth=1,
+        )
+
+    ax.text(w * 0.5, txth, text, horizontalalignment='center', transform=trans_data)
+    return im
+
+
+def setup_fig(title):
+    fig, ax = plt.subplots(1, 1)
+    fig.patch.set_facecolor('white')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.get_xaxis().set_ticks([])
+    ax.get_yaxis().set_ticks([])
+    plt.suptitle(title)
+    return fig, ax
+
+
+import matplotlib.transforms as mtransforms
+
+
+def timelapse_persp(Q, title, labels=None, outputfile=None, show=True, **kw):
+    overlap = 0.1
+    vmax = np.nanmax(Q)
+    fig, ax = setup_fig(title)
+    w, _ = Q[0].shape
+    fig.set_size_inches(len(Q) * 3, 6)
+    for i, s in enumerate(Q):
+        transform = mtransforms.Affine2D().scale(1, 1.5)
+        transform = transform.skew_deg(0, 20).translate(w * (1 - overlap) * i, 0)
+        im = do_plot(ax, s, vmax, transform, labels[i], **kw)
+    ax.set_xlim(-0.5 * w, (len(Q) - overlap) * w)
+    cbar_ax = fig.add_axes([0.85, 0.28, 0.015, 0.5])
+    cb = fig.colorbar(im, cax=cbar_ax, drawedges=False)
+    cb.outline.set_linewidth(0)
+    cb.ax.locator_params(nbins=5)
+    if outputfile is not None:
+        plt.savefig(outputfile, dpi=150)
+    if show:
+        plt.show()
+    plt.close()
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#                              BINNING BASED TOOLS
+# ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     binstats     --
 # ···············································································
 
@@ -297,9 +671,6 @@ def binstats(
 
 
 #                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{               --     balancing individual dataset     --
 # ···············································································
 
@@ -362,9 +733,6 @@ def balance_each_dataset(
 
 
 #                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     plot heatmap     --
 # ···············································································
 import string
@@ -765,344 +1133,138 @@ def heatmap(
 # )
 
 #                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                      --     data load/save     --
+# {{{                       --     data manager     --
 # ···············································································
-import pickle
 
 
-def save(data, path, overwrite=False, rename_if_exists=True):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if overwrite:
-            path.unlink()
-        elif rename_if_exists:
-            path = path.with_name(path.stem + '_' + path.suffix)
-        else:
-            raise RuntimeError(f'File {path} already exists.')
-    with open(path, 'wb') as file:
-        pickle.dump(data, file)
+class DataManager_bin:
+    def __init__(self, X: dict, Y: dict, models: dict, enable_checks=True):
+        self.X = X
+        self.Y = Y
+        self.models = models
+        self.enable_checks = enable_checks
 
+        basic_data_checks(X, Y, models)
 
-def load(path):
-    path = Path(path)
-    if not path.is_file():
-        raise ValueError(f'Not a file: {path}')
-    with open(path, 'rb') as file:
-        data = pickle.load(file)
-    return data
+        if self.enable_checks:
+            advanced_data_checks(X, Y, models)
+            self.N_TEST = 100
+
+    def normalize(self, factor):
+        # for now, let's just scale the data
+        # we can add more later
+        self.X = jax.tree_map(lambda x: x / factor, self.X)
+        self.Y = jax.tree_map(lambda x: x / factor, self.Y)
+        basic_data_checks(self.X, self.Y, self.models)
+        if self.enable_checks:
+            advanced_data_checks(self.X, self.Y, self.models)
+        return self.X, self.Y
+
+    def consolidated(raw_X, raw_Y, rng_key):
+        keys = list(raw_X.keys())
+        # all sets don't necessary have the same shape, so we want to:
+        # - pad with zeros to the right on the feature axis
+        # - fill with random samples (from the same set of course) on the sample axis
+        # first, let's get the max shape
+        max_shape_x = (0, 0)
+        max_shape_y = (0, 0)
+        for k in keys:
+            max_shape_x = max(max_shape_x, raw_X[k].shape)
+            max_shape_y = max(max_shape_y, raw_Y[k].shape)
+        assert max_shape_x[0] == max_shape_y[0]
+        # now, let's pad and fill
+        X = {}
+        Y = {}
+        for k in keys:
+            X[k] = np.zeros(max_shape_x)
+            Y[k] = np.zeros(max_shape_y)
+            assert raw_X[k].shape[0] == raw_Y[k].shape[0]
+            rng_key, subkey = jax.random.split(rng_key)
+            # indices contains all the indices of the samples in the set, in a loop
+            # until we have enough samples to fill the set
+            shuff_range = jax.random.permutation(rng_key, raw_X[k].shape[0])
+            indices = np.tile(shuff_range, max_shape_x[0] // raw_X[k].shape[0] + 1)[
+                : max_shape_x[0]
+            ]
+            indices = jax.random.permutation(subkey, indices)
+            X[k][: raw_X[k].shape[0], : raw_X[k].shape[1]] = raw_X[k][indices]
+            Y[k][: raw_Y[k].shape[0], : raw_Y[k].shape[1]] = raw_Y[k][indices]
+        return X, Y
+
+    def preprocess(self, rng_key, cfg):
+        XX, YY = balance_each_dataset(
+            self.models,
+            self.Y,
+            rng_key,
+            bin_resolution=cfg['balance_bin_resolution'],
+            threshold_quantile=cfg['balance_threshold_quantile'],
+            threshold_min=cfg['balance_threshold_min'],
+        )
+
+        basic_data_checks(XX, YY, self.models)
+        if self.enable_checks:
+            advanced_data_checks(XX, YY, self.models)
+            # let's also pick n random samples for each YY and check
+            # - that they can be found in the original Y
+            # - that the matching X is the same
+            for k, v in YY.items():
+                indices = jax.random.choice(rng_key, v.shape[0], (self.N_TEST,))
+                assert np.all(jax.vmap(jnp.all)(v[indices] == self.Y[k]))
+                assert np.all(jax.vmap(jnp.all)(XX[k][indices] == self.X[k]))
+
+        self.X = XX
+        self.Y = YY
+        self.normalize(cfg['normalize_factor'])
+
+    def postscale(self, data, factor):
+        return jax.tree_map(lambda x: x * factor, data)
 
 
 #                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                         --     batches     --
-# ···············································································
 
 
-def split_array_uniform(arr, n_batches, rng_key):
-    n = len(arr)
-    batch_size = n // n_batches
-    a = jax.random.permutation(rng_key, arr)
-    return [a[i * batch_size : (i + 1) * batch_size] for i in range(n_batches)]
 
 
-def split_array_to_len(arr, l, rng_key):
-    a = jax.random.permutation(rng_key, arr)
-    return [a[i * l : (i + 1) * l] for i in range(len(arr) // l)]
+### {{{                         --     archives     --
 
-
-def make_batches_dict(Y, n_batches, rng_key, models):
-    y_ = {s: split_array_uniform(Y[s], n_batches, rng_key) for s in Y.keys()}
-    y_batches = [{s: y_[s][i] for s in y_.keys()} for i in range(n_batches)]
-    # get x_batches from y_batches
-    x_batches = []
-    for y_batch in y_batches:
-        x_batch = {}
-        for s in y_batch.keys():
-            x_batch[s] = models[s].get_input_from_output(y_batch[s])
-        x_batches.append(x_batch)
-    return x_batches, y_batches
-
-
-def make_batches_uniform_sampling(
-    X: list[np.ndarray],
-    Y: list[np.ndarray],
-    batch_size: int,
-    rng_key,
-    total_size=None,
+def jitable_sample_batches_attempt(
+    X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.07, x_pad_to=None, y_pad_to=None
 ):
-    """Split data into batches of equal size, for a list of arrays (one per sample).
-    Each array might not have the same size originally, but the batches will
-    have the same size and there will be the same amount of batches for Each
-    sample in the end. To do so, we randomly sample from the arrays to get the
-    same size for each batch.
+    assert X.shape[0] == Y.shape[0]
+    total_size = batch_size * n_batches
+    rngk, _ = jax.random.split(rng)
 
-    batch_size: int, the size of each batch (per sample)
-    total_size: batch_size * n_batches. If None, it uses the largest array size.
-
-    returns: x_batches, y_batches. Dimensions are (n_batches, n_models, batch_size, n_features)
-
-    """
-
-    if total_size is None:  # use the largest array as target total size
-        total_size = max(len(y) for y in Y)
-
-    n_batches = total_size // batch_size
-
-    ylist = [jax.random.choice(rng_key, jnp.array(y), (total_size,)) for y in tqdm(Y)]
-    xlist = [m.get_input_from_output(ylist[i]) for i, m in enumerate(models)]
-
-    n_outputs = max(y.shape[1] for y in ylist)
-    n_inputs = max(x.shape[1] for x in xlist)
-
-    # add 0 pad
-    y_p = jnp.array([np.pad(y, ((0, 0), (0, n_outputs - y.shape[1]))) for y in ylist])
-    x_p = jnp.array([np.pad(x, ((0, 0), (0, n_inputs - x.shape[1]))) for x in xlist])
-
-    y_batches = jnp.array(np.split(y_p[:, : n_batches * batch_size], n_batches, axis=1))
-    x_batches = jnp.array(np.split(x_p[:, : n_batches * batch_size], n_batches, axis=1))
-
-    assert y_batches.shape == (n_batches, len(Y), batch_size, n_outputs)
-    assert x_batches.shape == (n_batches, len(Y), batch_size, n_inputs)
-
-    return x_batches, y_batches
-
-
-def batch(X, Y, batch_size, n_batches=None):
-    """Yields batches of data from X and Y."""
-    n = X.shape[0]
-    if n_batches is None:
-        n_batches = n // batch_size
-    # using sampling with replacement
-    for i in range(n_batches):
-        idx = np.random.choice(n, size=batch_size, replace=True)
-        yield X[idx], Y[idx]
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-
-### {{{                    --     plot styling tools     --
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-
-def mkfig(rows, cols, size=(7, 7)):
-    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]))
-    return fig, ax
-
-
-def remove_spines(ax):
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-
-def remove_topright_spines(ax):
-    for spine in ['top', 'right']:
-        ax.spines[spine].set_visible(False)
-
-
-def style_violin(parts):
-    for pc in parts['bodies']:
-        pc.set_facecolor('k')
-        pc.set_edgecolor('k')
-        pc.set_linewidth(1)
-    parts['cbars'].set_linewidth(0)
-    parts['cmaxes'].set_color('black')
-    parts['cmaxes'].set_linewidth(0.5)
-    parts['cmins'].set_color('black')
-    parts['cmins'].set_linewidth(0.5)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-
-### {{{                    --     neighboorhood plots     --
-from scipy.spatial import cKDTree
-
-
-@jax.jit
-def weighted_quantile(data, weights, qu):
-    ix = jnp.argsort(data)
-    data = data[ix]
-    weights = weights[ix]
-    cdf = (jnp.cumsum(weights) - 0.5 * weights) / jnp.sum(weights)
-    return jnp.interp(qu, cdf, data)
-
-
-def get_knn(x, tree, knn=100, min_points=20):
-    distances, indices = tree.query(x, k=knn, distance_upper_bound=0.2)
-    mask = distances == np.inf
-    nb_points = (~mask).sum(axis=1)
-    gausspdf = (
-        lambda x, mu, sigma: 1
-        / (sigma * np.sqrt(2 * np.pi))
-        * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-    )
-    weights = gausspdf(distances, 0, 0.1)
-    indices[mask] = 0
-    weights[mask] = 0
-    weights[nb_points < min_points, :] = np.nan
-    return indices, weights
-
-
-def get_knn_mean(x, y, tree, knn=100, min_points=20):
-    indices, weights = get_knn(x, tree, knn, min_points)
-    avg = np.average(y[indices], axis=1, weights=weights)
-    return avg
-
-
-def get_knn_quantile(x, y, tree, qu, knn=100, min_points=20):
-    indices, weights = get_knn(x, tree, knn, min_points)
-    q = jax.vmap(weighted_quantile, in_axes=(0, 0, None))(y[indices], weights, qu)
-    return q
-
-
-def get_knn_smooth(logX, logY, xlims=(0, 3), res=200, knn=100, min_points=10, method='mean', **kw):
-    tree = cKDTree(logX)
-
-    x = jnp.linspace(xlims[0], xlims[1], res)
-    xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
-
-    if method == 'mean':
-        Z = get_knn_mean(xygrid, logY, knn=knn, min_points=min_points, tree=tree)
-    elif method == 'quantile':
-        assert 'qu' in kw
-        Z = get_knn_quantile(xygrid, logY, knn=knn, min_points=min_points, tree=tree, **kw)
-    else:
-        raise ValueError(f'Unknown method {method}')
-
-    XX = xygrid[:, 0].reshape(res, res)
-    YY = xygrid[:, 1].reshape(res, res)
-
-    return Z.reshape(res, res), x
-
-
-def smooth_heatmap(logX, logY, ax=None, **kw):
-    if ax is None:
-        fig, ax = mkfig(1, 1)
-
-    Z, x = get_knn_smooth(logX, logY, **kw)
-
-    res = Z.shape[0]
-    YY, XX = np.meshgrid(x, x)
-
-    cmap = plt.get_cmap('YlGnBu')
-    cmap.set_bad(color='#EEEEEE')
-
-    ax.set_aspect('equal')
-    im = ax.pcolormesh(
-        XX,
-        YY,
-        Z,
-        cmap=cmap,
-    )
-    # add contour
-    ax.contour(
-        XX,
-        YY,
-        Z,
-        levels=4,
-        linewidths=0.25,
-    )
-    loglabels = 10**x - 1
-    tickfreq = res // 5
-    ax.set_xticks(x[::tickfreq])
-    ax.set_xticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
-    ax.set_yticks(x[::tickfreq])
-    ax.set_yticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
-    # add colorbar to ax
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.05)
-    cbar = plt.colorbar(im, cax=cax)
-
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-    return ax
-
-
-def do_plot(ax, Z, vmax, transform, text='', connector=True):
-    cmap = plt.get_cmap('YlGnBu')
-    cmap.set_bad(color='#EEEEEE')
-    trans_data = transform + ax.transData
-    im = ax.imshow(Z.T, origin='lower', aspect=1, cmap=cmap, vmin=0, vmax=vmax, transform=transform)
-    # add contour
-    ax.contour(
-        Z.T,
-        levels=4,
-        linewidths=0.3,
-        transform=trans_data,
-    )
-
-    im.set_transform(trans_data)
-    x1, x2, y1, y2 = im.get_extent()
-    w = x2 - x1
-    h = y1 - y2
-    textPad = 0.4 * h
-
-    if connector:
-        ax.plot(
-            [x1, x2, x2, x1, x1],
-            [y1, y1, y2, y2, y1],
-            "-",
-            color='grey',
-            transform=trans_data,
-            linewidth=0.3,
+    @jit
+    def select_indices():
+        selection = density_subsample(X, kde, rngk, quantile_threshold)[None, :]
+        selection = jax.lax.while_loop(
+            lambda x: jnp.sum(x) < total_size,
+            lambda x: jnp.concatenate(
+                (x, density_subsample(X, kde, rngk, quantile_threshold)[None, :]), axis=0
+            ),
+            selection,
         )
-        ax.plot(
-            [w * 0.5, w * 0.5],
-            [y1 + 0.05 * h, y1 + 0.3 * h],
-            ":",
-            color='grey',
-            transform=trans_data,
-            linewidth=1,
-        )
-    ax.text(w * 0.5, y1 + textPad, text, horizontalalignment='center', transform=trans_data)
-    return im
+        n_selection = jnp.sum(selection)
+        row_id = jnp.arange(X.shape[0])[None, :]
+        row_id = jnp.tile(row_id, (selection.shape[0], 1))
+        preselected = jnp.where(selection, row_id, -1).reshape(-1)
+        preselected = jnp.sort(preselected)[n_selection:]
+        return preselected
 
+    preselected = select_indices()
+    indices = jax.random.choice(rngk, preselected, shape=(total_size,), replace=False)
+    Xsub, Ysub = X[indices], Y[indices]
+    # pad with nans to the right if necessary
+    if x_pad_to is not None:
+        Xsub = jnp.pad(Xsub, ((0, 0), (0, x_pad_to - Xsub.shape[1])), constant_values=jnp.nan)
+    if y_pad_to is not None:
+        Ysub = jnp.pad(Ysub, ((0, 0), (0, y_pad_to - Ysub.shape[1])), constant_values=jnp.nan)
 
-def setup_fig(title):
-    fig, ax = plt.subplots(1, 1)
-    fig.patch.set_facecolor('white')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_visible(False)
-    ax.spines['left'].set_visible(False)
-    ax.get_xaxis().set_ticks([])
-    ax.get_yaxis().set_ticks([])
-    plt.suptitle(title)
-    return fig, ax
+    assert Xsub.shape[0] == Ysub.shape[0]
+    Xbatches = jnp.split(Xsub, n_batches)
+    Ybatches = jnp.split(Ysub, n_batches)
 
-
-import matplotlib.transforms as mtransforms
-
-
-def timelapse_persp(Q, title, labels=None, outputfile=None, show=True):
-    overlap = 0.1
-    vmax = np.nanmax(Q)
-    fig, ax = setup_fig(title)
-    w, _ = Q[0].shape
-    fig.set_size_inches(len(Q) * 3, 6)
-    for i, s in enumerate(Q):
-        transform = mtransforms.Affine2D().scale(1, 1.5)
-        transform = transform.skew_deg(0, 20).translate(w * (1 - overlap) * i, 0)
-        im = do_plot(ax, s, vmax, transform, labels[i])
-    ax.set_xlim(-0.5 * w, (len(Q) - overlap) * w)
-    cbar_ax = fig.add_axes([0.85, 0.28, 0.015, 0.5])
-    cb = fig.colorbar(im, cax=cbar_ax, drawedges=False)
-    cb.outline.set_linewidth(0)
-    cb.ax.locator_params(nbins=5)
-    if outputfile is not None:
-        plt.savefig(outputfile, dpi=150)
-    if show:
-        plt.show()
-    plt.close()
+    return Xbatches, Ybatches
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

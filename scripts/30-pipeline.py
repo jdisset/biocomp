@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#                                     SETUP 
+#                                     SETUP
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
 ### {{{                          --     imports     --
 import biocomp as bc
@@ -596,7 +596,7 @@ import matplotlib.transforms as mtransforms
 y = Y[:, output_id['eYFP']]
 
 qu = 0.1
-ax = du.smooth_heatmap(X,y, method='quantile', qu=qu)
+# ax = du.smooth_heatmap(X,y, method='quantile', qu=qu)
 
 
 # playing with transforms:
@@ -608,20 +608,23 @@ ax = du.smooth_heatmap(X,y, method='quantile', qu=qu)
 # # ax.get_children()[0].set_transform(tr + ax.transData)
 # # ax.get_children()[1].set_transform(tr + ax.transData)
 # for c in ax.get_children():
-    # c.set_transform(tr + ax.transData)
+# c.set_transform(tr + ax.transData)
 # # remove colorbar
 # ax.figure.delaxes(ax.figure.axes[1])
 # ax.set_xticks([])
 # ax.set_yticks([])
 
 
-##
-quantiles = np.linspace(0.1,0.9,9)
-allZ = [du.get_knn_smooth(X,y,method='quantile', qu=i)[0] for i in tqdm(quantiles)]
+quantiles = np.linspace(0.1, 0.9, 9)
+allZ = [du.get_knn_smooth(X, y, method='quantile', qu=i)[0] for i in tqdm(quantiles)]
 allZ = np.array(allZ)
 ##
+fig, ax = mkfig(1, 1)
+x = jnp.linspace(0, 3, 200)
+du.do_heatmap(np.abs(allZ[8] - allZ[0]), x, ax)
+##
 
-du.timelapse_persp(allZ,'Original data, smoothed quantiles', [f'q={i:.1f}' for i in quantiles])
+du.timelapse_persp(allZ, 'Original data, smoothed quantiles', [f'q={i:.1f}' for i in quantiles])
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -638,14 +641,50 @@ title = 'Range of YFP output between 0.1 and 0.9 quantile'
 ax.set_title(title)
 
 ##
-quantiles = np.linspace(0.1,0.9,9)
-zzz = jnp.ones(Y.shape)
-yyy = [vern(params, X, zzz*i, rng_key)[:, output_id['eYFP']] for i in tqdm(quantiles)]
+x = jnp.linspace(0, 3, 200)
+xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
+quantiles = np.linspace(0.1, 0.9, 9)
+zzz = jnp.ones((xygrid.shape[0], Y.shape[1]))
+yyy = [
+    vern(params, xygrid, zzz * i, rng_key)[:, output_id['eYFP']].reshape(200, 200)
+    for i in tqdm(quantiles)
+]
 ##
-allZ = [du.get_knn_smooth(X,y)[0] for y,i in tqdm(zip(yyy, quantiles))]
-allZ = np.array(allZ)
+# genZ = [du.get_knn_smooth(X,y)[0] for y,i in tqdm(zip(yyy, quantiles))]
+# genZ = np.array(genZ)
 ##
-du.timelapse_persp(allZ,'Generated data, smoothed quantiles', [f'q={i:.1f}' for i in quantiles])
+du.timelapse_persp(
+    yyy[::-1],
+    'Generated data, smoothed quantiles',
+    [f'q={i:.1f}' for i in quantiles],
+    connector_orientation='top',
+)
+
+##
+res = 150
+x = jnp.linspace(0, 3, res)
+xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
+vvvern = jit(vmap(vern, in_axes=(None, None, 0, None)))
+xygrid.shape
+nsamples = [1, 10, 50, 100]
+yyy = [
+    jnp.mean(
+    vvvern(
+        params,
+        xygrid,
+        jax.random.uniform(rng_key, shape=(int(i), xygrid.shape[0], Y.shape[1])),
+        rng_key,
+    ), axis=0)[:, output_id['eYFP']].reshape(res, res)
+    for i in tqdm(nsamples)
+]
+##
+du.timelapse_persp(
+    yyy,
+    'Generated data',
+    [f'{i} samples' for i in nsamples],
+    connector_orientation='top',
+    contours=False,
+)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -653,4 +692,10 @@ du.timelapse_persp(allZ,'Generated data, smoothed quantiles', [f'q={i:.1f}' for 
 #                   LEARNING THE ERN XP WITH THE REAL MODEL
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
 
-
+# TODO:
+# [x] assign quantile variable to each node ("z coloring")
+# [ ] properly dispatch the q variables to each node
+# [ ] train + generate on simple xp
+# [ ] train + generate on multiple xp
+# [ ] ...
+# [ ] profit
