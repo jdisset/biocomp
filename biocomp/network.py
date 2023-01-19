@@ -4,8 +4,7 @@ import numpy as np
 import pandas as pd
 from . import utils as ut
 from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast
-import copy
-import json
+from itertools import product
 
 
 part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF_group': 'tl_rate'}
@@ -244,30 +243,27 @@ class Network:
         if build:
             self.build()
 
-
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                  --     public tools & utils    --
-    #···············································································
-    
+    # ···············································································
+
     def get_compute_types(self):
         node_dict = self.compute_graph.groupby('type').apply(lambda x: x.index.to_list()).to_dict()
         return node_dict
 
     # def get_compute_types_and_extra(self):
-        # gb = self.compute_graph.groupby('type')
-        # # extra is a dict, so we need to json it
-        # gb = gb['extra'].apply(lambda x: x.apply(partial(json.dumps, default=np_converter)).tolist())
-        # gb = gb.apply(lambda x: list(set(x)))
-        # # we want to build a dict of {type: {extra: [indices]}}
-        # # but we have a series of {extra: [indices]}
-        # # so we need to build a dict for each extra
-        # gb = gb.apply(lambda x: {e: i for e, i in zip(x, gb.index)})
-        # return gb.to_dict()
+    # gb = self.compute_graph.groupby('type')
+    # # extra is a dict, so we need to json it
+    # gb = gb['extra'].apply(lambda x: x.apply(partial(json.dumps, default=np_converter)).tolist())
+    # gb = gb.apply(lambda x: list(set(x)))
+    # # we want to build a dict of {type: {extra: [indices]}}
+    # # but we have a series of {extra: [indices]}
+    # # so we need to build a dict for each extra
+    # gb = gb.apply(lambda x: {e: i for e, i in zip(x, gb.index)})
+    # return gb.to_dict()
 
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
-
-
 
     def __build_from_db(self):
         assert self.db is not None
@@ -858,6 +854,45 @@ class Network:
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
 
+    def get_output_proteins(self):
+        """Returns the names of the proteins that are outputs of the network"""
+        onode = self.compute_graph[self.compute_graph['type'] == 'output']
+        assert len(onode) == 1, f'Invalid number of output nodes: {len(onode)}'
+        return [
+            self.central_dogma_graph.loc[cdg_id]['content'][0]
+            for cdg_id in onode.iloc[0]['cdg_input']
+        ]
+
+    def get_input_from_output(self, output_arr):
+        """Given an array of output values, returns the columns that are inputs of the inverted network,
+        properly ordered by input number"""
+        # In inverted networks, each input node has,
+        # in its extra, 'input_from_output' and 'input_position' (which get_inverted_input_positions uses)
+        # We want to transform output_arr by reordering the columns accordingly
+        mapping = self.get_inverted_input_positions()
+        return output_arr[:, [mapping[i] for i in range(len(mapping))]]
+
+    def get_inverted_input_proteins(self):
+        """Returns the names of the proteins that are inputs of the inverted network, ordered"""
+        mapping = self.get_inverted_input_positions()
+        output_proteins = self.get_output_proteins()
+        assert len(mapping) <= len(output_proteins)
+        return [output_proteins[mapping[i]] for i in range(len(mapping))]
+
+    def get_inverted_input_positions(self):
+        """Returns a mapping from input position to output position"""
+        mapping = {}  # input number -> output position
+        inputs = self.compute_graph[self.compute_graph['type'] == 'input']
+        for _, row in inputs.iterrows():
+            assert 'input_position' in row.extra
+            assert 'input_from_output' in row.extra
+            assert row.extra['input_position'] not in mapping
+            mapping[row.extra['input_position']] = row.extra['input_from_output']
+        assert set(mapping.keys()) == set(range(len(mapping.keys())))
+        assert len(mapping.keys()) == len(set(mapping.values()))
+        return mapping
+
+
     def cleanup(self):
         if self.compute_graph is not None:
             self.compute_graph.source_id = self.compute_graph.source_id.apply(
@@ -938,16 +973,17 @@ class Network:
         Proceeds by propagating from the output towards the upstream nodes.
         Inverted nodes are assigned the same quantile as their forward node.
         If a node is linked is not linked to a non-inverted one, has only one output
-        but is linked downstream to paths that lead to multiple outputs, 
+        but is linked downstream to paths that lead to multiple outputs,
         quantile_variable_id is set to [None].
         """
         cg = self.compute_graph
+
         def propagate_upstream(node, quantile_id, output_id):
             node['extra'].setdefault('quantile_variable_id', [])
             if node['extra'].get('is_inverse_of', None) is not None:
-                node['extra']['quantile_variable_id'] = cg.loc[node['extra']['is_inverse_of']]['extra'].get(
-                    'quantile_variable_id', []
-                )
+                node['extra']['quantile_variable_id'] = cg.loc[node['extra']['is_inverse_of']][
+                    'extra'
+                ].get('quantile_variable_id', [])
             else:
                 if len(node['extra']['quantile_variable_id']) <= output_id:
                     # append -1 until the right size
@@ -977,7 +1013,6 @@ class Network:
         output_node = cg[cg.type == 'output'].iloc[0]
         for i, (nid, oid) in enumerate(output_node.input_from):
             propagate_upstream(cg.loc[nid], i, oid)
-
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -1041,83 +1076,104 @@ DEFAULT_INVERSE_DICT = {
 }
 
 
-def inverted_network(network: Network, nodes: str = 'auto', inverse_dict=DEFAULT_INVERSE_DICT):
+def inverted_network(
+    network: Network, nodes: str = 'auto', inverse_dict=DEFAULT_INVERSE_DICT, mode='shortest'
+):
     ut.debug(f'Inverting network {network.name}')
+
     # inverse_dict: node_type -> inverse_node_type
-    if nodes == 'auto':
-        # we assume all numeric nodes should be linked to an inverted path
+
+    # First we pick the start nodes. (Numeric nodes by default, or user supplied list)
+    # We will then try to find invertible paths that go from each of the start nodes to the output.
+    # A path is invertible if each of its nodes has been marked as having an inverted equivalent in the inverse_dict
+    # We then prepend an input node + the inverted nodes to the original network, and that's what we
+    # call an inverted network.
+    if nodes == 'auto':  # numeric nodes as start nodes
         start_nodes = network.compute_graph[
             network.compute_graph['type'] == 'numeric'
         ].index.tolist()
-    elif isinstance(nodes, str) or not isinstance(nodes, Iterable):
+    elif not isinstance(nodes, Iterable):
         raise ValueError(f"Unrecognized node mode: {nodes}. Use 'auto' or a list of node ids.")
-    else:
+    else:  # list of nodes
         start_nodes = nodes
-    invertible_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
-    new_network = network.copy()
 
-    uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
+    # we compute a list of invertible paths that link each start nodes to the output
+    inv_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
 
-    # we pick the shortest path for each node
-    paths = {n: min(invertible_paths[n], key=len) for n in start_nodes}
+    # For each start_node, we might have more than one path.
+    # In 'shortest' mode, we just pick the shortest one.
+    # In the 'all' mode, we want to return every possible combination of paths per start node
+    # e.g. if we have 2 start nodes, and 2 paths for each, we want to return 4 paths
+    # (the cartesian product of the paths)
+    if mode == 'shortest':
+        inversions = [{n: min(p, key=len) for n, p in inv_paths.items() if p}]
+    elif mode == 'all':
+        inversions = [dict(zip(inv_paths.keys(), p)) for p in product(*inv_paths.values())]
+    else:
+        raise ValueError(f"Unrecognized mode: {mode}. Use 'shortest' or 'all'.")
 
-    inputpos = 0
+    new_networks = []
+    for paths in inversions:
+        inputpos = 0
+        new_network = network.copy()
+        uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
+        for start_n, path in paths.items():
+            # we start by replacing the start node by the first node of the path
+            new_network.compute_graph.loc[start_n, 'type'] = inverse_dict[
+                new_network.compute_graph.loc[start_n, 'type']
+            ]
+            prev = start_n
 
-    for start_n, path in paths.items():
-        # we start by replacing the start node by the first node of the path
-        new_network.compute_graph.loc[start_n, 'type'] = inverse_dict[
-            new_network.compute_graph.loc[start_n, 'type']
-        ]
-        prev = start_n
+            for i, (node_id, slot) in enumerate(
+                path
+            ):  # slot is output_id for nodes, input_id for output
+                original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
+                n_type = original_node['type']
+                nid = uidGen()
 
-        for i, (node_id, slot) in enumerate(
-            path
-        ):  # slot is output_id for nodes, input_id for output
-            original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
-            n_type = original_node['type']
-            nid = uidGen()
+                if n_type == 'output':  # special case when we reach the output
+                    assert i == len(path) - 1, 'output node should be the last node in the path'
+                    # we add an input node
+                    in_n = GraphComputeNode(nid, 'input', None, None)
+                    in_n.output_to = [(prev, 0)]
+                    in_n.input_from = []
+                    in_n.extra = {'input_from_output': slot, 'input_position': inputpos}
+                    inputpos += 1
+                    new_network.compute_graph = pd.concat(
+                        [new_network.compute_graph, pd.DataFrame([in_n.toDict()]).set_index('id')]
+                    )
+                    break
 
-            if n_type == 'output':  # special case when we reach the output
-                assert i == len(path) - 1, 'output node should be the last node in the path'
-                # we add an input node
-                in_n = GraphComputeNode(nid, 'input', None, None)
-                in_n.output_to = [(prev, 0)]
-                in_n.input_from = []
-                in_n.extra = {'input_from_output': slot, 'input_position': inputpos}
-                inputpos += 1
-                new_network.compute_graph = pd.concat(
-                    [new_network.compute_graph, pd.DataFrame([in_n.toDict()]).set_index('id')]
+                # General case, create a new node and prepend to prev
+                cdg_in = new_network.compute_graph.loc[prev, 'cdg_output']
+                if isinstance(cdg_in, list):
+                    cdg_in = cdg_in[slot]
+                new_n = GraphComputeNode(
+                    nid, inverse_dict[n_type], cdg_in, original_node.cdg_output
                 )
-                break
+                new_n.output_to = [(prev, 0)]
+                # inverse nodes always have only one input and one output
+                # but we need to store the original output slot id in the extra field
+                # so that we can use it when converting aggregation nodes for example
+                # (where we convert a single input / multi output node to a single input / single output node
+                # but we need to know which path, i.e slot, to use)
+                new_n.extra = {
+                    'original_output_slot': slot,
+                    'original_output_len': len(original_node['output_to']),
+                    'is_inverse_of': node_id,
+                }
 
-            # General case, create a new node and prepend to prev
-            cdg_in = new_network.compute_graph.loc[prev, 'cdg_output']
-            if isinstance(cdg_in, list):
-                cdg_in = cdg_in[slot]
-            new_n = GraphComputeNode(nid, inverse_dict[n_type], cdg_in, original_node.cdg_output)
-            new_n.output_to = [(prev, 0)]
-            # inverse node always have only one input and one output
-            # but we need to store the original output slot id in the extra field
-            # so that we can use it when converting aggregation nodes for example
-            # (where we convert a single input / multi output node to a single input / single output nodes
-            # but we need to know which path, i.e slot, to use)
-            new_n.extra = {
-                'original_output_slot': slot,
-                'original_output_len': len(original_node['output_to']),
-                'is_inverse_of': node_id,
-            }
+                # set prev input_from to new nodes
+                new_network.compute_graph.loc[prev, 'input_from'] = [(nid, 0)]
+                new_network.compute_graph = pd.concat(
+                    [new_network.compute_graph, pd.DataFrame([new_n.toDict()]).set_index('id')]
+                )
 
-            # set prev input_from to new nodes
-            new_network.compute_graph.loc[prev, 'input_from'] = [(nid, 0)]
-            new_network.compute_graph = pd.concat(
-                [new_network.compute_graph, pd.DataFrame([new_n.toDict()]).set_index('id')]
-            )
+                prev = nid
 
-            prev = nid
-
-    new_network.cleanup()
-
-    return new_network
+        new_network.cleanup()
+        new_networks.append(new_network)
+    return new_networks
 
 
 #                                                                            }}}

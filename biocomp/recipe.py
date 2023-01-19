@@ -4,6 +4,8 @@ from .network import Network, inverted_network
 from .compute import ComputeGraphModel
 from pathlib import Path
 import numpy as np
+import jax
+from jax import numpy as jnp
 import pandas as pd
 from tqdm import tqdm
 import sqlite3
@@ -17,6 +19,7 @@ import logging as log
 # {{{                            --     sql     --
 # ···············································································
 
+
 def create_db(conn):
     sql = """
     CREATE TABLE IF NOT EXISTS `recipes` (
@@ -29,7 +32,7 @@ def create_db(conn):
         id INTEGER PRIMARY KEY,
         recipe TEXT,
         notes TEXT,
-        FOREIGN KEY (recipe) REFERENCES recipes(name));
+        FOREIGN KEY (recipe) REFERENCES recipes(name) ON DELETE CASCADE);
 
     CREATE TABLE IF NOT EXISTS `sources` (
         name TEXT PRIMARY KEY,
@@ -39,8 +42,7 @@ def create_db(conn):
         source TEXT,
         TU INTEGER,
         position INTEGER,
-        FOREIGN KEY(source) REFERENCES sources(name),
-        FOREIGN KEY(TU) REFERENCES TUs(id),
+        FOREIGN KEY(source) REFERENCES sources(name) ON DELETE CASCADE,
         PRIMARY KEY(source, TU));
 
     CREATE TABLE IF NOT EXISTS `source_in_aggregation`(
@@ -49,8 +51,8 @@ def create_db(conn):
         ratio REAL,
         notes TEXT,
         extra TEXT,
-        FOREIGN KEY (aggregation) REFERENCES aggregations(id),
-        FOREIGN KEY (source) REFERENCES sources(name),
+        FOREIGN KEY (aggregation) REFERENCES aggregations(id) ON DELETE CASCADE,
+        FOREIGN KEY (source) REFERENCES sources(name) ON DELETE CASCADE,
         PRIMARY KEY(aggregation, source));
 
     CREATE TABLE IF NOT EXISTS `XPs` (
@@ -64,8 +66,8 @@ def create_db(conn):
         recipe TEXT,
         sample_name TEXT,
         sample_notes TEXT,
-        FOREIGN KEY (XP) REFERENCES XPs(id),
-        FOREIGN KEY (recipe) REFERENCES recipes(name),
+        FOREIGN KEY (XP) REFERENCES XPs(name) ON DELETE CASCADE,
+        FOREIGN KEY (recipe) REFERENCES recipes(name) ON DELETE CASCADE,
         PRIMARY KEY(XP, recipe));
 
     """
@@ -73,13 +75,16 @@ def create_db(conn):
     c.executescript(sql)
 
 
-def recipes_to_sql(recipes:list, conn, lib):
+def recipes_to_sql(recipes: list, conn, lib):
     c = conn.cursor()
+    c.execute("PRAGMA foreign_keys = ON;")
     create_db(conn)
+
     for obj in recipes:
         c.execute("SELECT name FROM recipes WHERE name = ?", (obj['name'],))
         if c.fetchone():
             # already in db so we skip
+            log.debug(f'Recipe {obj["name"]} already in db, skipping')
             return
 
         extra = {k: v for k, v in obj.items() if k not in ['name', 'description', 'notes']}
@@ -93,6 +98,7 @@ def recipes_to_sql(recipes:list, conn, lib):
                 extra_json if extra else None,
             ),
         )
+        error_in_recipe = False
         for agg in obj['content']:
             ratios = []
             for s in agg['sources']:
@@ -119,38 +125,61 @@ def recipes_to_sql(recipes:list, conn, lib):
                     slot_cols = [f'slot_{i}' for i in range(1, 7)]
                     l1ids = [s for s in lib.L2s.loc[s['plasmid']][slot_cols].tolist() if s]
                 if type is None:
-                    raise RuntimeError(
-                        f'Error while importing recipe {obj["name"]}: unknown plasmid {s["plasmid"]}'
-                    )
+                    err_msg = f'In recipe {obj["name"]}: unknown plasmid {s["plasmid"]}'
+                    ut.error(err_msg)
+                    error_in_recipe = True
+                    continue  # we still continue to get a list of all errors
                 c.execute("SELECT name FROM sources WHERE name = ?", (s['plasmid'],))
                 if not c.fetchone():
                     c.execute("INSERT INTO sources VALUES (?, ?)", (s['plasmid'], type))
                     for i, l1id in enumerate(l1ids):
-                        c.execute("INSERT INTO TU_in_source VALUES (?, ?, ?)", (s['plasmid'], l1id, i))
+                        c.execute(
+                            "INSERT INTO TU_in_source VALUES (?, ?, ?)", (s['plasmid'], l1id, i)
+                        )
                 # we put in "extra" everything other than ratio, plasmid and notes. Serialized to json.
                 extra = {k: v for k, v in s.items() if k not in ['ratio', 'plasmid', 'notes']}
                 extra_json = json.dumps(extra)
                 c.execute(
                     "INSERT INTO source_in_aggregation VALUES (?, ?, ?, ?, ?)",
-                    (aggregation_id, s['plasmid'], r, s['notes'] if 'notes' in s else None, extra_json),
+                    (
+                        aggregation_id,
+                        s['plasmid'],
+                        r,
+                        s['notes'] if 'notes' in s else None,
+                        extra_json,
+                    ),
                 )
+        if error_in_recipe:
+            ut.error(f'Skipped recipe {obj["name"]} because of import errors')
+            c.execute("DELETE FROM recipes WHERE name = ?", (obj['name'],))
+            conn.commit()
+            return
     conn.commit()
 
-def xp_to_sql(xps:list, conn):
+
+def xp_to_sql(xps: list, conn):
     c = conn.cursor()
     create_db(conn)
     for obj in xps:
         c.execute("SELECT name FROM XPs WHERE name = ?", (obj['name'],))
         if c.fetchone():
             # already in db so we skip
+            ut.debug(f'XP {obj["name"]} already in db, skipping')
             return
+        ut.info(f'Adding XP {obj["name"]} to sql db')
         c.execute(
             "INSERT INTO XPs VALUES (?, ?, ?, ?)",
             (
                 obj['name'],
                 obj['flow_date'] if 'flow_date' in obj else None,
                 obj['transfection_date'] if 'transfection_date' in obj else None,
-                json.dumps({k: v for k, v in obj.items() if k not in ['name', 'flow_date', 'transfection_date']}),
+                json.dumps(
+                    {
+                        k: v
+                        for k, v in obj.items()
+                        if k not in ['name', 'flow_date', 'transfection_date']
+                    }
+                ),
             ),
         )
         for s in obj['samples']:
@@ -161,12 +190,12 @@ def xp_to_sql(xps:list, conn):
     conn.commit()
 
 
-
 def import_recipes_to_sql(recipe_files: list, conn, lib):
     # recipe files are json5 files
     recipes = []
-    
+
     from tqdm import tqdm
+
     for f in tqdm(recipe_files, desc='Importing recipes'):
         try:
             recipe = ut.load_json5(f)
@@ -183,9 +212,10 @@ def import_recipes_to_sql(recipe_files: list, conn, lib):
 def network_from_recipe(recipe, lib, db_path=':memory:'):
     dbconn = sqlite3.connect(db_path)
     recipes_to_sql([recipe], dbconn, lib)
-    assert(recipe['name'] in [r[0] for r in dbconn.execute("SELECT name FROM recipes").fetchall()])
+    assert recipe['name'] in [r[0] for r in dbconn.execute("SELECT name FROM recipes").fetchall()]
     n = Network(lib, recipe['name'], dbconn)
     return n
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -198,19 +228,20 @@ from rich.progress import track
 
 class XP:
     # Each sample in an Experiment implements one recipe, and resulted in one data file.
-    # The XP object stores all the recipes (in a sqlite database), and the corrsponding
-    # networks and inverted networks.
+    # The XP object stores, along xp specific infos, all the recipes (in a sqlite database)
+    # and data (in a dictionary of sample name -> pandas dataframe)
+    # It also provides convenience functions to build the corrersponding networks and models.
 
-    def __init__(self, xp_name, xp_path, recipe_path, lib, db_path=":memory:", inverse=True):
+    def __init__(self, xp_name, xp_path, recipe_path, lib, db_path=":memory:", inverse='shortest'):
         log.debug(f'Initializing XP {xp_name}')
         self.xp_path, self.recipe_path = Path(xp_path), Path(recipe_path)
         self.samples: list  # [{name, recipe, notes}]
         self.name: str
-        self.networks: dict[str, Network]  # {sample_name: Network}
-        self.inv_networks: Optional[dict[str, Network]]  # {sample_name: Network}
         self.dbconn = sqlite3.connect(db_path)
         self.color_names: dict
+        self.lib = lib
 
+        # load the xp file
         self.xpfile = xp_path / xp_name / f"{xp_name}.xp.json5"
         with open(self.xpfile) as f:
             try:
@@ -221,47 +252,17 @@ class XP:
             except Exception as e:
                 raise RuntimeError(f'Error loading xp file {self.xpfile}: \n{e}')
 
+        # load all the recipes inside
         self.recipe_names = [s['recipe'] for s in self.samples]
         unique_recipe_names = list(set(self.recipe_names))
         log.debug(f'Found {len(unique_recipe_names)} unique recipes')
         import_recipes_to_sql(
             [recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], self.dbconn, lib
         )
-        self.networks = {}
-        for recipename in unique_recipe_names:
-            try:
-                log.debug(f'building recipe {recipename}')
-                self.networks[recipename] = Network(lib, recipename, self.dbconn)
-            except Exception as e:
-                raise RuntimeError(f'Error building network for recipe {recipename}: \n{e}')
+        self.load_raw_data()
 
-        log.debug(f'Loaded {len(self.networks)} networks')
-        if inverse:
-            self.inv_networks = {k: inverted_network(v) for k, v in self.networks.items()}
-        else:
-            self.inv_networks = None
-
-    def get_models(self, inverse=True, node_impl=dict(), numeric_inputs=False) -> dict[str, ComputeGraphModel]:
-        if inverse:
-            assert self.inv_networks is not None
-        nets = self.inv_networks if inverse else self.networks
-        assert nets
-        if numeric_inputs and not inverse:
-            for net in nets.values():
-                net.set_numeric_as_input()
-        models = {}
-        # for s in track(self.samples, description='Building models'):
-        for s in self.samples:
-            try:
-                ut.debug(f'Building model for sample {s["name"]}')
-                models[s['name']] = ComputeGraphModel(nets[s['recipe']])
-                models[s['name']].build(node_impl=node_impl, node_namespace=s['name'])
-            except Exception as e:
-                msg = f'Error building {"inverse" if inverse else ""} model for sample {s}: {e}'
-                raise RuntimeError(msg)
-        return models
-
-    def get_raw_data(self) -> dict[str, pd.DataFrame]:
+    def load_raw_data(self):
+        """Load the raw data for each sample in the xp"""
         datafiles = [
             self.xp_path / self.name / 'data' / f"{s['name']}.{self.name}.csv" for s in self.samples
         ]
@@ -272,29 +273,73 @@ class XP:
             content = pd.read_csv(f)
             assert isinstance(content, pd.DataFrame)  # otherwise type hints won't match
             df_data[s['name']] = content
-        return df_data
+        self.raw_data = df_data
 
-    def get_XY(self, model_dict:dict[str, ComputeGraphModel]) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-        """Returns a dict of {sample_name: (X, Y)} where Y is the reordered data (so that it matches the model's output)"""
-        assert self.inv_networks is not None
+    def build_networks(self, inverse='shortest'):
+        """Build the networks for each sample in the xp,
+        returns two lists: (networks, sample names)"""
+
+        # first build each network for each recipe
+        unique_recipe_names = list(set(self.recipe_names))
+        fwd_networks = {}
+        for recipename in tqdm(unique_recipe_names, desc='Building networks'):
+            try:
+                log.debug(f'building recipe {recipename}')
+                fwd_networks[recipename] = Network(self.lib, recipename, self.dbconn)
+            except Exception as e:
+                raise RuntimeError(f'Error building network for recipe {recipename}: \n{e}')
+
+        # now go through the samples and create the correct pairs
+        networks = []
+        for s in self.samples:
+            if not inverse:
+                networks.append((fwd_networks[s['recipe']], s['name']))
+            else:
+                inv_nets = inverted_network(fwd_networks[s['recipe']], mode=inverse)
+                for n in inv_nets:
+                    networks.append((n, s['name']))
+
+        return tuple(zip(*networks))
+
+    def build_models(self, node_impl=dict(), numeric_inputs=False, inverse='shortest'):
+
+        """Build the models for each network in the xp.
+        If there are multiple networks per samples (i.e several inversions per network)
+        there will be multiple models per sample."""
+
+        sample_names, networks = self.build_networks(inverse=inverse)
+
+        if numeric_inputs and not inverse:
+            for net in networks.values():
+                net.set_numeric_as_input()
+
+        models = []
+        for i, (n, s) in enumerate(zip(sample_names, networks)):
+            try:
+                ut.debug(f'Building model for sample {s}')
+                m = ComputeGraphModel(n)
+                m.build(node_impl=node_impl, node_namespace=f'model_{i}')
+                models.append((m, s))
+            except Exception as e:
+                msg = f'Error building {"inverse" if inverse else ""} model for sample {s}: {e}'
+                raise RuntimeError(msg)
+        return tuple(zip(*models))
+
+    def get_Y(self, models, sample_names):
+        assert self.raw_data is not None
         # we want to reorder data columns to match the model's output
-        df_data = self.get_raw_data()
-        out_prots = {sample: model.get_output_proteins() for sample, model in model_dict.items()}
-        out_channels = {
-            sample: [self.color_names[k] for k in out_prot]
-            for sample, out_prot in out_prots.items()
-        }
-        Y = {
-            sample: np.array(df_data[sample][out_channels[sample]]) for sample in model_dict.keys()
-        }
-        X = {
-            sample: model_dict[sample].get_input_from_output(Y[sample])
-            for sample in model_dict.keys()
-        }
-        return X, Y
+        out_prots = [model.get_output_proteins() for model in models]
+        out_channels = [[self.color_names[k] for k in out_prot] for out_prot in out_prots]
+        Y = [
+            jnp.array(self.raw_data[sample][out_chan])
+            for sample, out_chan in zip(sample_names, out_channels)
+        ]
+        return Y
 
-    def get_Y(self, *args, **kwargs):
-        return self.get_XY(*args, **kwargs)[1]
+    def get_XY(self, models, sample_names):
+        Y = self.get_Y(models, sample_names)
+        X = [model.get_input_from_output(y) for model, y in zip(models, Y)]
+        return X, Y
 
     def __str__(self):
         # add borders:
@@ -346,4 +391,3 @@ def test_module():
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-

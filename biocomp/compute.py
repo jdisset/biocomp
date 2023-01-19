@@ -243,7 +243,12 @@ class ComputeGraphModel:
             call_dicts.append(call_d)
 
         def collect_all_results(
-            params: dict, inputs: jnp.ndarray, rng_key, quantiles=None, read_only=True, constraints=None
+            params: dict,
+            inputs: jnp.ndarray,
+            rng_key,
+            quantiles=None,
+            read_only=True,
+            constraints=None,
         ) -> tuple[jnp.ndarray, dict[int, jnp.ndarray]]:
             """
             params: the parameters
@@ -284,14 +289,15 @@ class ComputeGraphModel:
                     read_only=read_only,
                 )
 
+                extra_params = n['extra_params']
                 qtl = None
                 if quantiles is not None:
                     pick_quantile = n['extra_params'].get('quantile_variable_id', [])
                     if len(pick_quantile) > 0:
-                        qtl = quantiles[jnp.array(pick_quantile)]
+                        extra_params['quantile'] = quantiles[jnp.array(pick_quantile)]
 
                 get_q = partial(n['get_q'], get_p, rng_key=key)
-                comp_node = n['fun'](get_p, get_q, z=qtl, **n['extra_params'])
+                comp_node = n['fun'](get_p, get_q, z=qtl, **extra_params)
                 res = comp_node(*upstream_results, rng_key=key)
                 results[nid] = res
 
@@ -357,44 +363,16 @@ class ComputeGraphModel:
         return batches
 
     def get_output_proteins(self):
-        """Returns the names of the proteins that are outputs of the network"""
-        onode = self.network.compute_graph[self.network.compute_graph['type'] == 'output']
-        assert len(onode) == 1, f'Invalid number of output nodes: {len(onode)}'
-        return [
-            self.network.central_dogma_graph.loc[cdg_id]['content'][0]
-            for cdg_id in onode.iloc[0]['cdg_input']
-        ]
+        return self.network.get_output_proteins()
 
     def get_input_from_output(self, output_arr):
-        """Givem an array of output values, returns the columns that are inputs of the inverted network,
-        properly ordered by input number"""
-        # In inverted networks, each input node has,
-        # in its extra, 'input_from_output' and 'input_position' (which get_inverted_input_positions uses)
-        # We want to transform output_arr by reordering the columns accordingly
-        mapping = self.get_inverted_input_positions()
-        return output_arr[:, [mapping[i] for i in range(len(mapping))]]
+        return self.network.get_input_from_output(output_arr)
 
     def get_inverted_input_proteins(self):
-        """Returns the names of the proteins that are inputs of the inverted network, ordered"""
-        mapping = self.get_inverted_input_positions()
-        output_proteins = self.get_output_proteins()
-        assert len(mapping) <= len(output_proteins)
-        return [output_proteins[mapping[i]] for i in range(len(mapping))]
+        return self.network.get_inverted_input_proteins()
 
     def get_inverted_input_positions(self):
-        """Returns a mapping from input position to output position"""
-        mapping = {}  # input number -> output position
-        inputs = self.network.compute_graph[self.network.compute_graph['type'] == 'input']
-        assert len(inputs) == self.n_inputs
-        for _, row in inputs.iterrows():
-            assert 'input_position' in row.extra
-            assert 'input_from_output' in row.extra
-            assert row.extra['input_position'] not in mapping
-            mapping[row.extra['input_position']] = row.extra['input_from_output']
-
-        assert set(mapping.keys()) == set(range(len(mapping.keys())))
-        assert len(mapping.keys()) == len(set(mapping.values()))
-        return mapping
+        return self.network.get_inverted_input_positions()
 
     def get_quantized_parameters_per_node_type(self, params):
         """Returns a dictionary with node types as keys and a list of quantized parameters used by that node type as values.

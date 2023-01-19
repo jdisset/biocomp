@@ -57,3 +57,148 @@ import Fuse from "fuse.js";
 
 /*════════════════════════════════════════════════════════════════════════════════*/
 
+const Filter = ({ filter, onFilterRemove, onFilterAdd }) => (
+  <div className="filter">
+    {filter.field}: {filter.value}
+    {onFilterRemove && (
+      <button onClick={() => onFilterRemove(filter)}>X</button>
+    )}
+    {onFilterAdd && (
+      <button onClick={() => onFilterAdd(filter)}>+</button>
+    )}
+  </div>
+);
+
+const FilterBar = ({ filters, onFilterRemove }) => (
+  <div className="filter-bar">
+    {filters.map(filter => (
+      <Filter
+        key={filter.field}
+        filter={filter}
+        onFilterRemove={onFilterRemove}
+      />
+    ))}
+  </div>
+);
+
+const SearchBar = ({ query, onQueryChange, onFilterAdd }) => (
+  <div className="search-bar">
+    <input
+      type="text"
+      placeholder="Search for a filter"
+      value={query}
+      onChange={onQueryChange}
+    />
+    <SuggestedFilters
+      query={query}
+      onFilterAdd={onFilterAdd}
+    />
+  </div>
+);
+
+const SuggestedFilters = ({ query, onFilterAdd, allFilters }) => (
+  <div className="suggested-filters">
+    {/* Use Fuse to search for filters that match the search query */}
+    const fuse = new Fuse(allFilters, {
+      keys: ['field', 'value'],
+    });
+    const results = fuse.search(query);
+    {results.map(filter => (
+      <Filter
+        key={filter.field}
+        filter={filter}
+        onFilterAdd={onFilterAdd}
+      />
+    ))}
+  </div>
+);
+
+const Element = ({ element, onFilterAdd }) => (
+  <div className="element">
+    {Object.keys(element).map(key => (
+      <div key={key} onClick={() => onFilterAdd({ field: key, value: element[key] })}>
+        <strong>{key}</strong>: {element[key]}
+      </div>
+    ))}
+  </div>
+);
+
+const List = ({ name, elements, onFilterAdd }) => (
+  <div className="list">
+    <h3>{name}</h3>
+    {elements.map(element => (
+      <Element
+        key={element.name}
+        element={element}
+        onFilterAdd={onFilterAdd}
+      />
+    ))}
+  </div>
+);
+
+const App = () => {
+  // Initialize the state for the different lists of data
+  const [xps, setXps] = useState([]);
+  const [recipes, setRecipes] = useState([]);
+  const [l2s, setL2s] = useState([]);
+  const [l1s, setL1s] = useState([]);
+  const [tus, setTus] = useState([]);
+  const [parts, setParts] = useState([]);
+
+  // Initialize the state for the filters and search query
+  const [filters, setFilters] = useState([]);
+  const [searchQuery, setSearchQuery] = useState("");
+
+  // Fetch the data from the REST server when the component is first mounted
+  useEffect(() => {
+    axios.get("localhost:4321/xps").then((res) => setXps(res.data));
+    axios.get("localhost:4321/recipes").then((res) => setRecipes(res.data));
+    axios.get("localhost:4321/l2s").then((res) => setL2s(res.data));
+    axios.get("localhost:4321/l1s").then((res) => setL1s(res.data));
+    axios.get("localhost:4321/tus").then((res) => setTus(res.data));
+    axios.get("localhost:4321/parts").then((res) => setParts(res.data));
+  }, []);
+
+  // Handle changes to the search query by updating the state
+  const handleSearchQueryChange = (event) => {
+    setSearchQuery(event.target.value);
+
+    // Use Fuse to search for filters that match the search query
+    const fuse = new Fuse(filters, {
+      keys: ["field", "value"],
+    });
+    const results = fuse.search(searchQuery);
+
+    // Update the list of suggested filters
+    setSuggestedFilters(results);
+  };
+
+  // Handle adding a filter to the filter bar
+  const handleFilterAdd = (filter) => {
+    setFilters([...filters, filter]);
+  };
+
+  // Handle removing a filter from the filter bar
+  const handleFilterRemove = (filter) => {
+    setFilters(filters.filter((f) => f !== filter));
+  };
+
+  return (
+    <div className="app">
+      <SearchBar
+        query={searchQuery}
+        onQueryChange={handleSearchQueryChange}
+        onFilterAdd={handleFilterAdd}
+      />
+      <FilterBar filters={filters} onFilterRemove={handleFilterRemove} />
+      <List name="Experiments" elements={xps} onFilterAdd={handleFilterAdd} />
+      <List name="Recipes" elements={recipes} onFilterAdd={handleFilterAdd} />
+      <List name="L2s" elements={l2s} onFilterAdd={handleFilterAdd} />
+      <List name="L1s" elements={l1s} onFilterAdd={handleFilterAdd} />
+      <List name="TUs" elements={tus} onFilterAdd={handleFilterAdd} />
+      <List name="Parts" elements={parts} onFilterAdd={handleFilterAdd} />
+    </div>
+  );
+};
+
+export default App;

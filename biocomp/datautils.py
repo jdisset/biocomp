@@ -89,101 +89,54 @@ def style_violin(parts):
 # ···············································································
 
 
-def check_model(m, x, y):
-    # simple sanity checks for the model
-    outp = m.get_output_proteins()  # name of output proteins
-    inp = m.get_inverted_input_proteins()  # name of input proteins
-    in_pos = m.get_inverted_input_positions()
-    assert len(inp) == len(in_pos)
-    assert len(inp) == len(set(inp))
-    for iname in inp:
-        assert iname in outp
-    for ipos, outpos in in_pos.items():
-        assert inp[ipos] == outp[outpos]
-        assert np.all(x[:, ipos] == y[:, outpos])
-    # mdef = bc.ComputeGraphModel(m.network)
-    # mdef.build(bc.nodes.DEFAULT_COMPUTE_NODES_DICT)
-    # zerorng = jax.random.PRNGKey(0)
-    # p, _ = mdef.init(zerorng)
-    # vmapped = jax.jit(jax.vmap(mdef, in_axes=(None, 0, None)))
-    # ydef = vmapped(p, x, zerorng)
-    # for ipos, outpos in in_pos.items():
-    # assert np.allclose(x[:, ipos], ydef[:, outpos])
+def data_checks(X, Y, models):
+    assert len(X) == len(Y)
+    assert len(models) == len(X)
 
-
-def basic_data_checks(X, Y, models):
-    # basic checks
-    assert set(X.keys()) == set(Y.keys()), 'X and Y must have the same keys'
-    assert set(X.keys()) == set(models.keys()), 'data and models must have the same keys'
-
-    for k, v in X.items():
-        assert v.shape[0] == Y[k].shape[0], f"shape mismatch for key {k}"
-        assert v.shape[1] == models[k].n_inputs, f"input shape mismatch for key {k}"
-        assert Y[k].shape[1] == models[k].n_outputs, f"output shape mismatch for key {k}"
-
-
-def advanced_data_checks(X, Y, models):
-    for k, m in tqdm(models.items()):
-        check_model(m, X[k], Y[k])
-
-
-def shuffled_data(X, Y, models, rng_key):
-    """shuffles each sample's data"""
-    basic_data_checks(X, Y, models)
-    new_order = {}
-    keys = jax.random.split(rng_key, len(X))
-    for sample, key in zip(X.keys(), keys):
-        new_order[sample] = jax.random.permutation(key, X[sample].shape[0])
-    Xout, Yout = {}, {}
-    for sample in X.keys():
-        Xout[sample] = X[sample][new_order[sample]]
-        Yout[sample] = Y[sample][new_order[sample]]
-
-    return Xout, Yout
-
-
-def test_train_split(X, Y, models, rng_key, test_size=0.8):
-    """get a random split train/test. Returns (Xtrain, Xtest, Ytrain, Ytest)"""
-    basic_data_checks(X, Y, models)
-    Xshuf, Yshuf = shuffled_data(X, Y, models, rng_key)
-    # same is doable using jax.tree_map:
-    X_train, X_test = jax.tree_map(lambda x: x[: int(x.shape[0] * test_size)], Xshuf), jax.tree_map(
-        lambda x: x[int(x.shape[0] * test_size) :], Xshuf
-    )
-    Y_train, Y_test = jax.tree_map(lambda x: x[: int(x.shape[0] * test_size)], Yshuf), jax.tree_map(
-        lambda x: x[int(x.shape[0] * test_size) :], Yshuf
-    )
-    return (X_train, Y_train), (X_test, Y_test)
+    for x, y, m in zip(X, Y, models):
+        assert x.shape[0] == y.shape[0], f"shape mismatch"
+        assert x.shape[1] == m.n_inputs, f"input shape mismatch"
+        assert y.shape[1] == m.n_outputs, f"output shape mismatch"
+        outp = m.get_output_proteins()  # name of output proteins
+        inp = m.get_inverted_input_proteins()  # name of input proteins
+        in_pos = m.get_inverted_input_positions()
+        assert len(inp) == len(in_pos)
+        assert len(inp) == len(set(inp))
+        assert all(iname in outp for iname in inp)
+        for ipos, outpos in in_pos.items():
+            assert inp[ipos] == outp[outpos]
+            assert jnp.all(x[:, ipos] == y[:, outpos])
 
 
 @jit
-def density_subsample(X, kde, rng, quantile_threshold=0.1):
+def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     EPSILON = 1e-12
     HIGH_DENSITIES_PENALTY = 1.05
     densities = kde.evaluate(X.T) + EPSILON
     threshold = jnp.quantile(densities, quantile_threshold)
     diceroll = jax.random.uniform(rng, shape=(len(densities),))
-    selected = (densities < threshold) | (diceroll < (threshold / (densities * HIGH_DENSITIES_PENALTY)))
+    selected = (densities < threshold) | (
+        diceroll < (threshold / (densities * HIGH_DENSITIES_PENALTY))
+    )
     return selected
 
 
-def sample_batches(
+def sample_batches_direct(
     X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1, x_pad_to=None, y_pad_to=None
 ):
     assert X.shape[0] == Y.shape[0]
-    total_size = batch_size * n_batches
+    EPSILON = 1e-12
+    HIGH_DENSITIES_PENALTY = 1.0
 
-    selection = density_subsample(X, kde, rng, quantile_threshold)
-    Xsub, Ysub = X[selection], Y[selection]
+    # select batch_size * n_batches random points, weight by inverse of density
+    densities = kde.evaluate(X.T) + EPSILON
+    threshold = jnp.quantile(densities, quantile_threshold)
+    print(f"threshold = {threshold}")
+    selection_proba = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY)))
+    indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
 
-    while Xsub.shape[0] < total_size:
-        print('resampling')
-        rng, _ = jax.random.split(rng)
-        selection = density_subsample(X, kde, rng, quantile_threshold)
-        Xsub, Ysub = jnp.concatenate((Xsub, X[selection])), jnp.concatenate((Ysub, Y[selection]))
-
-    assert Xsub.shape[0] == Ysub.shape[0]
-    indices = jax.random.choice(rng, Xsub.shape[0], shape=(total_size,), replace=False)
+    Xsub = X[indices]
+    Ysub = Y[indices]
 
     # pad with nans to the right if necessary
     if x_pad_to is not None:
@@ -191,64 +144,72 @@ def sample_batches(
     if y_pad_to is not None:
         Ysub = jnp.pad(Ysub, ((0, 0), (0, y_pad_to - Ysub.shape[1])), constant_values=jnp.nan)
 
-    Xbatches = jnp.split(Xsub[indices], n_batches)
-    Ybatches = jnp.split(Ysub[indices], n_batches)
+    Xbatches = jnp.split(Xsub, n_batches)
+    Ybatches = jnp.split(Ysub, n_batches)
 
     return Xbatches, Ybatches
 
 
+# @partial(jit, static_argnames=('batch_size', 'n_batches', 'density_quantile_threshold'))
+def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_threshold):
+    max_xfeatures = max([x.shape[1] for x in X])
+    max_yfeatures = max([y.shape[1] for y in Y])
+    all_batches = [
+        sample_batches_direct(
+            x,
+            y,
+            batch_size,
+            n_batches,
+            kde,
+            rng,
+            quantile_threshold=density_quantile_threshold,
+            x_pad_to=max_xfeatures,
+            y_pad_to=max_yfeatures,
+        )
+        for x, y, kde, rng in tqdm(
+            list(zip(X, Y, kdes, jax.random.split(rng_key, len(X)))),
+            desc='generating batches',
+        )
+    ]
+    xbatches, ybatches = zip(*all_batches)
+    xbatches, ybatches = jnp.array(xbatches), jnp.array(ybatches)
+    # swap dimension 0 and 1 so that we have (N_BATCHES, N_MODELS, BATCH_SIZE, FEATURES)
+    xbatches = jnp.swapaxes(xbatches, 0, 1)
+    ybatches = jnp.swapaxes(ybatches, 0, 1)
+    return xbatches, ybatches
+
+
 class DataManager:
-    def __init__(self, X: dict, Y: dict, models: dict, enable_checks=True):
-        self.X = X
-        self.Y = Y
+    def __init__(self, X: list, Y: list, models: list, cfg: dict):
+        self.raw_X = [jnp.array(x) for x in X]
+        self.raw_Y = [jnp.array(y) for y in Y]
         self.models = models
-        self.key_order = sorted(list(models.keys()))
-        self.enable_checks = enable_checks
-        self.kdes = None
-        basic_data_checks(X, Y, models)
-        if self.enable_checks:
-            advanced_data_checks(X, Y, models)
+        self.cfg = cfg
+        self.X = self.rescale(self.raw_X)
+        self.Y = self.rescale(self.raw_Y)
+        self.kdes = [gaussian_kde(x.T, bw_method=cfg['kde_bw_method']) for x in self.X]
+        data_checks(X, Y, models)
 
-    def rescale(self, factor=1e6):
-        self.X = jax.tree_map(lambda x: jnp.log10(1 + (x / factor)), self.X)
-        self.Y = jax.tree_map(lambda y: jnp.log10(1 + (y / factor)), self.Y)
-        basic_data_checks(self.X, self.Y, self.models)
-        if self.enable_checks:
-            advanced_data_checks(self.X, self.Y, self.models)
-        return self.X, self.Y
+    def rescale(self, X):
+        factor = self.cfg['log_factor']
+        maxv = self.cfg['max_value']
+        return [jnp.log10(1 + (x / factor)) / jnp.log10(maxv / factor) for x in X]
 
-    def estimate_densities(self):
-        self.kdes = {k: gaussian_kde(v.T) for k, v in self.X.items()}
+    def unscale(self, X):
+        factor = self.cfg['norm_factor']
+        maxv = self.cfg['max_value']
+        return [factor * (jnp.power(maxv / factor, x) - 1) for x in X]
 
-    def get_batches(self, cfg, rng_key):
-        if self.kdes is None:
-            self.estimate_densities()
-        max_xfeatures = max([v.shape[1] for v in self.X.values()])
-        max_yfeatures = max([v.shape[1] for v in self.Y.values()])
-
-        all_batches = [sample_batches(
-                    self.X[k],
-                    self.Y[k],
-                    cfg['batch_size'],
-                    cfg['n_batches'],
-                    self.kdes[k],
-                    rng,
-                    quantile_threshold=cfg['density_quantile_threshold'],
-                    x_pad_to=max_xfeatures,
-                    y_pad_to=max_yfeatures,
-                )
-                for k, rng in tqdm(
-                    list(zip(self.key_order, jax.random.split(rng_key, len(self.key_order)))), desc='generating batches'
-                )
-            ]
-        xbatches, ybatches = zip(*all_batches)
-        xbatches, ybatches = jnp.array(xbatches), jnp.array(ybatches)
-        # swap dimension 0 and 1 so that we have (N_BATCHES, N_MODELS, BATCH_SIZE, FEATURES)
-        xbatches = jnp.swapaxes(xbatches, 0, 1)
-        ybatches = jnp.swapaxes(ybatches, 0, 1)
-        return xbatches, ybatches
-
-
+    def get_batches(self, rng_key):
+        return _get_batches(
+            self.X,
+            self.Y,
+            self.kdes,
+            rng_key,
+            self.cfg['batch_size'],
+            self.cfg['n_batches'],
+            self.cfg['density_quantile_threshold'],
+        )
 
     def get_models_in_order(self):
         return ([self.models[k] for k in self.key_order], self.key_order)
@@ -357,8 +318,8 @@ def weighted_quantile(data, weights, qu):
     return jnp.interp(qu, cdf, data)
 
 
-def get_knn(x, tree, knn=100, min_points=20):
-    distances, indices = tree.query(x, k=knn, distance_upper_bound=0.2)
+def get_knn(x, tree, knn=500, min_points=20, radius=0.05):
+    distances, indices = tree.query(x, k=knn, distance_upper_bound=radius)
     mask = distances == np.inf
     nb_points = (~mask).sum(axis=1)
     gausspdf = (
@@ -366,26 +327,26 @@ def get_knn(x, tree, knn=100, min_points=20):
         / (sigma * np.sqrt(2 * np.pi))
         * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
     )
-    weights = gausspdf(distances, 0, 0.1)
+    weights = gausspdf(distances, 0, radius / 2)
     indices[mask] = 0
     weights[mask] = 0
     weights[nb_points < min_points, :] = np.nan
     return indices, weights
 
 
-def get_knn_mean(x, y, tree, knn=100, min_points=20):
-    indices, weights = get_knn(x, tree, knn, min_points)
+def get_knn_mean(x, y, tree, **kw):
+    indices, weights = get_knn(x, tree, **kw)
     avg = np.average(y[indices], axis=1, weights=weights)
     return avg
 
 
-def get_knn_quantile(x, y, tree, qu, knn=100, min_points=20):
-    indices, weights = get_knn(x, tree, knn, min_points)
+def get_knn_quantile(x, y, tree, qu, **kw):
+    indices, weights = get_knn(x, tree, **kw)
     q = jax.vmap(weighted_quantile, in_axes=(0, 0, None))(y[indices], weights, qu)
     return q
 
 
-def get_knn_smooth(logX, logY, xlims=(0, 3), res=200, knn=100, min_points=10, method='mean', **kw):
+def get_knn_smooth(logX, logY, xlims=(0, 1), res=200, knn=100, min_points=10, method='mean', **kw):
     tree = cKDTree(logX)
 
     x = jnp.linspace(xlims[0], xlims[1], res)
@@ -410,7 +371,6 @@ def heatmap_old(Z, x, ax):
     YY, XX = np.meshgrid(x, x)
     cmap = plt.get_cmap('YlGnBu')
     cmap.set_bad(color='#EEEEEE')
-
     ax.set_aspect('equal')
     im = ax.pcolormesh(
         XX,
@@ -432,11 +392,11 @@ def heatmap_old(Z, x, ax):
     ax.set_xticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
     ax.set_yticks(x[::tickfreq])
     ax.set_yticklabels([f'{l:.0e}' for l in loglabels[::tickfreq]])
+
     # add colorbar to ax
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.05)
     cbar = plt.colorbar(im, cax=cax)
-
     for spine in ax.spines.values():
         spine.set_visible(False)
     return ax
@@ -450,17 +410,30 @@ def smooth_heatmap(logX, logY, Z=None, x=None, ax=None, **kw):
 
 
 def heatmap(
-    ax, Z, vmax, transform, text='', connector=True, connector_orientation='bottom', contours=True
+    ax,
+    Z,
+    vmin=0.1,
+    vmax=1,
+    ticks=[],
+    ticklabels=[],
+    transform=None,
+    text='',
+    connector=False,
+    connector_orientation='bottom',
+    contours=True,
+    colorbar=False,
 ):
     cmap = plt.get_cmap('YlGnBu')
     cmap.set_bad(color='#EEEEEE')
-    trans_data = transform + ax.transData
+    trans_data = ax.transData
+    if transform is not None:
+        trans_data = trans_data + transform
     im = ax.imshow(
         Z.T,
         origin='lower',
         aspect=1,
         cmap=cmap,
-        vmin=0,
+        vmin=0.1,
         vmax=vmax,
         transform=trans_data,
         interpolation='none',
@@ -482,10 +455,39 @@ def heatmap(
         [x1, x2, x2, x1, x1],
         [y1, y1, y2, y2, y1],
         "-",
-        color='grey',
+        color='#AAAAAA',
         transform=trans_data,
         linewidth=0.2,
     )
+
+    # ticks:
+    if len(ticks) > 0:
+        # rescale ticks to image coordinates (they are btwn 0 and 1 to start)
+        sc_ticks = ticks * Z.shape[0]
+        ax.set_xticks(sc_ticks)
+        ax.set_xticklabels(ticklabels)
+        ax.set_yticks(sc_ticks)
+        ax.set_yticklabels(ticklabels)
+
+    # colorbar
+    if colorbar:
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="4%", pad=0.05)
+        cbar = plt.colorbar(im, cax=cax)
+        cbar.ax.tick_params(labelsize=6)
+        # no cbar spines
+        for spine in cbar.ax.spines.values():
+            spine.set_visible(False)
+
+        # use same ticks if present
+        if len(ticks) > 0:
+            valid = ticks >= vmin
+            diff = len(ticks)
+            ticks = ticks[valid]
+            diff -= len(ticks)
+            cbar.set_ticks(ticks)
+            cbar.set_ticklabels(ticklabels[diff:])
+        
 
     if connector:
         if connector_orientation == 'bottom':
@@ -502,9 +504,71 @@ def heatmap(
             transform=trans_data,
             linewidth=1,
         )
+        ax.text(w * 0.5, txth, text, horizontalalignment='center', transform=trans_data)
 
-    ax.text(w * 0.5, txth, text, horizontalalignment='center', transform=trans_data)
     return im
+
+
+def smooth_1d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
+    tree = cKDTree(x)
+    input_name = model.get_inverted_input_proteins()
+    output_names = model.get_output_proteins()
+    assert len(output_names) == 2
+    assert len(input_name) == 1
+    output = list(set(output_names) - set(input_name))
+    output_pos = output_names.index(output[0])
+    y = y[:, output_pos]
+
+    unscaled_ticks = np.logspace(0, 12, 13)
+    ticks = np.array(rescaler(unscaled_ticks))
+    ticks = ticks[ticks < xmax]
+    tlabels = [
+        scformat.format("{:m}", x) if i > 1 else ''
+        for i, x in enumerate(unscaled_ticks[: len(ticks)])
+    ]
+
+    xx = jnp.linspace(xmin, xmax, res).reshape(-1, 1)
+    z = get_knn_mean(xx, y, tree)
+    zq1 = get_knn_quantile(xx, y, qu=0.1, tree=tree)
+    zq9 = get_knn_quantile(xx, y, qu=0.9, tree=tree)
+    ax.plot(xx, z, c='k')
+    ax.fill_between(xx[:, 0], zq1, zq9, alpha=0.25, color='k')
+    ax.set_title(f'{model.network.name}\nSmoothed mean and [0.1 - 0.9] quantile')
+    ax.set_xlabel(input_name[0])
+    ax.set_ylabel(output[0])
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(xmin, xmax)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(tlabels)
+    ax.set_yticks(ticks)
+    ax.set_yticklabels(tlabels)
+
+
+def smooth_2d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
+    input_name = model.get_inverted_input_proteins()
+    output_names = model.get_output_proteins()
+    assert len(output_names) == 3
+    assert len(input_name) == 2
+    output = list(set(output_names) - set(input_name))
+    output_pos = output_names.index(output[0])
+
+    unscaled_ticks = np.logspace(0, 12, 13)
+    ticks = np.array(rescaler(unscaled_ticks))
+    ticks = ticks[ticks < xmax]
+    tlabels = [
+        scformat.format("{:m}", x) if i > 1 else ''
+        for i, x in enumerate(unscaled_ticks[: len(ticks)])
+    ]
+
+    y = y[:, output_pos]
+    z, xx = get_knn_smooth(x, y)
+    heatmap(ax, z, ticks=ticks, ticklabels=tlabels, colorbar=True)
+    ax.set_title(f'{model.network.name}\n{output[0]} smoothed mean')
+    ax.set_xlabel(input_name[0])
+    ax.set_ylabel(input_name[1])
+    # remove plot border (the frame, I think?)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
 
 
 def setup_fig(title):
@@ -738,15 +802,25 @@ def balance_each_dataset(
 import string
 
 
-class MyFormatter(string.Formatter):
+class ShortScientificFormatter(string.Formatter):
     def format_field(self, value, format_spec):
         if format_spec == 'm':
-            return super().format_field(value, '.1e').replace('e+0', 'e').replace('e+', 'e')
+            if value < 1000:
+                if value == int(value):
+                    return super().format_field(int(value), '')
+                else:
+                    return super().format_field(value, '.1f')
+            else:
+                if value == int(value):
+                    return super().format_field(value, '.0e').replace('e+0', 'e').replace('e+', 'e')
+                else:
+                    return super().format_field(value, '.1e').replace('e+0', 'e').replace('e+', 'e')
         else:
             return super().format_field(value, format_spec)
 
 
-fmt = MyFormatter()
+scformat = ShortScientificFormatter()
+fmt = scformat
 
 
 def model_parallel_coords(
@@ -877,7 +951,7 @@ def model_heatmap(
             bin_max=lims[1],
             force_minmax=True,
         )
-        heatmap(
+        old_heatmap(
             ax_stats,
             ax_bins,
             axes=[ax],
@@ -916,7 +990,7 @@ def model_heatmap_old(model, y, resolution=0.5):
     in_proteins = model.get_inverted_input_proteins()
     stats, bins = binstats(y, out_proteins, in_proteins, resolution=resolution)
     z_prot = set(out_proteins) - set(in_proteins)
-    fig, ax = heatmap(
+    fig, ax = old_heatmap(
         stats,
         bins,
         figscale=0.6,
@@ -930,7 +1004,7 @@ def model_heatmap_old(model, y, resolution=0.5):
     return fig, ax
 
 
-def heatmap(
+def old_heatmap(
     statdf,
     bins,
     fig=None,
@@ -1223,9 +1297,81 @@ class DataManager_bin:
 #                                                                            }}}
 
 
-
-
 ### {{{                         --     archives     --
+
+
+def sample_batches(
+    X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1, x_pad_to=None, y_pad_to=None
+):
+    assert X.shape[0] == Y.shape[0]
+    total_size = batch_size * n_batches
+
+    selection = density_subsample(X, kde, rng, quantile_threshold)
+    Xsub, Ysub = X[selection], Y[selection]
+
+    while Xsub.shape[0] < total_size:
+        print('resampling')
+        rng, _ = jax.random.split(rng)
+        selection = density_subsample(X, kde, rng, quantile_threshold)
+        Xsub, Ysub = jnp.concatenate((Xsub, X[selection])), jnp.concatenate((Ysub, Y[selection]))
+
+    assert Xsub.shape[0] == Ysub.shape[0]
+    indices = jax.random.choice(rng, Xsub.shape[0], shape=(total_size,), replace=False)
+
+    # pad with nans to the right if necessary
+    if x_pad_to is not None:
+        Xsub = jnp.pad(Xsub, ((0, 0), (0, x_pad_to - Xsub.shape[1])), constant_values=jnp.nan)
+    if y_pad_to is not None:
+        Ysub = jnp.pad(Ysub, ((0, 0), (0, y_pad_to - Ysub.shape[1])), constant_values=jnp.nan)
+
+    Xbatches = jnp.split(Xsub[indices], n_batches)
+    Ybatches = jnp.split(Ysub[indices], n_batches)
+
+    return Xbatches, Ybatches
+
+
+# @partial(jit, static_argnames=('batch_size', 'n_batches', 'x_pad_to', 'y_pad_to'))
+def sample_batches_jit(
+    X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1, x_pad_to=None, y_pad_to=None
+):
+    assert X.shape[0] == Y.shape[0]
+    total_size = batch_size * n_batches
+    rngk, rng = jax.random.split(rng)
+
+    selection = density_subsample(X, kde, rngk, quantile_threshold).astype(jnp.int32)
+
+    selection, rng = jax.lax.while_loop(
+        lambda x: jnp.sum(x[0]) < total_size,
+        lambda x: tuple(
+            [
+                x[0] + density_subsample(X, kde, rngk, quantile_threshold).astype(jnp.int32),
+                jax.random.split(x[1])[0],
+            ]
+        ),
+        (selection, rngk),
+    )
+
+    # while jnp.sum(selection) < total_size:
+    # rng, _ = jax.random.split(rng)
+    # selection = selection + density_subsample(X, kde, rng, quantile_threshold).astype(jnp.int32)
+
+    selection_probability = selection / jnp.sum(selection)
+    indices = jax.random.choice(rng, X.shape[0], shape=(total_size,), p=selection_probability)
+
+    Xsub = X[indices]
+    Ysub = Y[indices]
+
+    # pad with nans to the right if necessary
+    if x_pad_to is not None:
+        Xsub = jnp.pad(Xsub, ((0, 0), (0, x_pad_to - Xsub.shape[1])), constant_values=jnp.nan)
+    if y_pad_to is not None:
+        Ysub = jnp.pad(Ysub, ((0, 0), (0, y_pad_to - Ysub.shape[1])), constant_values=jnp.nan)
+
+    Xbatches = jnp.split(Xsub, n_batches)
+    Ybatches = jnp.split(Ysub, n_batches)
+
+    return Xbatches, Ybatches
+
 
 def jitable_sample_batches_attempt(
     X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.07, x_pad_to=None, y_pad_to=None

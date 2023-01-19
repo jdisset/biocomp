@@ -16,17 +16,25 @@ import logging
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     logging utils     --
-#···············································································
+# ···············································································
 logger = logging.getLogger('biocomp')
+
 
 def warn(*args, **kwargs):
     logger.warning(*args, **kwargs)
 
+
 def info(*args, **kwargs):
     logger.info(*args, **kwargs)
 
+
 def debug(*args, **kwargs):
     logger.debug(*args, **kwargs)
+
+
+def error(*args, **kwargs):
+    logger.error(*args, **kwargs)
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -52,10 +60,12 @@ def at_path(d: dict, path, val=None, defaultinit=lambda: None):
         d = d.setdefault(path[-1], defaultinit())
     return d
 
+
 def delete_path(d, path):
     for key in path[:-1]:
         d = d[key]
     del d[path[-1]]
+
 
 def apply_constraints(par, cons):
     newpar = par.copy()
@@ -253,6 +263,7 @@ def progress_scan(num_samples, progress_type=TQDMProgress, message=None, print_r
 def tree_shape(t):
     return pytree.tree_map(lambda x: x.shape, t)
 
+
 @jit
 def tree_append(t, e):
     fa, tt = pytree.tree_flatten(t)
@@ -260,8 +271,10 @@ def tree_append(t, e):
     assert te == tt
     return pytree.tree_unflatten(tt, [jnp.concatenate([a, jnp.array([b])]) for a, b in zip(fa, fb)])
 
+
 def tree_get(t, i):
     return pytree.tree_map(lambda x: x[i], t)
+
 
 @jax.jit
 def tree_unstack(t):
@@ -270,17 +283,16 @@ def tree_unstack(t):
     return [tree_get(t, i) for i in range(N)]
 
 
-
-
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                     --     parameters utils     --
-#···············································································
+# ···············································································
 
 DEFAULT_MIN_RATE = 0.0
 DEFAULT_MAX_RATE = 1.0
+
 
 def continuous_initializer(rng, shape=(), minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
     def init():
@@ -288,16 +300,21 @@ def continuous_initializer(rng, shape=(), minval=DEFAULT_MIN_RATE, maxval=DEFAUL
             key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32
         )
         return res
+
     return init
+
 
 def glorot_initializer(rng, shape):
     def init():
         return jax.nn.initializers.glorot_normal()(rng, shape)
+
     return init
+
 
 def he_initializer(rng, shape):
     def init():
         return jax.nn.initializers.he_uniform()(rng, shape)
+
     return init
 
 
@@ -317,8 +334,9 @@ def assemble_params(dynamic, static):
     res = updated_dict(dynamic, static)
     return res
 
+
 def flatten_params(params):
-    """Flatten params into a single vector, 
+    """Flatten params into a single vector,
     and also returns a descriptor that can be used
     to unflatten them."""
     leaves, treedef = jax.tree_util.tree_flatten(params)
@@ -327,6 +345,7 @@ def flatten_params(params):
     flat_params = jnp.concatenate(flat_leaves)
     descriptor = (shapes, treedef)
     return flat_params, descriptor
+
 
 def unflatten_params(flat_params, pdescriptor):
     """Unflatten params from a single vector and a descriptor."""
@@ -341,6 +360,7 @@ def unflatten_params(flat_params, pdescriptor):
     params = jax.tree_util.tree_unflatten(treedef, leaves)
     return params
 
+
 @jax.jit
 def get_params(param_tree, i):
     return [jit(tree_get, static_argnums=(1,))(t, i) for t in tqdm(param_tree)]
@@ -350,12 +370,14 @@ def params_to_numpy(params):
     # use tree_map to convert all the jax arrays to numpy arrays
     return jax.tree_map(lambda x: x if isinstance(x, float) else np.array(x), params)
 
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                        --     time utils     --
-#···············································································
+# ···············································································
+
 
 class Timer:
     def __init__(self, name, console=None):
@@ -367,7 +389,7 @@ class Timer:
     def start(self, with_spinner=False):
         self.start_time = time.time()
         if with_spinner:
-            assert(self.console is not None)
+            assert self.console is not None
             stat = f"{self.name}..." if not isinstance(with_spinner, str) else with_spinner
             self.spinner = self.console.status(stat, spinner="dots")
             self.spinner.start()
@@ -405,10 +427,10 @@ class TimeStore:
 
     def stop_print(self, name):
         if isinstance(name, str):
-            assert(name in self.timers)
+            assert name in self.timers
             self.timers[name].stop_print()
         else:
-            assert(isinstance(name, Timer))
+            assert isinstance(name, Timer)
             name.stop_print()
 
     def stop_all(self):
@@ -419,6 +441,6 @@ class TimeStore:
         for name in self.times:
             print(f"{name}: {self.times[name][-1]}")
 
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-

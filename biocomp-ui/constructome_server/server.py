@@ -197,9 +197,6 @@ def get_xp(xp_name):
     return {'data': res}
 
 
-##
-get_recipe(recipenames[5].split('.')[0])
-
 def build_network(recipe_name):
     dbconn = sqlite3.connect(dbpath)
     n = bc.Network(lib, recipe_name, dbconn)
@@ -212,12 +209,6 @@ def get_network_json(net):
         params = {**kwargs}
     ut.drawComputeGraph(net.compute_graph, cdg=net.central_dogma_graph, func=param_extractor)
     return json.dumps(params)
-
-
-net = build_network(recipenames[5].split('.')[0])
-
-get_network_json(net)
-
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────

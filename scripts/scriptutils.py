@@ -385,7 +385,7 @@ def screenCaptures(
     print(f'Saved all screenshots in {end-start}s')
 
 
-def plot_networks(nets: List[bc.Network], filenames=None, H=1000, W=1000, outputs=None, figsize=(10, 10), show=False):
+def plot_networks(nets: List[bc.Network], filenames=None, axes=None, H=2000, W=800, outputs=None, figsize=(10, 10), show=False, show_title=True):
     import nest_asyncio
 
     nest_asyncio.apply()
@@ -423,26 +423,24 @@ def plot_networks(nets: List[bc.Network], filenames=None, H=1000, W=1000, output
     if show:
         import matplotlib.pyplot as plt
         import matplotlib.image as mpimg
-        for f, n in zip(filenames, nets):
+        if axes is None:
+             axes = [plt.subplots(figsize=figsize)[1] for _ in nets]
+        for f, n, (ax) in zip(filenames, nets, axes):
             img = mpimg.imread(f)
             # we want no border, nothing other than the image
-            fig = plt.figure(frameon=False)
-            fig.set_size_inches(figsize)
-            ax = plt.Axes(fig, [0.0, 0.0, 1.0, 1.0])
             ax.set_axis_off()
-            fig.add_axes(ax)
             ax.imshow(img)
-            ax.text(
-                0.90,
-                0.95,
-                n.name,
-                horizontalalignment='center',
-                verticalalignment='center',
-                transform=ax.transAxes,
-            )
-            fig.patch.set_facecolor('white')
+            if show_title:
+                ax.text(
+                    0.90,
+                    0.95,
+                    n.name,
+                    horizontalalignment='center',
+                    verticalalignment='center',
+                    transform=ax.transAxes,
+                )
             ax.patch.set_facecolor('white')
-            plt.show()
+
 
 
 
