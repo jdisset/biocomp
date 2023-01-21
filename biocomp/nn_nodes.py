@@ -6,13 +6,18 @@ import jax.numpy as jnp
 
 DEFAULT_ACTIVATION = jax.nn.leaky_relu
 
+def flat_concat(*arrays):
+    return jnp.concatenate([a.ravel() for a in arrays])
 
 def dense_layer(input_values, output_size, get_param, key, name):
     input_size = 1 if input_values.shape == () else input_values.shape[0]
-    w = get_param(
-        f'{name}_w', init=ut.he_initializer(key, (input_size, output_size)), shared=True
-    )
+    w = get_param(f'{name}_w', init=ut.he_initializer(key, (input_size, output_size)), shared=True)
     b = get_param(f'{name}_b', init=lambda: jnp.zeros((output_size,)), shared=True)
+
+    assert input_values.shape == (input_size,)
+    assert w.shape == (input_size, output_size)
+    assert b.shape == (output_size,)
+
     res = jnp.dot(input_values, w) + b
     return res.squeeze()
 
@@ -45,7 +50,7 @@ def transform_nn(
     tr_namespace='',
     **_,
 ):
-    def inner(value, rate_embeding, key):
+    def inner(value, rate_embeding, quantile, key):
         """For a single source, computes a latent output from the concatenation of
         the rate embedding and the source value.
         All of these outputs will then be summed up and passed through a final layer.
@@ -54,13 +59,19 @@ def transform_nn(
         # value as this might allow clever padding of the sum
         # we'd then need to make sure that the index is unique for each
         # while, probably, being random (to avoid any "preferred" order)
+
         if value.ndim == 0:
             value = value.reshape((1,))
         if rate_embeding.ndim == 0:
             rate_embeding = rate_embeding.reshape((1,))
-        inputs = jnp.concatenate([value, rate_embeding], axis=-1)
 
-        return inner_activation(
+        assert quantile.ndim == 1
+        assert value.ndim == 1
+        assert rate_embeding.ndim == 1
+
+        inputs = flat_concat(value, rate_embeding, quantile)
+
+        out = inner_activation(
             dense_multilevel(
                 inputs,
                 inner_wsize,
@@ -73,7 +84,11 @@ def transform_nn(
             )
         )
 
-    def apply(*values, rng_key):
+        assert out.shape == (inner_out,)
+
+        return out
+
+    def apply(*values, quantile, rng_key):
 
         k0, k1, k2 = jax.random.split(rng_key, 3)
         val = jnp.array(values)
@@ -89,7 +104,11 @@ def transform_nn(
         assert val.shape[0] == rates.shape[0]
 
         # first we apply a simple inner layer to all inputs and sum them:
-        inner_out = jnp.sum(jax.vmap(inner, in_axes=(0, 0, None))(val, rates, k1), axis=0)
+        inner_out = jnp.sum(
+            jax.vmap(inner, in_axes=(0, 0, None, None))(val, rates, quantile, k1), axis=0
+        )
+
+        inner_out = flat_concat(inner_out, quantile)
 
         # then we apply a final outer layer to the summed output:
         return outer_activation(
@@ -109,15 +128,23 @@ def transform_nn(
 
 
 def sequestron_ERN(
-    get_param, get_quantized, seq_name, affinity_dim=1, wsize=128, depth=3, out_dim=1, subtype='5p', **_
+    get_param,
+    get_quantized,
+    seq_name,
+    affinity_dim=1,
+    wsize=128,
+    depth=3,
+    out_dim=1,
+    subtype='5p',
+    **_,
 ):
-    def apply(neg, pos, rng_key, **_):
+    def apply(neg, pos, quantile, rng_key, **_):
         param_name = f'{seq_name}::affinity_{subtype}'
         affinity = get_param(
             param_name, init=ut.continuous_initializer(rng_key, (affinity_dim,)), shared=True
         )
         res = dense_multilevel(
-            jnp.concatenate([jnp.array([neg, pos]), affinity], axis=-1),
+            flat_concat(neg, pos, affinity, quantile),
             wsize,
             out_dim,
             depth,
@@ -127,7 +154,9 @@ def sequestron_ERN(
             DEFAULT_ACTIVATION,
         )
         return DEFAULT_ACTIVATION(jnp.squeeze(res))
+
     return apply
+
 
 
 transcription = partial(transform_nn, transform_name='tc')
@@ -138,14 +167,26 @@ inv_translation = partial(transform_nn, transform_name='tl', tr_namespace='inv_'
 ERN5p = partial(sequestron_ERN, subtype='5p')
 ERN3p = partial(sequestron_ERN, subtype='3p')
 
-def output(get_param, get_quantized, **_):
-    def apply(*value, rng_key, **_):
+def output(get_param, get_quantized, wsize=64, depth=3, **_):
+    def apply(*value, quantile, rng_key, **_):
+
+        value = jnp.array(value)
+        assert value.shape[0] == quantile.shape[0]
+        assert quantile.ndim == 1
+
         res = jnp.array(
             [
                 dense_multilevel(
-                    x.squeeze(), 128, 1, 2, get_param, rng_key, 'out', DEFAULT_ACTIVATION
+                    flat_concat(x,q),
+                    wsize,
+                    1,
+                    depth,
+                    get_param,
+                    rng_key,
+                    'out',
+                    DEFAULT_ACTIVATION,
                 )
-                for x in value
+                for x, q in zip(value, quantile)
             ]
         )
         return res

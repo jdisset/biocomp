@@ -245,8 +245,8 @@ class ComputeGraphModel:
         def collect_all_results(
             params: dict,
             inputs: jnp.ndarray,
+            quantiles,
             rng_key,
-            quantiles=None,
             read_only=True,
             constraints=None,
         ) -> tuple[jnp.ndarray, dict[int, jnp.ndarray]]:
@@ -260,8 +260,8 @@ class ComputeGraphModel:
             the result dictionnary with each node's output and feeding the output of each
             upstream node as input to the next downstream one."""
             assert (
-                len(inputs) == self.n_inputs
-            ), f'len(inputs)={len(inputs)} != n_inputs={self.n_inputs}'
+                len(inputs) >= self.n_inputs
+            ), f'len(inputs)={len(inputs)} < n_inputs={self.n_inputs}'
 
             keys = jax.random.split(rng_key, len(flat_batches))
 
@@ -290,15 +290,16 @@ class ComputeGraphModel:
                 )
 
                 extra_params = n['extra_params']
+
                 qtl = None
                 if quantiles is not None:
                     pick_quantile = n['extra_params'].get('quantile_variable_id', [])
-                    if len(pick_quantile) > 0:
-                        extra_params['quantile'] = quantiles[jnp.array(pick_quantile)]
+                    if len(pick_quantile) > 0 and all([x is not None for x in pick_quantile]):
+                        qtl = quantiles[jnp.array(pick_quantile)]
 
                 get_q = partial(n['get_q'], get_p, rng_key=key)
-                comp_node = n['fun'](get_p, get_q, z=qtl, **extra_params)
-                res = comp_node(*upstream_results, rng_key=key)
+                comp_node = n['fun'](get_p, get_q, **extra_params)
+                res = comp_node(*upstream_results, quantile=qtl, rng_key=key)
                 results[nid] = res
 
                 if n['type'] == 'output':
@@ -315,9 +316,9 @@ class ComputeGraphModel:
             constraints = {} if pre_constraints is None else pre_constraints
             apply(
                 params,
-                [jnp.array([1.0])] * self.n_inputs,
+                jnp.zeros(self.n_inputs),
+                jnp.zeros(self.n_outputs),
                 rng_key,
-                quantiles=[jnp.array([1.0])] * self.n_outputs,
                 constraints=constraints,
                 read_only=False,
             )

@@ -176,6 +176,7 @@ for i, log_factor in enumerate(all_log_factors):
         which_output = int(not (output_names.index(input_name)))
         originalX = dman.rescale(X_raw_uorfs[mname])
         originalY = dman.rescale(Y_raw_uorfs[mname])
+
         ax = axes[0]
         ax.scatter(originalX, originalY[:, which_output], s=1, c='k', alpha=0.1)
         ax.set_title('Original scatter')

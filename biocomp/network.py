@@ -1011,6 +1011,8 @@ class Network:
             node['extra'].pop('quantile_variable_id', None)
 
         output_node = cg[cg.type == 'output'].iloc[0]
+        # add the quantile variable to the output node
+        output_node['extra']['quantile_variable_id'] = list(range(len(output_node.input_from)))
         for i, (nid, oid) in enumerate(output_node.input_from):
             propagate_upstream(cg.loc[nid], i, oid)
 

@@ -84,7 +84,7 @@ def recipes_to_sql(recipes: list, conn, lib):
         c.execute("SELECT name FROM recipes WHERE name = ?", (obj['name'],))
         if c.fetchone():
             # already in db so we skip
-            log.debug(f'Recipe {obj["name"]} already in db, skipping')
+            log.info(f'Recipe {obj["name"]} already in db, skipping')
             return
 
         extra = {k: v for k, v in obj.items() if k not in ['name', 'description', 'notes']}
@@ -153,7 +153,7 @@ def recipes_to_sql(recipes: list, conn, lib):
             ut.error(f'Skipped recipe {obj["name"]} because of import errors')
             c.execute("DELETE FROM recipes WHERE name = ?", (obj['name'],))
             conn.commit()
-            return
+            # return
     conn.commit()
 
 
@@ -318,7 +318,7 @@ class XP:
             try:
                 ut.debug(f'Building model for sample {s}')
                 m = ComputeGraphModel(n)
-                m.build(node_impl=node_impl, node_namespace=f'model_{i}')
+                m.build(node_impl=node_impl, node_namespace=f'{self.name}::{s}::{i}')
                 models.append((m, s))
             except Exception as e:
                 msg = f'Error building {"inverse" if inverse else ""} model for sample {s}: {e}'

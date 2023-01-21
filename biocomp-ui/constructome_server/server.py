@@ -263,8 +263,14 @@ def _recipes():
 
 @app.route('/network/<recipe_name>')
 def _network(recipe_name):
-    net = build_network(recipe_name)
-    return get_network_json(net)
+    # try and catch if fail:
+    try:
+        net = build_network(recipe_name)
+        net_json = get_network_json(net)
+        return net_json
+    except Exception as e:
+        return json.dumps({'error': str(e)})
+
 
 
 if __name__ == '__main__':

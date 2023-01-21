@@ -91,13 +91,7 @@ def _transform(get_param, get_quantized, transform_name, **_):
         )
 
         deg_rate = get_param(deg_param_name, init=ut.continuous_initializer(k1), shared=True)
-        # print(t'Calling {transform_name} with rates {rates} and deg_rate {deg_rate} and rng_key {rng_key}')
         res = jnp.dot(rates, val) / deg_rate
-        # print(f'values: {values}')
-        # print(f'val: {val}')
-        # print(f'rates: {rates}')
-        # print(f'deg_rate: {deg_rate}')
-        # print(f'res: {res}')
         return res
 
     return apply
@@ -182,7 +176,6 @@ def sequestron_RCB(get_param, get_quantized, **_):
 def source(get_param, get_quantized, n_outputs, **_):
     def apply(inp, **_):
         return jnp.ones(n_outputs) * inp
-
     return apply
 
 
@@ -228,12 +221,13 @@ def inv_numeric(*_, **__):
 
     return apply
 
+# 
 
 # aggregations split a single input in ratios (defined by parameters)
 @compnode
 def aggregation(get_param, get_quantized, n_outputs, normalize=False, **kwargs):
-    def apply(inp, rng_key):
-
+    def apply(inp, quantile, rng_key):
+        #TODO: use the quantile to compute some noise around the ratio
         if 'ratios' in kwargs:
             ratios = get_param(
                 "ratios", overwrite_with=jnp.array(kwargs['ratios'], dtype=jnp.float32)
@@ -254,11 +248,10 @@ def inv_aggregation(get_param, get_quantized, original_output_len, original_outp
     assert original_output_len > 0
     assert original_output_slot < original_output_len
 
-    def apply(inp, rng_key):
+    def apply(inp, quantile, rng_key):
         ratios = get_param("ratios", init=ut.continuous_initializer(rng_key, (original_output_len,)))
         # ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
         return inp / ratios[original_output_slot]
-
     return apply
 
 

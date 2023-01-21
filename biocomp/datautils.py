@@ -92,6 +92,8 @@ def style_violin(parts):
 def data_checks(X, Y, models):
     assert len(X) == len(Y)
     assert len(models) == len(X)
+    namespaces = [m.node_namespace for m in models]
+    assert len(set(namespaces)) == len(namespaces), 'Duplicate namespaces in models.'
 
     for x, y, m in zip(X, Y, models):
         assert x.shape[0] == y.shape[0], f"shape mismatch"
@@ -131,7 +133,6 @@ def sample_batches_direct(
     # select batch_size * n_batches random points, weight by inverse of density
     densities = kde.evaluate(X.T) + EPSILON
     threshold = jnp.quantile(densities, quantile_threshold)
-    print(f"threshold = {threshold}")
     selection_proba = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY)))
     indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
 
