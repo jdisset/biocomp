@@ -182,14 +182,19 @@ def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_th
 
 class DataManager:
     def __init__(self, X: list, Y: list, models: list, cfg: dict):
-        self.raw_X = [jnp.array(x) for x in X]
-        self.raw_Y = [jnp.array(y) for y in Y]
-        self.models = models
         self.cfg = cfg
-        self.X = self.rescale(self.raw_X)
-        self.Y = self.rescale(self.raw_Y)
-        self.kdes = [gaussian_kde(x.T, bw_method=cfg['kde_bw_method']) for x in self.X]
+        self._raw_X = [jnp.array(x) for x in X]
+        self._raw_Y = [jnp.array(y) for y in Y]
+        self._models = models
+        self._jitted_models = [jit(m) for m in models]
+        self._X = self.rescale(self._raw_X)
+        self._Y = self.rescale(self._raw_Y)
+        self._kdes = [gaussian_kde(x.T, bw_method=cfg['kde_bw_method']) for x in self._X]
+        self.indices = None
         data_checks(X, Y, models)
+
+    def set_subset(self, indices):
+        self.indices = indices
 
     def rescale(self, X):
         factor = self.cfg['log_factor']
@@ -203,17 +208,34 @@ class DataManager:
 
     def get_batches(self, rng_key):
         return _get_batches(
-            self.X,
-            self.Y,
-            self.kdes,
+            self.get_X(),
+            self.get_Y(),
+            self.get_kdes(),
             rng_key,
             self.cfg['batch_size'],
             self.cfg['n_batches'],
             self.cfg['density_quantile_threshold'],
         )
 
-    def get_models_in_order(self):
-        return ([self.models[k] for k in self.key_order], self.key_order)
+    def __get(self, fromlist):
+        if self.indices is not None:
+            return [fromlist[i] for i in self.indices]
+        return fromlist
+
+    def get_models(self):
+        return self.__get(self._models)
+
+    def get_kdes(self):
+        return self.__get(self._kdes)
+
+    def get_X(self):
+        return self.__get(self._X)
+
+    def get_Y(self):
+        return self.__get(self._Y)
+
+    def get_jitted_models(self):
+        return self.__get(self._jitted_models)
 
 
 #                                                                            }}}
@@ -347,20 +369,15 @@ def get_knn_quantile(x, y, tree, qu, **kw):
     return q
 
 
-def get_knn_smooth(logX, logY, xlims=(0, 1), res=200, knn=100, min_points=10, method='mean', **kw):
-    tree = cKDTree(logX)
-
-    x = jnp.linspace(xlims[0], xlims[1], res)
-    xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
-
+def get_knn_smooth(xquery, logY, tree, knn=100, min_points=10, method='mean', **kw):
     if method == 'mean':
-        Z = get_knn_mean(xygrid, logY, knn=knn, min_points=min_points, tree=tree)
+        Z = get_knn_mean(xquery, logY, knn=knn, min_points=min_points, tree=tree)
     elif method == 'quantile':
         assert 'qu' in kw
-        Z = get_knn_quantile(xygrid, logY, knn=knn, min_points=min_points, tree=tree, **kw)
+        Z = get_knn_quantile(xquery, logY, knn=knn, min_points=min_points, tree=tree, **kw)
     else:
         raise ValueError(f'Unknown method {method}')
-    return Z.reshape(res, res), x
+    return Z
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -488,7 +505,6 @@ def heatmap(
             diff -= len(ticks)
             cbar.set_ticks(ticks)
             cbar.set_ticklabels(ticklabels[diff:])
-        
 
     if connector:
         if connector_orientation == 'bottom':
@@ -545,14 +561,13 @@ def smooth_1d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
     ax.set_yticklabels(tlabels)
 
 
-def smooth_2d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
+def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, **kw):
     input_name = model.get_inverted_input_proteins()
     output_names = model.get_output_proteins()
     assert len(output_names) == 3
     assert len(input_name) == 2
     output = list(set(output_names) - set(input_name))
     output_pos = output_names.index(output[0])
-
     unscaled_ticks = np.logspace(0, 12, 13)
     ticks = np.array(rescaler(unscaled_ticks))
     ticks = ticks[ticks < xmax]
@@ -562,14 +577,43 @@ def smooth_2d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
     ]
 
     y = y[:, output_pos]
-    z, xx = get_knn_smooth(x, y)
+
+    tree = cKDTree(x)
+    xx = jnp.linspace(xmin, xmax, res)
+    xygrid = jnp.array(np.meshgrid(xx, xx)).T.reshape(-1, 2)
+
+    if x.shape[1] > 2:
+        assert xslice.shape == (x.shape[1] - 2,)
+        xquery = jnp.concatenate([xygrid, jnp.tile(xslice, (xygrid.shape[0], 1))], axis=1)
+    else:
+        xquery = xygrid
+
+    print(kw)
+    z = get_knn_smooth(xquery, y, tree=tree, **kw).reshape(res, res)
+
     heatmap(ax, z, ticks=ticks, ticklabels=tlabels, colorbar=True)
     ax.set_title(f'{model.network.name}\n{output[0]} smoothed mean')
     ax.set_xlabel(input_name[0])
     ax.set_ylabel(input_name[1])
+
     # remove plot border (the frame, I think?)
     for spine in ax.spines.values():
         spine.set_visible(False)
+
+
+def smooth_3d(x, y, model, rescaler, ax, slices=np.linspace(0, 1, 5), **kw):
+    # we'll divide the third axis into slices
+    inputs = model.get_inverted_input_proteins()
+    # divide ax using make_axes_locatable
+    divider = make_axes_locatable(ax)
+    axes = [ax]
+    width = 1 / (len(slices) - 1)
+    for i in range(len(slices) - 1):
+        axes.append(divider.append_axes('top', size=width, pad=0.01))
+    # plot each slice
+    for i, s in enumerate(slices):
+        smooth_2d(x, y, model, rescaler, axes[i], xslice=np.array([s]), **kw)
+        axes[i].set_title(f'{inputs[2]} ≈ {s:.2f}')
 
 
 def setup_fig(title):
