@@ -796,7 +796,6 @@ def plot_node(
 
 def get_jaxpr(fun, *args, **kwargs):
     import jax
-
     return jax.make_jaxpr(fun)(*args, **kwargs)
 
 

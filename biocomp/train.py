@@ -17,9 +17,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from . import datautils as du
 from . import utils as ut
+from . import nodes as nodes
+from . import nn_nodes as nn
 from .compute import ComputeGraphModel
 import wandb as wb
 import os
+import time
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -36,6 +39,12 @@ def mse_loss(y, y_hat, n_outputs=None):
     return jnp.mean((y[:, :n_outputs] - y_hat[:, :n_outputs]) ** 2)
 
 
+def huber_quantile_loss(e, q, delta=0.1):
+    return jnp.where(
+        jnp.abs(e) <= delta, 0.5 * e**2, delta * (jnp.abs(e) - 0.5 * delta)
+    ) * jnp.where(e < 0, q, (1.0 - q))
+
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -43,24 +52,71 @@ def mse_loss(y, y_hat, n_outputs=None):
 # {{{                      --     default config     --
 # ···············································································
 
+T_SIZE = 64
+T_DEPTH = 3
+I_SIZE = 64
+I_DEPTH = 2
+I_OUT = 8
+ERN_SIZE = 128
+ERN_DEPTH = 3
+MEFL_SIZE = 64
+MEFL_DEPTH = 3
+
+NN_NODES = dict(
+    nodes.DEFAULT_COMPUTE_NODES_DICT,
+    **{
+        'output': partial(nn.output, wsize=MEFL_SIZE, depth=MEFL_DEPTH),
+        'transcription': partial(
+            nn.transcription,
+            outer_wsize=T_SIZE,
+            outer_depth=T_DEPTH,
+            inner_wsize=I_SIZE,
+            inner_depth=I_DEPTH,
+            inner_out=I_OUT,
+        ),
+        'translation': partial(
+            nn.translation,
+            outer_wsize=T_SIZE,
+            outer_depth=T_DEPTH,
+            inner_wsize=I_SIZE,
+            inner_depth=I_DEPTH,
+            inner_out=I_OUT,
+        ),
+        'inv_transcription': partial(
+            nn.inv_transcription,
+            outer_wsize=T_SIZE,
+            outer_depth=T_DEPTH,
+            inner_wsize=I_SIZE,
+            inner_depth=I_DEPTH,
+            inner_out=I_OUT,
+        ),
+        'inv_translation': partial(
+            nn.inv_translation,
+            outer_wsize=T_SIZE,
+            outer_depth=T_DEPTH,
+            inner_wsize=I_SIZE,
+            inner_depth=I_DEPTH,
+            inner_out=I_OUT,
+        ),
+        'sequestron_ERN': partial(nn.ERN5p, wsize=ERN_SIZE, depth=ERN_DEPTH),
+        'sequestron_ERN3p': partial(nn.ERN3p, wsize=ERN_SIZE, depth=ERN_DEPTH),
+    },
+)
+
 DEFAULT_CFG = {
-    "optimizer": "amsgrad",
-    "learning_rate": 0.001,
-    "adam_w_decay": 0.0001,
-    "loss_function": mse_loss,
+    "optimizer": "adam",
+    "learning_rate": 1e-5,
+    "adam_w_decay": 1e-7,
     "rng_key": 42,
-    "epochs": 10000,
+    "epochs": 100,
     "n_replicates": 1,
-    "compile_training": True,
-    "batch_size": 128,  # per whole batch, i.e the sum of each xp's batch size
-    "norm_factor": 1e7,
-    "balance_bin_resolution": 0.5,
-    "balance_threshold_quantile": 0.4,
-    "balance_threshold_min": 40,
-    "log_rate": 1,
-    "node_impl": {},
-    "plot_rate": 100,
-    "save_rate": 100,
+    "batch_size": 16,
+    "n_batches": 2048,
+    "kde_bw_method": 0.05,
+    "log_factor": 1e3,
+    "max_value": 1e7,
+    "density_quantile_threshold": 0.07,
+    "huber_quantile_loss_delta": 0.1,
     "static_params": [['node']],
 }
 
@@ -72,87 +128,107 @@ DEFAULT_CFG = {
 # ···············································································
 
 
-def wandb_log_epoch(history, epoch, cfg, project=None, **_):
-    loss = history['loss'][-1]
-    params = history['params'][-1]
-    if epoch == 0 and project is not None:
-        wb.init(config=cfg, project=project, entity="jdisset", reinit=False)
-    wb.log({'loss': loss}, step=epoch)
-    wb.log({'shared_params': params['shared']}, step=epoch)
+@partial(jit, static_argnums=(1,))
+def compstats(v, smooth_win=1):
+    medians = vmap(jnp.median)(v)
+    mins = vmap(jnp.min)(v)
+    maxs = vmap(jnp.max)(v)
+    p20s = vmap(lambda x: jnp.percentile(x, 20))(v)
+    p80s = vmap(lambda x: jnp.percentile(x, 80))(v)
+    if smooth_win > 1:
+        medians = jnp.convolve(medians, jnp.ones(smooth_win) / smooth_win, mode='same')
+        p80s = jnp.convolve(p80s, jnp.ones(smooth_win) / smooth_win, mode='same')
+        p20s = jnp.convolve(p20s, jnp.ones(smooth_win) / smooth_win, mode='same')
+        maxs = jnp.convolve(maxs, jnp.ones(smooth_win) / smooth_win, mode='same')
+        mins = jnp.convolve(mins, jnp.ones(smooth_win) / smooth_win, mode='same')
+    return medians, p20s, p80s, mins, maxs
 
 
-def wandb_log_plot(history, epoch, cfg, models, X, Y, project=None, **_):
-
-    if epoch == 0 and project is not None:
-        wb.init(config=cfg, project=project, entity="jdisset", reinit=False)
-
-    params = history['params'][-1]
-
-    jitted_models = {
-        s: jit(jax.vmap(partial(m, rng_key=jax.random.PRNGKey(0)), in_axes=(None, 0)))
-        for s, m in models.items()
-    }
-
-    def log_plots():
-        gtruth = []
-        pred = []
-        for sample, f in jitted_models.items():
-            model = models[sample]
-            x = X[sample]
-            y = Y[sample]
-            y_hat = f(params, X[sample])
-            out_proteins = model.get_output_proteins()
-            in_proteins = model.get_inverted_input_proteins()
-            stats, bins = du.binstats(y, out_proteins, in_proteins, resolution=0.5)
-            stats_hat, bins_hat = du.binstats(y_hat, out_proteins, in_proteins, resolution=0.5)
-            fig, _ = du.heatmap(
-                stats,
-                bins,
-                figscale=0.6,
-                stat_columns=['mean'],
-                z_protein=(set(out_proteins) - set(in_proteins)).pop(),
-                lims={'mean': (1e-5, 100)},
-                title=f'{model.network.name} ground truth',
-                subtitle=f'{len(y)} data points',
-                show=False,
-            )
-            gtruth.append(wb.Image(fig, caption=f'{model.network.name} ground truth'))
-            fig_hat, _ = du.heatmap(
-                stats_hat,
-                bins_hat,
-                figscale=0.6,
-                stat_columns=['mean'],
-                z_protein=(set(out_proteins) - set(in_proteins)).pop(),
-                lims={'mean': (1e-5, 100)},
-                title=f'{model.network.name} predicted',
-                subtitle=f'{len(y)} data points',
-                show=False,
-            )
-            pred.append(wb.Image(fig_hat, caption=f'{model.network.name} predicted'))
-
-        wb.log({'ground_truth': gtruth}, step=epoch)
-        wb.log({'predictions': pred}, step=epoch)
-        plt.close('all')
+def get_epoch_stats(epoch_data, smooth_win=1):
+    stats = {'grad': {}, 'params': {}}
+    for k, v in epoch_data['grad']['shared'].items():
+        stats['grad'][k] = compstats(v)
+    for k, v in epoch_data['params']['shared'].items():
+        stats['params'][k] = compstats(v)
+    return stats
 
 
-def console_log(history, epoch, cfg, **_):
-    loss = history['loss'][-1]
-    print(f'[{epoch}/{cfg["epochs"]}] loss: {loss:.5f}')
+def local_save(epoch, cfg, epoch_history=None, save_dir=None, full_save=False, **_):
+    assert save_dir is not None
+    if epoch_history is None:
+        return
+    t0 = time.time()
+
+    if full_save:
+        full_save_until_epoch = full_save if isinstance(full_save, int) else 2
+        if epoch <= full_save_until_epoch:
+            du.save(epoch_history, f'{save_dir}/epoch_{epoch}_full.pkl')
+
+    params = ut.tree_get(epoch_history['params'], -1)
+    loss = np.array(epoch_history['loss'])
+    avg_loss = np.mean(loss)
+
+    # stats = get_epoch_stats(epoch_history)
+    # stats['loss'] = loss
+    # du.save(stats, f'{save_dir}/epoch_{epoch}_stats.pkl')
+
+    # first we rename the old params
+    for f in Path(save_dir).glob('latest_params_*.pkl'):
+        f.rename(f'{save_dir}/old_{f.name}')
+
+    # then we save the new ones
+    du.save(params, f'{save_dir}/latest_params_({avg_loss:.5f}).pkl')
+
+    # then we delete the old one
+    for f in Path(save_dir).glob('old_latest_params_*.pkl'):
+        f.unlink()
+
+    print(f"Saving epoch to disk took {time.time() - t0:.2f}s")
 
 
-def manual_save(history, epoch, cfg, save_path=None, loss_history=None, **_):
-    save_path = cfg.get('save_path', save_path)
-    assert save_path is not None, 'save_path must be specified'
+def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
+    if epoch_history is None:
+        return
 
-    if epoch == 0:
-        print(f'Saving results to {save_path}')
-        save_path.mkdir(parents=True, exist_ok=True)
-        with open(save_path / 'config.json', 'w') as f:
-            json.dump(cfg, f)
+    t0 = time.time()
+    params = ut.tree_get(epoch_history['params'], -1)
+    pred = []
+    models = dman.get_models()
+    try:
+        for i in range(len(dman.get_models())):
+            fig, ax = du.report(params, dman, i)
+            # fig.set_dpi(10)
+            pred.append(wb.Image(fig, caption=f'{models[i].node_namespace}'))
+            plt.close(fig)
+    except Exception as e:
+        # raise e
+        print(e)
+        print("Failed to plot predictions")
+    wb.log({'Evaluations': pred})
+    print(f'Done logging prediction plots for epoch {epoch} in {time.time() - t0:.2f}s')
 
-    du.save(history['param'][-1], f'{save_path}/params_epoch-{epoch}.pkl', overwrite=True)
-    if loss_history is not None:
-        du.save(loss_history, f'{save_path}/loss_history.pkl', overwrite=True)
+
+def wandb_log_epoch(epoch, cfg, epoch_history=None, **_):
+    if epoch_history is not None:
+        # measure time now:
+        t0 = time.time()
+        losses = np.array(epoch_history['loss'])
+        for loss in losses:
+            wb.log({'loss': loss})
+        del losses
+        wb.log({'epoch_time': epoch_history['epoch_time']})
+        print(f"Logging epoch {epoch} to wandb took {time.time() - t0:.2f}s")
+
+
+def console_log(epoch, cfg, epoch_history=None, **_):
+    if epoch_history is not None:
+        loss = np.array(epoch_history['loss'])
+        avg = np.mean(loss)
+        std = np.std(loss)
+        lmin, lmax = jnp.min(loss), jnp.max(loss)
+        print(
+            f'[{epoch}/{cfg["epochs"]}] loss: {avg:.4f} ± {std:.4f} [min {lmin:.4f}, max {lmax:.4f}] in {epoch_history["epoch_time"]:.2f}s'
+        )
 
 
 def log_w_replicates(history, epoch, cfg, **_):
@@ -171,53 +247,8 @@ def log_w_replicates(history, epoch, cfg, **_):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                       --     train from xp     --
-# ···············································································
 
-
-# def train_xp(xp, config=DEFAULT_CFG, **kwargs):
-    # cfg = {**DEFAULT_CFG, **config}
-
-    # rng_key = jax.random.PRNGKey(cfg['rng_key'])
-
-    # models = xp.get_models(node_impl=config['node_impl'])
-    # data = du.DataManager(xp.get_XY(models))
-
-
-    # X, Y = preprocess_data(models, Y, cfg)
-
-    # individual_batch_sizes = cfg['batch_size'] // len(models)
-
-    # model_values = []
-    # Y_values = []
-    # for k, m in models.items():
-        # model_values.append(m)
-        # Y_values.append(Y[k])
-
-    # x_batches, y_batches = du.make_batches_uniform_sampling(
-        # Y_values, individual_batch_sizes, rng_key, model_values
-    # )
-
-    # return train_models(model_values, x_batches, y_batches, config=config, **kwargs)
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{               --     train models (no replicates)     --
-# ···············································································
-def train_models(
-    models: list[ComputeGraphModel],
-    x_batches: np.ndarray,
-    y_batches: np.ndarray,
-    config: dict = DEFAULT_CFG,
-    loggers: tuple[int, Callable] = None,
-):
-
-    cfg = {**DEFAULT_CFG, **config}
-
+def get_optimizer(cfg):
     optimizers = {
         'sgd': optax.sgd(learning_rate=cfg['learning_rate']),
         'adam': optax.adam(learning_rate=cfg['learning_rate']),
@@ -228,75 +259,70 @@ def train_models(
         cfg['optimizer'] in optimizers.keys()
     ), f"Optimizer {cfg['optimizer']} not available. Available optimizers are {optimizers.keys()}"
     optimizer = optimizers[cfg['optimizer']]
+    return optimizer
 
-    loss_f = cfg['loss_function']
-    assert callable(loss_f), f"loss_f must be callable, not {type(loss_f)}"
 
-    ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-    # {{{                           --     init     --
-    # ···············································································
+def setup_wandb_logging(project, dman, config):
+    import wandb as wb
 
-    def init(key):
-        ikeys = jax.random.split(key, len(models))
-        print('Initializing parameters')
-        params, constraints = {}, {}
-        for m, k in zip(models, ikeys):
-            params, constraints = m.init(k, pre_params=params, pre_constraints=constraints)
+    wb.init(config=config, project=project, entity="jdisset", reinit=True)
+    save_dir = Path(wb.run.dir)
+    loggers = [
+        (1, console_log),
+        (10, partial(local_save, save_dir=save_dir)),
+        (1, wandb_log_epoch),
+        (10, partial(wandb_plot_pred, dman=dman)),
+    ]
+    return loggers
 
-        dynamic, _ = ut.split_params(params, cfg['static_params'])
-        opt_state = optimizer.init(dynamic)
 
-        return params, constraints, opt_state
+def start(dman: du.DataManager, cfg, loggers=None):
+    config = {**DEFAULT_CFG, **cfg}
 
-    #                                                                            }}}
-    ## ─────────────────────────────────────────────────────────────────────────────
+    key = jax.random.PRNGKey(config['rng_key'])
 
-    key = jax.random.PRNGKey(cfg['rng_key'])
-    params, constraints, opt_state = init(key)
+    xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
+    models = dman.get_models()
 
-    ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-    # {{{                       --     training step     --
-    # ···············································································
+    nbatches, nmodels = config['n_batches'], len(models)
+    assert nbatches == xbatches.shape[0] == ybatches.shape[0]
 
-    def loss_func(dynamic, static, X, Y, rng_key):
-        nmodels = len(models)
-        assert len(X) == nmodels, f"Expected {nmodels} models, got {X.shape}"
-        assert len(Y) == nmodels
+    # --- init
+    params, constraints = {}, {}
+    optimizer = get_optimizer(config)
+    for m, k in zip(models, jax.random.split(key, len(models))):
+        params, constraints = m.init(k, pre_params=params, pre_constraints=constraints)
+    dynamic, _ = ut.split_params(params, config['static_params'])
+    opt_state = optimizer.init(dynamic)
+
+    # --- loss and updates
+    x_start = np.cumsum([0] + [m.n_inputs for m in models])[:-1]
+    x_end = np.array([m.n_inputs for m in models]) + x_start
+
+    def apply_models(params, x, z, key):
+        keys = jax.random.split(key, nmodels)
+        y = [m(params, x[s:e], z[s:e], k) for m, s, e, k in zip(models, x_start, x_end, keys)]
+        return jnp.concatenate(y, axis=0)
+
+    def loss_func(dynamic, static, X, Y, Z, key):
+        assert X.ndim == Y.ndim == Z.ndim == 2
+        assert X.shape[0] == Y.shape[0] == Z.shape[0]
+        assert X.shape[1] == sum([m.n_inputs for m in models])
+        assert Y.shape[1] == Z.shape[1] == sum([m.n_outputs for m in models])
+
         params = ut.assemble_params(dynamic, static)
-        K = jax.random.split(rng_key, nmodels)
-        res = jnp.array(
-            [
-                loss_f(vmap(partial(m, params, rng_key=k))(x[:, : m.n_inputs]), y, m.n_outputs)
-                for m, x, y, k in zip(models, X, Y, K)
-            ]
-        ).mean()
-        return res
 
-    # def model_loss(m, params, x, y, k):
-        # return loss_f(vmap(partial(m, params, rng_key=k))(x[:, : m.n_inputs]), y, m.n_outputs)
-    # mlosses = [partial(model_loss, m) for m in models]
+        keys = jax.random.split(key, X.shape[0])
+        yhat = vmap(apply_models, in_axes=(None, 0, 0, 0))(params, X, Z, keys)
+        assert yhat.shape == Y.shape
 
-    # def loss_func(dynamic, static, X, Y, rng_key): # using jax.lax.map
-        # nmodels = len(models)
-        # assert len(X) == nmodels, f"Expected {nmodels} models, got {X.shape}"
-        # assert len(Y) == nmodels
-        # params = ut.assemble_params(dynamic, static)
-        # K = jax.random.split(rng_key, nmodels)
-        # vmap_functions = vmap(lambda i,p,x,y,k: jax.lax.switch(i, mlosses, p,x,y,k), in_axes=(0, None, 0, 0, 0))
-        # res = jnp.array(vmap_functions(jnp.arange(nmodels), params, X, Y, K)).mean()
-        # return res
+        error = yhat - Y
+        return jnp.mean(huber_quantile_loss(error, Z, delta=config['huber_quantile_loss_delta']))
 
-    def flatten_tree(g):
-        leaves = jax.tree_util.tree_leaves(g)
-        return jnp.concatenate([l.flatten() for l in leaves])
-
-    def training_step(params, opt_state, key, x, y):
+    def training_step(params, opt_state, x, y, z, key):
         dynamic, static = ut.split_params(params, [['node']])
-        loss, grads = value_and_grad(loss_func)(dynamic, static, x, y, key)
+        loss, grads = value_and_grad(loss_func)(dynamic, static, x, y, z, key)
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
-
-        updt = flatten_tree(updates)
-        magnitude = jnp.linalg.norm(updt)
 
         dynamic = optax.apply_updates(dynamic, updates)
         dynamic = ut.apply_constraints(dynamic, constraints)
@@ -307,131 +333,43 @@ def train_models(
             'loss': loss,
             'grad': grads,
             'opt': opt_state,
-            'magnitude': magnitude,
         }
         return res
 
-    nbatches = len(x_batches)
-
     @ut.progress_scan(nbatches, message='Training model')
-    def scannable_step(carry, i_x_y_k):
+    def scannable_step(carry, i_x_y_z_k):
         params, opt_state = carry
-        i, x, y, k = i_x_y_k
-        updt = training_step(params, opt_state, k, x, y)
+        i, x, y, z, k = i_x_y_z_k
+        updt = training_step(params, opt_state, x, y, z, k)
         params, opt_state = updt['params'], updt['opt']
         return (params, opt_state), updt
 
+    @jit
     def epoch_step(start_params, start_opt_state, epoch_key):
+        zbatches = jax.random.uniform(epoch_key, ybatches.shape)
         batch_keys = jax.random.split(epoch_key, nbatches)
         (final_params, final_opt_state), epoch_history = jax.lax.scan(
             scannable_step,
             (start_params, start_opt_state),
-            (jnp.arange(len(x_batches)), x_batches, y_batches, batch_keys),
+            (jnp.arange(nbatches), xbatches, ybatches, zbatches, batch_keys),
         )
         return final_params, final_opt_state, epoch_history
 
-    step = epoch_step
-
-    if cfg['compile_training']:
-        import time
-        print('Compiling training step')
-        t0 = time.time()
-        step = jit(step)
-        lowered = step.lower(params, opt_state, key)
-        compiled = lowered.compile()
-        step = compiled
-        print(f'Compiled in {time.time() - t0:.2f}s')
-
-    #                                                                            }}}
-    ## ─────────────────────────────────────────────────────────────────────────────
-
     if loggers is None:
-        loggers = []
+        loggers = [
+            (1, console_log),
+        ]
 
     print('Initial logger calls')
     for _, l in loggers:
-        l(0, cfg)
+        l(0, config)
 
-    print('Beginning training')
+    print(f'Begin training for {config["epochs"]} epochs')
 
-    for i, epoch_key in enumerate(jax.random.split(key, cfg['epochs']), 1):
-        params, opt_state, epoch_history = step(params, opt_state, epoch_key)
-
+    for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
+        t0 = time.time()
+        params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key)
+        epoch_history['epoch_time'] = time.time() - t0
         for t, l in loggers:
             if i % t == 0 or i == cfg['epochs']:
-                l(i, cfg, epoch_history=epoch_history, nbatches=nbatches)
-
-
-    return epoch_history
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{          --     train single model but with replicates     --
-# ···············································································
-def train_model(model, x, y, config, loggers=None):
-    cfg = {**DEFAULT_CFG, **config}
-    loggers = loggers or {}
-    optimizer = optax.sgd(learning_rate=cfg['learning_rate'])
-    key = jax.random.PRNGKey(cfg['rng_key'])
-    repl_keys = jax.random.split(key, cfg['n_replicates'])
-
-    params, constraints = jax.vmap(model.init)(repl_keys)
-    dynamic, _ = ut.split_params(params, cfg['static_params'])
-    opt_states = optimizer.init(dynamic)
-
-    history = {
-        'params': [params],
-        'opt': [opt_states],
-        'grad': [],
-        'loss': [],
-    }
-
-    def training_step(params, opt_states, x, y):
-        def loss_func(dynamic, static, x, y):
-            params = ut.assemble_params(dynamic, static)
-            y_hat = jax.vmap(partial(model, params, rng_key=key))(x)
-            assert y_hat.shape == y.shape
-            return jnp.mean((y - y_hat) ** 2)
-
-        dynamic, static = ut.split_params(params, cfg['static_params'])
-
-        loss, grads = jax.vmap(jax.value_and_grad(loss_func), in_axes=(0, 0, None, None))(
-            dynamic, static, x, y
-        )
-        updates, opt_states = optimizer.update(grads, opt_states, dynamic)
-
-        dynamic = optax.apply_updates(dynamic, updates)
-        # dynamic = ut.apply_constraints(dynamic, constraints)
-        params = ut.assemble_params(dynamic, static)
-
-        res = {
-            'params': params,
-            'loss': loss,
-            'grad': grads,
-            'opt': opt_states,
-        }
-        return res
-
-    step = jax.jit(training_step)
-
-    print('Beginning training')
-
-    n_batches = cfg.get('n_batches', x.shape[0] // cfg['batch_size'])
-
-    for i, k in enumerate(jax.random.split(key, cfg['epochs']), 1):
-
-        for x_batch, y_batch in batch(x, y, cfg['batch_size'], n_batches):
-            updt = step(history['params'][-1], history['opt'][-1], x_batch, y_batch)
-            history = {k: v + [updt[k]] for k, v in history.items()}
-
-        for t, l in loggers.items():
-            if i % t == 0 or i == cfg['epochs']:
-                l(history, i, cfg)
-    return history
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
+                l(i, config, epoch_history=epoch_history, nbatches=nbatches)

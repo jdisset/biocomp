@@ -14,6 +14,7 @@ import json
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from jax.scipy.stats import gaussian_kde
+import itertools
 
 #                                                                            }}}
 
@@ -123,9 +124,8 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     return selected
 
 
-def sample_batches_direct(
-    X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1, x_pad_to=None, y_pad_to=None
-):
+@partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold'))
+def sample_batches_direct(X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1):
     assert X.shape[0] == Y.shape[0]
     EPSILON = 1e-12
     HIGH_DENSITIES_PENALTY = 1.0
@@ -139,22 +139,18 @@ def sample_batches_direct(
     Xsub = X[indices]
     Ysub = Y[indices]
 
-    # pad with nans to the right if necessary
-    if x_pad_to is not None:
-        Xsub = jnp.pad(Xsub, ((0, 0), (0, x_pad_to - Xsub.shape[1])), constant_values=jnp.nan)
-    if y_pad_to is not None:
-        Ysub = jnp.pad(Ysub, ((0, 0), (0, y_pad_to - Ysub.shape[1])), constant_values=jnp.nan)
+    # Xbatches = jnp.split(Xsub, n_batches)
+    # Ybatches = jnp.split(Ysub, n_batches)
+    # return jnp.array(Xbatches), jnp.array(Ybatches)
 
-    Xbatches = jnp.split(Xsub, n_batches)
-    Ybatches = jnp.split(Ysub, n_batches)
-
+    # or with reshape:
+    Xbatches = Xsub.reshape((n_batches, batch_size, Xsub.shape[1]))
+    Ybatches = Ysub.reshape((n_batches, batch_size, Ysub.shape[1]))
     return Xbatches, Ybatches
 
 
 # @partial(jit, static_argnames=('batch_size', 'n_batches', 'density_quantile_threshold'))
 def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_threshold):
-    max_xfeatures = max([x.shape[1] for x in X])
-    max_yfeatures = max([y.shape[1] for y in Y])
     all_batches = [
         sample_batches_direct(
             x,
@@ -164,8 +160,6 @@ def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_th
             kde,
             rng,
             quantile_threshold=density_quantile_threshold,
-            x_pad_to=max_xfeatures,
-            y_pad_to=max_yfeatures,
         )
         for x, y, kde, rng in tqdm(
             list(zip(X, Y, kdes, jax.random.split(rng_key, len(X)))),
@@ -173,10 +167,13 @@ def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_th
         )
     ]
     xbatches, ybatches = zip(*all_batches)
-    xbatches, ybatches = jnp.array(xbatches), jnp.array(ybatches)
-    # swap dimension 0 and 1 so that we have (N_BATCHES, N_MODELS, BATCH_SIZE, FEATURES)
-    xbatches = jnp.swapaxes(xbatches, 0, 1)
-    ybatches = jnp.swapaxes(ybatches, 0, 1)
+    # concat along the feature axis (last dimension)
+    xbatches, ybatches = jnp.concatenate(tuple(xbatches), axis=2), jnp.concatenate(
+        tuple(ybatches), axis=2
+    )
+    assert xbatches.shape == (n_batches, batch_size, sum([x.shape[1] for x in X]))
+    assert ybatches.shape == (n_batches, batch_size, sum([y.shape[1] for y in Y]))
+    # (N_BATCHES, BATCH_SIZE, N_MODELS * FEATURES)
     return xbatches, ybatches
 
 
@@ -207,7 +204,7 @@ class DataManager:
         return [factor * (jnp.power(maxv / factor, x) - 1) for x in X]
 
     def get_batches(self, rng_key):
-        return _get_batches(
+        xbatches, ybatches = _get_batches(
             self.get_X(),
             self.get_Y(),
             self.get_kdes(),
@@ -216,6 +213,9 @@ class DataManager:
             self.cfg['n_batches'],
             self.cfg['density_quantile_threshold'],
         )
+        assert xbatches.shape[2] == sum([m.n_inputs for m in self.get_models()])
+        assert ybatches.shape[2] == sum([m.n_outputs for m in self.get_models()])
+        return xbatches, ybatches
 
     def __get(self, fromlist):
         if self.indices is not None:
@@ -236,6 +236,19 @@ class DataManager:
 
     def get_jitted_models(self):
         return self.__get(self._jitted_models)
+
+    @classmethod
+    def from_xps(cls, xplist, config, **kw):
+        models, samples = zip(
+            *[xp.build_models(node_impl=config['node_impl'], **kw) for xp in xplist]
+        )
+        X, Y = zip(*[xp.get_XY(m, s) for xp, m, s in zip(xplist, models, samples)])
+        X, Y, models = (
+            list(itertools.chain(*X)),
+            list(itertools.chain(*Y)),
+            list(itertools.chain(*models)),
+        )
+        return cls(X, Y, models, config)
 
 
 #                                                                            }}}
@@ -652,6 +665,57 @@ def timelapse_persp(Q, title, labels=None, outputfile=None, show=True, **kw):
     if show:
         plt.show()
     plt.close()
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                --     summary model plot functions     --
+def model_plot(model: bc.ComputeGraphModel, X, Y, rescaler, ax, kde=None, **kw):
+    x, y = X, Y
+    if kde is not None:
+        rng = jax.random.PRNGKey(0)
+        subsample = optimal_density_subsample(x, kde, rng, quantile_threshold=0.1)
+        x, y = x[subsample], y[subsample]
+
+    ninputs = model.n_inputs
+    if ninputs == 1:
+        smooth_1d(x, y, model, rescaler, ax, **kw)
+    elif ninputs == 2:
+        smooth_2d(x, y, model, rescaler, ax, **kw)
+    elif ninputs == 3:
+        smooth_3d(x, y, model, rescaler, ax, **kw)
+
+
+def eval_model_plot(
+    model: bc.ComputeGraphModel,
+    params,
+    rescaler,
+    ax,
+    npoints=50000,
+    key=jax.random.PRNGKey(0),
+    jitted=None,
+    **kw,
+):
+
+    k_i, k_q = jax.random.split(key)
+    inputs = jax.random.uniform(k_i, (npoints, model.n_inputs))
+    quantiles = jax.random.uniform(k_q, (npoints, model.n_outputs))
+    keys = jax.random.split(key, npoints)
+    jm = jitted or model
+    results = vmap(jm, in_axes=(None, 0, 0, 0))(params, inputs, quantiles, keys)
+    model_plot(model, inputs, results, rescaler, ax, **kw)
+
+
+def report(params, dman, id, suptitle=''):
+    fig, ax = mkfig(1, 2, size=(4, 4))
+    model = dman.get_models()[id]
+    mX = dman.get_X()[id]
+    mY = dman.get_Y()[id]
+    model_plot(model, mX, mY, dman.rescale, ax[0], kde=dman.get_kdes()[id])
+    eval_model_plot(model, params, dman.rescale, ax[1], jitted=dman.get_jitted_models()[id])
+    ax[0].set_title(f'Original data (mean)')
+    ax[1].set_title(f'Predicted (mean)')
+    fig.suptitle(f'{suptitle} {model.node_namespace}')
+    return fig, ax
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

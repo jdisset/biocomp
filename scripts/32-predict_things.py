@@ -15,6 +15,7 @@ from jax import jit, vmap, grad, value_and_grad
 import jax.numpy as jnp
 import biocomp.datautils as du
 import optax
+from pathlib import Path
 from tqdm import tqdm
 import biocomp.nodes as bn
 import biocomp.compute as bcc
@@ -27,6 +28,7 @@ plt.rcParams['figure.dpi'] = 200
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                          --     config     --
+
 T_SIZE = 64
 T_DEPTH = 3
 I_SIZE = 64
@@ -76,11 +78,11 @@ node_impl = dict(
         'sequestron_ERN3p': partial(bc.nn.ERN3p, wsize=ERN_SIZE, depth=ERN_DEPTH),
     },
 )
+
 cfg = {
     "optimizer": "adam",
     "learning_rate": 1e-4,
     "rng_key": np.random.randint(0, 2**32),
-    # "rng_key": 11325,
     "epochs": 150,
     "compile_training": True,
     "node_impl": node_impl,
@@ -112,7 +114,7 @@ raw_X, raw_Y = uorf_X + ern_X, uorf_Y + ern_Y
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                      --     plot functions     --
+### {{{                --     summary model plot functions     --
 def model_plot(model: bc.ComputeGraphModel, X, Y, rescaler, ax, kde=None, **kw):
     ninputs = model.n_inputs
     noutputs = model.n_outputs
@@ -149,8 +151,9 @@ def eval_model_plot(
     results = vmap(jm, in_axes=(None, 0, 0, 0))(params, inputs, quantiles, keys)
     model_plot(model, inputs, results, rescaler, ax, **kw)
 
+
 def report(params, dman, id, suptitle=''):
-    fig, ax = du.mkfig(1, 2, size=(4,4))
+    fig, ax = du.mkfig(1, 2, size=(4, 4))
     model = dman.get_models()[id]
     mX = dman.get_X()[id]
     mY = dman.get_Y()[id]
@@ -168,14 +171,11 @@ def report(params, dman, id, suptitle=''):
 import wandb as wb
 
 project = 'quantile_v0'
-# project = None
+project = None
 log_grads_and_params_to_wandb = False
 
-if project is not None:
-    wb.init(config=cfg, project=project, entity="jdisset", reinit=True)
 
 current_date = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-save_dir = f'../__out/{project}/{current_date}' if project is None else f'../__out/{wb.run.name}'
 
 
 @partial(jit, static_argnums=(1,))
@@ -203,14 +203,36 @@ def get_epoch_stats(epoch_data, smooth_win=1):
     return stats
 
 
-def local_save(epoch, cfg, epoch_history=None, **_):
+def local_save(epoch, cfg, epoch_history=None, save_dir=None, full_save=False, **_):
+    assert save_dir is not None
     if epoch_history is None:
         return
     t0 = time.time()
-    if epoch <= 2:
-        du.save(epoch_history, f'{save_dir}/epoch_{epoch}_full.pkl')
+
+    if full_save:
+        full_save_until_epoch = full_save if isinstance(full_save, int) else 2
+        if epoch <= full_save_until_epoch:
+            du.save(epoch_history, f'{save_dir}/epoch_{epoch}_full.pkl')
+
     stats = get_epoch_stats(epoch_history)
+    params = bu.tree_get(epoch_history['params'], nbatches - 1)
+    loss = np.array(epoch_history['loss'])
+    avg_loss = np.mean(loss)
+    stats['loss'] = loss
+
     du.save(stats, f'{save_dir}/epoch_{epoch}_stats.pkl')
+
+    # first we rename the old params
+    for f in Path(save_dir).glob('latest_params_*.pkl'):
+        f.rename(f'{save_dir}/old_{f.name}')
+
+    # then we save the new ones
+    du.save(params, f'{save_dir}/latest_params_({avg_loss:.5f}).pkl')
+
+    # then we delete the old one
+    for f in Path(save_dir).glob('old_latest_params_*.pkl'):
+        f.unlink()
+
     print(f"Saving epoch to disk took {time.time() - t0:.2f}s")
 
 
@@ -244,12 +266,6 @@ def wandb_log_epoch(epoch, cfg, epoch_history=None, **_):
         for loss in losses:
             wb.log({'loss': loss})
         del losses
-        if log_grads_and_params_to_wandb:
-            stats = du.load(f'{save_dir}/epoch_{epoch}_stats.pkl')
-            for k, v in stats['grad'].items():
-                wb.log({f'grad/{k}': v})
-            for k, v in stats['params'].items():
-                wb.log({f'params/{k}': v})
         print(f"Logging epoch {epoch} to wandb took {time.time() - t0:.2f}s")
 
 
@@ -264,18 +280,23 @@ def console_log(epoch, cfg, epoch_history=None, **_):
         )
 
 
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 config = {**bc.train.DEFAULT_CFG, **cfg}
+
+if project is not None:
+    wb.init(config=config, project=project, entity="jdisset", reinit=True)
+
+save_dir = f'../__out/{project}/{current_date}' if project is None else f'../__out/{wb.run.name}'
+
 dman = du.DataManager(raw_X, raw_Y, combined_models, config)
-# dman.set_subset([0, 47])
+dman.set_subset([0, 22, 47, 10])
+
 
 if project is not None:
     loggers = [
         (1, console_log),
-        (100, local_save),
+        (100, partial(local_save, save_dir=save_dir)),
         (1, wandb_log_epoch),
         (10, partial(wandb_plot_pred, dman=dman)),
     ]
@@ -286,13 +307,26 @@ else:
 
 key = jax.random.PRNGKey(config['rng_key'])
 xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
+
 zbatches = jax.random.uniform(key, ybatches.shape)
 nbatches = xbatches.shape[0]
 
 models = dman.get_models()
 nmodels = len(models)
 
+assert xbatches.shape[2] == sum([m.n_inputs for m in models])
+assert ybatches.shape[2] == sum([m.n_outputs for m in models])
 ##
+
+x_start = np.cumsum([0] + [m.n_inputs for m in models])[:-1]
+x_end = np.array([m.n_inputs for m in models]) + x_start
+
+
+def apply_models(params, x, z, key):
+    keys = jax.random.split(key, nmodels)
+    y = [m(params, x[s:e], z[s:e], k) for m, s, e, k in zip(models, x_start, x_end, keys)]
+    return jnp.concatenate(y, axis=0)
+
 
 optimizer = optax.adam(learning_rate=config['learning_rate'])
 
@@ -311,29 +345,22 @@ def huber_quantile_loss(e, q, delta=0.1):
     ) * jnp.where(e < 0, q, (1.0 - q))
 
 
-def model_loss(model, params, x, y, z, key):
-    assert x.ndim == y.ndim == z.ndim == 2
-    keys = jax.random.split(key, x.shape[0])
-    yhat = vmap(model, in_axes=(None, 0, 0, 0))(params, x, z, keys)
-    error = yhat - y[:, : model.n_outputs]
-    return jnp.mean(huber_quantile_loss(error, z[:, : model.n_outputs]))
-
-
 def loss_func(dynamic, static, X, Y, Z, key):
     # Z is the quantile
-    # shape = (N_MODELS, BATCH_SIZE, FEATURES)
-    assert len(X) == len(Y) == len(Z) == nmodels
-    assert X.shape[1] == Y.shape[1] == Z.shape[1]
-    assert X.shape[2] == (Y.shape[2] - 1) == (Z.shape[2] - 1)
+    # shape = (BATCH_SIZE, FEATURES*MODELS)
+    assert X.ndim == Y.ndim == Z.ndim == 2
+    assert X.shape[0] == Y.shape[0] == Z.shape[0]
+    assert X.shape[1] == sum([m.n_inputs for m in models])
+    assert Y.shape[1] == Z.shape[1] == sum([m.n_outputs for m in models])
 
     params = bu.assemble_params(dynamic, static)
 
-    K = jax.random.split(key, nmodels)
-    res = jnp.array(
-        [model_loss(m, params, x, y, z, k) for m, x, y, z, k in zip(models, X, Y, Z, K)]
-    )
-    assert res.shape == (nmodels,)
-    return res.mean()
+    keys = jax.random.split(key, X.shape[0])
+    yhat = vmap(apply_models, in_axes=(None, 0, 0, 0))(params, X, Z, keys)
+    assert yhat.shape == Y.shape
+
+    error = yhat - Y
+    return jnp.mean(huber_quantile_loss(error, Z))
 
 
 def flatten_tree(g):
@@ -393,13 +420,11 @@ def epoch_step(start_params, start_opt_state, epoch_key):
     return final_params, final_opt_state, epoch_history
 
 
-ut.print_jaxpr(epoch_step, params, opt_state, key)
-
-if cfg['compile_training']:
+if config['compile_training']:
     epoch_step = jit(epoch_step)
     # print('Compiling epoch_step')
     # t0 = time.time()
-    # lowered = jit(epoch_step).lower(params, opt_state, key)
+    # lowered = epoch_step.lower(params, opt_state, key)
     # epoch_step = lowered.compile()
     # print(f'Compiled in {time.time() - t0:.2f}s')
 
@@ -412,11 +437,7 @@ for _, l in loggers:
 
 print('Beginning training')
 
-config['epochs']
-
-originalparamshape = bu.tree_shape(params)
-original_optshape = bu.tree_shape(opt_state)
-
+config['epochs'] = 15
 
 for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
     params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key)
@@ -424,9 +445,8 @@ for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
         if i % t == 0 or i == cfg['epochs']:
             l(i, config, epoch_history=epoch_history, nbatches=nbatches)
 
-epoch_history['loss']
 
-#TODO:
+# TODO:
 # - add recog sites as translation rate modifiers
 # - store parameters somewhere easily retrievable
 # - plot individual nodes

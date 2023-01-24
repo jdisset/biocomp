@@ -259,7 +259,6 @@ def progress_scan(num_samples, progress_type=TQDMProgress, message=None, print_r
     return _progress_bar_scan
 
 
-@jit
 def tree_shape(t):
     return pytree.tree_map(lambda x: x.shape, t)
 

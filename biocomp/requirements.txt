@@ -1,0 +1,15 @@
+evosax
+jax
+json5
+matplotlib
+numpy
+optax
+pandas
+rich
+scipy
+tqdm
+wandb
+pyppeteer
+gspread
+streamlit
+streamlit-aggrid
