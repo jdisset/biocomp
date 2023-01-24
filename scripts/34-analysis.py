@@ -92,93 +92,24 @@ config = {
         "rng_key": 1,
     },
 }
-##
 
 nlines = {}
 dman = du.DataManager.from_xps([uorf_xp, ern_xp], config, inverse='all')
-for subset in tqdm([list(range(i)) for i in range(1, 4)]):
-    # dman.set_subset([0, 47])
-    dman.set_subset(subset)
-
-    key = jax.random.PRNGKey(config['rng_key'])
-    xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
-    zbatches = jax.random.uniform(key, ybatches.shape)
-    models = dman.get_jitted_models()
-
-    # --- init
-    params, constraints = {}, {}
-    optimizer = bc.train.get_optimizer(config)
-    for m, k in zip(models, jax.random.split(key, len(models))):
-        params, constraints = m.init(k, pre_params=params, pre_constraints=constraints)
-    dynamic, _ = bu.split_params(params, config['static_params'])
-    opt_state = optimizer.init(dynamic)
-
-    nbatches, nmodels = config['n_batches'], len(models)
-    assert nbatches == xbatches.shape[0] == ybatches.shape[0]
-
-    x_start = np.cumsum([m.n_inputs for m in models])[:-1]
-    y_start = np.cumsum([m.n_outputs for m in models])[:-1]
+dman.set_subset([0,47])
+key = jax.random.PRNGKey(config['rng_key'])
+models = dman.get_jitted_models()
 
 
-    jnp.split(xbatches[0][0], x_start, axis=0)
+# get wandb run
+import wandb as wb
+project_name='quantile_v0'
+run_code ='0zzf24l6'
 
-    def apply_models(params, x, z, key):
-        keys = jax.random.split(key, nmodels)
-        xs = jnp.split(x, x_start)
-        zs = jnp.split(z, y_start)
-        yhat = [m(params, xx, zz, k) for m, xx, zz, k in zip(models, xs, zs, keys)]
-        return jnp.concatenate(yhat, axis=0)
+# load latest params (latest_params_(<loss>).pkl)
+from pathlib import Path
+wdbpath = Path.home()/'wandb'
+rundir = Path(run.dir)/'files'
+rundir
+latest_params = [p for p in rundir.glob('latest_params_*.pkl')]
+latest_params
 
-    vmap_of_for = vmap(apply_models, in_axes=(None, 0, 0, 0))
-    def vfloss(params, X, Y, Z, key):
-        keys = jax.random.split(key, X.shape[0])
-        yhat = vmap_of_for(params, X, Z, keys)
-        error = yhat - Y
-        return jnp.mean(error**2)
-    def for_of_vmap(params, X, Z, key):
-        keys = jax.random.split(key, X.shape[0] * nmodels)
-        keys = keys.reshape((nmodels, X.shape[0], 2))
-        xs = jnp.split(X, x_start, axis=1)
-        zs = jnp.split(Z, y_start, axis=1)
-        yhat = [
-            vmap(m, in_axes=(None, 0, 0, 0))(params, xx, zz, k)
-            for m, xx, zz, k in zip(models, xs, zs, keys)
-        ]
-        return jnp.concatenate(yhat, axis=1)
-    def fvloss(params, X, Y, Z, key):
-        yhat = for_of_vmap(params, X, Z, key)
-        error = yhat - Y
-        return jnp.mean(error**2)
-
-    assert vfloss(params, xbatches[0], ybatches[0], zbatches[0], key) == fvloss(
-        params, xbatches[0], ybatches[0], zbatches[0], key
-    )
-
-    vfloss(params, xbatches[0], ybatches[0], zbatches[0], key)
-    fvloss(params, xbatches[0], ybatches[0], zbatches[0], key)
-
-    xbatches.shape
-
-    # s = jax.make_jaxpr(apply_models)(params, xbatches[0][0], zbatches[0][0], key).pretty_print()
-    # nlines.setdefault('apply_models', {})
-    # nlines[len(subset)] = len(s.splitlines())
-    # nlines[len(subset)] = len(s.splitlines())
-    # print(len(subset), nlines[len(subset)])
-
-    s_vf = jax.make_jaxpr(vfloss)(params, xbatches[0], ybatches[0], zbatches[0], key).pretty_print()
-    len(s_vf.splitlines())
-
-    nlines.setdefault('vf', {})
-    nlines['vf'][len(subset)] = len(s_vf.splitlines())
-
-    s_fv = jax.make_jaxpr(fvloss)(params, xbatches[0], ybatches[0], zbatches[0], key).pretty_print()
-    len(s_fv.splitlines())
-    nlines.setdefault('fv', {})
-    nlines['fv'][len(subset)] = len(s_fv.splitlines())
-
-    print(len(subset), nlines['vf'][len(subset)], nlines['fv'][len(subset)])
-
-##
-
-plt.plot(list(nlines.keys()), list(nlines.values()))
-plt.show()

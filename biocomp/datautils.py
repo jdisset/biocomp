@@ -124,7 +124,7 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     return selected
 
 
-@partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold'))
+# @partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold'))
 def sample_batches_direct(X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1):
     assert X.shape[0] == Y.shape[0]
     EPSILON = 1e-12
@@ -132,9 +132,12 @@ def sample_batches_direct(X, Y, batch_size, n_batches, kde, rng, quantile_thresh
 
     # select batch_size * n_batches random points, weight by inverse of density
     densities = kde.evaluate(X.T) + EPSILON
-    threshold = jnp.quantile(densities, quantile_threshold)
-    selection_proba = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY)))
-    indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
+    threshold = np.quantile(densities, quantile_threshold)
+    selection_proba = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY)))
+    selection_proba /= np.sum(selection_proba)
+    # indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
+    np.random.seed(rng[0])
+    indices = np.random.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba)
 
     Xsub = X[indices]
     Ysub = Y[indices]
@@ -147,7 +150,6 @@ def sample_batches_direct(X, Y, batch_size, n_batches, kde, rng, quantile_thresh
     Xbatches = Xsub.reshape((n_batches, batch_size, Xsub.shape[1]))
     Ybatches = Ysub.reshape((n_batches, batch_size, Ysub.shape[1]))
     return Xbatches, Ybatches
-
 
 # @partial(jit, static_argnames=('batch_size', 'n_batches', 'density_quantile_threshold'))
 def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_threshold):
@@ -168,7 +170,7 @@ def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_th
     ]
     xbatches, ybatches = zip(*all_batches)
     # concat along the feature axis (last dimension)
-    xbatches, ybatches = jnp.concatenate(tuple(xbatches), axis=2), jnp.concatenate(
+    xbatches, ybatches = np.concatenate(tuple(xbatches), axis=2), np.concatenate(
         tuple(ybatches), axis=2
     )
     assert xbatches.shape == (n_batches, batch_size, sum([x.shape[1] for x in X]))
@@ -180,8 +182,8 @@ def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_th
 class DataManager:
     def __init__(self, X: list, Y: list, models: list, cfg: dict):
         self.cfg = cfg
-        self._raw_X = [jnp.array(x) for x in X]
-        self._raw_Y = [jnp.array(y) for y in Y]
+        self._raw_X = [np.array(x) for x in X]
+        self._raw_Y = [np.array(y) for y in Y]
         self._models = models
         self._jitted_models = [jit(m) for m in models]
         self._X = self.rescale(self._raw_X)
@@ -196,12 +198,12 @@ class DataManager:
     def rescale(self, X):
         factor = self.cfg['log_factor']
         maxv = self.cfg['max_value']
-        return [jnp.log10(1 + (x / factor)) / jnp.log10(maxv / factor) for x in X]
+        return [np.log10(1 + (x / factor)) / np.log10(maxv / factor) for x in X]
 
     def unscale(self, X):
         factor = self.cfg['norm_factor']
         maxv = self.cfg['max_value']
-        return [factor * (jnp.power(maxv / factor, x) - 1) for x in X]
+        return [factor * (np.power(maxv / factor, x) - 1) for x in X]
 
     def get_batches(self, rng_key):
         xbatches, ybatches = _get_batches(

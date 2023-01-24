@@ -68,14 +68,13 @@ config = {
     **bc.train.DEFAULT_CFG,
     **{
         'node_impl': node_impl,
-        'rng_key': 42,
+        'rng_key': np.random.randint(0, 2 ** 32),
     },
 }
 
 dman = du.DataManager.from_xps([uorf_xp, ern_xp], config, inverse='all')
-# dman.set_subset([0, 22, 47, 10])
 
-loggers = bc.train.setup_wandb_logging('quantile_v0', dman, config)
+loggers = bc.train.setup_wandb_logging('quantile_v1', dman, config)
 
 bc.train.start(dman, config, loggers)
 

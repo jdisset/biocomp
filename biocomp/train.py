@@ -168,20 +168,19 @@ def local_save(epoch, cfg, epoch_history=None, save_dir=None, full_save=False, *
     params = ut.tree_get(epoch_history['params'], -1)
     loss = np.array(epoch_history['loss'])
     avg_loss = np.mean(loss)
-
     # stats = get_epoch_stats(epoch_history)
     # stats['loss'] = loss
     # du.save(stats, f'{save_dir}/epoch_{epoch}_stats.pkl')
 
     # first we rename the old params
-    for f in Path(save_dir).glob('latest_params_*.pkl'):
-        f.rename(f'{save_dir}/old_{f.name}')
+    for f in Path(save_dir).glob('latest_params.pkl'):
+        f.rename(f'{save_dir}/old_params.pkl')
 
     # then we save the new ones
-    du.save(params, f'{save_dir}/latest_params_({avg_loss:.5f}).pkl')
+    du.save(params, f'{save_dir}/latest_params.pkl')
 
     # then we delete the old one
-    for f in Path(save_dir).glob('old_latest_params_*.pkl'):
+    for f in Path(save_dir).glob('old_params.pkl'):
         f.unlink()
 
     print(f"Saving epoch to disk took {time.time() - t0:.2f}s")
@@ -212,13 +211,10 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
 def wandb_log_epoch(epoch, cfg, epoch_history=None, **_):
     if epoch_history is not None:
         # measure time now:
-        t0 = time.time()
         losses = np.array(epoch_history['loss'])
         for loss in losses:
             wb.log({'loss': loss})
-        del losses
         wb.log({'epoch_time': epoch_history['epoch_time']})
-        print(f"Logging epoch {epoch} to wandb took {time.time() - t0:.2f}s")
 
 
 def console_log(epoch, cfg, epoch_history=None, **_):
