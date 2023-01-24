@@ -52,14 +52,14 @@ def huber_quantile_loss(e, q, delta=0.1):
 # {{{                      --     default config     --
 # ···············································································
 
-T_SIZE = 64
+T_SIZE = 32
 T_DEPTH = 3
-I_SIZE = 64
+I_SIZE = 32
 I_DEPTH = 2
 I_OUT = 8
-ERN_SIZE = 128
+ERN_SIZE = 64
 ERN_DEPTH = 3
-MEFL_SIZE = 64
+MEFL_SIZE = 32
 MEFL_DEPTH = 3
 
 NN_NODES = dict(
@@ -105,13 +105,14 @@ NN_NODES = dict(
 
 DEFAULT_CFG = {
     "optimizer": "adam",
-    "learning_rate": 1e-5,
+    "learning_rate": 1e-4,
     "adam_w_decay": 1e-7,
     "rng_key": 42,
-    "epochs": 100,
+    "epochs": 300,
     "n_replicates": 1,
     "batch_size": 16,
     "n_batches": 2048,
+    'n_epochs_per_batch_rotation': 16,
     "kde_bw_method": 0.05,
     "log_factor": 1e3,
     "max_value": 1e7,
@@ -269,9 +270,9 @@ def setup_wandb_logging(project, dman, config):
     save_dir = Path(wb.run.dir)
     loggers = [
         (1, console_log),
-        (10, partial(local_save, save_dir=save_dir)),
+        (100, partial(local_save, save_dir=save_dir)),
         (1, wandb_log_epoch),
-        (10, partial(wandb_plot_pred, dman=dman)),
+        (100, partial(wandb_plot_pred, dman=dman)),
     ]
     return loggers
 
@@ -284,8 +285,10 @@ def start(dman: du.DataManager, cfg, loggers=None):
     xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
     models = dman.get_models()
 
-    nbatches, nmodels = config['n_batches'], len(models)
-    assert nbatches == xbatches.shape[0] == ybatches.shape[0]
+    total_batches, nmodels = config['n_batches'], len(models)
+    assert total_batches == xbatches.shape[0] == ybatches.shape[0]
+
+    nbatches_per_epoch = total_batches // config['n_epochs_per_batch_rotation']
 
     # --- init
     params, constraints = {}, {}
@@ -296,13 +299,15 @@ def start(dman: du.DataManager, cfg, loggers=None):
     opt_state = optimizer.init(dynamic)
 
     # --- loss and updates
-    x_start = np.cumsum([0] + [m.n_inputs for m in models])[:-1]
-    x_end = np.array([m.n_inputs for m in models]) + x_start
+    x_start = np.cumsum([m.n_inputs for m in models])[:-1]
+    y_start = np.cumsum([m.n_outputs for m in models])[:-1]
 
     def apply_models(params, x, z, key):
         keys = jax.random.split(key, nmodels)
-        y = [m(params, x[s:e], z[s:e], k) for m, s, e, k in zip(models, x_start, x_end, keys)]
-        return jnp.concatenate(y, axis=0)
+        xs = jnp.split(x, x_start)
+        zs = jnp.split(z, y_start)
+        yhat = [m(params, xx, zz, k) for m, xx, zz, k in zip(models, xs, zs, keys)]
+        return jnp.concatenate(yhat, axis=0)
 
     def loss_func(dynamic, static, X, Y, Z, key):
         assert X.ndim == Y.ndim == Z.ndim == 2
@@ -336,7 +341,7 @@ def start(dman: du.DataManager, cfg, loggers=None):
         }
         return res
 
-    @ut.progress_scan(nbatches, message='Training model')
+    @ut.progress_scan(nbatches_per_epoch, message='Training model')
     def scannable_step(carry, i_x_y_z_k):
         params, opt_state = carry
         i, x, y, z, k = i_x_y_z_k
@@ -345,13 +350,13 @@ def start(dman: du.DataManager, cfg, loggers=None):
         return (params, opt_state), updt
 
     @jit
-    def epoch_step(start_params, start_opt_state, epoch_key):
-        zbatches = jax.random.uniform(epoch_key, ybatches.shape)
-        batch_keys = jax.random.split(epoch_key, nbatches)
+    def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
+        zbatches = jax.random.uniform(epoch_key, ybs.shape)
+        batch_keys = jax.random.split(epoch_key, nbatches_per_epoch)
         (final_params, final_opt_state), epoch_history = jax.lax.scan(
             scannable_step,
             (start_params, start_opt_state),
-            (jnp.arange(nbatches), xbatches, ybatches, zbatches, batch_keys),
+            (jnp.arange(nbatches_per_epoch), xbs, ybs, zbatches, batch_keys),
         )
         return final_params, final_opt_state, epoch_history
 
@@ -368,8 +373,14 @@ def start(dman: du.DataManager, cfg, loggers=None):
 
     for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
         t0 = time.time()
-        params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key)
+
+        batch_rotation = i % config['n_epochs_per_batch_rotation']
+        start_idx = batch_rotation * nbatches_per_epoch
+        end_idx = start_idx + nbatches_per_epoch
+        params, opt_state, epoch_history = epoch_step(
+            params, opt_state, epoch_key, xbatches[start_idx:end_idx], ybatches[start_idx:end_idx]
+        )
         epoch_history['epoch_time'] = time.time() - t0
         for t, l in loggers:
             if i % t == 0 or i == cfg['epochs']:
-                l(i, config, epoch_history=epoch_history, nbatches=nbatches)
+                l(i, config, epoch_history=epoch_history, nbatches=nbatches_per_epoch)

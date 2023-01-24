@@ -8,15 +8,16 @@ import itertools
 import numpy as np
 
 ### {{{                        --     node config     --
-T_SIZE = 128
+T_SIZE = 64
 T_DEPTH = 4
-I_SIZE = 128
+I_SIZE = 64
 I_DEPTH = 3
-I_OUT = 16
-ERN_SIZE = 256
+I_OUT = 8
+ERN_SIZE = 128
 ERN_DEPTH = 4
-MEFL_SIZE = 128
+MEFL_SIZE = 64
 MEFL_DEPTH = 4
+
 node_impl = dict(
     bc.nodes.DEFAULT_COMPUTE_NODES_DICT,
     **{
@@ -67,8 +68,7 @@ config = {
     **bc.train.DEFAULT_CFG,
     **{
         'node_impl': node_impl,
-        'epochs': 30,
-        "rng_key": np.random.randint(0, 2 ** 32),
+        'rng_key': 42,
     },
 }
 
