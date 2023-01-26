@@ -6,15 +6,12 @@ import jax.numpy as jnp
 
 DEFAULT_ACTIVATION = jax.nn.leaky_relu
 
-def flat_concat(*arrays):
-    return jnp.concatenate([a.ravel() for a in arrays])
-
 def dense_layer(input_values, output_size, get_param, key, name):
     input_size = 1 if input_values.shape == () else input_values.shape[0]
     w = get_param(f'{name}_w', init=ut.he_initializer(key, (input_size, output_size)), shared=True)
     b = get_param(f'{name}_b', init=lambda: jnp.zeros((output_size,)), shared=True)
-"
-"    assert input_values.shape == (input_size,)
+
+    assert input_values.shape == (input_size,)
     assert w.shape == (input_size, output_size)
     assert b.shape == (output_size,)
 
@@ -69,7 +66,7 @@ def transform_nn(
         assert value.ndim == 1
         assert rate_embeding.ndim == 1
 
-        inputs = flat_concat(value, rate_embeding, quantile)
+        inputs = ut.flat_concat(value, rate_embeding, quantile)
 
         out = inner_activation(
             dense_multilevel(
@@ -108,7 +105,7 @@ def transform_nn(
             jax.vmap(inner, in_axes=(0, 0, None, None))(val, rates, quantile, k1), axis=0
         )
 
-        inner_out = flat_concat(inner_out, quantile)
+        inner_out = ut.flat_concat(inner_out, quantile)
 
         # then we apply a final outer layer to the summed output:
         return outer_activation(
@@ -144,7 +141,7 @@ def sequestron_ERN(
             param_name, init=ut.continuous_initializer(rng_key, (affinity_dim,)), shared=True
         )
         res = dense_multilevel(
-            flat_concat(neg, pos, affinity, quantile),
+            ut.flat_concat(neg, pos, affinity, quantile),
             wsize,
             out_dim,
             depth,
@@ -177,7 +174,7 @@ def output(get_param, get_quantized, wsize=64, depth=3, **_):
         res = jnp.array(
             [
                 dense_multilevel(
-                    flat_concat(x,q),
+                    ut.flat_concat(x,q),
                     wsize,
                     1,
                     depth,
