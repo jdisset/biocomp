@@ -74,7 +74,7 @@ config = {
 
 dman = du.DataManager.from_xps([uorf_xp, ern_xp], config, inverse='all')
 
-loggers = bc.train.setup_wandb_logging('quantile_v1', dman, config)
+loggers = bc.train.setup_wandb_logging('quantile_v2', dman, config)
 
 bc.train.start(dman, config, loggers)
 

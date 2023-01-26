@@ -46,7 +46,7 @@ def get_param(
         return overwrite_with
 
     if ut.at_path(params, dpath) is None:
-        assert read_only is False
+        assert read_only is False, f'Cannot initialize a read_only param for path {dpath}'
         try:
             r = ut.at_path(params, dpath, init())
             if clip_to is not None:
@@ -249,6 +249,7 @@ class ComputeGraphModel:
             rng_key,
             read_only=True,
             constraints=None,
+            with_neg_grad=False,
         ) -> tuple[jnp.ndarray, dict[int, jnp.ndarray]]:
             """
             params: the parameters
@@ -266,8 +267,18 @@ class ComputeGraphModel:
             keys = jax.random.split(rng_key, len(flat_batches))
 
             results = {}
+            grads = []
 
             for (n, key) in zip(call_dicts, keys):
+                extra_params = n['extra_params']
+
+                get_grad = (
+                    with_neg_grad
+                    and n['type'] in with_neg_grad
+                    and extra_params['n_outputs'] <= 1
+                    and extra_params['n_inputs'] == 1
+                )
+
                 nid = n['nid']
 
                 if n['type'] == 'input':
@@ -275,6 +286,7 @@ class ComputeGraphModel:
                     continue
 
                 upstream_results = []
+
                 for inp in n['input_from']:
                     if len(results[inp[0]].shape) == 0:
                         upstream_results.append(results[inp[0]])
@@ -289,8 +301,6 @@ class ComputeGraphModel:
                     read_only=read_only,
                 )
 
-                extra_params = n['extra_params']
-
                 qtl = None
                 if quantiles is not None:
                     pick_quantile = n['extra_params'].get('quantile_variable_id', [])
@@ -299,17 +309,38 @@ class ComputeGraphModel:
 
                 get_q = partial(n['get_q'], get_p, rng_key=key)
                 comp_node = n['fun'](get_p, get_q, **extra_params)
-                res = comp_node(*upstream_results, quantile=qtl, rng_key=key)
+
+                if get_grad:
+                    res, grad = jax.value_and_grad(comp_node, argnums=0)(
+                        *upstream_results, quantile=qtl, rng_key=key
+                    )
+                    grads.append(grad)
+                else:
+                    res = comp_node(*upstream_results, quantile=qtl, rng_key=key)
+
                 results[nid] = res
 
                 if n['type'] == 'output':
+                    if with_neg_grad:
+                        return res, grads, results
                     return res, results
 
             raise ValueError('Invalid compute graph, no output node found')
 
         def apply(*args, **kwargs):
             """Executes the model. It simply calls collect_all_results and only returns the final output"""
-            return collect_all_results(*args, **kwargs)[0]
+            return collect_all_results(*args, with_neg_grad=False, **kwargs)[0]
+
+        def apply_and_grad(
+            *args, with_neg_grad=['transcription', 'translation', 'output'], **kwargs
+        ):
+            """Executes the model. It simply calls collect_all_results and only returns the final output"""
+            allres = collect_all_results(*args, with_neg_grad=with_neg_grad, **kwargs)
+            grads = jnp.array(allres[1])
+            neg_grad = (
+                jnp.zeros(1) if len(allres[1]) == 0 else jnp.mean(jnp.where(grads < 0, grads, 0))
+            )
+            return allres[0], neg_grad
 
         def init(rng_key, pre_params=None, pre_constraints=None):
             params = {} if pre_params is None else pre_params
@@ -325,6 +356,7 @@ class ComputeGraphModel:
             return params, constraints
 
         self.apply = apply
+        self.apply_and_grad = apply_and_grad
         self.collect_all_results = collect_all_results
         self.init = init
         self.flat_batches = flat_batches
@@ -385,7 +417,7 @@ class ComputeGraphModel:
         params_per_type = {k: dict() for k in node_dict.keys()}
         pnode = params['node']
         if self.node_namespace is not None:
-            pnode = pnode[self.node_namespace]
+            pnode = params['node'][self.node_namespace]
         for node_type, node_ids in node_dict.items():
             for node_id in node_ids:
                 if node_id in pnode.keys():

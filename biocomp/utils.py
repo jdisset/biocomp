@@ -159,6 +159,9 @@ def load_json5(path):
         return json5.load(f)
 
 
+def flat_concat(*arrays):
+    return jnp.concatenate([a.ravel() for a in arrays])
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 

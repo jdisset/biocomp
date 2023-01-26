@@ -117,6 +117,7 @@ DEFAULT_CFG = {
     "log_factor": 1e3,
     "max_value": 1e7,
     "density_quantile_threshold": 0.07,
+    "negative_grad_penalty": 0.1,
     "huber_quantile_loss_delta": 0.1,
     "static_params": [['node']],
 }
@@ -298,12 +299,20 @@ def start(dman: du.DataManager, cfg, loggers=None):
     x_start = np.cumsum([m.n_inputs for m in models])[:-1]
     y_start = np.cumsum([m.n_outputs for m in models])[:-1]
 
-    def apply_models(params, x, z, key):
+    def apply_models_and_grad(params, x, z, key):
         keys = jax.random.split(key, nmodels)
         xs = jnp.split(x, x_start)
         zs = jnp.split(z, y_start)
-        yhat = [m(params, xx, zz, k) for m, xx, zz, k in zip(models, xs, zs, keys)]
-        return jnp.concatenate(yhat, axis=0)
+        res = [m.apply_and_grad(params, xx, zz, k) for m, xx, zz, k in zip(models, xs, zs, keys)]
+        yhat, grads = zip(*res)
+        return jnp.concatenate(yhat, axis=0), jnp.min(ut.flat_concat(*grads))
+
+    # def apply_models(params, x, z, key):
+    # keys = jax.random.split(key, nmodels)
+    # xs = jnp.split(x, x_start)
+    # zs = jnp.split(z, y_start)
+    # yhat = [m(params, xx, zz, k) for m, xx, zz, k in zip(models, xs, zs, keys)]
+    # return jnp.concatenate(yhat, axis=0)
 
     def loss_func(dynamic, static, X, Y, Z, key):
         assert X.ndim == Y.ndim == Z.ndim == 2
@@ -314,11 +323,20 @@ def start(dman: du.DataManager, cfg, loggers=None):
         params = ut.assemble_params(dynamic, static)
 
         keys = jax.random.split(key, X.shape[0])
-        yhat = vmap(apply_models, in_axes=(None, 0, 0, 0))(params, X, Z, keys)
+        yhat, grads = vmap(apply_models_and_grad, in_axes=(None, 0, 0, 0))(params, X, Z, keys)
         assert yhat.shape == Y.shape
+        assert grads.shape == (X.shape[0],)
 
         error = yhat - Y
-        return jnp.mean(huber_quantile_loss(error, Z, delta=config['huber_quantile_loss_delta']))
+        qantile_loss = jnp.mean(
+            huber_quantile_loss(error, Z, delta=config['huber_quantile_loss_delta'])
+        )
+
+        negative_grad_penalty = config['negative_grad_penalty'] * jnp.mean(
+            jnp.where(grads < 0, -grads, 0)
+        )
+
+        return qantile_loss + negative_grad_penalty
 
     def training_step(params, opt_state, x, y, z, key):
         dynamic, static = ut.split_params(params, [['node']])

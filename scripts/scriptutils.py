@@ -628,8 +628,8 @@ def plot_node(
     ntype,
     params,
     model,
-    xlim=[0.0, 10.0],
-    ylim=[0.0, 10.0],
+    xlim=[0.0, 1.0],
+    ylim=[0.0, 1.0],
     n_samples=200,
     figsize=(12, 7),
     n_inputs=1,
@@ -641,7 +641,13 @@ def plot_node(
     import jax.numpy as jnp
 
     quantized_per_type = model.get_quantized_parameters_per_node_type(params)
-    print(quantized_per_type)
+    # quantized per type is a dict of node_name -> dict
+    # for each node_name that starts with inv_, we need to copy the dict of the node without the inv_ prefix
+    for k in list(quantized_per_type.keys()):
+        if k.startswith('inv_'):
+            if k[4:] in quantized_per_type:
+                quantized_per_type[k].update(quantized_per_type[k[4:]])
+
 
     def get_q(__, v, **_):
         return v
@@ -650,6 +656,7 @@ def plot_node(
         if shared:
             return params['shared'][param_name]
         else:
+            # if ntype starts with inv_ then we need to remove the inv_ prefix
             val: dict(str, jnp.array) = quantized_per_type[ntype][param_name]
             val = [val[k] for k in sorted(val.keys())]
             return val[index[param_name]]
@@ -676,6 +683,9 @@ def plot_node(
         ax.set_ylabel('output')
         ax.set_xlim(xlim)
         ax.set_ylim(ylim)
+        # set correct ratio (depends on xlim and ylim)
+        ax.set_aspect('equal')
+
 
     elif n_inputs == 2:
         # we will have a grid of n_combinations heatmaps
@@ -692,14 +702,14 @@ def plot_node(
 
     while True:
 
-        def vf(x):
+        def vf(x,z):
             if extra_args is not None:
                 f = model.node_impl[ntype](partial(get_p, index=counter_val), get_q, **extra_args)
             else:
                 f = model.node_impl[ntype](partial(get_p, index=counter_val), get_q)
-            return f(*x, rng_key=jax.random.PRNGKey(0))
+            return f(*x, quantile=z, rng_key=jax.random.PRNGKey(0))
 
-        Y = jax.vmap(vf)(X)
+        Y = jax.vmap(vf, in_axes=(0, None))(X, jnp.asarray([0.5]))
 
         values = [
             sorted(quantized_per_type[ntype][pname].keys())[counter_val[pname]]
