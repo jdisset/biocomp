@@ -248,7 +248,6 @@ class DataManager:
 
     @classmethod
     def from_xps(cls, xplist, config=dft.DEFAULT_CONFIG, **kw):
-        print(f'config = {config}')
         models, samples = zip(
             *[xp.build_models(node_impl=config['node_impl'], **kw) for xp in xplist]
         )
