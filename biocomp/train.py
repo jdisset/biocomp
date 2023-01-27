@@ -19,6 +19,7 @@ from . import datautils as du
 from . import utils as ut
 from . import nodes as nodes
 from . import nn_nodes as nn
+from . import defaults as dft
 from .compute import ComputeGraphModel
 import wandb as wb
 import os
@@ -44,83 +45,6 @@ def huber_quantile_loss(e, q, delta=0.1):
         jnp.abs(e) <= delta, 0.5 * e**2, delta * (jnp.abs(e) - 0.5 * delta)
     ) * jnp.where(e < 0, q, (1.0 - q))
 
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                      --     default config     --
-# ···············································································
-
-T_SIZE = 32
-T_DEPTH = 3
-I_SIZE = 32
-I_DEPTH = 2
-I_OUT = 8
-ERN_SIZE = 64
-ERN_DEPTH = 3
-MEFL_SIZE = 32
-MEFL_DEPTH = 3
-
-NN_NODES = dict(
-    nodes.DEFAULT_COMPUTE_NODES_DICT,
-    **{
-        'output': partial(nn.output, wsize=MEFL_SIZE, depth=MEFL_DEPTH),
-        'transcription': partial(
-            nn.transcription,
-            outer_wsize=T_SIZE,
-            outer_depth=T_DEPTH,
-            inner_wsize=I_SIZE,
-            inner_depth=I_DEPTH,
-            inner_out=I_OUT,
-        ),
-        'translation': partial(
-            nn.translation,
-            outer_wsize=T_SIZE,
-            outer_depth=T_DEPTH,
-            inner_wsize=I_SIZE,
-            inner_depth=I_DEPTH,
-            inner_out=I_OUT,
-        ),
-        'inv_transcription': partial(
-            nn.inv_transcription,
-            outer_wsize=T_SIZE,
-            outer_depth=T_DEPTH,
-            inner_wsize=I_SIZE,
-            inner_depth=I_DEPTH,
-            inner_out=I_OUT,
-        ),
-        'inv_translation': partial(
-            nn.inv_translation,
-            outer_wsize=T_SIZE,
-            outer_depth=T_DEPTH,
-            inner_wsize=I_SIZE,
-            inner_depth=I_DEPTH,
-            inner_out=I_OUT,
-        ),
-        'sequestron_ERN': partial(nn.ERN5p, wsize=ERN_SIZE, depth=ERN_DEPTH),
-        'sequestron_ERN3p': partial(nn.ERN3p, wsize=ERN_SIZE, depth=ERN_DEPTH),
-    },
-)
-
-DEFAULT_CFG = {
-    "optimizer": "adam",
-    "learning_rate": 1e-4,
-    "adam_w_decay": 1e-7,
-    "rng_key": 42,
-    "epochs": 300,
-    "n_replicates": 1,
-    "batch_size": 16,
-    "n_batches": 2048,
-    'n_epochs_per_batch_rotation': 16,
-    "kde_bw_method": 0.05,
-    "log_factor": 1e3,
-    "max_value": 1e7,
-    "density_quantile_threshold": 0.07,
-    "negative_grad_penalty": 0.1,
-    "huber_quantile_loss_delta": 0.1,
-    "static_params": [['node']],
-}
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -275,7 +199,7 @@ def setup_wandb_logging(project, dman, config):
 
 
 def start(dman: du.DataManager, cfg, loggers=None):
-    config = {**DEFAULT_CFG, **cfg}
+    config = {**dft.DEFAULT_CONFIG, **cfg}
 
     key = jax.random.PRNGKey(config['rng_key'])
 

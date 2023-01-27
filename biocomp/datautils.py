@@ -11,6 +11,7 @@ import scriptutils as ut
 from pathlib import Path
 import json5
 import json
+from . import defaults as dft
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from jax.scipy.stats import gaussian_kde
@@ -88,7 +89,6 @@ def style_violin(parts):
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     data manager     --
 # ···············································································
-
 
 def data_checks(X, Y, models):
     assert len(X) == len(Y)
@@ -179,8 +179,9 @@ def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_th
     return xbatches, ybatches
 
 
+
 class DataManager:
-    def __init__(self, X: list, Y: list, models: list, cfg: dict):
+    def __init__(self, X: list, Y: list, models: list, cfg: dict = dft.DEFAULT_CONFIG):
         self.cfg = cfg
         self._raw_X = [np.array(x) for x in X]
         self._raw_Y = [np.array(y) for y in Y]
@@ -201,7 +202,7 @@ class DataManager:
         return [np.log10(1 + (x / factor)) / np.log10(maxv / factor) for x in X]
 
     def unscale(self, X):
-        factor = self.cfg['norm_factor']
+        factor = self.cfg['log_factor']
         maxv = self.cfg['max_value']
         return [factor * (np.power(maxv / factor, x) - 1) for x in X]
 
@@ -236,11 +237,18 @@ class DataManager:
     def get_Y(self):
         return self.__get(self._Y)
 
+    def get_raw_X(self):
+        return self.__get(self._raw_X)
+
+    def get_raw_Y(self):
+        return self.__get(self._raw_Y)
+
     def get_jitted_models(self):
         return self.__get(self._jitted_models)
 
     @classmethod
-    def from_xps(cls, xplist, config, **kw):
+    def from_xps(cls, xplist, config=dft.DEFAULT_CONFIG, **kw):
+        print(f'config = {config}')
         models, samples = zip(
             *[xp.build_models(node_impl=config['node_impl'], **kw) for xp in xplist]
         )
@@ -254,6 +262,7 @@ class DataManager:
 
 
 #                                                                            }}}
+
 # {{{                         --     batches     --
 # ···············································································
 
@@ -543,6 +552,7 @@ def heatmap(
 
 def smooth_1d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
     tree = cKDTree(x)
+
     input_name = model.get_inverted_input_proteins()
     output_names = model.get_output_proteins()
     assert len(output_names) == 2
@@ -579,6 +589,11 @@ def smooth_1d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
 def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, **kw):
     input_name = model.get_inverted_input_proteins()
     output_names = model.get_output_proteins()
+    
+    reordered_input = sorted(input_name)[::-1]
+    if reordered_input != input_name:
+        x = x[:, [input_name.index(i) for i in reordered_input]]
+    
     assert len(output_names) == 3
     assert len(input_name) == 2
     output = list(set(output_names) - set(input_name))
@@ -608,8 +623,8 @@ def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, *
 
     heatmap(ax, z, ticks=ticks, ticklabels=tlabels, colorbar=True)
     ax.set_title(f'{model.network.name}\n{output[0]} smoothed mean')
-    ax.set_xlabel(input_name[0])
-    ax.set_ylabel(input_name[1])
+    ax.set_xlabel(reordered_input[0])
+    ax.set_ylabel(reordered_input[1])
 
     # remove plot border (the frame, I think?)
     for spine in ax.spines.values():
@@ -722,6 +737,12 @@ def report(params, dman, id, suptitle=''):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
+
+
+
+
+### {{{                         --     archives     --
 # ─────────────────────────────────────────────────────────────────────────────
 #                              BINNING BASED TOOLS
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -1318,6 +1339,7 @@ def old_heatmap(
 # )
 
 #                                                                            }}}
+
 # {{{                       --     data manager     --
 # ···············································································
 
@@ -1406,10 +1428,6 @@ class DataManager_bin:
 
 
 #                                                                            }}}
-
-
-### {{{                         --     archives     --
-
 
 def sample_batches(
     X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1, x_pad_to=None, y_pad_to=None

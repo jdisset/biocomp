@@ -78,10 +78,24 @@ node_impl = dict(
 )
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-lib = ut.load_lib()
-uorf_xp = ut.load_xp('2022-11-10_uORFs_and_company', lib)
-ern_xp = ut.load_xp('20220501-GW-l1vsl2', lib)
+### {{{                        --     load params     --
+# get wandb run
+import wandb as wb
+import pickle
+project_name='quantile_v2'
+run_code ='v1ruml8t'
+run_code='q0q94g0w'
+run = wb.Api().run(f'{project_name}/{run_code}')
 
+# load latest params (latest_params.pkl)
+param_file = run.file('latest_params.pkl').download(replace=True)
+with open(param_file.name, 'rb') as f:
+    params = pickle.load(f)
+
+##────────────────────────────────────────────────────────────────────────────}}}lib = ut.load_lib()
+
+### {{{                         --     load xps     --
+lib = ut.load_lib()
 
 config = {
     **bc.train.DEFAULT_CFG,
@@ -92,79 +106,142 @@ config = {
         "rng_key": 1,
     },
 }
+# config2 = {**config, **{'log_factor':1e3, 'max_value':1e9}}
+
+key = jax.random.PRNGKey(config['rng_key'])
+
+uorf_xp = ut.load_xp('2022-11-10_uORFs_and_company', lib)
+ern_xp = ut.load_xp('20220501-GW-l1vsl2', lib)
+real_data = '2023-01-22_CasE_ALLuORFs'
+real_xp = ut.load_xp(real_data, lib)
+real_dman = du.DataManager.from_xps([real_xp], config)
+##
+mass_xp = ut.load_xp('E20221012A_massCtrls', lib)
+mass_dman = du.DataManager.from_xps([mass_xp], config)
+# ut.plot_networks([m.network for m in mass_dman.get_models()])
+mass_mnames = [m.node_namespace for m in mass_dman.get_models()]
+mass_mnames
+
+plot_dist2d(mass_dman, 0)
+
+##────────────────────────────────────────────────────────────────────────────}}}
+from jax.scipy.stats import gaussian_kde
+
+def plot_dist2d(dman, mid):
+    fig, ax = du.mkfig(1,1, (10,10))
+    mnames = [m.node_namespace for m in dman.get_models()]
+    model = dman.get_models()[mid]
+    rawx = dman.get_raw_X()[mid]
+    input_name = model.get_inverted_input_proteins()
+    reordered_input = sorted(input_name)[::-1]
+    if reordered_input != input_name:
+        rawx = rawx[:, [input_name.index(i) for i in reordered_input]]
+    XX  = np.array([rawx[:,0], rawx[:,1]]).T
+    ax.scatter(XX[:,0], XX[:,1], s=1,  alpha=1, color='k', linewidth=0, marker=',')
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel(reordered_input[0])
+    ax.set_ylabel(reordered_input[1])
+    ax.set_xlim(1, 1e9)
+    ax.set_ylim(1, 1e9)
+    kde = gaussian_kde(XX.T, bw_method=1)
+    densities = kde(XX.T)
+    max_density_coords = XX[np.argmax(densities)]
+    # mark with a red cross
+    ax.scatter(max_density_coords[0], max_density_coords[1], marker='x', color='r', s=100, linewidth=2)
+    ax.set_title(f'{mnames[mid]}\n raw x data distribution')
+
+def plot_dist1d(dman, mid):
+    fig, ax = du.mkfig(1,1, (10,10))
+    mnames = [m.node_namespace for m in dman.get_models()]
+    model = dman.get_models()[mid]
+    rawx = dman.get_raw_X()[mid]
+    rawy = dman.get_raw_Y()[mid]
+    input_name = model.get_inverted_input_proteins()
+    output_names = model.get_output_proteins()
+    output = list(set(output_names) - set(input_name))
+    output_pos = output_names.index(output[0])
+    rawy = rawy[:, output_pos]
+    XX  = np.array([rawx[:,0], rawy]).T
+    ax.scatter(rawx, rawy, s=1,  alpha=1, color='k', linewidth=0, marker=',')
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel(input_name[0])
+    ax.set_ylabel(output[0])
+    ax.set_xlim(1, 1e9)
+    ax.set_ylim(1, 1e9)
+    kde = gaussian_kde(XX.T, bw_method=1)
+    densities = kde(XX.T)
+    max_density_coords = XX[np.argmax(densities)]
+    # mark with a red cross
+    ax.scatter(max_density_coords[0], max_density_coords[1], marker='x', color='r', s=100, linewidth=2)
+    ax.set_title(f'{mnames[mid]}\n raw x data distribution')
+
+plot_dist1d(dman, 0)
 
 dman = du.DataManager.from_xps([uorf_xp, ern_xp], config, inverse='all')
-dman.set_subset([0,47])
-key = jax.random.PRNGKey(config['rng_key'])
-jmodels = dman.get_jitted_models()
-models = dman.get_models()
+mnames = [m.node_namespace for m in dman.get_models()]
+
+plot_dist2d(dman, -1)
+plot_dist1d(dman, 0)
+
+plot_dist2d(dman, -2)
+plot_dist2d(dman, -3)
 
 
-# get wandb run
-import wandb as wb
-import pickle
-project_name='quantile_v1'
-run_code ='usby7330'
-run = wb.Api().run(f'{project_name}/{run_code}')
-
-# load latest params (latest_params.pkl)
-param_file = run.file('latest_params.pkl').download(replace=True)
-with open(param_file.name, 'rb') as f:
-    params = pickle.load(f)
-
-params['shared']
-
-# mparams = {}
-# m = models[47]
-# m.node_namespace = None
-# m.init(key, mparams)
-# full_params = params
-# full_params['node'] = mparams['node']
 
 ##
+
+real_data = '2023-01-22_CasE_ALLuORFs'
+real_xp = ut.load_xp(real_data, lib)
+# config2 = {**config, **{'log_factor':1e3, 'max_value':1e9}}
+real_dman = du.DataManager.from_xps([real_xp], config)
+
+real_mnames = [m.network.name for m in real_dman.get_models()]
+real_mnames
+
+plot_dist2d(real_dman, 1)
+mid = 1
+model = real_dman.get_models()[mid]
+mX = real_dman.get_X()[mid]
+mY = real_dman.get_Y()[mid]
+# fig, ax = du.mkfig(1,1)
+# du.model_plot(model, mX, mY, real_dman.rescale, ax, kde=real_dman.get_kdes()[mid])
+
+
+
+
+### {{{                        --     plot nodes     --
+
 ut.plot_networks([m.network])
 
-ut.plot_node('inv_translation', full_params, m, xlim=(0, 1), ylim=(-0.1, 2))
-ut.plot_node('inv_transcription', full_params, m, xlim=(-0.1, 2), ylim=(0, 2))
-ut.plot_node('transcription', full_params, m, xlim=(0, 2), ylim=(-0.05, 0.6))
-ut.plot_node('translation', full_params, m, xlim=(-0.05, .6), ylim=(-0.01, 0.8))
-
-extra = m.network.compute_graph[m.network.compute_graph.type == 'sequestron_ERN'].extra.to_list()
-ut.plot_node('sequestron_ERN', full_params, m, xlim=(-0.01, 0.8), n_inputs=2,extra_args=extra[0])
-ut.plot_node('output', full_params, m, xlim=(0, 3), ylim=(-0.3, 1.3))
-
-m.apply_and_grad(full_params, np.array([0.5,0.5]), np.array([0.5,0.5,0.5]), key)
-
-##
-nmodels = len(models)
-x_start = np.cumsum([m.n_inputs for m in models])[:-1]
-y_start = np.cumsum([m.n_outputs for m in models])[:-1]
-
-def flat_concat(*arrays):
-    return jnp.concatenate([a.ravel() for a in arrays])
-
-def apply_models(params, x, z, key):
-    keys = jax.random.split(key, nmodels)
-    xs = jnp.split(x, x_start)
-    zs = jnp.split(z, y_start)
-    res = [m.apply_and_grad(params, xx, zz, k) for m, xx, zz, k in zip(models, xs, zs, keys)]
-    yhat, grads = zip(*res)
-    return jnp.concatenate(yhat, axis=0), jnp.min(flat_concat(*grads))
-
-apply_models(params, np.ones(20), np.ones(30), key)
-
-keys = jax.random.split(key, 2)
-yhat = vmap(apply_models, in_axes=(None, 0, 0, 0))(params, np.ones((2,20)), np.ones((2,30)), keys)
-
-yhat
+# ut.plot_node('inv_translation', full_params, m, xlim=(0, 1), ylim=(-0.1, 2))
+# ut.plot_node('inv_transcription', full_params, m, xlim=(-0.1, 2), ylim=(0, 2))
+# ut.plot_node('transcription', full_params, m, xlim=(0, 2), ylim=(-0.05, 0.6))
+# ut.plot_node('translation', full_params, m, xlim=(-0.05, .6), ylim=(-0.01, 0.8))
+# ut.plot_node('output', full_params, m, xlim=(0, 3), ylim=(-0.3, 1.3))
 
 
-# TODO:
-# force > 0
-# force symmetry of inv/fwd nodes
+ut.plot_node('inv_translation', full_params, m, xlim=(0, 1), ylim=(-1, 2))
+ut.plot_node('inv_transcription', full_params, m, xlim=(0, 1), ylim=(-1, 2))
+ut.plot_node('transcription', full_params, m, xlim=(0, 2), ylim=(0, 2))
+ut.plot_node('translation', full_params, m, xlim=(0, 2), ylim=(0, 2))
+# ut.plot_node('translation', full_params, m, xlim=(-0.05, .6), ylim=(-0.01, 0.8))
+ut.plot_node('output', full_params, m, xlim=(0, 2), ylim=(0, 2))
 
+# extra = m.network.compute_graph[m.network.compute_graph.type == 'sequestron_ERN'].extra.to_list()
+# ut.plot_node('sequestron_ERN', full_params, m, xlim=(-0.01, 0.8), n_inputs=2,extra_args=extra[0])
+
+
+##────────────────────────────────────────────────────────────────────────────}}}m.apply_and_grad(full_params, np.array([0.5,0.5]), np.array([0.5,0.5,0.5]), key)
 
 ### {{{                     --     uorfs on ern side     --
+mparams = {}
+m = models[47]
+m.node_namespace = None
+m.init(key, mparams)
+full_params = params
+full_params['node'] = mparams['node']
 
 
 def any_uorf(lib, *_, **__):

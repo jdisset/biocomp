@@ -232,7 +232,16 @@ class XP:
     # and data (in a dictionary of sample name -> pandas dataframe)
     # It also provides convenience functions to build the corrersponding networks and models.
 
-    def __init__(self, xp_name, xp_path, recipe_path, lib, db_path=":memory:", inverse='shortest'):
+    def __init__(
+        self,
+        xp_name,
+        xp_path,
+        recipe_path,
+        lib,
+        db_path=":memory:",
+        inverse='shortest',
+        data_path='./data',
+    ):
         log.debug(f'Initializing XP {xp_name}')
         self.xp_path, self.recipe_path = Path(xp_path), Path(recipe_path)
         self.samples: list  # [{name, recipe, notes}]
@@ -252,6 +261,14 @@ class XP:
             except Exception as e:
                 raise RuntimeError(f'Error loading xp file {self.xpfile}: \n{e}')
 
+        if not Path(data_path).is_absolute():
+            self.datapath = self.xp_path / self.name / data_path
+        else:
+            self.datapath = Path(data_path)
+
+        if not self.datapath.exists():
+            raise RuntimeError(f'Data path {self.datapath} does not exist')
+
         # load all the recipes inside
         self.recipe_names = [s['recipe'] for s in self.samples]
         unique_recipe_names = list(set(self.recipe_names))
@@ -263,9 +280,7 @@ class XP:
 
     def load_raw_data(self):
         """Load the raw data for each sample in the xp"""
-        datafiles = [
-            self.xp_path / self.name / 'data' / f"{s['name']}.{self.name}.csv" for s in self.samples
-        ]
+        datafiles = [self.datapath / f"{s['name']}.{self.name}.csv" for s in self.samples]
         df_data: dict[str, pd.DataFrame] = {}
         for s, f in tqdm(
             list(zip(self.samples, datafiles)), desc=f"loading data files for {self.name}"

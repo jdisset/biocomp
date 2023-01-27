@@ -19,5 +19,6 @@ from . import train as train
 from . import evo as evo
 from . import nodes as nodes
 from . import nn_nodes as nn
+from . import defaults as defaults
 
 from .utils import logger as logger

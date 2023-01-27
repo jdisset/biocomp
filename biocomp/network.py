@@ -8,7 +8,7 @@ from itertools import product
 
 
 part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF_group': 'tl_rate'}
-parameter_to_default_part = {'tl_rate': 'empty_tc'}
+parameter_to_default_part = {'tl_rate': 'empty_tc', 'tc_rate': 'empty'}
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -144,7 +144,13 @@ class TranscriptionUnit:
         # then for each param that is not in the slots, add it with default value
         for _, p in part_type_to_parameter_name.items():
             if p not in self.params:
-                self.params[p] = [parameter_to_default_part[p]]
+                try:
+                    self.params[p] = [parameter_to_default_part[p]]
+                except KeyError:
+                    msg = f'No default part for parameter {p}'
+                    msg += f' (part_type_to_parameter_name: {part_type_to_parameter_name})'
+                    msg += f' (parameter_to_default_part: {parameter_to_default_part})'
+                    raise ValueError(msg)
 
     def __repr__(self):
         return f'L1({self.slots})'
