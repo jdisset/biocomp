@@ -201,7 +201,7 @@ centroids = compute_centroids(logdata, logcalib)
 ### {{{                         --     use peaks     --
 
 
-def compute_peaks(observations, beads, power=5, resolution=1000, mode='individual', bw_method=0.2):
+def compute_peaks(observations, beads, power=4, resolution=1000, mode='individual', bw_method=0.2):
 
 
     if mode == 'individual':
@@ -226,9 +226,9 @@ def compute_peaks(observations, beads, power=5, resolution=1000, mode='individua
         raise ValueError('mode must be either "individual" or "all"')
 
     # then raise to a high power to drown out the low confidence votes
-    # we do it in 2 steps with renormalization in between to avoid numerical issues
+    # we do it in steps with renormalization in between to avoid numerical issues
     norm = lambda x: x / jnp.sum(x, axis=1)[:, None]
-    vmat = norm(norm(norm(vmat) ** power) ** power)
+    vmat = norm(norm(norm(norm(vmat) ** power) ** power) ** power)
 
     # now we can compute the densities for each bead and in each channel, using the votes as weights
     x = jnp.linspace(0, 1.25, resolution)
@@ -255,7 +255,7 @@ for c in range(len(color_channels)):
         dens /= jnp.max(densities[c, i])
         # plot a gradient to show the confidence threshold
         ax.plot(x, dens, label=f'bead {i}', linewidth=1)
-        # ax.imshow(weights[::5][None, :], extent=(0, 1.25, 0, 1.5), aspect='auto', cmap='Greys_r', alpha=0.05)
+        ax.imshow(weights[::5][None, :], extent=(0, 1.25, 0, 1.5), aspect='auto', cmap='Greys_r', alpha=0.05)
         # vline at peak
         ax.axvline(peaks[c, i], color='k', linewidth=0.5, dashes=(3, 3))
         # write bead number
