@@ -31,10 +31,10 @@ def is_interactive():
     import matplotlib as mpl
     return mpl.is_interactive()
 
-DEFAULT_DATA_PATH = Path("/Users/jeandisset/Dropbox (MIT)/Biocomp/")
+DEFAULT_DATA_PATH = Path("~/Dropbox (MIT)/Biocomp/").expanduser()
 DEFAULT_XP_PATH = DEFAULT_DATA_PATH / "Experiments"
 DEFAULT_RECIPE_PATH = DEFAULT_DATA_PATH / "Recipes"
-DEFAULT_LIB_PATH = Path("/Users/jeandisset/Code/Weiss/biocomp/__cache/lib.pickle")
+DEFAULT_LIB_PATH = Path("~/Code/Weiss/biocomp/__cache/lib.pickle").expanduser()
 
 # we check if there is a file named ~/.biocomp.json
 # if so, we load it and use the paths defined there
@@ -60,8 +60,8 @@ if 'BIOCOMP_LIB_PATH' in os.environ:
     DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_LIB_PATH'])
 
 # convenience loading functions with default paths
-def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH):
-    xp = bc.XP(xpname, xp_path, recipe_path, lib)
+def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH, **kwargs):
+    xp = bc.XP(xpname, xp_path, recipe_path, lib, **kwargs)
     return xp
 
 
