@@ -70,9 +70,9 @@ channels_to_units = {
     'PerCP-Cy5-5-A': 'MEPCY5.5',
     'PE-A': 'MEPE',
     'PE-Texas Red-A': 'MEPTR',
-    'APC-A': 'MEAPC',
-    'APC-Alexa 700-A': 'MEAX700',
-    'APC-Cy7-A': 'MEAPCCY7',
+    # 'APC-A': 'MEAPC',
+    # 'APC-Alexa 700-A': 'MEAX700',
+    # 'APC-Cy7-A': 'MEAPCCY7',
 }
 
 xpname = '2023-01-22_CasE_ALLuORFs'
@@ -138,21 +138,24 @@ def vote(source, target):
     ot_prob = linear_problem.LinearProblem(geom)
     return sinkhorn.Sinkhorn()(ot_prob).matrix
 
+
 @jit
 def vote_all(source, target):
     geom = pointcloud.PointCloud(source, target)
     ot_prob = linear_problem.LinearProblem(geom)
     return sinkhorn.Sinkhorn()(ot_prob).matrix
 
+
 vote_vm = jit(vmap(vote, in_axes=(1, 1)))
+
 
 @jit
 def compute_centroids(
     source,
     target,
-    thresholds=(0.33 , 0.72),
+    thresholds=(0.33, 0.72),
     confidence_threshold_quantile=0.9,
-    confidence_threshold_absolute=0.3,
+    confidence_threshold_absolute=0.2,
     left_steepness=10,
     right_steepness=100,
 ):
@@ -173,6 +176,7 @@ def compute_centroids(
     # Weight each observation in each channel:
     # 0 = out of range, 1 = in range (with some smoothness at the edges)
     # same shape as votes
+
     weights = vmap(w_function, in_axes=(0, None, None, None, None))(
         source, thresholds[0], thresholds[1], left_steepness, right_steepness
     ).T
@@ -189,7 +193,7 @@ def compute_centroids(
     confidence_threshold = jnp.clip(conf, confidence_threshold_absolute)
     wvmat_th = jnp.where(wvmat_norm > confidence_threshold, wvmat_norm, 0)
 
-    beadcentroids = vmap(jnp.average, in_axes=(None, None, 1))(source, 0, wvmat_th).T
+    beadcentroids = vmap(jnp.average, in_axes=(None, None, 1))(source, 0, wvmat_th)
     return beadcentroids
 
 
@@ -201,65 +205,78 @@ centroids = compute_centroids(logdata, logcalib)
 ### {{{                         --     use peaks     --
 
 
-def compute_peaks(observations, beads, power=4, resolution=1000, mode='individual', bw_method=0.2):
+def compute_peaks(observations, beads, resolution=1000, bw_method=0.15):
 
+    # First we compute the vote matrix:
+    # it's a (CHANNEL, OBSERVATIONS, BEAD) matrix
+    # where each channel tells what affinity each observation has to each bead, from the channel's perspective.
+    # This is computed using optimal transport (it's the OT matrix)
+    # High values mean it's quite obvious in this channel that the observation should be paired with a certain bead.
+    # Low values mean it's not so obvious, usually because the observation is not in the valid range
+    # so there's a bunch of points around this one that could be paired with any of the remaining beads
+    # This is much more robust than just computing OT for all channels at once
+    votes = vote_vm(observations, beads)
 
-    if mode == 'individual':
-        # First we compute the votes matrix:
-        # it's a (CHANNEL, OBSERVATIONS, BEAD) matrix
-        # where each channel tells what affinity each observation has to each bead from its perspective.
-        # This is computed using optimal transport (it's the OT matrix, really...)
-        # High values mean it's quite obvious in this channel that the observation should be paired with a certain bead.
-        # Low values mean it's not so obvious, usually because the observation is not in the valid range
-        # so there's a bunch of points around this one that could be paired with any of the remaining beads
-        votes = vote_vm(observations, beads)
-        # we sum channel votes per observations, which leaves us with a (OBSERVATIONS, BEADS) matrix
-        vmat = jnp.sum(votes, axis=0)
+    # votes already intrinsically contain a notion of confidence in the pairing, but I want to
+    # make it even more explicit by manually "discrediting" votes for observations that are clearly out of range.
+    # Weight each observation in each channel:
+    # 0 = out of range, 1 = in range (with some smoothness at the edges)
+    # Good improvements when using few channels in tricky cases
+    weights = vmap(w_function)(observations).T
+    weighted_votes = votes * weights[:, :, None] + 1e-12
+    vmat = jnp.sum(weighted_votes, axis=0) / jnp.sum(weights, axis=0)[:, None]  # weighted average
 
-    elif mode == 'all':
-        # we compute the OT matrix for all channels at once
-        # this is a (OBSERVATIONS, BEADS) matrix
-        # Faster to compute, but less stable especially with few channels
-        vmat = vote_all(observations, beads)
+    # Use these votes to decide which beads are the most likely for each observation
+    # Tried with a softer version of this just in case, but I couldn't see any improvement
+    vmat = jnp.argmax(vmat, axis=1)[:, None] == jnp.arange(vmat.shape[1])[None, :]
 
-    else:
-        raise ValueError('mode must be either "individual" or "all"')
-
-    # then raise to a high power to drown out the low confidence votes
-    # we do it in steps with renormalization in between to avoid numerical issues
-    norm = lambda x: x / jnp.sum(x, axis=1)[:, None]
-    vmat = norm(norm(norm(norm(vmat) ** power) ** power) ** power)
-
-    # now we can compute the densities for each bead and in each channel, using the votes as weights
+    # Now we can compute the densities for each bead in each channel
     x = jnp.linspace(0, 1.25, resolution)
-    w_kde = lambda samples, weights: gaussian_kde(samples, weights=weights, bw_method=bw_method)(x.T)
+    w_kde = lambda samples, weights: gaussian_kde(samples, weights=weights, bw_method=bw_method)(
+        x.T
+    )
     densities = jit(vmap(vmap(w_kde, in_axes=(None, 1)), in_axes=(1, None)))(observations, vmat)
-    # densities.shape is (CHANNELS, BEADS, RESOLUTION)
-
+    densities = densities.transpose(1, 0, 2)
+    # densities.shape is (BEADS, CHANNELS, RESOLUTION)
     peaks = x[jnp.argmax(densities, axis=2)]
+    # peaks.shape is (BEADS, CHANNELS)
     return peaks, densities
+
 
 peaks, densities = compute_peaks(logdata, logcalib)
 
 
-
-x = jnp.linspace(0, 1.25,1000)
+x = jnp.linspace(0, 1.25, 1000)
 fig, axes = du.mkfig(len(color_channels), 1, (8, 2))
 if len(color_channels) == 1:
     axes = [axes]
 weights = vmap(w_function)(x)
 for c in range(len(color_channels)):
     ax = axes[c]
-    for i in range(peaks.shape[1]):
-        dens = densities[c, i]
-        dens /= jnp.max(densities[c, i])
+    for b in range(peaks.shape[0]):
+        dens = densities[b,c]
+        dens /= jnp.max(densities[b,c])
         # plot a gradient to show the confidence threshold
-        ax.plot(x, dens, label=f'bead {i}', linewidth=1)
-        ax.imshow(weights[::5][None, :], extent=(0, 1.25, 0, 1.5), aspect='auto', cmap='Greys_r', alpha=0.05)
+        ax.plot(x, dens, label=f'bead {b}', linewidth=1)
+
+        # also plot the actual distribution
+        kde = gaussian_kde(logdata[:, c], bw_method=0.01)
+        d2 = kde(x)
+        d2 /= jnp.max(d2) * 2
+        ax.plot(x, d2, color='k', linewidth=0.5, alpha=0.5)
+        ax.fill_between(x, d2, 0, color='k', alpha=0.01)
+
+        ax.imshow(
+            weights[::5][None, :],
+            extent=(0, 1.25, 0, 1.5),
+            aspect='auto',
+            cmap='Greys_r',
+            alpha=0.05,
+        )
         # vline at peak
-        ax.axvline(peaks[c, i], color='k', linewidth=0.5, dashes=(3, 3))
+        ax.axvline(peaks[b,c], color='k', linewidth=0.5, dashes=(3, 3))
         # write bead number
-        ax.text(peaks[c, i] + 0.01, 0.3 + 0.1*i, f'{i}', fontsize=8, ha='center', va='center')
+        ax.text(peaks[b,c] + 0.01, 0.3 + 0.1 * b, f'{b}', fontsize=8, ha='center', va='center')
         ax.set_ylim(0, 1.2)
         ax.set_xlim(0, 1.1)
         ax.set_title(f'{color_channels[c]}')
@@ -268,51 +285,37 @@ fig.tight_layout()
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
-# color_channels
-
-##
-
-
-##
-kde = gaussian_kde(wvmat.T, bw_method=0.1)
-
-# plot:
-fig, ax = du.mkfig(wvmat.shape[1], 1)
-x = np.linspace(0, 1, 100)
-x = np.repeat(x[:, None], wvmat.shape[1], axis=1)
-k = kde(x.T)
-k
-
-
-for i in range(wvmat.shape[1]):
-    ax[i].plot(x[:, 0], kde(x.T))
-    ax[i].set_title(f'bead {i}')
-    ax[i].set_xlabel('density')
-    ax[i].set_ylabel('probability')
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ### {{{                      --     plot centroids     --
-ax0 = 2
-ax1 = 0
+ax0 = 4
+ax1 = 2
 # scatter bead centroids and target
 fig, ax = du.mkfig(1, 1, (5, 5))
 # scater points in black
 ax.scatter(logdata[:, ax0], logdata[:, ax1], s=1, alpha=0.05, color='k', linewidth=0)
-colors = plt.cm.tab10(np.linspace(0, 1, centroids.shape[0]))
-for i in range(centroids.shape[0]):
+colors = plt.cm.tab10(np.linspace(0, 1, len(color_channels)))
+
+for i in range(len(color_channels)):
+    ax.scatter(
+        peaks[i, ax0],
+        peaks[i, ax1],
+        s=20,
+        alpha=0.5,
+        color=colors[i],
+    )
     ax.scatter(
         centroids[i, ax0],
-        centroids[i, ax1],
+        centroids[i, ax0],
         s=20,
-        alpha=1,
+        alpha=0.5,
         color=colors[i],
+        marker='^',
     )
 
 # scatter target, same color (from assignment
-for i in range(centroids.shape[0]):
+for i in range(len(color_channels)):
     ax.scatter(logcalib[i, ax0], logcalib[i, ax1], s=25, alpha=1, marker='x', color=colors[i])
 
 # add labels
@@ -322,34 +325,38 @@ ax.set_ylabel(color_channels[ax1])
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                   --     fitting and plotting     --
+# we could maybe have gone with a simple Ordinary Least Squares, 
+# but I want to be able to weight the peaks and add non-negative constraints
+# and we already have all the machinery for that in the biocomp so why not use it
 
 LEARNING_RATE = 0.01
 DUMP_EVERY = 1
-N_ITER = 2000
+N_ITER = 3000
 
-source = centroids
+source = peaks
 target = logcalib
-
 
 def loss_mse(params, source, target):
     xx = jnp.where(jnp.isnan(source), 0, source)
     xx = params['a'] * xx + params['b']
-    weights = vmap(w_function)(source)
+    weights = vmap(w_function, in_axes=0)(source)
     weights = jnp.where(jnp.isnan(weights), 0, weights)
     # first bead has 0 weight:
     weights = weights.at[0, :].set(0)
     avg = jnp.average((xx - target) ** 2, weights=weights)
-    return avg
+    # we want a to be non-negative so we add a penalty where a < 0
+    penalty = -jnp.sum(jnp.clip(params['a'], None, 0))
+    return avg + penalty
 
 
 lossf = jax.value_and_grad(loss_mse)
 optimizer = optax.adam(learning_rate=LEARNING_RATE)
-params = {'a': jnp.ones((centroids.shape[1],)), 'b': jnp.zeros((centroids.shape[1],))}
+params = {'a': jnp.ones((source.shape[1],)), 'b': jnp.zeros((source.shape[1],))}
 opt_state = optimizer.init(params)
 
 
 @jit
-def update(params, opt_state, source=centroids, target=logcalib):
+def update(params, opt_state, source=source, target=logcalib):
     loss, grad = lossf(params, source, target)
     loss
     grad
@@ -370,63 +377,7 @@ print('final loss', loss)
 # plot loss
 fig, ax = du.mkfig(1, 1, (5, 5))
 ax.plot(losses)
-
-
-##
-def plot_calib(axpairs, params, layout, fname=None):
-    fig, axes = du.mkfig(*layout, (5, 5))
-    axes = axes.flatten()
-    for i, (ax0, ax1) in enumerate(axpairs):
-        ax = axes if len(axpairs) == 1 else axes[i]
-        xx = params['a'] * centroids + params['b']
-        data_tr = params['a'] * logdata + params['b']
-        ax.scatter(data_tr[:, ax0], data_tr[:, ax1], s=0.2, alpha=0.2, color='k', linewidth=0)
-        # ax.scatter(xx[1:, ax0], xx[1:, ax1], s=25, alpha=1)
-        ax.scatter(logcalib[1:, ax0], logcalib[1:, ax1], s=25, alpha=1, marker='x', color='red')
-        # add text "bead 1" etc near the logcalib points
-        for i in range(1, centroids.shape[0]):
-            # slight offset to avoid overlap, fontsize 8
-            ax.text(
-                logcalib[i, ax0] + 0.01,
-                logcalib[i, ax1],
-                f'bead {i}',
-                fontsize=8,
-                color='red',
-            )
-        ax.set_xlabel(color_channels[ax0])
-        ax.set_ylabel(color_channels[ax1])
-        ax.set_xlabel(
-            f'{color_channels[ax0]} (calibrated to {channels_to_units[color_channels[ax0]]})'
-        )
-        ax.set_ylabel(
-            f'{color_channels[ax1]} (calibrated to {channels_to_units[color_channels[ax1]]})'
-        )
-        ax.set_xlim(0, 1.1)
-        ax.set_ylim(0, 1.1)
-
-    if fname is not None:
-        fig.savefig(fname, dpi=140)
-        print('saved', fname)
-
-    plt.close(fig)
-
-
-basedir = Path('~/Desktop/calib').expanduser()
-basedir.mkdir(exist_ok=True)
-logparams = np.logspace(0, np.log10(len(all_params) - 1), 100).astype(int)
-logparams = np.unique(logparams)
-selectedparams = [all_params[i] for i in logparams]
-fnames = [f'calib_step_{i}.png' for i in range(len(selectedparams))]
-
-# generate all pairs of axes
-from itertools import combinations
-
-axpairs = list(combinations(range(centroids.shape[1]), 2))
-len(axpairs)
-
-
-for fname, params in zip(fnames, selectedparams):
-    plot_calib(axpairs, params, layout=(4, 9), fname=basedir / fname)
+ax.set_yscale('log')
 
 ##
 
@@ -473,7 +424,7 @@ import matplotlib as mpl
 def plot_dists(params, fname=None):
     fig, axes = du.mkfig(1, 9, (2, 10))
     tdata = params['a'] * logdata + params['b']
-    weights = vmap(w_function)(centroids)
+    weights = vmap(w_function)(peaks)
     for i in range(centroids.shape[1]):
         ax = axes[i]
         # add beads as horizontal red lines
@@ -511,3 +462,66 @@ for fname, params in zip(fnames, selectedparams):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}# TODO
+
+
+### {{{                            --     old     --
+def plot_calib(axpairs, params, layout, fname=None):
+    fig, axes = du.mkfig(*layout, (5, 5))
+    axes = axes.flatten()
+    for i, (ax0, ax1) in enumerate(axpairs):
+        ax = axes if len(axpairs) == 1 else axes[i]
+        xx = params['a'] * centroids + params['b']
+        data_tr = params['a'] * logdata + params['b']
+        ax.scatter(data_tr[:, ax0], data_tr[:, ax1], s=0.2, alpha=0.2, color='k', linewidth=0)
+        # ax.scatter(xx[1:, ax0], xx[1:, ax1], s=25, alpha=1)
+        ax.scatter(logcalib[1:, ax0], logcalib[1:, ax1], s=25, alpha=1, marker='x', color='red')
+        # add text "bead 1" etc near the logcalib points
+        for i in range(1, centroids.shape[0]):
+            # slight offset to avoid overlap, fontsize 8
+            ax.text(
+                logcalib[i, ax0] + 0.01,
+                logcalib[i, ax1],
+                f'bead {i}',
+                fontsize=8,
+                color='red',
+            )
+        ax.set_xlabel(color_channels[ax0])
+        ax.set_ylabel(color_channels[ax1])
+        ax.set_xlabel(
+            f'{color_channels[ax0]} (calibrated to {channels_to_units[color_channels[ax0]]})'
+        )
+        ax.set_ylabel(
+            f'{color_channels[ax1]} (calibrated to {channels_to_units[color_channels[ax1]]})'
+        )
+        ax.set_xlim(0, 1.1)
+        ax.set_ylim(0, 1.1)
+
+    if fname is not None:
+        fig.savefig(fname, dpi=140)
+        print('saved', fname)
+
+    plt.close(fig)
+plot_calib(axpairs, params, layout=(4, 9))
+##
+
+
+# basedir = Path('~/Desktop/calib').expanduser()
+# basedir.mkdir(exist_ok=True)
+# logparams = np.logspace(0, np.log10(len(all_params) - 1), 100).astype(int)
+# logparams = np.unique(logparams)
+# selectedparams = [all_params[i] for i in logparams]
+# fnames = [f'calib_step_{i}.png' for i in range(len(selectedparams))]
+
+# generate all pairs of axes
+# from itertools import combinations
+
+# axpairs = list(combinations(range(centroids.shape[1]), 2))
+# len(axpairs)
+
+
+# for fname, params in zip(fnames, selectedparams):
+    # plot_calib(axpairs, params, layout=(4, 9), fname=basedir / fname)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}##
+
