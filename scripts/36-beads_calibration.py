@@ -224,7 +224,6 @@ for i in range(len(X)):
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                  --     random explorations...     --
-
 choice = jax.random.choice(key, jnp.arange(data.shape[0]), shape=(1000,), replace=False)
 logsample = logdata[choice]
 source = logsample / 7

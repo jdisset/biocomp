@@ -18,6 +18,8 @@ import biocomp.nodes as bn
 import biocomp.compute as bcc
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+import biocomp.defaults as bdf
+
 import matplotlib.pyplot as plt
 
 plt.rcParams['figure.figsize'] = [7.0, 7.0]
@@ -98,7 +100,7 @@ with open(param_file.name, 'rb') as f:
 lib = ut.load_lib()
 
 config = {
-    **bc.train.DEFAULT_CFG,
+    **bdf.DEFAULT_CONFIG,
     **{
         'node_impl': node_impl,
         'epochs': 30,
@@ -148,7 +150,7 @@ def plot_dist2d(dman, mid):
     densities = kde(XX.T)
     max_density_coords = XX[np.argmax(densities)]
     # mark with a red cross
-    ax.scatter(max_density_coords[0], max_density_coords[1], marker='x', color='r', s=100, linewidth=2)
+    # ax.scatter(max_density_coords[0], max_density_coords[1], marker='x', color='r', s=100, linewidth=2)
     ax.set_title(f'{mnames[mid]}\n raw x data distribution')
 
 def plot_dist1d(dman, mid):
@@ -177,7 +179,6 @@ def plot_dist1d(dman, mid):
     ax.scatter(max_density_coords[0], max_density_coords[1], marker='x', color='r', s=100, linewidth=2)
     ax.set_title(f'{mnames[mid]}\n raw x data distribution')
 
-plot_dist1d(dman, 0)
 
 dman = du.DataManager.from_xps([uorf_xp, ern_xp], config, inverse='all')
 mnames = [m.node_namespace for m in dman.get_models()]
@@ -189,6 +190,7 @@ plot_dist2d(dman, -2)
 plot_dist2d(dman, -3)
 
 
+print('done')
 
 ##
 
@@ -196,17 +198,55 @@ real_data = '2023-01-22_CasE_ALLuORFs'
 real_xp = ut.load_xp(real_data, lib)
 # config2 = {**config, **{'log_factor':1e3, 'max_value':1e9}}
 real_dman = du.DataManager.from_xps([real_xp], config)
-
 real_mnames = [m.network.name for m in real_dman.get_models()]
-real_mnames
 
+
+rx = real_dman.get_raw_X().copy()
+ry = real_dman.get_raw_Y().copy()
+
+## 
+a = np.array([0.85, 1.2])
+b = - np.array([1.2, 4.2])
+rrx = [10**jnp.clip(a * jnp.log10(r)+ b, 0) for r in rx]
+# rry = [10**jnp.clip(a * jnp.log10(r)+ b, 0) for r in ry]
+
+real_dman._raw_X = rrx
+# real_dman._raw_Y[0] = 10**rry
+# real_dman._raw_X = real_dman.unscale(real_dman._X)
+# real_dman._raw_Y = real_dman.rescale(real_dman._Y)
+# self._X = self.rescale(self._raw_X)
 plot_dist2d(real_dman, 1)
-mid = 1
-model = real_dman.get_models()[mid]
-mX = real_dman.get_X()[mid]
-mY = real_dman.get_Y()[mid]
-# fig, ax = du.mkfig(1,1)
-# du.model_plot(model, mX, mY, real_dman.rescale, ax, kde=real_dman.get_kdes()[mid])
+##
+
+real_dman._X = real_dman.rescale(real_dman._raw_X)
+
+real_dman._kdes = [gaussian_kde(x.T, bw_method=0.05) for x in real_dman._X]
+# real_dman._Y = real_dman.rescale(real_dman._raw_Y)
+
+real_mnames
+fig, axes = du.mkfig(1,9)
+
+maxy = []
+for i in range(9):
+    mid = i + 1
+    model = real_dman.get_models()[mid]
+    input_name = model.get_inverted_input_proteins()
+    output_names = model.get_output_proteins()
+    output = list(set(output_names) - set(input_name))
+    output_pos = output_names.index(output[0])
+    mY = real_dman.get_Y()[mid]
+    maxy.append(mY[:, output_pos].max())
+vmax = max(maxy)
+
+
+
+for i in range(9):
+    mid = i + 1
+    ax = axes[i]
+    model = real_dman.get_models()[mid]
+    mX = real_dman.get_X()[mid]
+    mY = real_dman.get_Y()[mid]
+    du.model_plot(model, mX, mY, real_dman.rescale, ax, kde=real_dman.get_kdes()[mid], vmax=vmax)
 
 
 
@@ -236,6 +276,9 @@ ut.plot_node('output', full_params, m, xlim=(0, 2), ylim=(0, 2))
 ##────────────────────────────────────────────────────────────────────────────}}}m.apply_and_grad(full_params, np.array([0.5,0.5]), np.array([0.5,0.5,0.5]), key)
 
 ### {{{                     --     uorfs on ern side     --
+train_dman = du.DataManager.from_xps([ern_xp, uorf_xp], config, inverse='all')
+
+models = train_dman.get_models()
 mparams = {}
 m = models[47]
 m.node_namespace = None
@@ -296,13 +339,33 @@ for invn in invns:
 
 ##
 
-fig, axes = du.mkfig(NROWS, NROWS)
-for i,j in tqdm(list(itertools.product(range(NROWS), range(NROWS)))):
-    ax = axes[i,j]
-    model = invmodels[i*NROWS+j]
-    du.eval_model_plot(model, full_params, dman.rescale, ax)
-    ax.set_title(f'REC:{rec_uorfs[i]}-ERN:{ern_uorfs[j]}')
-print('done')
+# fig, axes = du.mkfig(NROWS, NROWS)
+# for i,j in tqdm(list(itertools.product(range(NROWS), range(NROWS)))):
+    # ax = axes[i,j]
+    # model = invmodels[i*NROWS+j]
+    # du.eval_model_plot(model, full_params, dman.rescale, ax)
+    # ax.set_title(f'REC:{rec_uorfs[i]}-ERN:{ern_uorfs[j]}')
+# print('done')
 
+##
+
+# maxy = []
+# for i in tqdm(list(range(NROWS))[:]):
+    # model = invmodels[i]
+    # input_name = model.get_inverted_input_proteins()
+    # output_names = model.get_output_proteins()
+    # output = list(set(output_names) - set(input_name))
+    # output_pos = output_names.index(output[0])
+    # mY = real_dman.get_Y()[mid]
+    # maxy.append(mY[:, output_pos].max())
+# vmax = max(maxy)
+
+fig, axes = du.mkfig(1, NROWS)
+for i in tqdm(list(range(NROWS))[:]):
+    ax = axes[i]
+    model = invmodels[i]
+    du.eval_model_plot(model, full_params, dman.rescale, ax, npoints=100000, vmax=vmax)
+    ax.set_title(f'ERN:{ern_uorfs[i]}')
+print('done')
 
 ##────────────────────────────────────────────────────────────────────────────}}}

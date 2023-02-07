@@ -448,8 +448,8 @@ def smooth_heatmap(logX, logY, Z=None, x=None, ax=None, **kw):
         fig, ax = mkfig(1, 1)
     Z, x = get_knn_smooth(logX, logY, **kw)
     return heatmap_old(Z, x, ax)
-
-
+"
+"
 def heatmap(
     ax,
     Z,
@@ -474,7 +474,7 @@ def heatmap(
         origin='lower',
         aspect=1,
         cmap=cmap,
-        vmin=0.1,
+        # vmin=vmin,
         vmax=vmax,
         transform=trans_data,
         interpolation='none',
@@ -709,11 +709,15 @@ def eval_model_plot(
     npoints=50000,
     key=jax.random.PRNGKey(0),
     jitted=None,
+    xrange=None,
     **kw,
 ):
 
     k_i, k_q = jax.random.split(key)
-    inputs = jax.random.uniform(k_i, (npoints, model.n_inputs))
+    if xrange is None:
+        xrange = jnp.array([[0, 0], [0.6, 0.7]])
+
+    inputs = jax.random.uniform(k_i, (npoints, model.n_inputs), minval=xrange[0], maxval=xrange[1])
     quantiles = jax.random.uniform(k_q, (npoints, model.n_outputs))
     keys = jax.random.split(key, npoints)
     jm = jitted or model

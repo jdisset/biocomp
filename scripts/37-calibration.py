@@ -20,10 +20,9 @@ import biocomp.compute as bcc
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import flowio
 import matplotlib.pyplot as plt
-from ott.geometry import pointcloud
-from ott.problems.linear import linear_problem
-from ott.solvers.linear import sinkhorn
-import ott
+from ott.geometry.pointcloud import PointCloud
+from ott.problems.linear.linear_problem import LinearProblem
+from ott.solvers.linear.sinkhorn import Sinkhorn
 
 plt.rcParams['figure.figsize'] = [7.0, 7.0]
 plt.rcParams['figure.dpi'] = 300
@@ -131,22 +130,19 @@ source = logdata
 target = logcalib
 
 
-def vote(source, target):
-    s = source[:, None]
-    t = target[:, None]
-    geom = pointcloud.PointCloud(s, t)
-    ot_prob = linear_problem.LinearProblem(geom)
-    return sinkhorn.Sinkhorn()(ot_prob).matrix
+def vote(s, t):
+    ot_prob = LinearProblem(PointCloud(s[:, None], t[:, None]))
+    return Sinkhorn()(ot_prob).matrix
+
+
+vote_vm = jit(vmap(vote, in_axes=(1, 1)))
 
 
 @jit
 def vote_all(source, target):
-    geom = pointcloud.PointCloud(source, target)
-    ot_prob = linear_problem.LinearProblem(geom)
-    return sinkhorn.Sinkhorn()(ot_prob).matrix
-
-
-vote_vm = jit(vmap(vote, in_axes=(1, 1)))
+    geom = PointCloud(source, target)
+    ot_prob = LinearProblem(geom)
+    return Sinkhorn()(ot_prob).matrix
 
 
 @jit
@@ -168,24 +164,23 @@ def compute_centroids(
     # Low values mean it's not so obvious, usually because the observation is not in the valid range
     # so there's a bunch of points around this one that could be paired with any of the remaining beads
 
-    votes = vote_vm(source, target)
-    # votes = votes / jnp.sum(votes, axis=1)[:, None]
+    @partial(vmap, in_axes=(1, 1))
+    def vote(s, t):
+        return Sinkhorn()(LinearProblem(PointCloud(s[:, None], t[:, None]))).matrix
+
+    votes = vote(source, target)
 
     # votes already intrinsically contain a notion of confidence in the pairing, but I want to
     # make it more explicit by manually "discrediting" votes for observations that are clearly out of range.
     # Weight each observation in each channel:
     # 0 = out of range, 1 = in range (with some smoothness at the edges)
     # same shape as votes
-
     weights = vmap(w_function, in_axes=(0, None, None, None, None))(
         source, thresholds[0], thresholds[1], left_steepness, right_steepness
     ).T
 
     weighted_votes = votes * weights[:, :, None]
-    weighted_votes.shape
-
     wvmat = jnp.sum(weighted_votes, axis=0) / jnp.sum(weights, axis=0)[:, None]
-    wvmat.shape
 
     # threshold the weights
     wvmat_norm = wvmat / jnp.sum(wvmat, axis=1)[:, None]
@@ -205,23 +200,27 @@ centroids = compute_centroids(logdata, logcalib)
 ### {{{                         --     use peaks     --
 
 
+@jit
 def compute_peaks(observations, beads, resolution=1000, bw_method=0.15):
 
     # First we compute the vote matrix:
     # it's a (CHANNEL, OBSERVATIONS, BEAD) matrix
     # where each channel tells what affinity each observation has to each bead, from the channel's perspective.
     # This is computed using optimal transport (it's the OT matrix)
-    # High values mean it's quite obvious in this channel that the observation should be paired with a certain bead.
+    # High values mean it's obvious in this channel that the observation should be paired with a certain bead.
     # Low values mean it's not so obvious, usually because the observation is not in the valid range
     # so there's a bunch of points around this one that could be paired with any of the remaining beads
     # This is much more robust than just computing OT for all channels at once
-    votes = vote_vm(observations, beads)
+
+    @partial(vmap, in_axes=(1, 1))
+    def vote(s, t):
+        return Sinkhorn()(LinearProblem(PointCloud(s[:, None], t[:, None]))).matrix
+
+    votes = vote(observations, beads)
 
     # votes already intrinsically contain a notion of confidence in the pairing, but I want to
-    # make it even more explicit by manually "discrediting" votes for observations that are clearly out of range.
-    # Weight each observation in each channel:
-    # 0 = out of range, 1 = in range (with some smoothness at the edges)
-    # Good improvements when using few channels in tricky cases
+    # make it even more explicit by discrediting votes for observations that are clearly out of range.
+    # Weight each observation in each channel: 0 = out of range, 1 = in range (+ smooth at the edges)
     weights = vmap(w_function)(observations).T
     weighted_votes = votes * weights[:, :, None] + 1e-12
     vmat = jnp.sum(weighted_votes, axis=0) / jnp.sum(weights, axis=0)[:, None]  # weighted average
@@ -232,14 +231,12 @@ def compute_peaks(observations, beads, resolution=1000, bw_method=0.15):
 
     # Now we can compute the densities for each bead in each channel
     x = jnp.linspace(0, 1.25, resolution)
-    w_kde = lambda samples, weights: gaussian_kde(samples, weights=weights, bw_method=bw_method)(
-        x.T
-    )
+    w_kde = lambda s, w: gaussian_kde(s, weights=w, bw_method=bw_method)(x.T)
     densities = jit(vmap(vmap(w_kde, in_axes=(None, 1)), in_axes=(1, None)))(observations, vmat)
-    densities = densities.transpose(1, 0, 2)
-    # densities.shape is (BEADS, CHANNELS, RESOLUTION)
-    peaks = x[jnp.argmax(densities, axis=2)]
-    # peaks.shape is (BEADS, CHANNELS)
+    densities = densities.transpose(1, 0, 2) # densities.shape is (BEADS, CHANNELS, RESOLUTION)
+
+    peaks = x[jnp.argmax(densities, axis=2)] # peaks.shape is (BEADS, CHANNELS)
+
     return peaks, densities
 
 
@@ -254,8 +251,8 @@ weights = vmap(w_function)(x)
 for c in range(len(color_channels)):
     ax = axes[c]
     for b in range(peaks.shape[0]):
-        dens = densities[b,c]
-        dens /= jnp.max(densities[b,c])
+        dens = densities[b, c]
+        dens /= jnp.max(densities[b, c])
         # plot a gradient to show the confidence threshold
         ax.plot(x, dens, label=f'bead {b}', linewidth=1)
 
@@ -274,9 +271,9 @@ for c in range(len(color_channels)):
             alpha=0.05,
         )
         # vline at peak
-        ax.axvline(peaks[b,c], color='k', linewidth=0.5, dashes=(3, 3))
+        ax.axvline(peaks[b, c], color='k', linewidth=0.5, dashes=(3, 3))
         # write bead number
-        ax.text(peaks[b,c] + 0.01, 0.3 + 0.1 * b, f'{b}', fontsize=8, ha='center', va='center')
+        ax.text(peaks[b, c] + 0.01, 0.3 + 0.1 * b, f'{b}', fontsize=8, ha='center', va='center')
         ax.set_ylim(0, 1.2)
         ax.set_xlim(0, 1.1)
         ax.set_title(f'{color_channels[c]}')
@@ -325,7 +322,7 @@ ax.set_ylabel(color_channels[ax1])
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                   --     fitting and plotting     --
-# we could maybe have gone with a simple Ordinary Least Squares, 
+# we could maybe have gone with a simple Ordinary Least Squares,
 # but I want to be able to weight the peaks and add non-negative constraints
 # and we already have all the machinery for that in the biocomp so why not use it
 
@@ -335,6 +332,7 @@ N_ITER = 3000
 
 source = peaks
 target = logcalib
+
 
 def loss_mse(params, source, target):
     xx = jnp.where(jnp.isnan(source), 0, source)
@@ -501,6 +499,8 @@ def plot_calib(axpairs, params, layout, fname=None):
         print('saved', fname)
 
     plt.close(fig)
+
+
 plot_calib(axpairs, params, layout=(4, 9))
 ##
 
@@ -520,8 +520,7 @@ plot_calib(axpairs, params, layout=(4, 9))
 
 
 # for fname, params in zip(fnames, selectedparams):
-    # plot_calib(axpairs, params, layout=(4, 9), fname=basedir / fname)
+# plot_calib(axpairs, params, layout=(4, 9), fname=basedir / fname)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
-
