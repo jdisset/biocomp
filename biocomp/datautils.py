@@ -448,8 +448,7 @@ def smooth_heatmap(logX, logY, Z=None, x=None, ax=None, **kw):
         fig, ax = mkfig(1, 1)
     Z, x = get_knn_smooth(logX, logY, **kw)
     return heatmap_old(Z, x, ax)
-"
-"
+
 def heatmap(
     ax,
     Z,
