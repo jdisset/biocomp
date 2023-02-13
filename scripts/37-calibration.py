@@ -356,8 +356,6 @@ opt_state = optimizer.init(params)
 @jit
 def update(params, opt_state, source=source, target=logcalib):
     loss, grad = lossf(params, source, target)
-    loss
-    grad
     updates, opt_state = optimizer.update(grad, opt_state, params)
     params = optax.apply_updates(params, updates)
     return params, opt_state, loss
@@ -391,7 +389,6 @@ def remove_axis_and_spines(ax):
 
 def plot_fluo_distribution(ax, data, res=2000):
     from jax.scipy.stats import gaussian_kde
-
     xrange = 1.2
     XX = jnp.linspace(-0.05, xrange, res)
     kde = gaussian_kde(data.T, bw_method=0.01)
