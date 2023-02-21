@@ -200,11 +200,8 @@ def remove_axis_and_spines(ax):
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
-
-
 def plot_fluo_distribution(ax, data, res=2000):
     from jax.scipy.stats import gaussian_kde
-
     xrange = 1.2
     XX = jnp.linspace(-0.05, xrange, res)
     kde = gaussian_kde(data.T, bw_method=0.01)
@@ -394,107 +391,6 @@ FORTESSA_CHANNELS = {
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                     --     calibration class     --
-
-
-class Calibration:
-    """
-    The Calibration class handles the calibration of the fluorescence values of a given experiment
-    using color controls, blank controls, and some beads of known fluorescence values.
-    """
-
-    def __init__(
-        self,
-        blank: str,
-        color_controls: dict[tuple[str], str],
-        beads: str,
-        beads_reference_values: dict[str, list[float]] = SPHEROTECH_RCP_30_5a,
-        channel_to_unit: dict[str, str] = FORTESSA_CHANNELS,
-    ):
-        """
-        Parameters
-        ----------
-        blank : str - path to the blank control fcs file
-
-        color_controls : dict[tuple[str], str] - dictionary associating a list of the proteins in the control to the path for the fcs control file
-            e.g. {('eYFP',): 'path/to/eyfp-control.fcs', ('eBFP',): 'path/to/ebfp-control.fcs', ('eYFP', 'eBFP'): 'path/to/allcolor-control.fcs'}
-
-        beads : str - path to the beads control fcs file
-
-        beads_reference_vlaues : dict[str, list[float]] - dictionary associating the unit name
-            to the list of reference values for the beads in this unit
-            e.g : {'MEFL': [456, 4648, 14631, 42313, 128924, 381106, 1006897, 2957538, 7435549], 'MEPE': ...}
-
-        channel_to_unit : dict[str, str] - dictionary associating the channel name to the unit name
-            e.g. {'Pacific Blue-A': 'PacBlue', 'AmCyan-A': 'MEAMCY', ...}
-
-        """
-        self.blank = blank
-        self.color_controls = color_controls
-        self.beads = beads
-        self.beads_reference_values = beads_reference_values
-        self.channel_to_unit = channel_to_unit
-        self.__autofluorescence = None
-        self.__spectral_signature_matrix = None
-        self.__fitted = False
-
-    def fit(self, standardize_to_unit='MEFL', **kwargs):
-        """
-        Fit the calibration parameters to the controls.
-        """
-        # The general idea is that we can express fluorescence as a
-        # linear combination of the spectral signatures of the proteins + autofluorescence.
-        # So for each observation Y_i, we have Y_i = X_i @ S + A
-        # where X_i is the vector representing the quantity of fluorochrome of each type of shape (n_proteins,)
-        # S is the matrix of spectral signatures of shape (n_proteins, n_channels),
-        # and A is the vector of autofluorescence of shape (n_channels,).
-        # Y_i is the observation, a vector of fluorescence intensities of shape (n_channels,).
-        # The goal of this optimization is to find S and A such that Y_i = X_i @ S + A for all i. (i.e. minimize the error)
-        # However for each observation, we only have the fluorescence intensities Y_i, and we don't know X_i.
-        # The "trick" is that we have many controls where, although we don't know X_I exactly, we know
-        # that X_i should be of the form x_i * M where x_i is a scalar and M is a "mask" vector of shape (n_proteins,).
-        # For example, if we have a control with only eYFP, then M = [1, 0, 0, ...] and x_i is the amount of eYFP.
-        # If we have a control with eYFP and eBFP, then M = [1, 0, 1, ...] and x_i is the amount of eYFP + eBFP.
-        # And to estimate the autofluorescence, we can use the blank control, where M = [0, 0, 0, ...]
-        # As long as we have enough controls to constrain the problem, we should be able to estimate S and A pretty well.
-
-        # With the controls only, we can estimate *a* value for S and A, but then X will be in arbitrary units.
-        # In order to standardize things and constrain X to reproducible units, we can use the beads:
-        # we need to fist compute the functions Fstd that convert a channel to it's standardized units (using the beads).
-        # Then if we want to standardize to, let's say, MEFL, we need to add another constrain that the
-        # value of X_i[MEFL] should be equal to Fstd[MEFL](Y_i[MEFL]).
-
-        # Let's GO
-
-        # First, we prepare all data with the corresponding mask.
-
-        # The blank control
-
-    def apply(
-        self, fcs_file: str, fluorescent_proteins: Optional[list[str]] = None, **kwargs
-    ) -> pd.DataFrame:
-        """
-        Apply the calibration to the fcs file. The input file contains raw, but gated, intensity data for all channels.
-        The returned dataframe contains the standardized count of fluorescent proteins. If fluorescent_proteins is not None,
-        only the count of the specified proteins will be returned (in the same order as in the list), and it will help with the
-        precision of the count. If fluorescent_proteins is None, all the proteins will be estimated.
-
-        Parameters
-        ----------
-        fcs_file : str - path to the fcs file to calibrate
-
-        Returns
-        -------
-        pd.DataFrame - the calibrated fluorescen
-        """
-        if not self.__fitted:
-            self.fit(**kwargs)
-
-        # apply...
-
-
-##────────────────────────────────────────────────────────────────────────────}}}##
-
 ### {{{                       --     loading data     --
 
 
@@ -557,6 +453,7 @@ channel_to_unit = FORTESSA_CHANNELS
 
 controls_order = list(controls.keys())
 fluo_proteins = list(set([p for c in controls_order for p in c]))
+
 controls_values, controls_masks = [], []
 for m in controls_order:
     vals = controls[m].values
@@ -791,7 +688,6 @@ plt.show()
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ### {{{                          --     archive     --
 
 ### {{{                          --     gating?     --
@@ -886,7 +782,6 @@ plt.show()
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ### {{{                      --     plot functions     --
 
 # plot the spectral signature matrix
@@ -911,7 +806,8 @@ def plot_single_controls_Xdist(X, masks, ax, title=None):
         # compute kde
         ids = jnp.all(s_masks == mask, axis=1)
         kde = gaussian_kde(s_x[ids][:, i], bw_method=KDE_BW)
-        x = np.linspace(-500, jnp.quantile(X, 0.95), 1500)
+        q = jnp.quantile(X, 0.95)
+        x = np.linspace(-0.1*q,q, 1500)
         y = kde(x)
         ax.plot(x, y, label=f'Control {mask}')
         ax.legend()
@@ -930,7 +826,8 @@ def plot_single_controls_Ydist(y, masks, ax, title=None):
     for i, mask in enumerate(unique_masks):
         # compute kde
         ids = jnp.all(s_masks == mask, axis=1)
-        x = np.linspace(-0.05, jnp.quantile(y, 0.95), 1500)
+        q = jnp.quantile(y, 0.95)
+        x = np.linspace(-0.1*q, q, 1500)
         d = gaussian_kde(s_y[ids], bw_method=KDE_BW)(x)
         d = d / d.max()
         ax.plot(x, d, label=f'Control {mask}')
@@ -954,7 +851,7 @@ def contrast(s, pow=2, n=2):
 ### {{{                        --     toy example     --
 
 # we have the following spectral signature matrix, for 4 channels and 3 proteins
-p, c = 3, 4
+p, c = 3,6 
 key = jax.random.PRNGKey(1087)
 k1, k2, k3, k4 = jax.random.split(key, 4)
 Strue = jax.random.uniform(k1, (p, c), minval=0.25, maxval=1)
@@ -968,20 +865,21 @@ masks = jax.nn.one_hot(jax.random.randint(jax.random.PRNGKey(0), (NCELLS,), 0, p
 masks = masks.at[jax.random.bernoulli(jax.random.PRNGKey(0), 1 / (p + 1), (NCELLS,))].set(
     jnp.ones_like(masks[0])
 )
-Xbase = jax.random.gamma(k3, 1, (NCELLS, 1)) * 1e3
+XSCALE = 1e3
+Xbase = jax.random.gamma(k3, 1, (NCELLS, 1)) * XSCALE
 Xtrue = Xbase * masks
 
 # now we generate the observations
 Y = Xtrue @ Strue
-Y += jax.random.normal(k4, Y.shape) * Y * 0.2
+Y += jax.random.normal(k4, Y.shape) * Y * 0.1
 
 # plot the data
-fig, axes = du.mkfig(2 + Y.shape[1], 1, (8, 2))
-plot_spectral_sig(Strue, axes[0])
-plot_single_controls_Xdist(Xtrue, masks, axes[1])
-for i in range(Y.shape[1]):
-    plot_single_controls_Ydist(Y[:, i], masks, axes[2 + i], title=f'Channel {i}')
-fig.tight_layout()
+fig, ax = du.mkfig(1, 1, (8, 2))
+plot_spectral_sig(Strue, ax)
+# plot_single_controls_Xdist(Xtrue, masks, axes[1])
+# for i in range(Y.shape[1]):
+    # plot_single_controls_Ydist(Y[:, i], masks, axes[2 + i], title=f'Channel {i}')
+# fig.tight_layout()
 
 # estimate S
 # TODO
@@ -994,7 +892,6 @@ Y.shape
 
 M = masks
 
-PROT, CHAN = 2, 0
 # fluo_proteins
 # channel_order
 
@@ -1004,7 +901,7 @@ def spectral_signature_estimation(
     M,
     max_iterations=10,
     max_n=10000,
-    normalize_to_prot_chan=(PROT, CHAN),
+    normalize_to_prot_chan=(0, 0),
     jax_seed=0,
 ):
 
@@ -1039,41 +936,46 @@ def spectral_signature_estimation(
     return S, K
 
 
+jnp.set_printoptions(precision=3, suppress=True)
+
 def spectral_signature_estimation_gd(
     Y,
     M,
-    max_iterations=500,
-    max_n=100000,
-    learning_rate=1,
-    normalize_to_prot_chan=(PROT, CHAN),
+    max_iterations=300,
+    max_n=500000,
+    learning_rate=0.1,
+    normalize_to_prot_chan=(0, 0),
     jax_seed=0,
 ):
+
     # TODO: weighted Alternating Least Square
     # http://ethen8181.github.io/machine-learning/recsys/1_ALSWR.html
-
     if Y.shape[0] > max_n:  # resample Y and M to get only max_n
         choice = jax.random.choice(jax.random.PRNGKey(jax_seed), len(Y), (max_n,))
         Y, M = Y[choice], M[choice]
+
+
+
 
     # initialize with OLS (way faster!)
     S, _ = spectral_signature_estimation(
         Y,
         M,
         max_iterations=10,
-        max_n=1000,
+        max_n=5000,
         jax_seed=jax_seed,
         normalize_to_prot_chan=normalize_to_prot_chan,
     )
 
-    K = Y @ jnp.linalg.pinv(S)
-    print(f'K = {K[:20]}')
-    print(f'S = {S}')
+    rescaler = jnp.quantile(Y, 0.9)
+    Y = Y / max(rescaler, 1e-6)
 
-    S
-    K
-    learning_rate=1
-    optS = optax.adam(learning_rate=learning_rate)
-    optK = optax.adam(learning_rate=learning_rate)
+    K = Y @ jnp.linalg.pinv(S)
+    K = jnp.average(K, axis=1, weights=M)
+
+
+    optS = optax.amsgrad(learning_rate=learning_rate)
+    optK = optax.amsgrad(learning_rate=learning_rate)
     stateS, stateK = optS.init(S), optK.init(K)
 
     def loss_single_row(yi, ki, mi, S):
@@ -1084,13 +986,8 @@ def spectral_signature_estimation_gd(
         err = vmap(loss_single_row, in_axes=(0, 0, 0, None))(Y, K, M, s)
         return jnp.mean(err)
 
-    regK = 0
     def lK(K, S):
-        return lS(S, K) + regK * jnp.linalg.norm(K)
-
-    lS(S, K)
-    lK(K, S)
-    update(S,K,stateS,stateK)
+        return lS(S, K)
 
 
     def half_update(a, b, lossf, opt, state):
@@ -1111,21 +1008,17 @@ def spectral_signature_estimation_gd(
         S, K, stateS, stateK, loss = update(S, K, stateS, stateK)
         losses.append(loss)
         pbar.set_description(f'Spectral signature estimation (loss={loss:.5f})')
-
-    fig, ax = du.mkfig(1, 1)
-    # log scale
-    ax.plot(losses)
-    ax.set_yscale('log')
+        if i < 3:
+            print(f'loss = {loss:.7f}')
 
     S = S / S[normalize_to_prot_chan]
-    print(f'K = {K[:20]}')
-    print(f'S = {S}')
-    return S, K
+
+    return S, K, losses
 
 
-PROT, CHAN = 1, 0
+PROT, CHAN = 1, 1
 
-Sguess, K = spectral_signature_estimation_gd(Y, masks, normalize_to_prot_chan=(PROT, CHAN))
+Sguess, K, _ = spectral_signature_estimation_gd(Y, masks, normalize_to_prot_chan=(PROT, CHAN))
 # Sguess, K = spectral_signature_estimation(Y, masks, normalize_to_prot_chan=(PROT, CHAN))
 Xguess = Y @ jnp.linalg.pinv(Sguess)
 Xguess.max()
@@ -1151,14 +1044,44 @@ fig, axes = du.mkfig(2, 1, (8, 2))
 plot_spectral_sig(Strue, axes[0])
 plot_spectral_sig(Sguess, axes[1])
 print(f'\n Sguess = \n {Sguess}')
+print(f'\n Strue= \n {Strue/ Strue[PROT, CHAN]}')
 
 
-fig, axes = du.mkfig(3, 1, (8, 2))
-plot_single_controls_Xdist(Xguess, masks, axes[0], 'Estimated X dist')
-plot_single_controls_Xdist(Xtrue, masks, axes[1], 'Original X dist')
+# fig, axes = du.mkfig(4, 1, (8, 2))
+# plot_single_controls_Xdist(Xguess, masks, axes[0], 'Estimated X dist')
+# plot_single_controls_Xdist(Xtrue, masks, axes[1], 'Original X dist')
+# plot_single_controls_Ydist(Y[:,CHAN], masks, axes[2], 'Y distribution of ref channel')
+# fig.tight_layout()
+
+##
+
+
+def plot_single_controls_Xdist(X, masks, mask, ax, title=None):
+    choice = jax.random.choice(jax.random.PRNGKey(0), X.shape[0], (min(10000, X.shape[0]),))
+    s_masks = masks[choice]
+    s_x = X[choice]
+    ids = jnp.all(s_masks == mask, axis=1)
+    # plot estimated protein content for this mask
+    for prot in range(X.shape[1]):
+        # compute kde
+        kde = gaussian_kde(s_x[ids, prot], bw_method=0.1)
+        q = jnp.quantile(X, 0.95)
+        x = np.linspace(-0.1*q,q, 1500)
+        y = kde(x)
+        y = y / y.max()
+        ax.plot(x, y, label=f'Protein {prot}')
+        ax.legend()
+    if title is not None:
+        ax.set_title(title)
+
+
+fig, axes = du.mkfig(3, 1, (10,3))
+unique_masks = jax.nn.one_hot(jnp.arange(p), p).astype(jnp.int32)
+mask = unique_masks[PROT]
+plot_single_controls_Xdist(Xguess, masks, mask, axes[0], f'Estimated X dist for mask {mask}')
+plot_single_controls_Xdist(Xtrue, masks, mask, axes[1], f'Original X dist for mask {mask}')
 plot_single_controls_Ydist(Y[:,CHAN], masks, axes[2], 'Y distribution of ref channel')
 fig.tight_layout()
-
 
 # reorder = jax.random.permutation(key, jnp.arange(Y.shape[0]))[:50000]
 # # plot original distributions

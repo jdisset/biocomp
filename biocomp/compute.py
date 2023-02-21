@@ -7,6 +7,8 @@ from . import utils as ut
 from . import nodes as nd
 from typing import List, Dict, Tuple, Union, Optional, Callable, Any
 
+#TODO:
+# might be able to parallelize at a finer level (create a "meta model") using jax's partial?
 
 # {{{                  --     Params and quantization     --
 # ···············································································
