@@ -1,6 +1,7 @@
 import jax
 import optax
 import jax.numpy as jnp
+import time
 from jax import jit, vmap, value_and_grad
 from jax.tree_util import Partial as partial
 from jax.scipy.stats import gaussian_kde
@@ -66,7 +67,7 @@ FORTESSA_CHANNELS = {
 
 ### {{{              --     small tools     --
 def escape_name(name):
-    return name.replace('-', '_').replace(' ', '_').upper()
+    return name.replace('-', '_').replace(' ', '_').upper().rstrip('_A')
 
 
 def escape(names):
@@ -102,6 +103,7 @@ def load_fcs_to_df(fcs_file):
 
 def load_to_df(file, column_order=None):
     file = Path(file)
+    assert file.exists(), f'File {file} does not exist'
     if file.suffix == '.fcs':
         df = load_fcs_to_df(file)
     elif file.suffix == '.csv':
@@ -459,7 +461,7 @@ def plot_spectral_sig(S, ax, prots=None, channels=None):
 ### {{{                 --     simple optimization functions   --
 
 
-def spectral_bleedthrough(Y, M, max_iterations=10, jax_seed=0):
+def spectral_bleedthrough(Y, M, max_iterations=50, jax_seed=0):
     # Solves with Alternating Least Square using closed form solutions (pinv)
 
     # model: Y = XM.S
@@ -483,7 +485,7 @@ def spectral_bleedthrough(Y, M, max_iterations=10, jax_seed=0):
     for _ in range(max_iterations):
         S, K = alsq(K)
         error = ((Y - (K[:, None] * M) @ S) ** 2).mean() / jnp.linalg.norm(Y)
-        print(f'error: {error:.2e}, update: {jnp.mean((Sprev - S)**2):.2e}')
+        # print(f'error: {error:.2e}, update: {jnp.mean((Sprev - S)**2):.2e}')
         Sprev = S
 
     return S, K
@@ -496,7 +498,7 @@ def affine_opt(Ylog, ref_channel):
     # so we solve the linear system
     # Ylog[:, i] = A @ [a_i, b_i] (with A = [Ylog[:, refchanid], 1])
 
-    ref = Ylog[:, ref_channel] 
+    ref = Ylog[:, ref_channel]
 
     def solve_column(y):
         A = jnp.stack([y, jnp.ones_like(y)], axis=1)
@@ -506,7 +508,8 @@ def affine_opt(Ylog, ref_channel):
     a, b = res[:, 0], res[:, 1]
     return a, b
 
-def affine_gd(Y, ref_channel, num_iter=100, learning_rate=0.1, max_N=500000):
+
+def affine_gd(Y, ref_channel, num_iter=1000, learning_rate=0.1, max_N=500000):
 
     NCHAN = Y.shape[1]
     if len(Y) > max_N:
@@ -523,15 +526,14 @@ def affine_gd(Y, ref_channel, num_iter=100, learning_rate=0.1, max_N=500000):
     opt_state = optimizer.init(params)
 
     Yref = Y[:, ref_channel]
-    # Yref = jnp.maximum(Yref - 3.5, 0) * 5.0
 
     @jax.value_and_grad
     def lossf(params):
         yhat = params['a'] * Y + params['b']
         yhat = jnp.maximum(yhat, 0)
-        err = (yhat - Yref[:, None])**2
-        err = err 
-        return jnp.mean(err ** 2)
+        err = (yhat - Yref[:, None]) ** 2
+        err = err
+        return jnp.mean(err**2)
 
     @jit
     def update(params, opt_state):
@@ -544,18 +546,16 @@ def affine_gd(Y, ref_channel, num_iter=100, learning_rate=0.1, max_N=500000):
     for i in range(0, num_iter):
         params, opt_state, loss = update(params, opt_state)
         losses.append(loss)
-        print(f'iter {i}: loss = {loss:.2e}')
+        # print(f'iter {i}: loss = {loss:.2e}')
 
     a, b = params['a'], params['b']
     return a, b
 
 
-
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                     --     calibration class     --
+
 
 class Calibration:
     """
@@ -567,11 +567,9 @@ class Calibration:
 
     def __init__(
         self,
-        blanks_file: str,
         color_controls_files: dict[tuple[str], str],
         beads_file: str,
         reference_protein: str = 'EBFP2',
-        reference_channel: str = 'PACIFIC_BLUE_A',
         beads_reference_values: dict[str, list[float]] = SPHEROTECH_RCP_30_5a,
         channel_to_unit: dict[str, str] = FORTESSA_CHANNELS,
         random_seed: int = 42,
@@ -580,21 +578,17 @@ class Calibration:
         """
         Parameters
         ----------
-        blanks_files : str - path to the blank control fcs file
-
-        color_controls_files : dict[tuple[str], str] - dictionary {list of the control proteins : fcs path)
-            e.g. {('eYFP',): 'path/to/eyfp-control.fcs',
-                  ('eBFP',): 'path/to/ebfp-control.fcs',
-                  ('eYFP', 'eBFP'): 'path/to/allcolor-control.fcs'}
+        color_controls_files : dict[tuple[str], str] - dictionary {control protein : path to fcs or csv)
+            e.g. {'eYFP': 'path/to/eyfp-control.fcs',
+                  'eBFP': 'path/to/ebfp-control.fcs',
+                  'all OR allcolor OR allcolors OR full': 'path/to/allcolor-control.fcs'
+                  'blank OR empty OR inert OR cntl ': 'path/to/allcolor-control.fcs' }
 
         beads_file : str - path to the beads control fcs file
 
         reference_protein : str - name of the reference protein that will be used to align all
                             other proteins quantities to, i.e they will be expressed in the same unit
-
-        reference_channel : str - name of the reference channel (should be bright for the reference protein)
-                            After alignment and calibration, the fluo intensities will be expressed in the
-                            MEF for this channel. E.g. for FITC-A on Fortessa, the standard units are MEFL
+                            The channel is picked as the brightest channel of the reference protein
 
         beads_reference_vlaues : dict[str, list[float]] - dictionary associating the unit name
             to the list of reference values for the beads in this unit
@@ -604,55 +598,84 @@ class Calibration:
             e.g. {'Pacific Blue-A': 'PacBlue', 'AmCyan-A': 'MEAMCY', ...}
 
         """
-        self.blanks_file = blanks_file
         self.color_controls_files = color_controls_files
         self.beads_file = beads_file
         self.reference_protein = escape(reference_protein)
-        self.reference_channel = escape(reference_channel)
         self.beads_reference_values = {escape(k): v for k, v in beads_reference_values.items()}
         self.channel_to_unit = {escape(k): escape(v) for k, v in channel_to_unit.items()}
         self.unit_to_channel = {v: k for k, v in self.channel_to_unit.items()}
         self.random_seed = random_seed
-        self.__spectral_signature_matrix = None
         self.__fitted = False
         self.__channel_order = sorted(list(self.channel_to_unit.keys()))
         # remove channels that are not in the channel_to_unit dict
         if use_channels is not None:
             self.__channel_order = [c for c in self.__channel_order if c in escape(use_channels)]
-        self.blanks = load_to_df(self.blanks_file, self.__channel_order)
+
         self.controls = {
             astuple(escape(k)): load_to_df(v, self.__channel_order)
             for k, v in color_controls_files.items()
         }
 
-        self.controls[tuple()] = self.blanks
-
         self.beads = load_to_df(self.beads_file, self.__channel_order)
 
+        VALID_BLANK_NAMES = ['BLANK', 'EMPTY', 'INERT', 'CNTL']
+        VALID_ALL_NAMES = ['ALL', 'ALLCOLOR', 'ALLCOLORS', 'FULL']
+
         controls_order = sorted(list(self.controls.keys()))
-        self.__fluo_proteins = sorted(list(set([p for c in controls_order for p in c])))
+        self.__fluo_proteins = sorted(
+            list(
+                set(
+                    [
+                        p
+                        for c in controls_order
+                        for p in c
+                        if p not in VALID_BLANK_NAMES + VALID_ALL_NAMES
+                    ]
+                )
+            )
+        )
+
+        assert self.reference_protein in self.__fluo_proteins
 
         controls_values, controls_masks = [], []
+        NPROTEINS = len(self.__fluo_proteins)
+        has_blank, has_all = False, False
         for m in controls_order:
             vals = self.controls[m].values
-            masks = jnp.tile(jnp.array([p in m for p in self.__fluo_proteins]), (vals.shape[0], 1))
+            if m in [astuple(escape(n)) for n in VALID_BLANK_NAMES]:
+                base_mask = np.zeros((NPROTEINS,))
+                has_blank = True
+            elif m in [astuple(escape(n)) for n in VALID_ALL_NAMES]:
+                base_mask = np.ones((NPROTEINS,))
+                has_all = True
+            else:
+                for p in m:
+                    assert p in self.__fluo_proteins, f'Unknown protein {p}'
+                base_mask = np.array([p in m for p in self.__fluo_proteins])
+
+            masks = np.tile(base_mask, (vals.shape[0], 1))
             controls_values.append(vals)
             controls_masks.append(masks)
 
         self.__controls_values = jnp.vstack(controls_values)
         self.__controls_masks = jnp.vstack(controls_masks)
+        assert self.__controls_values.shape == self.__controls_masks.shape
+
+        assert has_blank, f'BLANK control not found. Should be named any of {VALID_BLANK_NAMES}'
+        assert has_all, f'ALLCOLOR control not found. Should be named any of {VALID_ALL_NAMES}'
 
     ##────────────────────────────────────────────────────────────────────────────}}}    def __to_MEF(self, Y):
 
     def fit_TASBE(self):
+        t0 = time.time()
         print('Estimating autofluorescence...')
-        self.__autofluorescence = np.median(self.blanks.values, axis=0)
-
-        # first we find the parameters of the log10 transform
-        maxv = max(jnp.max(self.__controls_values), jnp.max(self.beads.values)) * 1.01
-        self.__log_scale_factor = jnp.log10(maxv)
+        zero_masks = self.__controls_masks.sum(axis=1) == 0
+        self.__autofluorescence = np.median(self.__controls_values[zero_masks], axis=0)
 
         print('Computing peaks assignment...')
+        # we find the parameters of the log10 transform so that values are ~ [0, 1]
+        maxv = max(jnp.max(self.__controls_values), jnp.max(self.beads.values)) * 1.01
+        self.__log_scale_factor = jnp.log10(maxv)
         calib_values = jnp.array(
             [self.beads_reference_values[self.channel_to_unit[c]] for c in self.__channel_order]
         ).T
@@ -680,20 +703,27 @@ class Calibration:
         X = X[jnp.all(X >= 1, axis=1)]
         self.__cmap_a, self.__cmap_b = affine_gd(jnp.log10(X), refprotid)
         self.__fitted = True
-        print('Done')
+        print('Done fitting in {:.2f} seconds'.format(time.time() - t0))
 
-    def apply(self, Y):
+    def apply_to_array(self, Y):
+        assert self.__fitted, 'You must fit the calibration first'
         Y = Y - self.__autofluorescence  # remove autofluorescence
         X = Y @ jnp.linalg.pinv(self.__bleedthrough_matrix)  # remove bleedthrough
-        X = jnp.maximum(X, 0)  # remove negative values
+        X = jnp.maximum(X, 0)  # clip negative values
         X = (10**self.__cmap_b) * (X**self.__cmap_a)  # color mapping
-        # apply bead transform
+        # apply bead transform :
         refprotid = self.__fluo_proteins.index(self.reference_protein)
         a = self.__beads_params['a'][refprotid]
         b = self.__beads_params['b'][refprotid]
         X = (X**a) * (10**b)
-
         return X
+
+    def apply(self, df):
+        assert self.__fitted, 'You must fit the calibration first'
+        df.columns = escape(list(df.columns))
+        df = df[self.__channel_order]
+        X = self.apply_to_array(df.values)
+        return pd.DataFrame(X, columns=self.__fluo_proteins, index=df.index)
 
     def plot_beads_diagnostics(self):
         if self.__beads_peaks is None:
