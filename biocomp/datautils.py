@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from jax.scipy.stats import gaussian_kde
 import itertools
 
-#                                                                            }}}
+##────────────────────────────────────────────────────────────────────────────}}}
 
 # ─────────────────────────────────────────────────────────────────────────────
 #                            GENERAL PURPOSE TOOLS
@@ -70,6 +70,24 @@ def remove_topright_spines(ax):
         ax.spines[spine].set_visible(False)
 
 
+def remove_axis_and_spines(ax):
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+
+def set_size(w, h, axes, fig):
+    """w, h: width, height in inches"""
+    l = min([ax.figure.subplotpars.left for ax in axes])
+    r = max([ax.figure.subplotpars.right for ax in axes])
+    t = max([ax.figure.subplotpars.top for ax in axes])
+    b = min([ax.figure.subplotpars.bottom for ax in axes])
+    figw = float(w) / (r - l)
+    figh = float(h) / (t - b)
+    fig.set_size_inches(figw, figh)
+
+
 def style_violin(parts):
     for pc in parts['bodies']:
         pc.set_facecolor('k')
@@ -82,6 +100,29 @@ def style_violin(parts):
     parts['cmins'].set_linewidth(0.5)
 
 
+import string
+
+
+class ShortScientificFormatter(string.Formatter):
+    def format_field(self, value, format_spec):
+        if format_spec == 'm':
+            if value < 1000:
+                if value == int(value):
+                    return super().format_field(int(value), '')
+                else:
+                    return super().format_field(value, '.1f')
+            else:
+                if value == int(value):
+                    return super().format_field(value, '.0e').replace('e+0', 'e').replace('e+', 'e')
+                else:
+                    return super().format_field(value, '.1e').replace('e+0', 'e').replace('e+', 'e')
+        else:
+            return super().format_field(value, format_spec)
+
+
+scformat = ShortScientificFormatter()
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,6 +130,7 @@ def style_violin(parts):
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     data manager     --
 # ···············································································
+
 
 def data_checks(X, Y, models):
     assert len(X) == len(Y)
@@ -151,6 +193,7 @@ def sample_batches_direct(X, Y, batch_size, n_batches, kde, rng, quantile_thresh
     Ybatches = Ysub.reshape((n_batches, batch_size, Ysub.shape[1]))
     return Xbatches, Ybatches
 
+
 # @partial(jit, static_argnames=('batch_size', 'n_batches', 'density_quantile_threshold'))
 def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_threshold):
     all_batches = [
@@ -177,7 +220,6 @@ def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_th
     assert ybatches.shape == (n_batches, batch_size, sum([y.shape[1] for y in Y]))
     # (N_BATCHES, BATCH_SIZE, N_MODELS * FEATURES)
     return xbatches, ybatches
-
 
 
 class DataManager:
@@ -261,7 +303,6 @@ class DataManager:
 
 
 #                                                                            }}}
-
 # {{{                         --     batches     --
 # ···············································································
 
@@ -449,6 +490,7 @@ def smooth_heatmap(logX, logY, Z=None, x=None, ax=None, **kw):
     Z, x = get_knn_smooth(logX, logY, **kw)
     return heatmap_old(Z, x, ax)
 
+
 def heatmap(
     ax,
     Z,
@@ -587,11 +629,11 @@ def smooth_1d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
 def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, **kw):
     input_name = model.get_inverted_input_proteins()
     output_names = model.get_output_proteins()
-    
+
     reordered_input = sorted(input_name)[::-1]
     if reordered_input != input_name:
         x = x[:, [input_name.index(i) for i in reordered_input]]
-    
+
     assert len(output_names) == 3
     assert len(input_name) == 2
     output = list(set(output_names) - set(input_name))
@@ -684,8 +726,9 @@ def timelapse_persp(Q, title, labels=None, outputfile=None, show=True, **kw):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                --     summary model plot functions     --
-def model_plot(model: bc.ComputeGraphModel, X, Y, rescaler, ax, kde=None, **kw):
-    x, y = X, Y
+def model_plot(dman: DataManager, model_id: int, ax, kde=None, **kw):
+    model = dman.get_models()[model_id]
+    x, y = dman.get_X()[model_id], dman.get_Y()[model_id]
     if kde is not None:
         rng = jax.random.PRNGKey(0)
         subsample = optimal_density_subsample(x, kde, rng, quantile_threshold=0.1)
@@ -693,11 +736,13 @@ def model_plot(model: bc.ComputeGraphModel, X, Y, rescaler, ax, kde=None, **kw):
 
     ninputs = model.n_inputs
     if ninputs == 1:
-        smooth_1d(x, y, model, rescaler, ax, **kw)
+        smooth_1d(x, y, model, dman.rescale, ax, **kw)
     elif ninputs == 2:
-        smooth_2d(x, y, model, rescaler, ax, **kw)
+        smooth_2d(x, y, model, dman.rescale, ax, **kw)
     elif ninputs == 3:
-        smooth_3d(x, y, model, rescaler, ax, **kw)
+        smooth_3d(x, y, model, dman.rescale, ax, **kw)
+    else:
+        raise NotImplementedError(f'Cannot plot {ninputs} inputs')
 
 
 def eval_model_plot(
@@ -738,10 +783,177 @@ def report(params, dman, id, suptitle=''):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                  --     Fluo distribution plots     --
 
 
+def get_bio_color(name, default='k'):
+    import difflib
+
+    colors = {'ebfp': '#529edb', 'eyfp': '#fbda73', 'mkate': '#f75a5a', 'neongreen': '#33f397'}
+    colors['fitc'] = colors['neongreen']
+    colors['pe_texas_red'] = colors['mkate']
+    colors['pacific_blue'] = colors['ebfp']
+    closest = difflib.get_close_matches(name.lower(), colors.keys(), n=1)
+    if len(closest) == 0:
+        color = default
+    else:
+        color = colors[closest[0]]
+    return color
 
 
+@jit
+def loglog(x):
+    return jnp.where(x > 1, jnp.log10(x), jnp.where(x < -1, -jnp.log10(-x), 0))
+
+
+@jit
+def inv_loglog(x):
+    return jnp.where(x > 0, 10**x, jnp.where(x < 0, -(10**-x), 0))
+
+
+def fluo_scatter(rawx, pnames, title=None, types=None):
+    fig, axes = plt.subplots(1, len(pnames), figsize=(1.25 * len(pnames), 10), sharey=True)
+    if types is None:
+        types = [''] * len(pnames)
+    for xid, ax in enumerate(axes):
+        color = get_bio_color(pnames[xid])
+        xcoords = jax.random.normal(jax.random.PRNGKey(0), (rawx.shape[0],)) * 0.1
+        ax.scatter(xcoords, rawx[:, xid], color=color, alpha=0.03, s=5, zorder=10, lw=0)
+        ax.set_yscale('symlog')
+        ax.set_xlim(-0.5, 0.5)
+        ax.set_ylim(min(rawx.min(), 0), rawx.max())
+        ax.set_xlabel(f'{pnames[xid]} {types[xid]}', rotation=0, labelpad=20, fontsize=10)
+        remove_spines(ax)
+        ax.set_xticks([])
+
+    if title is not None:
+        fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+
+
+def density_plot_1d(x, sample_at, ax, color='k', label=None, ticks=None, ticks_labels=None, x2=None, show_quantiles=[0.005, 0.995], **kw):
+    left_kde = gaussian_kde(x.T, bw_method=0.005)
+    left_densities = left_kde(sample_at.T)
+    if x2 is not None:
+        right_kde = gaussian_kde(x2.T, bw_method=0.005)
+        right_densities = right_kde(sample_at.T)
+    else:
+        x2 = x
+        right_kde = left_kde
+        right_densities = left_densities
+
+    left_densities = (left_densities / left_densities.max()) * 0.4
+    right_densities = (right_densities / right_densities.max()) * 0.4
+
+    ax.plot(-left_densities, sample_at, color='k', alpha=1, lw=0.5)
+    ax.plot(right_densities, sample_at, color='k', alpha=1, lw=0.5)
+
+    if show_quantiles is not None:
+        maxleft = sample_at[left_densities.argmax()]
+        q1 = jnp.quantile(x, show_quantiles[0])
+        q9 = jnp.quantile(x, show_quantiles[-1])
+        ax.plot([-0.5, 0], [q1, q1], color=color, lw=1)
+        ax.plot([-0.5, 0], [q9, q9], color=color, lw=1)
+        # ax.plot([-0.5, 0], [maxleft, maxleft], color='k', lw=1)
+        ax.fill_betweenx([q1, q9], -0.5, 0, color=color, alpha=0.1, lw=0)
+        maxright = sample_at[right_densities.argmax()]
+        q1 = jnp.quantile(x2, show_quantiles[0])
+        q9 = jnp.quantile(x2, show_quantiles[-1])
+        ax.plot([0, 0.5], [q1, q1], color=color, lw=1)
+        ax.plot([0, 0.5], [q9, q9], color=color, lw=1)
+        # ax.plot([0, 0.5], [maxright, maxright], color='k', lw=1)
+        ax.fill_betweenx([q1, q9], 0, 0.5, color=color, alpha=0.1, lw=0)
+
+    ax.fill_betweenx(sample_at, -left_densities, 0, color=color, alpha=1, lw=0)
+    ax.fill_betweenx(sample_at, 0, right_densities, color=color, alpha=1, lw=0)
+    ax.axvline(0, color='k', alpha=0.5, lw=0.5, dashes=(10, 10), dash_capstyle='round')
+    ax.set_aspect("equal")
+    ax.set_xlim(-0.5, 0.5)
+    remove_axis_and_spines(ax)
+    if label is not None:
+        ax.set_xlabel(label, rotation=0, labelpad=20, fontsize=10)
+    if ticks is not None:
+        for t in ticks:
+            ax.axhline(
+                t,
+                xmin=-0.2,
+                xmax=1,
+                c='#777777',
+                linewidth=0.2,
+                zorder=0,
+                clip_on=False,
+                alpha=1,
+                dashes=(10, 20),
+                dash_capstyle='round',
+            )
+
+        if ticks_labels is not None:
+            ax.set_yticks(ticks)
+            ax.set_yticklabels(ticks_labels)
+            ax.tick_params(axis='y', which='both', length=0, pad=30)
+            for tick in ax.yaxis.get_major_ticks():
+                tick.label.set_fontsize(8)
+                tick.label.set_color('grey')
+
+
+def fluo_densities(rawx, pnames, xmin=None, xmax=None, res=2000, title=None, types=None, **kw):
+    fig, axes = plt.subplots(1, len(pnames), figsize=(1.5 * len(pnames), 10))
+
+    X = loglog(rawx)
+    xmin = xmin if xmin is not None else np.floor(X.min())
+    xmax = xmax if xmax is not None else np.ceil(X.max())
+
+    ticks = np.arange(xmin, xmax + 1, 1)
+    sample_at = jnp.linspace(xmin, xmax, res)
+    ylabels = [scformat.format("{:m}", x) for x in inv_loglog(ticks)]
+
+    if types is None:
+        types = [''] * len(pnames)
+    for xid, ax in enumerate(axes):
+        color = get_bio_color(pnames[xid], default='#AAAAAA')
+        tlabels = ylabels if xid == 0 else None
+        density_plot_1d(
+            X[:, xid],
+            sample_at,
+            ax,
+            color=color,
+            label=f'{pnames[xid]} {types[xid]}',
+            ticks=ticks,
+            ticks_labels=tlabels,
+            **kw,
+        )
+        ax.set_ylim(xmin, xmax)
+    if title is not None:
+        fig.suptitle(
+            title,
+            fontsize=10,
+            y=0.85,
+            x=0.45,
+        )
+    fig.tight_layout()
+
+
+def model_fluo_distributions(dman, model_id, method='scatter', **kwargs):
+    model = dman.get_models()[model_id]
+    rawx = dman.get_raw_X()[model_id]
+    rawy = dman.get_raw_Y()[model_id]
+    input_names = model.get_inverted_input_proteins()
+    reordered_input = sorted(input_names)
+    output_names = model.get_output_proteins()
+    output = list(set(output_names) - set(input_names))
+    output_pos = output_names.index(output[0])
+    if reordered_input != input_names:
+        rawx = rawx[:, [input_names.index(i) for i in reordered_input]]
+    rawx = jnp.hstack([rawx, rawy[:, output_pos][:, None]])
+    pnames = reordered_input + output
+    types = ['[in]'] * len(reordered_input) + ['[out]']
+    if method == 'scatter':
+        fluo_scatter(rawx, pnames, types=types, **kwargs)
+    elif method == 'kde':
+        fluo_densities(rawx, pnames, types=types, **kwargs)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ### {{{                         --     archives     --
@@ -1430,6 +1642,7 @@ class DataManager_bin:
 
 
 #                                                                            }}}
+
 
 def sample_batches(
     X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1, x_pad_to=None, y_pad_to=None

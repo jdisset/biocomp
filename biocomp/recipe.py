@@ -2,6 +2,7 @@ from .library import PartsLibrary as PartsLibrary
 from . import utils as ut
 from .network import Network, inverted_network
 from .compute import ComputeGraphModel
+from . import Calibration as Calibration
 from pathlib import Path
 import numpy as np
 import jax
@@ -241,6 +242,7 @@ class XP:
         db_path=":memory:",
         inverse='shortest',
         data_path='./data',
+
     ):
         log.debug(f'Initializing XP {xp_name}')
         self.xp_path, self.recipe_path = Path(xp_path), Path(recipe_path)
@@ -257,7 +259,10 @@ class XP:
                 xpobj = json5.load(f)
                 xp_to_sql([xpobj], self.dbconn)
                 for k, v in xpobj.items():
-                    setattr(self, k, v)
+                    if k == 'color_names':
+                        self.color_names = {kk: Calibration.escape(vv) for kk, vv in v.items()}
+                    else:
+                        setattr(self, k, v)
             except Exception as e:
                 raise RuntimeError(f'Error loading xp file {self.xpfile}: \n{e}')
 

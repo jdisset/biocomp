@@ -84,36 +84,15 @@ config = {
 
 lib = ut.load_lib()
 matrix_xp = ut.load_xp('2023-02-16_Matrix', lib, data_path='./data/calibrated_data')
+dman = du.DataManager.from_xps([matrix_xp], config, inverse='all')
 
-matrix_xp
 
-# dman = du.DataManager.from_xps([uorf_xp, ern_xp], config, inverse='all')
+##
+fig, ax = du.mkfig(1,1)
+du.model_plot(dman, 1, ax=ax)
+##
+du.model_fluo_distributions(dman, 2)
+du.model_fluo_densities(dman, 2)
+
 # loggers = bc.train.setup_wandb_logging('quantile_v2', dman, config)
 # bc.train.start(dman, config, loggers)
-
-##
-
-xp_path = ut.DEFAULT_XP_PATH / '2023-02-16_Matrix'
-# load al csv files in xp_path/data/raw_data_gated
-raw_path = xp_path / 'data/raw_data_gated'
-datafiles = list(raw_path.glob('*.csv'))
-
-control_files = list(raw_path.glob('color_controls/*.csv'))
-control_color = [c.stem.split('.')[0] for c in control_files]
-controls = {c: cpath for c, cpath in zip(control_color, control_files)}
-beads = list(raw_path.glob('beads/*.fcs'))[0]
-
-cal = Calibration(controls, beads, reference_protein='EBFP2', use_channels=['FITC', 'PACIFIC_BLUE', 'PE_TEXAS_RED'])
-
-cal.fit_TASBE()
-
-##
-calibrated_path = xp_path / 'data/calibrated_data'
-calibrated_path.mkdir(exist_ok=True)
-
-for f in tqdm(datafiles):
-    calibrated = cal.apply(pd.read_csv(f))
-    calibrated.to_csv(calibrated_path / f.name, index=False)
-
-
-

@@ -1,8 +1,7 @@
 import jax
 import optax
+from jax import jit, vmap
 import jax.numpy as jnp
-import time
-from jax import jit, vmap, value_and_grad
 from jax.tree_util import Partial as partial
 from jax.scipy.stats import gaussian_kde
 
@@ -10,11 +9,10 @@ from ott.geometry.pointcloud import PointCloud
 from ott.problems.linear.linear_problem import LinearProblem
 from ott.solvers.linear.sinkhorn import Sinkhorn
 
+import time
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from tqdm import tqdm
-import matplotlib as mpl
 import matplotlib.pyplot as plt
 import flowio
 
@@ -62,6 +60,9 @@ FORTESSA_CHANNELS = {
     'APC_Cy7_A': 'MEAPCCY7',
 }
 
+FORTESSA_MAX_V = 2**18 - 1
+
+FORTESSA_OFFSET = 200
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -77,6 +78,10 @@ def escape(names):
         return [escape_name(name) for name in names]
     if isinstance(names, tuple):
         return tuple([escape_name(name) for name in names])
+    if isinstance(names, dict):
+        return {escape_name(k): escape_name(v) for k, v in names.items()}
+    else:
+        return names
 
 
 def astuple(x):
@@ -88,7 +93,7 @@ def astuple(x):
 
 
 # weights observations: 0 if out of range, 1 if in range
-def w_function(x, a=0.3, b=0.75, lsteepness=70, rsteepness=500):
+def w_function(x, a=0, b=0.99, lsteepness=10, rsteepness=1000):
     y1 = 1 / (1 + jnp.exp(-lsteepness * (x - a)))
     y2 = 1 / (1 + jnp.exp(-rsteepness * (x - b)))
     return jnp.clip(y1 - y2, 0, 1)
@@ -132,16 +137,19 @@ def inverse_logtransform(x, scale, offset=0):
 
 affine_transform = lambda params, x: params['a'] * x + params['b']
 
+CALIBRATION_PEAKS_MIN_X = -0.025
+CALIBRATION_PEAKS_MAX_X = 1.025
+
 
 @partial(jit, static_argnums=(2, 3, 4))
 def compute_peaks(
     observations,
     beads,
     resolution=1000,
-    bw_method=0.15,
-    max_obs=15000,
-    peaks_min_x=-0.025,
-    peaks_max_x=1.1,
+    bw_method=0.2,
+    max_obs=20000,
+    peaks_min_x=CALIBRATION_PEAKS_MIN_X,
+    peaks_max_x=CALIBRATION_PEAKS_MAX_X,
 ):
     """Compute coordinates of each bead's peak in all channels"""
 
@@ -154,6 +162,7 @@ def compute_peaks(
     # so there's a bunch of points around this one that could be paired with any of the remaining beads
     # This is much more robust than just computing OT for all channels at once
 
+    @jit
     @partial(vmap, in_axes=(1, 1))
     def vote(s, t):
         return Sinkhorn()(LinearProblem(PointCloud(s[:, None], t[:, None]))).matrix
@@ -168,7 +177,7 @@ def compute_peaks(
     # votes already intrinsically contain a notion of confidence in the pairing, but I want to
     # make it even more explicit by discrediting votes for observations that are clearly out of range.
     # Weight each observation in each channel: 0 = out of range, 1 = in range (+ smooth at the edges)
-    weights = vmap(w_function)(observations).T  # (CHANNELS, OBSERVATIONS)
+    weights = vmap(w_function)(observations).T  # (CHANNELS, OBSERVATIONS) -> "validity" from range
     weighted_votes = votes * weights[:, :, None] + 1e-12  # (CHANNELS, OBSERVATIONS, BEADS)
     vmat = jnp.sum(weighted_votes, axis=0) / jnp.sum(weights, axis=0)[:, None]  # weighted average
 
@@ -187,7 +196,27 @@ def compute_peaks(
     densities = jit(vmap(vmap(w_kde, in_axes=(None, 1)), in_axes=(1, None)))(obs, vmat)
     densities = densities.transpose(1, 0, 2)  # densities.shape is (BEADS, CHANNELS, RESOLUTION)
 
-    peaks = x[jnp.argmax(densities, axis=2)]  # peaks.shape is (BEADS, CHANNELS)
+    # find the most likely peak positions for each bead using the average intensity weighted by density
+    DENSITY_TH = (
+        0.25  # min threshold (as fraction of max) for density to be included in the average
+    )
+    RANGE_TH = (
+        0.2  # min weight from the validity range (to avoid giving importance to saturated values)
+    )
+    normalized_densities = densities / jnp.max(densities, axis=2)[:, :, None]
+    w = jnp.where(
+        (normalized_densities > DENSITY_TH) & (w_function(x) > RANGE_TH)[None, None, :],
+        normalized_densities - DENSITY_TH,
+        0,
+    )
+    w = jnp.where(
+        normalized_densities > DENSITY_TH, jnp.maximum(w, 1e-9), 0
+    )  # still some tiny weight when OOR
+    xx = jnp.tile(x, (densities.shape[0], densities.shape[1], 1))
+    peaks = jnp.average(xx, axis=2, weights=w)  # peaks.shape is (BEADS, CHANNELS)
+
+    # let's also estimate a confidence score for each peak
+    # we will compute that by how much overlap ther is between each bead's distributions
 
     return peaks, (densities, vmat)
 
@@ -207,6 +236,11 @@ def beads_fit(logpeaks, logcalib, num_iter=5000, learning_rate=0.01, ignore_firs
 
     X = jnp.where(jnp.isnan(logpeaks), 0, logpeaks)
     weights = vmap(w_function, in_axes=0)(logpeaks)
+    xrange = X.max(axis=0) - X.min(axis=0)
+    # ignore top 5% and bottom 5% of values
+    weights = jnp.where(
+        (X < X.min(axis=0) + xrange * 0.05) | (X > X.max(axis=0) - xrange * 0.05), 0, weights
+    )
     if ignore_first_bead:
         weights = weights.at[0, :].set(0)
 
@@ -232,13 +266,71 @@ def beads_fit(logpeaks, logcalib, num_iter=5000, learning_rate=0.01, ignore_firs
     return params, losses
 
 
+from scipy.interpolate import UnivariateSpline
+
+
+def beads_fit_spline(logpeaks, logcalib, spline_degree=2, smooth_percent=1, CF=100, ignore_first_bead=True):
+    X = logpeaks * CF  # (NBEADS, NCHAN)
+    Y = logcalib * CF
+    NBEADS, NCHAN = X.shape
+
+    # it's necessary that the function is monotonous for invertibility
+    ydiff = np.diff(Y, axis=0)
+    assert np.all(ydiff >= 0)
+
+    # any distance between peaks that is less than MIN_PERCENT_DIST%
+    # of the range will be given a weight that's inversely proportional to the distance
+    # Peaks so close together probably means the bead data is overlapping in this region
+    # and we can't be that confident in the fit
+    MIN_PERCENT_DIST = 3
+    dist_fwd = np.abs(X[1:] - X[:-1])
+    dist_fwd = np.concatenate([dist_fwd[0:1], dist_fwd], axis=0)
+    dist_bwd = np.abs(X[:-1] - X[1:])
+    dist_bwd = np.concatenate([dist_bwd, dist_bwd[-1:]], axis=0)
+    avg_dist_to_neigh = (dist_fwd + dist_bwd) / 2
+    w = np.clip(avg_dist_to_neigh / MIN_PERCENT_DIST, 0, 1)
+    # check that X is ordered
+    order = np.argsort(X, axis=0)
+    # detect if there are any beads that are out of order and put their weight to a very small value
+    w = np.where(order != np.arange(0, NBEADS)[:, None], 1e-6, w)
+
+    # reorder, but only X
+    X = X[order, np.arange(0, NCHAN)]
+
+    if ignore_first_bead:
+        w[0, :] = 1e-9
+
+    splines = [
+        UnivariateSpline(
+            X[:, c], Y[:, c], k=spline_degree, s=smooth_percent, check_finite=True, w=w[:, c]
+        )
+        for c in range(0, NCHAN)
+    ]
+    inv_splines = [
+        UnivariateSpline(
+            Y[:, c], X[:, c], k=spline_degree, s=smooth_percent, check_finite=True, w=w[:, c]
+        )
+        for c in range(0, NCHAN)
+    ]
+
+    transforms = [lambda x: s(x * CF) / CF for s in splines]
+    inv_transforms = [lambda x: s(x * CF) / CF for s in inv_splines]
+    return transforms, inv_transforms
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                     --     diagnostic plots     --
-
-
+# {{{
 def plot_bead_peaks_diagnostics(
-    peaks, densities, vmat, observations, color_channels, max_obs=20000
+    peaks,
+    densities,
+    vmat,
+    observations,
+    color_channels,
+    max_obs=20000,
+    peaks_min_x=CALIBRATION_PEAKS_MIN_X,
+    peaks_max_x=CALIBRATION_PEAKS_MAX_X,
 ):
     """
     Plot diagnostics for the bead peaks computation:
@@ -276,9 +368,7 @@ def plot_bead_peaks_diagnostics(
     ax.set_yticks([0, len(assignment)])
 
     resolution = densities.shape[2]
-    xmin = PEAKS_MIN_X
-    xmax = PEAKS_MAX_X
-    x = jnp.linspace(xmin, xmax, resolution)
+    x = jnp.linspace(peaks_min_x, peaks_max_x, resolution)
     axes = subfigs[1].subplots(len(color_channels), 1, sharex=True)
     if len(color_channels) == 1:
         axes = [axes]
@@ -300,7 +390,7 @@ def plot_bead_peaks_diagnostics(
 
             ax.imshow(
                 weights[::5][None, :],
-                extent=(xmin, xmax, 0, 1.5),
+                extent=(peaks_min_x, peaks_max_x, 0, 1.5),
                 aspect='auto',
                 cmap='Greys_r',
                 alpha=0.05,
@@ -311,14 +401,15 @@ def plot_bead_peaks_diagnostics(
             ax.text(peaks[b, c] + 0.01, 0.3 + 0.1 * b, f'{b}', fontsize=8, ha='center', va='center')
             ax.set_ylim(0, 1.2)
             ax.set_yticks([])
-            ax.set_xlim(xmin, 1.1)
+            ax.set_xlim(peaks_min_x, 1.1)
             title = f'{color_channels[c]}'
             ax.set_ylabel(title)
 
+        # show real legend!!!!!!!
         axes[0].set_title(
             'Density of observations across channel range (grey background = out of range)'
         )
-        # color: density of observations per bead assignment\n
+        # color: density of observations per bead assignment\n}}}
         # ----: estimated peak position\n
         # dark curve: original distribution of observations in channel
     subfigs[1].suptitle("Bead peak diagnostics")
@@ -334,28 +425,29 @@ def remove_axis_and_spines(ax):
 def plot_fluo_distribution(ax, data, res=2000):
     from jax.scipy.stats import gaussian_kde
 
-    xrange = 1.2
-    XX = jnp.linspace(-0.05, xrange, res)
+    xmax = np.max(data)
+    XX = jnp.linspace(0.0, 1.1 * xmax, res)
     kde = gaussian_kde(data.T, bw_method=0.01)
-    smoothkde = gaussian_kde(data.T, bw_method=0.1)
     densities = kde(XX.T)
     ldensities = jnp.log10(1.0 + densities)
     densities = (densities / densities.max()) * 0.4
     ldensities = (ldensities / ldensities.max()) * 0.4
     ax.fill_betweenx(XX, -ldensities, 0, color='k', alpha=0.2, lw=0)
-    # ax.fill_betweenx(XX, 0, ldensities, color='k', alpha=0.2, lw=0)
     ax.fill_betweenx(XX, -densities, 0, color='k', alpha=0.2, lw=0)
-    # ax.fill_betweenx(XX, 0, densities, color='k', alpha=0.2, lw=0)
-    # ax.plot(densities, XX, color='k', alpha=0.5, lw=0.7)
     ax.plot(-densities, XX, color='k', alpha=0.5, lw=0.7)
-    # ax.set_aspect("equal")
-    ax.set_ylim(-0.05, xrange)
     ax.set_xlim(-0.5, 0.5)
     remove_axis_and_spines(ax)
 
 
 def plot_beads_dists(
-    params, peaks, calib, observations, color_channels, channel_to_unit, max_obs=20000, fname=None
+    transform,
+    peaks,
+    calib,
+    observations,
+    color_channels,
+    channel_to_unit,
+    max_obs=20000,
+    fname=None,
 ):
     from matplotlib import cm
 
@@ -365,20 +457,15 @@ def plot_beads_dists(
         observations = observations[reorder]
 
     NBEADS, NCHAN = peaks.shape
-    fig, axes = plt.subplots(NCHAN, 1, figsize=(2.2 * NCHAN, 12))
-    tdata = affine_transform(params, observations)
-    tpeaks = affine_transform(params, peaks)
-    weights = affine_transform(params, peaks)
-    beadcolors = [plt.get_cmap('tab10')(1.0 * i / 10) for i in range(10)]
+    fig, axes = plt.subplots(1, NCHAN, figsize=(2.2 * NCHAN, 12))
+    tdata = transform(observations)
+    tpeaks = transform(peaks)
     for c in range(NCHAN):
         ax = axes[c]
-        error = jnp.average(jnp.abs(tpeaks[1:, c] - calib[1:, c]), weights=weights[1:, c])
-        # add beads as horizontal red lines
-        for b in range(1, NBEADS):
-            w = float(weights[b, c])
-            # color by w : from red to green in jet cmap
-            alpha = 0.3 + w * 0.7
-            # ax.axhline(calib[j, i], color=color, lw=1, dashes=(3, 3))
+        error = jnp.average(jnp.abs(tpeaks[1:, c] - calib[1:, c]))
+        # add beads as horizontal lines
+        for b in range(0, NBEADS):
+            alpha = 0.7
             ax.axhline(tpeaks[b, c], color='k', lw=1, xmin=0, xmax=0.5)
             ax.text(
                 -0.07 - (0.05 * b),
@@ -392,7 +479,7 @@ def plot_beads_dists(
             ax.axhline(calib[b, c], alpha=alpha, color='k', lw=1, dashes=(3, 3), xmin=0.5, xmax=1)
             ax.text(
                 0.45,
-                logcalib[b, c] + 0.01,
+                calib[b, c] + 0.01,
                 f'{b}',
                 fontsize=8,
                 color='k',
@@ -400,9 +487,9 @@ def plot_beads_dists(
                 horizontalalignment='center',
                 verticalalignment='center',
             )
+
         plot_fluo_distribution(ax, tdata[:, c])
         ax.set_title(f'{color_channels[c]} \n(to {channel_to_unit[color_channels[c]]})', pad=40)
-
         ax.text(
             0.05,
             1.15,
@@ -412,7 +499,6 @@ def plot_beads_dists(
             horizontalalignment='left',
             verticalalignment='center',
         )
-
         ax.text(
             -0.05,
             1.15,
@@ -422,7 +508,6 @@ def plot_beads_dists(
             horizontalalignment='right',
             verticalalignment='center',
         )
-
         cmap = cm.get_cmap('RdYlGn_r')
         color = cmap(error / 0.02)
         ax.text(
@@ -461,7 +546,7 @@ def plot_spectral_sig(S, ax, prots=None, channels=None):
 ### {{{                 --     simple optimization functions   --
 
 
-def spectral_bleedthrough(Y, M, max_iterations=50, jax_seed=0):
+def spectral_bleedthrough(Y, M, max_iterations=50, jax_seed=0, verbose=False):
     # Solves with Alternating Least Square using closed form solutions (pinv)
 
     # model: Y = XM.S
@@ -485,7 +570,8 @@ def spectral_bleedthrough(Y, M, max_iterations=50, jax_seed=0):
     for _ in range(max_iterations):
         S, K = alsq(K)
         error = ((Y - (K[:, None] * M) @ S) ** 2).mean() / jnp.linalg.norm(Y)
-        # print(f'error: {error:.2e}, update: {jnp.mean((Sprev - S)**2):.2e}')
+        if verbose:
+            print(f'error: {error:.2e}, update: {jnp.mean((Sprev - S)**2):.2e}')
         Sprev = S
 
     return S, K
@@ -509,7 +595,8 @@ def affine_opt(Ylog, ref_channel):
     return a, b
 
 
-def affine_gd(Y, ref_channel, num_iter=1000, learning_rate=0.1, max_N=500000):
+def affine_gd(Y, ref_channel, num_iter=1000, learning_rate=0.1, max_N=500000, verbose=False):
+    # gradient descent version of the above affine fit
 
     NCHAN = Y.shape[1]
     if len(Y) > max_N:
@@ -546,10 +633,40 @@ def affine_gd(Y, ref_channel, num_iter=1000, learning_rate=0.1, max_N=500000):
     for i in range(0, num_iter):
         params, opt_state, loss = update(params, opt_state)
         losses.append(loss)
-        # print(f'iter {i}: loss = {loss:.2e}')
+        if verbose:
+            print(f'iter {i}: loss = {loss:.2e}')
 
     a, b = params['a'], params['b']
     return a, b
+
+
+from tqdm import tqdm
+
+
+from scipy.interpolate import LSQUnivariateSpline
+
+DEFAULT_CMAP_Q = np.array([0.001, 0.999])
+
+def cmap_spline(X, Y, n_knots=1, spline_order=3, CF=100, Q=DEFAULT_CMAP_Q):
+    X, Y = X * CF, Y * CF
+    x_order = np.argsort(X, axis=0)
+    Xx, Yx = np.take_along_axis(X, x_order, axis=0), Y[x_order]
+    w = 0.1 * np.ones_like(Y)
+    xknots = np.linspace(np.quantile(X, Q[0], axis=0), np.quantile(X,Q[-1], axis=0), n_knots).T
+    splines = [
+        LSQUnivariateSpline(Xx[:, c], Yx[:, c], k=spline_order, t=xknots[c], w=w)
+        for c in tqdm(range(X.shape[1]))
+    ]
+    y_order = np.argsort(Y, axis=0)
+    Xy, Yy = X[y_order], Y[y_order]
+    yknots = np.linspace(Yy.min() + 1, Yy.max() - 1, n_knots)
+    inv_splines = [
+        LSQUnivariateSpline(Yy, Xy[:, c], k=spline_order, t=yknots, w=w) for c in range(X.shape[1])
+    ]
+    transform = lambda X: np.array([s(x * CF) / CF for s, x in zip(splines, X.T)]).T
+    inv_transform = lambda Y: np.array([s(y * CF) / CF for s, y in zip(inv_splines, Y.T)]).T
+
+    return transform, inv_transform
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -570,10 +687,12 @@ class Calibration:
         color_controls_files: dict[tuple[str], str],
         beads_file: str,
         reference_protein: str = 'EBFP2',
-        beads_reference_values: dict[str, list[float]] = SPHEROTECH_RCP_30_5a,
+        beads_mef_values: dict[str, list[float]] = SPHEROTECH_RCP_30_5a,
         channel_to_unit: dict[str, str] = FORTESSA_CHANNELS,
         random_seed: int = 42,
         use_channels: list[str] = None,
+        max_value=FORTESSA_MAX_V,
+        offset=FORTESSA_OFFSET,
     ):
         """
         Parameters
@@ -590,18 +709,26 @@ class Calibration:
                             other proteins quantities to, i.e they will be expressed in the same unit
                             The channel is picked as the brightest channel of the reference protein
 
-        beads_reference_vlaues : dict[str, list[float]] - dictionary associating the unit name
+        beads_mef_vlaues : dict[str, list[float]] - dictionary associating the unit name
             to the list of reference values for the beads in this unit
             e.g : {'MEFL': [456, 4648, 14631, 42313, 128924, 381106, 1006897, 2957538, 7435549], 'MEPE': ...}
 
         channel_to_unit : dict[str, str] - dictionary associating the channel name to the unit name
             e.g. {'Pacific Blue-A': 'PacBlue', 'AmCyan-A': 'MEAMCY', ...}
 
+        random_seed : int - random seed for any resampling that might be done
+
+        use_channels : list[str] - list of channels to use. None means all available channels
+
+        max_value : int - maximum value of the fluorescence values, used to detect saturation
+
+        offset : int - offset to add to the fluorescence values to avoid negative values
+
         """
         self.color_controls_files = color_controls_files
         self.beads_file = beads_file
         self.reference_protein = escape(reference_protein)
-        self.beads_reference_values = {escape(k): v for k, v in beads_reference_values.items()}
+        self.beads_mef_values = {escape(k): v for k, v in beads_mef_values.items()}
         self.channel_to_unit = {escape(k): escape(v) for k, v in channel_to_unit.items()}
         self.unit_to_channel = {v: k for k, v in self.channel_to_unit.items()}
         self.random_seed = random_seed
@@ -616,7 +743,11 @@ class Calibration:
             for k, v in color_controls_files.items()
         }
 
-        self.beads = load_to_df(self.beads_file, self.__channel_order)
+        self.__beads_channel_order = sorted(list(self.channel_to_unit.keys()))
+        self.beads = load_to_df(self.beads_file, self.__beads_channel_order)
+
+        self.__max_value = max_value
+        self.__offset = offset
 
         VALID_BLANK_NAMES = ['BLANK', 'EMPTY', 'INERT', 'CNTL']
         VALID_ALL_NAMES = ['ALL', 'ALLCOLOR', 'ALLCOLORS', 'FULL']
@@ -672,51 +803,68 @@ class Calibration:
         zero_masks = self.__controls_masks.sum(axis=1) == 0
         self.__autofluorescence = np.median(self.__controls_values[zero_masks], axis=0)
 
-        print('Computing peaks assignment...')
-        # we find the parameters of the log10 transform so that values are ~ [0, 1]
-        maxv = max(jnp.max(self.__controls_values), jnp.max(self.beads.values)) * 1.01
-        self.__log_scale_factor = jnp.log10(maxv)
-        calib_values = jnp.array(
-            [self.beads_reference_values[self.channel_to_unit[c]] for c in self.__channel_order]
-        ).T
-        logcalib = logtransform(calib_values, self.__log_scale_factor)
-        self.__logbeads = logtransform(jnp.clip(self.beads.values, 1), self.__log_scale_factor)
-        self.__beads_peaks, (self.__beads_densities, self.__beads_vmat) = compute_peaks(
-            self.__logbeads, logcalib
-        )
-
-        print('Computing channel calibration to MEF...')
-        self.__beads_params, self.__beads_loss = beads_fit(self.__beads_peaks, logcalib)
-
         print('Computing bleedthrough matrix...')
         single_masks = self.__controls_masks.sum(axis=1) == 1
         masks = self.__controls_masks[single_masks]
         Y = self.__controls_values[single_masks] - self.__autofluorescence
         self.__bleedthrough_matrix, _ = spectral_bleedthrough(Y, masks)
 
+        print('Computing peaks assignment...')
+        refprotid = self.__fluo_proteins.index(self.reference_protein)
+        refchanid = jnp.argmax(self.__bleedthrough_matrix[refprotid])
+        self.cal_units = self.channel_to_unit[self.__channel_order[refchanid]]
+
+        # normalizing beads values to [0;1] (fo the observations, not necessarily the reference values)
+        self.__log_scale_factor = jnp.log10(self.__max_value + self.__offset)
+        calib_values = jnp.array(
+            [self.beads_mef_values[self.channel_to_unit[c]] for c in self.__beads_channel_order]
+        ).T
+        self.__log_beads_mef = logtransform(calib_values, self.__log_scale_factor, 0)
+        self.__log_beads_data = logtransform(
+            self.beads.values, self.__log_scale_factor, self.__offset
+        )
+        self.__log_beads_peaks, (self.__beads_densities, self.__beads_vmat) = compute_peaks(
+            self.__log_beads_data, self.__log_beads_mef
+        )
+
+        print('Computing channel calibration to MEF...')
+        self.beads_transform, self.beads_inv_transform = beads_fit_spline(
+            self.__log_beads_peaks, self.__log_beads_mef
+        )
+
         print('Computing color mapping...')  # yi = xi mi S ;  gi = ai * log(yi) + bi
         all_masks = self.__controls_masks.sum(axis=1) > 1
-        Y = self.__controls_values[all_masks] - self.__autofluorescence
-        X = Y @ jnp.linalg.pinv(self.__bleedthrough_matrix)
+        fluo_X = self.__controls_values[all_masks] - self.__autofluorescence
+        X = fluo_X @ jnp.linalg.pinv(self.__bleedthrough_matrix)
+        X += self.__offset  # add offset
         refprotid = self.__fluo_proteins.index(self.reference_protein)
-        # remove X that have very low or negative values
-        X = X[jnp.all(X >= 1, axis=1)]
-        self.__cmap_a, self.__cmap_b = affine_gd(jnp.log10(X), refprotid)
+        X = X[jnp.all(X > 1, axis=1)]
+        logX = logtransform(X, self.__log_scale_factor, 0)
+        self.cmap_transform, self.cmap_inv_transform = cmap_spline(logX, logX[:, refprotid])
+        self.clamp_values = jnp.quantile(logX, DEFAULT_CMAP_Q, axis=0)
+
+
         self.__fitted = True
         print('Done fitting in {:.2f} seconds'.format(time.time() - t0))
 
     def apply_to_array(self, Y):
         assert self.__fitted, 'You must fit the calibration first'
         Y = Y - self.__autofluorescence  # remove autofluorescence
-        X = Y @ jnp.linalg.pinv(self.__bleedthrough_matrix)  # remove bleedthrough
-        X = jnp.maximum(X, 0)  # clip negative values
-        X = (10**self.__cmap_b) * (X**self.__cmap_a)  # color mapping
-        # apply bead transform :
+        X = Y @ jnp.linalg.pinv(self.__bleedthrough_matrix)  # apply bleedthrough
+        X += self.__offset  # add offset
+        X = X[jnp.all(X > 0, axis=1)]
+        logX = logtransform(X, self.__log_scale_factor, 0)
+        logX = logX[jnp.all(logX > self.clamp_values[0], axis=1)]
+        logX = logX[jnp.all(logX < self.clamp_values[1], axis=1)]
+        cmapX = self.cmap_transform(logX)
+
         refprotid = self.__fluo_proteins.index(self.reference_protein)
-        a = self.__beads_params['a'][refprotid]
-        b = self.__beads_params['b'][refprotid]
-        X = (X**a) * (10**b)
-        return X
+        refchanid = jnp.argmax(self.__bleedthrough_matrix[refprotid])
+        calibratedX = jnp.array([self.beads_transform[refchanid](cmapX[:, i]) for i in range(cmapX.shape[1])]).T
+
+        finalX = inverse_logtransform(calibratedX, self.__log_scale_factor)
+
+        return finalX
 
     def apply(self, df):
         assert self.__fitted, 'You must fit the calibration first'
@@ -726,16 +874,29 @@ class Calibration:
         return pd.DataFrame(X, columns=self.__fluo_proteins, index=df.index)
 
     def plot_beads_diagnostics(self):
-        if self.__beads_peaks is None:
+        if self.__log_beads_peaks is None:
             raise ValueError('You must fit the calibration first')
-        # plot_bead_peaks_diagnostics(peaks, densities, vmat, logbeads, channel_order)
-        plot_bead_peaks_diagnostics(
-            self.__beads_peaks,
-            self.__beads_densities,
-            self.__beads_vmat,
-            self.__logbeads,
-            self.__channel_order,
+
+        # # plot_bead_peaks_diagnostics(peaks, densities, vmat, logbeads, channel_order)
+        # plot_bead_peaks_diagnostics(
+        # self.__beads_peaks,
+        # self.__beads_densities,
+        # self.__beads_vmat,
+        # self.__logbeads,
+        # self.__beads_channel_order,
+        # )
+
+        plot_beads_dists(
+            self.beads_transform,
+            self.__log_beads_peaks,
+            self.__log_beads_mef,
+            self.__log_beads_data,
+            self.__beads_channel_order,
+            self.channel_to_unit,
         )
+
+
+# bc.calibration.plot_beads_dists(transform, beads_peaks, logcalib, logbeads, bchan, cal.channel_to_unit)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
