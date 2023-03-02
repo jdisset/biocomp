@@ -143,7 +143,7 @@ def wandb_log_epoch(epoch, cfg, epoch_history=None, **_):
 
 
 def console_log(epoch, cfg, epoch_history=None, **_):
-    if epoch_history is not None:
+    if epoch_history is not None and len(epoch_history['loss']) > 0:
         loss = np.array(epoch_history['loss'])
         avg = np.mean(loss)
         std = np.std(loss)
@@ -203,21 +203,23 @@ def start(dman: du.DataManager, cfg, loggers=None):
 
     key = jax.random.PRNGKey(config['rng_key'])
 
-    xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
     models = dman.get_models()
-
-    total_batches, nmodels = config['n_batches'], len(models)
-    assert total_batches == xbatches.shape[0] == ybatches.shape[0]
-
-    nbatches_per_epoch = total_batches // config['n_epochs_per_batch_rotation']
+    nmodels = len(models)
 
     # --- init
+    # params
     params, constraints = {}, {}
     optimizer = get_optimizer(config)
     for m, k in zip(models, jax.random.split(key, len(models))):
         params, constraints = m.init(k, pre_params=params, pre_constraints=constraints)
     dynamic, _ = ut.split_params(params, config['static_params'])
     opt_state = optimizer.init(dynamic)
+
+    # batches
+    xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
+    total_batches = config['n_batches']
+    assert total_batches == xbatches.shape[0] == ybatches.shape[0]
+    nbatches_per_epoch = total_batches // config['n_epochs_per_batch_rotation']
 
     # --- loss and updates
     x_start = np.cumsum([m.n_inputs for m in models])[:-1]

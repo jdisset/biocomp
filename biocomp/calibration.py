@@ -426,10 +426,10 @@ def plot_fluo_distribution(ax, data, res=2000):
     from jax.scipy.stats import gaussian_kde
 
     xmax = np.max(data)
-    XX = jnp.linspace(0.0, 1.1 * xmax, res)
+    XX = np.linspace(0.0, 1.1 * xmax, res)
     kde = gaussian_kde(data.T, bw_method=0.01)
     densities = kde(XX.T)
-    ldensities = jnp.log10(1.0 + densities)
+    ldensities = np.log10(1.0 + densities)
     densities = (densities / densities.max()) * 0.4
     ldensities = (ldensities / ldensities.max()) * 0.4
     ax.fill_betweenx(XX, -ldensities, 0, color='k', alpha=0.2, lw=0)
@@ -453,7 +453,7 @@ def plot_beads_dists(
 
     if observations.shape[0] > max_obs:
         key = jax.random.PRNGKey(0)
-        reorder = jax.random.permutation(key, jnp.arange(max_obs))
+        reorder = jax.random.permutation(key, np.arange(max_obs))
         observations = observations[reorder]
 
     NBEADS, NCHAN = peaks.shape
@@ -462,7 +462,7 @@ def plot_beads_dists(
     tpeaks = transform(peaks)
     for c in range(NCHAN):
         ax = axes[c]
-        error = jnp.average(jnp.abs(tpeaks[1:, c] - calib[1:, c]))
+        error = np.average(np.abs(tpeaks[1:, c] - calib[1:, c]))
         # add beads as horizontal lines
         for b in range(0, NBEADS):
             alpha = 0.7
@@ -645,7 +645,8 @@ from tqdm import tqdm
 
 from scipy.interpolate import LSQUnivariateSpline
 
-DEFAULT_CMAP_Q = np.array([0.001, 0.999])
+DEFAULT_CMAP_Q = np.array([0.005, 0.995]) # where to put spline knots
+DEFAULT_CLAMP_Q = np.array([0.001, 0.999]) # where to clamp values
 
 def cmap_spline(X, Y, n_knots=1, spline_order=3, CF=100, Q=DEFAULT_CMAP_Q):
     X, Y = X * CF, Y * CF
@@ -841,8 +842,7 @@ class Calibration:
         X = X[jnp.all(X > 1, axis=1)]
         logX = logtransform(X, self.__log_scale_factor, 0)
         self.cmap_transform, self.cmap_inv_transform = cmap_spline(logX, logX[:, refprotid])
-        self.clamp_values = jnp.quantile(logX, DEFAULT_CMAP_Q, axis=0)
-
+        self.clamp_values = jnp.quantile(logX, DEFAULT_CLAMP_Q, axis=0)
 
         self.__fitted = True
         print('Done fitting in {:.2f} seconds'.format(time.time() - t0))
@@ -852,7 +852,7 @@ class Calibration:
         Y = Y - self.__autofluorescence  # remove autofluorescence
         X = Y @ jnp.linalg.pinv(self.__bleedthrough_matrix)  # apply bleedthrough
         X += self.__offset  # add offset
-        X = X[jnp.all(X > 0, axis=1)]
+        X = X[jnp.all(X > 1, axis=1)]
         logX = logtransform(X, self.__log_scale_factor, 0)
         logX = logX[jnp.all(logX > self.clamp_values[0], axis=1)]
         logX = logX[jnp.all(logX < self.clamp_values[1], axis=1)]
@@ -871,7 +871,7 @@ class Calibration:
         df.columns = escape(list(df.columns))
         df = df[self.__channel_order]
         X = self.apply_to_array(df.values)
-        return pd.DataFrame(X, columns=self.__fluo_proteins, index=df.index)
+        return pd.DataFrame(X, columns=self.__fluo_proteins)
 
     def plot_beads_diagnostics(self):
         if self.__log_beads_peaks is None:

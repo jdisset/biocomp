@@ -166,7 +166,7 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     return selected
 
 
-# @partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold'))
+@partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold'))
 def sample_batches_direct(X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1):
     assert X.shape[0] == Y.shape[0]
     EPSILON = 1e-12
@@ -174,21 +174,14 @@ def sample_batches_direct(X, Y, batch_size, n_batches, kde, rng, quantile_thresh
 
     # select batch_size * n_batches random points, weight by inverse of density
     densities = kde.evaluate(X.T) + EPSILON
-    threshold = np.quantile(densities, quantile_threshold)
-    selection_proba = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY)))
-    selection_proba /= np.sum(selection_proba)
-    # indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
-    np.random.seed(rng[0])
-    indices = np.random.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba)
+    threshold = jnp.quantile(densities, quantile_threshold)
+    selection_proba = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY)))
+    selection_proba /= jnp.sum(selection_proba)
+    indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
 
-    Xsub = X[indices]
-    Ysub = Y[indices]
+    Xsub = jnp.take(X, indices, axis=0)
+    Ysub = jnp.take(Y, indices, axis=0)
 
-    # Xbatches = jnp.split(Xsub, n_batches)
-    # Ybatches = jnp.split(Ysub, n_batches)
-    # return jnp.array(Xbatches), jnp.array(Ybatches)
-
-    # or with reshape:
     Xbatches = Xsub.reshape((n_batches, batch_size, Xsub.shape[1]))
     Ybatches = Ysub.reshape((n_batches, batch_size, Ysub.shape[1]))
     return Xbatches, Ybatches
@@ -231,7 +224,17 @@ class DataManager:
         self._jitted_models = [jit(m) for m in models]
         self._X = self.rescale(self._raw_X)
         self._Y = self.rescale(self._raw_Y)
-        self._kdes = [gaussian_kde(x.T, bw_method=cfg['kde_bw_method']) for x in self._X]
+
+        # resample the data to get a faster estimate of the density
+        MAX_N = 50000
+        key = jax.random.PRNGKey(0)
+        self._kdes = [
+            gaussian_kde(
+                x[jax.random.choice(key, x.shape[0], shape=(MAX_N,))].T,
+                bw_method=cfg['kde_bw_method'],
+            )
+            for x in self._X
+        ]
         self.indices = None
         data_checks(X, Y, models)
 
@@ -300,6 +303,12 @@ class DataManager:
             list(itertools.chain(*models)),
         )
         return cls(X, Y, models, config)
+
+    # def make_subset(self, ids):
+    # sub_x = [self._raw_X[i] for i in ids]
+    # sub_y = [self._raw_Y[i] for i in ids]
+    # sub_models = [self._models[i] for i in ids]
+    # return DataManager(sub_x, sub_y, sub_models, self.cfg)
 
 
 #                                                                            }}}
@@ -405,7 +414,7 @@ def weighted_quantile(data, weights, qu):
     return jnp.interp(qu, cdf, data)
 
 
-def get_knn(x, tree, knn=500, min_points=20, radius=0.05):
+def get_knn(x, tree, knn=500, min_points=20, radius=0.1, **_):
     distances, indices = tree.query(x, k=knn, distance_upper_bound=radius)
     mask = distances == np.inf
     nb_points = (~mask).sum(axis=1)
@@ -414,7 +423,7 @@ def get_knn(x, tree, knn=500, min_points=20, radius=0.05):
         / (sigma * np.sqrt(2 * np.pi))
         * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
     )
-    weights = gausspdf(distances, 0, radius / 2)
+    weights = gausspdf(distances, 0, radius / 3)
     indices[mask] = 0
     weights[mask] = 0
     weights[nb_points < min_points, :] = np.nan
@@ -433,9 +442,9 @@ def get_knn_quantile(x, y, tree, qu, **kw):
     return q
 
 
-def get_knn_smooth(xquery, logY, tree, knn=100, min_points=10, method='mean', **kw):
+def get_knn_smooth(xquery, logY, tree, knn=300, min_points=20, method='mean', **kw):
     if method == 'mean':
-        Z = get_knn_mean(xquery, logY, knn=knn, min_points=min_points, tree=tree)
+        Z = get_knn_mean(xquery, logY, knn=knn, min_points=min_points, tree=tree, **kw)
     elif method == 'quantile':
         assert 'qu' in kw
         Z = get_knn_quantile(xquery, logY, knn=knn, min_points=min_points, tree=tree, **kw)
@@ -494,7 +503,7 @@ def smooth_heatmap(logX, logY, Z=None, x=None, ax=None, **kw):
 def heatmap(
     ax,
     Z,
-    vmin=0.1,
+    vmin=0,
     vmax=1,
     ticks=[],
     ticklabels=[],
@@ -502,8 +511,9 @@ def heatmap(
     text='',
     connector=False,
     connector_orientation='bottom',
-    contours=True,
-    colorbar=False,
+    contours=3,
+    colorbar=True,
+    **_,
 ):
     cmap = plt.get_cmap('YlGnBu')
     cmap.set_bad(color='#EEEEEE')
@@ -521,10 +531,10 @@ def heatmap(
         interpolation='none',
     )
     # add contour
-    if contours:
+    if contours is not None:
         ax.contour(
             Z.T,
-            levels=4,
+            levels=contours,
             linewidths=0.3,
             transform=trans_data,
         )
@@ -626,7 +636,7 @@ def smooth_1d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
     ax.set_yticklabels(tlabels)
 
 
-def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, **kw):
+def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, title=True, **kw):
     input_name = model.get_inverted_input_proteins()
     output_names = model.get_output_proteins()
 
@@ -658,11 +668,18 @@ def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, *
     else:
         xquery = xygrid
 
-    print(kw)
     z = get_knn_smooth(xquery, y, tree=tree, **kw).reshape(res, res)
 
-    heatmap(ax, z, ticks=ticks, ticklabels=tlabels, colorbar=True)
-    ax.set_title(f'{model.network.name}\n{output[0]} smoothed mean')
+    heatmap(ax, z, ticks=ticks, ticklabels=tlabels, **kw)
+
+    ttle = None
+    if title is True:
+        ttle = f'{model.network.name}\n{output[0]} smoothed mean'
+    elif title is not None:
+        ttle = title
+    if ttle is not None:
+        ax.set_title(ttle)
+
     ax.set_xlabel(reordered_input[0])
     ax.set_ylabel(reordered_input[1])
 
@@ -811,7 +828,7 @@ def inv_loglog(x):
     return jnp.where(x > 0, 10**x, jnp.where(x < 0, -(10**-x), 0))
 
 
-def fluo_scatter(rawx, pnames, title=None, types=None):
+def fluo_scatter(rawx, pnames, title=None, types=None, fname=None):
     fig, axes = plt.subplots(1, len(pnames), figsize=(1.25 * len(pnames), 10), sharey=True)
     if types is None:
         types = [''] * len(pnames)
@@ -830,8 +847,22 @@ def fluo_scatter(rawx, pnames, title=None, types=None):
         fig.suptitle(title, fontsize=12)
     fig.tight_layout()
 
+    if fname is not None:
+        fig.savefig(fname)
 
-def density_plot_1d(x, sample_at, ax, color='k', label=None, ticks=None, ticks_labels=None, x2=None, show_quantiles=[0.005, 0.995], **kw):
+
+def density_plot_1d(
+    x,
+    sample_at,
+    ax,
+    color='k',
+    label=None,
+    ticks=None,
+    ticks_labels=None,
+    x2=None,
+    show_quantiles=[0.005, 0.995],
+    **kw,
+):
     left_kde = gaussian_kde(x.T, bw_method=0.005)
     left_densities = left_kde(sample_at.T)
     if x2 is not None:

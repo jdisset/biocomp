@@ -1022,6 +1022,16 @@ class Network:
         for i, (nid, oid) in enumerate(output_node.input_from):
             propagate_upstream(cg.loc[nid], i, oid)
 
+        # treat the case where we have a "deadend" node, i.e a branch that ends
+        # without being connected to the output node. The node type is litteraly "deadend"
+        # we'll just assign quantile 0
+        deadend_nodes = cg[cg.type == 'deadend'].index
+        for node_id in deadend_nodes:
+            propagate_upstream(cg.loc[node_id], 0, 0)
+
+
+
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     the inverter     --

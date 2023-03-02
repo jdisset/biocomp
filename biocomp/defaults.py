@@ -57,8 +57,8 @@ DEFAULT_DATA_CONFIG = {
     "batch_size": 16,
     "n_batches": 2048,
     "kde_bw_method": 0.05,
-    "log_factor": 1e3,
-    "max_value": 1e7,
+    "log_factor": 5e3,
+    "max_value": 5e7,
     "density_quantile_threshold": 0.07,
 }
 

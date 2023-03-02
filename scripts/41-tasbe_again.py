@@ -188,18 +188,17 @@ plt.title(
 ##
 
 th=0
-offset = 100
+offset = 200
 
 Y_all = cal.controls[('ALL',)].values - autofluo
 X_all = Y_all @ jnp.linalg.pinv(S) 
 YY=X_all + offset
 YY = YY[jnp.all(YY > th, axis=1)]
-# YY = YY[YY[:,1] >= th]
-du.fluo_densities(YY,cnames)
+du.fluo_scatter(YY,pnames)
 
 ##
 Y_all = cal.controls[('ALL',)].values
 X_corrected = cal.apply_to_array(Y_all)
-du.fluo_densities(X_corrected, pnames)
+du.fluo_scatter(X_corrected, pnames, fname=Path('~/Desktop/fluos_corrected.png').expanduser()
 
 

@@ -19,7 +19,6 @@ import biocomp.defaults as bdf
 import pandas as pd
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{                        --     node config     --
 T_SIZE = 64
 T_DEPTH = 4
@@ -77,6 +76,9 @@ config = {
     **{
         'node_impl': node_impl,
         'rng_key': np.random.randint(0, 2**32),
+    "batch_size": 16,
+    "n_batches": 2048,
+    "epochs": 200,
     },
 }
 
@@ -84,15 +86,9 @@ config = {
 
 lib = ut.load_lib()
 matrix_xp = ut.load_xp('2023-02-16_Matrix', lib, data_path='./data/calibrated_data')
-dman = du.DataManager.from_xps([matrix_xp], config, inverse='all')
-
-
-##
-fig, ax = du.mkfig(1,1)
-du.model_plot(dman, 1, ax=ax)
-##
-du.model_fluo_distributions(dman, 2)
-du.model_fluo_densities(dman, 2)
-
-# loggers = bc.train.setup_wandb_logging('quantile_v2', dman, config)
-# bc.train.start(dman, config, loggers)
+dman_full = du.DataManager.from_xps([matrix_xp], config, inverse='all')
+names = [m.node_namespace for m in dman_full.get_models()]
+training_set = [0] + [i for i, n in enumerate(names) if 'inert' in n.lower()]
+loggers = bc.train.setup_wandb_logging('matrix_train_v0', dman_full, config)
+bc.train.start(dman_full, config, loggers)
+print('done')
