@@ -89,7 +89,7 @@ lib = ut.load_lib()
 matrix_xp = ut.load_xp('2023-02-16_Matrix', lib, data_path='./data/calibrated_data')
 dman_full = du.DataManager.from_xps([matrix_xp], config, inverse='all')
 names = [m.node_namespace for m in dman_full.get_models()]
-
+training_set = [0] + [i for i, n in enumerate(names) if 'inert' in n.lower()]
 
 ### {{{                        --     plot matrix     --
 
@@ -173,36 +173,32 @@ fig.savefig(Path('~/Desktop/matrix_data_smooth.pdf').expanduser())
 print('done')
 ##────────────────────────────────────────────────────────────────────────────}}})
 
-training_set = [0] + [i for i, n in enumerate(names) if 'inert' in n.lower()]
-
-for i in training_set:
-    print(i, names[i])
-    dman_full.set_subset([i])
-    # loggers = bc.train.setup_wandb_logging('matrix_train_v0', dman_full, config)
-    bc.train.start(dman_full, config)
-    print('done')
-
-##
-dman_full.set_subset(training_set)
-bc.train.start(dman_full, config)
-print('done for all')
 
 
+# dman_full.set_subset(training_set)
 
-##
 
-m = dman_full.get_models()[9]
-# ut.plot_networks([m.network])
-m.network.compute_graph
-# --- init
-# params
-params, constraints = {}, {}
+### {{{                        --     load params     --
+# get wandb run
+import wandb as wb
+import pickle
+project_name='matrix_train_v0'
+run_code='v875434k'
+run = wb.Api().run(f'{project_name}/{run_code}')
+
+# load latest params (latest_params.pkl)
+param_file = run.file('latest_params.pkl').download(replace=True)
+with open(param_file.name, 'rb') as f:
+    trained_params = pickle.load(f)
+
+##────────────────────────────────────────────────────────────────────────────}}}lib = ut.load_lib()
+
+# initialize node params for each model
+models = dman_full.get_models()
 key = jax.random.PRNGKey(0)
-params, constraints = m.init(key, pre_params=params, pre_constraints=constraints)
-##
-dman_full.set_subset(np.arange(0, len(names)))
-du.model_fluo_distributions(dman_full, 3)
+for m, k in tqdm(zip(models, jax.random.split(key, len(models)))):
+    params, _ = m.init(k, pre_params=params)
 
-dman_full.get_batches(key)
+# use trained params to initialize the shared weights
+params['shared'] = trained_params['shared']
 
-du.fluo_scatter(
