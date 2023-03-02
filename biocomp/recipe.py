@@ -2,7 +2,7 @@ from .library import PartsLibrary as PartsLibrary
 from . import utils as ut
 from .network import Network, inverted_network
 from .compute import ComputeGraphModel
-from . import Calibration as Calibration
+from .calibration import escape
 from pathlib import Path
 import numpy as np
 import jax
@@ -260,7 +260,7 @@ class XP:
                 xp_to_sql([xpobj], self.dbconn)
                 for k, v in xpobj.items():
                     if k == 'color_names':
-                        self.color_names = {kk: Calibration.escape(vv) for kk, vv in v.items()}
+                        self.color_names = {kk: escape(vv) for kk, vv in v.items()}
                     else:
                         setattr(self, k, v)
             except Exception as e:

@@ -776,22 +776,30 @@ def eval_model_plot(
 
     k_i, k_q = jax.random.split(key)
     if xrange is None:
-        xrange = jnp.array([[0, 0], [0.6, 0.7]])
+        xrange = jnp.array([[0, 0], [0.9, 0.9]])
 
-    inputs = jax.random.uniform(k_i, (npoints, model.n_inputs), minval=xrange[0], maxval=xrange[1])
-    quantiles = jax.random.uniform(k_q, (npoints, model.n_outputs))
+    x = jax.random.uniform(k_i, (npoints, model.n_inputs), minval=xrange[0], maxval=xrange[1])
+    quantiles = jax.random.uniform(k_q, (npoints, model.n_outputs), minval=0.25, maxval=0.75)
     keys = jax.random.split(key, npoints)
     jm = jitted or model
-    results = vmap(jm, in_axes=(None, 0, 0, 0))(params, inputs, quantiles, keys)
-    model_plot(model, inputs, results, rescaler, ax, **kw)
+    y = vmap(jm, in_axes=(None, 0, 0, 0))(params, x, quantiles, keys)
+
+    ninputs = model.n_inputs
+    if ninputs == 1:
+        smooth_1d(x, y, model, rescaler, ax, **kw)
+    elif ninputs == 2:
+        smooth_2d(x, y, model, rescaler, ax, **kw)
+    elif ninputs == 3:
+        smooth_3d(x, y, model, rescaler, ax, **kw)
+    else:
+        raise NotImplementedError(f'Cannot plot {ninputs} inputs')
 
 
 def report(params, dman, id, suptitle=''):
     fig, ax = mkfig(1, 2, size=(4, 4))
     model = dman.get_models()[id]
-    mX = dman.get_X()[id]
-    mY = dman.get_Y()[id]
-    model_plot(model, mX, mY, dman.rescale, ax[0], kde=dman.get_kdes()[id])
+    kde= dman.get_kdes()[id]
+    model_plot(dman, id, ax[0], kde=kde)
     eval_model_plot(model, params, dman.rescale, ax[1], jitted=dman.get_jitted_models()[id])
     ax[0].set_title(f'Original data (mean)')
     ax[1].set_title(f'Predicted (mean)')

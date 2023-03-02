@@ -89,6 +89,7 @@ matrix_xp = ut.load_xp('2023-02-16_Matrix', lib, data_path='./data/calibrated_da
 dman_full = du.DataManager.from_xps([matrix_xp], config, inverse='all')
 names = [m.node_namespace for m in dman_full.get_models()]
 training_set = [0] + [i for i, n in enumerate(names) if 'inert' in n.lower()]
+dman_full.set_subset(training_set)
 loggers = bc.train.setup_wandb_logging('matrix_train_v0', dman_full, config)
 bc.train.start(dman_full, config, loggers)
 print('done')
