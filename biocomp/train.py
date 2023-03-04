@@ -226,19 +226,26 @@ def start(dman: du.DataManager, cfg, loggers=None):
     y_start = np.cumsum([m.n_outputs for m in models])[:-1]
 
     def apply_models_and_grad(params, x, z, key):
-        keys = jax.random.split(key, nmodels)
+        k1, k2 = jax.random.split(key)
+        keys = jax.random.split(k1, nmodels)
         xs = jnp.split(x, x_start)
         zs = jnp.split(z, y_start)
-        res = [m.apply_and_grad(params, xx, zz, k) for m, xx, zz, k in zip(models, xs, zs, keys)]
-        yhat, grads = zip(*res)
-        return jnp.concatenate(yhat, axis=0), jnp.min(ut.flat_concat(*grads))
-
-    # def apply_models(params, x, z, key):
-    # keys = jax.random.split(key, nmodels)
-    # xs = jnp.split(x, x_start)
-    # zs = jnp.split(z, y_start)
-    # yhat = [m(params, xx, zz, k) for m, xx, zz, k in zip(models, xs, zs, keys)]
-    # return jnp.concatenate(yhat, axis=0)
+        res = [
+            m.apply_and_negative_grad(params, xx, zz, k)
+            for m, xx, zz, k in zip(models, xs, zs, keys)
+        ]
+        keys = jax.random.split(k2, nmodels)
+        just_for_grads = [
+            m.apply_and_negative_grad(
+                params, xx, zz, k, override_w_uniform=['transcription', 'translation', 'output']
+            )
+            for m, xx, zz, k in zip(models, xs, zs, keys)
+        ]
+        yhat, negative_grads_x = zip(*res)
+        _, negative_grads_rdm = zip(*just_for_grads)
+        return jnp.concatenate(yhat, axis=0), jnp.sum(
+            ut.flat_concat(*[negative_grads_x, negative_grads_rdm])
+        )
 
     def loss_func(dynamic, static, X, Y, Z, key):
         assert X.ndim == Y.ndim == Z.ndim == 2

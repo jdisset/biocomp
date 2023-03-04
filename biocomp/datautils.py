@@ -746,10 +746,14 @@ def timelapse_persp(Q, title, labels=None, outputfile=None, show=True, **kw):
 def model_plot(dman: DataManager, model_id: int, ax, kde=None, **kw):
     model = dman.get_models()[model_id]
     x, y = dman.get_X()[model_id], dman.get_Y()[model_id]
-    if kde is not None:
+
+    if kde is not False:
+        if kde is None:
+            kde = dman.get_kdes()[model_id]
         rng = jax.random.PRNGKey(0)
         subsample = optimal_density_subsample(x, kde, rng, quantile_threshold=0.1)
         x, y = x[subsample], y[subsample]
+    
 
     ninputs = model.n_inputs
     if ninputs == 1:
@@ -763,48 +767,50 @@ def model_plot(dman: DataManager, model_id: int, ax, kde=None, **kw):
 
 
 def eval_model_plot(
-    model: bc.ComputeGraphModel,
     params,
-    rescaler,
+    dman,
+    id,
     ax,
-    npoints=50000,
+    npoints_eval=10000,
+    quantile_range=[0.25,0.75],
     key=jax.random.PRNGKey(0),
-    jitted=None,
-    xrange=None,
+    xrange_eval=None,
     **kw,
 ):
 
     k_i, k_q = jax.random.split(key)
-    if xrange is None:
-        xrange = jnp.array([[0, 0], [0.9, 0.9]])
+    if xrange_eval is None:
+        xrange_eval = jnp.array([[0, 0], [1,1]])
 
-    x = jax.random.uniform(k_i, (npoints, model.n_inputs), minval=xrange[0], maxval=xrange[1])
-    quantiles = jax.random.uniform(k_q, (npoints, model.n_outputs), minval=0.25, maxval=0.75)
-    keys = jax.random.split(key, npoints)
-    jm = jitted or model
+    model = dman.get_models()[id]
+    jm= dman.get_jitted_models()[id]
+
+    x = jax.random.uniform(k_i, (npoints_eval, model.n_inputs), minval=xrange_eval[0], maxval=xrange_eval[1])
+    quantiles = jax.random.uniform(k_q, (npoints_eval, model.n_outputs), minval=quantile_range[0], maxval=quantile_range[1])
+    keys = jax.random.split(key, npoints_eval)
     y = vmap(jm, in_axes=(None, 0, 0, 0))(params, x, quantiles, keys)
 
     ninputs = model.n_inputs
     if ninputs == 1:
-        smooth_1d(x, y, model, rescaler, ax, **kw)
+        smooth_1d(x, y, model, dman.rescale, ax, **kw)
     elif ninputs == 2:
-        smooth_2d(x, y, model, rescaler, ax, **kw)
+        smooth_2d(x, y, model, dman.rescale, ax, **kw)
     elif ninputs == 3:
-        smooth_3d(x, y, model, rescaler, ax, **kw)
+        smooth_3d(x, y, model, dman.rescale, ax, **kw)
     else:
         raise NotImplementedError(f'Cannot plot {ninputs} inputs')
 
 
-def report(params, dman, id, suptitle=''):
+def report(params, dman, id, suptitle='', **kw):
     fig, ax = mkfig(1, 2, size=(4, 4))
-    model = dman.get_models()[id]
-    kde= dman.get_kdes()[id]
-    model_plot(dman, id, ax[0], kde=kde)
-    eval_model_plot(model, params, dman.rescale, ax[1], jitted=dman.get_jitted_models()[id])
+    model_plot(dman, id, ax[0], **kw)
+    eval_model_plot(params, dman, id, ax[1], **kw)
     ax[0].set_title(f'Original data (mean)')
     ax[1].set_title(f'Predicted (mean)')
+    model = dman.get_models()[id]
     fig.suptitle(f'{suptitle} {model.node_namespace}')
     return fig, ax
+
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -836,15 +842,18 @@ def inv_loglog(x):
     return jnp.where(x > 0, 10**x, jnp.where(x < 0, -(10**-x), 0))
 
 
-def fluo_scatter(rawx, pnames, title=None, types=None, fname=None):
+def fluo_scatter(rawx, pnames, title=None, types=None, fname=None, logscale=True):
     fig, axes = plt.subplots(1, len(pnames), figsize=(1.25 * len(pnames), 10), sharey=True)
+    if len(pnames) == 1:
+        axes = [axes]
     if types is None:
         types = [''] * len(pnames)
     for xid, ax in enumerate(axes):
         color = get_bio_color(pnames[xid])
         xcoords = jax.random.normal(jax.random.PRNGKey(0), (rawx.shape[0],)) * 0.1
         ax.scatter(xcoords, rawx[:, xid], color=color, alpha=0.03, s=5, zorder=10, lw=0)
-        ax.set_yscale('symlog')
+        if logscale:
+            ax.set_yscale('symlog')
         ax.set_xlim(-0.5, 0.5)
         ax.set_ylim(min(rawx.min(), 0), rawx.max())
         ax.set_xlabel(f'{pnames[xid]} {types[xid]}', rotation=0, labelpad=20, fontsize=10)

@@ -78,7 +78,7 @@ config = {
         'rng_key': np.random.randint(0, 2**32),
     "batch_size": 16,
     "n_batches": 2048,
-    "epochs": 200,
+    "epochs": 100,
     },
 }
 

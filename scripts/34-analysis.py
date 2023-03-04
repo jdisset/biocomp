@@ -276,6 +276,7 @@ ut.plot_node('output', full_params, m, xlim=(0, 2), ylim=(0, 2))
 ##────────────────────────────────────────────────────────────────────────────}}}m.apply_and_grad(full_params, np.array([0.5,0.5]), np.array([0.5,0.5,0.5]), key)
 
 ### {{{                     --     uorfs on ern side     --
+
 train_dman = du.DataManager.from_xps([ern_xp, uorf_xp], config, inverse='all')
 
 models = train_dman.get_models()

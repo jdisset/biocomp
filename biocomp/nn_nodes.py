@@ -5,25 +5,37 @@ from . import nodes as nodes
 import jax.numpy as jnp
 
 DEFAULT_ACTIVATION = jax.nn.leaky_relu
+DEFAULT_OUT_ACTIVATION = jax.nn.sigmoid
+
 
 def dense_layer(input_values, output_size, get_param, key, name):
     input_size = 1 if input_values.shape == () else input_values.shape[0]
     w = get_param(f'{name}_w', init=ut.he_initializer(key, (input_size, output_size)), shared=True)
     b = get_param(f'{name}_b', init=lambda: jnp.zeros((output_size,)), shared=True)
 
-    assert input_values.shape == (input_size,)
-    assert w.shape == (input_size, output_size)
-    assert b.shape == (output_size,)
+    assert input_values.shape == (input_size,), f'In {name}: {input_values.shape} != {(input_size,)}'
+    assert w.shape == (input_size, output_size), f'In {name}: {w.shape} != {(input_size, output_size)}'
+    assert b.shape == (output_size,), f'In {name}: {b.shape} != {(output_size,)}'
 
     res = jnp.dot(input_values, w) + b
     return res.squeeze()
 
 
-def dense_multilevel(input_values, hidden_s, output_s, depth, get_param, key, name, activation):
+def dense_multilevel(
+    input_values,
+    hidden_s,
+    output_s,
+    depth,
+    get_param,
+    key,
+    name,
+    activation,
+):
     res = input_values
     keys = jax.random.split(key, depth)
     for i in range(depth - 1):
         res = activation(dense_layer(res, hidden_s, get_param, keys[i], f'{name}_{i}'))
+
     return dense_layer(res, output_s, get_param, keys[-1], f'{name}_{depth - 1}')
 
 
@@ -38,13 +50,13 @@ def transform_nn(
     transform_name,
     outer_wsize=64,
     outer_depth=2,
-    outer_activation=DEFAULT_ACTIVATION,
     inner_wsize=32,
     inner_depth=2,
     inner_out=4,
-    inner_activation=DEFAULT_ACTIVATION,
     rate_dim=1,
     tr_namespace='',
+    inner_activation=DEFAULT_ACTIVATION,
+    outer_activation=DEFAULT_OUT_ACTIVATION,
     **_,
 ):
     def inner(value, rate_embeding, quantile, key):
@@ -117,7 +129,7 @@ def transform_nn(
                 get_param=get_param,
                 key=k2,
                 name=f'{tr_namespace}{transform_name}_outer',
-                activation=outer_activation,
+                activation=inner_activation,
             )
         )
 
@@ -133,6 +145,8 @@ def sequestron_ERN(
     depth=3,
     out_dim=1,
     subtype='5p',
+    inner_activation=DEFAULT_ACTIVATION,
+    outer_activation=DEFAULT_OUT_ACTIVATION,
     **_,
 ):
     def apply(neg, pos, quantile, rng_key, **_):
@@ -148,12 +162,11 @@ def sequestron_ERN(
             get_param,
             rng_key,
             f'ERN_{subtype}',
-            DEFAULT_ACTIVATION,
+            activation=inner_activation,
         )
-        return DEFAULT_ACTIVATION(jnp.squeeze(res))
+        return outer_activation(jnp.squeeze(res))
 
     return apply
-
 
 
 transcription = partial(transform_nn, transform_name='tc')
@@ -164,7 +177,16 @@ inv_translation = partial(transform_nn, transform_name='tl', tr_namespace='inv_'
 ERN5p = partial(sequestron_ERN, subtype='5p')
 ERN3p = partial(sequestron_ERN, subtype='3p')
 
-def output(get_param, get_quantized, wsize=64, depth=3, **_):
+
+def output(
+    get_param,
+    get_quantized,
+    wsize=64,
+    depth=3,
+    inner_activation=DEFAULT_ACTIVATION,
+    outer_activation=DEFAULT_OUT_ACTIVATION,
+    **_,
+):
     def apply(*value, quantile, rng_key, **_):
 
         value = jnp.array(value)
@@ -174,23 +196,22 @@ def output(get_param, get_quantized, wsize=64, depth=3, **_):
         res = jnp.array(
             [
                 dense_multilevel(
-                    ut.flat_concat(x,q),
+                    ut.flat_concat(x, q),
                     wsize,
                     1,
                     depth,
                     get_param,
                     rng_key,
                     'out',
-                    DEFAULT_ACTIVATION,
+                    activation=inner_activation,
                 )
                 for x, q in zip(value, quantile)
             ]
         )
-        return res
+        return outer_activation(res)
 
     return apply
 
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-

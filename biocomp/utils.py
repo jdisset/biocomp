@@ -13,6 +13,7 @@ import pickle
 import json5
 import numpy as np
 import logging
+from jax.tree_util import Partial as partial
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     logging utils     --
@@ -160,7 +161,7 @@ def load_json5(path):
 
 
 def flat_concat(*arrays):
-    return jnp.concatenate([a.ravel() for a in arrays])
+    return jnp.concatenate([jnp.asarray(a).ravel() for a in arrays])
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -168,6 +169,18 @@ def flat_concat(*arrays):
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                        --     JAX helpers     --
 # ···············································································
+
+def value_and_jacfwd(f, x):
+  pushfwd = partial(jax.jvp, f, (x,))
+  basis = jnp.eye(x.size, dtype=x.dtype)
+  y, jac = jax.vmap(pushfwd, out_axes=(None, 1))((basis,))
+  return y, jac
+
+def value_and_jacrev(f, x):
+  y, pullback = jax.vjp(f, x)
+  basis = jnp.eye(y.size, dtype=y.dtype)
+  jac = jax.vmap(pullback)(basis)
+  return y, jac
 
 
 class TQDMProgress:

@@ -7,7 +7,7 @@ from . import utils as ut
 from . import nodes as nd
 from typing import List, Dict, Tuple, Union, Optional, Callable, Any
 
-#TODO:
+# TODO:
 # might be able to parallelize at a finer level (create a "meta model") using jax's partial?
 
 # {{{                  --     Params and quantization     --
@@ -247,21 +247,40 @@ class ComputeGraphModel:
         def collect_all_results(
             params: dict,
             inputs: jnp.ndarray,
-            quantiles,
+            quantiles: jnp.ndarray,
             rng_key,
             read_only=True,
             constraints=None,
-            with_neg_grad=False,
-        ) -> tuple[jnp.ndarray, dict[int, jnp.ndarray]]:
+            with_grad: Optional[list[str]] = None,
+            override_w_uniform: Optional[list[str]] = None,
+        ):
             """
             params: the parameters
             inputs: the inputs to the network
             quantiles: array of quantiles we want to estimate (1 per output)
+            rng_key: the rng key
+            read_only: will make sure that the parameters are not modified by the node functions
 
             Executes and collects all the results of the nodes in the compute graph.
             This method basically just calls the nodes in call_dicts, in order, populating
             the result dictionnary with each node's output and feeding the output of each
-            upstream node as input to the next downstream one."""
+            upstream node as input to the next downstream one.
+
+
+            Special parameters (mostly useful during training):
+            --------------------------------------------
+
+            constraints: a list of constraints to be applied to the output of the nodes (like clamping)
+            with_grad: if True, will also return the gradient (the full jacobian) of the output
+            with respect to the input of the specified node types. Useful for monotonicity constraints.
+
+            override_w_uniform: if not None, will override the inputs to the specified
+            node types with uniform values. This is useful for collecting the behavior of
+            some nodes across their entire input space so that they can't learn sneaky tricks
+            like being twice increasing in two different regions of the input space where the "junction"
+            is never visited by the training data (and thus would never show up in the gradients)
+
+            """
             assert (
                 len(inputs) >= self.n_inputs
             ), f'len(inputs)={len(inputs)} < n_inputs={self.n_inputs}'
@@ -272,14 +291,11 @@ class ComputeGraphModel:
             grads = []
 
             for (n, key) in zip(call_dicts, keys):
+                k1, k2, k3 = jax.random.split(key, 3)
+
                 extra_params = n['extra_params']
 
-                get_grad = (
-                    with_neg_grad
-                    and n['type'] in with_neg_grad
-                    and extra_params['n_outputs'] <= 1
-                    and extra_params['n_inputs'] == 1
-                )
+                get_grad = (with_grad and n['type'] in with_grad)
 
                 nid = n['nid']
 
@@ -289,11 +305,19 @@ class ComputeGraphModel:
 
                 upstream_results = []
 
-                for inp in n['input_from']:
-                    if len(results[inp[0]].shape) == 0:
-                        upstream_results.append(results[inp[0]])
-                    else:
-                        upstream_results.append(results[inp[0]][inp[1]])
+                if override_w_uniform is not None and n['type'] in override_w_uniform:
+                    subkeys = jax.random.split(k1, extra_params['n_inputs'])
+                    for inp, k in zip(n['input_from'], subkeys):
+                        if len(results[inp[0]].shape) == 0:
+                            upstream_results.append(jax.random.uniform(k))
+                        else:
+                            upstream_results.append(jax.random.uniform(k, shape=results[inp[0]][inp[1]].shape))
+                else:
+                    for inp in n['input_from']:
+                        if len(results[inp[0]].shape) == 0:
+                            upstream_results.append(results[inp[0]])
+                        else:
+                            upstream_results.append(results[inp[0]][inp[1]])
 
                 get_p = partial(
                     n['get_p'],
@@ -309,21 +333,22 @@ class ComputeGraphModel:
                     if len(pick_quantile) > 0 and all([x is not None for x in pick_quantile]):
                         qtl = quantiles[jnp.array(pick_quantile)]
 
-                get_q = partial(n['get_q'], get_p, rng_key=key)
+                get_q = partial(n['get_q'], get_p, rng_key=k2)
                 comp_node = n['fun'](get_p, get_q, **extra_params)
 
+                f = partial(comp_node, quantile=qtl, rng_key=k3)
+
+                res = f(*upstream_results)
+
                 if get_grad:
-                    res, grad = jax.value_and_grad(comp_node, argnums=0)(
-                        *upstream_results, quantile=qtl, rng_key=key
-                    )
+                    n_upstream = len(upstream_results)
+                    grad = jax.jacfwd(f, argnums=list(range(n_upstream)))(*upstream_results)
                     grads.append(grad)
-                else:
-                    res = comp_node(*upstream_results, quantile=qtl, rng_key=key)
 
                 results[nid] = res
 
                 if n['type'] == 'output':
-                    if with_neg_grad:
+                    if with_grad:
                         return res, grads, results
                     return res, results
 
@@ -331,18 +356,17 @@ class ComputeGraphModel:
 
         def apply(*args, **kwargs):
             """Executes the model. It simply calls collect_all_results and only returns the final output"""
-            return collect_all_results(*args, with_neg_grad=False, **kwargs)[0]
+            return collect_all_results(*args, with_grad=False, **kwargs)[0]
 
-        def apply_and_grad(
-            *args, with_neg_grad=['transcription', 'translation', 'output'], **kwargs
+        def apply_and_negative_grad(
+            *args, with_grad=['transcription', 'translation', 'output'], **kwargs
         ):
-            """Executes the model. It simply calls collect_all_results and only returns the final output"""
-            allres = collect_all_results(*args, with_neg_grad=with_neg_grad, **kwargs)
-            grads = jnp.array(allres[1])
-            neg_grad = (
-                jnp.zeros(1) if len(allres[1]) == 0 else jnp.mean(jnp.where(grads < 0, grads, 0))
-            )
-            return allres[0], neg_grad
+            allres = collect_all_results(*args, with_grad=with_grad, **kwargs)
+            grads = jnp.zeros(1)
+            if len(allres[1]) > 0:
+                grads = ut.flat_concat(*allres[1])
+            negative_grad = jnp.mean(jnp.where(grads < 0, grads, 0))
+            return allres[0], negative_grad
 
         def init(rng_key, pre_params=None, pre_constraints=None):
             params = {} if pre_params is None else pre_params
@@ -358,7 +382,7 @@ class ComputeGraphModel:
             return params, constraints
 
         self.apply = apply
-        self.apply_and_grad = apply_and_grad
+        self.apply_and_negative_grad = apply_and_negative_grad
         self.collect_all_results = collect_all_results
         self.init = init
         self.flat_batches = flat_batches
