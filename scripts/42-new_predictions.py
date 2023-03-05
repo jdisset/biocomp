@@ -179,8 +179,8 @@ print('done')
 # get wandb run
 import wandb as wb
 import pickle
-project_name='matrix_train_v0'
-run_code='v875434k'
+project_name='matrix_train_v1'
+run_code='fxhnbjvb'
 run = wb.Api().run(f'{project_name}/{run_code}')
 
 # load latest params (latest_params.pkl)
@@ -225,6 +225,7 @@ for m, (E, R) in tqdm(enumerate(list(zip(case_uorf_numbers, caseR_uorf_numbers))
         colorbar=False,
         res=100,
         title=title,
+        xrange_eval=jnp.array([[0,0],[1,1]]),
         contours=contours,
     )
     # remove left ticks except if j == 0
@@ -244,7 +245,7 @@ for m, (E, R) in tqdm(enumerate(list(zip(case_uorf_numbers, caseR_uorf_numbers))
         )
 
 fig.tight_layout()
-fig.savefig(Path('~/Desktop/matrix_pred_smooth.pdf').expanduser())
+fig.savefig(Path('~/Desktop/matrix_pred_smooth_v2_15.pdf').expanduser())
 print('done')
 ##────────────────────────────────────────────────────────────────────────────}}})
 
@@ -270,20 +271,21 @@ fig, ax = du.mkfig(1, 1, (4, 4))
 du.report(params_copy, dman_full, 50)
 
 dman_full.set_subset(np.arange(len(names)))
-m = dman_full.get_models()[54]
 ut.plot_networks([m.network], figsize=(30, 30), H=3000,W=1500)
 
-m = model
+m = dman_full.get_models()[50]
 
-ut.plot_node('translation', params, m, xlim=(0, 10), ylim=(0, 10))
-ut.plot_node('transcription', params, m, xlim=(0, 10), ylim=(0, 10))
-ut.plot_node('inv_transcription', params, m, xlim=(-10, 10), ylim=(-10, 10))
-ut.plot_node('inv_translation', params, m, xlim=(0, 2), ylim=(0, 2))
+ut.plot_node('translation', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
+ut.plot_node('transcription', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
+ut.plot_node('inv_transcription', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
+ut.plot_node('inv_translation', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
+ut.plot_node('inv_transcription', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
 
 extra = m.network.compute_graph[m.network.compute_graph.type == 'sequestron_ERN'].extra.to_list()
-ut.plot_node('sequestron_ERN', params, m, xlim=(0, 6), n_inputs=2,extra_args=extra[0])
-ut.plot_node('output', params, m, xlim=(0, 10), ylim=(0, 2))
+ut.plot_node('sequestron_ERN', params, m, xlim=(0, 1.2), n_inputs=2,extra_args=extra[0],mode='3d')
+ut.plot_node('output', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
 
+m = dman_full.get_models()[54]
 ut.plot_networks([m.network], figsize=(30, 30), H=3000,W=1500)
 
 # for model 50
@@ -303,11 +305,21 @@ params_copy = copy.deepcopy(params)
 # params_copy['shared']['3x_uORF::tl_rate'] = jnp.array([1.0653249])
 # params_copy['shared']['empty::tc_rate'] = 100000
 m.collect_all_results(params_copy, jnp.zeros((2, 1)), jnp.ones((2,))/2, key)
+
+y, g, r = m.collect_all_results(params_copy, jnp.zeros((2, 1)), jnp.ones((2,))/2, key, with_grad=['translation', 'transcription', 'output'])
+
+from biocomp import utils as bu
+bu.flat_concat(*g)
+
+m = dman_full.get_models()[54]
+testp, _ = m.init(key)
+m.apply_and_negative_grad(params_copy, jnp.zeros((2, 1)), jnp.ones((2,))/2, key, override_w_uniform = ['translation', 'transcription', 'output'])
+
 du.report(params_copy, dman_full, 54)
 
 ##
 # hypothesis: ERN outputs in a different domain than transcription, and
-# the translation node has learnt 2 different functions for the 2 domains
+# the translation node has learnt 2 different functions for the 2 domains
 # (and the ERN one doesn't know how to deal with uORFs)
 model.network.compute_graph
 ut.plot_networks([model.network], figsize=(30, 30), H=3000,W=1500)
@@ -337,9 +349,11 @@ du.fluo_scatter(res, ['inverse-out'], logscale=False)
 model.get_output_proteins()
 
 
+jnp.asarray(6).shape
+jax.random.uniform(key, shape=()) 
 
 
-
+x = 
 
 
 

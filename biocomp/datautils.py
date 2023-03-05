@@ -753,7 +753,6 @@ def model_plot(dman: DataManager, model_id: int, ax, kde=None, **kw):
         rng = jax.random.PRNGKey(0)
         subsample = optimal_density_subsample(x, kde, rng, quantile_threshold=0.1)
         x, y = x[subsample], y[subsample]
-    
 
     ninputs = model.n_inputs
     if ninputs == 1:
@@ -772,7 +771,7 @@ def eval_model_plot(
     id,
     ax,
     npoints_eval=10000,
-    quantile_range=[0.25,0.75],
+    quantile_range=[0.2,0.8],
     key=jax.random.PRNGKey(0),
     xrange_eval=None,
     **kw,
@@ -790,11 +789,12 @@ def eval_model_plot(
     keys = jax.random.split(key, npoints_eval)
     y = vmap(jm, in_axes=(None, 0, 0, 0))(params, x, quantiles, keys)
 
+    xmin, xmax = jnp.min(x, axis=0)[0], jnp.max(x, axis=0)[0]
     ninputs = model.n_inputs
     if ninputs == 1:
         smooth_1d(x, y, model, dman.rescale, ax, **kw)
     elif ninputs == 2:
-        smooth_2d(x, y, model, dman.rescale, ax, **kw)
+        smooth_2d(x, y, model, dman.rescale, ax, xmin=xmin, xmax=xmax, **kw)
     elif ninputs == 3:
         smooth_3d(x, y, model, dman.rescale, ax, **kw)
     else:
