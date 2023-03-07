@@ -78,9 +78,9 @@ config = {
     **{
         'node_impl': node_impl,
         'rng_key': np.random.randint(0, 2**32),
-    "batch_size": 16,
-    "n_batches": 4,
-    "epochs": 12,
+        "batch_size": 16,
+        "n_batches": 4,
+        "epochs": 12,
     },
 }
 
@@ -146,13 +146,13 @@ for m, (E, R) in tqdm(enumerate(list(zip(case_uorf_numbers, caseR_uorf_numbers))
         dman_full,
         m,
         ax=ax,
-        radius=0.2,
-        knn=500,
-        min_points=5,
+        radius=0.125,
+        knn=300,
+        min_points=20,
         colorbar=False,
-        res=100,
         title=title,
         contours=contours,
+        res=100,
     )
     # remove left ticks except if j == 0
     if j != N - 1:
@@ -171,7 +171,9 @@ for m, (E, R) in tqdm(enumerate(list(zip(case_uorf_numbers, caseR_uorf_numbers))
         )
 
 fig.tight_layout()
-fig.savefig(Path('~/Desktop/matrix_data_smooth.pdf').expanduser())
+savepath = Path('~/Desktop/matrixdata').expanduser()
+savepath.mkdir(parents=True, exist_ok=True)
+fig.savefig(savepath / 'matrix_data_smooth_default_v3.pdf')
 print('done')
 ##────────────────────────────────────────────────────────────────────────────}}})
 
@@ -179,8 +181,11 @@ print('done')
 # get wandb run
 import wandb as wb
 import pickle
-project_name='matrix_train_v1'
-run_code='fxhnbjvb'
+
+project_name = 'matrix_train_v1'
+# run_code='fxhnbjvb' # 1 corner
+run_code = 'x32fpgne'  # 4 corners
+# run_code='rd1y0rgp' # 3 corners
 run = wb.Api().run(f'{project_name}/{run_code}')
 
 # load latest params (latest_params.pkl)
@@ -202,6 +207,22 @@ params['shared'] = trained_params['shared']
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                        --     plot prediction matrix     --
+
+du.plot_model_at_x(params, dman_full, 0, ax)
+
+x, y, yhat = du.model_at_x(params, dman_full, 0)
+y
+np.abs(y - yhat).mean(axis=0)
+m = dman_full.get_models()[0]
+m.get_output_proteins()
+
+fig, ax = du.mkfig(1, 1)
+du.plot_model_diff(params, dman_full, 0, ax)
+
+du.report(params, dman_full, 0)
+
+##
+
 fig, axes = du.mkfig(N, N, (2, 2))
 for m, (E, R) in tqdm(enumerate(list(zip(case_uorf_numbers, caseR_uorf_numbers))[:])):
     print(E, R, m)
@@ -214,21 +235,19 @@ for m, (E, R) in tqdm(enumerate(list(zip(case_uorf_numbers, caseR_uorf_numbers))
     ax = axes[j, i]
     title = ''
     contours = np.linspace(0, 1, 7)
-    du.eval_model_plot(
+    du.plot_model_at_x(
         params,
         dman_full,
         m,
-        ax=ax,
-        radius=0.1,
-        knn=500,
-        min_points=5,
+        ax,
         colorbar=False,
-        res=100,
         title=title,
-        xrange_eval=jnp.array([[0,0],[1,1]]),
         contours=contours,
+        radius=0.125,
+        knn=300,
+        min_points=20,
+        res=100,
     )
-    # remove left ticks except if j == 0
     if j != N - 1:
         ax.set_xticks([])
         ax.set_xlabel('')
@@ -245,7 +264,7 @@ for m, (E, R) in tqdm(enumerate(list(zip(case_uorf_numbers, caseR_uorf_numbers))
         )
 
 fig.tight_layout()
-fig.savefig(Path('~/Desktop/matrix_pred_smooth_v2_15.pdf').expanduser())
+fig.savefig(savepath / 'matrix_pred_smooth_4corners_v2.pdf')
 print('done')
 ##────────────────────────────────────────────────────────────────────────────}}})
 
@@ -261,6 +280,7 @@ tl_rate_keys
 [params['shared'][key] for key in tl_rate_keys]
 
 import copy
+
 params_copy = copy.deepcopy(params)
 params_copy['shared']['3x_uORF::tl_rate'] = jnp.array([0.0])
 
@@ -271,22 +291,21 @@ fig, ax = du.mkfig(1, 1, (4, 4))
 du.report(params_copy, dman_full, 50)
 
 dman_full.set_subset(np.arange(len(names)))
-ut.plot_networks([m.network], figsize=(30, 30), H=3000,W=1500)
+ut.plot_networks([m.network], figsize=(30, 30), H=3000, W=1500)
 
 m = dman_full.get_models()[50]
-
 ut.plot_node('translation', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
 ut.plot_node('transcription', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
-ut.plot_node('inv_transcription', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
-ut.plot_node('inv_translation', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
-ut.plot_node('inv_transcription', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
+# ut.plot_node('inv_transcription', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
+# ut.plot_node('inv_translation', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
+# ut.plot_node('inv_transcription', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
 
 extra = m.network.compute_graph[m.network.compute_graph.type == 'sequestron_ERN'].extra.to_list()
-ut.plot_node('sequestron_ERN', params, m, xlim=(0, 1.2), n_inputs=2,extra_args=extra[0],mode='3d')
+ut.plot_node('sequestron_ERN', params, m, xlim=(0, 1.2), n_inputs=2, extra_args=extra[0], mode='3d')
 ut.plot_node('output', params, m, xlim=(0, 1.2), ylim=(0, 1.2))
 
 m = dman_full.get_models()[54]
-ut.plot_networks([m.network], figsize=(30, 30), H=3000,W=1500)
+ut.plot_networks([m.network], figsize=(30, 30), H=3000, W=1500)
 
 # for model 50
 # translation node 8
@@ -304,16 +323,29 @@ params_copy = copy.deepcopy(params)
 # m 53 is 3x uorf
 # params_copy['shared']['3x_uORF::tl_rate'] = jnp.array([1.0653249])
 # params_copy['shared']['empty::tc_rate'] = 100000
-m.collect_all_results(params_copy, jnp.zeros((2, 1)), jnp.ones((2,))/2, key)
+m.collect_all_results(params_copy, jnp.zeros((2, 1)), jnp.ones((2,)) / 2, key)
 
-y, g, r = m.collect_all_results(params_copy, jnp.zeros((2, 1)), jnp.ones((2,))/2, key, with_grad=['translation', 'transcription', 'output'])
+y, g, r = m.collect_all_results(
+    params_copy,
+    jnp.zeros((2, 1)),
+    jnp.ones((2,)) / 2,
+    key,
+    with_grad=['translation', 'transcription', 'output'],
+)
 
 from biocomp import utils as bu
+
 bu.flat_concat(*g)
 
 m = dman_full.get_models()[54]
 testp, _ = m.init(key)
-m.apply_and_negative_grad(params_copy, jnp.zeros((2, 1)), jnp.ones((2,))/2, key, override_w_uniform = ['translation', 'transcription', 'output'])
+m.apply_and_negative_grad(
+    params_copy,
+    jnp.zeros((2, 1)),
+    jnp.ones((2,)) / 2,
+    key,
+    override_w_uniform=['translation', 'transcription', 'output'],
+)
 
 du.report(params_copy, dman_full, 54)
 
@@ -322,84 +354,62 @@ du.report(params_copy, dman_full, 54)
 # the translation node has learnt 2 different functions for the 2 domains
 # (and the ERN one doesn't know how to deal with uORFs)
 model.network.compute_graph
-ut.plot_networks([model.network], figsize=(30, 30), H=3000,W=1500)
+ut.plot_networks([model.network], figsize=(30, 30), H=3000, W=1500)
 
 p = copy.deepcopy(params)
-npoints_eval=20000
-quantile_range=[0.25,0.75]
-key=jax.random.PRNGKey(0)
-xrange_eval=None
+npoints_eval = 20000
+quantile_range = [0.25, 0.75]
+key = jax.random.PRNGKey(0)
+xrange_eval = None
 model = dman_full.get_models()[50]
 k_i, k_q = jax.random.split(key)
 if xrange_eval is None:
-    xrange_eval = jnp.array([[0, 0], [1,1]])
-x = jax.random.uniform(k_i, (npoints_eval, model.n_inputs), minval=xrange_eval[0], maxval=xrange_eval[1])
-quantiles = jax.random.uniform(k_q, (npoints_eval, model.n_outputs), minval=quantile_range[0], maxval=quantile_range[1])
+    xrange_eval = jnp.array([[0, 0], [1, 1]])
+x = jax.random.uniform(
+    k_i, (npoints_eval, model.n_inputs), minval=xrange_eval[0], maxval=xrange_eval[1]
+)
+quantiles = jax.random.uniform(
+    k_q, (npoints_eval, model.n_outputs), minval=quantile_range[0], maxval=quantile_range[1]
+)
 keys = jax.random.split(key, npoints_eval)
-y, allres = jit(vmap(model.collect_all_results, in_axes=(None, 0, 0, 0)))(params, x, quantiles, keys)
+y, allres = jit(vmap(model.collect_all_results, in_axes=(None, 0, 0, 0)))(
+    params, x, quantiles, keys
+)
 
 allres[1].shape
 allres[7].shape
 allres[8].shape
-res = jnp.vstack([allres[18], allres[12], allres[1], allres[7], allres[8], allres[0][:,0], allres[0][:,1], allres[0][:,2]]).T
-du.fluo_scatter(res, ['inverse out', 'tx out', 'ern out','post-tx TL', 'post-ERN TL', 'eBFP out', 'eYFP out', 'mKate out'], logscale=False)
+res = jnp.vstack(
+    [
+        allres[18],
+        allres[12],
+        allres[1],
+        allres[7],
+        allres[8],
+        allres[0][:, 0],
+        allres[0][:, 1],
+        allres[0][:, 2],
+    ]
+).T
+du.fluo_scatter(
+    res,
+    [
+        'inverse out',
+        'tx out',
+        'ern out',
+        'post-tx TL',
+        'post-ERN TL',
+        'eBFP out',
+        'eYFP out',
+        'mKate out',
+    ],
+    logscale=False,
+)
 
-res = jnp.vstack([allres[18],  allres[20]]).T
+res = jnp.vstack([allres[18], allres[20]]).T
 du.fluo_scatter(res, ['inverse-out'], logscale=False)
 model.get_output_proteins()
 
 
 jnp.asarray(6).shape
-jax.random.uniform(key, shape=()) 
-
-
-x = 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+jax.random.uniform(key, shape=())

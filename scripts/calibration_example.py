@@ -4,7 +4,16 @@ from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
 
-xp_path = ut.DEFAULT_XP_PATH / '2023-02-16_Matrix'
+# get xp_name from --xp argument
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--xp', type=str, default='2023-02-16_Matrix')
+args = parser.parse_args()
+
+xp_name = args.xp
+
+
+xp_path = ut.DEFAULT_XP_PATH / xp_name
 raw_path = xp_path / 'data/raw_data_gated'
 
 # create the control dictionnary:

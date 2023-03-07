@@ -156,7 +156,7 @@ def data_checks(X, Y, models):
 @jit
 def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     EPSILON = 1e-12
-    HIGH_DENSITIES_PENALTY = 1.05
+    HIGH_DENSITIES_PENALTY = 1.00
     densities = kde.evaluate(X.T) + EPSILON
     threshold = jnp.quantile(densities, quantile_threshold)
     diceroll = jax.random.uniform(rng, shape=(len(densities),))
@@ -166,18 +166,23 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     return selected
 
 
-@partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold'))
-def sample_batches_direct(X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.1):
+# @partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold'))
+def sample_batches_direct(X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.05, density_coords=0.3):
     assert X.shape[0] == Y.shape[0]
-    EPSILON = 1e-12
+    EPSILON = 1e-16
     HIGH_DENSITIES_PENALTY = 1.0
 
     # select batch_size * n_batches random points, weight by inverse of density
     densities = kde.evaluate(X.T) + EPSILON
     threshold = jnp.quantile(densities, quantile_threshold)
+    midX = jnp.ones((X.shape[1],))*density_coords
+    density_at_midX = kde.evaluate(midX.T)
+    threshold = min(threshold, density_at_midX)
     selection_proba = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY)))
-    selection_proba /= jnp.sum(selection_proba)
     indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
+    # or with numpy:
+    # selection_proba /= np.sum(selection_proba)
+    # indices = np.random.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba)
 
     Xsub = jnp.take(X, indices, axis=0)
     Ysub = jnp.take(Y, indices, axis=0)
@@ -188,7 +193,7 @@ def sample_batches_direct(X, Y, batch_size, n_batches, kde, rng, quantile_thresh
 
 
 # @partial(jit, static_argnames=('batch_size', 'n_batches', 'density_quantile_threshold'))
-def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_threshold):
+def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_threshold, density_coords):
     all_batches = [
         sample_batches_direct(
             x,
@@ -198,6 +203,7 @@ def _get_batches(X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_th
             kde,
             rng,
             quantile_threshold=density_quantile_threshold,
+            density_coords=density_coords,
         )
         for x, y, kde, rng in tqdm(
             list(zip(X, Y, kdes, jax.random.split(rng_key, len(X)))),
@@ -224,22 +230,28 @@ class DataManager:
         self._jitted_models = [jit(m) for m in models]
         self._X = self.rescale(self._raw_X)
         self._Y = self.rescale(self._raw_Y)
-
-        # resample the data to get a faster estimate of the density
-        MAX_N = 50000
-        key = jax.random.PRNGKey(0)
-        self._kdes = [
-            gaussian_kde(
-                x[jax.random.choice(key, x.shape[0], shape=(MAX_N,))].T,
-                bw_method=cfg['kde_bw_method'],
-            )
-            for x in self._X
-        ]
+        MAX_VAL = 1.5
+        assert(max([x.max() for x in self._X]) < MAX_VAL)
+        assert(max([y.max() for y in self._Y]) < MAX_VAL)
         self.indices = None
+        self.gen_kdes()
         data_checks(X, Y, models)
 
     def set_subset(self, indices):
         self.indices = indices
+
+    def gen_kdes(self, bw=None, max_n=10000):
+        if bw is None:
+            bw = self.cfg['kde_bw_method']
+        key = jax.random.PRNGKey(0)
+        self._kdes = [
+            gaussian_kde(
+                x[jax.random.choice(key, x.shape[0], shape=(max_n,))].T,
+                bw_method=bw,
+            )
+            for x in self._X
+        ]
+
 
     def rescale(self, X):
         factor = self.cfg['log_factor']
@@ -260,6 +272,7 @@ class DataManager:
             self.cfg['batch_size'],
             self.cfg['n_batches'],
             self.cfg['density_quantile_threshold'],
+            self.cfg['coords_for_density_threshold'],
         )
         assert xbatches.shape[2] == sum([m.n_inputs for m in self.get_models()])
         assert ybatches.shape[2] == sum([m.n_outputs for m in self.get_models()])
@@ -600,6 +613,18 @@ def heatmap(
     return im
 
 
+def smooth(x, y, model, rescale, ax, **kw):
+    ninputs = model.n_inputs
+    if ninputs == 1:
+        smooth_1d(x, y, model, rescale, ax, **kw)
+    elif ninputs == 2:
+        smooth_2d(x, y, model, rescale, ax, **kw)
+    elif ninputs == 3:
+        smooth_3d(x, y, model, rescale, ax, **kw)
+    else:
+        raise NotImplementedError(f'Cannot plot {ninputs} inputs')
+
+
 def smooth_1d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
     tree = cKDTree(x)
 
@@ -636,18 +661,15 @@ def smooth_1d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
     ax.set_yticklabels(tlabels)
 
 
-def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, title=True, **kw):
-    input_name = model.get_inverted_input_proteins()
+def model_ticks_and_labels(model, rescaler, xmax=1):
+    input_names = model.get_inverted_input_proteins()
     output_names = model.get_output_proteins()
-
-    reordered_input = sorted(input_name)[::-1]
-    if reordered_input != input_name:
-        x = x[:, [input_name.index(i) for i in reordered_input]]
-
+    reordered_input = sorted(input_names)
+    input_order = [input_names.index(i) for i in reordered_input]
     assert len(output_names) == 3
-    assert len(input_name) == 2
-    output = list(set(output_names) - set(input_name))
-    output_pos = output_names.index(output[0])
+    assert len(input_names) == 2
+    output_name = list(set(output_names) - set(input_names))[0]
+    output_pos = output_names.index(output_name)
     unscaled_ticks = np.logspace(0, 12, 13)
     ticks = np.array(rescaler(unscaled_ticks))
     ticks = ticks[ticks < xmax]
@@ -655,37 +677,40 @@ def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, t
         scformat.format("{:m}", x) if i > 1 else ''
         for i, x in enumerate(unscaled_ticks[: len(ticks)])
     ]
+    return input_order, input_names, output_pos, output_name, ticks, tlabels
+
+
+def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, title=True, **kw):
+
+    input_order, input_names, output_pos, output_name, ticks, tlabels = model_ticks_and_labels(
+        model, rescaler, xmax=xmax
+    )
 
     y = y[:, output_pos]
+    x = x[:, input_order]
 
     tree = cKDTree(x)
     xx = jnp.linspace(xmin, xmax, res)
     xygrid = jnp.array(np.meshgrid(xx, xx)).T.reshape(-1, 2)
-
     if x.shape[1] > 2:
         assert xslice.shape == (x.shape[1] - 2,)
         xquery = jnp.concatenate([xygrid, jnp.tile(xslice, (xygrid.shape[0], 1))], axis=1)
     else:
         xquery = xygrid
-
     z = get_knn_smooth(xquery, y, tree=tree, **kw).reshape(res, res)
 
     heatmap(ax, z, ticks=ticks, ticklabels=tlabels, **kw)
+    ax.set_xlabel(input_names[0])
+    ax.set_ylabel(input_names[1])
+    remove_spines(ax)
 
     ttle = None
     if title is True:
-        ttle = f'{model.network.name}\n{output[0]} smoothed mean'
+        ttle = f'{model.network.name}\n{output_name} smoothed mean'
     elif title is not None:
         ttle = title
     if ttle is not None:
         ax.set_title(ttle)
-
-    ax.set_xlabel(reordered_input[0])
-    ax.set_ylabel(reordered_input[1])
-
-    # remove plot border (the frame, I think?)
-    for spine in ax.spines.values():
-        spine.set_visible(False)
 
 
 def smooth_3d(x, y, model, rescaler, ax, slices=np.linspace(0, 1, 5), **kw):
@@ -754,15 +779,7 @@ def model_plot(dman: DataManager, model_id: int, ax, kde=None, **kw):
         subsample = optimal_density_subsample(x, kde, rng, quantile_threshold=0.1)
         x, y = x[subsample], y[subsample]
 
-    ninputs = model.n_inputs
-    if ninputs == 1:
-        smooth_1d(x, y, model, dman.rescale, ax, **kw)
-    elif ninputs == 2:
-        smooth_2d(x, y, model, dman.rescale, ax, **kw)
-    elif ninputs == 3:
-        smooth_3d(x, y, model, dman.rescale, ax, **kw)
-    else:
-        raise NotImplementedError(f'Cannot plot {ninputs} inputs')
+    smooth(x, y, model, dman.rescale, ax, **kw)
 
 
 def eval_model_plot(
@@ -771,7 +788,7 @@ def eval_model_plot(
     id,
     ax,
     npoints_eval=10000,
-    quantile_range=[0.2,0.8],
+    quantile_range=[0.2, 0.8],
     key=jax.random.PRNGKey(0),
     xrange_eval=None,
     **kw,
@@ -779,38 +796,96 @@ def eval_model_plot(
 
     k_i, k_q = jax.random.split(key)
     if xrange_eval is None:
-        xrange_eval = jnp.array([[0, 0], [1,1]])
+        xrange_eval = jnp.array([[0, 0], [1, 1]])
 
     model = dman.get_models()[id]
-    jm= dman.get_jitted_models()[id]
+    jm = dman.get_jitted_models()[id]
 
-    x = jax.random.uniform(k_i, (npoints_eval, model.n_inputs), minval=xrange_eval[0], maxval=xrange_eval[1])
-    quantiles = jax.random.uniform(k_q, (npoints_eval, model.n_outputs), minval=quantile_range[0], maxval=quantile_range[1])
+    x = jax.random.uniform(
+        k_i, (npoints_eval, model.n_inputs), minval=xrange_eval[0], maxval=xrange_eval[1]
+    )
+    quantiles = jax.random.uniform(
+        k_q, (npoints_eval, model.n_outputs), minval=quantile_range[0], maxval=quantile_range[1]
+    )
     keys = jax.random.split(key, npoints_eval)
     y = vmap(jm, in_axes=(None, 0, 0, 0))(params, x, quantiles, keys)
 
     xmin, xmax = jnp.min(x, axis=0)[0], jnp.max(x, axis=0)[0]
-    ninputs = model.n_inputs
-    if ninputs == 1:
-        smooth_1d(x, y, model, dman.rescale, ax, **kw)
-    elif ninputs == 2:
-        smooth_2d(x, y, model, dman.rescale, ax, xmin=xmin, xmax=xmax, **kw)
-    elif ninputs == 3:
-        smooth_3d(x, y, model, dman.rescale, ax, **kw)
+
+    smooth(x, y, model, dman.rescale, ax, xmin=xmin, xmax=xmax, **kw)
+
+
+def eval_model_grid(
+    params,
+    dman,
+    id,
+    ax,
+    quantile=0.5,
+    key=jax.random.PRNGKey(0),
+    xrange_eval=None,
+    res=100,
+    **kw,
+):
+    k_i, k_q = jax.random.split(key)
+    if xrange_eval is None:
+        xrange_eval = jnp.array([0, 1])
+    model = dman.get_models()[id]
+    jm = dman.get_jitted_models()[id]
+    xx = jnp.linspace(xrange_eval[0], xrange_eval[1], res)
+    xygrid = jnp.array(np.meshgrid(xx, xx)).T.reshape(-1, 2)
+    input_order, input_names, output_pos, output_name, ticks, tlabels = model_ticks_and_labels(
+        model, dman.rescale
+    )
+    keys = jax.random.split(key, xygrid.shape[0])
+    xygrid = xygrid[:, input_order]
+    y = vmap(jm, in_axes=(None, 0, None, 0))(
+        params, xygrid, jnp.ones((model.n_outputs,)) * quantile, keys
+    )
+    z = y[:, output_pos].reshape(res, res)
+    heatmap(ax, z, ticks=ticks, ticklabels=tlabels, **kw)
+    ax.set_xlabel(input_names[0])
+    ax.set_ylabel(input_names[1])
+    remove_spines(ax)
+
+
+def model_at_x(params, dman, id, key=jax.random.PRNGKey(0), quantile=None, **_):
+    jm = dman.get_jitted_models()[id]
+    x, y = dman.get_X()[id], dman.get_Y()[id]
+    keys = jax.random.split(key, x.shape[0])
+
+    if quantile is not None:
+        Q = jnp.ones(y.shape) * quantile
     else:
-        raise NotImplementedError(f'Cannot plot {ninputs} inputs')
+        Q = jax.random.uniform(key, y.shape)
+
+    yhat = vmap(jm, in_axes=(None, 0, 0, 0))(params, x, Q, keys)
+    return x, y, yhat
+
+
+def plot_model_at_x(params, dman, id, ax, **kw):
+    x, y, yhat = model_at_x(params, dman, id, **kw)
+    model = dman.get_models()[id]
+    smooth(x, yhat, model, dman.rescale, ax, **kw)
+
+
+def plot_model_diff(params, dman, id, ax, **kw):
+    x, y, yhat = model_at_x(params, dman, id, **kw)
+    model = dman.get_models()[id]
+    err = jnp.abs(y - yhat)
+    smooth(x, err, model, dman.rescale, ax, **kw)
 
 
 def report(params, dman, id, suptitle='', **kw):
     fig, ax = mkfig(1, 2, size=(4, 4))
     model_plot(dman, id, ax[0], **kw)
-    eval_model_plot(params, dman, id, ax[1], **kw)
+    plot_model_at_x(params, dman, id, ax[1], **kw)
+    # eval_model_plot(params, dman, id, ax[1], **kw)
     ax[0].set_title(f'Original data (mean)')
     ax[1].set_title(f'Predicted (mean)')
     model = dman.get_models()[id]
     fig.suptitle(f'{suptitle} {model.node_namespace}')
+    fig.tight_layout()
     return fig, ax
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -876,14 +951,17 @@ def density_plot_1d(
     label=None,
     ticks=None,
     ticks_labels=None,
+    bw_method=None,
     x2=None,
     show_quantiles=[0.005, 0.995],
     **kw,
 ):
-    left_kde = gaussian_kde(x.T, bw_method=0.005)
+    if bw_method is None:
+        bw_method = 0.01
+    left_kde = gaussian_kde(x.T, bw_method=bw_method)
     left_densities = left_kde(sample_at.T)
     if x2 is not None:
-        right_kde = gaussian_kde(x2.T, bw_method=0.005)
+        right_kde = gaussian_kde(x2.T, bw_method=bw_method)
         right_densities = right_kde(sample_at.T)
     else:
         x2 = x
@@ -944,16 +1022,22 @@ def density_plot_1d(
                 tick.label.set_color('grey')
 
 
-def fluo_densities(rawx, pnames, xmin=None, xmax=None, res=2000, title=None, types=None, **kw):
+def fluo_densities(rawx, pnames, xmin=None, xmax=None, res=2000, title=None, types=None, logscale=True, **kw):
     fig, axes = plt.subplots(1, len(pnames), figsize=(1.5 * len(pnames), 10))
 
-    X = loglog(rawx)
+    if logscale:
+        X = loglog(rawx)
+    else:
+        X = rawx
     xmin = xmin if xmin is not None else np.floor(X.min())
     xmax = xmax if xmax is not None else np.ceil(X.max())
 
     ticks = np.arange(xmin, xmax + 1, 1)
     sample_at = jnp.linspace(xmin, xmax, res)
-    ylabels = [scformat.format("{:m}", x) for x in inv_loglog(ticks)]
+    if logscale:
+        ylabels = [scformat.format("{:m}", x) for x in inv_loglog(ticks)]
+    else:
+        ylabels = [scformat.format("{:m}", x) for x in ticks]
 
     if types is None:
         types = [''] * len(pnames)

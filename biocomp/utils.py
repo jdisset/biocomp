@@ -351,6 +351,7 @@ def assemble_params(dynamic, static):
 
 
 def flatten_params(params):
+    #TODO: switch to jax.flattten_util.ravel_pytree
     """Flatten params into a single vector,
     and also returns a descriptor that can be used
     to unflatten them."""
@@ -363,6 +364,7 @@ def flatten_params(params):
 
 
 def unflatten_params(flat_params, pdescriptor):
+    #TODO: switch to jax.flattten_util.ravel_pytree
     """Unflatten params from a single vector and a descriptor."""
     shapes, treedef = pdescriptor
     # splits = jnp.cumsum(jnp.array([jnp.prod(jnp.array(s)) for s in shapes]), dtype=jnp.int32)

@@ -56,10 +56,11 @@ DEFAULT_NN_NODES = dict(
 DEFAULT_DATA_CONFIG = {
     "batch_size": 16,
     "n_batches": 2048,
-    "kde_bw_method": 0.05,
-    "log_factor": 5e3,
+    "kde_bw_method": 0.1,
+    "log_factor": 2e4,
     "max_value": 5e7,
-    "density_quantile_threshold": 0.07,
+    "density_quantile_threshold": 0.025, # threshold = min of both
+    "coords_for_density_threshold": 0.3, # threshold = min of both
 }
 
 DEFAULT_TRAINING_CONFIG = {
