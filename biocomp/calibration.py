@@ -297,8 +297,8 @@ def beads_fit_spline(logpeaks, logcalib, spline_degree=2, smooth_percent=1, CF=1
     # reorder, but only X
     X = X[order, np.arange(0, NCHAN)]
 
-    if ignore_first_bead:
-        w[0, :] = 1e-9
+    if ignore_first_bead: # almost...
+        w[0, :] = 1e-6
 
     splines = [
         UnivariateSpline(
@@ -313,8 +313,13 @@ def beads_fit_spline(logpeaks, logcalib, spline_degree=2, smooth_percent=1, CF=1
         for c in range(0, NCHAN)
     ]
 
-    transforms = [lambda x: s(x * CF) / CF for s in splines]
-    inv_transforms = [lambda x: s(x * CF) / CF for s in inv_splines]
+    def make_transform(s):
+        def transform(x):
+            return s(x * CF) / CF
+        return transform
+
+    transforms = [make_transform(s) for s in splines]
+    inv_transforms = [make_transform(s) for s in inv_splines]
     return transforms, inv_transforms
 
 
@@ -458,8 +463,8 @@ def plot_beads_dists(
 
     NBEADS, NCHAN = peaks.shape
     fig, axes = plt.subplots(1, NCHAN, figsize=(2.2 * NCHAN, 12))
-    tdata = transform(observations)
-    tpeaks = transform(peaks)
+    tdata = jnp.array([t(o) for t,o in zip(transform, observations.T)]).T
+    tpeaks = jnp.array([t(p) for t,p in zip(transform, peaks.T)]).T
     for c in range(NCHAN):
         ax = axes[c]
         error = np.average(np.abs(tpeaks[1:, c] - calib[1:, c]))
@@ -645,22 +650,23 @@ from tqdm import tqdm
 
 from scipy.interpolate import LSQUnivariateSpline
 
-DEFAULT_CMAP_Q = np.array([0.005, 0.995]) # where to put spline knots
-DEFAULT_CLAMP_Q = np.array([0.001, 0.999]) # where to clamp values
+DEFAULT_CMAP_Q = np.array([0.7, 0.8]) # where to put spline knots
+DEFAULT_CLAMP_Q = np.array([0.0001, 0.9999]) # where to clamp values
 
 def cmap_spline(X, Y, n_knots=1, spline_order=3, CF=100, Q=DEFAULT_CMAP_Q):
     X, Y = X * CF, Y * CF
     x_order = np.argsort(X, axis=0)
     Xx, Yx = np.take_along_axis(X, x_order, axis=0), Y[x_order]
-    w = 0.1 * np.ones_like(Y)
-    xknots = np.linspace(np.quantile(X, Q[0], axis=0), np.quantile(X,Q[-1], axis=0), n_knots).T
+    w = 0.25 * np.ones_like(Y)
+    X6 = Xx[-6]
+    xknots = np.linspace(np.quantile(X, Q[0], axis=0), np.quantile(X, Q[1], axis=0), n_knots).T
     splines = [
         LSQUnivariateSpline(Xx[:, c], Yx[:, c], k=spline_order, t=xknots[c], w=w)
         for c in tqdm(range(X.shape[1]))
     ]
     y_order = np.argsort(Y, axis=0)
     Xy, Yy = X[y_order], Y[y_order]
-    yknots = np.linspace(Yy.min() + 1, Yy.max() - 1, n_knots)
+    yknots = np.linspace(np.quantile(Yy, Q[0], axis=0), np.quantile(Yy,Q[-1], axis=0), n_knots, endpoint=True).T
     inv_splines = [
         LSQUnivariateSpline(Yy, Xy[:, c], k=spline_order, t=yknots, w=w) for c in range(X.shape[1])
     ]
@@ -687,7 +693,8 @@ class Calibration:
         self,
         color_controls_files: dict[tuple[str], str],
         beads_file: str,
-        reference_protein: str = 'EBFP2',
+        reference_protein: str = 'mkate',
+        reference_channel: str = 'PE_TEXAS_RED',
         beads_mef_values: dict[str, list[float]] = SPHEROTECH_RCP_30_5a,
         channel_to_unit: dict[str, str] = FORTESSA_CHANNELS,
         random_seed: int = 42,
@@ -729,6 +736,7 @@ class Calibration:
         self.color_controls_files = color_controls_files
         self.beads_file = beads_file
         self.reference_protein = escape(reference_protein)
+        self.reference_channel = escape(reference_channel)
         self.beads_mef_values = {escape(k): v for k, v in beads_mef_values.items()}
         self.channel_to_unit = {escape(k): escape(v) for k, v in channel_to_unit.items()}
         self.unit_to_channel = {v: k for k, v in self.channel_to_unit.items()}
@@ -858,8 +866,7 @@ class Calibration:
         logX = logX[jnp.all(logX < self.clamp_values[1], axis=1)]
         cmapX = self.cmap_transform(logX)
 
-        refprotid = self.__fluo_proteins.index(self.reference_protein)
-        refchanid = jnp.argmax(self.__bleedthrough_matrix[refprotid])
+        refchanid = self.__beads_channel_order.index(self.reference_channel)
         calibratedX = jnp.array([self.beads_transform[refchanid](cmapX[:, i]) for i in range(cmapX.shape[1])]).T
 
         finalX = inverse_logtransform(calibratedX, self.__log_scale_factor)
@@ -877,14 +884,13 @@ class Calibration:
         if self.__log_beads_peaks is None:
             raise ValueError('You must fit the calibration first')
 
-        # # plot_bead_peaks_diagnostics(peaks, densities, vmat, logbeads, channel_order)
-        # plot_bead_peaks_diagnostics(
-        # self.__beads_peaks,
-        # self.__beads_densities,
-        # self.__beads_vmat,
-        # self.__logbeads,
-        # self.__beads_channel_order,
-        # )
+        plot_bead_peaks_diagnostics(
+            self.__log_beads_peaks,
+            self.__beads_densities,
+            self.__beads_vmat,
+            self.__log_beads_data,
+            self.__beads_channel_order,
+        )
 
         plot_beads_dists(
             self.beads_transform,

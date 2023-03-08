@@ -26,7 +26,7 @@ controls = {c.stem.split('.')[0]: c for c in control_files}
 
 beads = list(raw_path.glob('beads/*.fcs'))[0]
 
-cal = Calibration(controls, beads, reference_protein='EYFP', use_channels=['FITC', 'PACIFIC_BLUE', 'PE_TEXAS_RED'])
+cal = Calibration(controls, beads, reference_protein='MKATE', use_channels=['FITC', 'PACIFIC_BLUE', 'PE_TEXAS_RED', 'APC_ALEXA_700'])
 cal.fit_TASBE()
 
 datafiles = list(raw_path.glob('*.csv'))
