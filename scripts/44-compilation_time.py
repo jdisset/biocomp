@@ -39,15 +39,16 @@ name = 'a'
 node_id = 4
 
 
-def select(a, i, axis=0):
-    """Reduces an array to its ith element along axis"""
-    mask = jax.nn.one_hot(i, a.shape[0])
-    # replace 0 with nan so that we don't return ambiguous zeros
-    # when i is out of bounds
-    mask = jnp.where(mask == 0, jnp.nan, mask)
-    c = (a.swapaxes(axis, -1) * mask).swapaxes(axis, -1)
-    # return jnp.sum(c, axis=axis)
-    return jnp.nanmean(c, axis=axis)
+# def select(a, i, axis=0):
+    # """Reduces an array to its ith element along axis"""
+    # mask = jax.nn.one_hot(i, a.shape[0])
+    # # replace 0 with nan so that we don't return ambiguous zeros
+    # # when i is out of bounds
+    # mask = jnp.where(mask == 0, jnp.nan, mask)
+    # c = (a.swapaxes(axis, -1) * mask).swapaxes(axis, -1)
+    # # return jnp.sum(c, axis=axis)
+    # return jnp.nanmean(c, axis=axis)
+
 
 def get_param_vect(
     params,
@@ -71,49 +72,66 @@ def get_param_vect(
 
     dpath.append(name)
 
-    keys_path = ['keys'] + dpath
 
+    # The slight complication here is that we can't jit/vectorize a
+    # dictionnary lookup. i.e we can't do:
+    # res = params[node_id] as this requires branching
+    # Indexing an array is fine though, so we could simply create
+    # an array of params for each node that is as big as the largest
+    # node_id, and then index it. However, this would be wasteful
+    # for params that have large shapes.
+
+    # So instead I add one layer of indirection:
     # we save a key_vec which will contain -1 for all nodes that don't have
-    # a param for this path, and the param_id for the nodes that do
+    # a param for this path, and the actual param_id for the nodes that do.
+    # This way we can jit the lookup, and only need to store the params
+    # that are actually used. The extra '-1' entries are certainly not
+    # a problem. (And easier to deal with than sparse arrays)
+    
 
     nparams = ut.at_path(params, dpath, None)
     nparams = nparams.shape[0] if nparams is not None else 0
 
+    keys_path = ['keys'] + dpath
     key_vec = ut.at_path(params, keys_path, None)
-    if not read_only:
+
+    if not read_only: # non-jittable path (only used for initialization)
         assert (init is None) != (overwrite_with is None)
         if key_vec is None or node_id >= key_vec.shape[0]:
             v = key_vec if key_vec is not None else jnp.zeros((0,), dtype=jnp.int32)
             v = jnp.concatenate([v, jnp.full((node_id - v.shape[0] + 1,), -1, dtype=jnp.int32)])
             key_vec = v
 
-        param_id = select(key_vec, node_id)
-        if param_id == -1:
+        param_id = key_vec[node_id]
+        if param_id == -1: # param doesn't exist yet
             try:
-                param_id = nparams
+                new_param_value = init()
                 p = ut.at_path(params, dpath)
-                obj = init()
-                if p is None:
-                    p = jnp.expand_dims(obj, axis=0)
-                else:
-                    p = jnp.concatenate([p, jnp.expand_dims(obj, axis=0)])
-                ut.at_path(params, dpath, p)
-                key_vec = key_vec.at[node_id].set(param_id)
-                ut.at_path(params, keys_path, key_vec)
+                if p is None: # first param ever for this path
+                    p = jnp.expand_dims(new_param_value, axis=0)
+                else: # add new param to existing array
+                    p = jnp.concatenate([p, jnp.expand_dims(new_param_value, axis=0)])
+                ut.at_path(params, dpath, p) # update params
+                # update and save key_vec:
+                ut.at_path(params, keys_path, key_vec.at[node_id].set(nparams)) 
             except Exception as e:
                 msg = f'Error initializing param "{name}" from node {node_id}: {e}'
-                raise RuntimeError(msg)
+                raise RuntimeError(msg) from e
 
-    param_id = select(key_vec, node_id)
+    param_id = key_vec[node_id]
 
-    if overwrite_with is not None:
+    assert param_id != -1, f'Param "{name}" not found for node {node_id}'
+    # right now when jitted, param_id will be clamped to the last or first index
+    # we could pad the array with nans to make sure things stand out, but
+    # I don't think it's worth the hassle + memory cost.
+
+    if overwrite_with is not None: # also non-jittable
         assert read_only is False, f'Cannot overwrite a read_only param for path {dpath}'
         allp = ut.at_path(params, dpath)
         allp = allp.at[param_id].set(overwrite_with)
         ut.at_path(params, dpath, allp)
 
-    allp = ut.at_path(params, dpath)
-    return select(allp, param_id)
+    return ut.at_path(params, dpath)[param_id]
 
 
 
@@ -426,3 +444,11 @@ jit(models[0])(params,xx[2:4],zz[:3],key)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
+
+def test(a, i):
+    return a[i]
+
+a = jnp.arange(10).astype(jnp.float32)
+a_dict = {i: float(a[i]) for i in range(10)}
+
+jit(test)(a_dict, 2)
