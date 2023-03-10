@@ -44,6 +44,13 @@ def error(*args, **kwargs):
 # {{{                    --     random misc stuff     --
 # ···············································································
 
+NODE_PATH = ['node']
+SHARED_PATH = ['shared']
+STATIC_PATH = ['__static__']
+KEYS_PATH = STATIC_PATH + ['__keys__']
+MASK_PATH = STATIC_PATH + ['qmasks']
+QNAME_PATH = STATIC_PATH + ['qnames']
+QVALS_PATH = SHARED_PATH + ['qvals']
 
 def at_path(d: dict, path, val=None, defaultinit=lambda: None):
     for key in path[:-1]:

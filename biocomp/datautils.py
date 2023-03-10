@@ -666,8 +666,7 @@ def model_ticks_and_labels(model, rescaler, xmax=1):
     output_names = model.get_output_proteins()
     reordered_input = sorted(input_names)
     input_order = [input_names.index(i) for i in reordered_input]
-    assert len(output_names) == 3
-    assert len(input_names) == 2
+    assert len(output_names) == (len(input_names) + 1)
     output_name = list(set(output_names) - set(input_names))[0]
     output_pos = output_names.index(output_name)
     unscaled_ticks = np.logspace(0, 12, 13)
@@ -713,19 +712,50 @@ def smooth_2d(x, y, model, rescaler, ax, res=200, xmin=0, xmax=1, xslice=None, t
         ax.set_title(ttle)
 
 
-def smooth_3d(x, y, model, rescaler, ax, slices=np.linspace(0, 1, 5), **kw):
+def smooth_3d(x, y, model, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), axes = None, **kw):
     # we'll divide the third axis into slices
     inputs = model.get_inverted_input_proteins()
     # divide ax using make_axes_locatable
-    divider = make_axes_locatable(ax)
-    axes = [ax]
-    width = 1 / (len(slices) - 1)
-    for i in range(len(slices) - 1):
-        axes.append(divider.append_axes('top', size=width, pad=0.01))
-    # plot each slice
+    if axes is None:
+        assert ax is not None
+        divider = make_axes_locatable(ax)
+        axes = [ax]
+        width = 1 / (len(slices) - 1)
+        for i in range(len(slices) - 1):
+            axes.append(divider.append_axes('top', size=width, pad=0.01))
+        each_w, each_h = axes[0].get_position().size 
+        each_w /= len(slices)
+        each_h /= len(slices)
+        pos = ax.get_position()
+
+        # resize all axes  so that they are square and fit in the original ax
+        for i, a in enumerate(axes):
+            a.set_position([pos.x0 + i * each_w + i*0.05, pos.y0, each_w, each_h])
+            # plot each slice
+    print(f'Plotting {len(slices)} slices')
     for i, s in enumerate(slices):
-        smooth_2d(x, y, model, rescaler, axes[i], xslice=np.array([s]), **kw)
-        axes[i].set_title(f'{inputs[2]} ≈ {s:.2f}')
+        smooth_2d(x, y, model, rescaler, axes[i], xslice=np.array([slices[i]]), **kw)
+        axes[i].text(0.5, 0.85, f'{inputs[2]} ≈ {s:.2f}', fontsize=8, transform=axes[i].transAxes)
+
+
+    # resize all axes  so that they are square and fit in the original ax
+    for i, a in enumerate(axes):
+        if i > 0:
+            a.set_yticks([])
+            a.set_ylabel('')
+        if i < len(axes)-1:
+            a.get_images()[0].colorbar.remove()
+        a.set_xticks([])
+        remove_spines(a)
+        a.set_title('')
+
+    # write title on top
+    axes[0].set_title(f'{model.network.name}\n{model.get_output_proteins()[0]} smoothed mean', fontsize=8)
+    
+
+
+
+
 
 
 def setup_fig(title):

@@ -16,10 +16,24 @@ def quantize(x, possible_values):
     else:
         return quantize_impl(x, possible_values)
 
+def quantize_masked(x, possible_values, mask):
+    if len(possible_values) == 0:
+        return x
+    if len(possible_values) == 1:
+        return possible_values[0]
+    else:
+        return quantize_masked_impl(x, possible_values, mask)
+
 
 def quantize_impl(x, arr):
     zero = x - jax.lax.stop_gradient(x) # for straight-through gradient
     return zero + jax.lax.stop_gradient(arr[jnp.argmin(jnp.abs(arr - x))])
+
+
+def quantize_masked_impl(x, arr, mask):
+    zero = x - jax.lax.stop_gradient(x) # for straight-through gradient
+    dist = jnp.where(mask, jnp.abs(arr - x), jnp.inf)
+    return zero + jax.lax.stop_gradient(arr[jnp.argmin(dist)])
 
 @jax.custom_jvp
 def round_to_int(x):
