@@ -576,38 +576,43 @@ cg = network.compute_graph
 node_impl = nd.DEFAULT_COMPUTE_NODES_DICT
 node_namespace = None
 
+batches = get_batch_sequence_of_nodes(network)
+batches
+su.plot_networks([network])
 
-batches = get_batch_sequence_of_nodes()
+for e in cg.extra:
+    pprint(e)
+
+
+#TODO:
+# - move is_inverse_of to its own column in the cdf (as it can't be a param)
+# - write a save_extra_arg_to_param(node_id,...) function that transform all the extra_args into params
+#   It probably should check for the dimension of every value of the 
+# - use it before calling the nodes
+# - in every nodes, switch to getting the extra args from the params (read_only = True, they should be there!)
+# - write optimal flat_batches finding algorithm that maximizes parallelism
+#   i.e. max number of same functions per batch
+
+
+
 # each sublist in batches contains independent nodes that can be safely called in parallel
 # however we are not parallelizing the calls, so we can flatten the list and be sure
 # that the dependency order is respected (upstream nodes will always be called before downstream ones)
 flat_batches = [item for sublist in batches for item in sublist]
+flat_batches
 call_dicts = []
 for nid in flat_batches:
     call_d = {}
     node_row = cg.loc[nid]
+    cdg=network.central_dogma_graph,
+    cdf=cg
+    quantize_fun=nd.quantize
 
     # if it's an inverse node, we need to get the id of the node that it's inverting
     nodeid_for_getters = nid
     if node_row.extra is not None and 'is_inverse_of' in node_row.extra:
         nodeid_for_getters = node_row.extra['is_inverse_of']
 
-    # a node needs a method to access the parameters.
-    # we simply preset the general purpose get_param on the correct nodeid
-    get_p = partial(
-        get_param_,
-        node_id=nodeid_for_getters,
-    )
-    # same with get_quantized
-    # we preset the node id, the central dogma graph and the compute graph
-    # as well as the actual quantize function
-    get_q = partial(
-        get_quantized,
-        node_id=nodeid_for_getters,
-        cdf=cg,
-        cdg=self.network.central_dogma_graph,
-        quantize_fun=nd.quantize,
-    )
 
     # extra_params will be passed to the node function
     # n_outputs and n_inputs are always passed

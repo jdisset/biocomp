@@ -9,6 +9,8 @@ from ott.geometry.pointcloud import PointCloud
 from ott.problems.linear.linear_problem import LinearProblem
 from ott.solvers.linear.sinkhorn import Sinkhorn
 
+from scipy.interpolate import UnivariateSpline
+
 import time
 import pandas as pd
 import numpy as np
@@ -135,7 +137,6 @@ def inverse_logtransform(x, scale, offset=0):
 ### {{{                  --     beads related functions     --
 
 
-affine_transform = lambda params, x: params['a'] * x + params['b']
 
 CALIBRATION_PEAKS_MIN_X = -0.025
 CALIBRATION_PEAKS_MAX_X = 1.025
@@ -221,8 +222,10 @@ def compute_peaks(
     return peaks, (densities, vmat)
 
 
-def beads_fit(logpeaks, logcalib, num_iter=5000, learning_rate=0.01, ignore_first_bead=True):
+def beads_fit_affine(logpeaks, logcalib, num_iter=5000, learning_rate=0.01, ignore_first_bead=True):
     # simple full batch gradient descent
+
+    affine_transform = lambda params, x: params['a'] * x + params['b']
 
     beads_init = lambda NCHAN: {
         'a': jnp.ones((NCHAN,)),
@@ -266,10 +269,11 @@ def beads_fit(logpeaks, logcalib, num_iter=5000, learning_rate=0.01, ignore_firs
     return params, losses
 
 
-from scipy.interpolate import UnivariateSpline
 
 
-def beads_fit_spline(logpeaks, logcalib, spline_degree=2, smooth_percent=1, CF=100, ignore_first_bead=True):
+def beads_fit_spline(
+    logpeaks, logcalib, spline_degree=2, smooth_percent=1, CF=100, ignore_first_bead=True
+):
     X = logpeaks * CF  # (NBEADS, NCHAN)
     Y = logcalib * CF
     NBEADS, NCHAN = X.shape
@@ -297,7 +301,7 @@ def beads_fit_spline(logpeaks, logcalib, spline_degree=2, smooth_percent=1, CF=1
     # reorder, but only X
     X = X[order, np.arange(0, NCHAN)]
 
-    if ignore_first_bead: # almost...
+    if ignore_first_bead:  # almost...
         w[0, :] = 1e-6
 
     splines = [
@@ -316,6 +320,7 @@ def beads_fit_spline(logpeaks, logcalib, spline_degree=2, smooth_percent=1, CF=1
     def make_transform(s):
         def transform(x):
             return s(x * CF) / CF
+
         return transform
 
     transforms = [make_transform(s) for s in splines]
@@ -326,7 +331,6 @@ def beads_fit_spline(logpeaks, logcalib, spline_degree=2, smooth_percent=1, CF=1
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                     --     diagnostic plots     --
-# {{{
 def plot_bead_peaks_diagnostics(
     peaks,
     densities,
@@ -410,12 +414,11 @@ def plot_bead_peaks_diagnostics(
             title = f'{color_channels[c]}'
             ax.set_ylabel(title)
 
-        # show real legend!!!!!!!
         axes[0].set_title(
             'Density of observations across channel range (grey background = out of range)'
         )
-        # color: density of observations per bead assignment\n}}}
-        # ----: estimated peak position\n
+        # color: density of observations per bead assignment
+        # --: estimated peak position\n
         # dark curve: original distribution of observations in channel
     subfigs[1].suptitle("Bead peak diagnostics")
 
@@ -444,7 +447,7 @@ def plot_fluo_distribution(ax, data, res=2000):
     remove_axis_and_spines(ax)
 
 
-def plot_beads_dists(
+def plot_beads_after_correction(
     transform,
     peaks,
     calib,
@@ -452,6 +455,7 @@ def plot_beads_dists(
     color_channels,
     channel_to_unit,
     max_obs=20000,
+    title=None,
     fname=None,
 ):
     from matplotlib import cm
@@ -463,8 +467,8 @@ def plot_beads_dists(
 
     NBEADS, NCHAN = peaks.shape
     fig, axes = plt.subplots(1, NCHAN, figsize=(2.2 * NCHAN, 12))
-    tdata = jnp.array([t(o) for t,o in zip(transform, observations.T)]).T
-    tpeaks = jnp.array([t(p) for t,p in zip(transform, peaks.T)]).T
+    tdata = jnp.array([t(o) for t, o in zip(transform, observations.T)]).T
+    tpeaks = jnp.array([t(p) for t, p in zip(transform, peaks.T)]).T
     for c in range(NCHAN):
         ax = axes[c]
         error = np.average(np.abs(tpeaks[1:, c] - calib[1:, c]))
@@ -524,14 +528,19 @@ def plot_beads_dists(
             horizontalalignment='center',
         )
 
+    if title is not None:
+        fig.suptitle(title)
+
+    fig.tight_layout()
+
     if fname is not None:
-        fig.savefig(fname, dpi=200)
+        fig.savefig(fname, dpi=150)
         print('saved', fname)
         plt.close(fig)
 
 
 # plot the spectral signature matrix
-def plot_spectral_sig(S, ax, prots=None, channels=None):
+def plot_spectral_signature(S, ax, prots=None, channels=None):
     ax.imshow(S, cmap='Reds')
     ax.set_xticks(range(S.shape[1]))
     ax.set_yticks(range(S.shape[0]))
@@ -650,8 +659,9 @@ from tqdm import tqdm
 
 from scipy.interpolate import LSQUnivariateSpline
 
-DEFAULT_CMAP_Q = np.array([0.7, 0.8]) # where to put spline knots
-DEFAULT_CLAMP_Q = np.array([0.0001, 0.9999]) # where to clamp values
+DEFAULT_CMAP_Q = np.array([0.7, 0.8])  # where to put spline knots
+DEFAULT_CLAMP_Q = np.array([0.0001, 0.9999])  # where to clamp values
+
 
 def cmap_spline(X, Y, n_knots=1, spline_order=3, CF=100, Q=DEFAULT_CMAP_Q):
     X, Y = X * CF, Y * CF
@@ -666,7 +676,9 @@ def cmap_spline(X, Y, n_knots=1, spline_order=3, CF=100, Q=DEFAULT_CMAP_Q):
     ]
     y_order = np.argsort(Y, axis=0)
     Xy, Yy = X[y_order], Y[y_order]
-    yknots = np.linspace(np.quantile(Yy, Q[0], axis=0), np.quantile(Yy,Q[-1], axis=0), n_knots, endpoint=True).T
+    yknots = np.linspace(
+        np.quantile(Yy, Q[0], axis=0), np.quantile(Yy, Q[-1], axis=0), n_knots, endpoint=True
+    ).T
     inv_splines = [
         LSQUnivariateSpline(Yy, Xy[:, c], k=spline_order, t=yknots, w=w) for c in range(X.shape[1])
     ]
@@ -679,7 +691,6 @@ def cmap_spline(X, Y, n_knots=1, spline_order=3, CF=100, Q=DEFAULT_CMAP_Q):
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                     --     calibration class     --
-
 
 class Calibration:
     """
@@ -717,6 +728,9 @@ class Calibration:
                             other proteins quantities to, i.e they will be expressed in the same unit
                             The channel is picked as the brightest channel of the reference protein
 
+        reference_channel : str - name of the reference channel that will be used to convert
+                            to standatd MEF units
+
         beads_mef_vlaues : dict[str, list[float]] - dictionary associating the unit name
             to the list of reference values for the beads in this unit
             e.g : {'MEFL': [456, 4648, 14631, 42313, 128924, 381106, 1006897, 2957538, 7435549], 'MEPE': ...}
@@ -726,7 +740,9 @@ class Calibration:
 
         random_seed : int - random seed for any resampling that might be done
 
-        use_channels : list[str] - list of channels to use. None means all available channels
+        use_channels : list[str] - list of channels to use when computing protein quantity 
+                        from channel values (aka "bleedthrough correction"). 
+                        None means all available channels
 
         max_value : int - maximum value of the fluorescence values, used to detect saturation
 
@@ -804,9 +820,9 @@ class Calibration:
         assert has_blank, f'BLANK control not found. Should be named any of {VALID_BLANK_NAMES}'
         assert has_all, f'ALLCOLOR control not found. Should be named any of {VALID_ALL_NAMES}'
 
-    ##────────────────────────────────────────────────────────────────────────────}}}    def __to_MEF(self, Y):
+    ##────────────────────────────────────────────────────────────────────────────}}}
 
-    def fit_TASBE(self):
+    def fit(self):
         t0 = time.time()
         print('Estimating autofluorescence...')
         zero_masks = self.__controls_masks.sum(axis=1) == 0
@@ -855,19 +871,28 @@ class Calibration:
         self.__fitted = True
         print('Done fitting in {:.2f} seconds'.format(time.time() - t0))
 
-    def apply_to_array(self, Y):
+    def apply_bleedthrough_correction(self,Y):
         assert self.__fitted, 'You must fit the calibration first'
-        Y = Y - self.__autofluorescence  # remove autofluorescence
         X = Y @ jnp.linalg.pinv(self.__bleedthrough_matrix)  # apply bleedthrough
         X += self.__offset  # add offset
         X = X[jnp.all(X > 1, axis=1)]
+        return X
+
+    def apply_to_array(self, Y):
+
+        assert self.__fitted, 'You must fit the calibration first'
+        Y = Y - self.__autofluorescence  # remove autofluorescence
+        X = self.apply_bleedthrough_correction(Y)
+
         logX = logtransform(X, self.__log_scale_factor, 0)
         logX = logX[jnp.all(logX > self.clamp_values[0], axis=1)]
         logX = logX[jnp.all(logX < self.clamp_values[1], axis=1)]
         cmapX = self.cmap_transform(logX)
 
         refchanid = self.__beads_channel_order.index(self.reference_channel)
-        calibratedX = jnp.array([self.beads_transform[refchanid](cmapX[:, i]) for i in range(cmapX.shape[1])]).T
+        calibratedX = jnp.array(
+            [self.beads_transform[refchanid](cmapX[:, i]) for i in range(cmapX.shape[1])]
+        ).T
 
         finalX = inverse_logtransform(calibratedX, self.__log_scale_factor)
 
@@ -892,17 +917,45 @@ class Calibration:
             self.__beads_channel_order,
         )
 
-        plot_beads_dists(
+        plot_beads_after_correction(
             self.beads_transform,
             self.__log_beads_peaks,
             self.__log_beads_mef,
             self.__log_beads_data,
             self.__beads_channel_order,
             self.channel_to_unit,
+            title="""Beads-based MEF calibration
+            right side shows beads intensities in their respective MEF units
+            left side shows the real beads data after calibration\n\n"""
         )
 
-
-# bc.calibration.plot_beads_dists(transform, beads_peaks, logcalib, logbeads, bchan, cal.channel_to_unit)
+    def plot_color_mapping_diagnostics(self):
+        fig, ax = plt.subplots(1, 1)
+        # plot transform
+        NP = len(self.__fluo_proteins)
+        all_masks = self.__controls_masks.sum(axis=1) > 1
+        Y = self.__controls_values[all_masks] - self.__autofluorescence
+        X = self.apply_bleedthrough_correction(Y)
+        logX = logtransform(X, self.__log_scale_factor, 0)
+        logX = logX[jnp.all(logX > self.clamp_values[0], axis=1)]
+        logX = logX[jnp.all(logX < self.clamp_values[1], axis=1)]
+        print(f'clamp values: {self.clamp_values}')
+        target = logX[:, self.__fluo_proteins.index(self.reference_protein)]
+        for i in range(NP):
+            xx = np.linspace(self.clamp_values[0,i], self.clamp_values[1,i], 200)
+            print(f'xx range: {xx.min()} {xx.max()}')
+            yy = self.cmap_transform(np.tile(xx, (NP,1)).T)[:, i]
+            print(f'shapes: {xx.shape} {yy.shape}')
+            ax.scatter(logX[:, i], target, s=5, alpha=0.05, marker='.', linewidths=0)
+            ax.plot(xx, yy, alpha=1, lw=2.5, color='w')
+            ax.plot(xx, yy, label=self.__fluo_proteins[i], alpha=1, lw=1, color='C%d' % i)
+        yrange = self.clamp_values.min()*0.9, self.clamp_values.max()*1.05
+        ax.set_ylim(yrange)
+        ax.set_xlim(yrange)
+        ax.legend()
+        ax.set_xlabel('source')
+        ax.set_ylabel('target')
+        ax.set_title(f'Color mapping to {self.reference_protein}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
