@@ -1,0 +1,20 @@
+[project]
+name = "calibry"
+version = "0.1.0"
+description = "Calibry: flow cytometry calibration package"
+authors = ["Jean Disset <jdisset@mit.edu>"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+
+[options]
+packages = ["calibry"]
+
+[options.extras_require]
+jax = ["jax", "optax", "ott"]
+scipy = ["scipy"]
+pandas = ["pandas"]
+numpy = ["numpy"]
+matplotlib = ["matplotlib"]
+flowio = ["flowio"]
+tqdm = ["tqdm"]
