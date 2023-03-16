@@ -1,4 +1,5 @@
-# Calibry ![calibry logo](blob/logo_sd.png | width=64)
+![calibry logo](blob/logo_sd.png | width=64)
+# Calibry
 
 Calibry is a Python package for calibrating fluorescence values in flow cytometry data. 
 It uses color controls, blank controls, and beads with known fluorescence values for calibration.
