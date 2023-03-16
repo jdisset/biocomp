@@ -42,9 +42,11 @@ cal = Calibration(
     use_channels=['FITC-A', 'PACIFIC_BLUE_A', 'PE_TEXAS_RED_A'],
 )
 
-cal.fit_TASBE()
+cal.fit()
 
 cal.plot_beads_diagnostics()
+
+cal.plot_color_mapping_diagnostics()
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -89,7 +91,6 @@ pnames= cal._Calibration__fluo_proteins
 cnames= cal._Calibration__channel_order
 
 
-
 # plot transform
 xx = np.linspace(0, 1, 500)
 xx_3 = np.array([xx, xx, xx]).T
@@ -106,7 +107,6 @@ for i in range(0, 3):
     plt.plot(xx, yy, label=pnames[i], alpha=1, lw=1, color='C%d' % i)
     plt.plot(xx_inv, yy, alpha=1, lw=2.5, color='w')
     plt.plot(xx_inv, yy, label=pnames[i], alpha=1, lw=1, color='k')
-
 plt.ylim(yrange)
 plt.xlim(yrange)
 plt.legend()

@@ -20,7 +20,8 @@ raw_path = xp_path / 'data/raw_data_gated'
 # key = name of the control, value = path to the csv or fcs file
 # key follows the following convention:
 # single color control : the name of the protein. 'EBFP2', 'EYFP', ...
-# all color control: 
+# all color control: 'ALL'
+# blank: 'CNTL' or 'EMPTY'
 control_files = list(raw_path.glob('color_controls/*.csv'))
 controls = {c.stem.split('.')[0]: c for c in control_files}
 
