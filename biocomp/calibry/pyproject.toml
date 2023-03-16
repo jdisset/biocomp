@@ -2,8 +2,7 @@
 name = "calibry"
 version = "0.1.0"
 description = "Calibry: flow cytometry calibration package"
-authors = ["Jean Disset <jdisset@mit.edu>"]
-
+authors = [{name = "Jean Disset", email = "jdisset@mit.edu"}]
 [build-system]
 requires = ["setuptools", "wheel"]
 
