@@ -1,4 +1,5 @@
-![calibry logo](blob/logo_sd.png | width=64)
+<img src="blob/logo_sd.png" alt="calibry logo" width="64">
+
 # Calibry
 
 Calibry is a Python package for calibrating fluorescence values in flow cytometry data. 
