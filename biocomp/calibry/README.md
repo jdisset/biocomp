@@ -49,19 +49,28 @@ beads = "path/to/beads/file.fcs"
 
 # create the control dictionnary:
 # key = name of the control, value = path to the csv or fcs file
-# key follows the following convention:
+# key follows the following convention (case insensitive):
 # single color control : the name of the protein. 'EBFP2', 'EYFP', ...
 # all color control: 'ALL'
 # blank: 'CNTL' or 'EMPTY'
 control_files = list(raw_path.glob('color_controls/*.csv'))
+# in this example I'm assuming that the control files are named like "KEY.blablabla.csv"
+# e.g. "EBFP2.2023-03-10.csv", "all.whatever.csv", "eMpTy.my_empty_ctrl.csv"
+# the relevant is the first part of the file name, before the first dot
+# so it's easy to extract it with the following line
 controls = {c.stem.split('.')[0]: c for c in control_files}
 
-
 # Initialize the Calibration instance
-cal = Calibration(controls, beads, reference_protein='MKATE', use_channels=['FITC', 'PACIFIC_BLUE', 'PE_TEXAS_RED', 'APC_ALEXA_700'])
+cal = Calibration(controls, beads, reference_protein='MKATE', 
+				use_channels=['FITC', 'PACIFIC_BLUE', 'PE_TEXAS_RED', 'APC_ALEXA_700'])
 
 # Fit the calibration model
 cal.fit()
+
+# OPTIONAL: plot diagnostics, very useful to check that everything looks right
+cal.plot_bleedthrough_diagnostics() # plots the spectral signature matrix
+cal.plot_beads_diagnostics() # plots the results of the beads detection, assignment and calibration steps
+cal.plot_color_mapping_diagnostics() # plots the mapping from every protein to the reference one
 
 # Apply the calibration to your data
 data = pd.read_csv("path/to/data/file.csv")
