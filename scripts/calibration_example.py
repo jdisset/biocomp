@@ -1,4 +1,4 @@
-from biocomp.calibration import Calibration
+from biocomp.calibration.calibry import Calibration
 import scriptutils as ut
 from pathlib import Path
 from tqdm import tqdm

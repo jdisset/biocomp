@@ -2,7 +2,7 @@ from .library import PartsLibrary as PartsLibrary
 from . import utils as ut
 from .network import Network, inverted_network
 from .compute import ComputeGraphModel
-from .calibration import escape
+from calibry.calibry import escape
 from pathlib import Path
 import numpy as np
 import jax

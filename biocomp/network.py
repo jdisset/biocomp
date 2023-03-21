@@ -102,6 +102,7 @@ class GraphComputeNode:
         self.input_from = []
         self.output_to = []
         self.extra = {}
+        self.is_inverse_of = None
 
     def removeOutput(self, other):
         other.input_from.remove(self.id)
@@ -118,6 +119,7 @@ class GraphComputeNode:
             "cdg_output": self.cdg_output,
             "input_from": self.input_from,
             "output_to": self.output_to,
+            "is_inverse_of": self.is_inverse_of,
             "extra": self.extra,
         }
 
@@ -898,7 +900,6 @@ class Network:
         assert len(mapping.keys()) == len(set(mapping.values()))
         return mapping
 
-
     def cleanup(self):
         if self.compute_graph is not None:
             self.compute_graph.source_id = self.compute_graph.source_id.apply(
@@ -986,10 +987,10 @@ class Network:
 
         def propagate_upstream(node, quantile_id, output_id):
             node['extra'].setdefault('quantile_variable_id', [])
-            if node['extra'].get('is_inverse_of', None) is not None:
-                node['extra']['quantile_variable_id'] = cg.loc[node['extra']['is_inverse_of']][
-                    'extra'
-                ].get('quantile_variable_id', [])
+            if node.is_inverse_of is not None:
+                node['extra']['quantile_variable_id'] = cg.loc[node.is_inverse_of]['extra'].get(
+                    'quantile_variable_id', []
+                )
             else:
                 if len(node['extra']['quantile_variable_id']) <= output_id:
                     # append -1 until the right size
@@ -1028,9 +1029,6 @@ class Network:
         deadend_nodes = cg[cg.type == 'deadend'].index
         for node_id in deadend_nodes:
             propagate_upstream(cg.loc[node_id], 0, 0)
-
-
-
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -1175,10 +1173,10 @@ def inverted_network(
                 # so that we can use it when converting aggregation nodes for example
                 # (where we convert a single input / multi output node to a single input / single output node
                 # but we need to know which path, i.e slot, to use)
+                new_n.is_inverse_of = node_id
                 new_n.extra = {
                     'original_output_slot': slot,
                     'original_output_len': len(original_node['output_to']),
-                    'is_inverse_of': node_id,
                 }
 
                 # set prev input_from to new nodes

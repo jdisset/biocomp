@@ -7,9 +7,6 @@ from . import utils as ut
 from . import nodes as nd
 from typing import List, Dict, Tuple, Union, Optional, Callable, Any
 
-# TODO:
-# might be able to parallelize at a finer level (create a "meta model") using jax's partial?
-
 # {{{                  --     Params and quantization     --
 # ···············································································
 def get_param(
@@ -158,7 +155,6 @@ def get_quantized(
 # {{{                  --     ComputeGraphModel class     --
 # ···············································································
 
-
 class ComputeGraphModel:
     def __init__(self, network):
         self.network = network
@@ -200,8 +196,8 @@ class ComputeGraphModel:
 
             # if it's an inverse node, we need to get the id of the node that it's inverting
             nodeid_for_getters = nid
-            if node_row.extra is not None and 'is_inverse_of' in node_row.extra:
-                nodeid_for_getters = node_row.extra['is_inverse_of']
+            if node_row.is_inverse_of is not None:
+                nodeid_for_getters = node_row.is_inverse_of
 
             # a node needs a method to access the parameters.
             # we simply preset the general purpose get_param on the correct nodeid
@@ -254,6 +250,8 @@ class ComputeGraphModel:
             with_grad: Optional[list[str]] = None,
             override_w_uniform: Optional[list[str]] = None,
         ):
+            print(f'quantiles: {quantiles}')
+
             """
             params: the parameters
             inputs: the inputs to the network
@@ -356,12 +354,12 @@ class ComputeGraphModel:
 
         def apply(*args, **kwargs):
             """Executes the model. It simply calls collect_all_results and only returns the final output"""
-            return collect_all_results(*args, with_grad=False, **kwargs)[0]
+            return collect_all_results(*args, **kwargs, with_grad=False)[0]
 
         def apply_and_negative_grad(
             *args, with_grad=['transcription', 'translation', 'output'], **kwargs
         ):
-            allres = collect_all_results(*args, with_grad=with_grad, **kwargs)
+            allres = collect_all_results(*args, **kwargs, with_grad=with_grad)
             grads = jnp.zeros(1)
             if len(allres[1]) > 0:
                 grads = ut.flat_concat(*allres[1])
@@ -470,3 +468,5 @@ class ComputeGraphModel:
 
 
 #                                                                            }}}
+
+

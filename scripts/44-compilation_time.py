@@ -6,7 +6,6 @@ from biocomp import datautils as du
 from biocomp import nodes as nd
 from jax.scipy.stats import gaussian_kde
 import matplotlib.pyplot as plt
-from biocomp.calibration import Calibration
 import scriptutils as su
 from biocomp import utils as ut
 from pathlib import Path
@@ -97,8 +96,8 @@ def get_param_vect(
     keys_path = ut.KEYS_PATH + dpath
     key_vec = ut.at_path(params, keys_path, None)
 
+
     if not read_only:  # non-jittable path (only used for initialization)
-        assert (init is None) != (overwrite_with is None)
         if key_vec is None or node_id >= key_vec.shape[0]:
             v = key_vec if key_vec is not None else jnp.zeros((0,), dtype=jnp.int32)
             key_vec = jnp.concatenate(
@@ -121,14 +120,51 @@ def get_param_vect(
                 msg = f'Error initializing param "{name}" from node {node_id}: {e}'
                 raise RuntimeError(msg) from e
 
+    if read_only and key_vec is None or key_vec[node_id] == -1:
+        return None # reading a non-existent param returns None
+
     param_id = key_vec[node_id]
 
     if overwrite_with is not None and not read_only:  # also non-jittable
         allp = ut.at_path(params, dpath).at[param_id].set(overwrite_with)
         ut.at_path(params, dpath, allp)
 
+
     return ut.at_path(params, dpath)[param_id]
 
+
+def save_to_params(all_params, node_id, node_params):
+    for param_name, param_value in node_params.items():
+        # Retrieve the current param value for this node, if it exists
+        current_param_value = get_param_vect(
+            all_params,
+            param_name,
+            node_id,
+            read_only=True,
+        )
+
+        if current_param_value is None or np.any(current_param_value.shape != param_value.shape):
+            # Resize all existing params if the new param_value has a different shape
+            existing_params = all_params[param_name]
+            max_shape = tuple(np.maximum(existing_params.shape[1:], param_value.shape))
+            resized_params = []
+            
+            for i in range(existing_params.shape[0]):
+                resized_param = np.full(max_shape, np.nan)
+                resized_param[:existing_params[i].shape[0], ...] = existing_params[i]
+                resized_params.append(resized_param)
+
+            all_params[param_name] = np.stack(resized_params, axis=0)
+
+        # Save the new param_value for the given node_id
+        get_param_vect(
+            all_params,
+            param_name,
+            node_id,
+            init=None,
+            overwrite_with=param_value,
+            read_only=False,
+        )
 
 def get_quantized_vect(
     values_to_quantize,
@@ -371,85 +407,6 @@ du.fluo_densities(Y[0] * 10, ['bfp', 'yfp', 'mkate'], logscale=False, bw_method=
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                 --     vectorized get_quantized     --
-
-
-def get_possible_parts(param_name, cdg_node_id, cdg):
-    # should return the name of possible parts for a given cdg node, slot and param name
-    # example: get_possible_values('transcription_rate', ...) -> ['hEF1a', 'hEF1b', 'hEF1c']
-    #          get_possible_values('translation_rate', ...) -> [None, '1xuORF', '2xuORF', ...]
-    # params are stored in the params column of the cdg as a dict {param_name:[possiblevaluees]}
-    available_params = cdg.loc[cdg_node_id, 'params']
-    if param_name not in available_params:
-        raise ValueError(
-            f'Param {param_name} not available for cdg node {cdg_node_id}. Available: {available_params}'
-        )
-    return available_params[param_name]
-
-
-def get_quantized(
-    get_param,
-    param_name,
-    values,
-    node_id,
-    cdf,
-    cdg,
-    quantize_fun,
-    rng_key,
-    mode='input_edges',
-    logto=None,
-):
-    """Return a *quantized* version of the parameter, conditioned on the
-    relevant species (either input or output cdg nodes). mode can be 'input' or 'output'."""
-    # We are selecting possible values for a parameter depending on which path, or edge, they come from.
-    # The edges of the compute graph are basically nodes in the central dogma graph,
-    # i.e they're *more or less*
-    # dual to each other, but not exactly since the compute graph adds interactions and extra nodes).
-    # Anyway I think it's reasonable to consider that the type of nodes that will call getQuantized
-    # are the types for which it's ok to consider the CDG as the dual of the COMPG.
-
-    # check that mode is either input_edges or output_edges or inner
-    if mode not in ['input_edges', 'output_edges', 'inner']:
-        raise ValueError(f'Invalid mode {mode} for get_quantized')
-
-    cdg_ids = (
-        cdf.loc[node_id]['cdg_input'] if mode == 'input_edges' else cdf.loc[node_id]['cdg_output']
-    )
-    if cdg_ids is None:
-        raise ValueError(f'Node {node_id} has no {mode} CDG node')
-    if not isinstance(cdg_ids, list):
-        cdg_ids = [cdg_ids]
-
-    possible_parts = [get_possible_parts(param_name, cdg_id, cdg) for cdg_id in cdg_ids]
-
-    # concat part names with param_name
-    possible_names = [[f'{part}::{param_name}' for part in parts] for parts in possible_parts]
-    assert len(possible_names) == len(
-        values
-    ), f'len(possible_names)={len(possible_names)} != len(values)={len(values)}'
-
-    possible_values = [
-        jnp.array(
-            [
-                get_param(n, ut.continuous_initializer(k, val.shape), shared=True)
-                for n, k in zip(names, jax.random.split(kk, len(names)))
-            ]
-        )
-        for names, val, kk in zip(possible_names, values, jax.random.split(rng_key, len(values)))
-    ]
-
-    if logto is not None:
-        if node_id in logto:
-            logto[node_id].add(param_name)
-        else:
-            logto[node_id] = {param_name}
-
-    res = jnp.array([quantize_fun(v, p) for v, p in zip(values, possible_values)])
-    return res
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{                   --     loss and compilation     --
 
 zb = jax.random.uniform(key, yb.shape)
@@ -570,6 +527,7 @@ def get_batch_sequence_of_nodes(network):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 network = models[0].network.copy()
 cg = network.compute_graph
 
@@ -577,17 +535,17 @@ node_impl = nd.DEFAULT_COMPUTE_NODES_DICT
 node_namespace = None
 
 batches = get_batch_sequence_of_nodes(network)
-batches
 su.plot_networks([network])
 
 for e in cg.extra:
     pprint(e)
 
-
 #TODO:
-# - move is_inverse_of to its own column in the cdf (as it can't be a param)
-# - write a save_extra_arg_to_param(node_id,...) function that transform all the extra_args into params
+# [x] move is_inverse_of to its own column in the cdf (as it can't be a param)
+
+# [ ] write a save_extra_arg_to_param(node_id,...) function that transform all the extra_args into params
 #   It probably should check for the dimension of every value of the 
+
 # - use it before calling the nodes
 # - in every nodes, switch to getting the extra args from the params (read_only = True, they should be there!)
 # - write optimal flat_batches finding algorithm that maximizes parallelism
