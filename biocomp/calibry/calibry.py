@@ -18,6 +18,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import flowio
 
+from typing import List, Dict, Tuple
+
 
 ### {{{             --     some default bead configurations     --
 
@@ -702,14 +704,14 @@ class Calibration:
 
     def __init__(
         self,
-        color_controls_files: dict[tuple[str], str],
+        color_controls_files: Dict[Tuple[str], str],
         beads_file: str,
         reference_protein: str = 'mkate',
         reference_channel: str = 'PE_TEXAS_RED',
-        beads_mef_values: dict[str, list[float]] = SPHEROTECH_RCP_30_5a,
-        channel_to_unit: dict[str, str] = FORTESSA_CHANNELS,
+        beads_mef_values: Dict[str, List[float]] = SPHEROTECH_RCP_30_5a,
+        channel_to_unit: Dict[str, str] = FORTESSA_CHANNELS,
         random_seed: int = 42,
-        use_channels: list[str] = None,
+        use_channels: List[str] = None,
         max_value=FORTESSA_MAX_V,
         offset=FORTESSA_OFFSET,
     ):
