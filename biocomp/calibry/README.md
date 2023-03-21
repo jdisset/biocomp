@@ -1,4 +1,4 @@
-<img src="blob/logo_sd.png" alt="calibry logo" width="64">
+<img src="docs/logo_sd.png" alt="calibry logo" width="64">
 
 # Calibry
 
