@@ -165,12 +165,6 @@ def flatten(x):
         return [x]
 
 
-import heapq
-
-##
-
-
-
 def get_current_batches(stack: ComputeStack, type_dict: dict[str, list[VirtualNode]]):
     # we find the minimum n.batch_order for each network
     current_batches = [None for _ in stack.networks]
@@ -265,58 +259,7 @@ with timer('computing smallest stacks'):
 
 networks
 
-pprint(stack)
+pprint(len(stack.layers))
+nbnodes = sum(len(l.nodes) for l in stack.layers)
 
 
-
-##
-
-
-stack = []
-
-def can_add(node, layer):
-    # any node with the same network_id has same batch_order
-    if not layer:
-        return True
-    else:
-        return all(
-            n.network_id != node.network_id or n.batch_order == node.batch_order for n in layer
-        ) and all(n.node_type == node.node_type for n in layer)
-
-
-current_batches = [0 for _ in networks]
-
-while any(node_list for node_list in type_dict.values()):
-    layer = []
-
-    # find node_type with lowest batch_order
-    node_type = sorted(
-        [
-            (node_list[0].batch_order, node_type)
-            for node_type, node_list in type_dict.items()
-            if node_list
-        ]
-    )[0][1]
-
-    node_list = type_dict[node_type]
-
-    for i, node in enumerate(node_list):
-        if can_add(node, layer):
-            layer.append(node_list.pop(i))
-            if node_list:
-                # Add next node of the same type to the priority queue
-                heapq.heappush(priority_queue, (node_list[0].batch_order, node_type))
-            break
-
-    if can_add(node_list[0], layer):
-        layer.append(node_list.pop(0))
-        if node_list:
-            # Add next node of the same type to the priority queue
-            heapq.heappush(priority_queue, (node_list[0].batch_order, node_type))
-    else:
-        break
-
-    stack.append(layer)
-
-
-stack
