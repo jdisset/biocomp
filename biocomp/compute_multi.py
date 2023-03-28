@@ -27,3 +27,6 @@ class ComputeGraphModel:
         # Most nodes except input nodes (in a same network) require as input the output of other upstream nodes, so there is a dependency order to be respected. The input to this big function is a tree represented as a pandas dataframe where each node has a node_id, a type field, an input_from column and an output_to column. Input_from and output_to are stored as a list of (node_id,slot_number) tuples, i.e {'node_id':3, 'input_from':[(2,0),(5,1)], 'output_to':[(1,0)]} represents a node (with id 2) that takes 2 inputs: one from the first output of node number 3 and the other one from the second output of node number 5. It outputs to the first input slot of node number 1.
 
         pass
+
+
+

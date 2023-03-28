@@ -2,7 +2,6 @@ from .library import PartsLibrary as PartsLibrary
 from . import utils as ut
 from .network import Network, inverted_network
 from .compute import ComputeGraphModel
-from calibry.calibry import escape
 from pathlib import Path
 import numpy as np
 import jax
@@ -14,6 +13,24 @@ import json
 import json5
 from typing import Optional
 import logging as log
+
+def escape_name(name):
+    return name.replace('-', '_').replace(' ', '_').upper().rstrip('_A')
+
+
+def escape(names):
+    if isinstance(names, str):
+        return escape_name(names)
+    if isinstance(names, list):
+        return [escape_name(name) for name in names]
+    if isinstance(names, tuple):
+        return tuple([escape_name(name) for name in names])
+    if isinstance(names, dict):
+        return {escape_name(k): escape_name(v) for k, v in names.items()}
+    else:
+        return names
+
+
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
