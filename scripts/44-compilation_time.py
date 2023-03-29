@@ -56,7 +56,7 @@ node_id = 4
 # return jnp.nanmean(c, axis=axis)
 
 
-def get_param_vect(
+def get_param(
     params,
     name,
     node_id=0,
@@ -67,24 +67,33 @@ def get_param_vect(
     **_,
 ):
     """
-    Retrieves a parameter from the given params dictionary.
+    Retrieves or sets a parameter from the given params dictionary.
+    Vectorizable across the node_id axis.
+    If the parameter is not found, it is created and added to the params dict. (unless read_only is True)
+    - params: the dictionary of parameters
+    - name: the name of the parameter
+    - node_id: the id of the node that owns this parameter
+    - base_path: the path to the node in the params dict, which acts as a namespace ("node", "shared", "static", ...)
+    - init: the initialization function to use if the parameter is not found
+    - overwrite_with: if not None, the parameter will be overwritten with this value wether it exists or not
+    - read_only: if True, the parameter will not be created if it is not found (and not overwritten)
     """
-    # The slight complication here is that we can't jit/vectorize a
-    # dictionnary lookup. i.e we can't do:
+    # We can't jit/vectorize a dictionnary lookup. i.e we can't do:
     # res = params[node_id] as this requires branching
     # Indexing an array is fine though, so we could simply create
     # an array of params for each node that is as big as the largest
-    # node_id, and then index it. However, this would be wasteful
-    # for params that have large shapes.
+    # node_id, and then index it with the node_id. However, this would be wasteful
+    # for params that have large shapes but are only used by a few nodes.
 
     # So instead I add one layer of indirection:
-    # we save a key_vec which will contain -1 for all nodes that don't have
-    # a param for this path, and the actual param_id for the nodes that do.
-    # This way we can jit the lookup, and only need to store the params
-    # that are actually used. The extra '-1' entries are certainly not
-    # a problem. (And easier to deal with than sparse arrays)
+    # we save a key_vec which will contain -1 for all nodes that don't use
+    # the given parameter, and an actual parameter_id for the nodes that do.
+    # This way we can use the key_vec to index a parameter array that contains
+    # only the parameters that are actually used by the network.
 
-    # I think we can use node_id with base_path = shared to vectorize tl vs tx by accessing different weights!
+    # I think in theory we can also use node_id with base_path = shared 
+    # to vectorize tl vs tx by accessing different weights!
+
 
     assert isinstance(params, dict), f'params must be a dict, not {type(params)}'
 
@@ -94,21 +103,20 @@ def get_param_vect(
     nparams = nparams.shape[0] if nparams is not None else 0
 
     keys_path = ut.KEYS_PATH + dpath
-    key_vec = ut.at_path(params, keys_path, None)
-
+    key_vec = ut.at_path(params, keys_path, None) # key_vec is an integer vector (n_nodes,)
 
     if not read_only:  # non-jittable path (only used for initialization)
-        if key_vec is None or node_id >= key_vec.shape[0]:
+        if key_vec is None or node_id >= key_vec.shape[0]: # key_vec is too small
+            # extend key_vec to fit node_id
             v = key_vec if key_vec is not None else jnp.zeros((0,), dtype=jnp.int32)
             key_vec = jnp.concatenate(
                 [v, jnp.full((node_id - v.shape[0] + 1,), -1, dtype=jnp.int32)]
             )
 
-        param_id = key_vec[node_id]
-        if param_id == -1:  # param doesn't exist yet
+        if key_vec[node_id] == -1:  # param doesn't exist yet
             try:
                 new_param_value = overwrite_with if overwrite_with is not None else init()
-                p = ut.at_path(params, dpath)
+                p = ut.at_path(params, dpath) # get existing parameter array
                 if p is None:  # first param ever for this path
                     p = jnp.expand_dims(new_param_value, axis=0)
                 else:  # add new param to existing array
@@ -121,7 +129,7 @@ def get_param_vect(
                 raise RuntimeError(msg) from e
 
     if read_only and key_vec is None or key_vec[node_id] == -1:
-        return None # reading a non-existent param returns None
+        return None  # reading a non-existent param returns None
 
     param_id = key_vec[node_id]
 
@@ -129,14 +137,13 @@ def get_param_vect(
         allp = ut.at_path(params, dpath).at[param_id].set(overwrite_with)
         ut.at_path(params, dpath, allp)
 
-
     return ut.at_path(params, dpath)[param_id]
 
 
 def save_to_params(all_params, node_id, node_params):
     for param_name, param_value in node_params.items():
         # Retrieve the current param value for this node, if it exists
-        current_param_value = get_param_vect(
+        current_param_value = get_param(
             all_params,
             param_name,
             node_id,
@@ -148,16 +155,16 @@ def save_to_params(all_params, node_id, node_params):
             existing_params = all_params[param_name]
             max_shape = tuple(np.maximum(existing_params.shape[1:], param_value.shape))
             resized_params = []
-            
+
             for i in range(existing_params.shape[0]):
                 resized_param = np.full(max_shape, np.nan)
-                resized_param[:existing_params[i].shape[0], ...] = existing_params[i]
+                resized_param[: existing_params[i].shape[0], ...] = existing_params[i]
                 resized_params.append(resized_param)
 
             all_params[param_name] = np.stack(resized_params, axis=0)
 
         # Save the new param_value for the given node_id
-        get_param_vect(
+        get_param(
             all_params,
             param_name,
             node_id,
@@ -166,6 +173,7 @@ def save_to_params(all_params, node_id, node_params):
             read_only=False,
         )
 
+
 def get_quantized_vect(
     values_to_quantize,
     params,
@@ -173,10 +181,8 @@ def get_quantized_vect(
     node_id,
 ):
     # initialization of both keys and values is done upstream. We assume both are already initialized
-    possible_values = get_param_vect(params, param_name, base_path=ut.SHARED_PATH, read_only=True)
-    masks = get_param_vect(
-        params, param_name, node_id=node_id, base_path=ut.MASK_PATH, read_only=True
-    )
+    possible_values = get_param(params, param_name, base_path=ut.SHARED_PATH, read_only=True)
+    masks = get_param(params, param_name, node_id=node_id, base_path=ut.MASK_PATH, read_only=True)
     # masks is a 2D array of shape (max_n_masks_per_node, n_qvalues)
     masks = masks[: values_to_quantize.shape[0]]
     return vmap(nd.quantize_masked, in_axes=(0, None, 0), out_axes=0)(
@@ -187,20 +193,14 @@ def get_quantized_vect(
 params = {}
 key = jax.random.PRNGKey(0)
 k1, k2, k3 = jax.random.split(key, 3)
-get_param_vect(
+get_param(
     params, 'a', init=lambda: jax.random.normal(key, (3, 3)), read_only=False, base_path=['shared']
 )
-get_param_vect(
-    params, 'n_a', init=lambda: jax.random.normal(k1, (3, 2)), read_only=False, node_id=7
-)
-get_param_vect(
-    params, 'n_a', init=lambda: jax.random.normal(k2, (3, 2)), read_only=False, node_id=4
-)
-get_param_vect(
-    params, 'n_a', init=lambda: jax.random.normal(k3, (3, 2)), read_only=False, node_id=0
-)
+get_param(params, 'n_a', init=lambda: jax.random.normal(k1, (3, 2)), read_only=False, node_id=7)
+get_param(params, 'n_a', init=lambda: jax.random.normal(k2, (3, 2)), read_only=False, node_id=4)
+get_param(params, 'n_a', init=lambda: jax.random.normal(k3, (3, 2)), read_only=False, node_id=0)
 
-gp = partial(get_param_vect, params, 'n_a', init=None)
+gp = partial(get_param, params, 'n_a', init=None)
 jit(vmap(gp))(jnp.arange(8))
 
 jnp.full((2,), np.nan)
@@ -236,7 +236,7 @@ def save_quantization_mask(params, pname, mask, node_id):
         mask.shape[0] == ut.at_path(params, ut.QVALS_PATH + [pname]).shape[0]
     ), f'mask must have same length as possible values for {pname}, got {mask.shape[0]} and {ut.at_path(params, ut.QVALS_PATH + [pname]).shape[0]}'
     mask_path = ut.MASK_PATH
-    get_param_vect(
+    get_param(
         params, pname, node_id=node_id, base_path=mask_path, overwrite_with=mask, read_only=False
     )
 
@@ -525,6 +525,7 @@ def get_batch_sequence_of_nodes(network):
         batches.append(independent)
     return batches
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
@@ -540,17 +541,16 @@ su.plot_networks([network])
 for e in cg.extra:
     pprint(e)
 
-#TODO:
+# TODO:
 # [x] move is_inverse_of to its own column in the cdf (as it can't be a param)
 
 # [ ] write a save_extra_arg_to_param(node_id,...) function that transform all the extra_args into params
-#   It probably should check for the dimension of every value of the 
+#   It probably should check for the dimension of every value of the
 
 # - use it before calling the nodes
 # - in every nodes, switch to getting the extra args from the params (read_only = True, they should be there!)
 # - write optimal flat_batches finding algorithm that maximizes parallelism
 #   i.e. max number of same functions per batch
-
 
 
 # each sublist in batches contains independent nodes that can be safely called in parallel
@@ -562,15 +562,14 @@ call_dicts = []
 for nid in flat_batches:
     call_d = {}
     node_row = cg.loc[nid]
-    cdg=network.central_dogma_graph,
-    cdf=cg
-    quantize_fun=nd.quantize
+    cdg = (network.central_dogma_graph,)
+    cdf = cg
+    quantize_fun = nd.quantize
 
     # if it's an inverse node, we need to get the id of the node that it's inverting
     nodeid_for_getters = nid
     if node_row.extra is not None and 'is_inverse_of' in node_row.extra:
         nodeid_for_getters = node_row.extra['is_inverse_of']
-
 
     # extra_params will be passed to the node function
     # n_outputs and n_inputs are always passed

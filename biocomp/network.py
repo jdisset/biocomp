@@ -5,6 +5,7 @@ import pandas as pd
 from . import utils as ut
 from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast
 from itertools import product
+from hashlib import sha256
 
 
 part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF_group': 'tl_rate'}
@@ -250,6 +251,10 @@ class Network:
             self.__build_from_db()
         if build:
             self.build()
+
+    def __hash__(self):
+        return sha256(self.name + self.compute_graph.to_csv().encode('utf-8')).hexdigest()
+
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                  --     public tools & utils    --
