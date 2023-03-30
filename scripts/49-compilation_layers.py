@@ -429,7 +429,7 @@ layer = stack.layers[14]
 
 # TODO:
 # [ ] rewrite every node to 
-#     - take as input some node-specific parameters (to be provided by the factory) + n_inputs + n_outputs
+#     - take as input some node-specific parameters (to be provided by the factory) + n_outputs + input_shapes
 #     - produce an apply(*inputs, node_id, quantiles, rng_key, params) function 
 #     - return the tuple (apply, output_shape)
 #  

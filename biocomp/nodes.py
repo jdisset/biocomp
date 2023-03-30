@@ -286,15 +286,20 @@ def deadend(*_, **__):
     def apply(value, *_, **__):
         return value
 
-    return apply
+    return apply, (1, )
 
 
 @compnode
-def output(*_, **__):
+def output(*_, input_shapes, **__):
+
     def apply(*value, **__):
+        assert len(value) == len(input_shapes)
+        assert all(v.shape == s for v, s in zip(value, input_shapes))
         return jnp.array(value)
 
-    return apply
+    output_shape = (len(input_shapes),)
+
+    return apply, output_shape
 
 
 @compnode
