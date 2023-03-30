@@ -91,10 +91,14 @@ class ComputeLayer:
 
     # function to compute
     f_name: str = None
-    f_out_shape: tuple[int] = (1,)
+    f_out_shape: list[tuple[int]] = None
 
-    def output_shape(self):
-        return (len(self.nodes), *self.f_out_shape)
+    def __post_init__(self):
+        if self.f_out_shape is None:
+            self.f_out_shape = [(1,)]
+
+    def flattened_output_shape(self):
+        return len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shape])
 
     def __repr__(self):
         # just print the list
@@ -108,7 +112,6 @@ class ComputeLayer:
         assert len(set(n.node_type for n in self.nodes)) == 1
         assert len(set(n for n in self.nodes)) == len(self.nodes)
         # check that they have the same output and input shapes
-        assert len(set(n.output_shape for n in self.nodes)) == 1
         assert len(set(len(n.input_from) for n in self.nodes)) == 1
 
 
@@ -139,14 +142,29 @@ class ComputeStack:
         self.layers_start_index = []
         for l in self.layers:
             self.layers_start_index.append(start_id)
-            start_id += np.prod(l.output_shape())  # flattened output shape of the layer
+            start_id += l.flattened_output_shape()
         self.output_shape = (start_id,)
         self.check()
 
-    def get_output_index(self, network_id, node_id):
-        """Return the first index of the output of a node in the flattened output array"""
-        assert self.node_map is not None
-        l_id, n_id = self.node_map[(network_id, node_id)]
+    def get_input_indices(self, node: VirtualNode, input_slot: int) -> tuple[int, int, tuple[int]]:
+        """Returns the start and stop index of the input #input_slot for the given node
+        in the flattened output array, as well as the shape of this input"""
+        assert self.node_map is not None, 'call build_map() first'
+        input_node_id, input_node_outslot = node.input_from[input_slot]
+        input_layer_id, input_node_layer_loc = self.node_map[(node.network_id, input_node_id)]
+        this_node_layer_id, _ = self.node_map[(node.network_id, node.node_id)]
+        assert input_layer_id < this_node_layer_id, 'input layer must be before this layer'
+        input_layer = self.layers[input_layer_id]
+        assert input_node_outslot < len(
+            input_layer.f_out_shape
+        ), 'input node has not enough outputs'
+        input_shape = input_layer.f_out_shape[input_node_outslot]
+        layer_start = self.layers_start_index[input_layer_id]
+        node_start = layer_start + input_node_layer_loc * np.prod(input_shape)
+        outslot_start = node_start + np.sum(
+            [np.prod(input_shape[:i]) for i in range(input_node_outslot)]
+        )
+        return int(outslot_start), input_shape
 
     def copy(self):
         # we only deepcopy the layers, not the networks
@@ -299,34 +317,15 @@ models = dman.get_models()
 all_networks = [m.network for m in models]
 
 stack = build_stack(all_networks)
-pprint(stack.layers)
+# pprint(stack.layers)
 pprint(f'Reduced {sum(len(l.nodes) for l in stack.layers)} nodes to {len(stack.layers)} layers')
 
 ##
 
-layer = stack.layers[2]
-input_indices = np.array([stack.get_input_indices(n) for n in layer.nodes])
-# shape = (n_nodes, n_inputs, out_dim
-
-
-input_indices.shape
-
-test_out = np.zeros(stack.output_shape)
-test_out.shape
-
-test_out[input_indices].shape
-
-
-def get_layer_base_function(layer: ComputeLayer):
-    pass
-
-##
 
 # let's see if we can gather all inputs for this layer
-def make_layer_f(stack, layer_id):
+def make_layer_input_getters(stack, layer_id):
     layer = stack.layers[layer_id]
-    base_f = get_layer_base_function(layer)
-
     # We use a big flattened array for all outputs,
     # either one that gets updated at every layer
     # or a (n_layers, stack_output_shape) array where we store the outputs of each layer
@@ -336,66 +335,104 @@ def make_layer_f(stack, layer_id):
     # - quantile
     # - rng_key
 
-    # for now, let's use one big array for all outputs that is the concatenation of all outputs
-    # and has a shape of (n_total_nodes, max_output_size)
-    # I guess we could completely flatten but let's not make things too complicated for now
+    n_inputs = len(layer.nodes[0].input_from)
+    input_starts, input_shapes = [], []
+    for i in range(n_inputs):
+        input_indices = [stack.get_input_indices(n, i) for n in layer.nodes]
+        start_indices, shapes = zip(*input_indices)
+        assert all(s == shapes[0] for s in shapes)
+        input_starts.append(np.array(start_indices))
+        input_shapes.append(shapes[0])
+    input_lengths = [int(np.prod(s)) for s in input_shapes]
 
-    n_inputs = len(layer.nodes[0].input_nodes)
-    input_start_indices = [
-        np.array([stack.get_input_start_indices(n, i) for n in layer.nodes])
-        for i in range(n_inputs)
-    ]
-    all_input_shapes = [
-        np.array([stack.get_input_shapes(n, i) for n in layer.nodes]) for i in range(n_inputs)
-    ]
-    # check that a same input has the same shape accross all nodes of the layer
-    assert np.all(np.all(s == s[0]) for s in all_input_shapes)
-    input_shapes = [s[0] for s in all_input_shapes]
-    input_lengths = [np.prod(s) for s in input_shapes]
+    # now we should be able to build a function that returns all inputs for a given layer
+    # from the big stack array
 
-    # now we should be able to rebuild the inputs for each node
-
-    @partial(jit, static_argnums=(1,))
-    def get_inputs(all_outputs, input_slot=0):
-        start_indices = input_start_indices[input_slot]
-        length = input_lengths[input_slot]
+    def generate_get_inputs(input_slot):
+        starts = input_starts[input_slot]
         shape = input_shapes[input_slot]
-        def get_input(n):
-            return all_outputs[start_indices[n] : start_indices[n] + length].reshape(shape)
-        return vmap(get_input)(np.arange(len(layer.nodes)))
+        length = input_lengths[input_slot]
+        indices = np.array([np.arange(st, st + length) for st in starts])
 
+        # We can either dynamically slice the big output array at start:length
+        # or directly index it at indices... I'm not sure which is faster
+        # but I guess it's better to use dynamic slicing for large inputs?
+        DYN_SLICE = False
+        DYN_SLICE_THRESHOLD = 20
+        if length > DYN_SLICE_THRESHOLD:
+            DYN_SLICE = True
+
+        def get_inputs_dyn(all_outputs):
+            def dyn_slice(start):
+                return jax.lax.dynamic_slice(all_outputs, (start,), (length,)).reshape(shape)
+            return vmap(dyn_slice)(starts)
+
+        def get_inputs_idx(all_outputs):
+            def slice(idx):
+                return all_outputs[idx].reshape(shape)
+            return vmap(slice)(indices)
+
+        return get_inputs_dyn if DYN_SLICE else get_inputs_idx
+
+    get_inputs = [generate_get_inputs(i) for i in range(n_inputs)]
 
     return get_inputs
 
 
-f = make_layer_f(stack, 2)
+layer = stack.layers[14]
+
+get_inputs = make_layer_input_getters(stack, 14)
+get_inputs[0](jnp.arange(4000))
+
+### {{{   --     a few tests of the vectorizable get_param and get_quantized     --
+import biocomp.nodes as bcn
+
+param_dict = {}
+
+params = {}
+key = jax.random.PRNGKey(0)
+k1, k2, k3 = jax.random.split(key, 3)
+bcn.get_param(
+    params, 'a', init=lambda: jax.random.normal(key, (3, 3)), read_only=False, base_path=['shared']
+)
+bcn.get_param(params, 'n_a', init=lambda: jax.random.normal(k1, (3, 2)), read_only=False, node_id=7)
+bcn.get_param(params, 'n_a', init=lambda: jax.random.normal(k2, (3, 2)), read_only=False, node_id=4)
+bcn.get_param(params, 'n_a', init=lambda: jax.random.normal(k3, (3, 2)), read_only=False, node_id=0)
+
+gp = partial(bcn.get_param, params, 'n_a', init=None)
+jit(vmap(gp))(jnp.arange(8))
+
+bcn.get_param(params, 'n_a', node_id=1)
+
+n = stack.networks[0]
+n.compute_graph
+qnames = bcn.get_all_possible_quantization_params(n)
+for qn, qv in qnames.items():
+    key, _ = jax.random.split(key)
+    bcn.initialize_quantization_values(params, qn, qv, lambda: jax.random.uniform(key, (len(qv),)))
+
+bcn.generate_quantization_masks(params, 'tl_rate', 7, n, 2)
+bcn.generate_quantization_masks(params, 'tc_rate', 5, n, 2)
+
+values_to_quantize = np.array([1.2, 3.4])
+
+jit(partial(bcn.get_quantized, params=params, param_name='tc_rate'))(values_to_quantize, 7)
 
 
-##
+##────────────────────────────────────────────────────────────────────────────}}}
+
+layer = stack.layers[14]
+# let's assign the correct function to a layer
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# TODO:
+# [ ] rewrite every node to 
+#     - take as input some node-specific parameters (to be provided by the factory) + n_inputs + n_outputs
+#     - produce an apply(*inputs, node_id, quantiles, rng_key, params) function 
+#     - return the tuple (apply, output_shape)
+#  
 
 
 
