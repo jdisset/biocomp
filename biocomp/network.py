@@ -862,14 +862,15 @@ class Network:
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
 
-    def get_output_proteins(self):
-        """Returns the names of the proteins that are outputs of the network"""
+    def get_output_compute_node(self):
         onode = self.compute_graph[self.compute_graph['type'] == 'output']
         assert len(onode) == 1, f'Invalid number of output nodes: {len(onode)}'
-        return [
-            self.central_dogma_graph.loc[cdg_id]['content'][0]
-            for cdg_id in onode.iloc[0]['cdg_input']
-        ]
+        return onode.iloc[0]
+
+    def get_output_proteins(self):
+        """Returns the names of the proteins that are outputs of the network"""
+        onode = self.get_output_compute_node()
+        return [self.central_dogma_graph.loc[cdg_id]['content'][0] for cdg_id in onode['cdg_input']]
 
     def get_input_from_output(self, output_arr):
         """Given an array of output values, returns the columns that are inputs of the inverted network,

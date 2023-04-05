@@ -293,6 +293,10 @@ def generate_quantization_masks(params, pname, node_id, network, maximum_require
 # So I guess yes, we should allow it. that means that we output a tuple of arrays
 
 
+# Signatures:
+# prepare (params, vnode, key)
+# apply (values, quantile, params, node_id, key)
+
 
 def empty_prepare(*_, **__):
     pass
@@ -339,7 +343,7 @@ def numeric(input_shapes, shape, **__):
         init_val = jax.random.uniform(key, shape=shape, minval=0.0, maxval=1.0)
         set_param(params, "numeric:value", init_val, node_id=vnode.id)
 
-    def apply(_, __, params, node_id):
+    def apply(v, q, params, node_id, k):
         return get_param(params, "numeric:value", node_id=node_id)
 
     output_shapes = [shape]
@@ -365,7 +369,7 @@ def aggregation(input_shapes, n_outputs, shared_config, normalize=False, **_):
         assert ratio_v.shape == (n_outputs,), f'Invalid ratio shape {ratio_v.shape}'
         set_param(params, "aggregation:ratios", ratio_v, node_id=vnode.id)
 
-    def apply(input, quantile, rng_key, params, node_id):
+    def apply(input, quantile, params, node_id, key):
         assert input.shape == input_shapes[0], f'Invalid input shape {input.shape}'
         ratios = get_param(params, node_id, "aggregation:ratios")
         if normalize:
@@ -400,7 +404,7 @@ def inv_aggregation(input_shapes, n_outputs, shared_config, normalize=False, **_
         )
         set_param(params, "inv_aggregation:inv_node_id", inv_node.id, node_id=vnode.id)
 
-    def apply(inp, quantile, rng_key, params, node_id):
+    def apply(inp, quantile, params, node_id, key):
         inv_id = get_param(params, node_id, "inv_aggregation:inv_node_id")
         original_output_slot = int(
             get_param(params, node_id, "inv_aggregation:original_output_slot")
@@ -412,8 +416,6 @@ def inv_aggregation(input_shapes, n_outputs, shared_config, normalize=False, **_
 
     output_shape = input_shapes
     return prepare, apply, output_shape
-
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -555,27 +557,27 @@ def transform_nn(
             )
         )
 
-    def prepare(params, vnode, key, **_):
+    def prepare(params, vnode, key):
         # during prepare, we call _impl with dummy inputs + a param_function that
         # creates the parameters on the fly if they don't exist yet
         __impl(
             *[np.zeros(shape) for shape in input_shapes],
             quantile=np.zeros((1,)),
             rng_key=key,
-            params=params,
             param_f=partial(init_param_if_needed, params=params),
+            params=params,
             node_id=vnode.id,
         )
 
-    def apply(*values, quantile, rng_key, params, node_id):
+    def apply(*values, quantile, params, node_id, key):
         assert len(values) == len(input_shapes)
         # apply uses the read_only param_f to get the parameters
         return __impl(
             *values,
             quantile=quantile,
-            rng_key=rng_key,
-            params=params,
+            rng_key=key,
             param_f=partial(get_param, params=params),
+            params=params,
             node_id=node_id,
         )
 
@@ -587,10 +589,10 @@ def transform_nn(
 def sequestron_ERN(
     input_shapes,
     n_outputs,
-    seq_name,
+    shared_config,
     affinity_dim=1,
     wsize=128,
-    depth=3,
+    depth=4,
     out_dim=1,
     subtype='5p',
     inner_activation=DEFAULT_ACTIVATION,
@@ -600,18 +602,20 @@ def sequestron_ERN(
 
     # ERN have 2 inputs of same size
     assert len(input_shapes) == 2
-    assert input_shapes[0] == input_shapes[1]
+    assert input_shapes[0] == input_shapes[1], f'ERN inputs must have same shape, got {input_shapes}'
     assert n_outputs == 1, f'ERN only supports 1 output, got {n_outputs}'
 
-    def __impl(neg, pos, quantile, rng_key, param_f, **_):
+    ERN_AFFINITY_ID_NAME = f'ERN{subtype}_affinity_id'
+    ERN_AFFINITY_VALUE_PARAM = f'ERN{subtype}_affinity_value'
 
-        affinity_param_name = f'{seq_name}::affinity_{subtype}'
+    def __impl(neg, pos, quantile, rng_key, param_f, node_id, params):
 
+        affinity_id = get_param(params, ERN_AFFINITY_ID_NAME, node_id=node_id)
         affinity = param_f(
-            param_name=affinity_param_name,
+            param_name=ERN_AFFINITY_VALUE_PARAM,
             init=ut.continuous_initializer(rng_key, (affinity_dim,)),
             base_path=ut.SHARED_PATH,
-            node_id=0,
+            node_id=affinity_id,
         )
 
         res = dense_multilevel(
@@ -627,18 +631,39 @@ def sequestron_ERN(
 
         return outer_activation(jnp.squeeze(res))
 
-    def prepare(params, vnode, key, **_):
+
+    def prepare(params, vnode, key):
+
+        # we need to know which affinity value to use for this node
+        assert 'seq_name' in vnode.get_compute_node().extra
+        seq_name = vnode.get_compute_node().extra['seq_name'] # ex: 'CasE'
+        affinity_param_name = f'{seq_name}::affinity_{subtype}'
+        assert 'affinity_params' in shared_config
+        assert affinity_param_name in shared_config['affinity_params']
+        affinity_id = int(shared_config['affinity_params'].index(affinity_param_name))
+        # now we have the index at which the affinity value is stored 
+        # in the array of all affinity values. We can store this index so that
+        # we can retrieve the correct value during apply (vectorized on all node_ids)
+        set_param(params, ERN_AFFINITY_ID_NAME, affinity_id, node_id=vnode.node_id)
+
         __impl(
             *[np.zeros(shape) for shape in input_shapes],
             quantile=np.zeros((1,)),
             rng_key=key,
             param_f=partial(init_param_if_needed, params=params),
+            node_id=vnode.id,
+            params=params,
         )
 
-    def apply(*values, quantile, rng_key, params):
+    def apply(*values, quantile, params, node_id, key):
         assert len(values) == len(input_shapes)
         return __impl(
-            *values, quantile=quantile, rng_key=rng_key, param_f=partial(get_param, params=params)
+            *values,
+            quantile=quantile,
+            rng_key=key,
+            param_f=partial(get_param, params=params),
+            node_id=node_id,
+            params=params,
         )
 
     output_shape = [(1,)]
@@ -687,6 +712,48 @@ def independent_output(
     return prepare, apply, output_shape
 
 
+def grouped_output(
+    input_shapes,
+    n_outputs,
+    wsize=64,
+    depth=3,
+    inner_activation=DEFAULT_ACTIVATION,
+    outer_activation=DEFAULT_OUT_ACTIVATION,
+    **_,
+):
+
+    def __impl(*inputs, quantile, rng_key, param_f, **_):
+        res = vmap(
+            lambda x: dense_multilevel(
+                ut.flat_concat(x, quantile),
+                wsize,
+                1,
+                depth,
+                param_f=partial(param_f, node_id=0, base_path=ut.SHARED_PATH),
+                key=rng_key,
+                name='grouped_output',
+                activation=inner_activation,
+            )
+        )(jnp.asarray(inputs))
+        return outer_activation(res)
+
+    def prepare(params, vnode, key, **_):
+        __impl(
+            *[np.zeros(shape) for shape in input_shapes],
+            quantile=np.zeros((1,)),
+            rng_key=key,
+            param_f=partial(init_param_if_needed, params=params),
+        )
+
+    def apply(*inputs, quantile, rng_key, params):
+        return __impl(*inputs, quantile=quantile, rng_key=rng_key, param_f=partial(get_param, params=params))
+
+    output_shape = [(1,)] * n_outputs
+
+    return prepare, apply, output_shape
+
+
+
 transcription = partial(transform_nn, transform_name='tc')
 translation = partial(transform_nn, transform_name='tl')
 inv_transcription = partial(transform_nn, transform_name='tc', tr_namespace='inv_')
@@ -700,6 +767,7 @@ ERN3p = partial(sequestron_ERN, subtype='3p')
 
 ### {{{                      --     config manager     --
 
+
 def unwrap_partial_function(implementation):
     if hasattr(implementation, 'func') and hasattr(implementation, 'keywords'):
         partial_args = implementation.keywords
@@ -707,6 +775,7 @@ def unwrap_partial_function(implementation):
     else:
         partial_args = {}
     return implementation, partial_args
+
 
 class ConfigManager:
     def __init__(self, module_name=None):
@@ -757,7 +826,6 @@ class ConfigManager:
             self.config = json.load(f)
 
 
-
 DEFAULT_NODE_CONFIG = ConfigManager()
 DEFAULT_NODE_CONFIG.set('transcription', transcription)
 DEFAULT_NODE_CONFIG.set('translation', translation)
@@ -772,9 +840,8 @@ DEFAULT_NODE_CONFIG.set('numeric', numeric)
 DEFAULT_NODE_CONFIG.set('inv_numeric', inv_numeric)
 DEFAULT_NODE_CONFIG.set('aggregation', aggregation)
 DEFAULT_NODE_CONFIG.set('inv_aggregation', inv_aggregation)
-
-
+DEFAULT_NODE_CONFIG.set('output', grouped_output)
+DEFAULT_NODE_CONFIG.set('deadend', single_passthrough)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-

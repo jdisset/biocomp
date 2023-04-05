@@ -109,34 +109,59 @@ class ComputeLayer:
     # each layer is parrallelized (all nodes are of the same type)
     nodes: list[VirtualNode]
 
+    layer_id: int = None
+
     # information about the function to apply
     f_type: str = None
     f_out_shapes: list[tuple[int]] = None
 
-    def setup( self, config:bcn.ConfigManager, prev_layer = None):
+    built = False
+
+    def setup(self, config: bcn.ConfigManager, stack):
+
         self.check()
-        self.f_type = self.nodes[0].get_compute_node().type
 
-        real_node = self.nodes[0].get_compute_node()
-        n_outputs = len(real_node.output_to)
+        first_node = self.nodes[0].get_compute_node()
+        self.f_type = first_node.type
 
-        if prev_layer is None:
-            assert self.f_type == 'input'
+        print(f'----- building layer {self.layer_id}: {self.f_type} ({self.nodes[0].type_signature})')
+
+        if self.f_type == 'input':
+            self.f_out_shapes = [(1,)]
+            self.built = True
             return
 
-        assert prev_layer is not None and self.f_type != 'input'
 
-        print(f'{self.f_type} layer with {len(self.nodes)} nodes ({n_outputs} outputs)')
+        # get the shapes of the inputs. We'll collect all the inputs for each node
+        # to make sure they are all the same
+        node_inputs = [] # list of list of (net_id, compute_node_id, slot_id)
+        for n in self.nodes:
+            ninp = n.get_compute_node().input_from
+            node_inputs.append([(n.network_id, *i) for i in ninp])
 
-        funcs =  config.get(self.f_type)(
-            input_shapes=prev_layer.f_out_shapes, n_outputs=n_outputs
-        )
-        print(f'funcs: {funcs}')
+        # get the shapes of the inputs
+        all_input_shapes = [] # list of list of shapes
+        for n_inp in node_inputs:
+            input_shapes = []
+            for input_net_id, input_compute_node_id, input_slot_id in n_inp:
+                input_layer_id, _ = stack.node_map[(input_net_id, input_compute_node_id)]
+                assert input_layer_id < self.layer_id, 'Input node is in a later layer'
+                assert stack.layers[input_layer_id].built, 'Input layer is not built'
+                input_layer_output_shapes = stack.layers[input_layer_id].f_out_shapes
+                assert input_slot_id < len(input_layer_output_shapes), f'Input slot {input_slot_id} is out of range'
+                input_shapes.append(input_layer_output_shapes[input_slot_id])
+            all_input_shapes.append(tuple(input_shapes))
+        # they should all be the same
+        assert len(set(all_input_shapes)) == 1
+        input_shapes = all_input_shapes[0]
 
-        self.f_prepare, self.f_apply, self.f_out_shapes = funcs
+        n_outputs = len(first_node.output_to)
+
+        impl = config.get(self.f_type)(input_shapes=input_shapes, n_outputs=n_outputs)
+        self.f_prepare, self.f_apply, self.f_out_shapes = impl
+        self.built = True
 
     def flattened_output_shape(self):
-        print(f'Layer {self.f_type} with {len(self.nodes)} nodes, ft: {self.f_type}')
         return len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes])
 
     def __repr__(self):
@@ -159,35 +184,57 @@ class ComputeStack:
     output_shape: tuple[int] = None
     node_map: dict[tuple[int, int], tuple[int, int]] = None
 
+    all_built = False
+
     def add_layer(self, layer: ComputeLayer):
         self.layers.append(layer)
         return self
 
     def build_map(self):
+        allbuilt = True
         # build a dict of {(net_id, node_id): (layer_id, node_position)}
+        node_id = 0
         self.node_map = {}
         for l_id, l in enumerate(self.layers):
-            for n_id, n in enumerate(l.nodes):
-                self.node_map[(n.network_id, n.node_id)] = (l_id, n_id)
+            l.layer_id = l_id
+            if l.built:
+                for n_id, n in enumerate(l.nodes):
+                    self.node_map[(n.network_id, n.compute_node_id)] = (l_id, n_id)
+                    n.node_id = node_id
+                    node_id += 1
+            else:
+                allbuilt = False
+                break
 
         # build info about the output shape
         # the output of a compute stack is a flat array of all the flattened outputs of all the nodes
         # in a layer, outputs are flattened in the same order as the nodes in the layer
-        start_id = 0
-        self.layers_start_index = []
-        for l in self.layers:
-            self.layers_start_index.append(start_id)
-            start_id += l.flattened_output_shape()
-        self.output_shape = (start_id,)
-        self.check()
+        if allbuilt:
+            start_id = 0
+            self.layers_start_index = []
+            for l in self.layers:
+                self.layers_start_index.append(start_id)
+                start_id += l.flattened_output_shape()
+            self.check()
+        self.all_built = allbuilt
 
-    def get_input_indices(self, node: VirtualNode, input_slot: int) -> tuple[int, int, tuple[int]]:
+    def get_network_output_indices(self, network_id:int):
+        """Returns the start index and shape of the output of the given network"""
+        output_node = self.networks[network_id].get_output_compute_node() # a row from the compute df
+        node_id = output_node.name
+        layer_id, node_loc = self.node_map[(network_id, node_id)]
+        out_shape = self.layers[layer_id].f_out_shapes
+        start_index = self.layers_start_index[layer_id] + node_loc * np.sum([np.prod(s) for s in out_shape])
+        return int(start_index), out_shape
+
+
+    def get_node_input_indices(self, node: VirtualNode, input_slot: int) -> tuple[int, int, tuple[int]]:
         """Returns the start and stop index of the input #input_slot for the given node
         in the flattened output array, as well as the shape of this input"""
         assert self.node_map is not None, 'call build_map() first'
         input_node_id, input_node_outslot = node.input_from[input_slot]
         input_layer_id, input_node_layer_loc = self.node_map[(node.network_id, input_node_id)]
-        this_node_layer_id, _ = self.node_map[(node.network_id, node.node_id)]
+        this_node_layer_id, _ = self.node_map[(node.network_id, node.compute_node_id)]
         assert input_layer_id < this_node_layer_id, 'input layer must be before this layer'
         input_layer = self.layers[input_layer_id]
         assert input_node_outslot < len(
@@ -220,7 +267,7 @@ class ComputeStack:
     def check(self):
         for l in self.layers:
             l.check()
-        assert self.layers[0].nodes[0].node_type == 'input'
+        assert self.layers[0].nodes[0].get_compute_node().type == 'input'
         for net_id in range(len(self.networks)):
             prev = -1
             for l in self.layers:
@@ -342,17 +389,7 @@ def build_stack(networks: list[bc.Network]):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-models = dman.get_models()
-m0 = models[0]
-m0.network.compute_graph
-all_networks = [m.network for m in models][:10]
-
-stack = build_stack(all_networks)
-# pprint(stack.layers)
-pprint(f'Reduced {sum(len(l.nodes) for l in stack.layers)} nodes to {len(stack.layers)} layers')
-
-##
-
+### {{{   --     a few tests of the vectorizable get_param and get_quantized     --
 
 # let's see if we can gather all inputs for this layer
 def make_layer_input_getters(stack, layer_id):
@@ -417,7 +454,7 @@ layer = stack.layers[14]
 get_inputs = make_layer_input_getters(stack, 14)
 get_inputs[0](jnp.arange(4000))
 
-### {{{   --     a few tests of the vectorizable get_param and get_quantized     --
+
 import biocomp.new_nodes as bcn
 
 param_dict = {}
@@ -453,21 +490,25 @@ jit(partial(bcn.get_quantized, params=params, param_name='tc_rate'))(values_to_q
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+models = dman.get_models()
+m0 = models[0]
+m0.network.compute_graph
+all_networks = [m.network for m in models][:10]
+
+stack = build_stack(all_networks)
+# pprint(stack.layers)
+pprint(f'Reduced {sum(len(l.nodes) for l in stack.layers)} nodes to {len(stack.layers)} layers')
 
 # build a compute stack
 
 config = bcn.DEFAULT_NODE_CONFIG
 config.get('transcription')(input_shapes=[(1,)], n_outputs=1)
 
-# first we set all f_types
-
+# first setup each layer
 prev_layer = None
 for layer in stack.layers:
-    layer.setup(config, prev_layer=prev_layer)
+    stack.build_map()
+    layer.setup(config, stack=stack)
     prev_layer = layer
+stack.build_map()
 
-
-# how to handle inputs?
-
-# TODO:
-# make sequestron affinity a vectorizable parameter, similar to quantization
