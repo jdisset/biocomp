@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from time import sleep
 from collections import defaultdict
+import biocomp
 import biocomp as bc
 from biocomp import datautils as du
 from biocomp import nodes as nd
@@ -25,6 +26,8 @@ from dataclasses import dataclass
 from rich import print as pprint
 from biocomp import defaults as bdf
 from copy import deepcopy
+
+import biocomp.new_nodes as bcn
 
 
 @contextmanager
@@ -50,38 +53,55 @@ names = [m.node_namespace for m in dman.get_models()]
 key = jax.random.PRNGKey(0)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+### {{{                     --     compute functions     --
+
 
 @dataclass
 class VirtualNode:
+    network: bc.Network
     network_id: int
-    node_id: int
-    node_type: str
-    input_from: list[tuple[int, int, int]]  # (network_id, node_id, port_id)
+    type_signature: str
+    compute_node_id: int  # id in the network
+    node_id: int = None
     batch_order: int = 0  # only used for sorting and debugging
 
     @classmethod
     def from_node(
-        cls, network_id: int, node_id: int, compute_df: pd.DataFrame, batch_order: int = 0
+        cls, network_id: int, network: bc.Network, compute_node_id: int, batch_order: int = 0
     ):
-        assert isinstance(network_id, int)
-        assert isinstance(node_id, int)
-        assert isinstance(compute_df, pd.DataFrame)
-        node = compute_df.loc[node_id]
+        node = network.compute_graph.loc[compute_node_id]
+        type = node['type']
+        n_inputs = len(node['input_from'])
+        n_outputs = len(node['output_to'])
+        type_signature = f'{type}_{n_inputs}_{n_outputs}'
         return cls(
             network_id=network_id,
-            node_id=node_id,
-            node_type=node['type'],
-            input_from=node['input_from'],
+            network=network,
+            compute_node_id=compute_node_id,
+            type_signature=type_signature,
             batch_order=batch_order,
         )
 
+    def get_compute_node(self):
+        return self.network.compute_graph.loc[self.compute_node_id]
+
     def __repr__(self):
-        out = f'{self.network_id}/{self.node_id}-{self.node_type} ({self.batch_order})'
-        # \u2193{self.input_from}│'
+        out = f'{self.network_id}/{self.compute_node_id}-{self.type_signature} ({self.batch_order})'
         return f'{out}'
 
     def __hash__(self):
-        return hash((self.network_id, self.node_id, self.node_type, self.batch_order))
+        return hash((self.network_id, self.node_id, self.type_signature, self.batch_order))
+
+    def __deepcopy__(self, memo):
+        # copy everything except the network (just a reference)
+        new_obj = self.__class__.__new__(self.__class__)
+        memo[id(self)] = new_obj
+        for k, v in self.__dict__.items():
+            if k == 'network':
+                setattr(new_obj, k, v)
+            else:
+                setattr(new_obj, k, deepcopy(v, memo))
+        return new_obj
 
 
 @dataclass
@@ -89,16 +109,35 @@ class ComputeLayer:
     # each layer is parrallelized (all nodes are of the same type)
     nodes: list[VirtualNode]
 
-    # function to compute
-    f_name: str = None
-    f_out_shape: list[tuple[int]] = None
+    # information about the function to apply
+    f_type: str = None
+    f_out_shapes: list[tuple[int]] = None
 
-    def __post_init__(self):
-        if self.f_out_shape is None:
-            self.f_out_shape = [(1,)]
+    def setup( self, config:bcn.ConfigManager, prev_layer = None):
+        self.check()
+        self.f_type = self.nodes[0].get_compute_node().type
+
+        real_node = self.nodes[0].get_compute_node()
+        n_outputs = len(real_node.output_to)
+
+        if prev_layer is None:
+            assert self.f_type == 'input'
+            return
+
+        assert prev_layer is not None and self.f_type != 'input'
+
+        print(f'{self.f_type} layer with {len(self.nodes)} nodes ({n_outputs} outputs)')
+
+        funcs =  config.get(self.f_type)(
+            input_shapes=prev_layer.f_out_shapes, n_outputs=n_outputs
+        )
+        print(f'funcs: {funcs}')
+
+        self.f_prepare, self.f_apply, self.f_out_shapes = funcs
 
     def flattened_output_shape(self):
-        return len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shape])
+        print(f'Layer {self.f_type} with {len(self.nodes)} nodes, ft: {self.f_type}')
+        return len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes])
 
     def __repr__(self):
         # just print the list
@@ -108,11 +147,7 @@ class ComputeLayer:
         return hash(tuple(self.nodes))
 
     def check(self):
-        # first check: every nodes of a lyer has the same type AND there's no duplicate
-        assert len(set(n.node_type for n in self.nodes)) == 1
-        assert len(set(n for n in self.nodes)) == len(self.nodes)
-        # check that they have the same output and input shapes
-        assert len(set(len(n.input_from) for n in self.nodes)) == 1
+        assert len(set(n.type_signature for n in self.nodes)) == 1
 
 
 @dataclass
@@ -156,9 +191,9 @@ class ComputeStack:
         assert input_layer_id < this_node_layer_id, 'input layer must be before this layer'
         input_layer = self.layers[input_layer_id]
         assert input_node_outslot < len(
-            input_layer.f_out_shape
+            input_layer.f_out_shapes
         ), 'input node has not enough outputs'
-        input_shape = input_layer.f_out_shape[input_node_outslot]
+        input_shape = input_layer.f_out_shapes[input_node_outslot]
         layer_start = self.layers_start_index[input_layer_id]
         node_start = layer_start + input_node_layer_loc * np.prod(input_shape)
         outslot_start = node_start + np.sum(
@@ -228,11 +263,8 @@ def flatten(x):
 def make_all_topo_vnodes(networks: list[bc.Network]):
     return [
         [
-            [
-                VirtualNode.from_node(net_id, node_id, net.compute_graph, b_id)
-                for node_id in node_bunch
-            ]
-            for b_id, node_bunch in enumerate(topological_order(net.compute_graph))
+            [VirtualNode.from_node(net_id, net, node_id, b_id) for node_id in node_batch]
+            for b_id, node_batch in enumerate(topological_order(net.compute_graph))
         ]
         for net_id, net in enumerate(networks)
     ]
@@ -302,19 +334,18 @@ def build_stack(networks: list[bc.Network]):
     n_list = flatten(make_all_topo_vnodes(networks))
     type_dict = {}
     for n in n_list:
-        type_dict.setdefault(n.node_type, []).append(n)
+        type_dict.setdefault(n.type_signature, []).append(n)
     with timer('Building smallest compute stack'):
         stack = make_smallest_stack(ComputeStack(networks, []), type_dict)
-    stack.check()
-    stack.build_map()
     return stack
 
 
-print('done')
-##
+##────────────────────────────────────────────────────────────────────────────}}}
 
 models = dman.get_models()
-all_networks = [m.network for m in models]
+m0 = models[0]
+m0.network.compute_graph
+all_networks = [m.network for m in models][:10]
 
 stack = build_stack(all_networks)
 # pprint(stack.layers)
@@ -365,11 +396,13 @@ def make_layer_input_getters(stack, layer_id):
         def get_inputs_dyn(all_outputs):
             def dyn_slice(start):
                 return jax.lax.dynamic_slice(all_outputs, (start,), (length,)).reshape(shape)
+
             return vmap(dyn_slice)(starts)
 
         def get_inputs_idx(all_outputs):
             def slice(idx):
                 return all_outputs[idx].reshape(shape)
+
             return vmap(slice)(indices)
 
         return get_inputs_dyn if DYN_SLICE else get_inputs_idx
@@ -385,7 +418,7 @@ get_inputs = make_layer_input_getters(stack, 14)
 get_inputs[0](jnp.arange(4000))
 
 ### {{{   --     a few tests of the vectorizable get_param and get_quantized     --
-import biocomp.nodes as bcn
+import biocomp.new_nodes as bcn
 
 param_dict = {}
 
@@ -410,7 +443,6 @@ qnames = bcn.get_all_possible_quantization_params(n)
 for qn, qv in qnames.items():
     key, _ = jax.random.split(key)
     bcn.initialize_quantization_values(params, qn, qv, lambda: jax.random.uniform(key, (len(qv),)))
-
 bcn.generate_quantization_masks(params, 'tl_rate', 7, n, 2)
 bcn.generate_quantization_masks(params, 'tc_rate', 5, n, 2)
 
@@ -421,36 +453,21 @@ jit(partial(bcn.get_quantized, params=params, param_name='tc_rate'))(values_to_q
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-layer = stack.layers[14]
-# let's assign the correct function to a layer
+
+# build a compute stack
+
+config = bcn.DEFAULT_NODE_CONFIG
+config.get('transcription')(input_shapes=[(1,)], n_outputs=1)
+
+# first we set all f_types
+
+prev_layer = None
+for layer in stack.layers:
+    layer.setup(config, prev_layer=prev_layer)
+    prev_layer = layer
 
 
-
+# how to handle inputs?
 
 # TODO:
-# [ ] rewrite every node to 
-#     - take as input some node-specific parameters (to be provided by the factory) + n_outputs + input_shapes
-#     - produce an apply(*inputs, node_id, quantiles, rng_key, params) function 
-#     - return the tuple (apply, output_shape)
-#  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# make sequestron affinity a vectorizable parameter, similar to quantization

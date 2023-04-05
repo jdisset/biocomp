@@ -3,7 +3,6 @@ import biocomp as bc
 from biocomp import datautils as du
 from jax.scipy.stats import gaussian_kde
 import matplotlib.pyplot as plt
-from biocomp.calibration import Calibration
 import scriptutils as ut
 from pathlib import Path
 import json5
@@ -93,6 +92,7 @@ matrix_xp = ut.load_xp('2023-03-26_MatrixCsy4', lib, data_path='./data/calibrate
 dman = du.DataManager.from_xps([matrix_xp], config, inverse='all')
 names = [m.node_namespace for m in dman.get_models()]
 
+ut.plot_networks([m.network for m in dman.get_models()[:2]])
 
 ### {{{                      --     quantify uorfs     --
 models = dman.get_models()
@@ -146,7 +146,7 @@ ER_to_rowcol = {
 ER_to_rowcol
 
 fig, axes = du.mkfig(n_unique_ern_side, n_unique_recog_side, (2, 2))
-for (E, R), m in tqdm(list(uorf_dict.items())[:12]):
+for (E, R), m in tqdm(list(uorf_dict.items())[:]):
     print(E, R, m)
     r, c = ER_to_rowcol[(E, R)]
     ax = axes[r, c]
@@ -185,7 +185,7 @@ for (E, R), m in tqdm(list(uorf_dict.items())[:12]):
 fig.tight_layout()
 savepath = Path('~/Desktop/matrixdata_csy4').expanduser()
 savepath.mkdir(parents=True, exist_ok=True)
-fig.savefig(savepath / 'matrix_data_smooth_default_v3.pdf')
+fig.savefig(savepath / 'csy4_matrix_data.pdf')
 print('done')
 
 ##────────────────────────────────────────────────────────────────────────────}}})
