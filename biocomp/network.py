@@ -8,7 +8,7 @@ from itertools import product
 
 
 part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF_group': 'tl_rate'}
-parameter_to_default_part = {'tl_rate': 'empty_tc', 'tc_rate': 'empty'}
+parameter_to_default_part = {'tl_rate': '00_empty_tc', 'tc_rate': 'hEF1a'}
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────

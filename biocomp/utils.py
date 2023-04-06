@@ -47,10 +47,11 @@ def error(*args, **kwargs):
 NODE_PATH = ['node']
 SHARED_PATH = ['shared']
 STATIC_PATH = ['__static__']
+QVALS_PATH = SHARED_PATH + ['qvals']
 KEYS_PATH = STATIC_PATH + ['__keys__']
 MASK_PATH = STATIC_PATH + ['qmasks']
-QNAME_PATH = STATIC_PATH + ['qnames']
-QVALS_PATH = SHARED_PATH + ['qvals']
+QNAME_PATH = ['qnames']
+PROPERTIES_PATH = ['properties']
 
 def at_path(d: dict, path, val=None, defaultinit=lambda: None):
     for key in path[:-1]:
