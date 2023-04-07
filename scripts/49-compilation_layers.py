@@ -127,6 +127,7 @@ class ComputeLayer:
     # information about the function to apply
     f_type: str = None
     f_out_shapes: list[tuple[int]] = None
+    f_input_shapes: list[tuple[int]] = None
 
     f_prepare = None
     f_apply = None
@@ -146,6 +147,7 @@ class ComputeLayer:
 
         if self.f_type == 'input':
             self.f_out_shapes = [(1,)]
+            self.f_input_shapes = [(1,)]
             self.is_built = True
             return
 
@@ -172,16 +174,18 @@ class ComputeLayer:
             all_input_shapes.append(tuple(input_shapes))
         # they should all be the same
         assert len(set(all_input_shapes)) == 1
-        input_shapes = all_input_shapes[0]
+        self.f_input_shapes = all_input_shapes[0]
 
         n_outputs = len(first_node.output_to)
 
-        impl = config.get(self.f_type)(input_shapes=input_shapes, n_outputs=n_outputs, stack=stack)
+        impl = config.get(self.f_type)(
+            input_shapes=self.f_input_shapes, n_outputs=n_outputs, stack=stack
+        )
         self.f_prepare, self.f_apply, self.f_out_shapes = impl
         self.is_built = True
 
     def flattened_output_shape(self):
-        return len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes])
+        return int(len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes]))
 
     def __repr__(self):
         # just print the list
@@ -240,8 +244,10 @@ class ComputeStack:
             self.layers_start_index = []
             for l in self.layers:
                 self.layers_start_index.append(start_id)
-                start_id += l.flattened_output_shape()
+                start_id += int(l.flattened_output_shape())
             self.check()
+            self.output_shape = (int(start_id),)
+
         self.all_built = allbuilt
 
     def get_vnode_from_net_and_compute_id(
@@ -266,24 +272,37 @@ class ComputeStack:
     def get_node_input_indices(
         self, node: VirtualNode, input_slot: int
     ) -> tuple[int, int, tuple[int]]:
-        """Returns the start and stop index of the input #input_slot for the given node
-        in the flattened output array, as well as the shape of this input"""
+        """Returns the start index of the input #input_slot for the given node
+        in the flattened output array"""
         assert self.node_map is not None, 'call build_map() first'
-        input_node_id, input_node_outslot = node.input_from[input_slot]
-        input_layer_id, input_node_layer_loc = self.node_map[(node.network_id, input_node_id)]
+
+        input_compute_node_id, input_compute_node_outslot = node.get_compute_node().input_from[
+            input_slot
+        ]
+
+        input_layer_id, input_node_layer_loc = self.node_map[
+            (node.network_id, input_compute_node_id)
+        ]
         this_node_layer_id, _ = self.node_map[(node.network_id, node.compute_node_id)]
+
         assert input_layer_id < this_node_layer_id, 'input layer must be before this layer'
+
+        this_layer = self.layers[this_node_layer_id]
         input_layer = self.layers[input_layer_id]
-        assert input_node_outslot < len(
-            input_layer.f_out_shapes
-        ), 'input node has not enough outputs'
-        input_shape = input_layer.f_out_shapes[input_node_outslot]
-        layer_start = self.layers_start_index[input_layer_id]
-        node_start = layer_start + input_node_layer_loc * np.prod(input_shape)
-        outslot_start = node_start + np.sum(
-            [np.prod(input_shape[:i]) for i in range(input_node_outslot)]
+
+        this_input_shapes = this_layer.f_input_shapes
+        input_layer_start = self.layers_start_index[input_layer_id]
+
+        assert this_input_shapes[input_slot] == input_layer.f_out_shapes[input_compute_node_outslot]
+
+        node_start = input_layer_start + input_node_layer_loc * np.prod(
+            input_layer.flattened_output_shape()
         )
-        return int(outslot_start), input_shape
+        flat_output_shape_till_input = np.sum(
+            [np.prod(s) for s in input_layer.f_out_shapes[:input_compute_node_outslot]]
+        )
+        outslot_start = node_start + flat_output_shape_till_input
+        return int(outslot_start)
 
     def copy(self):
         # we only deepcopy the layers, not the networks
@@ -424,37 +443,35 @@ def build_stack(networks: list[bc.Network]):
     return stack
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{   --     a few tests of the vectorizable get_param and get_quantized     --
-
-# let's see if we can gather all inputs for this layer
 def make_layer_input_getters(stack, layer_id):
-    layer = stack.layers[layer_id]
     # We use a big flattened array for all outputs,
     # either one that gets updated at every layer
     # or a (n_layers, stack_output_shape) array where we store the outputs of each layer
 
-    # a node takes as input:
-    # - *input_values (same number for all nodes in the layer)
-    # - quantile
-    # - rng_key
-
-    n_inputs = len(layer.nodes[0].input_from)
-    input_starts, input_shapes = [], []
-    for i in range(n_inputs):
-        input_indices = [stack.get_input_indices(n, i) for n in layer.nodes]
-        start_indices, shapes = zip(*input_indices)
-        assert all(s == shapes[0] for s in shapes)
-        input_starts.append(np.array(start_indices))
-        input_shapes.append(shapes[0])
+    layer = stack.layers[layer_id]
+    assert layer.is_built, 'Layer not built'
+    input_shapes = layer.f_input_shapes
     input_lengths = [int(np.prod(s)) for s in input_shapes]
+
+    if layer.f_type == 'input':
+        assert len(input_shapes) == 1
+        assert layer_id == 0
+        assert input_shapes == layer.f_out_shapes
+        # input indices of the input layer are just the indices of the nodes
+        input_start_indices = np.array([[n.node_id * input_lengths[0] for n in layer.nodes]])
+    else:
+        input_start_indices = np.array(
+            [
+                [stack.get_node_input_indices(n, i) for n in layer.nodes]
+                for i in range(len(input_shapes))
+            ]
+        )
 
     # now we should be able to build a function that returns all inputs for a given layer
     # from the big stack array
 
     def generate_get_inputs(input_slot):
-        starts = input_starts[input_slot]
+        starts = input_start_indices[input_slot]
         shape = input_shapes[input_slot]
         length = input_lengths[input_slot]
         indices = np.array([np.arange(st, st + length) for st in starts])
@@ -481,10 +498,14 @@ def make_layer_input_getters(stack, layer_id):
 
         return get_inputs_dyn if DYN_SLICE else get_inputs_idx
 
-    get_inputs = [generate_get_inputs(i) for i in range(n_inputs)]
+    get_inputs = [generate_get_inputs(i) for i in range(len(input_shapes))]
 
     return get_inputs
 
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+### {{{   --     a few tests of the vectorizable get_param and get_quantized     --
 
 layer = stack.layers[14]
 
@@ -532,7 +553,7 @@ jit(partial(bcn.get_quantized, params=params, param_name='tc_rate'))(values_to_q
 models = dman.get_models()
 m0 = models[0]
 m0.network.compute_graph
-all_networks = [m.network for m in models][:]
+all_networks = [m.network for m in models][:10]
 
 
 def make_stack(all_networks):
@@ -561,12 +582,10 @@ def make_stack(all_networks):
     ut.at_path(store, ut.PROPERTIES_PATH)
     pprint(store)
 
-    # first setup each layer
-    prev_layer = None
+    # setup each layer
     for layer in stack.layers:
         stack.build_map()
         layer.setup(config, stack=stack)
-        prev_layer = layer
     stack.build_map()
 
     # now what would be the init function:
@@ -576,13 +595,61 @@ def make_stack(all_networks):
             assert layer.is_built, 'Layer not built'
             if layer.f_prepare is not None:
                 layer.f_prepare(params, vnodelist=layer.nodes, key=rng_key)
+        return params
 
     stack.init = init
 
+    input_getters = [make_layer_input_getters(stack, l_id) for l_id in range(len(stack.layers))]
+
+    output_shape = stack.output_shape  # we use one big flat output array
+    assert len(output_shape) == 1, 'Only flat output arrays are supported for now'
+
+    node_ids = [jnp.array([n.node_id for n in l.nodes]) for l in stack.layers]
+
+    # use f_apply(*inputs, quantile, params, node_id, key)
+    def compute(params, inputs, quantiles, key):
+
+        out = jnp.full(output_shape, np.nan)
+        input_indices = jnp.arange(len(inputs))
+        out = out.at[input_indices].set(inputs)
+
+        for lid in range(1, len(stack.layers)):
+            layer_start_index = stack.layers_start_index[lid]
+            input_shapes = stack.layers[lid].f_input_shapes
+            n_inputs = len(input_shapes)
+            assert n_inputs == len(input_getters[lid]), 'Mismatch in number of inputs'
+            layer_inputs = [input_getters[lid][i](out) for i in range(n_inputs)]
+            assert all(
+                len(li) == len(layer_inputs[0]) for li in layer_inputs
+            ), 'Mismatch in input lengths'
+
+            # TODO: select right quantile using parameters:
+            # add a quantile_variable_id parameter to each node
+            # and use that to select the right quantile values.
+            # (The whole quantile array is passed to the layer)
+
+            def f(node_id, key, *inputs):
+                return stack.layers[lid].f_apply(
+                    *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
+                )
+
+            keys = jax.random.split(key, len(layer_inputs[0]))
+            out_layer = vmap(f)(node_ids[lid], keys, *layer_inputs)
+            out_flat = out_layer.reshape(-1)
+            out = out.at[layer_start_index:layer_start_index + len(out_flat)].set(out_flat)
+
+        return out
+
+    stack.compute = compute
+
     return stack
 
-# used to be 2:20 min, now 1:30
 
+# 2:20 -> 1:50 ->
 s = make_stack(all_networks)
 
 params = s.init(jax.random.PRNGKey(0))
+
+##
+
+s.compute(params, jnp.arange(100), jnp.arange(10), jax.random.PRNGKey(0))

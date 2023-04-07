@@ -95,6 +95,7 @@ def param_at(
         ut.at_path(params, dpath, allp)
 
     res = ut.at_path(params, dpath)[param_id]
+
     # if param_is is not valid, it's -1, and jax just returns the first element
     # however I want to return nans instead so I can at least see that something is wrong.
     # it won't work if the param is not a float, but that's better than nothing
@@ -261,7 +262,9 @@ def get_available_quantizations(param_name, cdg_node_id, cdg):
     return available_params[param_name]
 
 
-def generate_quantization_masks(qnames, params, pname, vnode, maximum_required_masks_per_node=4):
+def generate_quantization_masks(
+    qnames, params, pname, vnode, maximum_required_masks_per_node=4, **kwargs
+):
     """
     generate the quantization masks for a given node and parameter. One mask per input.
     - qnames: the ordered list of quantization names for this parameter
@@ -294,7 +297,7 @@ def generate_quantization_masks(qnames, params, pname, vnode, maximum_required_m
         mask[i, [qnames.index(q) for q in this_node_qnames[i]]] = True
 
     # now we store the mask in the params dict, under the mask namespace,
-    set_param(params, pname, mask, node_id=stack_node_id, base_path=ut.MASK_PATH)
+    set_param(params, pname, mask, node_id=stack_node_id, base_path=ut.MASK_PATH, **kwargs)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -425,7 +428,9 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
                 extra['original_output_slot'],
                 node_id=vnode.node_id,
             )
-            set_param(params, "inv_aggregation:inv_node_id", inv_vnode.node_id, node_id=vnode.node_id)
+            set_param(
+                params, "inv_aggregation:inv_node_id", inv_vnode.node_id, node_id=vnode.node_id
+            )
 
     def apply(inp, quantile, params, node_id, key):
         inv_id = get_param(params, node_id, "inv_aggregation:inv_node_id")
@@ -443,18 +448,6 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                    --     neural utils     --
-
-# ACTIVATION_FUNCTIONS = {
-# 'relu': jax.nn.relu,
-# 'leaky_relu': jax.nn.leaky_relu,
-# 'sigmoid': jax.nn.sigmoid,
-# 'tanh': jax.nn.tanh,
-# 'elu': jax.nn.elu,
-# 'swish': jax.nn.swish,
-# 'gelu': jax.nn.gelu,
-# 'selu': jax.nn.selu,
-# 'none': lambda x: x,
-# }
 
 
 def leaky_relu(x, alpha=0.2):
@@ -534,6 +527,7 @@ def dense_multilevel(
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{                       --     neural nodes     --
 
 
@@ -647,7 +641,9 @@ def transform_nn(
         init_param_if_needed(params, rate_name, init=init, base_path=ut.QVALS_PATH, node_id=0)
 
         for vnode in vnodelist:
-            generate_quantization_masks(qnames, params, rate_name, vnode)
+            generate_quantization_masks(
+                qnames, params, rate_name, vnode, number_of_nodes_at_least=stack.number_of_nodes
+            )
             key, _ = jax.random.split(key)
             val, rates = __node_impl(
                 *[np.zeros(shape) for shape in input_shapes],
@@ -746,7 +742,13 @@ def sequestron_ERN(
             # affinity_id is the index at which the affinity value is stored
             # in the array of all affinity values. We cNone an store this index so that
             # we can retrieve the correct value during apply (vectorized on all node_ids)
-            set_param(params, ERN_AFFINITY_ID_NAME, affinity_id, node_id=vnode.node_id)
+            set_param(
+                params,
+                ERN_AFFINITY_ID_NAME,
+                affinity_id,
+                node_id=vnode.node_id,
+                number_of_nodes_at_least=stack.number_of_nodes,
+            )
             affinity_id = get_param(params, ERN_AFFINITY_ID_NAME, node_id=vnode.node_id)
 
         __impl(

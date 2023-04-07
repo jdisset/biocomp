@@ -70,6 +70,29 @@ def at_path(d: dict, path, val=None, defaultinit=lambda: None):
     return d
 
 
+# def at_path(d: dict, path, val=None, defaultinit=lambda: None):
+    # for key in path[:-1]:
+        # next_dict = d.get(key)
+        # if next_dict is None:
+            # next_dict = dict()
+            # d[key] = next_dict
+        # elif not isinstance(next_dict, dict):
+            # msg = (
+                # f'Cannot set "{key}" at path {path}: {key} is not a dict. Did you pass something other than a dict?'
+            # )
+            # raise AttributeError(msg)
+        # d = next_dict
+
+    # last_key = path[-1]
+    # if val is not None:
+        # d[last_key] = val
+        # return val
+    # else:
+        # if last_key not in d:
+            # d[last_key] = defaultinit()
+        # return d[last_key]
+
+
 def delete_path(d, path):
     for key in path[:-1]:
         d = d[key]
