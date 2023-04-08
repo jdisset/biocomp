@@ -33,7 +33,7 @@ from jax.config import config
 
 config.update("jax_debug_nans", False)
 config.update("jax_check_tracer_leaks", False)
-config.update('jax_disable_jit', True)
+# config.update('jax_disable_jit', True)
 
 
 @contextmanager
@@ -99,7 +99,7 @@ class VirtualNode:
         return inv
 
     def __repr__(self):
-        out = f'{self.network_id}/{self.compute_node_id}-{self.type_signature} ({self.batch_order})'
+        out = f'{self.network_id}/{self.compute_node_id}/{self.node_id}-{self.type_signature}'
         return f'{out}'
 
     def __hash__(self):
@@ -141,9 +141,6 @@ class ComputeLayer:
         first_node = self.nodes[0].get_compute_node()
         self.f_type = first_node.type
 
-        print(
-            f'----- building layer {self.layer_id}: {self.f_type} ({self.nodes[0].type_signature})'
-        )
 
         if self.f_type == 'input':
             self.f_out_shapes = [(1,)]
@@ -188,7 +185,6 @@ class ComputeLayer:
         return int(len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes]))
 
     def __repr__(self):
-        # just print the list
         return self.nodes.__repr__()
 
     def __hash__(self):
@@ -207,6 +203,10 @@ class ComputeStack:
     output_shape: tuple[int] = None
     node_map: dict[tuple[int, int], tuple[int, int]] = None
 
+    total_nb_of_outputs: int = None
+    total_nb_of_inputs: int = None
+    max_nb_of_outputs_per_network: int = None
+
     shared_store: dict = None  # shared store for all the nodes.
     # can be used to store things like the name of the parts for some quantized parameters
     # as they can't be stored in params (no strings allowed)
@@ -221,6 +221,16 @@ class ComputeStack:
 
     def build_map(self):
         allbuilt = True
+
+        self.total_nb_of_outputs = 0
+        self.total_nb_of_inputs = 0
+        self.max_nb_of_outputs_per_network = 0
+        for n in self.networks:
+            nbout = int(n.get_nb_outputs())
+            self.total_nb_of_inputs += n.get_nb_inputs()
+            self.total_nb_of_outputs += nbout
+            self.max_nb_of_outputs_per_network = max(self.max_nb_of_outputs_per_network, nbout)
+
         # build a dict of {(net_id, node_id): (layer_id, node_position)}
         node_id = 0
         self.node_map = {}
@@ -250,6 +260,13 @@ class ComputeStack:
 
         self.all_built = allbuilt
 
+    def get_network_global_output_id(self, network_id: int, output_id: int):
+        """Considering every network's outputs ordered by network id,
+        returns the global id of the given output for the given network.
+        Useful to convert quantile ids from a network to the global quantile ids"""
+        assert network_id < len(self.networks)
+        return sum(n.get_nb_outputs() for n in self.networks[:network_id]) + output_id
+
     def get_vnode_from_net_and_compute_id(
         self, network_id: int, compute_node_id: int
     ) -> VirtualNode:
@@ -269,9 +286,7 @@ class ComputeStack:
         )
         return int(start_index), out_shape
 
-    def get_node_input_indices(
-        self, node: VirtualNode, input_slot: int
-    ) -> tuple[int, int, tuple[int]]:
+    def get_node_input_start_index(self, node: VirtualNode, input_slot: int) -> int:
         """Returns the start index of the input #input_slot for the given node
         in the flattened output array"""
         assert self.node_map is not None, 'call build_map() first'
@@ -295,13 +310,14 @@ class ComputeStack:
 
         assert this_input_shapes[input_slot] == input_layer.f_out_shapes[input_compute_node_outslot]
 
-        node_start = input_layer_start + input_node_layer_loc * np.prod(
-            input_layer.flattened_output_shape()
-        )
+        flat_out_size = int(np.sum([np.prod(s) for s in input_layer.f_out_shapes]))
+        node_start = input_layer_start + input_node_layer_loc * flat_out_size
+
         flat_output_shape_till_input = np.sum(
             [np.prod(s) for s in input_layer.f_out_shapes[:input_compute_node_outslot]]
         )
         outslot_start = node_start + flat_output_shape_till_input
+
         return int(outslot_start)
 
     def copy(self):
@@ -323,6 +339,8 @@ class ComputeStack:
     def check(self):
         for l in self.layers:
             l.check()
+            for n in l.nodes:
+                assert id(n.network) == id(self.networks[n.network_id])
         assert self.layers[0].nodes[0].get_compute_node().type == 'input'
         for net_id in range(len(self.networks)):
             prev = -1
@@ -444,29 +462,28 @@ def build_stack(networks: list[bc.Network]):
 
 
 def make_layer_input_getters(stack, layer_id):
-    # We use a big flattened array for all outputs,
-    # either one that gets updated at every layer
-    # or a (n_layers, stack_output_shape) array where we store the outputs of each layer
 
     layer = stack.layers[layer_id]
     assert layer.is_built, 'Layer not built'
-    input_shapes = layer.f_input_shapes
-    input_lengths = [int(np.prod(s)) for s in input_shapes]
+    input_shapes = layer.f_input_shapes  # list of tuples, one for each input
+    input_lengths = [int(np.prod(s)) for s in input_shapes]  # flattened length of each input
 
+    # input layer is a special case as it doesn't take values from the stack output
     if layer.f_type == 'input':
-        assert len(input_shapes) == 1
-        assert layer_id == 0
+        assert len(input_shapes) == 1  # each node has one "input"
+        assert layer_id == 0  # input layer is the first layer
         assert input_shapes == layer.f_out_shapes
         # input indices of the input layer are just the indices of the nodes
         input_start_indices = np.array([[n.node_id * input_lengths[0] for n in layer.nodes]])
     else:
         input_start_indices = np.array(
             [
-                [stack.get_node_input_indices(n, i) for n in layer.nodes]
+                [stack.get_node_input_start_index(n, i) for n in layer.nodes]
                 for i in range(len(input_shapes))
             ]
         )
 
+    # We use a big flattened array for all outputs,
     # now we should be able to build a function that returns all inputs for a given layer
     # from the big stack array
 
@@ -505,61 +522,63 @@ def make_layer_input_getters(stack, layer_id):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{   --     a few tests of the vectorizable get_param and get_quantized     --
+### {{{                 --     tests for param functions     --
 
-layer = stack.layers[14]
-
-get_inputs = make_layer_input_getters(stack, 14)
-get_inputs[0](jnp.arange(4000))
+from biocomp.new_nodes import set_param, get_param, init_param_if_needed
 
 
-import biocomp.new_nodes as bcn
+def test_set_and_get_param():
+    params = {}
 
-param_dict = {}
+    # Test setting and getting a single parameter at the root level
+    set_param(params, 'a', np.array([1, 2, 3]), node_id=1)
+    assert np.array_equal(get_param(params, 'a', node_id=1), np.array([1, 2, 3]))
 
-params = {}
-key = jax.random.PRNGKey(0)
-k1, k2, k3 = jax.random.split(key, 3)
-bcn.get_param(
-    params, 'a', init=lambda: jax.random.normal(key, (3, 3)), read_only=False, base_path=['shared']
-)
-bcn.get_param(params, 'n_a', init=lambda: jax.random.normal(k1, (3, 2)), read_only=False, node_id=7)
-bcn.get_param(params, 'n_a', init=lambda: jax.random.normal(k2, (3, 2)), read_only=False, node_id=4)
-bcn.get_param(params, 'n_a', init=lambda: jax.random.normal(k3, (3, 2)), read_only=False, node_id=0)
+    # Test setting and getting a single parameter with a custom node_id
+    set_param(params, 'a', np.array([4, 5, 6]), node_id=5)
+    assert np.array_equal(get_param(params, 'a', node_id=5), np.array([4, 5, 6]))
 
-gp = partial(bcn.get_param, params, 'n_a', init=None)
-jit(vmap(gp))(jnp.arange(8))
+    # Test setting and getting a parameter with a 3-level deep base_path
+    base_path = ['level1', 'level2', 'level3']
+    set_param(params, 'b', np.array([1, 1, 1]), base_path=base_path)
+    assert np.array_equal(get_param(params, 'b', base_path=base_path), np.array([1, 1, 1]))
 
-bcn.get_param(params, 'n_a', node_id=1)
 
-n = stack.networks[0]
-n.compute_graph
-qnames = bcn.get_all_possible_quantization_params(n)
+def test_init_param_if_needed():
+    params = {}
 
-for qn, qv in qnames.items():
-    key, _ = jax.random.split(key)
-    bcn.initialize_quantization_values(params, qn, qv, lambda: jax.random.uniform(key, (len(qv),)))
+    # Test initializing a parameter with a default value
+    init_param_if_needed(params, 'c', lambda: np.array([0, 0, 0]))
+    assert np.array_equal(get_param(params, 'c'), np.array([0, 0, 0]))
 
-bcn.generate_quantization_masks(params, 'tl_rate', 7, n, 2)
-bcn.generate_quantization_masks(params, 'tc_rate', 5, n, 2)
+    # Test initializing a parameter with a custom node_id
+    init_param_if_needed(params, 'c', lambda: np.array([1, 1, 1]), node_id=10)
+    assert np.array_equal(get_param(params, 'c', node_id=10), np.array([1, 1, 1]))
 
-values_to_quantize = np.array([1.2, 3.4])
+    # Test initializing a parameter with a 3-level deep base_path
+    base_path = ['init', 'level2', 'level3']
+    init_param_if_needed(params, 'd', lambda: np.array([-1, -1, -1]), base_path=base_path)
+    assert np.array_equal(get_param(params, 'd', base_path=base_path), np.array([-1, -1, -1]))
 
-jit(partial(bcn.get_quantized, params=params, param_name='tc_rate'))(values_to_quantize, 7)
+    # Test not initializing a parameter if it's already set
+    set_param(params, 'e', np.array([3, 3, 3]))
+    init_param_if_needed(params, 'e', lambda: np.array([4, 4, 4]))
+    assert np.array_equal(get_param(params, 'e'), np.array([3, 3, 3]))
+
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                        --     make stack     --
 
 models = dman.get_models()
 m0 = models[0]
 m0.network.compute_graph
-all_networks = [m.network for m in models][:10]
+all_networks = [m.network for m in models]
 
 
 def make_stack(all_networks):
 
     stack = build_stack(all_networks)
-    # pprint(stack.layers)
     pprint(f'Reduced {sum(len(l.nodes) for l in stack.layers)} nodes to {len(stack.layers)} layers')
 
     # build a compute stack
@@ -580,7 +599,6 @@ def make_stack(all_networks):
         ut.at_path(store, ut.QNAME_PATH + [pname], pv)
 
     ut.at_path(store, ut.PROPERTIES_PATH)
-    pprint(store)
 
     # setup each layer
     for layer in stack.layers:
@@ -606,7 +624,6 @@ def make_stack(all_networks):
 
     node_ids = [jnp.array([n.node_id for n in l.nodes]) for l in stack.layers]
 
-    # use f_apply(*inputs, quantile, params, node_id, key)
     def compute(params, inputs, quantiles, key):
 
         out = jnp.full(output_shape, np.nan)
@@ -623,10 +640,6 @@ def make_stack(all_networks):
                 len(li) == len(layer_inputs[0]) for li in layer_inputs
             ), 'Mismatch in input lengths'
 
-            # TODO: select right quantile using parameters:
-            # add a quantile_variable_id parameter to each node
-            # and use that to select the right quantile values.
-            # (The whole quantile array is passed to the layer)
 
             def f(node_id, key, *inputs):
                 return stack.layers[lid].f_apply(
@@ -634,9 +647,11 @@ def make_stack(all_networks):
                 )
 
             keys = jax.random.split(key, len(layer_inputs[0]))
+
             out_layer = vmap(f)(node_ids[lid], keys, *layer_inputs)
             out_flat = out_layer.reshape(-1)
-            out = out.at[layer_start_index:layer_start_index + len(out_flat)].set(out_flat)
+
+            out = out.at[layer_start_index : layer_start_index + out_flat.shape[0]].set(out_flat)
 
         return out
 
@@ -644,12 +659,67 @@ def make_stack(all_networks):
 
     return stack
 
-
-# 2:20 -> 1:50 ->
 s = make_stack(all_networks)
-
 params = s.init(jax.random.PRNGKey(0))
 
-##
+pprint(params)
 
-s.compute(params, jnp.arange(100), jnp.arange(10), jax.random.PRNGKey(0))
+##────────────────────────────────────────────────────────────────────────────}}}##
+
+
+quantiles = jnp.arange(s.total_nb_of_outputs).astype(jnp.float32) / s.total_nb_of_outputs
+inputs = jnp.arange(s.total_nb_of_inputs).astype(jnp.float32)
+k = jax.random.PRNGKey(0)
+
+batches = jax.random.uniform(k, (512,64, s.total_nb_of_inputs)).astype(jnp.float32)
+
+def simple_loss(params, batch, quantiles, key):
+    vmapped_compute = jax.vmap(s.compute, in_axes=(None, 0, None, None))
+    out = vmapped_compute(params, batch, quantiles, key)
+    return jnp.mean(out)
+
+lr = 0.01
+
+
+def scannable_loss(carry, batch):
+    params, key = carry
+    loss, grads = jax.value_and_grad(simple_loss)(params, batch, quantiles, key)
+    key, subkey = jax.random.split(key)
+    params = jax.tree_map(lambda p, g: p - lr * g, params, grads)
+    return (params, key), loss
+
+
+@jax.jit
+def train(params, batches, key):
+    key, subkey = jax.random.split(key)
+    (params, key), losses = jax.lax.scan(scannable_loss, (params, key), batches)
+    return params, key, losses
+
+
+for i in range(10):
+    with timer(f'Epoch {i}'):
+        params, k, losses = train(params, batches, k)
+    print(f'Loss: {np.mean(losses)}')
+
+# TODO:
+# - split static and dynamic params, use integer indexing as much as possible but in a
+#   parameter path that's not differentiated against! that should accelerate things
+# - check correctness vs previous model
+# - benchmark in simple forward pass
+# if it's less than 5x slower, we're good, 
+# - let's migrate everything!
+# - write a new training loop
+# if not:
+# - profile with jax to see what's slow (probably the indexing?)
+# - benchmark vs the switch version of previous model?
+# runtime speed improvement ideas: 
+# - add option to write param directly (without key)
+##
+ploss = partial(simple_loss, params, quantiles=quantiles, key=k)
+vploss = jit(vmap(ploss))
+
+
+# with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
+  # # Run the operations to be profiled
+  # y = vploss(N_random_inputs)
+  # y.block_until_ready()

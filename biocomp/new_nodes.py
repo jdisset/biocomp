@@ -54,6 +54,8 @@ def param_at(
     # I think in theory we can also use node_id with base_path = shared
     # to vectorize tl vs tx by accessing different weights!
 
+    node_id = jnp.asarray(node_id).astype(jnp.int32)
+
     assert isinstance(params, dict), f'params must be a dict, not {type(params)}'
 
     dpath = base_path + [name]
@@ -65,17 +67,21 @@ def param_at(
     key_vec = ut.at_path(params, keys_path, None)  # key_vec is an integer vector (n_nodes,)
 
     if not read_only:  # non-jittable path (only used for initialization)
-        N_NODES = max(node_id, number_of_nodes_at_least - 1)
-        if key_vec is None or key_vec.shape[0] < N_NODES:
+        N_NODES = max(node_id, number_of_nodes_at_least - 1) + 1
+        if key_vec is None or key_vec.shape[0] <= N_NODES:
             # extend key_vec to fit node_id
-            v = key_vec if key_vec is not None else jnp.zeros((0,), dtype=jnp.int32)
+            v = key_vec if key_vec is not None else jnp.zeros((0,), dtype=jnp.float32)
             key_vec = jnp.concatenate(
-                [v, jnp.full((N_NODES - v.shape[0] + 1,), -1, dtype=jnp.int32)]
+                [v, jnp.full((N_NODES - v.shape[0] + 1,), -1, dtype=jnp.float32)]
             )
 
-        if key_vec[node_id] == -1:  # param doesn't exist yet
+        if int(key_vec[node_id]) == -1:  # param doesn't exist yet
             try:
-                new_param_value = overwrite_with if overwrite_with is not None else init()
+                new_param_value = (
+                    overwrite_with.astype(jnp.float32)
+                    if overwrite_with is not None
+                    else init().astype(jnp.float32)
+                )
                 p = ut.at_path(params, dpath)  # get existing parameter array
                 if p is None:  # first param ever for this path
                     p = jnp.expand_dims(new_param_value, axis=0)
@@ -88,23 +94,26 @@ def param_at(
                 msg = f'Error initializing param "{name}" from node {node_id}: {e}'
                 raise RuntimeError(msg) from e
 
-    param_id = key_vec[node_id]
+    param_id = key_vec[node_id].astype(jnp.int32)
 
     if overwrite_with is not None and not read_only:  # also non-jittable
-        allp = ut.at_path(params, dpath).at[param_id].set(overwrite_with)
+        allp = ut.at_path(params, dpath).at[param_id].set(overwrite_with.astype(jnp.float32))
         ut.at_path(params, dpath, allp)
 
     res = ut.at_path(params, dpath)[param_id]
 
-    # if param_is is not valid, it's -1, and jax just returns the first element
+    # if param_is is not valid, it's -1, and jax just returns the first element[:10]
     # however I want to return nans instead so I can at least see that something is wrong.
     # it won't work if the param is not a float, but that's better than nothing
+    # using lax cond (not where but lax.cond directly) is faster than using jnp.where:
+
     res = jnp.where(param_id == -1, jnp.full_like(res, np.nan), res)
+
     return res
 
 
 def set_param(params, name, value, node_id=0, base_path=ut.NODE_PATH, **_):
-    return param_at(params, name, node_id, base_path, overwrite_with=value, read_only=False)
+    return param_at(params, name, node_id, base_path, overwrite_with=jnp.asarray(value), read_only=False)
 
 
 def get_param(params, name, node_id=0, base_path=ut.NODE_PATH, **_):
@@ -300,7 +309,33 @@ def generate_quantization_masks(
     set_param(params, pname, mask, node_id=stack_node_id, base_path=ut.MASK_PATH, **kwargs)
 
 
+def register_quantile_variable_ids(params, vnode, stack):
+    # problem is that a node may use more than one quantile variable so we'll just pad with -1
+    # grapb qids:
+    comp_node = vnode.get_compute_node()
+    assert 'quantile_variable_id' in comp_node.extra
+    qid = np.array(comp_node.extra['quantile_variable_id']).astype(int)
+    # turn qids from network to stack scope
+    qid_stack = np.array(
+        [stack.get_network_global_output_id(vnode.network_id, q) for q in qid]
+    ).astype(int)
+    assert qid_stack.ndim == 1
+    max_qsize = stack.max_nb_of_outputs_per_network
+    assert qid_stack.shape[0] <= max_qsize
+    qid_stack = np.pad(qid_stack, (0, max_qsize - qid_stack.shape[0]), constant_values=-1)
+    set_param(params, 'quantile_variable_id', qid_stack, node_id=vnode.node_id)
+
+
+def get_quantile_variables(params, node_id, quantiles, n):
+    qid = get_param(params, 'quantile_variable_id', node_id=node_id).astype(int)
+    assert qid.ndim == 1
+    q = jnp.where(qid == -1, 0, quantiles[qid])[:n]
+
+    return q.squeeze()
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 
 ### {{{                   --     general compute implementations    --
 
@@ -317,7 +352,7 @@ def generate_quantization_masks(
 
 # Signatures:
 # prepare (params, vnode, key)
-# apply (values, quantile, params, node_id, key)
+# apply (values, quantiles, params, node_id, key)
 
 
 def empty_prepare(*_, **__):
@@ -330,7 +365,7 @@ def single_passthrough(input_shapes, *_, **__):
     assert len(input_shapes) == 1, f'Passthrough expects 1 input, got {len(input_shapes)}'
 
     def apply(value, **___):
-        return (value,)
+        return value
 
     output_shapes = input_shapes
 
@@ -345,7 +380,7 @@ def source(input_shapes, n_outputs, **_):
     assert len(input_shapes) == 1, f'A source node should have 1 input, got {len(input_shapes)}'
 
     def apply(value, *_, **__):
-        return (value,) * n_outputs
+        return jnp.repeat(value, n_outputs, axis=0)
 
     output_shapes = input_shapes * n_outputs
 
@@ -392,10 +427,12 @@ def aggregation(input_shapes, n_outputs, normalize=False, **_):
                 ratio_v = jax.random.uniform(key, (n_outputs,))
             assert ratio_v.shape == (n_outputs,), f'Invalid ratio shape {ratio_v.shape}'
             set_param(params, "aggregation:ratios", ratio_v, node_id=vnode.node_id)
+            ratios = get_param(params, "aggregation:ratios", node_id=vnode.node_id)
+            ratios = get_param(params, "aggregation:ratios", node_id=141)
 
-    def apply(input, quantile, params, node_id, key):
+    def apply(input, quantiles, params, node_id, key):
         assert input.shape == input_shapes[0], f'Invalid input shape {input.shape}'
-        ratios = get_param(params, node_id, "aggregation:ratios")
+        ratios = get_param(params, "aggregation:ratios", node_id)
         if normalize:
             ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
         return jnp.array(ratios) * input
@@ -425,21 +462,22 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
             set_param(
                 params,
                 "inv_aggregation:original_output_slot",
-                extra['original_output_slot'],
+                jnp.asarray(extra['original_output_slot']),
                 node_id=vnode.node_id,
             )
             set_param(
-                params, "inv_aggregation:inv_node_id", inv_vnode.node_id, node_id=vnode.node_id
+                params, "inv_aggregation:inv_node_id", jnp.asarray(inv_vnode.node_id), node_id=vnode.node_id
             )
 
-    def apply(inp, quantile, params, node_id, key):
-        inv_id = get_param(params, node_id, "inv_aggregation:inv_node_id")
-        original_output_slot = int(
-            get_param(params, node_id, "inv_aggregation:original_output_slot")
-        )
-        ratios = get_param(params, inv_id, "aggregation:ratios")
+    def apply(inp, quantiles, params, node_id, key):
+        inv_id = get_param(params, "inv_aggregation:inv_node_id", node_id).astype(jnp.int32)
+        original_output_slot = get_param(
+            params, "inv_aggregation:original_output_slot", node_id
+        ).astype(jnp.int32)
+        ratios = get_param(params, "aggregation:ratios", inv_id)
         if normalize:
             ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
+
         return inp / ratios[original_output_slot]
 
     output_shape = input_shapes
@@ -447,6 +485,7 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{                    --     neural utils     --
 
 
@@ -585,8 +624,7 @@ def transform_nn(
             if rate_embeding.ndim == 0:
                 rate_embeding = rate_embeding.reshape((1,))
 
-            assert quantile.ndim == 1
-            assert value.ndim == 1
+            assert value.ndim == 1, f'In {transform_name}: {value.ndim} != 1: {value}'
             assert rate_embeding.ndim == 1
 
             inputs = ut.flat_concat(value, rate_embeding, quantile)
@@ -641,6 +679,7 @@ def transform_nn(
         init_param_if_needed(params, rate_name, init=init, base_path=ut.QVALS_PATH, node_id=0)
 
         for vnode in vnodelist:
+            register_quantile_variable_ids(params, vnode, stack)
             generate_quantization_masks(
                 qnames, params, rate_name, vnode, number_of_nodes_at_least=stack.number_of_nodes
             )
@@ -658,17 +697,18 @@ def transform_nn(
         __shared_impl(
             val,
             rates,
-            quantile=np.zeros((1,)),
+            quantile=0,
             key=key,
             param_f=partial(
                 init_param_if_needed, params, number_of_nodes_at_least=stack.number_of_nodes
             ),
         )
 
-    def apply(*values, quantile, params, node_id, key):
+    def apply(*values, quantiles, params, node_id, key):
         assert len(values) == len(input_shapes)
         param_f = partial(get_param, params)  # read-only
-        val, rates = __node_impl(*values, key, param_f, params, node_id)
+        val, rates = __node_impl(*values, key=key, param_f=param_f, params=params, node_id=node_id)
+        quantile = get_quantile_variables(params, node_id, quantiles, 1)
         return __shared_impl(val, rates, quantile, key, param_f)
 
     output_shape = [(1,)]
@@ -734,6 +774,7 @@ def sequestron_ERN(
 
     def prepare(params, vnodelist, key):
         for vnode in vnodelist:
+            register_quantile_variable_ids(params, vnode, stack)
             # we need to know which affinity value to use for this node
             assert 'seq_name' in vnode.get_compute_node().extra
             seq_name = vnode.get_compute_node().extra['seq_name']  # ex: 'CasE5p'
@@ -749,11 +790,11 @@ def sequestron_ERN(
                 node_id=vnode.node_id,
                 number_of_nodes_at_least=stack.number_of_nodes,
             )
-            affinity_id = get_param(params, ERN_AFFINITY_ID_NAME, node_id=vnode.node_id)
+            affinity_id = get_param(params, ERN_AFFINITY_ID_NAME, node_id=vnode.node_id).astype(jnp.int32)
 
         __impl(
             *[np.zeros(shape) for shape in input_shapes],
-            quantile=np.zeros((1,)),
+            quantile=0,
             rng_key=key,
             param_f=partial(
                 init_param_if_needed, params, number_of_nodes_at_least=stack.number_of_nodes
@@ -761,16 +802,16 @@ def sequestron_ERN(
             affinity_id=affinity_id,
         )
 
-    def apply(*values, quantile, params, node_id, key):
+    def apply(*values, quantiles, params, node_id, key):
         assert len(values) == len(input_shapes)
         affinity_id = get_param(params, ERN_AFFINITY_ID_NAME, node_id=node_id)
+        quantile = get_quantile_variables(params, node_id, quantiles, 1)
         return __impl(
             *values,
             quantile=quantile,
             rng_key=key,
             param_f=partial(get_param, params),
             affinity_id=affinity_id,
-            params=params,
         )
 
     output_shape = [(1,)]
@@ -792,10 +833,11 @@ def grouped_output(
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
 
-    def __impl(*inputs, quantile, rng_key, param_f, **_):
+    def __impl(*inputs, quantiles, rng_key, param_f, **_):
+        assert quantiles.shape == (len(inputs),)
         res = vmap(
             lambda x: dense_multilevel(
-                ut.flat_concat(x, quantile),
+                ut.flat_concat(x, quantiles),
                 wsize,
                 1,
                 depth,
@@ -808,19 +850,23 @@ def grouped_output(
         return outer_activation(res)
 
     def prepare(params, vnodelist, key):
+        for vnode in vnodelist:
+            register_quantile_variable_ids(params, vnode, stack)
+
         __impl(
             *[np.zeros(shape) for shape in input_shapes],
-            quantile=np.zeros((1,)),
+            quantiles=np.zeros((len(input_shapes),)),
             rng_key=key,
             param_f=partial(
                 init_param_if_needed, params, number_of_nodes_at_least=stack.number_of_nodes
             ),
         )
 
-    def apply(*inputs, quantile, params, node_id, key):
-        return __impl(*inputs, quantile=quantile, rng_key=key, param_f=partial(get_param, params))
+    def apply(*inputs, quantiles, params, node_id, key):
+        q = get_quantile_variables(params, node_id, quantiles, len(inputs))
+        return __impl(*inputs, quantiles=q, rng_key=key, param_f=partial(get_param, params))
 
-    output_shape = [(1,)] * n_outputs
+    output_shape = [(1,)] * len(input_shapes)
 
     return prepare, apply, output_shape
 

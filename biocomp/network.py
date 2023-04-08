@@ -872,6 +872,9 @@ class Network:
         onode = self.get_output_compute_node()
         return [self.central_dogma_graph.loc[cdg_id]['content'][0] for cdg_id in onode['cdg_input']]
 
+    def get_nb_outputs(self):
+        return len(self.get_output_proteins())
+
     def get_input_from_output(self, output_arr):
         """Given an array of output values, returns the columns that are inputs of the inverted network,
         properly ordered by input number"""
@@ -900,6 +903,9 @@ class Network:
         assert set(mapping.keys()) == set(range(len(mapping.keys())))
         assert len(mapping.keys()) == len(set(mapping.values()))
         return mapping
+
+    def get_nb_inputs(self):
+        return len(self.get_inverted_input_proteins())
 
     def cleanup(self):
         if self.compute_graph is not None:
