@@ -123,9 +123,9 @@ def direct_param_at(
         is_init_array = ut.at_path(params, IS_INIT_PATH + dpath, None)
         if is_init_array is None or is_init_array.shape[0] <= node_id:
             # extend is_init_array to fit node_id
-            v = is_init_array if is_init_array is not None else jnp.zeros((0,), dtype=jnp.bool_)
-            is_init_array = jnp.concatenate(
-                [v, jnp.full((node_id - v.shape[0] + 1,), False, dtype=jnp.bool_)]
+            v = is_init_array if is_init_array is not None else np.zeros((0,), dtype=np.bool_)
+            is_init_array = np.concatenate(
+                [v, np.full((node_id - v.shape[0] + 1,), False, dtype=np.bool_)]
             )
             ut.at_path(params, IS_INIT_PATH + dpath, is_init_array)
         param_is_init = is_init_array[node_id]
@@ -140,18 +140,18 @@ def direct_param_at(
             # then let's make sure the param array is big enough
             REQUIRED_LENGTH = max(node_id, number_of_nodes_at_least - 1) + 1
             if p_array is None:
-                p_array = jnp.zeros((REQUIRED_LENGTH,) + new_value.shape, dtype=new_value.dtype)
+                p_array = np.zeros((REQUIRED_LENGTH,) + new_value.shape, dtype=new_value.dtype)
             elif p_array.shape[0] < REQUIRED_LENGTH:
-                p_array = jnp.concatenate(
-                    [p_array, jnp.zeros((REQUIRED_LENGTH - p_array.shape[0],) + new_value.shape)]
+                p_array = np.concatenate(
+                    [p_array, np.zeros((REQUIRED_LENGTH - p_array.shape[0],) + new_value.shape)]
                 ).astype(new_value.dtype)
 
             # finally we can set the param
-            p_array = p_array.at[node_id].set(new_value)
+            p_array[node_id] = new_value
             p_array = ut.at_path(params, dpath, p_array)
             p = p_array[node_id]
             # and mark the param as initialized
-            is_init_array = is_init_array.at[node_id].set(True)
+            is_init_array[node_id] = True
             ut.at_path(params, IS_INIT_PATH + dpath, is_init_array)
 
     dtype = p_array.dtype
@@ -228,6 +228,7 @@ def quantize_impl(x, arr):
     return zero + jax.lax.stop_gradient(arr[jnp.argmin(jnp.abs(arr - x))])
 
 
+@jit
 def quantize_masked_impl(x, arr, mask):
     zero = x - jax.lax.stop_gradient(x)  # for straight-through gradient
     dist = jnp.where(mask, jnp.abs(arr - x), jnp.inf)
@@ -477,7 +478,6 @@ def aggregation(input_shapes, n_outputs, normalize=False, **_):
             assert ratio_v.shape == (n_outputs,), f'Invalid ratio shape {ratio_v.shape}'
             set_param(params, "aggregation:ratios", ratio_v, node_id=vnode.node_id)
             ratios = get_param(params, "aggregation:ratios", node_id=vnode.node_id)
-            ratios = get_param(params, "aggregation:ratios", node_id=141)
 
     def apply(input, quantiles, params, node_id, key):
         assert input.shape == input_shapes[0], f'Invalid input shape {input.shape}'
