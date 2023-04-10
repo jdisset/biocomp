@@ -30,7 +30,6 @@ from copy import deepcopy
 import biocomp.new_nodes as bcn
 
 from jax.config import config
-
 config.update("jax_debug_nans", False)
 config.update("jax_check_tracer_leaks", False)
 # config.update('jax_disable_jit', True)
@@ -47,6 +46,8 @@ def timer(name=None):
     else:
         print(f"\nElapsed time: {perf_counter() - t:.2f} seconds")
 
+import jax.profiler
+jax.profiler.start_server(9999)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -568,12 +569,13 @@ def test_init_param_if_needed():
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{                        --     make stack     --
 
 models = dman.get_models()
 m0 = models[0]
 m0.network.compute_graph
-all_networks = [m.network for m in models]
+all_networks = [m.network for m in models][:]
 
 
 def make_stack(all_networks):
@@ -589,16 +591,14 @@ def make_stack(all_networks):
     # first we need to store all quantizable parameter names
     stack.shared_store = {}
     store = stack.shared_store
-    store['properties'] = {}
     quantization_params = {}
     for n_id, n in enumerate(all_networks):
         for qn, qv in bcn.get_all_possible_quantization_params(n).items():
             quantization_params[qn] = set(qv) | quantization_params.get(qn, set())
     quantization_params = {k: sorted(v) for k, v in quantization_params.items()}
     for pname, pv in quantization_params.items():
-        ut.at_path(store, ut.QNAME_PATH + [pname], pv)
+        ut.at_path(store, ut.QNAME_PATH + f"/{pname}", pv)
 
-    ut.at_path(store, ut.PROPERTIES_PATH)
 
     # setup each layer
     for layer in stack.layers:
@@ -660,46 +660,111 @@ def make_stack(all_networks):
     return stack
 
 s = make_stack(all_networks)
-params = s.init(jax.random.PRNGKey(0))
+with timer('init'):
+    params = s.init(jax.random.PRNGKey(0))
 
-pprint(params)
+
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
 
+
+def is_equal(a1, a2):
+    if isinstance(a1, jnp.ndarray):
+        return jnp.all(a1 == a2)
+    else:
+        return a1 == a2
+
+def find_keys_diff(d1, d2):
+    # prints the keys in d1 and d2 that have different values
+    # d1 and d2 are nested
+    changed = []
+    for k, v in d1.items():
+        assert k in d2, f'{k} not in d2'
+        if isinstance(v, dict):
+            c = find_keys_diff(v, d2[k])
+            changed.extend(c)
+        else:
+            if not is_equal(v, d2[k]):
+                name = str(k)
+                changed.append(name)
+    return changed
+
+def contains_nan(d):
+    if isinstance(d, jnp.ndarray):
+        return jnp.any(jnp.isnan(d))
+    for k, v in d.items():
+        if isinstance(v, dict):
+            if contains_nan(v):
+                return True
+        else:
+            if jnp.any(jnp.isnan(v)):
+                return True
+    return False
+
+
+
+# from jax.config import config
+# config.update("jax_debug_nans", True)
 
 quantiles = jnp.arange(s.total_nb_of_outputs).astype(jnp.float32) / s.total_nb_of_outputs
 inputs = jnp.arange(s.total_nb_of_inputs).astype(jnp.float32)
 k = jax.random.PRNGKey(0)
 
-batches = jax.random.uniform(k, (512,64, s.total_nb_of_inputs)).astype(jnp.float32)
+batches = jax.random.uniform(k, (64,128, s.total_nb_of_inputs)).astype(jnp.float32)
+vmapped_compute = jax.vmap(s.compute, in_axes=(None, 0, None, None))
 
-def simple_loss(params, batch, quantiles, key):
-    vmapped_compute = jax.vmap(s.compute, in_axes=(None, 0, None, None))
-    out = vmapped_compute(params, batch, quantiles, key)
+def simple_loss(dynparams, staticparams, batch, quantiles, key):
+    allparams = ut.assemble_params(dynparams, staticparams)
+    out = vmapped_compute(allparams, batch, quantiles, key)
     return jnp.mean(out)
 
 lr = 0.01
 
 
 def scannable_loss(carry, batch):
-    params, key = carry
-    loss, grads = jax.value_and_grad(simple_loss)(params, batch, quantiles, key)
+    allparams, key = carry
+    dynamic, static = ut.split_params(allparams, ['/__static__','/node'])
+    loss, grads = jax.value_and_grad(simple_loss)(dynamic, static, batch, quantiles, key)
     key, subkey = jax.random.split(key)
-    params = jax.tree_map(lambda p, g: p - lr * g, params, grads)
-    return (params, key), loss
+    dynamic = jax.tree_map(lambda p, g: p - lr * g, dynamic, grads)
+    allparams = ut.assemble_params(dynamic, static)
+    return (allparams, key), loss
 
+params.keys()
 
-@jax.jit
+# pprint(params['shared'])
+
+@jit
 def train(params, batches, key):
     key, subkey = jax.random.split(key)
-    (params, key), losses = jax.lax.scan(scannable_loss, (params, key), batches)
-    return params, key, losses
+    (params, key), loss = jax.lax.scan(scannable_loss, (params, key), batches)
+    return params, key, loss
 
 
-for i in range(10):
+with timer('Compiling'):
+    train(params, batches, k)
+
+
+for i in range(2):
     with timer(f'Epoch {i}'):
         params, k, losses = train(params, batches, k)
-    print(f'Loss: {np.mean(losses)}')
+
+# benchmarking:
+# 10 first networks, 128x128: 
+# -----------------------------------
+# float indexing + all grad -> 3.6s per epoch, first epoch 19.2s
+# float indexing + only shared grad -> 3.8s per epoch (???)
+# integer indexing + only shared grad -> 3.4s per epoch
+# direct indexing + only shared grad -> 3.3s per epoch
+# TO TRY:
+# flat param dictionnary: just use '/' as separator
+# 10 nets, 64x128 with new default nn:
+# direct indexing + split grad + nested at_path -> 3s per epoch
+# direct indexing + split grad + flat at_path -> 2.9s per epoch
+
+
+
 
 # TODO:
 # - split static and dynamic params, use integer indexing as much as possible but in a

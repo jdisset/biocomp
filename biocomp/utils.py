@@ -44,16 +44,25 @@ def error(*args, **kwargs):
 # {{{                    --     random misc stuff     --
 # ···············································································
 
-NODE_PATH = ['node']
-SHARED_PATH = ['shared']
-STATIC_PATH = ['__static__']
-QVALS_PATH = SHARED_PATH + ['qvals']
-KEYS_PATH = STATIC_PATH + ['__keys__']
-MASK_PATH = STATIC_PATH + ['qmasks']
-QNAME_PATH = ['qnames']
-PROPERTIES_PATH = ['properties']
+# NODE_PATH = ['node']
+# SHARED_PATH = ['shared']
+# STATIC_PATH = ['__static__']
+# QVALS_PATH = SHARED_PATH + ['qvals']
+# KEYS_PATH = STATIC_PATH + ['__keys__']
+# MASK_PATH = STATIC_PATH + ['qmasks']
+# QNAME_PATH = ['qnames']
+# PROPERTIES_PATH = ['properties']
 
-def at_path(d: dict, path, val=None, defaultinit=lambda: None):
+NODE_PATH = '/node'
+SHARED_PATH = '/shared'
+STATIC_PATH = '/__static__'
+QVALS_PATH = SHARED_PATH + '/qvals'
+KEYS_PATH = STATIC_PATH + '/__keys__'
+MASK_PATH = STATIC_PATH + '/qmasks'
+QNAME_PATH = '/qnames'
+PROPERTIES_PATH = '/properties'
+
+def at_path_nested(d: dict, path, val=None, defaultinit=lambda: None):
     for key in path[:-1]:
         try:
             d = d.setdefault(key, dict())
@@ -70,33 +79,22 @@ def at_path(d: dict, path, val=None, defaultinit=lambda: None):
     return d
 
 
-# def at_path(d: dict, path, val=None, defaultinit=lambda: None):
-    # for key in path[:-1]:
-        # next_dict = d.get(key)
-        # if next_dict is None:
-            # next_dict = dict()
-            # d[key] = next_dict
-        # elif not isinstance(next_dict, dict):
-            # msg = (
-                # f'Cannot set "{key}" at path {path}: {key} is not a dict. Did you pass something other than a dict?'
-            # )
-            # raise AttributeError(msg)
-        # d = next_dict
-
-    # last_key = path[-1]
-    # if val is not None:
-        # d[last_key] = val
-        # return val
-    # else:
-        # if last_key not in d:
-            # d[last_key] = defaultinit()
-        # return d[last_key]
+def at_path_flat(d: dict, path:str, val=None, defaultinit=lambda: None):
+    if val is None:
+        return d.setdefault(path, defaultinit())
+    else:
+        d[path] = val
+        return val
 
 
-def delete_path(d, path):
+def delete_path_nested(d, path):
     for key in path[:-1]:
         d = d[key]
     del d[path[-1]]
+
+
+def delete_path_flat(d, path):
+    del d[path]
 
 
 def apply_constraints(par, cons):
@@ -194,6 +192,7 @@ def load_json5(path):
 def flat_concat(*arrays):
     return jnp.concatenate([jnp.asarray(a).ravel() for a in arrays])
 
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -201,17 +200,19 @@ def flat_concat(*arrays):
 # {{{                        --     JAX helpers     --
 # ···············································································
 
+
 def value_and_jacfwd(f, x):
-  pushfwd = partial(jax.jvp, f, (x,))
-  basis = jnp.eye(x.size, dtype=x.dtype)
-  y, jac = jax.vmap(pushfwd, out_axes=(None, 1))((basis,))
-  return y, jac
+    pushfwd = partial(jax.jvp, f, (x,))
+    basis = jnp.eye(x.size, dtype=x.dtype)
+    y, jac = jax.vmap(pushfwd, out_axes=(None, 1))((basis,))
+    return y, jac
+
 
 def value_and_jacrev(f, x):
-  y, pullback = jax.vjp(f, x)
-  basis = jnp.eye(y.size, dtype=y.dtype)
-  jac = jax.vmap(pullback)(basis)
-  return y, jac
+    y, pullback = jax.vjp(f, x)
+    basis = jnp.eye(y.size, dtype=y.dtype)
+    jac = jax.vmap(pullback)(basis)
+    return y, jac
 
 
 class TQDMProgress:
@@ -364,7 +365,7 @@ def he_initializer(rng, shape):
     return init
 
 
-def split_params(params, static_paths):
+def split_params_nested(params, static_paths):
     """Split params into static and dynamic parts."""
     # any path that is not in static_paths is dynamic
     dynamic = params.copy()
@@ -375,14 +376,34 @@ def split_params(params, static_paths):
     return dynamic, static
 
 
-def assemble_params(dynamic, static):
+def split_params_flat(params, static_paths):
+    """Split params into static and dynamic parts."""
+    static = {}
+    dynamic = {}
+    for k, v in params.items():
+        # if k starts with any of the static_paths, it is static
+        if any(k.startswith(p) for p in static_paths):
+            static[k] = v
+        else:
+            dynamic[k] = v
+    return dynamic, static
+
+
+def assemble_params_flat(dynamic, static):
+    """Assemble params from static and dynamic parts."""
+    res = dynamic.copy()
+    res.update(static)
+    return res
+
+
+def assemble_params_nested(dynamic, static):
     """Assemble params from static and dynamic parts."""
     res = updated_dict(dynamic, static)
     return res
 
 
 def flatten_params(params):
-    #TODO: switch to jax.flattten_util.ravel_pytree
+    # TODO: switch to jax.flattten_util.ravel_pytree
     """Flatten params into a single vector,
     and also returns a descriptor that can be used
     to unflatten them."""
@@ -395,7 +416,7 @@ def flatten_params(params):
 
 
 def unflatten_params(flat_params, pdescriptor):
-    #TODO: switch to jax.flattten_util.ravel_pytree
+    # TODO: switch to jax.flattten_util.ravel_pytree
     """Unflatten params from a single vector and a descriptor."""
     shapes, treedef = pdescriptor
     # splits = jnp.cumsum(jnp.array([jnp.prod(jnp.array(s)) for s in shapes]), dtype=jnp.int32)
@@ -492,3 +513,14 @@ class TimeStore:
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+# at_path = at_path_nested
+# delete_path = delete_path_nested
+# split_params = split_params_nested
+# assemble_params = assemble_params_nested
+
+
+at_path = at_path_flat
+delete_path = delete_path_flat
+split_params = split_params_flat
+assemble_params = assemble_params_flat

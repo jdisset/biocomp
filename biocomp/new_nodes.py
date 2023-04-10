@@ -13,9 +13,8 @@ from tqdm import tqdm
 
 ### {{{                  --     params and quantization     --
 
-
 # general param function (for initializing, setting or getting)
-def param_at(
+def indirect_param_at(
     params,
     name,
     node_id=0,
@@ -54,11 +53,9 @@ def param_at(
     # I think in theory we can also use node_id with base_path = shared
     # to vectorize tl vs tx by accessing different weights!
 
-    node_id = jnp.asarray(node_id).astype(jnp.int32)
-
     assert isinstance(params, dict), f'params must be a dict, not {type(params)}'
 
-    dpath = base_path + [name]
+    dpath = f'{base_path}/{name}'
 
     nparams = ut.at_path(params, dpath, None)
     nparams = nparams.shape[0] if nparams is not None else 0
@@ -70,18 +67,14 @@ def param_at(
         N_NODES = max(node_id, number_of_nodes_at_least - 1) + 1
         if key_vec is None or key_vec.shape[0] <= N_NODES:
             # extend key_vec to fit node_id
-            v = key_vec if key_vec is not None else jnp.zeros((0,), dtype=jnp.float32)
+            v = key_vec if key_vec is not None else jnp.zeros((0,), dtype=jnp.int32)
             key_vec = jnp.concatenate(
-                [v, jnp.full((N_NODES - v.shape[0] + 1,), -1, dtype=jnp.float32)]
+                [v, jnp.full((N_NODES - v.shape[0] + 1,), -1, dtype=jnp.int32)]
             )
 
         if int(key_vec[node_id]) == -1:  # param doesn't exist yet
             try:
-                new_param_value = (
-                    overwrite_with.astype(jnp.float32)
-                    if overwrite_with is not None
-                    else init().astype(jnp.float32)
-                )
+                new_param_value = overwrite_with if overwrite_with is not None else init()
                 p = ut.at_path(params, dpath)  # get existing parameter array
                 if p is None:  # first param ever for this path
                     p = jnp.expand_dims(new_param_value, axis=0)
@@ -94,34 +87,90 @@ def param_at(
                 msg = f'Error initializing param "{name}" from node {node_id}: {e}'
                 raise RuntimeError(msg) from e
 
-    param_id = key_vec[node_id].astype(jnp.int32)
+    param_id = key_vec[node_id]
 
     if overwrite_with is not None and not read_only:  # also non-jittable
-        allp = ut.at_path(params, dpath).at[param_id].set(overwrite_with.astype(jnp.float32))
+        allp = ut.at_path(params, dpath).at[param_id].set(overwrite_with)
         ut.at_path(params, dpath, allp)
 
     res = ut.at_path(params, dpath)[param_id]
 
-    # if param_is is not valid, it's -1, and jax just returns the first element[:10]
-    # however I want to return nans instead so I can at least see that something is wrong.
-    # it won't work if the param is not a float, but that's better than nothing
-    # using lax cond (not where but lax.cond directly) is faster than using jnp.where:
-
-    res = jnp.where(param_id == -1, jnp.full_like(res, np.nan), res)
-
     return res
 
 
+def direct_param_at(
+    params,
+    name,
+    node_id=0,
+    base_path=ut.NODE_PATH,
+    init=None,
+    overwrite_with=None,
+    read_only=True,
+    number_of_nodes_at_least=1,
+    **_,
+):
+
+    if not isinstance(params, dict):
+        raise TypeError(f'params must be a dict, not {type(params)}')
+
+    dpath = base_path + f'/{name}'
+    p_array = ut.at_path(params, dpath, None)  # p_array is the parameter array (n_params, *shape)
+
+    if not read_only:  # non-jittable path (only used for initialization)
+        # first we will check if the param is already initialized
+        IS_INIT_PATH = ut.STATIC_PATH + "/is_init"
+        # we store a boolean indicating if a param is initialized
+        is_init_array = ut.at_path(params, IS_INIT_PATH + dpath, None)
+        if is_init_array is None or is_init_array.shape[0] <= node_id:
+            # extend is_init_array to fit node_id
+            v = is_init_array if is_init_array is not None else jnp.zeros((0,), dtype=jnp.bool_)
+            is_init_array = jnp.concatenate(
+                [v, jnp.full((node_id - v.shape[0] + 1,), False, dtype=jnp.bool_)]
+            )
+            ut.at_path(params, IS_INIT_PATH + dpath, is_init_array)
+        param_is_init = is_init_array[node_id]
+
+        if not param_is_init or overwrite_with is not None:
+            new_value = overwrite_with if overwrite_with is not None else init()
+            if p_array is not None and p_array.shape[1:] != new_value.shape:
+                raise ValueError(
+                    f'Param "{name}" has shape {p_array.shape[1:]}, but '
+                    f'new value has shape {new_value.shape}.'
+                )
+            # then let's make sure the param array is big enough
+            REQUIRED_LENGTH = max(node_id, number_of_nodes_at_least - 1) + 1
+            if p_array is None:
+                p_array = jnp.zeros((REQUIRED_LENGTH,) + new_value.shape, dtype=new_value.dtype)
+            elif p_array.shape[0] < REQUIRED_LENGTH:
+                p_array = jnp.concatenate(
+                    [p_array, jnp.zeros((REQUIRED_LENGTH - p_array.shape[0],) + new_value.shape)]
+                ).astype(new_value.dtype)
+
+            # finally we can set the param
+            p_array = p_array.at[node_id].set(new_value)
+            p_array = ut.at_path(params, dpath, p_array)
+            p = p_array[node_id]
+            # and mark the param as initialized
+            is_init_array = is_init_array.at[node_id].set(True)
+            ut.at_path(params, IS_INIT_PATH + dpath, is_init_array)
+
+    dtype = p_array.dtype
+    p = p_array[node_id].astype(dtype)
+    return p
+
+
 def set_param(params, name, value, node_id=0, base_path=ut.NODE_PATH, **_):
-    return param_at(params, name, node_id, base_path, overwrite_with=jnp.asarray(value), read_only=False)
+    return direct_param_at(
+        params, name, node_id, base_path, overwrite_with=jnp.asarray(value), read_only=False
+    )
 
 
 def get_param(params, name, node_id=0, base_path=ut.NODE_PATH, **_):
-    return param_at(params, name, node_id, base_path)
+    return direct_param_at(params, name, node_id, base_path)
 
 
 def init_param_if_needed(params, name, init, node_id=0, base_path=ut.NODE_PATH, **_):
-    return param_at(params, name, node_id, base_path, init=init, read_only=False)
+    return direct_param_at(params, name, node_id, base_path, init=init, read_only=False)
 
 
 def save_to_params(all_params, node_id, node_params):
@@ -466,7 +515,10 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
                 node_id=vnode.node_id,
             )
             set_param(
-                params, "inv_aggregation:inv_node_id", jnp.asarray(inv_vnode.node_id), node_id=vnode.node_id
+                params,
+                "inv_aggregation:inv_node_id",
+                jnp.asarray(inv_vnode.node_id),
+                node_id=vnode.node_id,
             )
 
     def apply(inp, quantiles, params, node_id, key):
@@ -576,10 +628,10 @@ def transform_nn(
     stack,
     transform_name,
     outer_wsize=64,
-    outer_depth=2,
-    inner_wsize=32,
-    inner_depth=2,
-    inner_outsize=4,
+    outer_depth=4,
+    inner_wsize=64,
+    inner_depth=3,
+    inner_outsize=8,
     rate_dim=1,
     tr_namespace='',
     inner_activation_name=DEFAULT_ACTIVATION,
@@ -672,7 +724,7 @@ def transform_nn(
         # during prepare, we call _impl with dummy inputs + a param_function that
         # creates the parameters on the fly if they don't exist yet
 
-        qnames = ut.at_path(stack.shared_store, ut.QNAME_PATH + [rate_name])
+        qnames = ut.at_path(stack.shared_store, ut.QNAME_PATH + f"/{rate_name}")
         assert qnames is not None, f'quantization names for {rate_name} not initialized'
 
         init = ut.continuous_initializer(key, (len(qnames), rate_dim))
@@ -716,9 +768,9 @@ def transform_nn(
     return prepare, apply, output_shape
 
 
-def property_id(prop_dict, prop_name, prop_value):
+def property_id(store, prop_name, prop_value):
     """Returns the id of the property value in the dict, or creates it if it doesn't exist"""
-    pvals = ut.at_path(prop_dict, ut.PROPERTIES_PATH + [prop_name], defaultinit=lambda: [])
+    pvals = ut.at_path(store, ut.PROPERTIES_PATH + f'/{prop_name}', defaultinit=lambda: [])
     if prop_value not in pvals:
         pvals.append(prop_value)
     return pvals.index(prop_value)
@@ -779,7 +831,9 @@ def sequestron_ERN(
             assert 'seq_name' in vnode.get_compute_node().extra
             seq_name = vnode.get_compute_node().extra['seq_name']  # ex: 'CasE5p'
             prop_name = f'ERN_affinity_{subtype}'
-            affinity_id = property_id(stack.shared_store['properties'], prop_name, seq_name)
+            affinity_id = int(property_id(stack.shared_store, prop_name, seq_name))
+
+
             # affinity_id is the index at which the affinity value is stored
             # in the array of all affinity values. We cNone an store this index so that
             # we can retrieve the correct value during apply (vectorized on all node_ids)
@@ -790,7 +844,9 @@ def sequestron_ERN(
                 node_id=vnode.node_id,
                 number_of_nodes_at_least=stack.number_of_nodes,
             )
-            affinity_id = get_param(params, ERN_AFFINITY_ID_NAME, node_id=vnode.node_id).astype(jnp.int32)
+            affinity_id = get_param(params, ERN_AFFINITY_ID_NAME, node_id=vnode.node_id).astype(
+                jnp.int32
+            )
 
         __impl(
             *[np.zeros(shape) for shape in input_shapes],
@@ -824,7 +880,7 @@ def grouped_output(
     n_outputs,
     stack,
     wsize=64,
-    depth=3,
+    depth=4,
     inner_activation_name=DEFAULT_ACTIVATION,
     outer_activation_name=DEFAULT_OUT_ACTIVATION,
     **_,
