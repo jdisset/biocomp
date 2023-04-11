@@ -61,8 +61,6 @@ key = jax.random.PRNGKey(0)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                     --     compute functions     --
-
-
 @dataclass
 class VirtualNode:
     network: bc.Network
@@ -524,7 +522,6 @@ def make_layer_input_getters(stack, layer_id):
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                 --     tests for param functions     --
-
 from biocomp.new_nodes import set_param, get_param, init_param_if_needed
 
 
@@ -571,7 +568,6 @@ def test_init_param_if_needed():
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                        --     make stack     --
-
 models = dman.get_models()
 m0 = models[0]
 m0.network.compute_graph
@@ -606,10 +602,11 @@ def make_stack(all_networks):
         layer.setup(config, stack=stack)
     stack.build_map()
 
-    # now what would be the init function:
+
     def init(rng_key):
         params = {}
         for layer in tqdm(stack.layers):
+            rng_key, _ = jax.random.split(rng_key)
             assert layer.is_built, 'Layer not built'
             if layer.f_prepare is not None:
                 layer.f_prepare(params, vnodelist=layer.nodes, key=rng_key)
@@ -762,8 +759,6 @@ for i in range(2):
 # 10 nets, 64x128 with new default nn:
 # direct indexing + split grad + nested at_path -> 3s per epoch
 # direct indexing + split grad + flat at_path -> 2.9s per epoch
-
-
 
 
 # TODO:

@@ -13,13 +13,20 @@ import pickle
 import json5
 import numpy as np
 import logging
+from rich.logging import RichHandler
 from jax.tree_util import Partial as partial
+from contextlib import contextmanager
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     logging utils     --
 # ···············································································
-logger = logging.getLogger('biocomp')
 
+FORMAT = "%(message)s"
+logging.basicConfig(
+    level="NOTSET", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()]
+)
+
+logger = logging.getLogger('biocomp')
 
 def warn(*args, **kwargs):
     logger.warning(*args, **kwargs)
@@ -36,6 +43,15 @@ def debug(*args, **kwargs):
 def error(*args, **kwargs):
     logger.error(*args, **kwargs)
 
+@contextmanager
+def timer(name=None):
+    from time import perf_counter
+    t = perf_counter()
+    yield
+    if name is not None:
+        print(f"\n{name}: {perf_counter() - t:.2f} seconds")
+    else:
+        print(f"\nElapsed time: {perf_counter() - t:.2f} seconds")
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -192,6 +208,13 @@ def load_json5(path):
 def flat_concat(*arrays):
     return jnp.concatenate([jnp.asarray(a).ravel() for a in arrays])
 
+
+def flatten_list(x):
+    """Flatten nested lists of lists."""
+    if isinstance(x, list):
+        return [a for i in x for a in flatten_list(i)]
+    else:
+        return [x]
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────

@@ -1,472 +1,555 @@
-from .library import PartsLibrary as PartsLibrary
+### {{{                          --     imports     --
+from copy import deepcopy
+from dataclasses import dataclass
+
 import jax
-from jax.tree_util import Partial as partial
 import jax.numpy as jnp
-from . import utils as ut
+import numpy as np
+from jax import jit, vmap
 
 from . import nodes as nd
-from typing import List, Dict, Tuple, Union, Optional, Callable, Any
+from .network import Network
+from . import utils as ut
 
-# {{{                  --     Params and quantization     --
-# ···············································································
-def get_param(
-    params,
-    name,
-    init=None,
-    overwrite_with=None,
-    shared=False,
-    node_id=None,
-    node_namespace=None,
-    clip_to=None,
-    constraints=None,
-    read_only=True,
-):
-    assert isinstance(params, dict), f'params must be a dict, not {type(params)}'
-    assert constraints is None or isinstance(
-        constraints, dict
-    ), f'constraints must be a dict, not {type(constraints)}'
+##────────────────────────────────────────────────────────────────────────────}}}
 
-    dpath = []
-    if not shared:
-        assert node_id is not None
-        dpath.append('node')
-        if node_namespace is not None:
-            dpath.append(node_namespace)
-        dpath.append(node_id)
-    else:
-        dpath.append('shared')
-
-    dpath.append(name)
-
-    assert (init is None) != (overwrite_with is None)
-
-    if overwrite_with is not None and read_only is False:
-        ut.at_path(params, dpath, overwrite_with)
-        return overwrite_with
-
-    if ut.at_path(params, dpath) is None:
-        assert read_only is False, f'Cannot initialize a read_only param for path {dpath}'
-        try:
-            r = ut.at_path(params, dpath, init())
-            if clip_to is not None:
-                assert (
-                    constraints is not None
-                ), 'clip_to requires to pass a constraints dict to get_param'
-                r = jnp.clip(r, *clip_to)
-                ut.at_path(params, dpath, r)
-                c = ut.at_path(constraints, ['clip'], defaultinit=list)
-                c.append((tuple(dpath), clip_to))
-                ut.at_path(constraints, ['clip'], c)
-
-        except Exception as e:
-            msg = f'Error initializing param "{name}" from node {node_id}: {e}'
-            raise RuntimeError(msg)
-    return ut.at_path(params, dpath)
+### {{{                       --     Virtual Node     --
 
 
-def get_possible_parts(param_name, cdg_node_id, cdg):
-    # should return the name of possible parts for a given cdg node, slot and param name
-    # example: get_possible_values('transcription_rate', ...) -> ['hEF1a', 'hEF1b', 'hEF1c']
-    #          get_possible_values('translation_rate', ...) -> [None, '1xuORF', '2xuORF', ...]
-    # params are stored in the params column of the cdg as a dict {param_name:[possiblevaluees]}
-    available_params = cdg.loc[cdg_node_id, 'params']
-    if param_name not in available_params:
-        raise ValueError(
-            f'Param {param_name} not available for cdg node {cdg_node_id}. Available: {available_params}'
-        )
-    return available_params[param_name]
+@dataclass
+class VirtualNode:
+    """A virtual node does match with a compute node in the network, but it is
+    used to represent a node in the stack, with a unique id, and a type signature
+    that depends on the topology of the network. It also has a batch_order, which
+    is used to sort the nodes in the stack, so that the nodes that need to be computed
+    first are at the top of the stack."""
 
+    network: Network = None
+    network_id: int = None
+    type_signature: str = None  # type of node, and number of inputs and outputs
+    compute_node_id: int = None  # id of the compute node in the network
+    node_id: int = None  # unique id for the node in the stack
+    batch_order: int = 0  # only used for sorting and debugging
 
-def get_quantized(
-    get_param,
-    param_name,
-    values,
-    node_id,
-    cdf,
-    cdg,
-    quantize_fun,
-    rng_key,
-    mode='input_edges',
-    logto=None,
-):
-    """Return a *quantized* version of the parameter, conditioned on the
-    relevant species (either input or output cdg nodes). mode can be 'input' or 'output'."""
-    # We are selecting possible values for a parameter depending on which path, or edge, they come from.
-    # The edges of the compute graph are basically nodes in the central dogma graph,
-    # i.e they're *more or less*
-    # dual to each other, but not exactly since the compute graph adds interactions and extra nodes).
-    # Anyway I think it's reasonable to consider that the type of nodes that will call getQuantized
-    # are the types for which it's ok to consider the CDG as the dual of the COMPG.
-
-    # check that mode is either input_edges or output_edges or inner
-    if mode not in ['input_edges', 'output_edges', 'inner']:
-        raise ValueError(f'Invalid mode {mode} for get_quantized')
-
-    cdg_ids = (
-        cdf.loc[node_id]['cdg_input'] if mode == 'input_edges' else cdf.loc[node_id]['cdg_output']
-    )
-    if cdg_ids is None:
-        raise ValueError(f'Node {node_id} has no {mode} CDG node')
-    if not isinstance(cdg_ids, list):
-        cdg_ids = [cdg_ids]
-
-    try:
-        possible_parts = [get_possible_parts(param_name, cdg_id, cdg) for cdg_id in cdg_ids]
-    except ValueError as e:
-        raise ValueError(
-            f"""get_quantized: Error getting possible parts for node {node_id} with cdg_ids {cdg_ids} and param_name {param_name}, mode {mode}:
-            \n-> {e}.
-            \n compute graph:
-            \n{cdf}
-            \n node:
-            \n{cdf.loc[node_id]}
-            \n central dogma graph:
-            \n{cdg}"""
-        )
-
-    # concat part names with param_name
-    possible_names = [[f'{part}::{param_name}' for part in parts] for parts in possible_parts]
-    assert len(possible_names) == len(
-        values
-    ), f'len(possible_names)={len(possible_names)} != len(values)={len(values)}'
-
-    possible_values = [
-        jnp.array(
-            [
-                get_param(n, ut.continuous_initializer(k, val.shape), shared=True)
-                for n, k in zip(names, jax.random.split(kk, len(names)))
-            ]
-        )
-        for names, val, kk in zip(possible_names, values, jax.random.split(rng_key, len(values)))
-    ]
-
-    if logto is not None:
-        if node_id in logto:
-            logto[node_id].add(param_name)
-        else:
-            logto[node_id] = {param_name}
-
-    res = jnp.array([quantize_fun(v, p) for v, p in zip(values, possible_values)])
-    return res
-
-
-#                                                                            }}}
-
-# {{{                  --     ComputeGraphModel class     --
-# ···············································································
-
-class ComputeGraphModel:
-    def __init__(self, network):
-        self.network = network
-        cg = self.network.compute_graph
-        assert len(cg[cg['type'] == 'output']) == 1, 'The graph must have exactly one output node'
-        self.n_inputs = len(cg[cg['type'] == 'input'])
-        self.n_outputs = len(cg[cg['type'] == 'output'].input_from[0])
-        self.built = False
-
-    def build(
-        self,
-        node_impl: Dict[str, Callable] = nd.DEFAULT_COMPUTE_NODES_DICT,
-        node_namespace: Optional[str] = None,
+    @classmethod
+    def from_node(
+        cls, network_id: int, network: Network, compute_node_id: int, batch_order: int = 0
     ):
-        """Builds the model, i.e. creates a list of functions to be called in sequence
-        (together with the necesary information to call them) according to the compute graph"""
+        node = network.compute_graph.loc[compute_node_id]
+        type = node['type']
+        n_inputs = len(node['input_from'])
+        n_outputs = len(node['output_to'])
+        type_signature = f'{type}_{n_inputs}_{n_outputs}'
+        return cls(
+            network_id=network_id,
+            network=network,
+            compute_node_id=compute_node_id,
+            type_signature=type_signature,
+            batch_order=batch_order,
+        )
 
-        self.node_namespace = node_namespace
-        assert self.network is not None
-        assert self.network.is_built()
-        assert isinstance(node_impl, dict)
-        self.node_impl = node_impl
+    def get_compute_node(self):
+        return self.network.compute_graph.loc[self.compute_node_id]
 
-        cg = self.network.compute_graph
-
-        # we'll build the list of call_dicts
-        # a call dict is a dictionary that contains the relevant information in
-        # order to actually call a node function
-
-        batches = self.__get_batch_sequence_of_nodes()
-        # each sublist in batches contains independent nodes that can be safely called in parallel
-        # however we are not parallelizing the calls, so we can flatten the list and be sure
-        # that the dependency order is respected (upstream nodes will always be called before downstream ones)
-        flat_batches = [item for sublist in batches for item in sublist]
-        call_dicts = []
-        for nid in flat_batches:
-            call_d = {}
-            node_row = cg.loc[nid]
-
-            # if it's an inverse node, we need to get the id of the node that it's inverting
-            nodeid_for_getters = nid
-            if node_row.is_inverse_of is not None:
-                nodeid_for_getters = node_row.is_inverse_of
-
-            # a node needs a method to access the parameters.
-            # we simply preset the general purpose get_param on the correct nodeid
-            get_p = partial(
-                get_param,
-                node_id=nodeid_for_getters,
-            )
-            # same with get_quantized
-            # we preset the node id, the central dogma graph and the compute graph
-            # as well as the actual quantize function
-            get_q = partial(
-                get_quantized,
-                node_id=nodeid_for_getters,
-                cdf=cg,
-                cdg=self.network.central_dogma_graph,
-                quantize_fun=nd.quantize,
-            )
-
-            # extra_params will be passed to the node function
-            # n_outputs and n_inputs are always passed
-            # + any specific thing that the network builder has added
-            extra_params = {
-                'n_outputs': len(cg.loc[nid]['output_to']),
-                'n_inputs': len(cg.loc[nid]['input_from']),
-            }
-            if node_row.extra is not None:
-                extra_params.update(node_row.extra)
-
-            call_d['get_p'] = get_p  # a node needs a method to access the parameters
-            call_d['get_q'] = get_q  # and a method for quantization
-            call_d['extra_params'] = extra_params  # these will be appended to the node call
-            call_d['type'] = node_row.type
-            call_d['input_from'] = node_row.input_from  # upstream node(s) we are taking input from
-            call_d['fun'] = None  # the actual function to call (set later)
-            call_d['nid'] = nid  # this node's id, important to store the output
-
-            if node_row.type not in ('input'):
-                assert node_row.type in self.node_impl, f'Unimplemented node type {node_row.type}'
-                call_d['fun'] = self.node_impl[node_row.type]  # the actual function to call
-
-            call_dicts.append(call_d)
-
-        def collect_all_results(
-            params: dict,
-            inputs: jnp.ndarray,
-            quantiles: jnp.ndarray,
-            rng_key,
-            read_only=True,
-            constraints=None,
-            with_grad: Optional[list[str]] = None,
-            override_w_uniform: Optional[list[str]] = None,
-        ):
-            print(f'quantiles: {quantiles}')
-
-            """
-            params: the parameters
-            inputs: the inputs to the network
-            quantiles: array of quantiles we want to estimate (1 per output)
-            rng_key: the rng key
-            read_only: will make sure that the parameters are not modified by the node functions
-
-            Executes and collects all the results of the nodes in the compute graph.
-            This method basically just calls the nodes in call_dicts, in order, populating
-            the result dictionnary with each node's output and feeding the output of each
-            upstream node as input to the next downstream one.
-
-
-            Special parameters (mostly useful during training):
-            --------------------------------------------
-
-            constraints: a list of constraints to be applied to the output of the nodes (like clamping)
-            with_grad: if True, will also return the gradient (the full jacobian) of the output
-            with respect to the input of the specified node types. Useful for monotonicity constraints.
-
-            override_w_uniform: if not None, will override the inputs to the specified
-            node types with uniform values. This is useful for collecting the behavior of
-            some nodes across their entire input space so that they can't learn sneaky tricks
-            like being twice increasing in two different regions of the input space where the "junction"
-            is never visited by the training data (and thus would never show up in the gradients)
-
-            """
-            assert (
-                len(inputs) >= self.n_inputs
-            ), f'len(inputs)={len(inputs)} < n_inputs={self.n_inputs}'
-
-            keys = jax.random.split(rng_key, len(flat_batches))
-
-            results = {}
-            grads = []
-
-            for (n, key) in zip(call_dicts, keys):
-                k1, k2, k3 = jax.random.split(key, 3)
-
-                extra_params = n['extra_params']
-
-                get_grad = (with_grad and n['type'] in with_grad)
-
-                nid = n['nid']
-
-                if n['type'] == 'input':
-                    results[nid] = inputs[n['extra_params']['input_position']]
-                    continue
-
-                upstream_results = []
-
-                if override_w_uniform is not None and n['type'] in override_w_uniform:
-                    subkeys = jax.random.split(k1, extra_params['n_inputs'])
-                    for inp, k in zip(n['input_from'], subkeys):
-                        if len(results[inp[0]].shape) == 0:
-                            upstream_results.append(jax.random.uniform(k))
-                        else:
-                            upstream_results.append(jax.random.uniform(k, shape=results[inp[0]][inp[1]].shape))
-                else:
-                    for inp in n['input_from']:
-                        if len(results[inp[0]].shape) == 0:
-                            upstream_results.append(results[inp[0]])
-                        else:
-                            upstream_results.append(results[inp[0]][inp[1]])
-
-                get_p = partial(
-                    n['get_p'],
-                    params,
-                    node_namespace=self.node_namespace,
-                    constraints=constraints,
-                    read_only=read_only,
-                )
-
-                qtl = None
-                if quantiles is not None:
-                    pick_quantile = n['extra_params'].get('quantile_variable_id', [])
-                    if len(pick_quantile) > 0 and all([x is not None for x in pick_quantile]):
-                        qtl = quantiles[jnp.array(pick_quantile)]
-
-                get_q = partial(n['get_q'], get_p, rng_key=k2)
-                comp_node = n['fun'](get_p, get_q, **extra_params)
-
-                f = partial(comp_node, quantile=qtl, rng_key=k3)
-
-                res = f(*upstream_results)
-
-                if get_grad:
-                    n_upstream = len(upstream_results)
-                    grad = jax.jacfwd(f, argnums=list(range(n_upstream)))(*upstream_results)
-                    grads.append(grad)
-
-                results[nid] = res
-
-                if n['type'] == 'output':
-                    if with_grad:
-                        return res, grads, results
-                    return res, results
-
-            raise ValueError('Invalid compute graph, no output node found')
-
-        def apply(*args, **kwargs):
-            """Executes the model. It simply calls collect_all_results and only returns the final output"""
-            return collect_all_results(*args, **kwargs, with_grad=False)[0]
-
-        def apply_and_negative_grad(
-            *args, with_grad=['transcription', 'translation', 'output'], **kwargs
-        ):
-            allres = collect_all_results(*args, **kwargs, with_grad=with_grad)
-            grads = jnp.zeros(1)
-            if len(allres[1]) > 0:
-                grads = ut.flat_concat(*allres[1])
-            negative_grad = jnp.mean(jnp.where(grads < 0, grads, 0))
-            return allres[0], negative_grad
-
-        def init(rng_key, pre_params=None, pre_constraints=None):
-            params = {} if pre_params is None else pre_params
-            constraints = {} if pre_constraints is None else pre_constraints
-            apply(
-                params,
-                jnp.zeros(self.n_inputs),
-                jnp.zeros(self.n_outputs),
-                rng_key,
-                constraints=constraints,
-                read_only=False,
-            )
-            return params, constraints
-
-        self.apply = apply
-        self.apply_and_negative_grad = apply_and_negative_grad
-        self.collect_all_results = collect_all_results
-        self.init = init
-        self.flat_batches = flat_batches
-        self.built = True
+    def get_inverse_vnode(self, stack):
+        cnode = self.get_compute_node()
+        assert cnode.is_inverse_of is not None, 'Node is not an inverse'
+        inv = stack.get_vnode_from_net_and_compute_id(self.network_id, cnode.is_inverse_of)
+        assert inv is not None, 'Inverse not found'
+        return inv
 
     def __repr__(self):
-        def list_network_inputs():
-            return [self.network.compute_graph[self.network.compute_graph['type'] == 'input']]
+        out = f'{self.network_id}/{self.compute_node_id}/{self.node_id}-{self.type_signature}'
+        return f'{out}'
 
-        def list_network_outputs():
-            return [self.network.compute_graph[self.network.compute_graph['type'] == 'output']]
+    def __hash__(self):
+        return hash((self.network_id, self.node_id, self.type_signature, self.batch_order))
 
-        return f'ComputeGraphModel({list_network_inputs()} -> {list_network_outputs()})'
+    def __deepcopy__(self, memo):
+        # copy everything except the network (just a reference)
+        new_obj = self.__class__.__new__(self.__class__)
+        memo[id(self)] = new_obj
+        for k, v in self.__dict__.items():
+            if k == 'network':
+                setattr(new_obj, k, v)
+            else:
+                setattr(new_obj, k, deepcopy(v, memo))
+        return new_obj
 
-    def __call__(self, *args, **kwargs):
-        assert self.built
-        return self.apply(*args, **kwargs)
 
-    def __get_batch_sequence_of_nodes(self):
+##────────────────────────────────────────────────────────────────────────────}}}
+
+### {{{                       --     Compute Layer     --
+@dataclass
+class ComputeLayer:
+    nodes: list[VirtualNode]
+    layer_id: int = None
+
+    # information about the function to apply
+    f_type: str = None
+    f_out_shapes: list[tuple[int]] = None
+    f_input_shapes: list[tuple[int]] = None
+
+    f_prepare = None
+    f_apply = None
+
+    is_built = False
+
+    def setup(self, config: nd.ComputeConfigManager, stack):
+
+        self.check()
+
+        first_node = self.nodes[0].get_compute_node()
+        self.f_type = first_node.type
+
+        if self.f_type == 'input':
+            self.f_out_shapes = [(1,)]
+            self.f_input_shapes = [(1,)]
+            self.is_built = True
+            return
+
+        # get the shapes of the inputs. We'll collect all the inputs for each node
+        # to make sure they are all the same
+        node_inputs = []  # list of list of (net_id, compute_node_id, slot_id)
+        for n in self.nodes:
+            ninp = n.get_compute_node().input_from
+            node_inputs.append([(n.network_id, *i) for i in ninp])
+
+        # get the shapes of the inputs
+        all_input_shapes = []  # list of list of shapes
+        for n_inp in node_inputs:
+            input_shapes = []
+            for input_net_id, input_compute_node_id, input_slot_id in n_inp:
+                input_layer_id, _ = stack.node_map[(input_net_id, input_compute_node_id)]
+                assert input_layer_id < self.layer_id, 'Input node is in a later layer'
+                assert stack.layers[input_layer_id].is_built, 'Input layer is not built'
+                input_layer_output_shapes = stack.layers[input_layer_id].f_out_shapes
+                assert input_slot_id < len(
+                    input_layer_output_shapes
+                ), f'Input slot {input_slot_id} is out of range'
+                input_shapes.append(input_layer_output_shapes[input_slot_id])
+            all_input_shapes.append(tuple(input_shapes))
+        # they should all be the same
+        assert len(set(all_input_shapes)) == 1
+        self.f_input_shapes = all_input_shapes[0]
+
+        n_outputs = len(first_node.output_to)
+
+        impl = config.get(self.f_type)(
+            input_shapes=self.f_input_shapes, n_outputs=n_outputs, stack=stack
+        )
+        self.f_prepare, self.f_apply, self.f_out_shapes = impl
+        self.is_built = True
+
+    def flattened_output_shape(self):
+        return int(len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes]))
+
+    def __repr__(self):
+        return self.nodes.__repr__()
+
+    def __hash__(self):
+        return hash(tuple(self.nodes))
+
+    def check(self):
+        assert len(set(n.type_signature for n in self.nodes)) == 1
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+### {{{                       --     Compute Stack     --
+
+@dataclass
+class ComputeStack:
+    networks: list[Network]
+    layers: list[ComputeLayer] = None
+
+    layers_start_index: list[int] = None
+    output_shape: tuple[int] = None
+    node_map: dict[tuple[int, int], tuple[int, int]] = None
+
+    total_nb_of_outputs: int = None
+    total_nb_of_inputs: int = None
+    max_nb_of_outputs_per_network: int = None
+
+    shared_store: dict = None  # shared store for all the nodes.
+    # can be used to store things like the name of the parts for some quantized parameters
+    # as they can't be stored in params (no strings allowed)
+
+    init = None
+    is_built = False
+    number_of_nodes = 0
+
+### {{{                     --     public interface     --
+    def get_network_output_indices(self, network_id: int):
+        """Returns the start index and shape of the output of the given network"""
+        output_node = self.networks[
+            network_id
+        ].get_output_compute_node()  # a row from the compute df
+        node_id = output_node.name
+        layer_id, node_loc = self.node_map[(network_id, node_id)]
+        out_shape = self.layers[layer_id].f_out_shapes
+        start_index = self.layers_start_index[layer_id] + node_loc * np.sum(
+            [np.prod(s) for s in out_shape]
+        )
+        return int(start_index), out_shape
+
+
+    def get_network_global_output_id(self, network_id: int, output_id: int):
+        """Considering every network's outputs ordered by network id,
+        returns the global id of the given output for the given network.
+        Useful to convert quantile ids from a network to the global quantile ids"""
+        assert network_id < len(self.networks)
+        return sum(n.get_nb_outputs() for n in self.networks[:network_id]) + output_id
+
+    def get_vnode_from_net_and_compute_id(
+        self, network_id: int, compute_node_id: int
+    ) -> VirtualNode:
+        layer_id, node_loc = self.node_map[(network_id, compute_node_id)]
+        return self.layers[layer_id].nodes[node_loc]
+
+    def copy(self):
+        # we only deepcopy the layers, not the networks
+        return ComputeStack(self.networks, deepcopy(self.layers))
+
+    def __repr__(self):
+        # layers with line breaks
+        return '\n'.join([l.__repr__() for l in self.layers])
+
+    def __hash__(self):
+        return hash((tuple(self.networks), tuple(self.layers)))
+
+    def build(self):
+        self.assemble_stack()
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+### {{{                       --    internal utils     --
+
+    def add_layer(self, layer: ComputeLayer):
+        self.layers.append(layer)
+        return self
+
+    def add_substack(self, substack):
+        assert self.networks == substack.networks
+        self.layers.extend(substack.layers)
+        return self
+
+    def check(self):
+        for l in self.layers:
+            l.check()
+            for n in l.nodes:
+                assert id(n.network) == id(self.networks[n.network_id])
+        assert self.layers[0].nodes[0].get_compute_node().type == 'input'
+        for net_id in range(len(self.networks)):
+            prev = -1
+            for l in self.layers:
+                for n in l.nodes:
+                    if n.network_id == net_id:
+                        assert (
+                            n.batch_order >= prev
+                        ), f'wrong batch order ({n.batch_order} < {prev} for {n})'
+                        prev = n.batch_order
+
+    def get_node_input_start_index(self, node: VirtualNode, input_slot: int) -> int:
+        """Returns the start index of the input #input_slot for the given node
+        in the flattened output array"""
+        assert self.node_map is not None, 'call build_map() first'
+
+        input_compute_node_id, input_compute_node_outslot = node.get_compute_node().input_from[
+            input_slot
+        ]
+
+        input_layer_id, input_node_layer_loc = self.node_map[
+            (node.network_id, input_compute_node_id)
+        ]
+        this_node_layer_id, _ = self.node_map[(node.network_id, node.compute_node_id)]
+
+        assert input_layer_id < this_node_layer_id, 'input layer must be before this layer'
+
+        this_layer = self.layers[this_node_layer_id]
+        input_layer = self.layers[input_layer_id]
+
+        this_input_shapes = this_layer.f_input_shapes
+        input_layer_start = self.layers_start_index[input_layer_id]
+
+        assert this_input_shapes[input_slot] == input_layer.f_out_shapes[input_compute_node_outslot]
+
+        flat_out_size = int(np.sum([np.prod(s) for s in input_layer.f_out_shapes]))
+        node_start = input_layer_start + input_node_layer_loc * flat_out_size
+
+        flat_output_shape_till_input = np.sum(
+            [np.prod(s) for s in input_layer.f_out_shapes[:input_compute_node_outslot]]
+        )
+        outslot_start = node_start + flat_output_shape_till_input
+
+        return int(outslot_start)
+
+    @staticmethod
+    def topological_order(graph: pd.DataFrame):
         """Returns a list of lists of compute nodes from the network,
         where each node of a sublist can be computed independently of the others,
         but each sublist must be computed in order."""
         visited = set()
         batches = []
-        while len(visited) < len(self.network.compute_graph):
+        while len(visited) < len(graph):
             independent = [
                 i
-                for i, row in self.network.compute_graph.iterrows()
+                for i, row in graph.iterrows()
                 if (not row['input_from'] or all([x[0] in visited for x in row['input_from']]))
                 and i not in visited
             ]
             if not independent:
-                msg = f'Invalid compute graph, no independent nodes found. Remaining nodes: {set(self.network.compute_graph.index) - visited}. visited={visited}'
+                msg = f'No independent node. Remaining:{set(graph.index) - visited}. Visited:{visited}'
                 raise ValueError(msg)
             visited.update(independent)
             batches.append(independent)
         return batches
 
-    def get_output_proteins(self):
-        return self.network.get_output_proteins()
 
-    def get_input_from_output(self, output_arr):
-        return self.network.get_input_from_output(output_arr)
-
-    def get_inverted_input_proteins(self):
-        return self.network.get_inverted_input_proteins()
-
-    def get_inverted_input_positions(self):
-        return self.network.get_inverted_input_positions()
-
-    def get_quantized_parameters_per_node_type(self, params):
-        """Returns a dictionary with node types as keys and a list of quantized parameters used by that node type as values.
-        When a parameter is quantized, the key to each value is the name of the quantized value (i.e '1x_uORF').
-        When a parameter is not quantized, we record all of the values for this param in use in the network, and the key
-        is the id of the node that uses this parameter with the specific given value.
-        """
-        node_dict = self.network.get_compute_types()
-        params_per_type = {k: dict() for k in node_dict.keys()}
-        pnode = params['node']
-        if self.node_namespace is not None:
-            pnode = params['node'][self.node_namespace]
-        for node_type, node_ids in node_dict.items():
-            for node_id in node_ids:
-                if node_id in pnode.keys():
-                    for pname, v in pnode[node_id].items():
-                        if pname in params_per_type[node_type].keys():
-                            params_per_type[node_type][pname].update({node_id: v})
-                        else:
-                            params_per_type[node_type][pname] = {node_id: v}
-        res = {}
-        shared = params['shared']
-        for ntype, pdict in params_per_type.items():  # pdict is dict(str,dict(int,np.ndarray))
-            res[ntype] = {}
-            # check if we have some quantization values for the parameters
-            # a quantization value has a key of the form vname::param_name
-            # we want to collect all the quantization values for the parameters of this node type
-            for pname in pdict:
-                matching = {k: v for k, v in shared.items() if k.endswith(f'::{pname}')}
-                if len(matching) > 0:
-                    res[ntype][pname] = matching
-                else:
-                    res[ntype][pname] = params_per_type[ntype][pname]
-        res
-        return res
+    @staticmethod
+    def make_all_topo_vnodes(networks: list[bc.Network]):
+        return [
+            [
+                [VirtualNode.from_node(net_id, net, node_id, b_id) for node_id in node_batch]
+                for b_id, node_batch in enumerate(ComputeStack.topological_order(net.compute_graph))
+            ]
+            for net_id, net in enumerate(networks)
+        ]
 
 
-#                                                                            }}}
+    @staticmethod
+    def get_current_batches(stack, type_dict: dict[str, list[VirtualNode]]):
+        MAXINT = 2**60
+        current_batches = [MAXINT for _ in stack.networks]
+        for t, nodes in type_dict.items():
+            for n in nodes:
+                assert n.batch_order < MAXINT
+                current_batches[n.network_id] = min(current_batches[n.network_id], n.batch_order)
+        current_batches = [None if b == MAXINT else b for b in current_batches]
+        return current_batches
 
 
+    @staticmethod
+    def get_available_next_layer_types(current_batches, type_dict: dict[str, list[VirtualNode]]):
+        # a type is available if there are any node with batch_order == current_batches[network_id]
+        return [
+            t
+            for t, nodes in type_dict.items()
+            if any(n.batch_order <= current_batches[n.network_id] for n in nodes)
+        ]
+
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+### {{{                         --     building     --
+
+    @staticmethod
+    def make_smallest_stack(stack, type_dict: dict[str, list[VirtualNode]]):
+        current_batches = ComputeStack.get_current_batches(stack, type_dict)
+        if all(b is None for b in current_batches):
+            return stack
+        next_types = ComputeStack.get_available_next_layer_types(current_batches, type_dict)
+        res = []
+        for t in next_types:
+            l, new_type_dict = ComputeLayer.make_layer(current_batches, type_dict, t)
+            substack = ComputeStack(stack.networks, [l])
+            res.append(ComputeStack.make_smallest_stack(substack, new_type_dict))
+        # we append the stack with the smallest number of layers
+        minstack = min(res, key=lambda s: len(s.layers))
+        return stack.add_substack(minstack)
+
+
+    def assemble_stack(self):
+        n_list = ut.flatten(ComputeStack.make_all_topo_vnodes(self.networks))
+        type_dict = {}
+        for n in n_list:
+            type_dict.setdefault(n.type_signature, []).append(n)
+        minstack = ComputeStack.make_smallest_stack(ComputeStack(self.networks, []), type_dict)
+        self.layers = minstack.layers
+
+
+
+
+    def make_layer_input_getters(self, layer_id):
+        """Returns a list of functions that return the input values for each node in the given layer
+        from the flattened output array"""
+
+        layer = self.layers[layer_id]
+        assert layer.is_built, 'Layer not built'
+        input_shapes = layer.f_input_shapes  # list of tuples, one for each input
+        input_lengths = [int(np.prod(s)) for s in input_shapes]  # flattened length of each input
+
+        # input layer is a special case as it doesn't take values from the stack output
+        if layer.f_type == 'input':
+            assert len(input_shapes) == 1  # each node has one "input"
+            assert layer_id == 0  # input layer is the first layer
+            assert input_shapes == layer.f_out_shapes
+            # input indices of the input layer are just the indices of the nodes
+            input_start_indices = np.array([[n.node_id * input_lengths[0] for n in layer.nodes]])
+        else:
+            input_start_indices = np.array(
+                [
+                    [self.get_node_input_start_index(n, i) for n in layer.nodes]
+                    for i in range(len(input_shapes))
+                ]
+            )
+
+        def generate_get_inputs(input_slot):
+            starts = input_start_indices[input_slot]
+            shape = input_shapes[input_slot]
+            length = input_lengths[input_slot]
+            indices = np.array([np.arange(st, st + length) for st in starts])
+
+            # We can either dynamically slice the big output array at start:length
+            # or directly index it at indices... I'm not sure which is faster
+            # but I guess it's better to use dynamic slicing for large inputs?
+            DYN_SLICE = False
+            DYN_SLICE_THRESHOLD = 20
+            if length > DYN_SLICE_THRESHOLD:
+                DYN_SLICE = True
+
+            def get_inputs_dyn(all_outputs):
+                def dyn_slice(start):
+                    return jax.lax.dynamic_slice(all_outputs, (start,), (length,)).reshape(shape)
+
+                return vmap(dyn_slice)(starts)
+
+            def get_inputs_idx(all_outputs):
+                def slice(idx):
+                    return all_outputs[idx].reshape(shape)
+
+                return vmap(slice)(indices)
+
+            return get_inputs_dyn if DYN_SLICE else get_inputs_idx
+
+        get_inputs = [generate_get_inputs(i) for i in range(len(input_shapes))]
+
+        return get_inputs
+
+    def _refresh(self):
+        allbuilt = True
+        self.total_nb_of_outputs = 0
+        self.total_nb_of_inputs = 0
+        self.max_nb_of_outputs_per_network = 0
+        for n in self.networks:
+            nbout = int(n.get_nb_outputs())
+            self.total_nb_of_inputs += n.get_nb_inputs()
+            self.total_nb_of_outputs += nbout
+            self.max_nb_of_outputs_per_network = max(self.max_nb_of_outputs_per_network, nbout)
+
+        # build a dict of {(net_id, node_id): (layer_id, node_position)}
+        node_id = 0
+        self.node_map = {}
+        for l_id, l in enumerate(self.layers):
+            l.layer_id = l_id
+            if l.is_built:
+                for n_id, n in enumerate(l.nodes):
+                    self.node_map[(n.network_id, n.compute_node_id)] = (l_id, n_id)
+                    n.node_id = node_id
+                    node_id += 1
+            else:
+                allbuilt = False
+                break
+
+        self.number_of_nodes = node_id
+        # build info about the output shape
+        # the output of a compute stack is a flat array of all the flattened outputs of all the nodes
+        # in a layer, outputs are flattened in the same order as the nodes in the layer
+        if allbuilt:
+            start_id = 0
+            self.layers_start_index = []
+            for l in self.layers:
+                self.layers_start_index.append(start_id)
+                start_id += int(l.flattened_output_shape())
+            self.check()
+            self.output_shape = (int(start_id),)
+
+        self.is_built = allbuilt
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+def make_stack(all_networks):
+
+    stack = build_stack(all_networks)
+    ut.info(
+        f'Reduced {sum(len(l.nodes) for l in stack.layers)} nodes to {len(stack.layers)} layers'
+    )
+
+    # build a compute stack
+
+    config = bcn.DEFAULT_NODE_CONFIG
+    # let's make shared_config a property of the stack
+
+    # first we need to store all quantizable parameter names
+    stack.shared_store = {}
+    store = stack.shared_store
+    quantization_params = {}
+    for n_id, n in enumerate(all_networks):
+        for qn, qv in bcn.get_all_possible_quantization_params(n).items():
+            quantization_params[qn] = set(qv) | quantization_params.get(qn, set())
+    quantization_params = {k: sorted(v) for k, v in quantization_params.items()}
+    for pname, pv in quantization_params.items():
+        ut.at_path(store, ut.QNAME_PATH + f"/{pname}", pv)
+
+    # setup each layer
+    for layer in stack.layers:
+        stack.build_map()
+        layer.setup(config, stack=stack)
+    stack.build_map()
+
+    def init(rng_key):
+        params = {}
+        for layer in tqdm(stack.layers):
+            rng_key, _ = jax.random.split(rng_key)
+            assert layer.is_built, 'Layer not built'
+            if layer.f_prepare is not None:
+                layer.f_prepare(params, vnodelist=layer.nodes, key=rng_key)
+        return params
+
+    stack.init = init
+
+    input_getters = [make_layer_input_getters(stack, l_id) for l_id in range(len(stack.layers))]
+
+    output_shape = stack.output_shape  # we use one big flat output array
+    assert len(output_shape) == 1, 'Only flat output arrays are supported for now'
+
+    node_ids = [jnp.array([n.node_id for n in l.nodes]) for l in stack.layers]
+
+    def compute(params, inputs, quantiles, key):
+
+        out = jnp.full(output_shape, np.nan)
+        input_indices = jnp.arange(len(inputs))
+        out = out.at[input_indices].set(inputs)
+
+        for lid in range(1, len(stack.layers)):
+            layer_start_index = stack.layers_start_index[lid]
+            input_shapes = stack.layers[lid].f_input_shapes
+            n_inputs = len(input_shapes)
+            assert n_inputs == len(input_getters[lid]), 'Mismatch in number of inputs'
+            layer_inputs = [input_getters[lid][i](out) for i in range(n_inputs)]
+            assert all(
+                len(li) == len(layer_inputs[0]) for li in layer_inputs
+            ), 'Mismatch in input lengths'
+
+            def f(node_id, key, *inputs):
+                return stack.layers[lid].f_apply(
+                    *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
+                )
+
+            keys = jax.random.split(key, len(layer_inputs[0]))
+
+            out_layer = vmap(f)(node_ids[lid], keys, *layer_inputs)
+            out_flat = out_layer.reshape(-1)
+
+            out = out.at[layer_start_index : layer_start_index + out_flat.shape[0]].set(out_flat)
+
+        return out
+
+    stack.compute = compute
+
+    return stack
