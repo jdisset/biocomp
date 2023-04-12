@@ -5,7 +5,8 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import jit, vmap
+import pandas as pd
+from jax import vmap
 
 from . import nodes as nd
 from .network import Network
@@ -158,6 +159,7 @@ class ComputeLayer:
 
 ### {{{                       --     Compute Stack     --
 
+
 @dataclass
 class ComputeStack:
     networks: list[Network]
@@ -175,11 +177,14 @@ class ComputeStack:
     # can be used to store things like the name of the parts for some quantized parameters
     # as they can't be stored in params (no strings allowed)
 
-    init = None
+    is_assembled = False
     is_built = False
     number_of_nodes = 0
 
-### {{{                     --     public interface     --
+    init = None
+    apply = None
+
+    ### {{{                     --     public interface     --
     def get_network_output_indices(self, network_id: int):
         """Returns the start index and shape of the output of the given network"""
         output_node = self.networks[
@@ -192,7 +197,6 @@ class ComputeStack:
             [np.prod(s) for s in out_shape]
         )
         return int(start_index), out_shape
-
 
     def get_network_global_output_id(self, network_id: int, output_id: int):
         """Considering every network's outputs ordered by network id,
@@ -207,6 +211,20 @@ class ComputeStack:
         layer_id, node_loc = self.node_map[(network_id, compute_node_id)]
         return self.layers[layer_id].nodes[node_loc]
 
+    def init(self, rng_key):
+        assert self.is_built, 'Stack not built'
+        params = {}
+        for l_id, layer in enumerate(self.layers):
+            assert layer.is_built, 'Layer not built'
+            assert l_id == layer.layer_id, 'Layer id mismatch'
+            rng_key, _ = jax.random.split(rng_key)
+            ut.logger.info(
+                f'Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}'
+            )
+            if layer.f_prepare is not None:
+                layer.f_prepare(params, vnodelist=layer.nodes, key=rng_key)
+        return params
+
     def copy(self):
         # we only deepcopy the layers, not the networks
         return ComputeStack(self.networks, deepcopy(self.layers))
@@ -218,18 +236,36 @@ class ComputeStack:
     def __hash__(self):
         return hash((tuple(self.networks), tuple(self.layers)))
 
-    def build(self):
-        self.assemble_stack()
+    def build(self, config: nd.ComputeConfigManager):
+        ut.logger.info('Building compute stack')
+        self._assemble_stack()
+        self._refresh()
+        self._init_quantization_params()
+        for layer in self.layers:
+            layer.setup(config, stack=self)
+            self._refresh()
+        self._generate_apply_method()
+        self.check()
+        self.is_built = True
 
-##────────────────────────────────────────────────────────────────────────────}}}
+    def __call__(self, *args, **kwargs):
+        if not self.is_built:
+            raise ValueError('Compute stack is not built, can\'t call it')
+        return self.apply(*args, **kwargs)
 
-### {{{                       --    internal utils     --
+    def apply_single_network(self, network_id: int, *args, **kwargs):
+        if not self.is_built:
+            raise ValueError('Compute stack is not built, can\'t call it')
+
+    ##────────────────────────────────────────────────────────────────────────────}}}
+
+    ### {{{                       --    internal utils     --
 
     def add_layer(self, layer: ComputeLayer):
         self.layers.append(layer)
         return self
 
-    def add_substack(self, substack):
+    def extend(self, substack):
         assert self.networks == substack.networks
         self.layers.extend(substack.layers)
         return self
@@ -305,9 +341,8 @@ class ComputeStack:
             batches.append(independent)
         return batches
 
-
     @staticmethod
-    def make_all_topo_vnodes(networks: list[bc.Network]):
+    def make_all_topo_vnodes(networks: list[Network]):
         return [
             [
                 [VirtualNode.from_node(net_id, net, node_id, b_id) for node_id in node_batch]
@@ -316,18 +351,16 @@ class ComputeStack:
             for net_id, net in enumerate(networks)
         ]
 
-
     @staticmethod
     def get_current_batches(stack, type_dict: dict[str, list[VirtualNode]]):
         MAXINT = 2**60
         current_batches = [MAXINT for _ in stack.networks]
-        for t, nodes in type_dict.items():
+        for nodes in type_dict.values():
             for n in nodes:
                 assert n.batch_order < MAXINT
                 current_batches[n.network_id] = min(current_batches[n.network_id], n.batch_order)
         current_batches = [None if b == MAXINT else b for b in current_batches]
         return current_batches
-
 
     @staticmethod
     def get_available_next_layer_types(current_batches, type_dict: dict[str, list[VirtualNode]]):
@@ -338,29 +371,45 @@ class ComputeStack:
             if any(n.batch_order <= current_batches[n.network_id] for n in nodes)
         ]
 
+    ##────────────────────────────────────────────────────────────────────────────}}}
 
+    ### {{{                         --     building     --
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{                         --     building     --
+    @staticmethod
+    def make_layer_from_current_batches(
+        current_batches, type_dict: dict[str, list[VirtualNode]], t: str
+    ):
+        """Returns a ComputeLayer and a new type_dict
+        without the nodes that were not used in the layer"""
+        layer_nodes = []
+        new_type_dict = deepcopy(type_dict)
+        new_type_dict[t] = []
+        for n in type_dict[t]:
+            if n.batch_order <= current_batches[n.network_id]:
+                layer_nodes.append(n)
+            else:
+                new_type_dict[t].append(n)
+        return ComputeLayer(layer_nodes), new_type_dict
 
     @staticmethod
     def make_smallest_stack(stack, type_dict: dict[str, list[VirtualNode]]):
+
         current_batches = ComputeStack.get_current_batches(stack, type_dict)
         if all(b is None for b in current_batches):
             return stack
         next_types = ComputeStack.get_available_next_layer_types(current_batches, type_dict)
         res = []
         for t in next_types:
-            l, new_type_dict = ComputeLayer.make_layer(current_batches, type_dict, t)
+            l, new_type_dict = ComputeStack.make_layer_from_current_batches(
+                current_batches, type_dict, t
+            )
             substack = ComputeStack(stack.networks, [l])
             res.append(ComputeStack.make_smallest_stack(substack, new_type_dict))
         # we append the stack with the smallest number of layers
         minstack = min(res, key=lambda s: len(s.layers))
-        return stack.add_substack(minstack)
+        return stack.extend(minstack)
 
-
-    def assemble_stack(self):
+    def _assemble_stack(self):
         n_list = ut.flatten(ComputeStack.make_all_topo_vnodes(self.networks))
         type_dict = {}
         for n in n_list:
@@ -368,10 +417,7 @@ class ComputeStack:
         minstack = ComputeStack.make_smallest_stack(ComputeStack(self.networks, []), type_dict)
         self.layers = minstack.layers
 
-
-
-
-    def make_layer_input_getters(self, layer_id):
+    def _make_layer_input_getters(self, layer_id):
         """Returns a list of functions that return the input values for each node in the given layer
         from the flattened output array"""
 
@@ -428,6 +474,7 @@ class ComputeStack:
         return get_inputs
 
     def _refresh(self):
+        """Refreshes all the meta information, indexing and mapping of the stack"""
         allbuilt = True
         self.total_nb_of_outputs = 0
         self.total_nb_of_inputs = 0
@@ -465,91 +512,60 @@ class ComputeStack:
             self.check()
             self.output_shape = (int(start_id),)
 
-        self.is_built = allbuilt
+        self.is_assembled = allbuilt
+
+    def _init_quantization_params(self):
+        # first we need to store all quantizable parameter names
+        self.shared_store = {}
+        quantization_params = {}
+        for n in self.networks:
+            for qn, qv in nd.get_all_possible_quantization_params(n).items():
+                quantization_params[qn] = set(qv) | quantization_params.get(qn, set())
+        quantization_params = {k: sorted(v) for k, v in quantization_params.items()}
+        for pname, pv in quantization_params.items():
+            ut.at_path(self.shared_store, ut.QNAME_PATH + f"/{pname}", pv)
+
+    def _generate_apply_method(self):
+
+        input_getters_f = [self._make_layer_input_getters(l_id) for l_id in range(len(self.layers))]
+        node_ids = [jnp.array([n.node_id for n in l.nodes]) for l in self.layers]
+
+        # TODO
+        # find all output nodes, their indices and shapes, so that we can select the right outputs
+        # THERE CAN BE MULTIPLE OUTPUT LAYERS!!
+
+        def get_outputs(out):
+            pass
+
+
+        def apply(params, inputs, quantiles, key):
+
+            assert len(inputs) == self.total_nb_of_inputs, 'Mismatch in number of inputs'
+
+            out = inputs.reshape(-1)
+
+            for lid in range(1, len(self.layers)):
+
+                assert out.shape[0] == self.layers_start_index[lid]
+
+                n_inputs = len(self.layers[lid].f_input_shapes)
+                layer_inputs = [input_getters_f[lid][i](out) for i in range(n_inputs)]
+
+                def f(node_id, key, *inputs):
+                    return self.layers[lid].f_apply(
+                        *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
+                    )
+
+                keys = jax.random.split(key, len(layer_inputs[0]))
+
+                layer_out = vmap(f)(node_ids[lid], keys, *layer_inputs).reshape(-1)
+                out = jnp.concatenate([out, layer_out])
+
+            return get_outputs(out)
+
+        self.apply = apply
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-
-def make_stack(all_networks):
-
-    stack = build_stack(all_networks)
-    ut.info(
-        f'Reduced {sum(len(l.nodes) for l in stack.layers)} nodes to {len(stack.layers)} layers'
-    )
-
-    # build a compute stack
-
-    config = bcn.DEFAULT_NODE_CONFIG
-    # let's make shared_config a property of the stack
-
-    # first we need to store all quantizable parameter names
-    stack.shared_store = {}
-    store = stack.shared_store
-    quantization_params = {}
-    for n_id, n in enumerate(all_networks):
-        for qn, qv in bcn.get_all_possible_quantization_params(n).items():
-            quantization_params[qn] = set(qv) | quantization_params.get(qn, set())
-    quantization_params = {k: sorted(v) for k, v in quantization_params.items()}
-    for pname, pv in quantization_params.items():
-        ut.at_path(store, ut.QNAME_PATH + f"/{pname}", pv)
-
-    # setup each layer
-    for layer in stack.layers:
-        stack.build_map()
-        layer.setup(config, stack=stack)
-    stack.build_map()
-
-    def init(rng_key):
-        params = {}
-        for layer in tqdm(stack.layers):
-            rng_key, _ = jax.random.split(rng_key)
-            assert layer.is_built, 'Layer not built'
-            if layer.f_prepare is not None:
-                layer.f_prepare(params, vnodelist=layer.nodes, key=rng_key)
-        return params
-
-    stack.init = init
-
-    input_getters = [make_layer_input_getters(stack, l_id) for l_id in range(len(stack.layers))]
-
-    output_shape = stack.output_shape  # we use one big flat output array
-    assert len(output_shape) == 1, 'Only flat output arrays are supported for now'
-
-    node_ids = [jnp.array([n.node_id for n in l.nodes]) for l in stack.layers]
-
-    def compute(params, inputs, quantiles, key):
-
-        out = jnp.full(output_shape, np.nan)
-        input_indices = jnp.arange(len(inputs))
-        out = out.at[input_indices].set(inputs)
-
-        for lid in range(1, len(stack.layers)):
-            layer_start_index = stack.layers_start_index[lid]
-            input_shapes = stack.layers[lid].f_input_shapes
-            n_inputs = len(input_shapes)
-            assert n_inputs == len(input_getters[lid]), 'Mismatch in number of inputs'
-            layer_inputs = [input_getters[lid][i](out) for i in range(n_inputs)]
-            assert all(
-                len(li) == len(layer_inputs[0]) for li in layer_inputs
-            ), 'Mismatch in input lengths'
-
-            def f(node_id, key, *inputs):
-                return stack.layers[lid].f_apply(
-                    *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
-                )
-
-            keys = jax.random.split(key, len(layer_inputs[0]))
-
-            out_layer = vmap(f)(node_ids[lid], keys, *layer_inputs)
-            out_flat = out_layer.reshape(-1)
-
-            out = out.at[layer_start_index : layer_start_index + out_flat.shape[0]].set(out_flat)
-
-        return out
-
-    stack.compute = compute
-
-    return stack

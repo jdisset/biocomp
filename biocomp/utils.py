@@ -27,21 +27,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger('biocomp')
-
-def warn(*args, **kwargs):
-    logger.warning(*args, **kwargs)
-
-
-def info(*args, **kwargs):
-    logger.info(*args, **kwargs)
-
-
-def debug(*args, **kwargs):
-    logger.debug(*args, **kwargs)
-
-
-def error(*args, **kwargs):
-    logger.error(*args, **kwargs)
+logger.setLevel(20)
 
 @contextmanager
 def timer(name=None):
@@ -137,9 +123,15 @@ def uniqueIdGenerator(start=0):
     return uniqueId
 
 
-def flatten(t):
+def flatten_single(t):
+    """Flattens a single level of a nested list"""
     return [item for sublist in t for item in sublist]
 
+def flatten(x):
+    if isinstance(x, list):
+        return [a for i in x for a in flatten(i)]
+    else:
+        return [x]
 
 def updated_dict(d1, d2):
     res = {}

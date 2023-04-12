@@ -5,11 +5,10 @@ import pandas as pd
 from . import utils as ut
 from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast
 from itertools import product
-from hashlib import sha256
 
 
 part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF_group': 'tl_rate'}
-parameter_to_default_part = {'tl_rate': 'empty_tc', 'tc_rate': 'empty'}
+parameter_to_default_part = {'tl_rate': '00_empty_tc', 'tc_rate': 'hEF1a'}
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -252,9 +251,6 @@ class Network:
         if build:
             self.build()
 
-    def __hash__(self):
-        return sha256(self.name + self.compute_graph.to_csv().encode('utf-8')).hexdigest()
-
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                  --     public tools & utils    --
     # ···············································································
@@ -363,7 +359,7 @@ class Network:
 
     def set_inputs(self, input_ids):
         assert self.is_built()
-        ut.debug(f'setting inputs to {input_ids}')
+        ut.logger.debug(f'setting inputs to {input_ids}')
         for i, inp_id in enumerate(input_ids):
             self.compute_graph.loc[inp_id, 'type'] = 'input'
             self.compute_graph.loc[inp_id, 'extra'].update({'input_position': i})
@@ -799,7 +795,7 @@ class Network:
         # we add 1 numeric node per source or aggregation that's "at the top",
         # i.e its input_from is empty.
         topnodes = cdf[cdf.input_from.apply(len) == 0]
-        ut.debug(f'Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}')
+        ut.logger.debug(f'Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}')
         for i, r in topnodes.iterrows():
             nid = uidGen()
             newnode = GraphComputeNode(nid, 'numeric', None, 1)
@@ -866,14 +862,18 @@ class Network:
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
 
-    def get_output_proteins(self):
-        """Returns the names of the proteins that are outputs of the network"""
+    def get_output_compute_node(self):
         onode = self.compute_graph[self.compute_graph['type'] == 'output']
         assert len(onode) == 1, f'Invalid number of output nodes: {len(onode)}'
-        return [
-            self.central_dogma_graph.loc[cdg_id]['content'][0]
-            for cdg_id in onode.iloc[0]['cdg_input']
-        ]
+        return onode.iloc[0]
+
+    def get_output_proteins(self):
+        """Returns the names of the proteins that are outputs of the network"""
+        onode = self.get_output_compute_node()
+        return [self.central_dogma_graph.loc[cdg_id]['content'][0] for cdg_id in onode['cdg_input']]
+
+    def get_nb_outputs(self):
+        return len(self.get_output_proteins())
 
     def get_input_from_output(self, output_arr):
         """Given an array of output values, returns the columns that are inputs of the inverted network,
@@ -903,6 +903,9 @@ class Network:
         assert set(mapping.keys()) == set(range(len(mapping.keys())))
         assert len(mapping.keys()) == len(set(mapping.values()))
         return mapping
+
+    def get_nb_inputs(self):
+        return len(self.get_inverted_input_proteins())
 
     def cleanup(self):
         if self.compute_graph is not None:
@@ -1055,9 +1058,9 @@ class Network:
 # -> prepend the invertible paths to the model, define inputs from output
 
 
-def get_invertible_paths(network, start_node_id, invertible_nodes:set[str]):
+def get_invertible_paths(network, start_node_id, inverse_dict):
     def _is_invertible(node):
-        invertible = node.type in invertible_nodes and len(node['input_from']) <= 1
+        invertible = node.type in inverse_dict and len(node['input_from']) <= 1
         return invertible
 
     paths = []
@@ -1087,19 +1090,19 @@ def get_invertible_paths(network, start_node_id, invertible_nodes:set[str]):
     return paths
 
 
-DEFAULT_INVERTIBLE_NODES= {
-    "translation",
-    "transcription",
-    "numeric",
-    "aggregation",
-    "source"
+DEFAULT_INVERSE_DICT = {
+    "translation": "inv_translation",
+    "transcription": "inv_transcription",
+    "numeric": "inv_numeric",
+    "aggregation": "inv_aggregation",
+    "source": "inv_source",
 }
 
 
 def inverted_network(
-    network: Network, nodes: str = 'auto', invertible_nodes:set[str]=DEFAULT_INVERTIBLE_NODES, mode='shortest'
+    network: Network, nodes: str = 'auto', inverse_dict=DEFAULT_INVERSE_DICT, mode='shortest'
 ):
-    ut.debug(f'Inverting network {network.name}')
+    ut.logger.debug(f'Inverting network {network.name}')
 
     # inverse_dict: node_type -> inverse_node_type
 
@@ -1118,7 +1121,7 @@ def inverted_network(
         start_nodes = nodes
 
     # we compute a list of invertible paths that link each start nodes to the output
-    inv_paths = {n: get_invertible_paths(network, n, invertible_nodes) for n in start_nodes}
+    inv_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
 
     # For each start_node, we might have more than one path.
     # In 'shortest' mode, we just pick the shortest one.
@@ -1139,9 +1142,9 @@ def inverted_network(
         uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
         for start_n, path in paths.items():
             # we start by replacing the start node by the first node of the path
-            new_network.compute_graph.loc[
-                start_n, 'type'
-            ] = f'inv_{new_network.compute_graph.loc[start_n, "type"]}'
+            new_network.compute_graph.loc[start_n, 'type'] = inverse_dict[
+                new_network.compute_graph.loc[start_n, 'type']
+            ]
             prev = start_n
 
             for i, (node_id, slot) in enumerate(
@@ -1169,7 +1172,7 @@ def inverted_network(
                 if isinstance(cdg_in, list):
                     cdg_in = cdg_in[slot]
                 new_n = GraphComputeNode(
-                    nid, invertible_nodes[n_type], cdg_in, original_node.cdg_output
+                    nid, inverse_dict[n_type], cdg_in, original_node.cdg_output
                 )
                 new_n.output_to = [(prev, 0)]
                 # inverse nodes always have only one input and one output

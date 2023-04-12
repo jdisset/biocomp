@@ -1,6 +1,7 @@
 from .library import PartsLibrary as PartsLibrary
 from . import utils as ut
 from .network import Network, inverted_network
+from .compute import ComputeGraphModel
 from pathlib import Path
 import numpy as np
 import jax
@@ -247,7 +248,7 @@ class XP:
     # Each sample in an Experiment implements one recipe, and resulted in one data file.
     # The XP object stores, along xp specific infos, all the recipes (in a sqlite database)
     # and data (in a dictionary of sample name -> pandas dataframe)
-    # It also provides convenience functions to build the corrersponding networks.
+    # It also provides convenience functions to build the corrersponding networks and models.
 
     def __init__(
         self,
@@ -337,10 +338,34 @@ class XP:
 
         return tuple(zip(*networks))
 
-    def get_Y(self, networks, sample_names):
+    def build_models(self, node_impl=dict(), numeric_inputs=False, inverse='shortest'):
+
+        """Build the models for each network in the xp.
+        If there are multiple networks per samples (i.e several inversions per network)
+        there will be multiple models per sample."""
+
+        sample_names, networks = self.build_networks(inverse=inverse)
+
+        if numeric_inputs and not inverse:
+            for net in networks.values():
+                net.set_numeric_as_input()
+
+        models = []
+        for i, (n, s) in enumerate(zip(sample_names, networks)):
+            try:
+                ut.logger.debug(f'Building model for sample {s}')
+                m = ComputeGraphModel(n)
+                m.build(node_impl=node_impl, node_namespace=f'{self.name}::{s}::{i}')
+                models.append((m, s))
+            except Exception as e:
+                msg = f'Error building {"inverse" if inverse else ""} model for sample {s}: {e}'
+                raise RuntimeError(msg)
+        return tuple(zip(*models))
+
+    def get_Y(self, models, sample_names):
         assert self.raw_data is not None
-        # we want to reorder data columns to match the network's output
-        out_prots = [net.get_output_proteins() for net in networks]
+        # we want to reorder data columns to match the model's output
+        out_prots = [model.get_output_proteins() for model in models]
         out_channels = [[self.color_names[k] for k in out_prot] for out_prot in out_prots]
         Y = [
             jnp.array(self.raw_data[sample][out_chan])
@@ -348,9 +373,9 @@ class XP:
         ]
         return Y
 
-    def get_XY(self, networks, sample_names):
-        Y = self.get_Y(networks, sample_names)
-        X = [net.get_input_from_output(y) for net, y in zip(networks, Y)]
+    def get_XY(self, models, sample_names):
+        Y = self.get_Y(models, sample_names)
+        X = [model.get_input_from_output(y) for model, y in zip(models, Y)]
         return X, Y
 
     def __str__(self):

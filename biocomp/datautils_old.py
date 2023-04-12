@@ -9,9 +9,9 @@ import pandas as pd
 import biocomp as bc
 import scriptutils as ut
 from pathlib import Path
+import json5
+import json
 from . import defaults as dft
-from . import nodes as nd
-from .compute import ComputeStack
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from jax.scipy.stats import gaussian_kde
@@ -48,34 +48,6 @@ def load(path):
     with open(path, 'rb') as file:
         data = pickle.load(file)
     return data
-
-
-#                                                                            }}}
-# {{{                         --     batches     --
-# ···············································································
-
-
-def split_array_uniform(arr, n_batches, rng_key):
-    n = len(arr)
-    batch_size = n // n_batches
-    a = jax.random.permutation(rng_key, arr)
-    return [a[i * batch_size : (i + 1) * batch_size] for i in range(n_batches)]
-
-
-def split_array_to_len(arr, l, rng_key):
-    a = jax.random.permutation(rng_key, arr)
-    return [a[i * l : (i + 1) * l] for i in range(len(arr) // l)]
-
-
-def batch(X, Y, batch_size, n_batches=None):
-    """Yields batches of data from X and Y."""
-    n = X.shape[0]
-    if n_batches is None:
-        n_batches = n // batch_size
-    # using sampling with replacement
-    for i in range(n_batches):
-        idx = np.random.choice(n, size=batch_size, replace=True)
-        yield X[idx], Y[idx]
 
 
 #                                                                            }}}
@@ -194,7 +166,7 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     return selected
 
 
-# @partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold', 'density_coords'))
+# @partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold'))
 def sample_batches_direct(
     X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.05, density_coords=0.3
 ):
@@ -207,7 +179,7 @@ def sample_batches_direct(
     threshold = jnp.quantile(densities, quantile_threshold)
     midX = jnp.ones((X.shape[1],)) * density_coords
     density_at_midX = kde.evaluate(midX.T)
-    threshold = jnp.minimum(threshold, density_at_midX)
+    threshold = min(threshold, density_at_midX)
     selection_proba = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY)))
     indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
     # or with numpy:
@@ -222,7 +194,7 @@ def sample_batches_direct(
     return Xbatches, Ybatches
 
 
-# @partial(jit, static_argnames=('batch_size', 'n_batches', 'density_quantile_threshold', 'density_coords'))
+# @partial(jit, static_argnames=('batch_size', 'n_batches', 'density_quantile_threshold'))
 def _get_batches(
     X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_threshold, density_coords
 ):
@@ -244,7 +216,7 @@ def _get_batches(
     ]
     xbatches, ybatches = zip(*all_batches)
     # concat along the feature axis (last dimension)
-    xbatches, ybatches = jnp.concatenate(tuple(xbatches), axis=2), jnp.concatenate(
+    xbatches, ybatches = np.concatenate(tuple(xbatches), axis=2), np.concatenate(
         tuple(ybatches), axis=2
     )
     assert xbatches.shape == (n_batches, batch_size, sum([x.shape[1] for x in X]))
@@ -254,54 +226,27 @@ def _get_batches(
 
 
 class DataManager:
-    """The DataManager handles XP data and their matching compute stacks"""
-
-    def __init__(
-        self,
-        X: list,
-        Y: list,
-        networks: list,
-        data_cfg: dict = dft.DEFAULT_CONFIG,
-        compute_cfg: nd.ComputeConfigManager = nd.DEFAULT_COMPUTE_CONFIG,
-    ):
-        self.data_cfg = data_cfg
-        self.compute_cfg = compute_cfg
+    def __init__(self, X: list, Y: list, models: list, cfg: dict = dft.DEFAULT_CONFIG):
+        self.cfg = cfg
         self._raw_X = [np.array(x) for x in X]
         self._raw_Y = [np.array(y) for y in Y]
-        self._networks = networks
+        self._models = models
+        self._jitted_models = [jit(m) for m in models]
         self._X = self.rescale(self._raw_X)
         self._Y = self.rescale(self._raw_Y)
         MAX_VAL = 1.5
         assert max([x.max() for x in self._X]) < MAX_VAL
         assert max([y.max() for y in self._Y]) < MAX_VAL
+        self.indices = None
         self.gen_kdes()
-        self.compute_stack = None
-        self.individual_compute_stacks = {}
-        self.build_compute_stack()
-        # data_checks(X, Y, models)
+        data_checks(X, Y, models)
 
-    def make_subset(self, network_ids):
-        sub_x = [self._raw_X[i] for i in network_ids]
-        sub_y = [self._raw_Y[i] for i in network_ids]
-        sub_networks = [self._networks[i] for i in network_ids]
-        return DataManager(sub_x, sub_y, sub_networks, self.data_cfg, self.compute_cfg)
-
-    def build_compute_stack(self):
-        self.compute_stack = ComputeStack(self._networks)
-        self.compute_stack.build(self.compute_cfg)
-
-    def get_compute_stack(self):
-        return self.compute_stack
-
-    def get_individual_compute_stack(self, network_id):
-        if network_id not in self.individual_compute_stacks:
-            self.individual_compute_stacks[network_id] = ComputeStack([self._networks[network_id]])
-            self.individual_compute_stacks[network_id].build(self.compute_cfg)
-        return self.individual_compute_stacks[network_id]
+    def set_subset(self, indices):
+        self.indices = indices
 
     def gen_kdes(self, bw=None, max_n=10000):
         if bw is None:
-            bw = self.data_cfg['kde_bw_method']
+            bw = self.cfg['kde_bw_method']
         key = jax.random.PRNGKey(0)
         self._kdes = [
             gaussian_kde(
@@ -312,13 +257,13 @@ class DataManager:
         ]
 
     def rescale(self, X):
-        factor = self.data_cfg['log_factor']
-        maxv = self.data_cfg['max_value']
+        factor = self.cfg['log_factor']
+        maxv = self.cfg['max_value']
         return [np.log10(1 + (x / factor)) / np.log10(maxv / factor) for x in X]
 
     def unscale(self, X):
-        factor = self.data_cfg['log_factor']
-        maxv = self.data_cfg['max_value']
+        factor = self.cfg['log_factor']
+        maxv = self.cfg['max_value']
         return [factor * (np.power(maxv / factor, x) - 1) for x in X]
 
     def get_batches(self, rng_key):
@@ -327,47 +272,147 @@ class DataManager:
             self.get_Y(),
             self.get_kdes(),
             rng_key,
-            self.data_cfg['batch_size'],
-            self.data_cfg['n_batches'],
-            self.data_cfg['density_quantile_threshold'],
-            self.data_cfg['coords_for_density_threshold'],
+            self.cfg['batch_size'],
+            self.cfg['n_batches'],
+            self.cfg['density_quantile_threshold'],
+            self.cfg['coords_for_density_threshold'],
         )
-        assert xbatches.shape[2] == sum([n.get_nb_inputs() for n in self._networks])
-        assert ybatches.shape[2] == sum([n.get_nb_outputs() for n in self._networks])
+        assert xbatches.shape[2] == sum([m.n_inputs for m in self.get_models()])
+        assert ybatches.shape[2] == sum([m.n_outputs for m in self.get_models()])
         return xbatches, ybatches
 
-    def get_networks(self):
-        return self._networks
+    def __get(self, fromlist):
+        if self.indices is not None:
+            return [fromlist[i] for i in self.indices]
+        return fromlist
+
+    def get_models(self):
+        return self.__get(self._models)
 
     def get_kdes(self):
-        return self._kdes
+        return self.__get(self._kdes)
 
     def get_X(self):
-        return self._X
+        return self.__get(self._X)
 
     def get_Y(self):
-        return self._Y
+        return self.__get(self._Y)
 
     def get_raw_X(self):
-        return self._raw_X
+        return self.__get(self._raw_X)
 
     def get_raw_Y(self):
-        return self._raw_Y
+        return self.__get(self._raw_Y)
+
+    def get_jitted_models(self):
+        return self.__get(self._jitted_models)
 
     @classmethod
     def from_xps(cls, xplist, config=dft.DEFAULT_CONFIG, **kw):
-        networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
-        X, Y = zip(*[xp.get_XY(m, s) for xp, m, s in zip(xplist, networks, samples)])
-        X, Y, networks = (
+        models, samples = zip(
+            *[xp.build_models(node_impl=config['node_impl'], **kw) for xp in xplist]
+        )
+        X, Y = zip(*[xp.get_XY(m, s) for xp, m, s in zip(xplist, models, samples)])
+        X, Y, models = (
             list(itertools.chain(*X)),
             list(itertools.chain(*Y)),
-            list(itertools.chain(*networks)),
+            list(itertools.chain(*models)),
         )
-        return cls(X, Y, networks, config)
+        return cls(X, Y, models, config)
+
+    # def make_subset(self, ids):
+    # sub_x = [self._raw_X[i] for i in ids]
+    # sub_y = [self._raw_Y[i] for i in ids]
+    # sub_models = [self._models[i] for i in ids]
+    # return DataManager(sub_x, sub_y, sub_models, self.cfg)
 
 
 #                                                                            }}}
+# {{{                         --     batches     --
+# ···············································································
 
+
+def split_array_uniform(arr, n_batches, rng_key):
+    n = len(arr)
+    batch_size = n // n_batches
+    a = jax.random.permutation(rng_key, arr)
+    return [a[i * batch_size : (i + 1) * batch_size] for i in range(n_batches)]
+
+
+def split_array_to_len(arr, l, rng_key):
+    a = jax.random.permutation(rng_key, arr)
+    return [a[i * l : (i + 1) * l] for i in range(len(arr) // l)]
+
+
+def make_batches_dict(Y, n_batches, rng_key, models):
+    y_ = {s: split_array_uniform(Y[s], n_batches, rng_key) for s in Y.keys()}
+    y_batches = [{s: y_[s][i] for s in y_.keys()} for i in range(n_batches)]
+    # get x_batches from y_batches
+    x_batches = []
+    for y_batch in y_batches:
+        x_batch = {}
+        for s in y_batch.keys():
+            x_batch[s] = models[s].get_input_from_output(y_batch[s])
+        x_batches.append(x_batch)
+    return x_batches, y_batches
+
+
+def make_batches_uniform_sampling(
+    X: list[np.ndarray],
+    Y: list[np.ndarray],
+    batch_size: int,
+    rng_key,
+    total_size=None,
+):
+    """Split data into batches of equal size, for a list of arrays (one per sample).
+    Each array might not have the same size originally, but the batches will
+    have the same size and there will be the same amount of batches for Each
+    sample in the end. To do so, we randomly sample from the arrays to get the
+    same size for each batch.
+
+    batch_size: int, the size of each batch (per sample)
+    total_size: batch_size * n_batches. If None, it uses the largest array size.
+
+    returns: x_batches, y_batches. Dimensions are (n_batches, n_models, batch_size, n_features)
+
+    """
+
+    if total_size is None:  # use the largest array as target total size
+        total_size = max(len(y) for y in Y)
+
+    n_batches = total_size // batch_size
+
+    ylist = [jax.random.choice(rng_key, jnp.array(y), (total_size,)) for y in tqdm(Y)]
+    xlist = [m.get_input_from_output(ylist[i]) for i, m in enumerate(models)]
+
+    n_outputs = max(y.shape[1] for y in ylist)
+    n_inputs = max(x.shape[1] for x in xlist)
+
+    # add 0 pad
+    y_p = jnp.array([np.pad(y, ((0, 0), (0, n_outputs - y.shape[1]))) for y in ylist])
+    x_p = jnp.array([np.pad(x, ((0, 0), (0, n_inputs - x.shape[1]))) for x in xlist])
+
+    y_batches = jnp.array(np.split(y_p[:, : n_batches * batch_size], n_batches, axis=1))
+    x_batches = jnp.array(np.split(x_p[:, : n_batches * batch_size], n_batches, axis=1))
+
+    assert y_batches.shape == (n_batches, len(Y), batch_size, n_outputs)
+    assert x_batches.shape == (n_batches, len(Y), batch_size, n_inputs)
+
+    return x_batches, y_batches
+
+
+def batch(X, Y, batch_size, n_batches=None):
+    """Yields batches of data from X and Y."""
+    n = X.shape[0]
+    if n_batches is None:
+        n_batches = n // batch_size
+    # using sampling with replacement
+    for i in range(n_batches):
+        idx = np.random.choice(n, size=batch_size, replace=True)
+        yield X[idx], Y[idx]
+
+
+#                                                                            }}}
 
 # ─────────────────────────────────────────────────────────────────────────────
 #                            NEIGHBORHOOD BASED TOOLS
@@ -534,29 +579,28 @@ def heatmap(
     return im
 
 
-def smooth(x, y, network, rescale, ax, **kw):
-    ninputs = network.get_nb_inputs()
+def smooth(x, y, model, rescale, ax, **kw):
+    ninputs = model.n_inputs
     if ninputs == 1:
-        smooth_1d(x, y, network, rescale, ax, **kw)
+        smooth_1d(x, y, model, rescale, ax, **kw)
     elif ninputs == 2:
-        smooth_2d(x, y, network, rescale, ax, **kw)
+        smooth_2d(x, y, model, rescale, ax, **kw)
     elif ninputs == 3:
-        smooth_3d(x, y, network, rescale, ax, **kw)
+        smooth_3d(x, y, model, rescale, ax, **kw)
     else:
         raise NotImplementedError(f'Cannot plot {ninputs} inputs')
 
 
-def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1):
+def smooth_1d(x, y, model, rescaler, ax, res=500, xmin=0, xmax=1):
     tree = cKDTree(x)
 
-    input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
-        network, rescaler, xmax=xmax, desired_order=input_order
-    )
-
-    assert len(input_names) == 1
-
+    input_name = model.get_inverted_input_proteins()
+    output_names = model.get_output_proteins()
+    assert len(output_names) == 2
+    assert len(input_name) == 1
+    output = list(set(output_names) - set(input_name))
+    output_pos = output_names.index(output[0])
     y = y[:, output_pos]
-    x = x[:, input_order]
 
     unscaled_ticks = np.logspace(0, 12, 13)
     ticks = np.array(rescaler(unscaled_ticks))
@@ -570,10 +614,11 @@ def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1):
     z = get_knn_mean(xx, y, tree)
     zq1 = get_knn_quantile(xx, y, qu=0.1, tree=tree)
     zq9 = get_knn_quantile(xx, y, qu=0.9, tree=tree)
+    ax.plot(xx, z, c='k')
     ax.fill_between(xx[:, 0], zq1, zq9, alpha=0.25, color='k')
-    ax.set_title(f'{network.name}\nSmoothed mean and [0.1 - 0.9] quantile')
-    ax.set_xlabel(input_names[0])
-    ax.set_ylabel(output_name)
+    ax.set_title(f'{model.network.name}\nSmoothed mean and [0.1 - 0.9] quantile')
+    ax.set_xlabel(input_name[0])
+    ax.set_ylabel(output[0])
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(xmin, xmax)
     ax.set_xticks(ticks)
@@ -582,13 +627,13 @@ def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1):
     ax.set_yticklabels(tlabels)
 
 
-def network_ticks_and_labels(network, rescaler, xmax=1, desired_order=None):
-    input_names = network.get_inverted_input_proteins()
-    output_names = network.get_output_proteins()
+def model_ticks_and_labels(model, rescaler, xmax=1, desired_order=None):
+    input_names = model.get_inverted_input_proteins()
+    output_names = model.get_output_proteins()
 
     if desired_order is not None:
         reordered_input_names = [input_names[i] for i in desired_order]
-        input_order = desired_order
+        input_order=desired_order
     else:
         reordered_input_names = sorted(input_names)
         input_order = [input_names.index(i) for i in reordered_input_names]
@@ -609,7 +654,7 @@ def network_ticks_and_labels(network, rescaler, xmax=1, desired_order=None):
 def smooth_2d(
     x,
     y,
-    network,
+    model,
     rescaler,
     ax,
     res=200,
@@ -620,12 +665,12 @@ def smooth_2d(
     title=True,
     density_plot=False,
     density_as_alpha=False,
-    density_threshold=10,
+    density_threshold = 10,
     **kw,
 ):
 
-    input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
-        network, rescaler, xmax=xmax, desired_order=input_order
+    input_order, input_names, output_pos, output_name, ticks, tlabels = model_ticks_and_labels(
+        model, rescaler, xmax=xmax, desired_order=input_order
     )
 
     y = y[:, output_pos]
@@ -649,23 +694,21 @@ def smooth_2d(
 
     heatmap(ax, z, ticks=ticks, ticklabels=tlabels, opacities=opacities, **kw)
     if x.shape[1] > 2:
-        ax.text(
-            0.35, 0.9, f'{input_names[2]} ≈ {xslice[0]:.2f}', fontsize=8, transform=ax.transAxes
-        )
+        ax.text(0.35, 0.9, f'{input_names[2]} ≈ {xslice[0]:.2f}', fontsize=8, transform=ax.transAxes)
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(input_names[1])
     remove_spines(ax)
 
     ttle = None
     if title is True:
-        ttle = f'{network.name}\n{output_name} smoothed mean'
+        ttle = f'{model.network.name}\n{output_name} smoothed mean'
     elif title is not None:
         ttle = title
     if ttle is not None:
         ax.set_title(ttle)
 
 
-def smooth_3d(x, y, network, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), axes=None, **kw):
+def smooth_3d(x, y, model, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), axes=None, **kw):
     # we'll divide the third axis into slices
     # divide ax using make_axes_locatable
     if axes is None:
@@ -685,7 +728,7 @@ def smooth_3d(x, y, network, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), 
             a.set_position([pos.x0 + i * each_w + i * 0.05, pos.y0, each_w, each_h])
             # plot each slice
     for i, s in enumerate(slices):
-        smooth_2d(x, y, network, rescaler, axes[i], xslice=np.array([slices[i]]), **kw)
+        smooth_2d(x, y, model, rescaler, axes[i], xslice=np.array([slices[i]]), **kw)
 
     # resize all axes  so that they are square and fit in the original ax
     for i, a in enumerate(axes):
@@ -700,11 +743,11 @@ def smooth_3d(x, y, network, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), 
 
     # write title on top
     axes[0].set_title(
-        f'{network.name}\n{network.get_output_proteins()[0]} smoothed mean', fontsize=8
+        f'{model.network.name}\n{model.get_output_proteins()[0]} smoothed mean', fontsize=8
     )
 
 
-def setup_clean_fig(title):
+def setup_fig(title):
     fig, ax = plt.subplots(1, 1)
     fig.patch.set_facecolor('white')
     ax.spines['top'].set_visible(False)
@@ -723,7 +766,7 @@ import matplotlib.transforms as mtransforms
 def timelapse_persp(Q, title, labels=None, outputfile=None, show=True, **kw):
     overlap = 0.1
     vmax = np.nanmax(Q)
-    fig, ax = setup_clean_fig(title)
+    fig, ax = setup_fig(title)
     w, _ = Q[0].shape
     fig.set_size_inches(len(Q) * 3, 6)
     for i, s in enumerate(Q):
@@ -744,27 +787,25 @@ def timelapse_persp(Q, title, labels=None, outputfile=None, show=True, **kw):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                --     summary model plot functions     --
-
-
-def network_plot(
-    dman: DataManager, network_id: int, ax, kde=None, density_quantile_threshold=0.05, **kw
+def model_plot(
+    dman: DataManager, model_id: int, ax, kde=None, density_quantile_threshold=0.05, **kw
 ):
-    network = dman.get_networks()[network_id]
-    x, y = dman.get_X()[network_id], dman.get_Y()[network_id]
+    model = dman.get_models()[model_id]
+    x, y = dman.get_X()[model_id], dman.get_Y()[model_id]
 
     if kde is not False:
         if kde is None:
-            kde = dman.get_kdes()[network_id]
+            kde = dman.get_kdes()[model_id]
         rng = jax.random.PRNGKey(0)
         subsample = optimal_density_subsample(
             x, kde, rng, quantile_threshold=density_quantile_threshold
         )
         x, y = x[subsample], y[subsample]
 
-    smooth(x, y, network, dman.rescale, ax, **kw)
+    smooth(x, y, model, dman.rescale, ax, **kw)
 
 
-def eval_network_plot(
+def eval_model_plot(
     params,
     dman,
     id,
@@ -780,21 +821,21 @@ def eval_network_plot(
     if xrange_eval is None:
         xrange_eval = jnp.array([[0, 0], [1, 1]])
 
-    network = dman.get_networks()[id]
-    jm = jit(dman.get_individual_stack(id).apply)
+    model = dman.get_models()[id]
+    jm = dman.get_jitted_models()[id]
 
     x = jax.random.uniform(
-        k_i, (npoints_eval, network.get_nb_inputs()), minval=xrange_eval[0], maxval=xrange_eval[1]
+        k_i, (npoints_eval, model.n_inputs), minval=xrange_eval[0], maxval=xrange_eval[1]
     )
     quantiles = jax.random.uniform(
-        k_q, (npoints_eval, network.n_outputs), minval=quantile_range[0], maxval=quantile_range[1]
+        k_q, (npoints_eval, model.n_outputs), minval=quantile_range[0], maxval=quantile_range[1]
     )
     keys = jax.random.split(key, npoints_eval)
     y = vmap(jm, in_axes=(None, 0, 0, 0))(params, x, quantiles, keys)
 
     xmin, xmax = jnp.min(x, axis=0)[0], jnp.max(x, axis=0)[0]
 
-    smooth(x, y, network, dman.rescale, ax, xmin=xmin, xmax=xmax, **kw)
+    smooth(x, y, model, dman.rescale, ax, xmin=xmin, xmax=xmax, **kw)
 
 
 def eval_model_grid(
@@ -859,7 +900,7 @@ def plot_model_diff(params, dman, id, ax, **kw):
 
 def report(params, dman, id, suptitle='', **kw):
     fig, ax = mkfig(1, 2, size=(4, 4))
-    network_plot(dman, id, ax[0], **kw)
+    model_plot(dman, id, ax[0], **kw)
     plot_model_at_x(params, dman, id, ax[1], **kw)
     # eval_model_plot(params, dman, id, ax[1], **kw)
     ax[0].set_title(f'Original data (mean)')

@@ -1,5 +1,5 @@
 from . import nodes as nodes
-from . import nn_nodes as nn
+from . import nodes_old as nodes_old
 from functools import partial
 
 T_SIZE = 32
@@ -13,11 +13,11 @@ MEFL_SIZE = 32
 MEFL_DEPTH = 3
 
 DEFAULT_NN_NODES = dict(
-    nodes.DEFAULT_COMPUTE_NODES_DICT,
+    nodes_old.DEFAULT_COMPUTE_NODES_DICT,
     **{
-        'output': partial(nn.output, wsize=MEFL_SIZE, depth=MEFL_DEPTH),
+        'output': partial(nodes_old.output, wsize=MEFL_SIZE, depth=MEFL_DEPTH),
         'transcription': partial(
-            nn.transcription,
+            nodes_old.transcription,
             outer_wsize=T_SIZE,
             outer_depth=T_DEPTH,
             inner_wsize=I_SIZE,
@@ -25,7 +25,7 @@ DEFAULT_NN_NODES = dict(
             inner_out=I_OUT,
         ),
         'translation': partial(
-            nn.translation,
+            nodes_old.translation,
             outer_wsize=T_SIZE,
             outer_depth=T_DEPTH,
             inner_wsize=I_SIZE,
@@ -33,7 +33,7 @@ DEFAULT_NN_NODES = dict(
             inner_out=I_OUT,
         ),
         'inv_transcription': partial(
-            nn.inv_transcription,
+            nodes_old.inv_transcription,
             outer_wsize=T_SIZE,
             outer_depth=T_DEPTH,
             inner_wsize=I_SIZE,
@@ -41,15 +41,15 @@ DEFAULT_NN_NODES = dict(
             inner_out=I_OUT,
         ),
         'inv_translation': partial(
-            nn.inv_translation,
+            nodes_old.inv_translation,
             outer_wsize=T_SIZE,
             outer_depth=T_DEPTH,
             inner_wsize=I_SIZE,
             inner_depth=I_DEPTH,
             inner_out=I_OUT,
         ),
-        'sequestron_ERN': partial(nn.ERN5p, wsize=ERN_SIZE, depth=ERN_DEPTH),
-        'sequestron_ERN3p': partial(nn.ERN3p, wsize=ERN_SIZE, depth=ERN_DEPTH),
+        'sequestron_ERN': partial(nodes_old.ERN5p, wsize=ERN_SIZE, depth=ERN_DEPTH),
+        'sequestron_ERN3p': partial(nodes_old.ERN3p, wsize=ERN_SIZE, depth=ERN_DEPTH),
     },
 )
 

@@ -4,7 +4,6 @@ from .recipe import (
     import_recipes_to_sql as import_recipes_to_sql,
     XP as XP,
 )
-from .compute import ComputeGraphModel as ComputeGraphModel
 from .network import (
     Network as Network,
     Slot as Slot,
@@ -18,7 +17,7 @@ from . import recipe as recipe
 from . import train as train
 from . import evo as evo
 from . import nodes as nodes
-from . import nn_nodes as nn
+from . import nodes_old as nodes_old
 from . import defaults as defaults
 
 from .utils import logger as logger

@@ -15,7 +15,6 @@ parameter_to_default_part = {'tl_rate': '00_empty_tc', 'tc_rate': 'hEF1a'}
 # {{{                   --     general network utils     --
 # ···············································································
 
-
 def fuse_consecutive(cg: pd.DataFrame, types_to_fuse: Tuple[str, str], new_type: str):
     """Fuse 2 consecutive nodes in a graph when they are of the types specified in types_to_fuse"""
     assert len(types_to_fuse) == 2
@@ -359,7 +358,7 @@ class Network:
 
     def set_inputs(self, input_ids):
         assert self.is_built()
-        ut.debug(f'setting inputs to {input_ids}')
+        ut.logger.debug(f'setting inputs to {input_ids}')
         for i, inp_id in enumerate(input_ids):
             self.compute_graph.loc[inp_id, 'type'] = 'input'
             self.compute_graph.loc[inp_id, 'extra'].update({'input_position': i})
@@ -795,7 +794,7 @@ class Network:
         # we add 1 numeric node per source or aggregation that's "at the top",
         # i.e its input_from is empty.
         topnodes = cdf[cdf.input_from.apply(len) == 0]
-        ut.debug(f'Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}')
+        ut.logger.debug(f'Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}')
         for i, r in topnodes.iterrows():
             nid = uidGen()
             newnode = GraphComputeNode(nid, 'numeric', None, 1)
@@ -1102,7 +1101,7 @@ DEFAULT_INVERSE_DICT = {
 def inverted_network(
     network: Network, nodes: str = 'auto', inverse_dict=DEFAULT_INVERSE_DICT, mode='shortest'
 ):
-    ut.debug(f'Inverting network {network.name}')
+    ut.logger.debug(f'Inverting network {network.name}')
 
     # inverse_dict: node_type -> inverse_node_type
 
