@@ -289,7 +289,7 @@ class ComputeStack:
     def get_node_input_start_index(self, node: VirtualNode, input_slot: int) -> int:
         """Returns the start index of the input #input_slot for the given node
         in the flattened output array"""
-        assert self.node_map is not None, 'call build_map() first'
+        assert self.node_map is not None
 
         input_compute_node_id, input_compute_node_outslot = node.get_compute_node().input_from[
             input_slot
@@ -319,6 +319,22 @@ class ComputeStack:
         outslot_start = node_start + flat_output_shape_till_input
 
         return int(outslot_start)
+
+    def get_node_output_start_index(self, node: VirtualNode, output_slot: int) -> int:
+        """Returns the start index of the output #output_slot for the given node"""
+        assert self.node_map is not None
+
+        this_node_layer_id, this_node_pos = self.node_map[(node.network_id, node.compute_node_id)]
+        this_layer = self.layers[this_node_layer_id]
+        assert len(this_layer.f_out_shapes) > output_slot
+
+        this_layer_start = self.layers_start_index[this_node_layer_id]
+        flat_out_size = int(np.sum([np.prod(s) for s in this_layer.f_out_shapes]))
+
+        node_start = this_layer_start + this_node_pos * flat_out_size
+        out_shape_till_output = np.sum([np.prod(s) for s in this_layer.f_out_shapes[:output_slot]])
+
+        return int(node_start + out_shape_till_output)
 
     @staticmethod
     def topological_order(graph: pd.DataFrame):
@@ -373,7 +389,7 @@ class ComputeStack:
 
     ##────────────────────────────────────────────────────────────────────────────}}}
 
-    ### {{{                         --     building     --
+    ### {{{                         --     building     --{{{
 
     @staticmethod
     def make_layer_from_current_batches(
@@ -530,16 +546,17 @@ class ComputeStack:
         input_getters_f = [self._make_layer_input_getters(l_id) for l_id in range(len(self.layers))]
         node_ids = [jnp.array([n.node_id for n in l.nodes]) for l in self.layers]
 
-        # TODO
-        # find all output nodes, their indices and shapes, so that we can select the right outputs
-        # THERE CAN BE MULTIPLE OUTPUT LAYERS!!
+        out_indices_and_shapes = [
+            self.get_network_output_indices(n_id) for n_id in range(len(self.networks))
+        ]
 
-        def get_outputs(out):
-            pass
-
+        output_indices = []
+        for i, shapes in out_indices_and_shapes:
+            assert all([s == (1,) for s in shapes]) # only 1d outputs
+            output_indices.append(np.arange(i, i + len(shapes)))
+        output_indices = np.concatenate(output_indices)
 
         def apply(params, inputs, quantiles, key):
-
             assert len(inputs) == self.total_nb_of_inputs, 'Mismatch in number of inputs'
 
             out = inputs.reshape(-1)
@@ -561,11 +578,20 @@ class ComputeStack:
                 layer_out = vmap(f)(node_ids[lid], keys, *layer_inputs).reshape(-1)
                 out = jnp.concatenate([out, layer_out])
 
-            return get_outputs(out)
+            return out[output_indices]
 
         self.apply = apply
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
+# }}}
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+# output_layers = [l_id for l_id, l in enumerate(self.layers) if l.f_type == 'output']
+# output_shapes = [self.layers[l_id].f_out_shapes for l_id in output_layers]
+# assert len(output_layers) > 0, 'No output layer found'
+# output_nodes = [
+# (l_id, n_id, n, shapes) for l_id, shapes in zip(output_layers, output_shapes)
+# for n_id, n in enumerate(self.layers[l_id].nodes)
+# ]
+# sorted_per_network = sorted(output_nodes, key=lambda x: x[2].network_id)

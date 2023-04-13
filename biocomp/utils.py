@@ -22,12 +22,16 @@ from contextlib import contextmanager
 # ···············································································
 
 FORMAT = "%(message)s"
-logging.basicConfig(
-    level="NOTSET", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()]
-)
 
 logger = logging.getLogger('biocomp')
 logger.setLevel(20)
+
+if not logger.handlers:
+    logging.basicConfig(
+        level="NOTSET", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()]
+    )
+
+
 
 @contextmanager
 def timer(name=None):

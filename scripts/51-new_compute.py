@@ -24,7 +24,8 @@ with ut.timer('from zero to ready-to-compile'):
     matrix_xp = su.load_xp('2023-02-16_Matrix', lib, data_path='./data/calibrated_data')
     dman_full = du.DataManager.from_xps([matrix_xp], config, inverse='all')
 
-dman = dman_full.make_subset(list(range(10)))
+# dman = dman_full.make_subset(list(range(10)))
+dman = dman_full
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                      --     quantify uorfs     --
@@ -74,21 +75,19 @@ stack = dman.get_compute_stack()
 
 config['static_params'] = ['/__static__','/node']
 
+dman.data_cfg['batch_size'] = 16
+dman.data_cfg['n_batches'] = 2048
 
-
-dman.data_cfg['batch_size'] = 8
-dman.data_cfg['n_batches'] = 32
-
-# --- init
+## --- init
 
 with ut.timer('Stack initialization'):
     params = stack.init(jax.random.PRNGKey(0))
+    optimizer = tr.get_optimizer(config)
+    dynamic, _ = ut.split_params(params, config['static_params'])
+    opt_state = optimizer.init(dynamic)
 
-optimizer = tr.get_optimizer(config)
-dynamic, _ = ut.split_params(params, config['static_params'])
-opt_state = optimizer.init(dynamic)
+## --- batches
 
-# batches
 with ut.timer('Getting batches'):
     xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
 
@@ -96,8 +95,7 @@ total_batches = config['n_batches']
 assert total_batches == xbatches.shape[0] == ybatches.shape[0]
 nbatches_per_epoch = total_batches // config['n_epochs_per_batch_rotation']
 
-# --- loss and updates
-##
+## --- loss and updates
 
 vmapped_compute = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
@@ -155,8 +153,11 @@ def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
     )
     return final_params, final_opt_state, epoch_history
 
+xbatches.shape
 
-config['epochs'] = 5
+config['epochs'] = 10
+
+nbatches_per_epoch
 
 for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
     t0 = time.time()
@@ -167,15 +168,15 @@ for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
         params, opt_state, epoch_key, xbatches[start_idx:end_idx], ybatches[start_idx:end_idx]
     )
     print(f'Epoch {i} took {time.time() - t0:.2f} seconds')
-
-
+    print(f'Epoch {i} loss: {epoch_history["loss"].mean()}')
 
 
 ##
 
-
-
-
+#TODO:
+# tl-rates depend on anything on the 5'. 
+# Oh but then you'll have a special case for every combination of uOrf and recog site
+# one way to solve that would be to do some kind of arithmetic on the rates or a multi-channel param (one for recognition, one for uorf)
 
 
 if loggers is None:

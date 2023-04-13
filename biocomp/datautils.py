@@ -876,7 +876,6 @@ def report(params, dman, id, suptitle='', **kw):
 
 def get_bio_color(name, default='k'):
     import difflib
-
     colors = {'ebfp': '#529edb', 'eyfp': '#fbda73', 'mkate': '#f75a5a', 'neongreen': '#33f397'}
     colors['fitc'] = colors['neongreen']
     colors['pe_texas_red'] = colors['mkate']
