@@ -244,7 +244,7 @@ def _get_batches(
     ]
     xbatches, ybatches = zip(*all_batches)
     # concat along the feature axis (last dimension)
-    xbatches, ybatches = jnp.concatenate(tuple(xbatches), axis=2), jnp.concatenate(
+    xbatches, ybatches = np.concatenate(tuple(xbatches), axis=2), np.concatenate(
         tuple(ybatches), axis=2
     )
     assert xbatches.shape == (n_batches, batch_size, sum([x.shape[1] for x in X]))
@@ -295,8 +295,10 @@ class DataManager:
 
     def get_individual_compute_stack(self, network_id):
         if network_id not in self.individual_compute_stacks:
-            self.individual_compute_stacks[network_id] = ComputeStack([self._networks[network_id]])
-            self.individual_compute_stacks[network_id].build(self.compute_cfg)
+            self.individual_compute_stacks[network_id] = self.compute_stack.make_subset(
+                [network_id]
+            )
+        # actually returns a tuple of (stack, get_param_subset)
         return self.individual_compute_stacks[network_id]
 
     def gen_kdes(self, bw=None, max_n=10000):
@@ -338,6 +340,9 @@ class DataManager:
 
     def get_networks(self):
         return self._networks
+
+    def get_network(self, i):
+        return self._networks[i]
 
     def get_kdes(self):
         return self._kdes
@@ -830,8 +835,16 @@ def eval_model_grid(
     remove_spines(ax)
 
 
-def model_at_x(params, dman, id, key=jax.random.PRNGKey(0), quantile=None, **_):
-    jm = dman.get_jitted_models()[id]
+def get_stack(dman, net_id, params):
+    stack, pf = dman.get_individual_compute_stack(net_id)
+    p = pf(params)
+    return stack, p
+
+
+def model_at_x(params, dman: DataManager, id, key=jax.random.PRNGKey(0), quantile=None, **_):
+
+    stack, p = get_stack(dman, id, params)
+
     x, y = dman.get_X()[id], dman.get_Y()[id]
     keys = jax.random.split(key, x.shape[0])
 
@@ -840,21 +853,23 @@ def model_at_x(params, dman, id, key=jax.random.PRNGKey(0), quantile=None, **_):
     else:
         Q = jax.random.uniform(key, y.shape)
 
-    yhat = vmap(jm, in_axes=(None, 0, 0, 0))(params, x, Q, keys)
+    yhat = jit(vmap(stack.apply, in_axes=(None, 0, 0, 0)))(p, x, Q, keys)
+
     return x, y, yhat
 
 
 def plot_model_at_x(params, dman, id, ax, **kw):
     x, y, yhat = model_at_x(params, dman, id, **kw)
-    model = dman.get_models()[id]
-    smooth(x, yhat, model, dman.rescale, ax, **kw)
+    net = dman.get_networks()[id]
+    print(f'yhat shape = {yhat.shape}')
+    smooth(x, yhat, net, dman.rescale, ax, **kw)
 
 
-def plot_model_diff(params, dman, id, ax, **kw):
-    x, y, yhat = model_at_x(params, dman, id, **kw)
-    model = dman.get_models()[id]
-    err = jnp.abs(y - yhat)
-    smooth(x, err, model, dman.rescale, ax, **kw)
+# def plot_model_diff(params, dman, id, ax, **kw):
+# x, y, yhat = model_at_x(params, dman, id, **kw)
+# model = dman.get_models()[id]
+# err = jnp.abs(y - yhat)
+# smooth(x, err, model, dman.rescale, ax, **kw)
 
 
 def report(params, dman, id, suptitle='', **kw):
@@ -864,8 +879,8 @@ def report(params, dman, id, suptitle='', **kw):
     # eval_model_plot(params, dman, id, ax[1], **kw)
     ax[0].set_title(f'Original data (mean)')
     ax[1].set_title(f'Predicted (mean)')
-    model = dman.get_models()[id]
-    fig.suptitle(f'{suptitle} {model.node_namespace}')
+    network = dman.get_networks()[id]
+    fig.suptitle(f'{suptitle} {network.name}')
     fig.tight_layout()
     return fig, ax
 
@@ -876,6 +891,7 @@ def report(params, dman, id, suptitle='', **kw):
 
 def get_bio_color(name, default='k'):
     import difflib
+
     colors = {'ebfp': '#529edb', 'eyfp': '#fbda73', 'mkate': '#f75a5a', 'neongreen': '#33f397'}
     colors['fitc'] = colors['neongreen']
     colors['pe_texas_red'] = colors['mkate']

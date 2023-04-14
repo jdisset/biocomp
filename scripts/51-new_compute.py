@@ -24,8 +24,8 @@ with ut.timer('from zero to ready-to-compile'):
     matrix_xp = su.load_xp('2023-02-16_Matrix', lib, data_path='./data/calibrated_data')
     dman_full = du.DataManager.from_xps([matrix_xp], config, inverse='all')
 
-# dman = dman_full.make_subset(list(range(10)))
-dman = dman_full
+dman = dman_full.make_subset(list(range(10)))
+# dman = dman_full
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                      --     quantify uorfs     --
@@ -66,6 +66,7 @@ uorf_dict
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+### {{{                   --     manual training loop     --
 import biocomp.train as tr
 import optax
 import time
@@ -87,7 +88,6 @@ with ut.timer('Stack initialization'):
     opt_state = optimizer.init(dynamic)
 
 ## --- batches
-
 with ut.timer('Getting batches'):
     xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
 
@@ -155,7 +155,7 @@ def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
 
 xbatches.shape
 
-config['epochs'] = 10
+config['epochs'] = 100
 
 nbatches_per_epoch
 
@@ -171,7 +171,8 @@ for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
     print(f'Epoch {i} loss: {epoch_history["loss"].mean()}')
 
 
-##
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 #TODO:
 # tl-rates depend on anything on the 5'. 
@@ -179,26 +180,46 @@ for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
 # one way to solve that would be to do some kind of arithmetic on the rates or a multi-channel param (one for recognition, one for uorf)
 
 
-if loggers is None:
-    loggers = [
-        (1, console_log),
-    ]
+### {{{                    --     testing subnetworks     --
 
-print('Initial logger calls')
-for _, l in loggers:
-    l(0, config)
+from jax.experimental import checkify
+errors = checkify.user_checks | checkify.index_checks | checkify.float_checks | checkify.nan_checks
 
-print(f'Begin training for {config["epochs"]} epochs')
+params = jax.tree_util.tree_map(lambda x: jnp.array(x), params)
 
-for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
-    t0 = time.time()
-    batch_rotation = i % config['n_epochs_per_batch_rotation']
-    start_idx = batch_rotation * nbatches_per_epoch
-    end_idx = start_idx + nbatches_per_epoch
-    params, opt_state, epoch_history = epoch_step(
-        params, opt_state, epoch_key, xbatches[start_idx:end_idx], ybatches[start_idx:end_idx]
-    )
-    epoch_history['epoch_time'] = time.time() - t0
-    for t, l in loggers:
-        if i % t == 0 or i == cfg['epochs']:
-            l(i, config, epoch_history=epoch_history, nbatches=nbatches_per_epoch)
+dman.build_compute_stack()
+c = dman.get_compute_stack()
+full_input = jax.random.uniform(jax.random.PRNGKey(0), (c.total_nb_of_inputs,))
+full_quantile = jax.random.uniform(jax.random.PRNGKey(0), (c.total_nb_of_outputs,))
+checked_apply = checkify.checkify(c.apply, errors=errors)
+err, full_res = checked_apply(params, full_input, full_quantile, jax.random.PRNGKey(0))
+err.throw()
+print('ok')
+
+
+def get_stack(dman, net_id, params):
+    stack, pf = dman.get_individual_compute_stack(net_id)
+    p = pf(params)
+    return stack, p
+
+input_start = 0
+for i in range(len(dman.get_networks())):
+    stack, p = get_stack(dman, i, params)
+    input_end = input_start + stack.total_nb_of_inputs
+    output_start = c.get_network_global_output_id(i)
+    output_end = output_start + stack.total_nb_of_outputs
+    inp = full_input[input_start:input_end]
+    quantile = full_quantile[output_start:output_end]
+    all_node_ids = [n.node_id for n in stack.each_node()]
+    checked_apply_local = checkify.checkify(stack.apply, errors=errors)
+    err, res = checked_apply_local(p, inp, quantile, jax.random.PRNGKey(0))
+    err.throw()
+    print(f'res = {res}')
+    desired_output = full_res[output_start:output_end]
+    assert np.allclose(res, desired_output)
+    input_start = input_end
+
+print('done checking')
+##────────────────────────────────────────────────────────────────────────────}}}
+
+fig, ax = du.report(params, dman, 0)

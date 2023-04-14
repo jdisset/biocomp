@@ -15,12 +15,14 @@ import pandas as pd
 import optax
 import matplotlib.pyplot as plt
 import numpy as np
+import joblib
+from joblib import Parallel, delayed
 from . import datautils as du
 from . import utils as ut
 from . import nodes as nodes
 from . import nodes_old as nodes_old
 from . import defaults as dft
-# from .compute import ComputeGraphModel
+
 import wandb as wb
 import os
 import time
@@ -198,86 +200,79 @@ def setup_wandb_logging(project, dman, config):
     return loggers
 
 
-def start(dman: du.DataManager, cfg, loggers=None):
-    config = {**dft.DEFAULT_CONFIG, **cfg}
+def get_memory(config):
+    cache_folder = config.get("cache_folder", None)
+    if cache_folder:
+        cache_folder = Path(cache_folder).expanduser()
+        cache_folder.mkdir(parents=True, exist_ok=True)
+        return joblib.Memory(cache_folder, verbose=0)
+    else:
+        return joblib.Memory(None, verbose=0)
+
+
+def start(dman: du.DataManager, training_config, loggers=None):
+    config = {**dft.DEFAULT_CONFIG, **training_config}
+
+    # --- cached init & batches generation
+    memory = get_memory(config)
+
+    @memory.cache
+    def init_stack(dman, key):
+        stack = dman.get_compute_stack()
+        with ut.timer('Stack initialization'):
+            params = stack.init(key)
+        return stack, params
+
+    @memory.cache
+    def generate_batches(dman, key):
+        with ut.timer('Generating batches'):
+            xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
+        return xbatches, ybatches
 
     key = jax.random.PRNGKey(config['rng_key'])
 
-    models = dman.get_models()
-    nmodels = len(models)
+    results = Parallel(n_jobs=2)(
+        delayed(func)(dman, key) for func in [init_stack, generate_batches]
+    )
 
-    # --- init
-    # params
-    params, constraints = {}, {}
+    stack, params = results[0]
+    xbatches, ybatches = results[1]
     optimizer = get_optimizer(config)
-    for m, k in zip(models, jax.random.split(key, len(models))):
-        params, constraints = m.init(k, pre_params=params, pre_constraints=constraints)
     dynamic, _ = ut.split_params(params, config['static_params'])
     opt_state = optimizer.init(dynamic)
-
-    # batches
-    xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
     total_batches = config['n_batches']
     assert total_batches == xbatches.shape[0] == ybatches.shape[0]
     nbatches_per_epoch = total_batches // config['n_epochs_per_batch_rotation']
 
-    # --- loss and updates
-    x_start = np.cumsum([m.n_inputs for m in models])[:-1]
-    y_start = np.cumsum([m.n_outputs for m in models])[:-1]
+    # --- loss & update functions
 
-    def apply_models_and_grad(params, x, z, key):
-        k1, k2 = jax.random.split(key)
-        keys = jax.random.split(k1, nmodels)
-        xs = jnp.split(x, x_start)
-        zs = jnp.split(z, y_start)
-        res = [
-            m.apply_and_negative_grad(params, xx, zz, k)
-            for m, xx, zz, k in zip(models, xs, zs, keys)
-        ]
-        keys = jax.random.split(k2, nmodels)
-        just_for_grads = [
-            m.apply_and_negative_grad(
-                params, xx, zz, k, override_w_uniform=['transcription', 'translation', 'output']
-            )
-            for m, xx, zz, k in zip(models, xs, zs, keys)
-        ]
-        yhat, negative_grads_x = zip(*res)
-        _, negative_grads_rdm = zip(*just_for_grads)
-        return jnp.concatenate(yhat, axis=0), jnp.sum(
-            ut.flat_concat(*[negative_grads_x, negative_grads_rdm])
-        )
+    vmapped_compute = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
     def loss_func(dynamic, static, X, Y, Z, key):
         assert X.ndim == Y.ndim == Z.ndim == 2
         assert X.shape[0] == Y.shape[0] == Z.shape[0]
-        assert X.shape[1] == sum([m.n_inputs for m in models])
-        assert Y.shape[1] == Z.shape[1] == sum([m.n_outputs for m in models])
+        assert X.shape[1] == sum([n.get_nb_inputs() for n in stack.networks])
+        assert Y.shape[1] == Z.shape[1] == sum([n.get_nb_outputs() for n in stack.networks])
 
         params = ut.assemble_params(dynamic, static)
-
         keys = jax.random.split(key, X.shape[0])
-        yhat, grads = vmap(apply_models_and_grad, in_axes=(None, 0, 0, 0))(params, X, Z, keys)
+
+        yhat = vmapped_compute(params, X, Z, keys)
         assert yhat.shape == Y.shape
-        assert grads.shape == (X.shape[0],)
 
         error = yhat - Y
-        qantile_loss = jnp.mean(
+        quantile_loss = jnp.mean(
             huber_quantile_loss(error, Z, delta=config['huber_quantile_loss_delta'])
         )
 
-        negative_grad_penalty = config['negative_grad_penalty'] * jnp.mean(
-            jnp.where(grads < 0, -grads, 0)
-        )
-
-        return qantile_loss + negative_grad_penalty
+        return quantile_loss
 
     def training_step(params, opt_state, x, y, z, key):
-        dynamic, static = ut.split_params(params, [['node']])
+        dynamic, static = ut.split_params(params, config['static_params'])
         loss, grads = value_and_grad(loss_func)(dynamic, static, x, y, z, key)
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
 
         dynamic = optax.apply_updates(dynamic, updates)
-        dynamic = ut.apply_constraints(dynamic, constraints)
         params = ut.assemble_params(dynamic, static)
 
         res = {
@@ -288,13 +283,16 @@ def start(dman: du.DataManager, cfg, loggers=None):
         }
         return res
 
+    keep_in_history = config.get('keep_in_history', ['loss'])
+
     @ut.progress_scan(nbatches_per_epoch, message='Training model')
     def scannable_step(carry, i_x_y_z_k):
         params, opt_state = carry
         i, x, y, z, k = i_x_y_z_k
         updt = training_step(params, opt_state, x, y, z, k)
         params, opt_state = updt['params'], updt['opt']
-        return (params, opt_state), updt
+        history = {k: updt[k] for k in keep_in_history}
+        return (params, opt_state), history
 
     @jit
     def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
@@ -307,16 +305,15 @@ def start(dman: du.DataManager, cfg, loggers=None):
         )
         return final_params, final_opt_state, epoch_history
 
-    if loggers is None:
-        loggers = [
-            (1, console_log),
-        ]
+    # --- main training loop
 
-    print('Initial logger calls')
+    if loggers is None:
+        loggers = [(1, console_log)]
+
     for _, l in loggers:
         l(0, config)
 
-    print(f'Begin training for {config["epochs"]} epochs')
+    ut.logger.info(f'Begin training for {config["epochs"]} epochs')
 
     for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
         t0 = time.time()
@@ -328,6 +325,8 @@ def start(dman: du.DataManager, cfg, loggers=None):
             params, opt_state, epoch_key, xbatches[start_idx:end_idx], ybatches[start_idx:end_idx]
         )
         epoch_history['epoch_time'] = time.time() - t0
+
         for t, l in loggers:
-            if i % t == 0 or i == cfg['epochs']:
+            if i % t == 0 or i == training_config['epochs']:
                 l(i, config, epoch_history=epoch_history, nbatches=nbatches_per_epoch)
+

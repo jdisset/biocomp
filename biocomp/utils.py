@@ -16,6 +16,7 @@ import logging
 from rich.logging import RichHandler
 from jax.tree_util import Partial as partial
 from contextlib import contextmanager
+import rich
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     logging utils     --
@@ -27,21 +28,22 @@ logger = logging.getLogger('biocomp')
 logger.setLevel(20)
 
 if not logger.handlers:
-    logging.basicConfig(
-        level="NOTSET", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()]
-    )
-
+    logging.basicConfig(level="NOTSET", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()])
 
 
 @contextmanager
 def timer(name=None):
     from time import perf_counter
+
     t = perf_counter()
+    if name is not None:
+        rich.print(f"\n{name}...")
     yield
     if name is not None:
-        print(f"\n{name}: {perf_counter() - t:.2f} seconds")
+        rich.print(f"\n{name} [bold green]done[/bold green] in {perf_counter() - t:.2f} seconds")
     else:
-        print(f"\nElapsed time: {perf_counter() - t:.2f} seconds")
+        rich.print(f"\nElapsed time: {perf_counter() - t:.2f} seconds")
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -68,6 +70,7 @@ MASK_PATH = STATIC_PATH + '/qmasks'
 QNAME_PATH = '/qnames'
 PROPERTIES_PATH = '/properties'
 
+
 def at_path_nested(d: dict, path, val=None, defaultinit=lambda: None):
     for key in path[:-1]:
         try:
@@ -85,7 +88,7 @@ def at_path_nested(d: dict, path, val=None, defaultinit=lambda: None):
     return d
 
 
-def at_path_flat(d: dict, path:str, val=None, defaultinit=lambda: None):
+def at_path_flat(d: dict, path: str, val=None, defaultinit=lambda: None):
     if val is None:
         return d.setdefault(path, defaultinit())
     else:
@@ -131,11 +134,13 @@ def flatten_single(t):
     """Flattens a single level of a nested list"""
     return [item for sublist in t for item in sublist]
 
+
 def flatten(x):
     if isinstance(x, list):
         return [a for i in x for a in flatten(i)]
     else:
         return [x]
+
 
 def updated_dict(d1, d2):
     res = {}
@@ -211,6 +216,7 @@ def flatten_list(x):
         return [a for i in x for a in flatten_list(i)]
     else:
         return [x]
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -407,6 +413,22 @@ def split_params_flat(params, static_paths):
             dynamic[k] = v
     return dynamic, static
 
+def path_contains_flat(params, path):
+    """returns the params with a path that contains the given path"""
+    contains, doesnt_contain = {}, {}
+    for k, v in params.items():
+        if path in k:
+            contains[k] = v
+        else:
+            doesnt_contain[k] = v
+    return contains, doesnt_contain
+
+def merge_dicts(*dicts):
+    res = {}
+    for d in dicts:
+        res.update(d)
+    return res
+
 
 def assemble_params_flat(dynamic, static):
     """Assemble params from static and dynamic parts."""
@@ -543,3 +565,4 @@ at_path = at_path_flat
 delete_path = delete_path_flat
 split_params = split_params_flat
 assemble_params = assemble_params_flat
+path_contains = path_contains_flat

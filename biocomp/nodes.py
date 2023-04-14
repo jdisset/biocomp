@@ -229,10 +229,21 @@ def quantize_impl(x, arr):
 
 
 @jit
-def quantize_masked_impl(x, arr, mask):
+def quantize_masked_impl(x, qvalues, mask):
+    """Quantize x to the nearest element in qvalues, but only if the corresponding
+    element in mask is True.
+    """
     zero = x - jax.lax.stop_gradient(x)  # for straight-through gradient
-    dist = jnp.where(mask, jnp.abs(arr - x), jnp.inf)
-    return zero + jax.lax.stop_gradient(arr[jnp.argmin(dist)])
+    dist = jnp.where(mask, jnp.abs(qvalues - x), jnp.inf)
+    amin = jnp.argmin(dist)
+    res = zero + jax.lax.stop_gradient(qvalues[amin])
+    # jax.debug.print('----------')
+    # jax.debug.print('x: {x}', x=x)
+    # jax.debug.print('qvalues: {arr}', arr=qvalues)
+    # jax.debug.print('mask: {mask}', mask=mask)
+    # jax.debug.print('amin: {amin}', amin=amin)
+    # jax.debug.print('res: {res}', res=res)
+    return res
 
 
 @jax.custom_jvp
@@ -253,6 +264,7 @@ def get_quantized(
     # of all the possible quantization values for this parameter.
 
     possible_values = get_param(params, param_name, base_path=ut.QVALS_PATH)
+    possible_values = jnp.atleast_1d(possible_values.squeeze())
     masks = get_param(params, param_name, node_id=node_id, base_path=ut.MASK_PATH)
     assert len(values_to_quantize) <= len(masks), (
         f'Number of inputs ({len(values_to_quantize)}) is larger than the number of masks '
@@ -271,6 +283,9 @@ def get_quantized(
     masks = masks[
         : values_to_quantize.shape[0]
     ]  # trim masks to the specific number of inputs of this node
+    # jax.debug.print(
+    # f'masks: {masks}, values_to_quantize: {values_to_quantize}, possible_values: {possible_values}'
+    # )
     return vmap(quantize_masked, in_axes=(0, None, 0), out_axes=0)(
         values_to_quantize, possible_values, masks
     )
@@ -373,11 +388,15 @@ def register_quantile_variable_ids(params, vnode, stack):
     max_qsize = stack.max_nb_of_outputs_per_network
     assert qid_stack.shape[0] <= max_qsize
     qid_stack = np.pad(qid_stack, (0, max_qsize - qid_stack.shape[0]), constant_values=-1)
-    set_param(params, 'quantile_variable_id', qid_stack, node_id=vnode.node_id)
+    set_param(
+        params, 'quantile_variable_id', qid_stack, node_id=vnode.node_id, base_path=ut.STATIC_PATH
+    )
 
 
 def get_quantile_variables(params, node_id, quantiles, n):
-    qid = get_param(params, 'quantile_variable_id', node_id=node_id).astype(int)
+    qid = get_param(
+        params, 'quantile_variable_id', node_id=node_id, base_path=ut.STATIC_PATH
+    ).astype(int)
     assert qid.ndim == 1
     q = jnp.where(qid == -1, 0, quantiles[qid])[:n]
 
@@ -512,18 +531,22 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
                 "inv_aggregation:original_output_slot",
                 jnp.asarray(extra['original_output_slot']),
                 node_id=vnode.node_id,
+                base_path=ut.STATIC_PATH,
             )
             set_param(
                 params,
                 "inv_aggregation:inv_node_id",
                 jnp.asarray(inv_vnode.node_id),
                 node_id=vnode.node_id,
+                base_path=ut.STATIC_PATH,
             )
 
     def apply(inp, quantiles, params, node_id, key):
-        inv_id = get_param(params, "inv_aggregation:inv_node_id", node_id).astype(jnp.int32)
+        inv_id = get_param(
+            params, "inv_aggregation:inv_node_id", node_id, base_path=ut.STATIC_PATH
+        ).astype(jnp.int32)
         original_output_slot = get_param(
-            params, "inv_aggregation:original_output_slot", node_id
+            params, "inv_aggregation:original_output_slot", node_id, base_path=ut.STATIC_PATH
         ).astype(jnp.int32)
         ratios = get_param(params, "aggregation:ratios", inv_id)
         if normalize:
@@ -832,7 +855,6 @@ def sequestron_ERN(
             prop_name = f'ERN_affinity_{subtype}'
             affinity_id = int(property_id(stack.shared_store, prop_name, seq_name))
 
-
             # affinity_id is the index at which the affinity value is stored
             # in the array of all affinity values. We cNone an store this index so that
             # we can retrieve the correct value during apply (vectorized on all node_ids)
@@ -842,9 +864,7 @@ def sequestron_ERN(
                 affinity_id,
                 node_id=vnode.node_id,
                 number_of_nodes_at_least=stack.number_of_nodes,
-            )
-            affinity_id = get_param(params, ERN_AFFINITY_ID_NAME, node_id=vnode.node_id).astype(
-                jnp.int32
+                base_path=ut.STATIC_PATH,
             )
 
         __impl(
@@ -859,7 +879,9 @@ def sequestron_ERN(
 
     def apply(*values, quantiles, params, node_id, key):
         assert len(values) == len(input_shapes)
-        affinity_id = get_param(params, ERN_AFFINITY_ID_NAME, node_id=node_id)
+        affinity_id = get_param(
+            params, ERN_AFFINITY_ID_NAME, node_id=node_id, base_path=ut.STATIC_PATH
+        )
         quantile = get_quantile_variables(params, node_id, quantiles, 1)
         return __impl(
             *values,

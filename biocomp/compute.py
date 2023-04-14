@@ -198,7 +198,7 @@ class ComputeStack:
         )
         return int(start_index), out_shape
 
-    def get_network_global_output_id(self, network_id: int, output_id: int):
+    def get_network_global_output_id(self, network_id: int, output_id: int = 0):
         """Considering every network's outputs ordered by network id,
         returns the global id of the given output for the given network.
         Useful to convert quantile ids from a network to the global quantile ids"""
@@ -237,6 +237,7 @@ class ComputeStack:
         return hash((tuple(self.networks), tuple(self.layers)))
 
     def build(self, config: nd.ComputeConfigManager):
+        self.config = config
         ut.logger.info('Building compute stack')
         self._assemble_stack()
         self._refresh()
@@ -253,9 +254,49 @@ class ComputeStack:
             raise ValueError('Compute stack is not built, can\'t call it')
         return self.apply(*args, **kwargs)
 
-    def apply_single_network(self, network_id: int, *args, **kwargs):
-        if not self.is_built:
-            raise ValueError('Compute stack is not built, can\'t call it')
+    def each_node(self):
+        for layer in self.layers:
+            for node in layer.nodes:
+                yield node
+
+    def make_subset(self, network_ids, pre_init=True):
+        """Returns a new stack with only the networks with the given ids"""
+        assert self.is_built, 'Stack not built'
+        s = ComputeStack([self.networks[i] for i in network_ids])
+        s.build(self.config)
+        s.shared_store = self.shared_store
+
+        old_node_id = []
+        for i, n in enumerate(s.each_node()):
+            assert n.node_id == i
+            old_net_id = network_ids[n.network_id]
+            l_id, n_pos = self.node_map[(old_net_id, n.compute_node_id)]
+            old_node_id.append(self.layers[l_id].nodes[n_pos].node_id)
+
+        old_node_id = jnp.array(old_node_id)
+
+        captured_static_p = {}
+        if pre_init:
+            # generate valid static parameters
+            _, captured_static_p = ut.split_params(s.init(jax.random.PRNGKey(0)), [ut.STATIC_PATH])
+
+        def get_param_subset(params):
+            static_p = captured_static_p
+            if not pre_init:
+                # new init to generate valid static parameters
+                _, static_p = ut.split_params(s.init(jax.random.PRNGKey(0)), [ut.STATIC_PATH])
+
+            # grab a copy of the shared parameters
+            copy_p = deepcopy(params)
+            _, shared_p = ut.split_params(copy_p, [ut.SHARED_PATH])
+
+            # truncated node parameters
+            _, node_p = ut.split_params(copy_p, [ut.NODE_PATH])
+            node_p = jax.tree_map(lambda x: jnp.array(x)[old_node_id], node_p)
+
+            return ut.merge_dicts(static_p, shared_p, node_p)
+
+        return s, get_param_subset
 
     ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -501,7 +542,7 @@ class ComputeStack:
             self.total_nb_of_outputs += nbout
             self.max_nb_of_outputs_per_network = max(self.max_nb_of_outputs_per_network, nbout)
 
-        # build a dict of {(net_id, node_id): (layer_id, node_position)}
+        # build a dict of {(net_id, compute_node_id): (layer_id, node_position)}
         node_id = 0
         self.node_map = {}
         for l_id, l in enumerate(self.layers):
@@ -552,7 +593,7 @@ class ComputeStack:
 
         output_indices = []
         for i, shapes in out_indices_and_shapes:
-            assert all([s == (1,) for s in shapes]) # only 1d outputs
+            assert all([s == (1,) for s in shapes])  # only 1d outputs
             output_indices.append(np.arange(i, i + len(shapes)))
         output_indices = np.concatenate(output_indices)
 
@@ -586,12 +627,3 @@ class ComputeStack:
 ##────────────────────────────────────────────────────────────────────────────}}}
 # }}}
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-# output_layers = [l_id for l_id, l in enumerate(self.layers) if l.f_type == 'output']
-# output_shapes = [self.layers[l_id].f_out_shapes for l_id in output_layers]
-# assert len(output_layers) > 0, 'No output layer found'
-# output_nodes = [
-# (l_id, n_id, n, shapes) for l_id, shapes in zip(output_layers, output_shapes)
-# for n_id, n in enumerate(self.layers[l_id].nodes)
-# ]
-# sorted_per_network = sorted(output_nodes, key=lambda x: x[2].network_id)
