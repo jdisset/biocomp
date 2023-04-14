@@ -120,17 +120,15 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
     t0 = time.time()
     params = ut.tree_get(epoch_history['params'], -1)
     pred = []
-    models = dman.get_models()
+    networks = dman.get_networks()
     try:
-        for i in range(len(dman.get_models())):
+        for i, net in enumerate(networks):
             fig, ax = du.report(params, dman, i)
-            # fig.set_dpi(10)
-            pred.append(wb.Image(fig, caption=f'{models[i].node_namespace}'))
+            pred.append(wb.Image(fig, caption=f'{net.name}'))
             plt.close(fig)
     except Exception as e:
         # raise e
-        print(e)
-        print("Failed to plot predictions")
+        ut.logger.warning(f"Failed to plot predictions: {e}")
     wb.log({'Evaluations': pred})
     print(f'Done logging prediction plots for epoch {epoch} in {time.time() - t0:.2f}s')
 
@@ -170,7 +168,6 @@ def log_w_replicates(history, epoch, cfg, **_):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 def get_optimizer(cfg):
     optimizers = {
@@ -231,12 +228,8 @@ def start(dman: du.DataManager, training_config, loggers=None):
 
     key = jax.random.PRNGKey(config['rng_key'])
 
-    results = Parallel(n_jobs=2)(
-        delayed(func)(dman, key) for func in [init_stack, generate_batches]
-    )
-
-    stack, params = results[0]
-    xbatches, ybatches = results[1]
+    stack, params = init_stack(dman, key)
+    xbatches, ybatches = generate_batches(dman, key)
     optimizer = get_optimizer(config)
     dynamic, _ = ut.split_params(params, config['static_params'])
     opt_state = optimizer.init(dynamic)
@@ -257,7 +250,7 @@ def start(dman: du.DataManager, training_config, loggers=None):
         params = ut.assemble_params(dynamic, static)
         keys = jax.random.split(key, X.shape[0])
 
-        yhat = vmapped_compute(params, X, Z, keys)
+        yhat, grads = vmapped_compute(params, X, Z, keys)
         assert yhat.shape == Y.shape
 
         error = yhat - Y
@@ -265,7 +258,12 @@ def start(dman: du.DataManager, training_config, loggers=None):
             huber_quantile_loss(error, Z, delta=config['huber_quantile_loss_delta'])
         )
 
-        return quantile_loss
+        # grads is the concatenated and flattened jacobian of 
+        # translate, transcript, and output nodes wrt their inputs
+        # they should be monotonically increasing so we add a loss term
+        negative_grads = jnp.mean(jnp.where(grads < 0, -grads, 0))
+
+        return quantile_loss + config['negative_grad_penalty'] * negative_grads
 
     def training_step(params, opt_state, x, y, z, key):
         dynamic, static = ut.split_params(params, config['static_params'])
@@ -330,3 +328,4 @@ def start(dman: du.DataManager, training_config, loggers=None):
             if i % t == 0 or i == training_config['epochs']:
                 l(i, config, epoch_history=epoch_history, nbatches=nbatches_per_epoch)
 
+    return params, epoch_history

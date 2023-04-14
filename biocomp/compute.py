@@ -582,7 +582,7 @@ class ComputeStack:
         for pname, pv in quantization_params.items():
             ut.at_path(self.shared_store, ut.QNAME_PATH + f"/{pname}", pv)
 
-    def _generate_apply_method(self):
+    def _generate_apply_method(self, get_grads_for=('translation', 'transcription', 'output')):
 
         input_getters_f = [self._make_layer_input_getters(l_id) for l_id in range(len(self.layers))]
         node_ids = [jnp.array([n.node_id for n in l.nodes]) for l in self.layers]
@@ -597,10 +597,13 @@ class ComputeStack:
             output_indices.append(np.arange(i, i + len(shapes)))
         output_indices = np.concatenate(output_indices)
 
+        w_grads = [l.f_type in get_grads_for for l in self.layers]
+
         def apply(params, inputs, quantiles, key):
             assert len(inputs) == self.total_nb_of_inputs, 'Mismatch in number of inputs'
 
             out = inputs.reshape(-1)
+            grads = jnp.array([])
 
             for lid in range(1, len(self.layers)):
 
@@ -608,22 +611,39 @@ class ComputeStack:
 
                 n_inputs = len(self.layers[lid].f_input_shapes)
                 layer_inputs = [input_getters_f[lid][i](out) for i in range(n_inputs)]
-
-                def f(node_id, key, *inputs):
-                    return self.layers[lid].f_apply(
-                        *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
-                    )
-
                 keys = jax.random.split(key, len(layer_inputs[0]))
 
-                layer_out = vmap(f)(node_ids[lid], keys, *layer_inputs).reshape(-1)
-                out = jnp.concatenate([out, layer_out])
+                l_apply = self.layers[lid].f_apply
 
-            return out[output_indices]
+                def f(node_id, key, *inputs):
+                    res = l_apply(
+                        *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
+                    )
+                    if w_grads[lid]:
+                        grad = jax.jacfwd(l_apply, argnums=list(range(n_inputs)))(
+                            *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
+                        )
+                        grad = jnp.concatenate([g.reshape(-1) for g in grad])
+                    else:
+                        grad = jnp.array([])
+                    return res, grad
+
+
+                def vmapped(*inputs):
+                    return vmap(f)(node_ids[lid], keys, *inputs)
+
+                layer_out, layer_grad = vmapped(*layer_inputs)
+
+                out = jnp.concatenate([out, layer_out.reshape(-1)])
+                grads = jnp.concatenate([grads, layer_grad.reshape(-1)])
+
+
+            return out[output_indices], grads
 
         self.apply = apply
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 # }}}
 ##────────────────────────────────────────────────────────────────────────────}}}

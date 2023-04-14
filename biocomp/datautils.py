@@ -861,15 +861,15 @@ def model_at_x(params, dman: DataManager, id, key=jax.random.PRNGKey(0), quantil
 def plot_model_at_x(params, dman, id, ax, **kw):
     x, y, yhat = model_at_x(params, dman, id, **kw)
     net = dman.get_networks()[id]
-    print(f'yhat shape = {yhat.shape}')
     smooth(x, yhat, net, dman.rescale, ax, **kw)
 
 
-# def plot_model_diff(params, dman, id, ax, **kw):
-# x, y, yhat = model_at_x(params, dman, id, **kw)
-# model = dman.get_models()[id]
-# err = jnp.abs(y - yhat)
-# smooth(x, err, model, dman.rescale, ax, **kw)
+def plot_model_diff(params, dman, id, ax, **kw):
+    x, y, yhat = model_at_x(params, dman, id, **kw)
+    net = dman.get_networks()[id]
+    err = jnp.abs(y - yhat)
+    smooth(x, err, net, dman.rescale, ax, **kw)
+
 
 
 def report(params, dman, id, suptitle='', **kw):

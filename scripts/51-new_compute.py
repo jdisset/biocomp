@@ -14,6 +14,7 @@ import pandas as pd
 from rich import print as pprint
 import biocomp.datautils as du
 
+import biocom.train as tr
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -179,7 +180,6 @@ for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
 # Oh but then you'll have a special case for every combination of uOrf and recog site
 # one way to solve that would be to do some kind of arithmetic on the rates or a multi-channel param (one for recognition, one for uorf)
 
-
 ### {{{                    --     testing subnetworks     --
 
 from jax.experimental import checkify
@@ -222,4 +222,4 @@ for i in range(len(dman.get_networks())):
 print('done checking')
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-fig, ax = du.report(params, dman, 0)
+tr.start(dman, config)
