@@ -516,7 +516,8 @@ class TrainingProgram:
 
     def start_training(self, dman: du.DataManager):
 
-        prog_config = self.__dict__
+        prog_config = self.args.__dict__.copy()
+
         self.training_config['program_config'] = prog_config
 
         if self.wandb_project is not None:
@@ -535,7 +536,6 @@ class TrainingProgram:
             ]
 
         start(dman, self.training_config, self.compute_config, loggers, seed=self.seed)
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
