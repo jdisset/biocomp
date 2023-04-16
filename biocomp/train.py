@@ -189,7 +189,7 @@ def get_optimizer(cfg):
             decay_steps = cfg['decay_epochs'] * steps_per_epoch
             end_learning_rate = cfg['end_learning_rate']
             learning_rate = optax.warmup_cosine_decay_schedule(
-                init_value=1e-9,
+                init_value=1e-7,
                 peak_value=max_learning_rate,
                 warmup_steps=warmup_steps,
                 decay_steps=decay_steps,
@@ -210,6 +210,9 @@ def get_optimizer(cfg):
         cfg['optimizer'] in optimizers.keys()
     ), f"Optimizer {cfg['optimizer']} not available. Available optimizers are {optimizers.keys()}"
     optimizer = optimizers[cfg['optimizer']]
+
+    gradient_clip = optax.clip_by_global_norm(cfg['max_gradient_norm'])
+    optimizer = optax.chain(gradient_clip, optimizer)
 
     return optimizer
 
@@ -392,15 +395,16 @@ DEFAULT_TRAINING_CONFIG = {
     'optimizer': 'adam',
     'epochs': 128,
     'schedule': 'cosine',
-    'learning_rate': 0.0015,
+    'learning_rate': 1e-3,
     'end_learning_rate': 1e-5,
-    'warmup_epochs': 20,
+    'warmup_epochs': 10,
     'steps_per_epoch': 128,
-    'decay_epochs': 100,
+    'decay_epochs': 110,
     'adam_w_decay': 0.001,
+    'max_gradient_norm': 1.0,
     # -------- data config --------
-    "batch_size": 16,
-    "n_batches": 4096,
+    "batch_size": 32,
+    "n_batches": 2048,
     "data_scaling_log_factor": 2e4,
     "data_scaling_max_value": 5e7,
     "data_sampling_kde_bw_method": 0.1,

@@ -57,7 +57,7 @@ def timer(name=None, use_logger=True):
         printf(f"\n{name}...")
     yield
     if name is not None:
-        printf(f"\n{name} [bold green]done[/bold green] in {perf_counter() - t:.2f} seconds")
+        printf(f"\n{name} done in {perf_counter() - t:.2f} seconds")
     else:
         printf(f"\nElapsed time: {perf_counter() - t:.2f} seconds")
 

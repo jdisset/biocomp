@@ -4,7 +4,6 @@ from .network import Network, inverted_network
 from pathlib import Path
 import numpy as np
 import jax
-from jax import numpy as jnp
 import pandas as pd
 from tqdm import tqdm
 import sqlite3
@@ -343,7 +342,7 @@ class XP:
         out_prots = [net.get_output_proteins() for net in networks]
         out_channels = [[self.color_names[k] for k in out_prot] for out_prot in out_prots]
         Y = [
-            jnp.array(self.raw_data[sample][out_chan])
+            np.array(self.raw_data[sample][out_chan])
             for sample, out_chan in zip(sample_names, out_channels)
         ]
         return Y

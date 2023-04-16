@@ -7,7 +7,7 @@ from jax import jit, vmap
 import numpy as np
 import pandas as pd
 import biocomp as bc
-import scriptutils as ut
+from . import utils as ut
 from pathlib import Path
 from . import defaults as dft
 from . import nodes as nd
@@ -205,18 +205,36 @@ def sample_batches_direct(
 
     # select batch_size * n_batches random points, weight by inverse of density
     densities = kde.evaluate(X.T) + EPSILON
-    threshold = jnp.quantile(densities, quantile_threshold)
-    midX = jnp.ones((X.shape[1],)) * density_coords
+    threshold = np.quantile(densities, quantile_threshold)
+    midX = np.ones((X.shape[1],)) * density_coords
     density_at_midX = kde.evaluate(midX.T)
-    threshold = jnp.minimum(threshold, density_at_midX)
-    selection_proba = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY)))
-    indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
-    # or with numpy:
-    # selection_proba /= np.sum(selection_proba)
-    # indices = np.random.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba)
+    if density_at_midX > 0:
+        threshold = np.minimum(threshold, density_at_midX)
 
-    Xsub = jnp.take(X, indices, axis=0)
-    Ysub = jnp.take(Y, indices, axis=0)
+    # with jax:
+    # selection_proba = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
+    # indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
+    # Xsub = np.take(X, indices, axis=0)
+    # Ysub = np.take(Y, indices, axis=0)
+
+    # or with numpy:
+    seed = jax.random.randint(rng, (1,), minval=0, maxval=2**28)[0]
+    rng = np.random.RandomState(seed)
+    selection_proba = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
+    selection_proba /= np.sum(selection_proba)
+    try:
+        indices = rng.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba)
+    except ValueError:
+        n_nans = np.sum(np.isnan(selection_proba))
+        ut.logger.warning(
+            f'Sampling failed, {n_nans} / {len(selection_proba)} NaNs in selection_proba.'
+        )
+        selection_proba[np.isnan(selection_proba)] = 0.0
+        selection_proba /= np.sum(selection_proba)
+        indices = rng.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba)
+
+    Xsub = X[indices]
+    Ysub = Y[indices]
 
     Xbatches = Xsub.reshape((n_batches, batch_size, Xsub.shape[1]))
     Ybatches = Ysub.reshape((n_batches, batch_size, Ysub.shape[1]))
@@ -227,6 +245,7 @@ def sample_batches_direct(
 def _get_batches(
     X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_threshold, density_coords
 ):
+
     all_batches = [
         sample_batches_direct(
             x,
@@ -243,6 +262,7 @@ def _get_batches(
             desc='generating batches',
         )
     ]
+
     xbatches, ybatches = zip(*all_batches)
     # concat along the feature axis (last dimension)
     xbatches, ybatches = np.concatenate(tuple(xbatches), axis=2), np.concatenate(
@@ -301,7 +321,7 @@ class DataManager:
         # actually returns a tuple of (stack, get_param_subset)
         return self.individual_compute_stacks[network_id]
 
-    def gen_kdes(self, bw=None, max_n=10000):
+    def gen_kdes(self, bw=None, max_n=7000):
         if bw is None:
             bw = self.data_cfg['data_sampling_kde_bw_method']
         key = jax.random.PRNGKey(0)
