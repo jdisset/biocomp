@@ -11,6 +11,7 @@ import scriptutils as ut
 from pathlib import Path
 from . import defaults as dft
 from . import nodes as nd
+from . import compute as cmp
 from .compute import ComputeStack
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -261,7 +262,7 @@ class DataManager:
         X: list,
         Y: list,
         networks: list,
-        data_cfg: dict = dft.DEFAULT_TRAINING_CONFIG,
+        data_cfg: dict,
     ):
         self.data_cfg = data_cfg
         self._raw_X = [np.array(x) for x in X]
@@ -359,7 +360,7 @@ class DataManager:
         return self._raw_Y
 
     @classmethod
-    def from_xps(cls, xplist, config=dft.DEFAULT_COMPUTE_CONFIG, **kw):
+    def from_xps(cls, xplist, config=cmp.DEFAULT_COMPUTE_CONFIG, **kw):
         networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
         X, Y = zip(*[xp.get_XY(m, s) for xp, m, s in zip(xplist, networks, samples)])
         X, Y, networks = (

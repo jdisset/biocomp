@@ -20,57 +20,25 @@ from biocomp.compute import ComputeConfigManager
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-MAX_UORF = 80
-TRAINING_SETS = {
-    '1_corner': [(0, 0)],
-    '2_corners_recog': [(0, 0), (0, MAX_UORF)],
-    '2_corners_ern': [(0, 0), (MAX_UORF, 0)],
-    '2_corners_diag': [(0, 0), (MAX_UORF, MAX_UORF)],
-    '3_corners': [(0, 0), (0, MAX_UORF), (MAX_UORF, 0)],
-    '4_corners': [(0, 0), (0, MAX_UORF), (MAX_UORF, 0), (MAX_UORF, MAX_UORF)],
-}
-
-training_config = bdf.DEFAULT_TRAINING_CONFIG
-compute_config = bdf.DEFAULT_COMPUTE_CONFIG
-
-import argparse
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--xpname', type=str, default='2023-02-16_Matrix', help='name of experiment to load')
-parser.add_argument('--wandb_project', type=str, default=None, help='name of wandb project')
-parser.add_argument('--training_set', type=str, default='1_corner', help='name of training set to use')
-parser.add_argument('--compute_config', type=str, default=None, help='path to compute config')
-parser.add_argument('--train_config', type=str, default=None, help='path to training config')
-parser.add_argument('--local_save_dir', type=str, default='./results', help='path to save results')
-args = parser.parse_args()
-
-xpname = args.xpname
-wandb_project = args.wandb_project
-training_set = args.training_set
-local_save_dir = Path(args.local_save_dir)
-
-if args.compute_config is not None:
-    if not Path(args.compute_config).is_file():
-        raise ValueError(f'{args.compute_config} is not a file')
-    compute_config = ComputeConfigManager.from_file(args.compute_config)
-
-if args.train_config is not None:
-    if not Path(args.train_config).is_file():
-        raise ValueError(f'{args.train_config} is not a file')
-    training_config = json.load(open(args.train_config))
+# xpname = '2023-02-16_Matrix'
+# xpname = '2023-03-26_MatrixCsy4'
 
 
-
+### {{{                        --     parse args     --
+prog = train.TrainingProgram()
+prog.add_argument('--xpname', type=str, default='2023-02-16_Matrix', help='name of experiment to load')
+prog.add_argument('--training_set', type=str, default='1_corner', help='name of training set to use')
+prog.parse_args()
+##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                      --     loading matrix xp     --
 with ut.timer('Loading data and building networks'):
     lib = su.load_lib()
-    matrix_xp = su.load_xp(xpname, lib, data_path='./data/calibrated_data')
-    dman_full = du.DataManager.from_xps([matrix_xp], training_config, inverse='all')
+    matrix_xp = su.load_xp(prog.xpname, lib, data_path='./data/calibrated_data')
+    dman_full = du.DataManager.from_xps([matrix_xp], prog.training_config, inverse='all')
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                      --     quantify uorfs     --
-
 
 def get_uorf_value(param):
     if 'tl_rate' in param:
@@ -116,36 +84,35 @@ for i, n in enumerate(dman_full.get_networks()):
 uorf_dict
 single_uorfs = [i for i in range(len(dman_full.get_networks())) if i not in uorf_dict.values()]
 
+# single_names = [n.name for i, n in enumerate(dman_full.get_networks()) if i in single_uorfs]
+
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-subset = single_uorfs + [uorf_dict[i] for i in TRAINING_SETS[training_set]]
+MAX_UORF = 80
+TRAINING_SETS = {
+    '1_corner': [(0, 0)],
+    '2_corners_recog': [(0, 0), (0, MAX_UORF)],
+    '2_corners_ern': [(0, 0), (MAX_UORF, 0)],
+    '2_corners_diag': [(0, 0), (MAX_UORF, MAX_UORF)],
+    '3_corners': [(0, 0), (0, MAX_UORF), (MAX_UORF, 0)],
+    '4_corners': [(0, 0), (0, MAX_UORF), (MAX_UORF, 0), (MAX_UORF, MAX_UORF)],
+    'all': list(uorf_dict.keys()),
+}
+TRAINING_SETS.keys()
+
+subset = single_uorfs + [uorf_dict[i] for i in TRAINING_SETS[prog.training_set]]
 
 dman = dman_full.make_subset(subset)
 
-if wandb_project is not None:
-    loggers = train.setup_wandb_logging(wandb_project, dman, training_config, compute_config)
+if prog.wandb_project is not None:
+    loggers = train.setup_wandb_logging(prog.wandb_project, dman, prog.training_config, prog.compute_config)
 else:
     loggers = [
         (1, train.console_log),
-        (100, partial(train.local_save, save_dir=local_save_dir)),
+        (100, partial(train.local_save, save_dir=prog.local_save_dir)),
     ]
 
-train.start(dman, training_config, compute_config, loggers)
-##
+train.start(dman, prog.training_config, prog.compute_config, loggers, seed=prog.seed)
 
-a = jnp.arange(10)
-
-
-def get_slice(a, start, end):
-    offset = start // a.shape[0]
-    start = start % a.shape[0]
-    end = end - offset * a.shape[0]
-    if end > a.shape[0]:
-        return jnp.concatenate([a[start:], get_slice(a, 0, end - a.shape[0])])
-    else:
-        return a[start:end]
-
-get_slice(a, 0, 10)
-get_slice(a, 0, 14)
-get_slice(a, 10, 22)

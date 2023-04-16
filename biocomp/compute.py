@@ -71,6 +71,10 @@ class ComputeConfigManager:
         with open(filename, 'r') as f:
             self.config = json.load(f)
 
+    # access functions through [] operator:
+    def __getitem__(self, key):
+        return self.get(key)
+
     @classmethod
     def from_file(cls, filename):
         ccm = cls()
@@ -81,6 +85,23 @@ class ComputeConfigManager:
         self.config = config
 
 
+from . import nodes
+
+DEFAULT_COMPUTE_CONFIG = ComputeConfigManager()
+DEFAULT_COMPUTE_CONFIG.set('transcription', nodes.transcription)
+DEFAULT_COMPUTE_CONFIG.set('translation', nodes.translation)
+DEFAULT_COMPUTE_CONFIG.set('inv_transcription', nodes.inv_transcription)
+DEFAULT_COMPUTE_CONFIG.set('inv_translation', nodes.inv_translation)
+DEFAULT_COMPUTE_CONFIG.set('sequestron_ERN', nodes.ERN5p)
+DEFAULT_COMPUTE_CONFIG.set('sequestron_ERN3p', nodes.ERN3p)
+DEFAULT_COMPUTE_CONFIG.set('source', nodes.source)
+DEFAULT_COMPUTE_CONFIG.set('inv_source', nodes.inv_source)
+DEFAULT_COMPUTE_CONFIG.set('numeric', nodes.numeric)
+DEFAULT_COMPUTE_CONFIG.set('inv_numeric', nodes.inv_numeric)
+DEFAULT_COMPUTE_CONFIG.set('aggregation', nodes.aggregation)
+DEFAULT_COMPUTE_CONFIG.set('inv_aggregation', nodes.inv_aggregation)
+DEFAULT_COMPUTE_CONFIG.set('output', nodes.grouped_output)
+DEFAULT_COMPUTE_CONFIG.set('deadend', nodes.single_passthrough)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 

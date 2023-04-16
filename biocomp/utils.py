@@ -242,6 +242,15 @@ def flatten_list(x):
 # {{{                        --     JAX helpers     --
 # ···············································································
 
+def get_looped_slice(a, start, end):
+    """Get a slice of an array that loops around the end of the array."""
+    offset = start // a.shape[0]
+    start = start % a.shape[0]
+    end = end - offset * a.shape[0]
+    if end > a.shape[0]:  # loop around
+        return jnp.concatenate([a[start:], get_looped_slice(a, 0, end - a.shape[0])])
+    else:
+        return a[start:end]
 
 def value_and_jacfwd(f, x):
     pushfwd = partial(jax.jvp, f, (x,))

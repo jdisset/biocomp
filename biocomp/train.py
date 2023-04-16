@@ -9,8 +9,6 @@ from jax import jit, vmap, grad, value_and_grad
 from pathlib import Path
 from jax.tree_util import Partial as partial
 import json
-from tqdm import tqdm
-from typing import Callable
 import pandas as pd
 import optax
 import matplotlib.pyplot as plt
@@ -21,7 +19,7 @@ from . import datautils as du
 from . import utils as ut
 from . import nodes as nodes
 from . import nodes_old as nodes_old
-from . import defaults as dft
+from . import compute as cmp
 
 import wandb as wb
 import os
@@ -129,6 +127,7 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
         ut.logger.warning(f"Failed to plot predictions: {e}")
         # print a stack trace
         import traceback
+
         traceback.print_exc()
 
     wb.log({'Evaluations': pred})
@@ -175,6 +174,8 @@ def log_w_replicates(history, epoch, cfg, **_):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+### {{{                       --     main function     --
+
 
 def get_optimizer(cfg):
 
@@ -218,8 +219,8 @@ def setup_wandb_logging(
     dman,
     training_config,
     compute_config,
-    plot_period=1,
-    params_save_period=100,
+    plot_period=-1,  # only at the end
+    params_save_period=-1,  # only at the end
     entity='jdisset',
     **kw,
 ):
@@ -248,12 +249,16 @@ def get_memory(config):
         return joblib.Memory(None, verbose=0)
 
 
-def start(dman: du.DataManager, training_config, compute_config, loggers=None, key=None):
+def start(dman: du.DataManager, training_config, compute_config, loggers=None, seed=None):
 
-    if key is None:
-        key = jax.random.PRNGKey(training_config['rng_key'])
-    else:
-        ut.logger.info(f"Using key {key} for training")
+    ut.logger.debug(f"About to start training")
+    ut.logger.debug(f"Training config: {training_config}")
+    ut.logger.debug(f"Compute config: {compute_config.get_config()}")
+
+    if seed is not None:
+        training_config['rng_key'] = seed
+    ut.logger.info(f"Going to train with random seed {training_config['rng_key']}")
+    key = jax.random.PRNGKey(training_config['rng_key'])
 
     # --- cached init & batches generation
     memory = get_memory(training_config)
@@ -356,25 +361,142 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, k
 
     ut.logger.info(f'Begin training for {training_config["epochs"]} epochs')
 
-    def get_slice(a, start, end):
-        offset = start // a.shape[0]
-        start = start % a.shape[0]
-        end = end - offset * a.shape[0]
-        if end > a.shape[0]:  # loop around
-            return jnp.concatenate([a[start:], get_slice(a, 0, end - a.shape[0])])
-        else:
-            return a[start:end]
-
     for i, epoch_key in enumerate(jax.random.split(key, training_config['epochs']), 1):
         t0 = time.time()
-        xb = get_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
-        yb = get_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
+        xb = ut.get_looped_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
+        yb = ut.get_looped_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
         params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key, xb, yb)
         epoch_history['epoch_time'] = time.time() - t0
         epoch_history['latest_params'] = params
 
         for t, l in loggers:
-            if i % t == 0 or i == training_config['epochs']:
+            if (t == 0 or (i % t == 0 and t > 0)) or i == training_config['epochs']:
                 l(i, training_config, epoch_history=epoch_history, nbatches=steps_per_epoch)
 
     return params, epoch_history
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+### {{{                  --     training program helper     --
+
+DEFAULT_TRAINING_CONFIG = {
+    # -------- training config --------
+    "rng_key": 42,
+    "negative_grad_penalty": 0.1,
+    "huber_quantile_loss_delta": 0.1,
+    "static_params": ['/__static__','/node'],
+    "cache_dir": "./.training_cache",
+    'optimizer': 'adam',
+    'epochs': 150,
+    'schedule': 'cosine',
+    'learning_rate': 0.002,
+    'end_learning_rate': 5e-6,
+    'warmup_epochs': 25,
+    'steps_per_epoch': 128,
+    'decay_epochs': 125,
+    'adam_w_decay': 0.001,
+    # -------- data config --------
+    "batch_size": 16,
+    "n_batches": 2048,
+    "data_scaling_log_factor": 2e4,
+    "data_scaling_max_value": 5e7,
+    "data_sampling_kde_bw_method": 0.1,
+    "data_sampling_density_quantile_threshold": 0.025, # threshold = min of both
+    "data_sampling_coords_for_density_threshold": 0.3, # threshold = min of both
+}
+
+import argparse
+import json
+from pathlib import Path
+
+
+class UpdateConfigAction(argparse.Action):
+    def __init__(self, config_name, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.config_name = config_name
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        updates = getattr(namespace, f"{self.config_name}_updates", None)
+        if updates is None:
+            updates = []
+        updates.append(values)
+        setattr(namespace, f"{self.config_name}_updates", updates)
+
+
+class TrainingProgram:
+    def __init__(self):
+        self.parser = argparse.ArgumentParser()
+        self._add_base_arguments()
+
+    def _add_base_arguments(self):
+        self.parser.add_argument(
+            '--wandb_project', type=str, default=None, help='name of wandb project'
+        )
+        self.parser.add_argument(
+            '--compute_config', type=str, default=None, help='path to compute config'
+        )
+        self.parser.add_argument(
+            '--training_config', type=str, default=None, help='path to training config'
+        )
+        self.parser.add_argument(
+            '--local_save_dir', type=str, default='./results', help='path to save results'
+        )
+        self.parser.add_argument(
+            '--seed', type=int, default=None, help='random seed (default: random)'
+        )
+        self.parser.add_argument(
+            '--training_config:update',
+            type=str,
+            action=partial(UpdateConfigAction, 'training_config'),
+            help='update training_config with format: <parameter>=<value>',
+        )
+
+    def add_argument(self, *args, **kwargs):
+        self.parser.add_argument(*args, **kwargs)
+
+    def parse_args(self):
+        self.args = self.parser.parse_args()
+
+        if self.args.compute_config is not None:
+            if not Path(self.args.compute_config).is_file():
+                raise ValueError(f'{self.args.compute_config} is not a file')
+            self.compute_config = cmp.ComputeConfigManager.from_file(self.args.compute_config)
+        else:
+            self.compute_config = cmp.DEFAULT_COMPUTE_CONFIG
+
+        if self.args.training_config is not None:
+            if not Path(self.args.training_config).is_file():
+                raise ValueError(f'{self.args.training_config} is not a file')
+            self.training_config = json.load(open(self.args.training_config))
+        else:
+            self.training_config = DEFAULT_TRAINING_CONFIG
+
+        self.local_save_dir = Path(self.args.local_save_dir)
+
+        if self.args.seed is not None:
+            self.seed = self.args.seed
+        else:
+            self.seed = np.random.randint(0, 2**32)
+
+        # Apply updates to the training_config dict
+        updates = getattr(self.args, f"training_config_updates", [])
+        for update in updates:
+            parameter, value = update.split('=')
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                pass  # Keep value as a string if it's not JSON-parseable
+            self.training_config[parameter] = value
+
+    def __getattr__(self, attr):
+        if attr in self.__dict__:
+            return self.__dict__[attr]
+        elif hasattr(self, 'args') and hasattr(self.args, attr):
+            return getattr(self.args, attr)
+        else:
+            raise AttributeError(f"{self.__class__.__name__} object has no attribute '{attr}'")
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
