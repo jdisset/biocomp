@@ -7,10 +7,80 @@ import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 from jax import vmap
+from jax.tree_util import Partial as partial
+import json
+import inspect
 
 from . import nodes as nd
 from .network import Network
 from . import utils as ut
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+### {{{                      --     Config manager     --
+
+def unwrap_partial_function(implementation):
+    if hasattr(implementation, 'func') and hasattr(implementation, 'keywords'):
+        partial_args = implementation.keywords
+        implementation = implementation.func
+    else:
+        partial_args = {}
+    return implementation, partial_args
+
+class ComputeConfigManager:
+    def __init__(self):
+        self.config = {'functions': {}}
+
+    def set(self, key, implementation, **kwargs):
+        implementation, partial_args = unwrap_partial_function(implementation)
+        kwargs.update(partial_args)
+
+        signature = inspect.signature(implementation)
+        parameters = {}
+        for name, param in signature.parameters.items():
+            if name in kwargs:
+                parameters[name] = kwargs[name]
+            elif param.default != inspect.Parameter.empty:
+                parameters[name] = param.default
+
+        sc = parameters.pop('stack', None)
+        assert sc is None, 'stack is a reserved parameter name'
+
+        self.config['functions'][key] = {
+            'implementation': implementation.__name__,
+            'parameters': parameters,
+        }
+
+    def get(self, key):
+        assert key in self.config['functions'], f'No function named {key}'
+        func_data = self.config['functions'][key]
+        # take from node module
+        node_m = nd
+        implementation = getattr(node_m, func_data['implementation'])
+        params = func_data['parameters']
+        return partial(implementation, **params)
+
+    def export(self, filename):
+        with open(filename, 'w') as f:
+            json.dump(self.config, f)
+
+    def get_config(self):
+        return self.config
+
+    def load_file(self, filename):
+        with open(filename, 'r') as f:
+            self.config = json.load(f)
+
+    @classmethod
+    def from_file(cls, filename):
+        ccm = cls()
+        ccm.load_file(filename)
+        return ccm
+
+    def load(self, config):
+        self.config = config
+
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -96,7 +166,7 @@ class ComputeLayer:
 
     is_built = False
 
-    def setup(self, config: nd.ComputeConfigManager, stack):
+    def setup(self, config: ComputeConfigManager, stack):
 
         self.check()
 
@@ -236,7 +306,7 @@ class ComputeStack:
     def __hash__(self):
         return hash((tuple(self.networks), tuple(self.layers)))
 
-    def build(self, config: nd.ComputeConfigManager):
+    def build(self, config: ComputeConfigManager):
         self.config = config
         ut.logger.info('Building compute stack')
         self._assemble_stack()
@@ -647,3 +717,4 @@ class ComputeStack:
 
 # }}}
 ##────────────────────────────────────────────────────────────────────────────}}}
+

@@ -1,84 +1,47 @@
 from . import nodes as nodes
+from . import compute as cmp
 from . import nodes_old as nodes_old
 from functools import partial
 
-# T_SIZE = 32
-# T_DEPTH = 3
-# I_SIZE = 32
-# I_DEPTH = 2
-# I_OUT = 8
-# ERN_SIZE = 64
-# ERN_DEPTH = 3
-# MEFL_SIZE = 32
-# MEFL_DEPTH = 3
-
-# DEFAULT_NN_NODES = dict(
-    # nodes_old.DEFAULT_COMPUTE_NODES_DICT,
-    # **{
-        # 'output': partial(nodes_old.output, wsize=MEFL_SIZE, depth=MEFL_DEPTH),
-        # 'transcription': partial(
-            # nodes_old.transcription,
-            # outer_wsize=T_SIZE,
-            # outer_depth=T_DEPTH,
-            # inner_wsize=I_SIZE,
-            # inner_depth=I_DEPTH,
-            # inner_out=I_OUT,
-        # ),
-        # 'translation': partial(
-            # nodes_old.translation,
-            # outer_wsize=T_SIZE,
-            # outer_depth=T_DEPTH,
-            # inner_wsize=I_SIZE,
-            # inner_depth=I_DEPTH,
-            # inner_out=I_OUT,
-        # ),
-        # 'inv_transcription': partial(
-            # nodes_old.inv_transcription,
-            # outer_wsize=T_SIZE,
-            # outer_depth=T_DEPTH,
-            # inner_wsize=I_SIZE,
-            # inner_depth=I_DEPTH,
-            # inner_out=I_OUT,
-        # ),
-        # 'inv_translation': partial(
-            # nodes_old.inv_translation,
-            # outer_wsize=T_SIZE,
-            # outer_depth=T_DEPTH,
-            # inner_wsize=I_SIZE,
-            # inner_depth=I_DEPTH,
-            # inner_out=I_OUT,
-        # ),
-        # 'sequestron_ERN': partial(nodes_old.ERN5p, wsize=ERN_SIZE, depth=ERN_DEPTH),
-        # 'sequestron_ERN3p': partial(nodes_old.ERN3p, wsize=ERN_SIZE, depth=ERN_DEPTH),
-    # },
-# )
-
-DEFAULT_DATA_CONFIG = {
-    "batch_size": 16,
-    "n_batches": 2048,
-    "kde_bw_method": 0.1,
-    "log_factor": 2e4,
-    "max_value": 5e7,
-    "density_quantile_threshold": 0.025, # threshold = min of both
-    "coords_for_density_threshold": 0.3, # threshold = min of both
-}
 
 DEFAULT_TRAINING_CONFIG = {
-    "optimizer": "adam",
-    "learning_rate": 1e-4,
-    "adam_w_decay": 1e-7,
+    # -------- training config --------
     "rng_key": 42,
-    "epochs": 300,
-    "n_replicates": 1,
-    "n_epochs_per_batch_rotation": 16,
     "negative_grad_penalty": 0.1,
     "huber_quantile_loss_delta": 0.1,
     "static_params": ['/__static__','/node'],
     "cache_dir": "./.training_cache",
-    # "node_impl": DEFAULT_NN_NODES,
+    'optimizer': 'adam',
+    'epochs': 150,
+    'schedule': 'cosine',
+    'learning_rate': 0.002,
+    'end_learning_rate': 5e-6,
+    'warmup_epochs': 25,
+    'steps_per_epoch': 128,
+    'decay_epochs': 125,
+    'adam_w_decay': 0.001,
+    # -------- data config --------
+    "batch_size": 16,
+    "n_batches": 2048,
+    "data_scaling_log_factor": 2e4,
+    "data_scaling_max_value": 5e7,
+    "data_sampling_kde_bw_method": 0.1,
+    "data_sampling_density_quantile_threshold": 0.025, # threshold = min of both
+    "data_sampling_coords_for_density_threshold": 0.3, # threshold = min of both
 }
 
-DEFAULT_CONFIG = {
-    **DEFAULT_DATA_CONFIG,
-    **DEFAULT_TRAINING_CONFIG,
-}
+DEFAULT_COMPUTE_CONFIG = cmp.ComputeConfigManager()
+DEFAULT_COMPUTE_CONFIG.set('transcription', nodes.transcription)
+DEFAULT_COMPUTE_CONFIG.set('translation', nodes.translation)
+DEFAULT_COMPUTE_CONFIG.set('inv_transcription', nodes.inv_transcription)
+DEFAULT_COMPUTE_CONFIG.set('inv_translation', nodes.inv_translation)
+DEFAULT_COMPUTE_CONFIG.set('sequestron_ERN', nodes.ERN5p)
+DEFAULT_COMPUTE_CONFIG.set('sequestron_ERN3p', nodes.ERN3p)
+DEFAULT_COMPUTE_CONFIG.set('source', nodes.source)
+DEFAULT_COMPUTE_CONFIG.set('inv_source', nodes.inv_source)
+DEFAULT_COMPUTE_CONFIG.set('numeric', nodes.numeric)
+DEFAULT_COMPUTE_CONFIG.set('inv_numeric', nodes.inv_numeric)
+DEFAULT_COMPUTE_CONFIG.set('aggregation', nodes.aggregation)
+DEFAULT_COMPUTE_CONFIG.set('inv_aggregation', nodes.inv_aggregation)
+DEFAULT_COMPUTE_CONFIG.set('output', nodes.grouped_output)
+DEFAULT_COMPUTE_CONFIG.set('deadend', nodes.single_passthrough)

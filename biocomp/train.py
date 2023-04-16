@@ -74,10 +74,12 @@ def compstats(v, smooth_win=1):
 
 def get_epoch_stats(epoch_data, smooth_win=1):
     stats = {'grad': {}, 'params': {}}
-    for k, v in epoch_data['grad']['shared'].items():
-        stats['grad'][k] = compstats(v)
-    for k, v in epoch_data['params']['shared'].items():
-        stats['params'][k] = compstats(v)
+    if 'grad' in epoch_data:
+        for k, v in epoch_data['grad']['shared'].items():
+            stats['grad'][k] = compstats(v)
+    if 'params' in epoch_data:
+        for k, v in epoch_data['params']['shared'].items():
+            stats['params'][k] = compstats(v)
     return stats
 
 
@@ -92,12 +94,9 @@ def local_save(epoch, cfg, epoch_history=None, save_dir=None, full_save=False, *
         if epoch <= full_save_until_epoch:
             du.save(epoch_history, f'{save_dir}/epoch_{epoch}_full.pkl')
 
-    params = ut.tree_get(epoch_history['params'], -1)
+    # params = ut.tree_get(epoch_history['params'], -1)
+    params = epoch_history['latest_params']
     loss = np.array(epoch_history['loss'])
-    avg_loss = np.mean(loss)
-    # stats = get_epoch_stats(epoch_history)
-    # stats['loss'] = loss
-    # du.save(stats, f'{save_dir}/epoch_{epoch}_stats.pkl')
 
     # first we rename the old params
     for f in Path(save_dir).glob('latest_params.pkl'):
@@ -110,7 +109,7 @@ def local_save(epoch, cfg, epoch_history=None, save_dir=None, full_save=False, *
     for f in Path(save_dir).glob('old_params.pkl'):
         f.unlink()
 
-    print(f"Saving epoch to disk took {time.time() - t0:.2f}s")
+    ut.logger.info(f"Saving epoch to disk took {time.time() - t0:.2f}s")
 
 
 def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
@@ -118,7 +117,7 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
         return
 
     t0 = time.time()
-    params = ut.tree_get(epoch_history['params'], -1)
+    params = epoch_history['latest_params']
     pred = []
     networks = dman.get_networks()
     try:
@@ -127,10 +126,13 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
             pred.append(wb.Image(fig, caption=f'{net.name}'))
             plt.close(fig)
     except Exception as e:
-        # raise e
         ut.logger.warning(f"Failed to plot predictions: {e}")
+        # print a stack trace
+        import traceback
+        traceback.print_exc()
+
     wb.log({'Evaluations': pred})
-    print(f'Done logging prediction plots for epoch {epoch} in {time.time() - t0:.2f}s')
+    ut.logger.info(f'Done logging prediction plots for epoch {epoch} in {time.time() - t0:.2f}s')
 
 
 def wandb_log_epoch(epoch, cfg, epoch_history=None, **_):
@@ -148,8 +150,12 @@ def console_log(epoch, cfg, epoch_history=None, **_):
         avg = np.mean(loss)
         std = np.std(loss)
         lmin, lmax = jnp.min(loss), jnp.max(loss)
-        print(
-            f'[{epoch}/{cfg["epochs"]}] loss: {avg:.4f} ± {std:.4f} [min {lmin:.4f}, max {lmax:.4f}] in {epoch_history["epoch_time"]:.2f}s'
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        fmt = lambda x: f'{x:.1e}' if x < 1e-3 or x > 1e3 else f'{x:.3f}'
+        ut.logger.info(
+            f"""[{epoch}/{cfg["epochs"]}] \
+        loss: {fmt(avg)} ± {fmt(std)} [min {fmt(lmin)}, max {fmt(lmax)}] in \
+        {epoch_history["epoch_time"]:.2f}s"""
         )
 
 
@@ -169,30 +175,65 @@ def log_w_replicates(history, epoch, cfg, **_):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+
 def get_optimizer(cfg):
+
+    learning_rate = cfg['learning_rate']
+
+    if 'schedule' in cfg:
+        if cfg['schedule'] == 'cosine':
+            steps_per_epoch = cfg['steps_per_epoch']
+            max_learning_rate = cfg['learning_rate']
+            warmup_steps = cfg['warmup_epochs'] * steps_per_epoch
+            decay_steps = cfg['decay_epochs'] * steps_per_epoch
+            end_learning_rate = cfg['end_learning_rate']
+            learning_rate = optax.warmup_cosine_decay_schedule(
+                init_value=1e-9,
+                peak_value=max_learning_rate,
+                warmup_steps=warmup_steps,
+                decay_steps=decay_steps,
+                end_value=end_learning_rate,
+            )
+        elif cfg['schedule'] == 'constant':
+            learning_rate = cfg['learning_rate']
+        else:
+            raise ValueError(f"Unknown learning rate schedule {cfg['schedule']}")
+
     optimizers = {
-        'sgd': optax.sgd(learning_rate=cfg['learning_rate']),
-        'adam': optax.adam(learning_rate=cfg['learning_rate']),
-        'adamw': optax.adamw(learning_rate=cfg['learning_rate'], weight_decay=cfg['adam_w_decay']),
-        'amsgrad': optax.amsgrad(learning_rate=cfg['learning_rate']),
+        'sgd': optax.sgd(learning_rate=learning_rate),
+        'adamw': optax.adamw(learning_rate=learning_rate, weight_decay=cfg['adam_w_decay']),
+        'adam': optax.adam(learning_rate=learning_rate),
+        'amsgrad': optax.amsgrad(learning_rate=learning_rate),
     }
     assert (
         cfg['optimizer'] in optimizers.keys()
     ), f"Optimizer {cfg['optimizer']} not available. Available optimizers are {optimizers.keys()}"
     optimizer = optimizers[cfg['optimizer']]
+
     return optimizer
 
 
-def setup_wandb_logging(project, dman, config):
+def setup_wandb_logging(
+    project,
+    dman,
+    training_config,
+    compute_config,
+    plot_period=1,
+    params_save_period=100,
+    entity='jdisset',
+    **kw,
+):
     import wandb as wb
 
-    wb.init(config=config, project=project, entity="jdisset", reinit=True)
+    full_config = {**training_config, **compute_config.get_config()}
+
+    wb.init(config=full_config, project=project, entity=entity, **kw)
     save_dir = Path(wb.run.dir)
     loggers = [
         (1, console_log),
-        (100, partial(local_save, save_dir=save_dir)),
+        (params_save_period, partial(local_save, save_dir=save_dir)),
         (1, wandb_log_epoch),
-        (100, partial(wandb_plot_pred, dman=dman)),
+        (plot_period, partial(wandb_plot_pred, dman=dman)),
     ]
     return loggers
 
@@ -207,15 +248,19 @@ def get_memory(config):
         return joblib.Memory(None, verbose=0)
 
 
-def start(dman: du.DataManager, training_config, loggers=None):
-    config = {**dft.DEFAULT_CONFIG, **training_config}
+def start(dman: du.DataManager, training_config, compute_config, loggers=None, key=None):
+
+    if key is None:
+        key = jax.random.PRNGKey(training_config['rng_key'])
+    else:
+        ut.logger.info(f"Using key {key} for training")
 
     # --- cached init & batches generation
-    memory = get_memory(config)
+    memory = get_memory(training_config)
 
     @memory.cache
     def init_stack(dman, key):
-        stack = dman.get_compute_stack()
+        stack = dman.build_compute_stack(compute_config)
         with ut.timer('Stack initialization'):
             params = stack.init(key)
         return stack, params
@@ -226,16 +271,14 @@ def start(dman: du.DataManager, training_config, loggers=None):
             xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
         return xbatches, ybatches
 
-    key = jax.random.PRNGKey(config['rng_key'])
-
     stack, params = init_stack(dman, key)
     xbatches, ybatches = generate_batches(dman, key)
-    optimizer = get_optimizer(config)
-    dynamic, _ = ut.split_params(params, config['static_params'])
+    optimizer = get_optimizer(training_config)
+    dynamic, _ = ut.split_params(params, training_config['static_params'])
     opt_state = optimizer.init(dynamic)
-    total_batches = config['n_batches']
+    total_batches = training_config['n_batches']
     assert total_batches == xbatches.shape[0] == ybatches.shape[0]
-    nbatches_per_epoch = total_batches // config['n_epochs_per_batch_rotation']
+    steps_per_epoch = max(1, int(training_config['steps_per_epoch']))
 
     # --- loss & update functions
 
@@ -255,18 +298,18 @@ def start(dman: du.DataManager, training_config, loggers=None):
 
         error = yhat - Y
         quantile_loss = jnp.mean(
-            huber_quantile_loss(error, Z, delta=config['huber_quantile_loss_delta'])
+            huber_quantile_loss(error, Z, delta=training_config['huber_quantile_loss_delta'])
         )
 
-        # grads is the concatenated and flattened jacobian of 
+        # grads is the concatenated and flattened jacobian of
         # translate, transcript, and output nodes wrt their inputs
         # they should be monotonically increasing so we add a loss term
         negative_grads = jnp.mean(jnp.where(grads < 0, -grads, 0))
 
-        return quantile_loss + config['negative_grad_penalty'] * negative_grads
+        return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
 
     def training_step(params, opt_state, x, y, z, key):
-        dynamic, static = ut.split_params(params, config['static_params'])
+        dynamic, static = ut.split_params(params, training_config['static_params'])
         loss, grads = value_and_grad(loss_func)(dynamic, static, x, y, z, key)
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
 
@@ -281,9 +324,9 @@ def start(dman: du.DataManager, training_config, loggers=None):
         }
         return res
 
-    keep_in_history = config.get('keep_in_history', ['loss'])
+    keep_in_history = training_config.get('keep_in_history', ['loss'])
 
-    @ut.progress_scan(nbatches_per_epoch, message='Training model')
+    @ut.progress_scan(steps_per_epoch, message='Training model')
     def scannable_step(carry, i_x_y_z_k):
         params, opt_state = carry
         i, x, y, z, k = i_x_y_z_k
@@ -295,11 +338,11 @@ def start(dman: du.DataManager, training_config, loggers=None):
     @jit
     def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
         zbatches = jax.random.uniform(epoch_key, ybs.shape)
-        batch_keys = jax.random.split(epoch_key, nbatches_per_epoch)
+        batch_keys = jax.random.split(epoch_key, steps_per_epoch)
         (final_params, final_opt_state), epoch_history = jax.lax.scan(
             scannable_step,
             (start_params, start_opt_state),
-            (jnp.arange(nbatches_per_epoch), xbs, ybs, zbatches, batch_keys),
+            (jnp.arange(steps_per_epoch), xbs, ybs, zbatches, batch_keys),
         )
         return final_params, final_opt_state, epoch_history
 
@@ -309,23 +352,29 @@ def start(dman: du.DataManager, training_config, loggers=None):
         loggers = [(1, console_log)]
 
     for _, l in loggers:
-        l(0, config)
+        l(0, training_config)
 
-    ut.logger.info(f'Begin training for {config["epochs"]} epochs')
+    ut.logger.info(f'Begin training for {training_config["epochs"]} epochs')
 
-    for i, epoch_key in enumerate(jax.random.split(key, config['epochs']), 1):
+    def get_slice(a, start, end):
+        offset = start // a.shape[0]
+        start = start % a.shape[0]
+        end = end - offset * a.shape[0]
+        if end > a.shape[0]:  # loop around
+            return jnp.concatenate([a[start:], get_slice(a, 0, end - a.shape[0])])
+        else:
+            return a[start:end]
+
+    for i, epoch_key in enumerate(jax.random.split(key, training_config['epochs']), 1):
         t0 = time.time()
-
-        batch_rotation = i % config['n_epochs_per_batch_rotation']
-        start_idx = batch_rotation * nbatches_per_epoch
-        end_idx = start_idx + nbatches_per_epoch
-        params, opt_state, epoch_history = epoch_step(
-            params, opt_state, epoch_key, xbatches[start_idx:end_idx], ybatches[start_idx:end_idx]
-        )
+        xb = get_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
+        yb = get_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
+        params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key, xb, yb)
         epoch_history['epoch_time'] = time.time() - t0
+        epoch_history['latest_params'] = params
 
         for t, l in loggers:
             if i % t == 0 or i == training_config['epochs']:
-                l(i, config, epoch_history=epoch_history, nbatches=nbatches_per_epoch)
+                l(i, training_config, epoch_history=epoch_history, nbatches=steps_per_epoch)
 
     return params, epoch_history

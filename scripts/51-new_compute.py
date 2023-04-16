@@ -13,8 +13,7 @@ import biocomp.defaults as bdf
 import pandas as pd
 from rich import print as pprint
 import biocomp.datautils as du
-
-import biocom.train as tr
+import biocomp.train as train
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -25,7 +24,7 @@ with ut.timer('from zero to ready-to-compile'):
     matrix_xp = su.load_xp('2023-02-16_Matrix', lib, data_path='./data/calibrated_data')
     dman_full = du.DataManager.from_xps([matrix_xp], config, inverse='all')
 
-dman = dman_full.make_subset(list(range(10)))
+# dman = dman_full.make_subset(list(range(10)))
 # dman = dman_full
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -56,19 +55,28 @@ def get_uorf_values(network):
     values = (get_uorf_value(ern_side.params), get_uorf_value(recog_side.params))
     return values
 
+def get_max_uorf(network):
+    cdg = network.central_dogma_graph
+    params = cdg.params.values
+    uorfs = [get_uorf_value(p) for p in params]
+    return max(uorfs)
+
 
 uorf_dict = {}
-for i, n in enumerate(dman.get_networks()):
+for i, n in enumerate(dman_full.get_networks()):
     has_ERN_node = n.compute_graph['type'] == 'sequestron_ERN'
     if has_ERN_node.any():
         uorf_dict[get_uorf_values(n)] = i
+    # else:
+        # uorf_dict[(get_max_uorf(n),)] = i
 
 uorf_dict
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                   --     manual training loop     --
-import biocomp.train as tr
+import biocomp.train as train
 import optax
 import time
 
@@ -84,7 +92,7 @@ dman.data_cfg['n_batches'] = 2048
 
 with ut.timer('Stack initialization'):
     params = stack.init(jax.random.PRNGKey(0))
-    optimizer = tr.get_optimizer(config)
+    optimizer = train.get_optimizer(config)
     dynamic, _ = ut.split_params(params, config['static_params'])
     opt_state = optimizer.init(dynamic)
 
@@ -114,7 +122,7 @@ def loss_func(dynamic, static, X, Y, Z, key):
 
     error = yhat - Y
     quantile_loss = jnp.mean(
-        tr.huber_quantile_loss(error, Z, delta=config['huber_quantile_loss_delta'])
+        train.huber_quantile_loss(error, Z, delta=config['huber_quantile_loss_delta'])
     )
 
     return quantile_loss
@@ -222,4 +230,4 @@ for i in range(len(dman.get_networks())):
 print('done checking')
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-tr.start(dman, config)
+train.start(dman, config)

@@ -261,11 +261,9 @@ class DataManager:
         X: list,
         Y: list,
         networks: list,
-        data_cfg: dict = dft.DEFAULT_CONFIG,
-        compute_cfg: nd.ComputeConfigManager = nd.DEFAULT_COMPUTE_CONFIG,
+        data_cfg: dict = dft.DEFAULT_TRAINING_CONFIG,
     ):
         self.data_cfg = data_cfg
-        self.compute_cfg = compute_cfg
         self._raw_X = [np.array(x) for x in X]
         self._raw_Y = [np.array(y) for y in Y]
         self._networks = networks
@@ -277,20 +275,21 @@ class DataManager:
         self.gen_kdes()
         self.compute_stack = None
         self.individual_compute_stacks = {}
-        self.build_compute_stack()
         # data_checks(X, Y, models)
 
     def make_subset(self, network_ids):
         sub_x = [self._raw_X[i] for i in network_ids]
         sub_y = [self._raw_Y[i] for i in network_ids]
         sub_networks = [self._networks[i] for i in network_ids]
-        return DataManager(sub_x, sub_y, sub_networks, self.data_cfg, self.compute_cfg)
+        return DataManager(sub_x, sub_y, sub_networks, self.data_cfg)
 
-    def build_compute_stack(self):
+    def build_compute_stack(self, compute_cfg):
         self.compute_stack = ComputeStack(self._networks)
-        self.compute_stack.build(self.compute_cfg)
+        self.compute_stack.build(compute_cfg)
+        return self.compute_stack
 
     def get_compute_stack(self):
+        assert self.compute_stack is not None, 'compute stack not built'
         return self.compute_stack
 
     def get_individual_compute_stack(self, network_id):
@@ -303,7 +302,7 @@ class DataManager:
 
     def gen_kdes(self, bw=None, max_n=10000):
         if bw is None:
-            bw = self.data_cfg['kde_bw_method']
+            bw = self.data_cfg['data_sampling_kde_bw_method']
         key = jax.random.PRNGKey(0)
         self._kdes = [
             gaussian_kde(
@@ -314,13 +313,13 @@ class DataManager:
         ]
 
     def rescale(self, X):
-        factor = self.data_cfg['log_factor']
-        maxv = self.data_cfg['max_value']
+        factor = self.data_cfg['data_scaling_log_factor']
+        maxv = self.data_cfg['data_scaling_max_value']
         return [np.log10(1 + (x / factor)) / np.log10(maxv / factor) for x in X]
 
     def unscale(self, X):
-        factor = self.data_cfg['log_factor']
-        maxv = self.data_cfg['max_value']
+        factor = self.data_cfg['data_scaling_log_factor']
+        maxv = self.data_cfg['data_scaling_max_value']
         return [factor * (np.power(maxv / factor, x) - 1) for x in X]
 
     def get_batches(self, rng_key):
@@ -331,8 +330,8 @@ class DataManager:
             rng_key,
             self.data_cfg['batch_size'],
             self.data_cfg['n_batches'],
-            self.data_cfg['density_quantile_threshold'],
-            self.data_cfg['coords_for_density_threshold'],
+            self.data_cfg['data_sampling_density_quantile_threshold'],
+            self.data_cfg['data_sampling_coords_for_density_threshold'],
         )
         assert xbatches.shape[2] == sum([n.get_nb_inputs() for n in self._networks])
         assert ybatches.shape[2] == sum([n.get_nb_outputs() for n in self._networks])
@@ -360,7 +359,7 @@ class DataManager:
         return self._raw_Y
 
     @classmethod
-    def from_xps(cls, xplist, config=dft.DEFAULT_CONFIG, **kw):
+    def from_xps(cls, xplist, config=dft.DEFAULT_COMPUTE_CONFIG, **kw):
         networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
         X, Y = zip(*[xp.get_XY(m, s) for xp, m, s in zip(xplist, networks, samples)])
         X, Y, networks = (
@@ -853,7 +852,7 @@ def model_at_x(params, dman: DataManager, id, key=jax.random.PRNGKey(0), quantil
     else:
         Q = jax.random.uniform(key, y.shape)
 
-    yhat = jit(vmap(stack.apply, in_axes=(None, 0, 0, 0)))(p, x, Q, keys)
+    yhat, _ = jit(vmap(stack.apply, in_axes=(None, 0, 0, 0)))(p, x, Q, keys)
 
     return x, y, yhat
 
@@ -869,7 +868,6 @@ def plot_model_diff(params, dman, id, ax, **kw):
     net = dman.get_networks()[id]
     err = jnp.abs(y - yhat)
     smooth(x, err, net, dman.rescale, ax, **kw)
-
 
 
 def report(params, dman, id, suptitle='', **kw):

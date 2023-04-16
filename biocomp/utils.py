@@ -22,27 +22,44 @@ import rich
 # {{{                       --     logging utils     --
 # ···············································································
 
-FORMAT = "%(message)s"
+import logging
+from rich.logging import RichHandler
 
-logger = logging.getLogger('biocomp')
-logger.setLevel(20)
 
-if not logger.handlers:
-    logging.basicConfig(level="NOTSET", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()])
+
+def setup_logger(lname=None, level=logging.INFO):
+    root_logger = logging.getLogger(lname)
+    root_logger.setLevel(level)
+    ch = RichHandler(rich_tracebacks=True)
+    ch.setFormatter(logging.Formatter("%(message)s"))
+    ch.setLevel(level)
+    root_logger.handlers = [ch]
+    root_logger.propagate = False
+    return root_logger
+
+
+logger = setup_logger('biocomp')
+setup_logger()
+setup_logger('jax')
+
 
 
 @contextmanager
-def timer(name=None):
+def timer(name=None, use_logger=True):
     from time import perf_counter
+    if use_logger:
+        printf = logger.info
+    else:
+        printf = rich.print
 
     t = perf_counter()
     if name is not None:
-        rich.print(f"\n{name}...")
+        printf(f"\n{name}...")
     yield
     if name is not None:
-        rich.print(f"\n{name} [bold green]done[/bold green] in {perf_counter() - t:.2f} seconds")
+        printf(f"\n{name} [bold green]done[/bold green] in {perf_counter() - t:.2f} seconds")
     else:
-        rich.print(f"\nElapsed time: {perf_counter() - t:.2f} seconds")
+        printf(f"\nElapsed time: {perf_counter() - t:.2f} seconds")
 
 
 #                                                                            }}}
