@@ -370,8 +370,9 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         epoch_history['latest_params'] = params
 
         for t, l in loggers:
-            if (t == 0 or (i % t == 0 and t > 0)) or i == training_config['epochs']:
-                l(i, training_config, epoch_history=epoch_history, nbatches=steps_per_epoch)
+            if t is not None:
+                if (t == 0 or (i % t == 0 and t > 0)) or i == training_config['epochs']:
+                    l(i, training_config, epoch_history=epoch_history, nbatches=steps_per_epoch)
 
     return params, epoch_history
 
@@ -386,7 +387,7 @@ DEFAULT_TRAINING_CONFIG = {
     "rng_key": 42,
     "negative_grad_penalty": 0.1,
     "huber_quantile_loss_delta": 0.1,
-    "static_params": ['/__static__','/node'],
+    "static_params": ['/__static__', '/node'],
     "cache_dir": "./.training_cache",
     'optimizer': 'adam',
     'epochs': 128,
@@ -403,8 +404,8 @@ DEFAULT_TRAINING_CONFIG = {
     "data_scaling_log_factor": 2e4,
     "data_scaling_max_value": 5e7,
     "data_sampling_kde_bw_method": 0.1,
-    "data_sampling_density_quantile_threshold": 0.025, # threshold = min of both
-    "data_sampling_coords_for_density_threshold": 0.3, # threshold = min of both
+    "data_sampling_density_quantile_threshold": 0.025,  # threshold = min of both
+    "data_sampling_coords_for_density_threshold": 0.3,  # threshold = min of both
 }
 
 import argparse
@@ -446,6 +447,21 @@ class TrainingProgram:
         self.parser.add_argument(
             '--seed', type=int, default=None, help='random seed (default: random)'
         )
+
+        self.parser.add_argument(
+            '--wandb_plot_period',
+            type=int,
+            default=-1,
+            help='wandb plot period, None = no plots, -1 = only at the end',
+        )
+
+        self.parser.add_argument(
+            '--wandb_save_period',
+            type=int,
+            default=-1,
+            help='wandb params save period, None = no save, -1 = only at the end',
+        )
+
         self.parser.add_argument(
             '--training_config:update',
             type=str,
@@ -497,6 +513,29 @@ class TrainingProgram:
             return getattr(self.args, attr)
         else:
             raise AttributeError(f"{self.__class__.__name__} object has no attribute '{attr}'")
+
+    def start_training(self, dman: du.DataManager):
+
+        prog_config = self.__dict__
+        self.training_config['program_config'] = prog_config
+
+        if self.wandb_project is not None:
+            loggers = setup_wandb_logging(
+                self.wandb_project,
+                dman,
+                self.training_config,
+                self.compute_config,
+                plot_period=self.wandb_plot_period,
+                save_period=self.wandb_save_period,
+            )
+        else:
+            loggers = [
+                (1, console_log),
+                (-1, partial(local_save, save_dir=self.local_save_dir)),
+            ]
+
+        start(dman, self.training_config, self.compute_config, loggers, seed=self.seed)
+
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

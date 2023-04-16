@@ -1,40 +1,33 @@
-#### {{{                          --     imports     --
 from biocomp import utils as ut
-from contextlib import contextmanager
 import scriptutils as su
-from pathlib import Path
-import jax.numpy as jnp
-import numpy as np
-import jax
-from jax import jit, vmap, value_and_grad
-from jax.tree_util import Partial as partial
-from tqdm import tqdm
-import biocomp.defaults as bdf
-import pandas as pd
-from rich import print as pprint
 import biocomp.datautils as du
-import biocomp.utils as bu
-import json
 import biocomp.train as train
-from biocomp.compute import ComputeConfigManager
 
-##────────────────────────────────────────────────────────────────────────────}}}
+MAX_UORF = 80
+TRAINING_SETS = {
+    '1_corner': [(0, 0)],
+    '2_corners_recog': [(0, 0), (0, MAX_UORF)],
+    '2_corners_ern': [(0, 0), (MAX_UORF, 0)],
+    '2_corners_diag': [(0, 0), (MAX_UORF, MAX_UORF)],
+    '3_corners': [(0, 0), (0, MAX_UORF), (MAX_UORF, 0)],
+    '4_corners': [(0, 0), (0, MAX_UORF), (MAX_UORF, 0), (MAX_UORF, MAX_UORF)],
+    'all': None,
+}
 
-# xpname = '2023-02-16_Matrix'
-# xpname = '2023-03-26_MatrixCsy4'
-
-
-### {{{                        --     parse args     --
+XP = {'case': '2023-02-16_Matrix', 'csy4': '2023-03-26_MatrixCsy4'}
 prog = train.TrainingProgram()
-prog.add_argument('--xpname', type=str, default='2023-02-16_Matrix', help='name of experiment to load')
-prog.add_argument('--training_set', type=str, default='1_corner', help='name of training set to use')
+prog.add_argument('xp', type=str, help=f'xp to train on from {list(XP.keys())}')
+prog.add_argument(
+    'training_set',
+    type=str,
+    help=f'name of training set to use from {list(TRAINING_SETS.keys())}',
+)
 prog.parse_args()
-##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                      --     loading matrix xp     --
-with ut.timer('Loading data and building networks'):
+with ut.timer(f'Loading data and building networks for {XP[prog.xp.lower()]}'):
     lib = su.load_lib()
-    matrix_xp = su.load_xp(prog.xpname, lib, data_path='./data/calibrated_data')
+    matrix_xp = su.load_xp(XP[prog.xp.lower()], lib, data_path='./data/calibrated_data')
     dman_full = du.DataManager.from_xps([matrix_xp], prog.training_config, inverse='all')
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -84,35 +77,14 @@ for i, n in enumerate(dman_full.get_networks()):
 uorf_dict
 single_uorfs = [i for i in range(len(dman_full.get_networks())) if i not in uorf_dict.values()]
 
-# single_names = [n.name for i, n in enumerate(dman_full.get_networks()) if i in single_uorfs]
+TRAINING_SETS['all'] = list(uorf_dict.keys())
 
+# single_names = [n.name for i, n in enumerate(dman_full.get_networks()) if i in single_uorfs]
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-MAX_UORF = 80
-TRAINING_SETS = {
-    '1_corner': [(0, 0)],
-    '2_corners_recog': [(0, 0), (0, MAX_UORF)],
-    '2_corners_ern': [(0, 0), (MAX_UORF, 0)],
-    '2_corners_diag': [(0, 0), (MAX_UORF, MAX_UORF)],
-    '3_corners': [(0, 0), (0, MAX_UORF), (MAX_UORF, 0)],
-    '4_corners': [(0, 0), (0, MAX_UORF), (MAX_UORF, 0), (MAX_UORF, MAX_UORF)],
-    'all': list(uorf_dict.keys()),
-}
-TRAINING_SETS.keys()
 
 subset = single_uorfs + [uorf_dict[i] for i in TRAINING_SETS[prog.training_set]]
 
-dman = dman_full.make_subset(subset)
-
-if prog.wandb_project is not None:
-    loggers = train.setup_wandb_logging(prog.wandb_project, dman, prog.training_config, prog.compute_config)
-else:
-    loggers = [
-        (1, train.console_log),
-        (100, partial(train.local_save, save_dir=prog.local_save_dir)),
-    ]
-
-train.start(dman, prog.training_config, prog.compute_config, loggers, seed=prog.seed)
-
+prog.start_training(dman_full.make_subset(subset))
