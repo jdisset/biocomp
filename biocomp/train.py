@@ -526,7 +526,7 @@ class TrainingProgram:
                 self.training_config,
                 self.compute_config,
                 plot_period=self.wandb_plot_period,
-                save_period=self.wandb_save_period,
+                params_save_period=self.wandb_save_period,
             )
         else:
             loggers = [
