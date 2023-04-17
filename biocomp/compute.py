@@ -390,6 +390,19 @@ class ComputeStack:
 
         return s, get_param_subset
 
+    def use_shared_params(self, my_params, other_params):
+        # grab a copy of the shared parameters
+        my_p = deepcopy(my_params)
+        other_p = deepcopy(other_params)
+
+        _, shared_p = ut.split_params(other_p, [ut.SHARED_PATH])
+        _, static_p = ut.split_params(my_p, [ut.STATIC_PATH])
+        _, node_p = ut.split_params(my_p, [ut.NODE_PATH])
+
+        my_p = ut.merge_dicts(static_p, shared_p, node_p)
+        return my_p
+
+
     ##────────────────────────────────────────────────────────────────────────────}}}
 
     ### {{{                       --    internal utils     --
