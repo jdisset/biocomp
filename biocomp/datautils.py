@@ -197,15 +197,14 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
 
 # @partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold', 'density_coords'))
 def sample_batches_direct(
-    X, Y, batch_size, n_batches, kde, rng, quantile_threshold=0.05, density_coords=0.3
+    X, Y, batch_size, n_batches, kde, densities, rng, quantile_threshold=0.05, density_coords=0.3
 ):
     assert X.shape[0] == Y.shape[0]
     EPSILON = 1e-16
     HIGH_DENSITIES_PENALTY = 1.0
 
     # select batch_size * n_batches random points, weight by inverse of density
-    densities = kde.evaluate(X.T) + EPSILON
-    threshold = np.quantile(densities, quantile_threshold)
+    threshold = np.quantile(densities + EPSILON, quantile_threshold)
     midX = np.ones((X.shape[1],)) * density_coords
     density_at_midX = kde.evaluate(midX.T)
     if density_at_midX > 0:
@@ -243,7 +242,15 @@ def sample_batches_direct(
 
 # @partial(jit, static_argnames=('batch_size', 'n_batches', 'density_quantile_threshold', 'density_coords'))
 def _get_batches(
-    X, Y, kdes, rng_key, batch_size, n_batches, density_quantile_threshold, density_coords
+    X,
+    Y,
+    kdes,
+    densities,
+    rng_key,
+    batch_size,
+    n_batches,
+    density_quantile_threshold,
+    density_coords,
 ):
 
     all_batches = [
@@ -253,12 +260,13 @@ def _get_batches(
             batch_size,
             n_batches,
             kde,
+            d,
             rng,
             quantile_threshold=density_quantile_threshold,
             density_coords=density_coords,
         )
-        for x, y, kde, rng in tqdm(
-            list(zip(X, Y, kdes, jax.random.split(rng_key, len(X)))),
+        for x, y, kde, d, rng in tqdm(
+            list(zip(X, Y, kdes, densities, jax.random.split(rng_key, len(X)))),
             desc='generating batches',
         )
     ]
@@ -295,6 +303,7 @@ class DataManager:
         assert max([y.max() for y in self._Y]) < MAX_VAL
         self.gen_kdes()
         self.compute_stack = None
+        self._densities = None
         self.individual_compute_stacks = {}
         # data_checks(X, Y, models)
 
@@ -321,7 +330,7 @@ class DataManager:
         # actually returns a tuple of (stack, get_param_subset)
         return self.individual_compute_stacks[network_id]
 
-    def gen_kdes(self, bw=None, max_n=7000):
+    def gen_kdes(self, bw=None, max_n=10000):
         if bw is None:
             bw = self.data_cfg['data_sampling_kde_bw_method']
         key = jax.random.PRNGKey(0)
@@ -331,6 +340,12 @@ class DataManager:
                 bw_method=bw,
             )
             for x in self._X
+        ]
+
+    def compute_densities(self):
+        self._densities = [
+            np.array(kde.evaluate(x.T))
+            for kde, x in tqdm(list(zip(self._kdes, self._X)), desc='computing densities')
         ]
 
     def rescale(self, X):
@@ -344,10 +359,13 @@ class DataManager:
         return [factor * (np.power(maxv / factor, x) - 1) for x in X]
 
     def get_batches(self, rng_key):
+        if self._densities is None:
+            self.compute_densities()
         xbatches, ybatches = _get_batches(
             self.get_X(),
             self.get_Y(),
             self.get_kdes(),
+            self._densities,
             rng_key,
             self.data_cfg['batch_size'],
             self.data_cfg['n_batches'],
@@ -357,6 +375,34 @@ class DataManager:
         assert xbatches.shape[2] == sum([n.get_nb_inputs() for n in self._networks])
         assert ybatches.shape[2] == sum([n.get_nb_outputs() for n in self._networks])
         return xbatches, ybatches
+
+    def get_uniform_samples(self, rng_key, n_samples=10000):
+        if self._densities is None:
+            self.compute_densities()
+        all_b = [
+            sample_batches_direct(
+                x,
+                y,
+                n_samples,
+                1,
+                kde,
+                d,
+                rng,
+                quantile_threshold=self.data_cfg['data_sampling_density_quantile_threshold'],
+                density_coords=self.data_cfg['data_sampling_coords_for_density_threshold'],
+            )
+            for x, y, kde, d, rng in zip(
+                self.get_X(),
+                self.get_Y(),
+                self.get_kdes(),
+                self._densities,
+                jax.random.split(rng_key, len(self._networks)),
+            )
+        ]
+        X, Y = zip(*all_b)
+        X = [x.squeeze() for x in X]
+        Y = [y.squeeze() for y in Y]
+        return X, Y
 
     def get_networks(self):
         return self._networks
@@ -410,6 +456,7 @@ def weighted_quantile(data, weights, qu):
     return jnp.interp(qu, cdf, data)
 
 
+# TODO: jax version using grid space partitionning
 def get_knn(x, tree, knn=500, min_points=20, radius=0.1, **_):
     distances, indices = tree.query(x, k=knn, distance_upper_bound=radius)
     mask = distances == np.inf
@@ -803,7 +850,7 @@ def eval_network_plot(
     dman,
     id,
     ax,
-    npoints_eval=10000,
+    npoints_eval=20000,
     quantile_range=[0.2, 0.8],
     key=jax.random.PRNGKey(0),
     xrange_eval=None,
@@ -907,8 +954,8 @@ def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
         x, y, yhat = use_x_y_yhat
         assert len(x) == len(y), 'x and y must have the same length'
         assert y.shape == yhat.shape, 'y and yhat must have the same shape'
-        network_plot(dman, id, ax[0], use_xy=(x, y), **kw)
-        network_plot(dman, id, ax[1], use_xy=(x, yhat), **kw)
+        network_plot(dman, id, ax[0], use_xy=(x, y), kde=False, **kw)
+        network_plot(dman, id, ax[1], use_xy=(x, yhat), kde=False, **kw)
     else:
         network_plot(dman, id, ax[0], **kw)
         plot_model_at_x(params, dman, id, ax[1], **kw)

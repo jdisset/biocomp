@@ -117,6 +117,7 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
 
     matplotlib.pyplot.switch_backend('Agg')
     import traceback
+    from tqdm import tqdm
 
     if epoch_history is None:
         return
@@ -125,41 +126,26 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
         params = epoch_history['latest_params']
         networks = dman.get_networks()
         stack = dman.get_compute_stack()
-        X = dman.get_X()
-        Y = dman.get_Y()
-
-        # X is a list of arrays, of different size. We want to pad with 0 up to the longest one
-        # and concatenate them along axis 1
-        ROWS_PER_CHUNK = 20000
-        longest = max([x.shape[0] for x in X])
-        longest = (longest // ROWS_PER_CHUNK + 1) * ROWS_PER_CHUNK
-
-        XX = np.concatenate(
-            [np.pad(x, ((0, longest - x.shape[0]), (0, 0)), constant_values=0) for x in X], axis=1
-        )
-        assert XX.shape[0] == longest
-        assert XX.shape[1] == sum([x.shape[1] for x in X])
-        assert stack.total_nb_of_inputs == XX.shape[1]
-
+        N_SAMPLES = 20000
         key = jax.random.PRNGKey(0)
-        Q = jax.random.uniform(key, (longest, stack.total_nb_of_outputs))
-        keys = jax.random.split(key, longest)
+        X, Y = dman.get_uniform_samples(key, N_SAMPLES)
+        assert len(X) == len(Y)
+        assert len(X) == len(networks)
+
+        ALLX = jnp.concatenate(X, axis=1)
+        assert ALLX.shape == (
+            N_SAMPLES,
+            stack.total_nb_of_inputs,
+        ), f"{ALLX.shape} != {(N_SAMPLES, stack.total_nb_of_inputs)}"
+
+        Q = jax.random.uniform(key, (N_SAMPLES, stack.total_nb_of_outputs))
+        keys = jax.random.split(key, N_SAMPLES)
 
         def compute(params, XX, Q, keys):
             res, _ = stack.apply(params, XX, Q, keys)
             return res
 
-        apply = jit(vmap(compute, in_axes=(None, 0, 0, 0)))
-
-        # cut XX into slices so that it fits in memory
-        chunks = np.split(XX, XX.shape[0] // ROWS_PER_CHUNK, axis=0)
-        Qchunks = np.split(Q, Q.shape[0] // ROWS_PER_CHUNK, axis=0)
-        keychunks = np.split(keys, keys.shape[0] // ROWS_PER_CHUNK, axis=0)
-
-        from tqdm import tqdm
-        YHAT = np.concatenate(
-            [apply(params, c, q, k) for c, q, k in tqdm(list(zip(chunks, Qchunks, keychunks)))], axis=0
-        )
+        YHAT = jit(vmap(compute, in_axes=(None, 0, 0, 0)))(params, ALLX, Q, keys)
 
         def plot_prediction(index):
             try:
@@ -168,7 +154,7 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
                 x, y = X[index], Y[index]
                 yhat = YHAT[: x.shape[0], out_id : out_id + n_out]
                 assert yhat.shape == y.shape, f"{yhat.shape} != {y.shape}"
-                fig, ax = du.report(params, dman, index, use_x_y_yhat=(x, y, yhat))
+                fig, ax = du.report(params, dman, index, use_x_y_yhat=(x, y, yhat), res=64)
                 img = wb.Image(fig, caption=f'{networks[index].name}')
                 plt.close(fig)
                 return img
@@ -458,7 +444,7 @@ DEFAULT_TRAINING_CONFIG = {
     "data_scaling_max_value": 5e7,
     "data_sampling_kde_bw_method": 0.1,
     "data_sampling_density_quantile_threshold": 0.025,  # threshold = min of both
-    "data_sampling_coords_for_density_threshold": 0.3,  # threshold = min of both
+    "data_sampling_coords_for_density_threshold": 0.15,  # threshold = min of both
 }
 
 import argparse
