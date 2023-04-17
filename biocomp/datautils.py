@@ -772,10 +772,19 @@ def timelapse_persp(Q, title, labels=None, outputfile=None, show=True, **kw):
 
 
 def network_plot(
-    dman: DataManager, network_id: int, ax, kde=None, density_quantile_threshold=0.05, **kw
+    dman: DataManager,
+    network_id: int,
+    ax,
+    kde=None,
+    density_quantile_threshold=0.05,
+    use_xy=None,
+    **kw,
 ):
     network = dman.get_networks()[network_id]
-    x, y = dman.get_X()[network_id], dman.get_Y()[network_id]
+    if use_xy is None:
+        x, y = dman.get_X()[network_id], dman.get_Y()[network_id]
+    else:
+        x, y = use_xy
 
     if kde is not False:
         if kde is None:
@@ -879,7 +888,7 @@ def model_at_x(params, dman: DataManager, id, key=jax.random.PRNGKey(0), quantil
 
 
 def plot_model_at_x(params, dman, id, ax, **kw):
-    x, y, yhat = model_at_x(params, dman, id, **kw)
+    x, _, yhat = model_at_x(params, dman, id, **kw)
     net = dman.get_networks()[id]
     smooth(x, yhat, net, dman.rescale, ax, **kw)
 
@@ -891,11 +900,19 @@ def plot_model_diff(params, dman, id, ax, **kw):
     smooth(x, err, net, dman.rescale, ax, **kw)
 
 
-def report(params, dman, id, suptitle='', **kw):
+def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
     fig, ax = mkfig(1, 2, size=(4, 4))
-    network_plot(dman, id, ax[0], **kw)
-    plot_model_at_x(params, dman, id, ax[1], **kw)
-    # eval_model_plot(params, dman, id, ax[1], **kw)
+
+    if use_x_y_yhat is not None:
+        x, y, yhat = use_x_y_yhat
+        assert len(x) == len(y), 'x and y must have the same length'
+        assert y.shape == yhat.shape, 'y and yhat must have the same shape'
+        network_plot(dman, id, ax[0], use_xy=(x, y), **kw)
+        network_plot(dman, id, ax[1], use_xy=(x, yhat), **kw)
+    else:
+        network_plot(dman, id, ax[0], **kw)
+        plot_model_at_x(params, dman, id, ax[1], **kw)
+
     ax[0].set_title(f'Original data (mean)')
     ax[1].set_title(f'Predicted (mean)')
     network = dman.get_networks()[id]

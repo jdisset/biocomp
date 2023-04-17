@@ -343,7 +343,8 @@ class ComputeStack:
     def __call__(self, *args, **kwargs):
         if not self.is_built:
             raise ValueError('Compute stack is not built, can\'t call it')
-        return self.apply(*args, **kwargs)
+        res, _ = self.apply(*args, **kwargs)
+        return res
 
     def each_node(self):
         for layer in self.layers:

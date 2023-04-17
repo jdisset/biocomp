@@ -88,3 +88,4 @@ TRAINING_SETS['all'] = list(uorf_dict.keys())
 subset = single_uorfs + [uorf_dict[i] for i in TRAINING_SETS[prog.training_set]]
 
 prog.start_training(dman_full.make_subset(subset))
+

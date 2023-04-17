@@ -3,6 +3,7 @@
 # ···············································································
 from jax.tree_util import Partial as partial
 import jax
+from typing import Tuple
 from datetime import datetime
 import jax.numpy as jnp
 from jax import jit, vmap, grad, value_and_grad
@@ -111,27 +112,75 @@ def local_save(epoch, cfg, epoch_history=None, save_dir=None, full_save=False, *
 
 
 def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
+
+    import matplotlib
+
+    matplotlib.pyplot.switch_backend('Agg')
+    import traceback
+
     if epoch_history is None:
         return
 
-    t0 = time.time()
-    params = epoch_history['latest_params']
-    pred = []
-    networks = dman.get_networks()
-    try:
-        for i, net in enumerate(networks):
-            fig, ax = du.report(params, dman, i)
-            pred.append(wb.Image(fig, caption=f'{net.name}'))
-            plt.close(fig)
-    except Exception as e:
-        ut.logger.warning(f"Failed to plot predictions: {e}")
-        # print a stack trace
-        import traceback
+    with ut.timer('wandb_plot_pred'):
+        params = epoch_history['latest_params']
+        networks = dman.get_networks()
+        stack = dman.get_compute_stack()
+        X = dman.get_X()
+        Y = dman.get_Y()
 
-        traceback.print_exc()
+        # X is a list of arrays, of different size. We want to pad with 0 up to the longest one
+        # and concatenate them along axis 1
+        ROWS_PER_CHUNK = 20000
+        longest = max([x.shape[0] for x in X])
+        longest = (longest // ROWS_PER_CHUNK + 1) * ROWS_PER_CHUNK
 
-    wb.log({'Evaluations': pred})
-    ut.logger.info(f'Done logging prediction plots for epoch {epoch} in {time.time() - t0:.2f}s')
+        XX = np.concatenate(
+            [np.pad(x, ((0, longest - x.shape[0]), (0, 0)), constant_values=0) for x in X], axis=1
+        )
+        assert XX.shape[0] == longest
+        assert XX.shape[1] == sum([x.shape[1] for x in X])
+        assert stack.total_nb_of_inputs == XX.shape[1]
+
+        key = jax.random.PRNGKey(0)
+        Q = jax.random.uniform(key, (longest, stack.total_nb_of_outputs))
+        keys = jax.random.split(key, longest)
+
+        def compute(params, XX, Q, keys):
+            res, _ = stack.apply(params, XX, Q, keys)
+            return res
+
+        apply = jit(vmap(compute, in_axes=(None, 0, 0, 0)))
+
+        # cut XX into slices so that it fits in memory
+        chunks = np.split(XX, XX.shape[0] // ROWS_PER_CHUNK, axis=0)
+        Qchunks = np.split(Q, Q.shape[0] // ROWS_PER_CHUNK, axis=0)
+        keychunks = np.split(keys, keys.shape[0] // ROWS_PER_CHUNK, axis=0)
+
+        from tqdm import tqdm
+        YHAT = np.concatenate(
+            [apply(params, c, q, k) for c, q, k in tqdm(list(zip(chunks, Qchunks, keychunks)))], axis=0
+        )
+
+        def plot_prediction(index):
+            try:
+                out_id = stack.get_network_global_output_id(index)
+                n_out = networks[index].get_nb_outputs()
+                x, y = X[index], Y[index]
+                yhat = YHAT[: x.shape[0], out_id : out_id + n_out]
+                assert yhat.shape == y.shape, f"{yhat.shape} != {y.shape}"
+                fig, ax = du.report(params, dman, index, use_x_y_yhat=(x, y, yhat))
+                img = wb.Image(fig, caption=f'{networks[index].name}')
+                plt.close(fig)
+                return img
+
+            except Exception as e:
+                ut.logger.warning(f"Failed to plot prediction {index}: {e}")
+                traceback.print_exc()
+                return None
+
+        pred = [plot_prediction(i) for i in tqdm(list(range(len(networks))))]
+
+        wb.log({'Evaluations': pred})
 
 
 def wandb_log_epoch(epoch, cfg, epoch_history=None, **_):
@@ -393,7 +442,7 @@ DEFAULT_TRAINING_CONFIG = {
     "static_params": ['/__static__', '/node'],
     "cache_dir": "./.training_cache",
     'optimizer': 'adam',
-    'epochs': 128,
+    'epochs': 2,
     'schedule': 'cosine',
     'learning_rate': 1e-3,
     'end_learning_rate': 1e-5,
