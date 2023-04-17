@@ -442,7 +442,7 @@ DEFAULT_TRAINING_CONFIG = {
     "static_params": ['/__static__', '/node'],
     "cache_dir": "./.training_cache",
     'optimizer': 'adam',
-    'epochs': 2,
+    'epochs': 128,
     'schedule': 'cosine',
     'learning_rate': 1e-3,
     'end_learning_rate': 1e-5,
