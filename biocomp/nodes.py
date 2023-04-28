@@ -699,7 +699,10 @@ def transform_nn(
         val = jnp.array(values)
         rshape = (val.shape[0], rate_dim)
         # first grab the continuous values for the rates
-        rates = param_f(rate_name, init=ut.continuous_initializer(key, rshape), node_id=node_id)
+        individual_rate_name = f'{rate_name}_x{rshape[0]}'
+        rates = param_f(
+            individual_rate_name, init=ut.continuous_initializer(key, rshape), node_id=node_id
+        )
         # then quantize them
         rates = get_quantized(rates, node_id=node_id, params=params, param_name=rate_name)
         return val, rates

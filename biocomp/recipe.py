@@ -12,6 +12,7 @@ import json5
 from typing import Optional
 import logging as log
 
+
 def escape_name(name):
     return name.replace('-', '_').replace(' ', '_').upper().rstrip('_A')
 
@@ -27,8 +28,6 @@ def escape(names):
         return {escape_name(k): escape_name(v) for k, v in names.items()}
     else:
         return names
-
-
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -142,7 +141,7 @@ def recipes_to_sql(recipes: list, conn, lib):
                     l1ids = [s for s in lib.L2s.loc[s['plasmid']][slot_cols].tolist() if s]
                 if type is None:
                     err_msg = f'In recipe {obj["name"]}: unknown plasmid {s["plasmid"]}'
-                    ut.error(err_msg)
+                    ut.logger.error(err_msg)
                     error_in_recipe = True
                     continue  # we still continue to get a list of all errors
                 c.execute("SELECT name FROM sources WHERE name = ?", (s['plasmid'],))
@@ -166,7 +165,7 @@ def recipes_to_sql(recipes: list, conn, lib):
                     ),
                 )
         if error_in_recipe:
-            ut.error(f'Skipped recipe {obj["name"]} because of import errors')
+            ut.logger.error(f'Skipped recipe {obj["name"]} because of import errors')
             c.execute("DELETE FROM recipes WHERE name = ?", (obj['name'],))
             conn.commit()
             # return
@@ -257,7 +256,6 @@ class XP:
         db_path=":memory:",
         inverse='shortest',
         data_path='./data',
-
     ):
         log.debug(f'Initializing XP {xp_name}')
         self.xp_path, self.recipe_path = Path(xp_path), Path(recipe_path)
@@ -317,12 +315,16 @@ class XP:
         # first build each network for each recipe
         unique_recipe_names = list(set(self.recipe_names))
         fwd_networks = {}
-        for recipename in tqdm(unique_recipe_names, desc='Building networks'):
+        for recipename in tqdm(unique_recipe_names, desc=f'Building networks for xp {self.name}'):
             try:
                 log.debug(f'building recipe {recipename}')
-                fwd_networks[recipename] = Network(self.lib, recipename, self.dbconn)
+                fwd_networks[recipename] = Network(
+                    self.lib, recipename, self.dbconn, metadata={'from_xp': self.name}
+                )
             except Exception as e:
-                raise RuntimeError(f'Error building network for recipe {recipename}: \n{e}')
+                raise RuntimeError(
+                    f'Error building network for recipe {recipename} in xp {self.name}: \n{e}'
+                )
 
         # now go through the samples and create the correct pairs
         networks = []

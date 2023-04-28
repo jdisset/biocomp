@@ -84,8 +84,8 @@ def batch(X, Y, batch_size, n_batches=None):
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
-def mkfig(rows, cols, size=(7, 7)):
-    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]))
+def mkfig(rows, cols, size=(7, 7), **kw):
+    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]), **kw)
     return fig, ax
 
 
@@ -313,9 +313,9 @@ class DataManager:
         sub_networks = [self._networks[i] for i in network_ids]
         return DataManager(sub_x, sub_y, sub_networks, self.data_cfg)
 
-    def build_compute_stack(self, compute_cfg):
+    def build_compute_stack(self, compute_cfg, **kwargs):
         self.compute_stack = ComputeStack(self._networks)
-        self.compute_stack.build(compute_cfg)
+        self.compute_stack.build(compute_cfg, **kwargs)
         return self.compute_stack
 
     def get_compute_stack(self):
@@ -348,14 +348,18 @@ class DataManager:
             for kde, x in tqdm(list(zip(self._kdes, self._X)), desc='computing densities')
         ]
 
-    def rescale(self, X):
-        factor = self.data_cfg['data_scaling_log_factor']
-        maxv = self.data_cfg['data_scaling_max_value']
+    def rescale(self, X, factor=None, maxv=None):
+        if factor is None:
+            factor = self.data_cfg['data_scaling_log_factor']
+        if maxv is None:
+            maxv = self.data_cfg['data_scaling_max_value']
         return [np.log10(1 + (x / factor)) / np.log10(maxv / factor) for x in X]
 
-    def unscale(self, X):
-        factor = self.data_cfg['data_scaling_log_factor']
-        maxv = self.data_cfg['data_scaling_max_value']
+    def unscale(self, X, factor=None, maxv=None):
+        if factor is None:
+            factor = self.data_cfg['data_scaling_log_factor']
+        if maxv is None:
+            maxv = self.data_cfg['data_scaling_max_value']
         return [factor * (np.power(maxv / factor, x) - 1) for x in X]
 
     def get_batches(self, rng_key):
@@ -606,6 +610,16 @@ def heatmap(
     return im
 
 
+def scatter(x, y, network, *args, **kw):
+    ninputs = network.get_nb_inputs()
+    if ninputs == 2:
+        return scatter_2d(x, y, network, *args, **kw)
+    if ninputs == 3:
+        return scatter_3d_interactive(x, y, network, *args, **kw)
+    else:
+        raise NotImplementedError(f'Cannot scater plot {ninputs} inputs')
+
+
 def smooth(x, y, network, rescale, ax, **kw):
     ninputs = network.get_nb_inputs()
     if ninputs == 1:
@@ -678,6 +692,249 @@ def network_ticks_and_labels(network, rescaler, xmax=1, desired_order=None):
     return input_order, reordered_input_names, output_pos, output_name, ticks, tlabels
 
 
+import plotly.express as px
+import plotly.graph_objs as go
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import plotly.offline as pyo
+
+import plotly.graph_objects as go
+
+import plotly.graph_objs as go
+import plotly.subplots as sp
+from IPython.display import display
+
+import plotly.graph_objects as go
+import plotly.offline as pyo
+import numpy as np
+
+def scatter_3d_interactive(
+    x,
+    y,
+    network,
+    rescaler,
+    xmin=0,
+    xmax=1,
+    title=None,
+    input_order=None,
+    key=jax.random.PRNGKey(0),
+    size=10,
+    colorbar=True,
+    lw=0.01,
+    filename=None,
+    **kw,
+):
+    input_order, input_names, output_pos, output_name, ticks, ticklabels = network_ticks_and_labels(
+        network, rescaler, xmax=xmax, desired_order=input_order
+    )
+
+    random_order = jax.random.permutation(key, len(x))
+    y = y[random_order, output_pos]
+    x = x[random_order][:, input_order]
+
+    fig = go.Figure()
+
+    scatter = go.Scatter3d(
+        x=x[:, 0],
+        y=x[:, 1],
+        z=x[:, 2],
+        mode='markers',
+        marker=dict(size=size, color=y, colorscale='YlGnBu', line=dict(color='black', width=lw)),
+    )
+
+    fig.add_trace(scatter)
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title=input_names[0],
+            yaxis_title=input_names[1],
+            zaxis_title=input_names[2],
+            xaxis=dict(showspikes=False, showbackground=False, tickvals=ticks, ticktext=ticklabels),
+            yaxis=dict(showspikes=False, showbackground=False, tickvals=ticks, ticktext=ticklabels),
+            zaxis=dict(showspikes=False, showbackground=False, tickvals=ticks, ticktext=ticklabels),
+        ),
+        width=1000,
+        height=800,
+    )
+
+    if colorbar:
+        cbar_trace = go.Scatter3d(
+            x=[None],
+            y=[None],
+            z=[None],
+            mode='markers',
+            marker=dict(
+                size=0,
+                cmin=y.min(),
+                cmax=y.max(),
+                colorscale='YlGnBu',
+                showscale=True,
+                colorbar=dict(title=output_name, tickvals=ticks, ticktext=ticklabels),
+            ),
+        )
+
+        fig.add_trace(cbar_trace)
+
+    ttle = None
+    if title is True:
+        ttle = f'{network.name}\n{output_name} smoothed mean'
+    elif title is not None:
+        ttle = title
+    if ttle is not None:
+        fig.update_layout(title=ttle)
+
+    if filename is None:
+        return pyo.plot(fig, auto_open=True)
+    else:
+
+        return pyo.plot(fig, filename=filename, auto_open=False)
+
+
+def scatter_3d(
+    x,
+    y,
+    network,
+    rescaler,
+    fig,
+    n_views,
+    xmin=0,
+    xmax=1,
+    title=None,
+    input_order=None,
+    key=jax.random.PRNGKey(0),
+    size=10,
+    colorbar=True,
+    lw=0.1,
+    **kw,
+):
+    input_order, input_names, output_pos, output_name, ticks, ticklabels = network_ticks_and_labels(
+        network, rescaler, xmax=xmax, desired_order=input_order
+    )
+
+    cmap = plt.get_cmap('YlGnBu')
+    random_order = jax.random.permutation(key, len(x))
+    y = y[random_order, output_pos]
+    x = x[random_order][:, input_order]
+
+    azim_values = np.linspace(0, 270, n_views)
+
+    for i, azim in enumerate(azim_values):
+        ax = fig.add_subplot(1, n_views, i + 1, projection='3d')
+        sc = ax.scatter(x[:, 0], x[:, 1], x[:, 2], c=y, cmap=cmap, s=size, lw=lw, edgecolor='k')
+        ax.set_xlabel(input_names[0])
+        ax.set_ylabel(input_names[1])
+        ax.set_zlabel(input_names[2])
+
+        if len(ticks) > 0:
+            sc_ticks = ticks
+            ax.set_xticks(sc_ticks)
+            ax.set_xticklabels(ticklabels)
+            ax.set_yticks(sc_ticks)
+            ax.set_yticklabels(ticklabels)
+            ax.set_zticks(sc_ticks)
+            ax.set_zticklabels(ticklabels)
+
+        # if colorbar and i == n_views - 1:  # Only show colorbar on the last plot
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes("top", size="4%", pad=0.05)
+        # cbar = plt.colorbar(sc, cax=cax)
+        # cbar.ax.tick_params(labelsize=6)
+        # for spine in cbar.ax.spines.values():
+        # spine.set_visible(False)
+
+        # if len(ticks) > 0:
+        # valid = ticks >= xmin
+        # diff = len(ticks)
+        # ticks = ticks[valid]
+        # diff -= len(ticks)
+        # cbar.set_ticks(ticks)
+        # cbar.set_ticklabels(ticklabels[diff:])
+
+        ttle = None
+
+        if title is True:
+            ttle = f'{network.name}\n{output_name} smoothed mean'
+        elif title is not None:
+            ttle = title
+        if ttle is not None:
+            ax.set_title(ttle)
+
+        # Rotate the axes
+        ax.view_init(elev=10, azim=azim)
+
+
+def scatter_2d(
+    x,
+    y,
+    network,
+    rescaler,
+    ax,
+    xmin=0,
+    xmax=1,
+    title=None,
+    input_order=None,
+    key=jax.random.PRNGKey(0),
+    size=10,
+    colorbar=True,
+    lw=0.1,
+    **kw,
+):
+    input_order, input_names, output_pos, output_name, ticks, ticklabels = network_ticks_and_labels(
+        network, rescaler, xmax=xmax, desired_order=input_order
+    )
+
+    cmap = plt.get_cmap('YlGnBu')
+    random_order = jax.random.permutation(key, len(x))
+    y = y[random_order, output_pos]
+    x = x[random_order][:, input_order]
+
+    sc = ax.scatter(x[:, 0], x[:, 1], c=y, cmap=cmap, s=size, lw=lw, edgecolor='k')
+
+    ax.set_xlabel(input_names[0])
+    ax.set_ylabel(input_names[1])
+
+    # remove right and top spine
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+
+    # ticks:
+    if len(ticks) > 0:
+        # rescale ticks to image coordinates (they are btwn 0 and 1 to start)
+        sc_ticks = ticks
+        ax.set_xticks(sc_ticks)
+        ax.set_xticklabels(ticklabels)
+        ax.set_yticks(sc_ticks)
+        ax.set_yticklabels(ticklabels)
+
+    # colorbar
+    if colorbar:
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="4%", pad=0.05)
+        cbar = plt.colorbar(sc, cax=cax)
+        cbar.ax.tick_params(labelsize=6)
+        # no cbar spines
+        for spine in cbar.ax.spines.values():
+            spine.set_visible(False)
+
+        # use same ticks if present
+        if len(ticks) > 0:
+            valid = ticks >= xmin
+            diff = len(ticks)
+            ticks = ticks[valid]
+            diff -= len(ticks)
+            cbar.set_ticks(ticks)
+            cbar.set_ticklabels(ticklabels[diff:])
+
+    ttle = None
+
+    if title is True:
+        ttle = f'{network.name}\n{output_name} smoothed mean'
+    elif title is not None:
+        ttle = title
+    if ttle is not None:
+        ax.set_title(ttle)
+
+
 def smooth_2d(
     x,
     y,
@@ -695,14 +952,11 @@ def smooth_2d(
     density_threshold=10,
     **kw,
 ):
-
     input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
-
     y = y[:, output_pos]
     x = x[:, input_order]
-
     tree = cKDTree(x)
     xx = jnp.linspace(xmin, xmax, res)
     xygrid = jnp.array(np.meshgrid(xx, xx)).T.reshape(-1, 2)
@@ -718,7 +972,6 @@ def smooth_2d(
     p = np.where(np.isnan(z), 1, p)
     if density_plot:
         z = p
-
     heatmap(ax, z, ticks=ticks, ticklabels=tlabels, opacities=opacities, **kw)
     if x.shape[1] > 2:
         ax.text(
@@ -727,7 +980,6 @@ def smooth_2d(
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(input_names[1])
     remove_spines(ax)
-
     ttle = None
     if title is True:
         ttle = f'{network.name}\n{output_name} smoothed mean'
@@ -821,10 +1073,11 @@ def timelapse_persp(Q, title, labels=None, outputfile=None, show=True, **kw):
 def network_plot(
     dman: DataManager,
     network_id: int,
-    ax,
+    *args,
     kde=None,
     density_quantile_threshold=0.05,
     use_xy=None,
+    method='smooth',
     **kw,
 ):
     network = dman.get_networks()[network_id]
@@ -842,7 +1095,10 @@ def network_plot(
         )
         x, y = x[subsample], y[subsample]
 
-    smooth(x, y, network, dman.rescale, ax, **kw)
+    if method == 'smooth':
+        return smooth(x, y, network, dman.rescale, *args, **kw)
+    elif method == 'scatter':
+        return scatter(x, y, network, dman.rescale, *args, **kw)
 
 
 def eval_network_plot(
@@ -862,7 +1118,7 @@ def eval_network_plot(
         xrange_eval = jnp.array([[0, 0], [1, 1]])
 
     network = dman.get_networks()[id]
-    jm = jit(dman.get_individual_stack(id).apply)
+    jm = jit(dman.get_individual_compute_stack(id).apply)
 
     x = jax.random.uniform(
         k_i, (npoints_eval, network.get_nb_inputs()), minval=xrange_eval[0], maxval=xrange_eval[1]
@@ -878,43 +1134,64 @@ def eval_network_plot(
     smooth(x, y, network, dman.rescale, ax, xmin=xmin, xmax=xmax, **kw)
 
 
+def get_stack(dman, net_id, params):
+    stack, pf = dman.get_individual_compute_stack(net_id)
+    p = pf(params)
+    return stack, p
+
+
 def eval_model_grid(
     params,
     dman,
     id,
     ax,
-    quantile=0.5,
     key=jax.random.PRNGKey(0),
-    xrange_eval=None,
+    xrange_eval=(0, 1),
+    n_repeats=10,
+    quantile_range=(0.2, 0.8),
     res=100,
+    input_order=None,
     **kw,
 ):
+
+    network = dman.get_networks()[id]
+    stack, p = get_stack(dman, id, params)
+    jm = jit(stack.apply)
+
+    input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
+        network, dman.rescale, xmax=xrange_eval[1], desired_order=input_order
+    )
+
     k_i, k_q = jax.random.split(key)
     if xrange_eval is None:
         xrange_eval = jnp.array([0, 1])
-    model = dman.get_models()[id]
-    jm = dman.get_jitted_models()[id]
+
     xx = jnp.linspace(xrange_eval[0], xrange_eval[1], res)
-    xygrid = jnp.array(np.meshgrid(xx, xx)).T.reshape(-1, 2)
-    input_order, input_names, output_pos, output_name, ticks, tlabels = model_ticks_and_labels(
-        model, dman.rescale
-    )
-    keys = jax.random.split(key, xygrid.shape[0])
-    xygrid = xygrid[:, input_order]
-    y = vmap(jm, in_axes=(None, 0, None, 0))(
-        params, xygrid, jnp.ones((model.n_outputs,)) * quantile, keys
-    )
-    z = y[:, output_pos].reshape(res, res)
+
+    x = jnp.array(np.meshgrid(xx, xx)).T.reshape(-1, 2)
+
+    def compute(k):
+        quantiles = jax.random.uniform(
+            k,
+            (len(x), network.get_nb_outputs()),
+            minval=quantile_range[0],
+            maxval=quantile_range[1],
+        )
+        keys = jax.random.split(k, len(x))
+        y, _ = vmap(jm, in_axes=(None, 0, 0, 0))(p, x, quantiles, keys)
+        return y
+
+    keys = jax.random.split(key, n_repeats)
+    all_y = vmap(compute)(keys)
+    y_mean = jnp.mean(all_y, axis=0)
+
+    z = y_mean[:, output_pos]
+    z = z.reshape(res, res)
+
     heatmap(ax, z, ticks=ticks, ticklabels=tlabels, **kw)
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(input_names[1])
     remove_spines(ax)
-
-
-def get_stack(dman, net_id, params):
-    stack, pf = dman.get_individual_compute_stack(net_id)
-    p = pf(params)
-    return stack, p
 
 
 def model_at_x(params, dman: DataManager, id, key=jax.random.PRNGKey(0), quantile=None, **_):

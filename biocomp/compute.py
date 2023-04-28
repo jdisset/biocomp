@@ -1,7 +1,10 @@
 ### {{{                          --     imports     --
 from copy import deepcopy
 from dataclasses import dataclass
+from queue import PriorityQueue
 
+from collections import deque
+from typing import Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -11,6 +14,8 @@ from jax.tree_util import Partial as partial
 import json
 import inspect
 
+from rich import print as pprint
+
 from . import nodes as nd
 from .network import Network
 from . import utils as ut
@@ -19,6 +24,7 @@ from . import utils as ut
 
 ### {{{                      --     Config manager     --
 
+
 def unwrap_partial_function(implementation):
     if hasattr(implementation, 'func') and hasattr(implementation, 'keywords'):
         partial_args = implementation.keywords
@@ -26,6 +32,7 @@ def unwrap_partial_function(implementation):
     else:
         partial_args = {}
     return implementation, partial_args
+
 
 class ComputeConfigManager:
     def __init__(self):
@@ -151,7 +158,7 @@ class VirtualNode:
         return inv
 
     def __repr__(self):
-        out = f'{self.network_id}/{self.compute_node_id}/{self.node_id}-{self.type_signature}'
+        out = f'{self.network_id}/{self.compute_node_id}/{self.node_id if self.node_id is not None else self.batch_order}-{self.type_signature}'
         return f'{out}'
 
     def __hash__(self):
@@ -170,6 +177,10 @@ class VirtualNode:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 ### {{{                       --     Compute Layer     --
 @dataclass
@@ -237,7 +248,9 @@ class ComputeLayer:
         return int(len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes]))
 
     def __repr__(self):
-        return self.nodes.__repr__()
+        first_node = self.nodes[0].get_compute_node()
+        ftype = first_node.type
+        return f'Layer {self.layer_id} ({ftype}) with {len(self.nodes)} nodes'
 
     def __hash__(self):
         return hash(tuple(self.nodes))
@@ -327,18 +340,20 @@ class ComputeStack:
     def __hash__(self):
         return hash((tuple(self.networks), tuple(self.layers)))
 
-    def build(self, config: ComputeConfigManager):
-        self.config = config
-        ut.logger.info('Building compute stack')
-        self._assemble_stack()
-        self._refresh()
-        self._init_quantization_params()
-        for layer in self.layers:
-            layer.setup(config, stack=self)
+    def build(self, config: ComputeConfigManager, **kwargs):
+        with ut.timer('Building compute stack'):
+            self.config = config
+            with ut.timer('assembling stack'):
+                self._assemble_stack(**kwargs)
             self._refresh()
-        self._generate_apply_method()
-        self.check()
-        self.is_built = True
+            self._init_quantization_params()
+            with ut.timer('building layers'):
+                for layer in self.layers:
+                    layer.setup(config, stack=self)
+                    self._refresh()
+            self._generate_apply_method()
+            self.check()
+            self.is_built = True
 
     def __call__(self, *args, **kwargs):
         if not self.is_built:
@@ -390,9 +405,12 @@ class ComputeStack:
 
         return s, get_param_subset
 
-    def use_shared_params(self, my_params, other_params):
+    @staticmethod
+    def use_shared_params(base_params, other_params):
+        """Returns a copy of the base_params with the shared parameters
+        replaced by the ones in other_params"""
         # grab a copy of the shared parameters
-        my_p = deepcopy(my_params)
+        my_p = deepcopy(base_params)
         other_p = deepcopy(other_params)
 
         _, shared_p = ut.split_params(other_p, [ut.SHARED_PATH])
@@ -401,7 +419,6 @@ class ComputeStack:
 
         my_p = ut.merge_dicts(static_p, shared_p, node_p)
         return my_p
-
 
     ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -505,6 +522,7 @@ class ComputeStack:
 
     @staticmethod
     def make_all_topo_vnodes(networks: list[Network]):
+        """Topological_order for all networks"""
         return [
             [
                 [VirtualNode.from_node(net_id, net, node_id, b_id) for node_id in node_batch]
@@ -514,7 +532,14 @@ class ComputeStack:
         ]
 
     @staticmethod
-    def get_current_batches(stack, type_dict: dict[str, list[VirtualNode]]):
+    def get_networks_current_batch_number(stack, type_dict: dict[str, list[VirtualNode]]):
+        """Determines the current (minimum) batch number for each network in the stack.
+        The batch number is the order in which a node should be computed (topological order of a network).
+        type_dict maps node types to the list of all VirtualNode of that type, for all the nodes not yet in the stack.
+
+        Returns a list of the current batch number for each network. If a network has no current batch,
+        it means it has no nodes left to be computed and its batch number value will be None.
+        """
         MAXINT = 2**60
         current_batches = [MAXINT for _ in stack.networks]
         for nodes in type_dict.values():
@@ -524,59 +549,249 @@ class ComputeStack:
         current_batches = [None if b == MAXINT else b for b in current_batches]
         return current_batches
 
-    @staticmethod
-    def get_available_next_layer_types(current_batches, type_dict: dict[str, list[VirtualNode]]):
-        # a type is available if there are any node with batch_order == current_batches[network_id]
-        return [
-            t
-            for t, nodes in type_dict.items()
-            if any(n.batch_order <= current_batches[n.network_id] for n in nodes)
-        ]
-
     ##────────────────────────────────────────────────────────────────────────────}}}
 
     ### {{{                         --     building     --{{{
 
     @staticmethod
-    def make_layer_from_current_batches(
-        current_batches, type_dict: dict[str, list[VirtualNode]], t: str
-    ):
-        """Returns a ComputeLayer and a new type_dict
-        without the nodes that were not used in the layer"""
-        layer_nodes = []
-        new_type_dict = deepcopy(type_dict)
-        new_type_dict[t] = []
-        for n in type_dict[t]:
-            if n.batch_order <= current_batches[n.network_id]:
-                layer_nodes.append(n)
-            else:
-                new_type_dict[t].append(n)
-        return ComputeLayer(layer_nodes), new_type_dict
+    def make_smallest_stack(stack, type_dict: dict[str, list[VirtualNode]], max_t=2):
+        # Initialize the BFS queue with the initial state
+        bfs_queue = deque([(stack, type_dict, [], 0)])
+        iteration = 0
+
+        while bfs_queue:
+            iteration += 1
+
+            current_stack, current_type_dict, path, depth = bfs_queue.popleft()
+
+            # current_batches is a list of the current batch number for each network in the stack.
+            current_batches = ComputeStack.get_networks_current_batch_number(
+                current_stack, current_type_dict
+            )
+            # pprint(f'current_batches: {current_batches}, depth: {depth}, path: {path}')
+
+            if all(b is None for b in current_batches):  # no nodes left to compute
+                return current_stack
+
+            # possible_next_types is a list of types that are candidates for the next layer, i.e they contain
+            # nodes that that have a batch_order == current_batches[network_id] for at least one network
+            possible_next_types = []
+            for t, nodes in current_type_dict.items():
+                for n in nodes:
+                    can_be_computed = [
+                        n for n in nodes if n.batch_order == current_batches[n.network_id]
+                    ]
+                    if can_be_computed:
+                        possible_next_types.append((t, len(can_be_computed)))
+                        break
+
+            total_nodes_left = sum([len(nodes) for nodes in current_type_dict.values()])
+            # pprint(f'total_nodes_left: {total_nodes_left}')
+
+            if max_t is not None:
+                # sort by decreasing number of nodes
+                possible_next_types = sorted(possible_next_types, key=lambda x: x[1], reverse=True)
+                possible_next_types = possible_next_types[:max_t]
+
+            assert possible_next_types, "No possible next type"
+            # pprint(f'possible_next_types: {possible_next_types}')
+
+            # we try every possible type for the next layer
+            for t, n in possible_next_types:
+                l, new_type_dict = ComputeStack.make_layer_from_current_batches(
+                    current_batches, current_type_dict, t
+                )
+                # l is a ComputeLayer, new_type_dict is a dict[str, list[VirtualNode]]
+                # without the nodes that were used in the layer
+                node_diff = len(current_type_dict[t]) - len(new_type_dict[t])
+                substack = ComputeStack(current_stack.networks, [l])
+                path_entry = (
+                    f'{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types'
+                )
+
+                assert n == node_diff, f'{n} != {node_diff}'
+
+                bfs_queue.append((substack, new_type_dict, path + [path_entry], depth + 1))
+                # pprint(f'bfs_queue size: {len(bfs_queue)}')
+
+        # If we reach here, we didn't find a solution
+        raise RuntimeError("No solution found")
 
     @staticmethod
-    def make_smallest_stack(stack, type_dict: dict[str, list[VirtualNode]]):
+    def make_smallest_stack_dfs(
+        stack, type_dict: dict[str, list[VirtualNode]], path=None, depth=0, max_depth=70, max_t=2
+    ):
 
-        current_batches = ComputeStack.get_current_batches(stack, type_dict)
-        if all(b is None for b in current_batches):
+        if path == None:
+            path = []
+
+        # current_batches is a list of the current batch number for each network in the stack.
+        current_batches = ComputeStack.get_networks_current_batch_number(stack, type_dict)
+
+        if all(b is None for b in current_batches):  # no nodes left to compute
             return stack
-        next_types = ComputeStack.get_available_next_layer_types(current_batches, type_dict)
-        res = []
-        for t in next_types:
+
+        # possible_next_types is a list of types that are candidates for the next layer, i.e they contain
+        # nodes that that have a batch_order == current_batches[network_id] for at least one network
+        possible_next_types = []
+        for t, nodes in type_dict.items():
+            for n in nodes:
+                can_be_computed = [
+                    n for n in nodes if n.batch_order == current_batches[n.network_id]
+                ]
+                if can_be_computed:
+                    possible_next_types.append((t, len(can_be_computed)))
+                    break
+
+        # total_nodes_left = sum([len(nodes) for nodes in type_dict.values()])
+        # pprint(f'total_nodes_left: {total_nodes_left}')
+
+        if max_t is not None:
+            # we're basically doing beam search here, by only keeping the max_t types with the most nodes
+            possible_next_types = sorted(possible_next_types, key=lambda x: x[1], reverse=True)
+            possible_next_types = possible_next_types[:max_t]
+
+        assert possible_next_types, "No possible next type"
+        candidate_stacks = []
+        # we try every possible type for the next layer
+        for t, _ in possible_next_types:
             l, new_type_dict = ComputeStack.make_layer_from_current_batches(
                 current_batches, type_dict, t
             )
+            # l is a ComputeLayer, new_type_dict is a dict[str, list[VirtualNode]]
+            # without the nodes that were used in the layer
+            node_diff = len(type_dict[t]) - len(new_type_dict[t])
             substack = ComputeStack(stack.networks, [l])
-            res.append(ComputeStack.make_smallest_stack(substack, new_type_dict))
-        # we append the stack with the smallest number of layers
-        minstack = min(res, key=lambda s: len(s.layers))
+            path_entry = f'{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types'
+            candidate_stacks.append(
+                ComputeStack.make_smallest_stack_dfs(
+                    substack, new_type_dict, path + [path_entry], depth + 1, max_depth, max_t
+                )
+            )
+
+        assert candidate_stacks, "No candidate stack"
+
+        if depth >= max_depth:
+            # raise a detailed error
+            msg = f"Max depth reached: {max_depth}\n"
+            msg += f"Current stack:\n{stack}\n"
+            msg += f"Current type_dict:\n{type_dict}\n"
+            msg += f"Current batches:\n{current_batches}\n"
+            msg += f"Possible next types:\n{possible_next_types}\n"
+            msg += f"Candidate stacks:\n{candidate_stacks}\n"
+            raise RuntimeError(msg)
+
+
+        # and we only keep the smallest stack
+        minstack = min(candidate_stacks, key=lambda s: len(s.layers))
+
         return stack.extend(minstack)
 
-    def _assemble_stack(self):
+    @staticmethod
+    def heuristic(type_dict):
+        total_nodes_left = sum(len(nodes) for nodes in type_dict.values())
+        if not total_nodes_left:
+            return 0
+
+        min_nodes_left = float('inf')
+        for t, nodes in type_dict.items():
+            nodes_left = sum(1 for n in nodes if n.batch_order is not None)
+            min_nodes_left = min(min_nodes_left, nodes_left)
+
+        return min_nodes_left
+
+    @staticmethod
+    def make_smallest_stack_astar(
+        stack, type_dict: dict[str, list[VirtualNode]], path=None, max_t=2
+    ):
+        if path == None:
+            path = []
+
+        # Initial state
+        start_node = (0, (stack, type_dict, path))
+
+        # Priority queue for A* search
+        queue = PriorityQueue()
+        queue.put(start_node)
+
+        while not queue.empty():
+            _, (current_stack, current_type_dict, current_path) = queue.get()
+
+            current_batches = ComputeStack.get_networks_current_batch_number(
+                current_stack, current_type_dict
+            )
+
+            if all(b is None for b in current_batches):  # no nodes left to compute
+                return current_stack
+
+            possible_next_types = []
+            for t, nodes in current_type_dict.items():
+                for n in nodes:
+                    can_be_computed = [
+                        n for n in nodes if n.batch_order == current_batches[n.network_id]
+                    ]
+                    if can_be_computed:
+                        possible_next_types.append((t, len(can_be_computed)))
+                        break
+
+            if max_t is not None:
+                possible_next_types = sorted(possible_next_types, key=lambda x: x[1], reverse=True)
+                possible_next_types = possible_next_types[:max_t]
+
+            assert possible_next_types, "No possible next type"
+
+            # we try every possible type for the next layer
+            for t, _ in possible_next_types:
+                l, new_type_dict = ComputeStack.make_layer_from_current_batches(
+                    current_batches, current_type_dict, t
+                )
+                node_diff = len(current_type_dict[t]) - len(new_type_dict[t])
+                substack = ComputeStack(current_stack.networks, [l])
+                new_path = current_path + [
+                    f'{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types'
+                ]
+
+                # Calculate the priority for A* search
+                cost_so_far = len(substack.layers)
+                estimated_cost = ComputeStack.heuristic(new_type_dict)
+                priority = cost_so_far + estimated_cost
+
+                queue.put((priority, (substack, new_type_dict, new_path)))
+
+        raise ValueError("No solution found")
+
+    @staticmethod
+    def make_layer_from_current_batches(
+        current_batches, type_dict: dict[str, list[VirtualNode]], t: str
+    ):
+        """
+        Creates a ComputeLayer from the nodes of type t that have a batch_order <= current_batches[network_id]
+        Returns a ComputeLayer and a new type_dict
+        without the nodes that were used in the layer"""
+        layer_nodes = []
+        new_type_dict = deepcopy(type_dict)
+        new_type_dict[t] = []
+        used = 0
+        for n in type_dict[t]:
+            if n.batch_order <= current_batches[n.network_id]:
+                layer_nodes.append(deepcopy(n))
+                used += 1
+            else:
+                new_type_dict[t].append(deepcopy(n))
+
+        assert used > 0, f'used {used} nodes of type {t} to make layer'
+        return ComputeLayer(layer_nodes), new_type_dict
+
+    def _assemble_stack(self, **kwargs):
         n_list = ut.flatten(ComputeStack.make_all_topo_vnodes(self.networks))
         type_dict = {}
         for n in n_list:
             type_dict.setdefault(n.type_signature, []).append(n)
-        minstack = ComputeStack.make_smallest_stack(ComputeStack(self.networks, []), type_dict)
+        with ut.timer('make_smallest_stack'):
+            minstack = ComputeStack.make_smallest_stack_dfs(
+                ComputeStack(self.networks, []), type_dict, **kwargs
+            )
+            ut.logger.info(f'Final stack size: {len(minstack.layers)}')
         self.layers = minstack.layers
 
     def _make_layer_input_getters(self, layer_id):
@@ -733,7 +948,6 @@ class ComputeStack:
                         grad = jnp.array([])
                     return res, grad
 
-
                 def vmapped(*inputs):
                     return vmap(f)(node_ids[lid], keys, *inputs)
 
@@ -741,7 +955,6 @@ class ComputeStack:
 
                 out = jnp.concatenate([out, layer_out.reshape(-1)])
                 grads = jnp.concatenate([grads, layer_grad.reshape(-1)])
-
 
             return out[output_indices], grads
 
@@ -752,4 +965,3 @@ class ComputeStack:
 
 # }}}
 ##────────────────────────────────────────────────────────────────────────────}}}
-

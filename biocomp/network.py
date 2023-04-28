@@ -15,6 +15,7 @@ parameter_to_default_part = {'tl_rate': '00_empty_tc', 'tc_rate': 'hEF1a'}
 # {{{                   --     general network utils     --
 # ···············································································
 
+
 def fuse_consecutive(cg: pd.DataFrame, types_to_fuse: Tuple[str, str], new_type: str):
     """Fuse 2 consecutive nodes in a graph when they are of the types specified in types_to_fuse"""
     assert len(types_to_fuse) == 2
@@ -54,10 +55,17 @@ def fuse_consecutive(cg: pd.DataFrame, types_to_fuse: Tuple[str, str], new_type:
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     base classes     --
 # ···············································································
+class NetworkConstructionError(Exception):
+    pass
+
+
 class Slot:
+    """Transcription Units are made of slots which contain either a part or a list of
+    possible parts that map to a quantized parameter"""
+
     def __init__(self, lib, part):
         self.part = part
-        self.maps_to_parameter = None
+        self.maps_to_parameter = None  # a slot can map to a parameter (tl_rate, tc_rate, etc...)
         if self.part == [] or self.part == [None]:
             self.part = None
         if isinstance(self.part, list):
@@ -70,9 +78,11 @@ class Slot:
         else:
             self.maps_to_parameter = self.__mapped_parameter(lib, self.part)
         if self.maps_to_parameter is not None and not isinstance(self.part, list):
+            # if the slot maps to a parameter, it must be a list (even if ther's ony one part)
             self.part = [self.part]
 
     def __mapped_parameter(self, lib, part_name):
+        """Returns the name of the parameter a part maps to, or None if it doesn't map to any"""
         if part_name is not None:
             if part_name in lib.pc.index:
                 category = lib.pc.loc[part_name, 'category']
@@ -89,44 +99,6 @@ class Slot:
             else:
                 return f'<{self.part}>'
         return f'<{self.part} -> {self.maps_to_parameter}>'
-
-
-class GraphComputeNode:
-    # a simple convenience one-off class to store the information about a node
-    def __init__(self, id, type, cdg_input, cdg_output):
-        self.id = id
-        self.type = type
-        self.cdg_input = cdg_input
-        self.cdg_output = cdg_output if cdg_output is not None else -1
-        self.input_from = []
-        self.output_to = []
-        self.extra = {}
-        self.is_inverse_of = None
-
-    def removeOutput(self, other):
-        other.input_from.remove(self.id)
-        for i in range(len(self.output_to)):
-            if self.output_to[i][0] == other.id:
-                self.output_to.pop(i)
-                break
-
-    def toDict(self):
-        return {
-            "id": self.id,
-            "type": self.type,
-            "cdg_input": self.cdg_input,
-            "cdg_output": self.cdg_output,
-            "input_from": self.input_from,
-            "output_to": self.output_to,
-            "is_inverse_of": self.is_inverse_of,
-            "extra": self.extra,
-        }
-
-    def __str__(self):
-        return str(self.toDict())
-
-    def __repr__(self):
-        return str(self.toDict())
 
 
 # transcription unit: 1 per L1, multiple per L2
@@ -178,6 +150,9 @@ class TranscriptionUnitGenerator:
     def __init__(self, part_generators):
         self.name = ''
         self.part_generators = part_generators
+        # a generator is a function that takes a library
+        # and a list of previously generated slots in this TU
+        # (and possibly other arguments) and returns a generated slot
 
     def generate_all(self, lib, order=None, *args, **kwargs):
         if order is None:
@@ -226,15 +201,52 @@ def transcription_unit_from_L1(l1id, lib):
             msg += f'\npart_cols: {part_cols}'
             msg += f'\nlib.L0s[{l}]: {lib.L0s.loc[l]}'
             msg += f'\nlib.L0s: {lib.L0s}'
-
-            raise RuntimeError(msg)
+            raise NetworkConstructionError(msg)
     tu = TranscriptionUnit([Slot(lib, p) for p in parts])
     return tu
 
 
+class GraphComputeNode:
+    # a simple convenience one-off class to store the information about a node
+    def __init__(self, id, type, cdg_input, cdg_output):
+        self.id = id
+        self.type = type
+        self.cdg_input = cdg_input
+        self.cdg_output = cdg_output if cdg_output is not None else -1
+        self.input_from = []
+        self.output_to = []
+        self.extra = {}
+        self.is_inverse_of = None
+
+    def removeOutput(self, other):
+        other.input_from.remove(self.id)
+        for i in range(len(self.output_to)):
+            if self.output_to[i][0] == other.id:
+                self.output_to.pop(i)
+                break
+
+    def toDict(self):
+        return {
+            "id": self.id,
+            "type": self.type,
+            "cdg_input": self.cdg_input,
+            "cdg_output": self.cdg_output,
+            "input_from": self.input_from,
+            "output_to": self.output_to,
+            "is_inverse_of": self.is_inverse_of,
+            "extra": self.extra,
+        }
+
+    def __str__(self):
+        return str(self.toDict())
+
+    def __repr__(self):
+        return str(self.toDict())
+
+
 # main class: a network of interacting transcription units
 class Network:
-    def __init__(self, lib, recipe_name, recipe_db, custom_outputs=None, build=True):
+    def __init__(self, lib, recipe_name, recipe_db, custom_outputs=None, build=True, metadata=None):
         self.lib = lib
         self.name: str = recipe_name
         self.custom_outputs = custom_outputs
@@ -244,6 +256,7 @@ class Network:
         self.aggregations: Optional[pd.DataFrame] = None
         self.tu_inputs: Optional[pd.DataFrame] = None
         self.db = recipe_db
+        self.metadata = metadata
         if recipe_db is not None:
             self.db.commit()
             self.__build_from_db()
@@ -413,11 +426,11 @@ class Network:
         for node in nodes:
             if node.id == id:
                 return node
-        raise Exception("Node not found")
+        raise NetworkConstructionError(f'Node {id} not found')
 
-    # removeShortcuts removes indirect links in the Compute graph,
-    # turning it from a directed acyclic graph to a tree.
     def __removeShortcuts(self, nodes, root_id):
+        # removeShortcuts removes indirect links in the Compute graph,
+        # turning it from a directed acyclic graph to a tree.
         labels = {}
         for node in nodes:
             labels[node.id] = 1
@@ -492,7 +505,7 @@ class Network:
         except Exception as e:
             msg = f'Error while grouping RNA that have one params: {e}\n'
             msg += f'tudf: \n{tudf}'
-            raise Exception(msg)
+            raise NetworkConstructionError(msg)
 
         rna_tuids_oneparamvalue = (
             [] if rna_tuids_oneparamvalue.empty else list(rna_tuids_oneparamvalue.name)
@@ -563,7 +576,7 @@ class Network:
             msg = f'Error while building central dogma graph. Error: {e}'
             msg += f'\ntudf: \n{tudf}'
             msg += f'\n\ncdg: \n{cdg}'
-            raise Exception(msg)
+            raise NetworkConstructionError(msg)
 
         # and add the available paras with their possible parts
         cdg['params'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type + '_params'], axis=1)
@@ -626,7 +639,7 @@ class Network:
                     msg += f'\nsources_tuids: \n{sources_tuids}'
                     msg += f'\ncentral dogma graph: \n{self.central_dogma_graph}'
                     msg += f'\ncdf: \n{cdf}'
-                    raise Exception(msg)
+                    raise NetworkConstructionError(msg)
 
             sources[i] = group
 
@@ -663,7 +676,7 @@ class Network:
                     msg += f'\n\naggregations: \n{self.aggregations}\n'
                     msg += f'\n{e}'
                     msg += f'\n{cdf}'
-                    raise RuntimeError(msg)
+                    raise NetworkConstructionError(msg)
                 # problem: some sources have no ids!!
 
                 # add the input_from to the cooresponding sources
@@ -682,7 +695,7 @@ class Network:
 
     def __buildRawGraph(self, uidGen: Callable[[], int]) -> List[GraphComputeNode]:
         cdg = self.central_dogma_graph
-        assert cdg is not None
+        assert cdg is not None, 'central dogma graph not built'
         assert isinstance(cdg, pd.DataFrame)
         newnodes = []
 
@@ -698,7 +711,7 @@ class Network:
         # then we add the sequestron nodes with an associated list of their cdg input nodes
         enabled_sequestrons = self.lib.get_enabled_sequestrons()
         for _, r in enabled_sequestrons.iterrows():
-            # sequestrons have 2 input hubs, negative and positive
+            # sequestrons have 2 inputs: negative and positive
             nlvl = cdg[cdg.type == r.negative_level]  # negative level (PRT, RNA, DNA)
             nparts = nlvl[nlvl.content.apply(lambda x: r.negative_part in x)]
 
@@ -708,8 +721,15 @@ class Network:
             olvl = cdg[cdg.type == r.output_level]  # output level (PRT, RNA, DNA)
             oparts = olvl[olvl.content.apply(lambda x: ut.isSubset(r.output_part, x))]
             if len(nparts) > 0 and len(pparts) > 0 and len(oparts.index) > 0:
-                assert len(pparts) == 1
-                assert len(nparts) == 1
+                if len(pparts) != 1:
+                    msg = f'Found {len(pparts)} positive parts for sequestron {r.type} (expected 1)'
+                    msg += f'\n\nparts: {pparts}'
+                    raise NetworkConstructionError(msg)
+
+                if len(nparts) != 1:
+                    msg = f'Found {len(nparts)} negative parts for sequestron {r.type} (expected 1)'
+                    msg += f'\n\nparts: {nparts}'
+                    raise NetworkConstructionError(msg)
                 try:
                     cnode = GraphComputeNode(
                         uidGen(),
@@ -728,7 +748,7 @@ class Network:
                     msg = f'Error while building compute graph for recipe {self.name}:\n{e}'
                     msg += f'Sequestron {r.type}.\nnparts: {nparts}, pparts: {pparts}, oparts: {oparts}'
                     msg += f'\nolevel: {olvl}, oparts: {oparts}, outlevel: {r.output_level}, outpart: {r.output_part}'
-                    raise RuntimeError(msg)
+                    raise NetworkConstructionError(msg)
 
         cg = []
 
@@ -750,8 +770,8 @@ class Network:
             cnode = GraphComputeNode(uidGen(), 'deadend', [i], None)
             newnodes.append(cnode)
 
-        # At first, each TU also has a corresponding source node that we need to add,
-        # but we will merge sources later (for TUs that are on a same plasmid)
+        # At first, each TU also has a corresponding source node that we need to add.
+        # We will merge sources later (for TUs that are on a same plasmid)
         while newnodes:
             n: GraphComputeNode = newnodes.pop()
             if n.type != 'source':
@@ -761,7 +781,7 @@ class Network:
                     msg += f'No cdg_input for node {n.id} of type {n.type}:\n{n}'
                     msg += f'Content of its cdg_output node:\n{cdg.loc[n.cdg_output]}'
                     msg += f'CDG:\n{cdg}'
-                    raise RuntimeError(msg)
+                    raise NetworkConstructionError(msg)
                 for i, n_inp in enumerate(n.cdg_input):
                     others = self.__isOutputedBy(
                         n_inp, cg + newnodes
@@ -826,6 +846,7 @@ class Network:
         # convert to dataframe
         self.compute_graph = pd.DataFrame([n.toDict() for n in cg]).set_index('id').sort_index()
 
+        # first sanity check:
         # there should be the same number of sources in the cdf compute graph as DNA nodes in the cdg
         nsources = len(self.compute_graph[self.compute_graph.type == 'source'])
         ndna = len(self.central_dogma_graph[self.central_dogma_graph.type == 'DNA'])
@@ -841,7 +862,7 @@ class Network:
             msg = f'When building compute graph for recipe {self.name}, '
             msg += f'found {nsources} DNA sources in the graph, but {ndna} DNA nodes total.'
             msg += f'\nExtra DNA nodes: {extradna}'
-            raise RuntimeError(msg)
+            raise NetworkConstructionError(msg)
 
         self.compute_graph = self.__mergeSources(
             self.compute_graph, uidGen
@@ -930,7 +951,7 @@ class Network:
                     msg += f'Trying to construct input_froms of node {i} from upstream outputs.\n'
                     msg += f'{r}'
                     msg += f'\nDetected upstream outputs:\n{output_to_me}'
-                    raise RuntimeError(msg)
+                    raise NetworkConstructionError(msg)
 
             # then fill it
             for i, r in self.compute_graph.iterrows():
@@ -942,7 +963,7 @@ class Network:
                         msg += f'currently processing {o}.\n'
                         msg += f'\ninput node is:\n{r}'
                         msg += f'\noutput node is:\n{self.compute_graph.loc[o[0]]}'
-                        raise RuntimeError(msg)
+                        raise NetworkConstructionError(msg)
 
             # make sure the proper quantile variable is assigned to each node
             self._assign_quantile_variable()
@@ -963,7 +984,7 @@ class Network:
                         f'In compute graph for recipe {self.name}, source node {i} has no source_id'
                     )
                     msg += f'\n{self.compute_graph}'
-                    raise RuntimeError(msg)
+                    raise NetworkConstructionError(msg)
 
         if self.central_dogma_graph is not None:
             assert len(self.central_dogma_graph.index) == len(
@@ -978,6 +999,7 @@ class Network:
         N.compute_graph = self.compute_graph.copy()
         N.tu_in_sources = self.tu_in_sources.copy()
         N.aggregations = self.aggregations.copy()
+        N.metadata = self.metadata.copy()
         return N
 
     def _assign_quantile_variable(self):

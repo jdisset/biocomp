@@ -38,10 +38,16 @@ def setup_logger(lname=None, level=logging.INFO):
     return root_logger
 
 
-logger = setup_logger('biocomp')
 setup_logger()
 setup_logger('jax')
+logger = setup_logger('biocomp')
 
+def set_loglevel(level:str):
+    global logger
+    level = level.upper()
+    logger.setLevel(level)
+    logger.info(f"Log level set to {level}")
+    return level
 
 
 @contextmanager

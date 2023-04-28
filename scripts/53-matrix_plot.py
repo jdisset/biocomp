@@ -1,6 +1,6 @@
 ### {{{                          --     imports     --
 import matplotlib
-matplotlib.use('agg')
+
 import biocomp as bc
 from biocomp import datautils as du
 from functools import partial
@@ -19,7 +19,7 @@ import biocomp.datautils as du
 from biocomp import train
 from biocomp import compute as cmp
 
-matplotlib.use('agg')
+# matplotlib.use('agg')
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -111,6 +111,7 @@ TRAINING_SETS['all'] = list(uorf_dict.keys())
 def plot_matrix(f, uorf_dict=None, square=None):
 
     from matplotlib import patches
+
     n_unique_ern_side = len(np.unique([v[0] for v in uorf_dict.keys()]))
     n_unique_recog_side = len(np.unique([v[1] for v in uorf_dict.keys()]))
 
@@ -162,7 +163,7 @@ def plot_matrix(f, uorf_dict=None, square=None):
             )
 
     if square:
-        for E,R in square:
+        for E, R in square:
             r, c = ER_to_rowcol[(E, R)]
             ax = axes[r, c]
             # add a star symbol to the top left corner
@@ -178,7 +179,6 @@ def plot_matrix(f, uorf_dict=None, square=None):
                 color='red',
             )
 
-
     fig.tight_layout()
     return fig
 
@@ -187,24 +187,24 @@ def plot_matrix(f, uorf_dict=None, square=None):
 
 import wandb
 import pickle
-wandb.login()
 
+wandb.login()
 
 
 REPLOT = False
 
 # ground truth
 
-savepath = Path(f'~/Desktop/predictions/lvl1_matrix/{xpname}').expanduser()
-savepath.mkdir(parents=True, exist_ok=True)
-figpath = savepath / 'ground_truth.png'
+# savepath = Path(f'~/Desktop/predictions/lvl1_matrix/{xpname}').expanduser()
+# savepath.mkdir(parents=True, exist_ok=True)
+# figpath = savepath / 'ground_truth.png'
 
-if not figpath.exists() or REPLOT:
-    print('plotting ground truth')
-    f = partial(du.network_plot, dman_full)
-    fig = plot_matrix(f, uorf_dict)
-    fig.suptitle(f'Ground truth for {xpname}', y=1.02)
-    fig.savefig(figpath, dpi=200)
+# if not figpath.exists() or REPLOT:
+# print('plotting ground truth')
+# f = partial(du.network_plot, dman_full)
+# fig = plot_matrix(f, uorf_dict)
+# fig.suptitle(f'Ground truth for {xpname}', y=1.02)
+# fig.savefig(figpath, dpi=200)
 
 
 ##
@@ -233,7 +233,6 @@ for tset in TRAINING_SETS.keys():
         with open(param_file.name, 'rb') as f:
             trained_params = pickle.load(f)
 
-
         best_params = stack.use_shared_params(base_params, trained_params)
 
         train_subset = single_uorfs + [uorf_dict[i] for i in TRAINING_SETS[tset]]
@@ -249,5 +248,69 @@ for tset in TRAINING_SETS.keys():
 
     except Exception as e:
         print(f'ERROR: {e}')
+
+
+##
+tset = '3corners'
+project_name = f'matrix_{xpname}_{tset}'
+entity = 'jdisset'
+
+api = wandb.Api()
+project_path = f"{entity}/{project_name}" if entity else project_name
+runs = api.runs(project_path)
+bestrun = None
+bestloss = np.inf
+for run in runs:
+    if 'loss' in run.summary and run.summary['loss'] is not None:
+        if run.summary['loss'] < bestloss:
+            bestrun = run
+            bestloss = run.summary['loss']
+print(f'Best run is {bestrun.name} with loss {bestloss}')
+
+tmp_dir = Path(f'/tmp/{project_name}')
+param_file = bestrun.file('latest_params.pkl').download(replace=True, root=tmp_dir)
+with open(param_file.name, 'rb') as f:
+    trained_params = pickle.load(f)
+
+best_params = stack.use_shared_params(base_params, trained_params)
+
+##
+mid = uorf_dict[(80,80)]
+contours = np.linspace(0, 1, 7)
+
+with ut.timer('plot 1'):
+    fig, ax = du.mkfig(1, 1)
+    du.plot_model_at_x(
+        best_params, dman_full, mid, ax=ax, radius=0.15, knn=400, min_points=20, colorbar=False, res=50, contours=contours
+    )
+
+##
+mid = uorf_dict[(80,80)]
+mid = uorf_dict[(0,80)]
+# mid = uorf_dict[(0,0)]
+with ut.timer('ground truth'):
+    fig, ax = du.mkfig(1, 1, (15,15))
+    du.network_plot(dman_full, mid, ax=ax,contours=contours, method='scatter', kde=False, size=10)
+
+savepath = Path(f'~/Desktop/predictions/lvl1_matrix').expanduser()
+savepath.mkdir(parents=True, exist_ok=True)
+fig.savefig(savepath/f'ern_{mid}_nokde.pdf', dpi=200)
+
+with ut.timer('ground truth'):
+    fig, ax = du.mkfig(1, 1, (15,15))
+    du.network_plot(dman_full, mid, ax=ax,contours=contours, method='scatter', size=10)
+
+savepath = Path(f'~/Desktop/predictions/lvl1_matrix').expanduser()
+savepath.mkdir(parents=True, exist_ok=True)
+fig.savefig(savepath/f'ern_{mid}_kde.pdf', dpi=200)
+
+
+# It's the clls with 0 ERN plasmids!!!!!
+
+# su.plot_networks([dman_full.get_networks()[mid]])
+##
+with ut.timer('plot 2'):
+    fig, ax = du.mkfig(1, 1)
+    du.eval_model_grid( best_params, dman_full, mid, ax=ax, n_repeats=100, res=100, contours=contours)
 
 

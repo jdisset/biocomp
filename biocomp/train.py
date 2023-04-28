@@ -111,7 +111,7 @@ def local_save(epoch, cfg, epoch_history=None, save_dir=None, full_save=False, *
     ut.logger.info(f"Saving epoch to disk took {time.time() - t0:.2f}s")
 
 
-def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
+def wandb_plot_pred(epoch, cfg, dman, epoch_history, base_params=None, log_key=None, **_):
 
     import matplotlib
 
@@ -119,13 +119,18 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
     import traceback
     from tqdm import tqdm
 
-    if epoch_history is None:
+    networks = dman.get_networks()
+    stack = dman.get_compute_stack()
+
+    if 'latest_params' not in epoch_history:
+        ut.logger.warning("No params for plotting evaluations")
         return
 
+    params = epoch_history['latest_params']
+    if base_params is not None:
+        params = stack.use_shared_params(base_params, params)
+
     with ut.timer('wandb_plot_pred'):
-        params = epoch_history['latest_params']
-        networks = dman.get_networks()
-        stack = dman.get_compute_stack()
         N_SAMPLES = 20000
         key = jax.random.PRNGKey(0)
         X, Y = dman.get_uniform_samples(key, N_SAMPLES)
@@ -154,10 +159,11 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
                 x, y = X[index], Y[index]
                 yhat = YHAT[: x.shape[0], out_id : out_id + n_out]
                 assert yhat.shape == y.shape, f"{yhat.shape} != {y.shape}"
+                error = jnp.abs(y - yhat).mean()
                 fig, ax = du.report(params, dman, index, use_x_y_yhat=(x, y, yhat), res=64)
-                img = wb.Image(fig, caption=f'{networks[index].name}')
+                img = wb.Image(fig, caption=f'{networks[index].name}, error={error:.4f}')
                 plt.close(fig)
-                return img
+                return img, error
 
             except Exception as e:
                 ut.logger.warning(f"Failed to plot prediction {index}: {e}")
@@ -165,8 +171,13 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history=None, **_):
                 return None
 
         pred = [plot_prediction(i) for i in tqdm(list(range(len(networks))))]
+        predimg, prederr = zip(*pred)
 
-        wb.log({'Evaluations': pred})
+        if log_key is None:
+            log_key = 'Evaluations'
+
+        wb.log({f'{log_key}': predimg})
+        wb.log({f'{log_key}_err': prederr})
 
 
 def wandb_log_epoch(epoch, cfg, epoch_history=None, **_):
@@ -440,7 +451,7 @@ DEFAULT_TRAINING_CONFIG = {
     # -------- data config --------
     "batch_size": 32,
     "n_batches": 2048,
-    "data_scaling_log_factor": 2e4,
+    "data_scaling_log_factor": 1e4,
     "data_scaling_max_value": 5e7,
     "data_sampling_kde_bw_method": 0.1,
     "data_sampling_density_quantile_threshold": 0.025,  # threshold = min of both
@@ -475,10 +486,10 @@ class TrainingProgram:
             '--wandb_project', type=str, default=None, help='name of wandb project'
         )
         self.parser.add_argument(
-            '--compute_config', type=str, default=None, help='path to compute config'
+            '--compute_config_file', type=str, default=None, help='path to compute config'
         )
         self.parser.add_argument(
-            '--training_config', type=str, default=None, help='path to training config'
+            '--training_config_file', type=str, default=None, help='path to training config'
         )
         self.parser.add_argument(
             '--local_save_dir', type=str, default='./results', help='path to save results'
@@ -486,7 +497,18 @@ class TrainingProgram:
         self.parser.add_argument(
             '--seed', type=int, default=None, help='random seed (default: random)'
         )
-
+        self.parser.add_argument(
+            '--loglevel', type=str, default='info', help='log level (default: info)'
+        )
+        self.parser.add_argument(
+            '--device', type=str, default='cpu', help='jax device (default: cpu)'
+        )
+        self.parser.add_argument(
+            '--data_path',
+            type=str,
+            default='./data/calibrated_data',
+            help='path to xp data directory',
+        )
         self.parser.add_argument(
             '--wandb_plot_period',
             type=int,
@@ -495,6 +517,12 @@ class TrainingProgram:
         )
 
         self.parser.add_argument(
+            '--wandb_eval_period',
+            type=int,
+            default=-1,
+            help='wandb eval plot period, None = no plots, -1 = only at the end',
+        )
+        self.parser.add_argument(
             '--wandb_save_period',
             type=int,
             default=-1,
@@ -502,33 +530,56 @@ class TrainingProgram:
         )
 
         self.parser.add_argument(
-            '--training_config:update',
+            '--config',
             type=str,
-            action=partial(UpdateConfigAction, 'training_config'),
+            action=partial(UpdateConfigAction, 'config'),
             help='update training_config with format: <parameter>=<value>',
         )
 
     def add_argument(self, *args, **kwargs):
         self.parser.add_argument(*args, **kwargs)
 
-    def parse_args(self):
-        self.args = self.parser.parse_args()
+    def parse_args(self, default_args=None):
 
-        if self.args.compute_config is not None:
-            if not Path(self.args.compute_config).is_file():
-                raise ValueError(f'{self.args.compute_config} is not a file')
-            self.compute_config = cmp.ComputeConfigManager.from_file(self.args.compute_config)
+        import sys
+
+        is_notebook = 'ipykernel' in sys.modules
+
+        ut.logger.info(f'is_notebook: {is_notebook}')
+
+        extra_args = default_args if default_args is not None else []
+
+        # combine parsed args and extra_args. parsed args have priority over extra_args.
+        # if we're in a notebook, only use extra_args. Otherwise we can combine them.
+        if is_notebook:
+            self.args = self.parser.parse_args(extra_args)
+        else:
+            self.args = self.parser.parse_args(extra_args + sys.argv[1:])
+            ut.logger.info(f'args: {self.args}')
+
+        if self.args.compute_config_file is not None:
+            if not Path(self.args.compute_config_file).is_file():
+                raise ValueError(f'{self.args.compute_config_file} is not a file')
+            self.compute_config = cmp.ComputeConfigManager.from_file(self.args.compute_config_file)
         else:
             self.compute_config = cmp.DEFAULT_COMPUTE_CONFIG
 
-        if self.args.training_config is not None:
-            if not Path(self.args.training_config).is_file():
-                raise ValueError(f'{self.args.training_config} is not a file')
-            self.training_config = json.load(open(self.args.training_config))
+        if self.args.training_config_file is not None:
+            if not Path(self.args.training_config_file).is_file():
+                raise ValueError(f'{self.args.training_config_file} is not a file')
+            self.training_config = json.load(open(self.args.training_config_file))
         else:
             self.training_config = DEFAULT_TRAINING_CONFIG
 
         self.local_save_dir = Path(self.args.local_save_dir)
+        ut.logger.info(f"Saving results to {self.local_save_dir}")
+
+        # loglevel
+        ut.set_loglevel(self.args.loglevel)
+
+        # device
+        self.device = jax.devices(self.args.device)[0]
+
 
         if self.args.seed is not None:
             self.seed = self.args.seed
@@ -536,8 +587,9 @@ class TrainingProgram:
             self.seed = np.random.randint(0, 2**32)
 
         # Apply updates to the training_config dict
-        updates = getattr(self.args, f"training_config_updates", [])
+        updates = getattr(self.args, f"config_updates", [])
         for update in updates:
+            ut.logger.info(f"Updating training_config with {update}")
             parameter, value = update.split('=')
             try:
                 value = json.loads(value)
@@ -553,7 +605,7 @@ class TrainingProgram:
         else:
             raise AttributeError(f"{self.__class__.__name__} object has no attribute '{attr}'")
 
-    def start_training(self, dman: du.DataManager):
+    def start_training(self, training: du.DataManager, validation: du.DataManager = None):
 
         prog_config = self.args.__dict__.copy()
 
@@ -562,19 +614,35 @@ class TrainingProgram:
         if self.wandb_project is not None:
             loggers = setup_wandb_logging(
                 self.wandb_project,
-                dman,
+                training,
                 self.training_config,
                 self.compute_config,
                 plot_period=self.wandb_plot_period,
                 params_save_period=self.wandb_save_period,
             )
+
+            if validation is not None:
+                with ut.timer('Validation stack initialization'):
+                    key = jax.random.PRNGKey(self.seed)
+                    base_params = validation.get_compute_stack().init(key)
+                    loggers.append(
+                        (
+                            self.wandb_eval_period,
+                            partial(
+                                wandb_plot_pred,
+                                dman=validation,
+                                base_params=base_params,
+                                log_key='Validation',
+                            ),
+                        )
+                    )
         else:
             loggers = [
                 (1, console_log),
                 (-1, partial(local_save, save_dir=self.local_save_dir)),
             ]
 
-        start(dman, self.training_config, self.compute_config, loggers, seed=self.seed)
+        start(training, self.training_config, self.compute_config, loggers, seed=self.seed)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
