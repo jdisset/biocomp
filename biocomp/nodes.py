@@ -925,6 +925,8 @@ def sequestron_ERN(
     return prepare, apply, output_shape
 
 
+from rich import print as pprint
+
 def grouped_output(
     input_shapes,
     n_outputs,
@@ -941,9 +943,12 @@ def grouped_output(
 
     def __impl(*inputs, quantiles, rng_key, param_f, **_):
         assert quantiles.shape == (len(inputs),)
+        assert len(inputs) == len(input_shapes)
+        # grouped output is actually simply the same output function aplied
+        # to each input, with a different quantile value
         res = vmap(
-            lambda x: dense_multilevel(
-                ut.flat_concat(x, quantiles),
+            lambda x, q: dense_multilevel(
+                ut.flat_concat(x, q),
                 wsize,
                 1,
                 depth,
@@ -952,7 +957,7 @@ def grouped_output(
                 name='grouped_output',
                 activation=inner_activation,
             )
-        )(jnp.asarray(inputs))
+        )(jnp.asarray(inputs), quantiles)
         return outer_activation(res)
 
     def prepare(params, vnodelist, key):

@@ -1,5 +1,6 @@
 from biocomp import utils as ut
 from pathlib import Path
+import jax
 import numpy as np
 import scriptutils as su
 import biocomp.datautils as du
@@ -28,9 +29,6 @@ with ut.timer(f'Loading data and building networks for {xpnames}'):
 all_networks = dman_full.get_networks()
 net_xp = [n.metadata['from_xp'] for n in all_networks]
 net_name = [n.name for n in all_networks]
-net_name
-
-net_name[184]
 # su.plot_networks(all_networks[184:185])
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -43,10 +41,6 @@ cascade_nets = {
     n: i for i, n in enumerate(net_name) if 'cascade' in n.lower() and 'inert' not in n.lower()
 }
 
-inert_nets
-
-cn = [all_networks[i] for i in cascade_nets.values()]
-
 # training set is all networks except the ones in inert or cascade
 training_set = [
     i
@@ -58,23 +52,26 @@ validation_set = [
     i for i, _ in enumerate(net_name) if i not in inert_nets.values() and i in cascade_nets.values()
 ]
 
-cascade_nets
+net_name
+
+n_outputs = [n.get_nb_outputs() for n in all_networks]
+
+test_set = [0,10,len(all_networks)-1]
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 validation = dman_full.make_subset(validation_set)
 training = dman_full.make_subset(training_set)
-# prog.start_training(dman_full.make_subset(training_set), validation)
+prog.start_training(dman_full.make_subset(training_set), validation)
 
 ##
 
-stack = training.build_compute_stack(prog.compute_config, max_t=1)
+# testing = dman_full.make_subset(test_set)
+# stack = testing.build_compute_stack(prog.compute_config, max_t=1)
+# key = jax.random.PRNGKey(0)
+# with ut.timer('Stack initialization'):
+    # params = stack.init(key)
 
-##
-key = jax.random.PRNGKey(0)
-with ut.timer('Stack initialization'):
-    params = stack.init(key)
-
-
-
+# params
 # for mid, n in enumerate(validation.get_networks()[:1]):
     # # fig, axes = du.mkfig(1, 4)
     # contours = np.linspace(0, 0.8, 5)
