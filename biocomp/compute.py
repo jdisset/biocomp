@@ -615,7 +615,7 @@ class ComputeStack:
 
     @staticmethod
     def make_smallest_stack_dfs(
-        stack, type_dict: dict[str, list[VirtualNode]], path=None, depth=0, max_depth=70, max_t=2
+        stack, type_dict: dict[str, list[VirtualNode]], path=None, depth=0, max_depth=70, max_t=1
     ):
 
         if path == None:
