@@ -82,7 +82,7 @@ def get_epoch_stats(epoch_data, smooth_win=1):
     return stats
 
 
-def local_save(epoch, cfg, epoch_history=None, save_dir=None, full_save=False, **_):
+def local_save(epoch, epoch_history=None, save_dir=None, full_save=False, **_):
     assert save_dir is not None
     if epoch_history is None:
         return
@@ -111,7 +111,7 @@ def local_save(epoch, cfg, epoch_history=None, save_dir=None, full_save=False, *
     ut.logger.info(f"Saving epoch to disk took {time.time() - t0:.2f}s")
 
 
-def wandb_plot_pred(epoch, cfg, dman, epoch_history, base_params=None, log_key=None, **_):
+def wandb_plot_pred(dman, epoch_history, base_params=None, log_key=None, **_):
 
     import matplotlib
 
@@ -180,7 +180,7 @@ def wandb_plot_pred(epoch, cfg, dman, epoch_history, base_params=None, log_key=N
         wb.log({f'{log_key}_err': prederr})
 
 
-def wandb_log_epoch(epoch, cfg, epoch_history=None, **_):
+def wandb_log_epoch(epoch_history=None, **_):
     if epoch_history is not None:
         # measure time now:
         losses = np.array(epoch_history['loss'])
@@ -202,19 +202,6 @@ def console_log(epoch, cfg, epoch_history=None, **_):
         loss: {fmt(avg)} ± {fmt(std)} [min {fmt(lmin)}, max {fmt(lmax)}] in \
         {epoch_history["epoch_time"]:.2f}s"""
         )
-
-
-def log_w_replicates(history, epoch, cfg, **_):
-    loss = history['loss'][-1]
-    losses = {
-        'mean': jnp.mean(loss),
-        'std': jnp.std(loss),
-        'min': jnp.min(loss),
-        'max': jnp.max(loss),
-    }
-    print(
-        f'epoch: {epoch}, loss: \n - mean: {losses["mean"]:.3f}, std: {losses["std"]:.3f}, min: {losses["min"]:.3f}, max: {losses["max"]:.3f}'
-    )
 
 
 #                                                                            }}}
@@ -421,7 +408,12 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         for t, l in loggers:
             if t is not None:
                 if (t == 0 or (i % t == 0 and t > 0)) or i == training_config['epochs']:
-                    l(i, training_config, epoch_history=epoch_history, nbatches=steps_per_epoch)
+                    l(
+                        epoch=i,
+                        training_config=training_config,
+                        epoch_history=epoch_history,
+                        nbatches=steps_per_epoch,
+                    )
 
     return params, epoch_history
 
@@ -579,7 +571,6 @@ class TrainingProgram:
 
         # device
         self.device = jax.devices(self.args.device)[0]
-
 
         if self.args.seed is not None:
             self.seed = self.args.seed
