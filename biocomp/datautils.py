@@ -319,7 +319,8 @@ class DataManager:
         return self.compute_stack
 
     def get_compute_stack(self):
-        assert self.compute_stack is not None, 'compute stack not built'
+        if self.compute_stack is None:
+            raise ValueError('Compute stack not built yet.')
         return self.compute_stack
 
     def get_individual_compute_stack(self, network_id):

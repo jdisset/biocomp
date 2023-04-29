@@ -8,6 +8,7 @@ import biocomp.train as train
 
 prog = train.TrainingProgram()
 # prog.parse_args(['--config', 'epochs=2'])
+prog.parse_args()
 
 ut.logger.debug(f'Using {prog.device} device')
 
