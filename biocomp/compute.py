@@ -550,7 +550,7 @@ class ComputeStack:
     ### {{{                         --     building     --{{{
 
     @staticmethod
-    def make_smallest_stack(stack, type_dict: dict[str, list[VirtualNode]], max_t=2):
+    def make_smallest_stack(stack, type_dict: dict[str, list[VirtualNode]], max_t=1):
         # Initialize the BFS queue with the initial state
         bfs_queue = deque([(stack, type_dict, [], 0)])
         iteration = 0
