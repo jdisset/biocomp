@@ -451,9 +451,9 @@ DEFAULT_TRAINING_CONFIG = {
     # -------- data config --------
     "batch_size": 32,
     "n_batches": 2048,
-    "data_scaling_log_factor": 1e4,
+    "data_scaling_log_factor": 5e4,
     "data_scaling_max_value": 5e7,
-    "data_sampling_kde_bw_method": 0.1,
+    "data_sampling_kde_bw_method": 0.02,
     "data_sampling_density_quantile_threshold": 0.025,  # threshold = min of both
     "data_sampling_coords_for_density_threshold": 0.15,  # threshold = min of both
 }

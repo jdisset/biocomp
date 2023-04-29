@@ -331,21 +331,35 @@ class DataManager:
         # actually returns a tuple of (stack, get_param_subset)
         return self.individual_compute_stacks[network_id]
 
-    def gen_kdes(self, bw=None, max_n=10000):
+    def gen_kdes(self, bw=None, max_n=20000):
         if bw is None:
             bw = self.data_cfg['data_sampling_kde_bw_method']
-        key = jax.random.PRNGKey(0)
+        # just grap max_n for each self._X using numpy
+        npoints = [min(x.shape[0], max_n) for x in self._X]
+        resampled_x = [np.random.choice(x, size=n) for x, n in zip(self._X, npoints)]
         self._kdes = [
             gaussian_kde(
-                x[jax.random.choice(key, x.shape[0], shape=(max_n,))].T,
+                x.T,
                 bw_method=bw,
             )
-            for x in self._X
+            for x in resampled_x
         ]
 
-    def compute_densities(self):
+    def compute_densities(self, max_chunk=50000):
+        def _compute_d(kde, x):
+            # cut in chunks to avoid memory issues
+            n = x.shape[0]
+            allarr = []
+            i = 0
+            while i < n:
+                allarr.append(kde.evaluate(x[i : min(i + max_chunk, n)].T))
+                i += max_chunk
+            res = np.concatenate(allarr)
+            assert res.shape == (n,)
+            return res
+
         self._densities = [
-            np.array(kde.evaluate(x.T))
+            _compute_d(kde, x)
             for kde, x in tqdm(list(zip(self._kdes, self._X)), desc='computing densities')
         ]
 
@@ -708,6 +722,7 @@ from IPython.display import display
 import plotly.graph_objects as go
 import plotly.offline as pyo
 import numpy as np
+
 
 def scatter_3d_interactive(
     x,
