@@ -336,13 +336,15 @@ class DataManager:
             bw = self.data_cfg['data_sampling_kde_bw_method']
         # just grap max_n for each self._X using numpy
         npoints = [min(x.shape[0], max_n) for x in self._X]
-        resampled_x = [np.random.choice(x, size=n) for x, n in zip(self._X, npoints)]
+        xindices = [
+            np.random.choice(x.shape[0], size=n, replace=False) for x, n in zip(self._X, npoints)
+        ]
         self._kdes = [
             gaussian_kde(
-                x.T,
+                x[xi].T,
                 bw_method=bw,
             )
-            for x in resampled_x
+            for x, xi in zip(self._X, xindices)
         ]
 
     def compute_densities(self, max_chunk=50000):
