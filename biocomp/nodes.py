@@ -265,6 +265,9 @@ def get_quantized(
 
     possible_values = get_param(params, param_name, base_path=ut.QVALS_PATH)
     possible_values = jnp.atleast_1d(possible_values.squeeze())
+    # possible_values is a 1D array of shape (n_qvalues,) that contains all the possible
+    # quantization values for this parameter. Possible values for the whole stack,
+    # but then will be masked to only use the ones available for this node
     masks = get_param(params, param_name, node_id=node_id, base_path=ut.MASK_PATH)
     assert len(values_to_quantize) <= len(masks), (
         f'Number of inputs ({len(values_to_quantize)}) is larger than the number of masks '
@@ -340,13 +343,14 @@ def generate_quantization_masks(
     qnames, params, pname, vnode, maximum_required_masks_per_node=4, **kwargs
 ):
     """
-    generate the quantization masks for a given node and parameter. One mask per input.
-    - qnames: the ordered list of quantization names for this parameter
+    generate the quantization masks for a given vnode and parameter. One mask per input.
+    - qnames: the ordered list of quantization names available for this parameter, for the whole stack
     - params: the parameters dictionnary, where only arrays can be used (because it'll be jitted)
     - pname: the name of the parameter we want to quantize (e.g. 'tl_rate')
     - vnode: the node we want to quantize
     - maximum_required_masks_per_node: basically the max number of inputs a node can have
     """
+    # example: generate_quantization_masks(['hEF1a', 'hEF1b', 'hEF1c'], params, 'tc_rate', vnode)
 
     network = vnode.network
     cdf = network.compute_graph
@@ -364,6 +368,14 @@ def generate_quantization_masks(
         f'Node {compute_node_id} has {len(this_node_qnames)} CDG inputs, '
         f'but only a max of {maximum_required_masks_per_node} masks are available'
     )
+    # check that this_node_qnames is a subset of qnames
+    for q in this_node_qnames:
+        for qq in q:
+            if qq not in qnames:
+                raise ValueError(
+                    f'Quantization name {qq} not available for parameter {pname}. '
+                    f'Available: {qnames}'
+                )
 
     # now create the mask array
     mask = np.zeros((maximum_required_masks_per_node, len(qnames)), dtype=bool)
@@ -482,24 +494,36 @@ def inv_numeric(*args, **kwargs):
     return single_passthrough(*args, **kwargs)
 
 
-def aggregation(input_shapes, n_outputs, normalize=False, **_):
+def aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
 
     assert len(input_shapes) == 1, f'Aggregation expects 1 input, got {len(input_shapes)}'
+
+    pname = f"aggregation:ratios"
+
+    max_agg_size = 0
+    for vnode in stack.get_all_nodes():
+        cnode = vnode.get_compute_node()
+        if cnode.type == 'aggregation':
+            max_agg_size = max(max_agg_size, len(cnode.output_to))
+
+    if max_agg_size < n_outputs:
+        raise ValueError(f'Aggregation expects at most {max_agg_size} outputs, got {n_outputs}')
 
     def prepare(params, vnodelist, key, **_):
         for vnode in vnodelist:
             extra = vnode.get_compute_node().extra
             if 'ratios' in extra:
+                assert len(extra['ratios']) == n_outputs
                 ratio_v = jnp.array(extra['ratios'], dtype=jnp.float32)
             else:
                 ratio_v = jax.random.uniform(key, (n_outputs,))
-            assert ratio_v.shape == (n_outputs,), f'Invalid ratio shape {ratio_v.shape}'
-            set_param(params, "aggregation:ratios", ratio_v, node_id=vnode.node_id)
-            ratios = get_param(params, "aggregation:ratios", node_id=vnode.node_id)
+            # pad to max_outputs if necessary
+            ratio_v = jnp.pad(ratio_v, (0, max_agg_size - n_outputs), constant_values=np.nan)
+            set_param(params, pname, ratio_v, node_id=vnode.node_id)
 
     def apply(input, quantiles, params, node_id, key):
         assert input.shape == input_shapes[0], f'Invalid input shape {input.shape}'
-        ratios = get_param(params, "aggregation:ratios", node_id)
+        ratios = get_param(params, pname, node_id)[:n_outputs]
         if normalize:
             ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
         return jnp.array(ratios) * input
@@ -516,6 +540,7 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
     assert n_outputs == 1, f'inverse_Aggregation expects 1 output, got {n_outputs}'
 
     def prepare(params, vnodelist, **_):
+        # affinity_id = int(property_id(stack.shared_store, prop_name, seq_name))
         for vnode in vnodelist:
             inv_vnode = vnode.get_inverse_vnode(stack)
             cnode = vnode.get_compute_node()
@@ -533,6 +558,7 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
                 node_id=vnode.node_id,
                 base_path=ut.STATIC_PATH,
             )
+
             set_param(
                 params,
                 "inv_aggregation:inv_node_id",
@@ -698,7 +724,7 @@ def transform_nn(
     def __node_impl(*values, key, param_f, params, node_id):
         val = jnp.array(values)
         rshape = (val.shape[0], rate_dim)
-        # first grab the continuous values for the rates
+        # first grab the continuous values for the rates, specific to this node
         individual_rate_name = f'{rate_name}_x{rshape[0]}'
         rates = param_f(
             individual_rate_name, init=ut.continuous_initializer(key, rshape), node_id=node_id
@@ -775,9 +801,11 @@ def transform_nn(
         # during prepare, we call _impl with dummy inputs + a param_function that
         # creates the parameters on the fly if they don't exist yet
 
+        # qnames is a list of names for the rate values available in this stack (1xuORf, ...)
         qnames = ut.at_path(stack.shared_store, ut.QNAME_PATH + f"/{rate_name}")
         assert qnames is not None, f'quantization names for {rate_name} not initialized'
 
+        # they all get an initial value that the rates will be quantized to
         init = ut.continuous_initializer(key, (len(qnames), rate_dim))
         init_param_if_needed(params, rate_name, init=init, base_path=ut.QVALS_PATH, node_id=0)
 
@@ -926,6 +954,7 @@ def sequestron_ERN(
 
 
 from rich import print as pprint
+
 
 def grouped_output(
     input_shapes,

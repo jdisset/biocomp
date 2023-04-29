@@ -130,15 +130,19 @@ class VirtualNode:
     node_id: int = None  # unique id for the node in the stack
     batch_order: int = 0  # only used for sorting and debugging
 
-    @classmethod
-    def from_node(
-        cls, network_id: int, network: Network, compute_node_id: int, batch_order: int = 0
-    ):
+    @staticmethod
+    def generate_type_signature(network, compute_node_id):
         node = network.compute_graph.loc[compute_node_id]
         type = node['type']
         n_inputs = len(node['input_from'])
         n_outputs = len(node['output_to'])
-        type_signature = f'{type}_{n_inputs}_{n_outputs}'
+        return f'{type}_{n_inputs}_{n_outputs}'
+
+    @classmethod
+    def from_node(
+        cls, network_id: int, network: Network, compute_node_id: int, batch_order: int = 0
+    ):
+        type_signature = VirtualNode.generate_type_signature(network, compute_node_id)
         return cls(
             network_id=network_id,
             network=network,
@@ -401,6 +405,7 @@ class ComputeStack:
 
         return s, get_param_subset
 
+
     @staticmethod
     def use_shared_params(base_params, other_params):
         """Returns a copy of the base_params with the shared parameters
@@ -444,6 +449,10 @@ class ComputeStack:
                             n.batch_order >= prev
                         ), f'wrong batch order ({n.batch_order} < {prev} for {n})'
                         prev = n.batch_order
+
+    def get_all_nodes(self):
+        return [n for l in self.layers for n in l.nodes]
+
 
     def get_node_input_start_index(self, node: VirtualNode, input_slot: int) -> int:
         """Returns the start index of the input #input_slot for the given node

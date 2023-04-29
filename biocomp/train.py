@@ -624,9 +624,8 @@ class TrainingProgram:
             if validation is not None:
                 with ut.timer('Validation stack initialization'):
                     key = jax.random.PRNGKey(self.seed)
-
-                    stack = validation.build_compute_stack(self.compute_config)
-                    base_params = validation.get_compute_stack().init(key)
+                    vstack = validation.build_compute_stack(self.compute_config)
+                    base_params = vstack.init(key)
                     loggers.append(
                         (
                             self.wandb_eval_period,

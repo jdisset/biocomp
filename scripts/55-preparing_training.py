@@ -57,7 +57,7 @@ net_name
 
 n_outputs = [n.get_nb_outputs() for n in all_networks]
 
-test_set = [0,10,len(all_networks)-1]
+test_set = [0,10,len(all_networks)-1, 50, 60, 20, 40, 44, 42, 120, 250, 280, 300]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 validation = dman_full.make_subset(validation_set)
@@ -65,6 +65,28 @@ training = dman_full.make_subset(training_set)
 prog.start_training(dman_full.make_subset(training_set), validation)
 
 ##
+
+# key = jax.random.PRNGKey(0)
+# vstack = validation.build_compute_stack(prog.compute_config)
+# base_params = vstack.init(key)
+
+# ## 
+# testing = dman_full.make_subset(test_set)
+# tstack = testing.build_compute_stack(prog.compute_config)
+# t_params = tstack.init(key)
+
+# ##
+# vstack.shared_store
+# tstack.shared_store
+# from rich import print as rprint
+# for k, v in t_params.items():
+    # if 'qvals' in k:
+        # rprint(f'{k}:{v}')
+# ##
+
+# testd = {'n': np.array([0, 1, 2]), 'a_0': 0, 'a_1':1}
+
+
 
 # testing = dman_full.make_subset(test_set)
 # stack = testing.build_compute_stack(prog.compute_config, max_t=1)
