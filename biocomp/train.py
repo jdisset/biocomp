@@ -196,7 +196,7 @@ def wandb_log_epoch(epoch_history=None, **_):
         wb.log({'epoch_time': epoch_history['epoch_time']})
 
 
-def console_log(epoch, cfg, epoch_history=None, **_):
+def console_log(epoch, training_config, epoch_history=None, **_):
     if epoch_history is not None and len(epoch_history['loss']) > 0:
         loss = np.array(epoch_history['loss'])
         avg = np.mean(loss)
@@ -205,7 +205,7 @@ def console_log(epoch, cfg, epoch_history=None, **_):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         fmt = lambda x: f'{x:.1e}' if x < 1e-3 or x > 1e3 else f'{x:.3f}'
         ut.logger.info(
-            f"""[{epoch}/{cfg["epochs"]}] \
+            f"""[{epoch}/{training_config["epochs"]}] \
         loss: {fmt(avg)} ± {fmt(std)} [min {fmt(lmin)}, max {fmt(lmax)}] in \
         {epoch_history["epoch_time"]:.2f}s"""
         )
