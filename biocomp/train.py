@@ -86,6 +86,11 @@ def local_save(epoch, epoch_history=None, save_dir=None, full_save=False, **_):
     assert save_dir is not None
     if epoch_history is None:
         return
+
+    if 'latest_params' not in epoch_history:
+        ut.logger.warning("No params for plotting evaluations")
+        return
+
     t0 = time.time()
 
     if full_save:
@@ -116,6 +121,7 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
         return
 
     import matplotlib
+
     matplotlib.pyplot.switch_backend('Agg')
     import traceback
     from tqdm import tqdm
@@ -394,7 +400,7 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         loggers = [(1, console_log)]
 
     for _, l in loggers:
-        l(0, training_config)
+        l(epoch=0, training_config=training_config)
 
     ut.logger.info(f'Begin training for {training_config["epochs"]} epochs')
 
