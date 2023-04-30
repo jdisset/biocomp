@@ -111,10 +111,11 @@ def local_save(epoch, epoch_history=None, save_dir=None, full_save=False, **_):
     ut.logger.info(f"Saving epoch to disk took {time.time() - t0:.2f}s")
 
 
-def wandb_plot_pred(dman, epoch_history, base_params=None, log_key=None, **_):
+def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **_):
+    if epoch_history is None:
+        return
 
     import matplotlib
-
     matplotlib.pyplot.switch_backend('Agg')
     import traceback
     from tqdm import tqdm
