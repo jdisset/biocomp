@@ -518,7 +518,7 @@ def aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
             else:
                 ratio_v = jax.random.uniform(key, (n_outputs,))
             # pad to max_outputs if necessary
-            ratio_v = jnp.pad(ratio_v, (0, max_agg_size - n_outputs), constant_values=np.nan)
+            ratio_v = jnp.pad(ratio_v, (0, max_agg_size - n_outputs), constant_values=0.0)
             set_param(params, pname, ratio_v, node_id=vnode.node_id)
 
     def apply(input, quantiles, params, node_id, key):
@@ -574,6 +574,7 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
         original_output_slot = get_param(
             params, "inv_aggregation:original_output_slot", node_id, base_path=ut.STATIC_PATH
         ).astype(jnp.int32)
+
         ratios = get_param(params, "aggregation:ratios", inv_id)
         if normalize:
             ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
