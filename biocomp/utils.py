@@ -627,9 +627,10 @@ class NoOpError:
     def throw(self):
         pass
 
-def checkwrap(func, errors=checkify.user_checks | checkify.index_checks | checkify.float_checks):
+def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | checkify.float_checks)):
     global enable_checks
     if enable_checks:
+        logger.info(f"checkwrap enabled for {func}")
         return checkify.checkify(func, errors=errors)
     else:
         def wrapped_function(*args, **kwargs):
