@@ -7,8 +7,10 @@ import biocomp.datautils as du
 import biocomp.train as train
 
 prog = train.TrainingProgram()
-# prog.parse_args(['--config', 'epochs=2'])
-prog.parse_args()
+prog.add_argument('--subset', type=str, help=f'nets to train on')
+prog.parse_args(['--config', 'epochs=3'])
+
+# prog.parse_args()
 
 ut.logger.debug(f'Using {prog.device} device')
 
@@ -32,12 +34,15 @@ net_xp = [n.metadata['from_xp'] for n in all_networks]
 net_name = [n.name for n in all_networks]
 # su.plot_networks(all_networks[184:185])
 
+net_xp[50]
+net_name[50]
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{               --     training and validation sets     --
 
 # list net names that have cascade in the name:
 inert_nets = {n: i for i, n in enumerate(net_name) if 'inert' in n.lower()}
+inert_nets
 cascade_nets = {
     n: i for i, n in enumerate(net_name) if 'cascade' in n.lower() and 'inert' not in n.lower()
 }
@@ -59,7 +64,24 @@ n_outputs = [n.get_nb_outputs() for n in all_networks]
 
 test_set = [0,10,len(all_networks)-1, 50, 60, 20, 40, 44, 42, 120, 250, 280, 300]
 
+validation_set
+net_name[50]
+[net_name[i] for i in validation_set]
+
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+if prog.args.subset == 'random':
+    nsub = 15 # we pick these from all the networks that are not inert
+    pool = [i for i in range(len(net_name)) if i not in inert_nets.values()]
+    training_set = np.random.choice(pool, nsub, replace=False)
+    ut.logger.info(f'Randomly selected {nsub} networks for training: {training_set}')
+
+#  or it could be a list (that we need to parse), e.g.: "[1, 2, 3]"
+elif prog.args.subset.startswith('['):
+    training_set = eval(prog.args.subset)
+    ut.logger.info(f'Using training set {training_set}')
+
+
 validation = dman_full.make_subset(validation_set)
 training = dman_full.make_subset(training_set)
 prog.start_training(dman_full.make_subset(training_set), validation)
@@ -84,41 +106,54 @@ prog.start_training(dman_full.make_subset(training_set), validation)
         # rprint(f'{k}:{v}')
 # ##
 
-# testd = {'n': np.array([0, 1, 2]), 'a_0': 0, 'a_1':1}
+testing = dman_full.make_subset(test_set)
+stack = testing.build_compute_stack(prog.compute_config, max_t=1)
+key = jax.random.PRNGKey(0)
+with ut.timer('Stack initialization'):
+    params = stack.init(key)
 
 
 
-# testing = dman_full.make_subset(test_set)
-# stack = testing.build_compute_stack(prog.compute_config, max_t=1)
-# key = jax.random.PRNGKey(0)
-# with ut.timer('Stack initialization'):
-    # params = stack.init(key)
+
+##
 
 # params
-# for mid, n in enumerate(validation.get_networks()[:1]):
-    # # fig, axes = du.mkfig(1, 4)
-    # contours = np.linspace(0, 0.8, 5)
-    # fig = du.network_plot(
-        # validation,
-        # mid,
-        # n_views=1,
-        # method='scatter',
-        # contours=contours,
-        # kde=False,
-        # size=3,
-        # lw=0.001,
-        # radius=0.15,
-        # knn=1000,
-        # input_order=[0, 1, 2],
-        # slices=np.linspace(0, 0.8, 4),
-    # )
+# # for mid, n in enumerate(validation.get_networks()[2]):
 
-    # fig.show()
+# mid = 0
+# n = validation.get_networks()[mid]
+# n.get_inverted_input_proteins()
+
+
+# fig, axes = du.mkfig(1, 4)
+# contours = np.linspace(0, 0.8, 5)
+# fig = du.network_plot(
+    # validation,
+    # mid,
+    # n_views=1,
+    # ax=None,
+    # axes=axes,
+    # # method='scatter',
+    # contours=contours,
+    # # kde=False,
+    # size=3,
+    # lw=0.001,
+    # radius=0.15,
+    # knn=1000,
+    # input_order=[0, 1, 2],
+    # slices=np.linspace(0.1, 0.8, 4),
+# )
+
 
     # savepath = Path(f'~/Desktop/cascade_v3/{n.name}_3d.pdf').expanduser()
     # if not savepath.parent.exists():
     # savepath.parent.mkdir()
     # fig.savefig(savepath, bbox_inches='tight')
+
+##
+
+
+
 
 ##
 
@@ -132,3 +167,4 @@ prog.start_training(dman_full.make_subset(training_set), validation)
 # [ ] Plot distribution of null-transfected cells to see the size of the zero band
 # [ ] plot validation with new x also (the ones that are actually computed)
 
+##

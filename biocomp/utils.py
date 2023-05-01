@@ -621,19 +621,18 @@ def check(*args, **kwargs):
     if enable_checks:
         checkify.check(*args, **kwargs)
     else:
-        pass
+        # replace by an assert of the same thing
+        assert args[0](*args[1:], **kwargs)
 
-class NoOpError:
-    def throw(self):
-        pass
+from jax.experimental.checkify import Error
 
 def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | checkify.float_checks)):
     global enable_checks
     if enable_checks:
         logger.info(f"checkwrap enabled for {func}")
-        return checkify.checkify(func, errors=errors)
+        return jit(checkify.checkify(func, errors=errors))
     else:
         def wrapped_function(*args, **kwargs):
             result = func(*args, **kwargs)
-            return NoOpError(), result
+            return Error({}, {}, {}, {}), result
         return wrapped_function

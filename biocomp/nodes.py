@@ -9,6 +9,8 @@ import jax.numpy as jnp
 import numpy as np
 from . import utils as ut
 
+from .utils import check
+
 from tqdm import tqdm
 
 ### {{{                  --     params and quantization     --

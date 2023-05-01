@@ -303,7 +303,7 @@ class XP:
         for s, f in tqdm(
             list(zip(self.samples, datafiles)), desc=f"loading data files for {self.name}"
         ):
-            content = pd.read_csv(f)
+            content = pd.read_csv(f, engine="pyarrow")
             assert isinstance(content, pd.DataFrame)  # otherwise type hints won't match
             df_data[s['name']] = content
         self.raw_data = df_data

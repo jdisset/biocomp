@@ -21,10 +21,12 @@ from . import utils as ut
 from . import nodes as nodes
 from . import nodes_old as nodes_old
 from . import compute as cmp
+from .utils import check, checkwrap
 
 import wandb as wb
 import os
 import time
+from tqdm import tqdm
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -332,29 +334,26 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
 
     vmapped_compute = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
+    @jit
     def loss_func(dynamic, static, X, Y, Z, key):
-        ut.check(X.ndim == Y.ndim == Z.ndim == 2, "X, Y, and Z must have 2 dimensions")
-        ut.check(
-            X.shape[0] == Y.shape[0] == Z.shape[0], "X, Y, and Z must have the same number of rows"
-        )
-
         nb_inputs = sum([n.get_nb_inputs() for n in stack.networks])
-        ut.check(
-            X.shape[1] == nb_inputs,
-            "X must have as many columns as the total number of inputs in the stack",
-        )
-
         nb_outputs = sum([n.get_nb_outputs() for n in stack.networks])
-        ut.check(
-            Y.shape[1] == Z.shape[1] == nb_outputs,
-            "Y and Z must have as many columns as the total number of outputs in the stack",
-        )
+        assert X.ndim == Y.ndim == Z.ndim == 2, "X, Y, and Z must have 2 dimensions"
+        assert (
+            X.shape[0] == Y.shape[0] == Z.shape[0]
+        ), "X, Y, and Z must have the same number of rows"
+        assert (
+            X.shape[1] == nb_inputs
+        ), "X must have as many columns as the total number of inputs in the stack"
+        assert (
+            Y.shape[1] == Z.shape[1] == nb_outputs
+        ), "Y and Z must have as many columns as the total number of outputs in the stack"
 
         params = ut.assemble_params(dynamic, static)
         keys = jax.random.split(key, X.shape[0])
 
         yhat, grads = vmapped_compute(params, X, Z, keys)
-        ut.check(yhat.shape == Y.shape, "yhat and Y must have the same shape")
+        assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
 
         error = yhat - Y
         quantile_loss = jnp.mean(
@@ -367,29 +366,28 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         negative_grads = jnp.mean(jnp.where(grads < 0, -grads, 0))
         return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
 
-    # def loss_func(dynamic, static, X, Y, Z, key):
-        # assert X.ndim == Y.ndim == Z.ndim == 2
-        # assert X.shape[0] == Y.shape[0] == Z.shape[0]
-        # assert X.shape[1] == sum([n.get_nb_inputs() for n in stack.networks])
-        # assert Y.shape[1] == Z.shape[1] == sum([n.get_nb_outputs() for n in stack.networks])
-        # params = ut.assemble_params(dynamic, static)
-        # keys = jax.random.split(key, X.shape[0])
-        # yhat, grads = vmapped_compute(params, X, Z, keys)
-        # assert yhat.shape == Y.shape
-        # error = yhat - Y
-        # quantile_loss = jnp.mean(
-            # huber_quantile_loss(error, Z, delta=training_config['huber_quantile_loss_delta'])
-        # )
-        # # grads is the concatenated and flattened jacobian of
-        # # translate, transcript, and output nodes wrt their inputs
-        # # they should be monotonically increasing so we add a loss term
-        # negative_grads = jnp.mean(jnp.where(grads < 0, -grads, 0))
-        # return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
 
     def training_step(params, opt_state, x, y, z, key):
         dynamic, static = ut.split_params(params, training_config['static_params'])
-        loss, grads = value_and_grad(loss_func)(dynamic, static, x, y, z, key)
+        loss, grads = value_and_grad(loss_func, has_aux=False)(dynamic, static, x, y, z, key)
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
+
+        # if there's any nan in updates
+
+        msg = ''
+
+        for k,v in grads.items():
+            if jnp.any(jnp.isnan(v)):
+                msg += f'\nGRAD:{k} has NaNs'
+
+        for k,v in updates.items():
+            if jnp.any(jnp.isnan(v)):
+                msg += f'\nUPDT:{k} has NaNs'
+
+        if msg != '':
+            msg += f'\nloss:{loss}'
+            raise ValueError(msg)
+
 
         dynamic = optax.apply_updates(dynamic, updates)
         params = ut.assemble_params(dynamic, static)
@@ -404,7 +402,6 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
 
     keep_in_history = training_config.get('keep_in_history', ['loss'])
 
-    @ut.progress_scan(steps_per_epoch, message='Training model')
     def scannable_step(carry, i_x_y_z_k):
         params, opt_state = carry
         i, x, y, z, k = i_x_y_z_k
@@ -414,16 +411,34 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         return (params, opt_state), history
 
     @jit
-    @ut.checkwrap
     def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
+        pscan = ut.progress_scan(steps_per_epoch, message='Training model')
         zbatches = jax.random.uniform(epoch_key, ybs.shape)
         batch_keys = jax.random.split(epoch_key, steps_per_epoch)
+        sstep = pscan(scannable_step)
         (final_params, final_opt_state), epoch_history = jax.lax.scan(
-            scannable_step,
+            sstep,
             (start_params, start_opt_state),
             (jnp.arange(steps_per_epoch), xbs, ybs, zbatches, batch_keys),
         )
         return final_params, final_opt_state, epoch_history
+
+    def epoch_step_no_scan(start_params, start_opt_state, epoch_key, xbs, ybs):
+        zbatches = jax.random.uniform(epoch_key, ybs.shape)
+        batch_keys = jax.random.split(epoch_key, steps_per_epoch)
+        all_history = []
+        tstep = training_step
+        for i, (x, y, z, k) in tqdm(
+            enumerate(zip(xbs, ybs, zbatches, batch_keys)), total=steps_per_epoch
+        ):
+            updt = tstep(start_params, start_opt_state, x, y, z, k)
+            start_params, start_opt_state = updt['params'], updt['opt']
+            history = {k: updt[k] for k in keep_in_history}
+            all_history.append(history)
+        epoch_history = {k: jnp.stack([h[k] for h in all_history]) for k in keep_in_history}
+        return start_params, start_opt_state, epoch_history
+
+    epoch_step = epoch_step if not ut.enable_checks else epoch_step_no_scan
 
     # --- main training loop
 
@@ -439,8 +454,7 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         t0 = time.time()
         xb = ut.get_looped_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
         yb = ut.get_looped_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
-        err, params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key, xb, yb)
-        err.throw()
+        params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key, xb, yb)
         epoch_history['epoch_time'] = time.time() - t0
         epoch_history['latest_params'] = params
 

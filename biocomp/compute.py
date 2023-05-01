@@ -19,6 +19,7 @@ from rich import print as pprint
 from . import nodes as nd
 from .network import Network
 from . import utils as ut
+from .utils import check, checkwrap
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
