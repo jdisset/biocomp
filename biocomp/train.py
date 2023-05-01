@@ -333,16 +333,28 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
     vmapped_compute = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
     def loss_func(dynamic, static, X, Y, Z, key):
-        assert X.ndim == Y.ndim == Z.ndim == 2
-        assert X.shape[0] == Y.shape[0] == Z.shape[0]
-        assert X.shape[1] == sum([n.get_nb_inputs() for n in stack.networks])
-        assert Y.shape[1] == Z.shape[1] == sum([n.get_nb_outputs() for n in stack.networks])
+        ut.check(X.ndim == Y.ndim == Z.ndim == 2, "X, Y, and Z must have 2 dimensions")
+        ut.check(
+            X.shape[0] == Y.shape[0] == Z.shape[0], "X, Y, and Z must have the same number of rows"
+        )
+
+        nb_inputs = sum([n.get_nb_inputs() for n in stack.networks])
+        ut.check(
+            X.shape[1] == nb_inputs,
+            "X must have as many columns as the total number of inputs in the stack",
+        )
+
+        nb_outputs = sum([n.get_nb_outputs() for n in stack.networks])
+        ut.check(
+            Y.shape[1] == Z.shape[1] == nb_outputs,
+            "Y and Z must have as many columns as the total number of outputs in the stack",
+        )
 
         params = ut.assemble_params(dynamic, static)
         keys = jax.random.split(key, X.shape[0])
 
         yhat, grads = vmapped_compute(params, X, Z, keys)
-        assert yhat.shape == Y.shape
+        ut.check(yhat.shape == Y.shape, "yhat and Y must have the same shape")
 
         error = yhat - Y
         quantile_loss = jnp.mean(
@@ -353,8 +365,26 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         # translate, transcript, and output nodes wrt their inputs
         # they should be monotonically increasing so we add a loss term
         negative_grads = jnp.mean(jnp.where(grads < 0, -grads, 0))
-
         return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
+
+    # def loss_func(dynamic, static, X, Y, Z, key):
+        # assert X.ndim == Y.ndim == Z.ndim == 2
+        # assert X.shape[0] == Y.shape[0] == Z.shape[0]
+        # assert X.shape[1] == sum([n.get_nb_inputs() for n in stack.networks])
+        # assert Y.shape[1] == Z.shape[1] == sum([n.get_nb_outputs() for n in stack.networks])
+        # params = ut.assemble_params(dynamic, static)
+        # keys = jax.random.split(key, X.shape[0])
+        # yhat, grads = vmapped_compute(params, X, Z, keys)
+        # assert yhat.shape == Y.shape
+        # error = yhat - Y
+        # quantile_loss = jnp.mean(
+            # huber_quantile_loss(error, Z, delta=training_config['huber_quantile_loss_delta'])
+        # )
+        # # grads is the concatenated and flattened jacobian of
+        # # translate, transcript, and output nodes wrt their inputs
+        # # they should be monotonically increasing so we add a loss term
+        # negative_grads = jnp.mean(jnp.where(grads < 0, -grads, 0))
+        # return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
 
     def training_step(params, opt_state, x, y, z, key):
         dynamic, static = ut.split_params(params, training_config['static_params'])
@@ -555,7 +585,6 @@ class TrainingProgram:
 
         extra_args = default_args if default_args is not None else []
 
-
         # combine parsed args and extra_args. parsed args have priority over extra_args.
         # if we're in a notebook, only use extra_args. Otherwise we can combine them.
         if is_notebook:
@@ -580,7 +609,6 @@ class TrainingProgram:
 
         if self.args.enable_checks:
             ut.set_enable_checks(True)
-
 
         self.local_save_dir = Path(self.args.local_save_dir)
         ut.logger.info(f"Saving results to {self.local_save_dir}")
