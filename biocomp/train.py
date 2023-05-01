@@ -384,6 +384,7 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         return (params, opt_state), history
 
     @jit
+    @ut.checkwrap
     def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
         zbatches = jax.random.uniform(epoch_key, ybs.shape)
         batch_keys = jax.random.split(epoch_key, steps_per_epoch)
@@ -408,7 +409,8 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         t0 = time.time()
         xb = ut.get_looped_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
         yb = ut.get_looped_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
-        params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key, xb, yb)
+        err, params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key, xb, yb)
+        err.throw()
         epoch_history['epoch_time'] = time.time() - t0
         epoch_history['latest_params'] = params
 
@@ -497,6 +499,11 @@ class TrainingProgram:
             '--seed', type=int, default=None, help='random seed (default: random)'
         )
         self.parser.add_argument(
+            '--enable_checks',
+            action='store_true',
+            help='enable checks (default: False)',
+        )
+        self.parser.add_argument(
             '--loglevel', type=str, default='info', help='log level (default: info)'
         )
         self.parser.add_argument(
@@ -548,6 +555,7 @@ class TrainingProgram:
 
         extra_args = default_args if default_args is not None else []
 
+
         # combine parsed args and extra_args. parsed args have priority over extra_args.
         # if we're in a notebook, only use extra_args. Otherwise we can combine them.
         if is_notebook:
@@ -569,6 +577,10 @@ class TrainingProgram:
             self.training_config = json.load(open(self.args.training_config_file))
         else:
             self.training_config = DEFAULT_TRAINING_CONFIG
+
+        if self.args.enable_checks:
+            ut.set_enable_checks(True)
+
 
         self.local_save_dir = Path(self.args.local_save_dir)
         ut.logger.info(f"Saving results to {self.local_save_dir}")

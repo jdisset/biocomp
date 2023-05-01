@@ -26,7 +26,6 @@ import logging
 from rich.logging import RichHandler
 
 
-
 def setup_logger(lname=None, level=logging.INFO):
     root_logger = logging.getLogger(lname)
     root_logger.setLevel(level)
@@ -42,7 +41,8 @@ setup_logger()
 setup_logger('jax')
 logger = setup_logger('biocomp')
 
-def set_loglevel(level:str):
+
+def set_loglevel(level: str):
     global logger
     level = level.upper()
     logger.setLevel(level)
@@ -53,6 +53,7 @@ def set_loglevel(level:str):
 @contextmanager
 def timer(name=None, use_logger=True):
     from time import perf_counter
+
     if use_logger:
         printf = logger.info
     else:
@@ -248,6 +249,7 @@ def flatten_list(x):
 # {{{                        --     JAX helpers     --
 # ···············································································
 
+
 def get_looped_slice(a, start, end):
     """Get a slice of an array that loops around the end of the array."""
     offset = start // a.shape[0]
@@ -257,6 +259,7 @@ def get_looped_slice(a, start, end):
         return jnp.concatenate([a[start:], get_looped_slice(a, 0, end - a.shape[0])])
     else:
         return a[start:end]
+
 
 def value_and_jacfwd(f, x):
     pushfwd = partial(jax.jvp, f, (x,))
@@ -445,6 +448,7 @@ def split_params_flat(params, static_paths):
             dynamic[k] = v
     return dynamic, static
 
+
 def path_contains_flat(params, path):
     """returns the params with a path that contains the given path"""
     contains, doesnt_contain = {}, {}
@@ -454,6 +458,7 @@ def path_contains_flat(params, path):
         else:
             doesnt_contain[k] = v
     return contains, doesnt_contain
+
 
 def merge_dicts(*dicts):
     res = {}
@@ -598,3 +603,36 @@ delete_path = delete_path_flat
 split_params = split_params_flat
 assemble_params = assemble_params_flat
 path_contains = path_contains_flat
+
+# checks
+enable_checks = False
+
+
+def set_enable_checks(value: bool):
+    global enable_checks
+    enable_checks = value
+
+
+from jax.experimental import checkify
+
+
+def check(*args, **kwargs):
+    global enable_checks
+    if enable_checks:
+        checkify.check(*args, **kwargs)
+    else:
+        pass
+
+class NoOpError:
+    def throw(self):
+        pass
+
+def checkwrap(func, errors=checkify.user_checks | checkify.index_checks | checkify.float_checks):
+    global enable_checks
+    if enable_checks:
+        return checkify.checkify(func, errors=errors)
+    else:
+        def wrapped_function(*args, **kwargs):
+            result = func(*args, **kwargs)
+            return NoOpError(), result
+        return wrapped_function
