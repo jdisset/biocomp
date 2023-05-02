@@ -75,7 +75,7 @@ if prog.args.subset == 'random':
     ut.logger.info(f'Randomly selected {nsub} networks for training: {training_set}')
 
 #  or it could be a list (that we need to parse), e.g.: "[1, 2, 3]"
-elif prog.args.subset.startswith('['):
+elif prog.args.subset is not None and prog.args.subset.startswith('['):
     training_set = eval(prog.args.subset)
     ut.logger.info(f'Using training set {training_set}')
 
