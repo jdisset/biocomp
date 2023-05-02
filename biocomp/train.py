@@ -488,7 +488,7 @@ DEFAULT_TRAINING_CONFIG = {
     'optimizer': 'adam',
     'epochs': 150,
     'schedule': 'cosine',
-    'learning_rate': 2e-3,
+    'learning_rate': 1e-3,
     'end_learning_rate': 1e-5,
     'warmup_epochs': 15,
     'steps_per_epoch': 128,

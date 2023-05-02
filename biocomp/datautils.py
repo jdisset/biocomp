@@ -671,9 +671,20 @@ def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1, input_order=
 
     xx = jnp.linspace(xmin, xmax, res).reshape(-1, 1)
     z = get_knn_mean(xx, y, tree)
-    zq1 = get_knn_quantile(xx, y, qu=0.1, tree=tree)
-    zq9 = get_knn_quantile(xx, y, qu=0.9, tree=tree)
-    ax.fill_between(xx[:, 0], zq1, zq9, alpha=0.25, color='k')
+    if len(z) == 0:
+        return
+    try:
+        ax.plot(xx, z, color='k')
+    except ValueError as e:
+        ut.logger.warning(f'Could not plot: {e}.\nxx: {xx}\nz: {z}')
+        pass
+    try:
+        zq1 = get_knn_quantile(xx, y, qu=0.1, tree=tree)
+        zq9 = get_knn_quantile(xx, y, qu=0.9, tree=tree)
+        ax.fill_between(xx[:, 0], zq1, zq9, alpha=0.25, color='k')
+    except ValueError as e:
+        ut.logger.warning(f'Could not fill between: {e}.\nzq1: {zq1}\nzq9: {zq9}')
+        pass
     ax.set_title(f'{network.name}\nSmoothed mean and [0.1 - 0.9] quantile')
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(output_name)
@@ -1243,14 +1254,42 @@ def plot_model_diff(params, dman, id, ax, **kw):
 
 
 def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
-    fig, ax = mkfig(1, 2, size=(4, 4))
 
+    fig, ax = mkfig(1, 2, size=(4, 4))
     if use_x_y_yhat is not None:
         x, y, yhat = use_x_y_yhat
         assert len(x) == len(y), 'x and y must have the same length'
         assert y.shape == yhat.shape, 'y and yhat must have the same shape'
-        network_plot(dman, id, ax[0], use_xy=(x, y), kde=False, **kw)
-        network_plot(dman, id, ax[1], use_xy=(x, yhat), kde=False, **kw)
+        ndim = y.ndim
+        if ndim <= 2:
+            network_plot(dman, id, ax[0], use_xy=(x, y), kde=False, **kw)
+            network_plot(dman, id, ax[1], use_xy=(x, yhat), kde=False, **kw)
+        elif ndim == 3:
+            fig, axes = mkfig(2, 4)
+            contours = np.linspace(0, 0.8, 5)
+            top_row_axes = axes[0, :]
+            bottom_row_axes = axes[1, :]
+            slices=np.linspace(0.1, 0.8, 4),
+            network_plot(
+                dman
+                id,
+                ax=None,
+                axes=top_row_axes,
+                contours=contours,
+                slices=np.linspace(0.1, 0.8, 4),
+                use_xy=(x, y),
+                **kw,
+            )
+            network_plot(
+                dman,
+                id,
+                ax=None,
+                axes=bottom_row_axes,
+                contours=contours,
+                slices=np.linspace(0.1, 0.8, 4),
+                use_xy=(x, yhat),
+                **kw,
+            )
     else:
         network_plot(dman, id, ax[0], **kw)
         plot_model_at_x(params, dman, id, ax[1], **kw)
