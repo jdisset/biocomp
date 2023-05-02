@@ -160,6 +160,7 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
             stack.total_nb_of_inputs,
         ), f"{ALLX.shape} != {(N_SAMPLES_TOTAL, stack.total_nb_of_inputs)}"
 
+        @jit
         def compute(params, XX, Q, keys):
             res, _ = stack.apply(params, XX, Q, keys)
             return res
@@ -171,7 +172,8 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
         for chunk_id, XX in enumerate(tqdm(ALLX_CHUNKS, desc='wandb_plot_pred chunks')):
             Q = jax.random.uniform(key, (N_SAMPLES_PER_CHUNK, stack.total_nb_of_outputs))
             keys = jax.random.split(key, N_SAMPLES_PER_CHUNK)
-            yhat_chunk = jit(vmap(compute, in_axes=(None, 0, 0, 0)))(params, XX, Q, keys)
+            key = keys[-1]
+            yhat_chunk = vmap(compute, in_axes=(None, 0, 0, 0))(params, XX, Q, keys)
             YHAT.append(np.array(yhat_chunk))
 
         YHAT = np.concatenate(YHAT, axis=0)
@@ -186,13 +188,15 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
                 error = np.abs(y - yhat).mean()
                 fig, ax = du.report(params, dman, index, use_x_y_yhat=(x, y, yhat), res=64)
                 img = wb.Image(fig, caption=f'{networks[index].name}, error={error:.4f}')
+                plt.close()
                 plt.close(fig)
+                plt.close('all')
                 return img, error
 
             except Exception as e:
                 ut.logger.warning(f"Failed to plot prediction {index}: {e}")
                 traceback.print_exc()
-                return None
+                return None, None
 
         pred = [plot_prediction(i) for i in tqdm(list(range(len(networks))))]
         predimg, prederr = zip(*pred)
@@ -481,13 +485,13 @@ DEFAULT_TRAINING_CONFIG = {
     "static_params": ['/__static__', '/node'],
     "cache_dir": "./.training_cache",
     'optimizer': 'adam',
-    'epochs': 128,
+    'epochs': 150,
     'schedule': 'cosine',
-    'learning_rate': 1e-3,
+    'learning_rate': 2e-3,
     'end_learning_rate': 1e-5,
-    'warmup_epochs': 10,
+    'warmup_epochs': 15,
     'steps_per_epoch': 128,
-    'decay_epochs': 110,
+    'decay_epochs': 130,
     'adam_w_decay': 0.001,
     'max_gradient_norm': 1.0,
     # -------- data config --------

@@ -649,7 +649,7 @@ def smooth(x, y, network, rescale, ax, **kw):
         raise NotImplementedError(f'Cannot plot {ninputs} inputs')
 
 
-def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1):
+def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1, input_order=None):
     tree = cKDTree(x)
 
     input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
