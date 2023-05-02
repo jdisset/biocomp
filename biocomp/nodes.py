@@ -576,12 +576,13 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
         original_output_slot = get_param(
             params, "inv_aggregation:original_output_slot", node_id, base_path=ut.STATIC_PATH
         ).astype(jnp.int32)
-
         ratios = get_param(params, "aggregation:ratios", inv_id)
         if normalize:
             ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
 
-        return inp / ratios[original_output_slot]
+        ratio = ratios[original_output_slot]
+        EPS = 1e-12
+        return jnp.where(ratio > EPS, inp / ratio, 0.0)
 
     output_shape = input_shapes
     return prepare, apply, output_shape

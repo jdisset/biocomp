@@ -761,6 +761,9 @@ class Network:
         # They're practically useless (and we can optimize them out during computation) but they're still
         # part of the graph (and merit being visualized).
         # We add all proteins that are not outputs, and whose tu is not part of any sequestron.
+
+        # Eventually, "deadend" should receive more attention, as they will be actual interesting payloads
+        # instead of simply fluorescent proteins. So we can't just wish them away.
         deadend_nodes = cdg[
             (cdg.is_output == False)
             & (cdg.type == 'PRT')
@@ -916,12 +919,12 @@ class Network:
         mapping = {}  # input number -> output position
         inputs = self.compute_graph[self.compute_graph['type'] == 'input']
         for _, row in inputs.iterrows():
-            assert 'input_position' in row.extra
-            assert 'input_from_output' in row.extra
+            assert 'input_position' in row.extra, f'input_position not in {row.extra}'
+            assert 'input_from_output' in row.extra, f'input_from_output not in {row.extra}'
             assert row.extra['input_position'] not in mapping
             mapping[row.extra['input_position']] = row.extra['input_from_output']
-        assert set(mapping.keys()) == set(range(len(mapping.keys())))
-        assert len(mapping.keys()) == len(set(mapping.values()))
+        assert set(mapping.keys()) == set(range(len(mapping.keys()))), f'Invalid mapping: {mapping}'
+        assert len(mapping.keys()) == len(set(mapping.values())), f'Invalid mapping: {mapping}'
         return mapping
 
     def get_nb_inputs(self):
@@ -1065,7 +1068,7 @@ class Network:
 # When training the intrinsic parameters of the model (aka the simulation part),
 # we actually don't really have data about the numeric values involved (which would
 # logically be the inputs of the network, as they most likely represent copy numbers).
-# Indeed, training data is only a list of output fluorescence.
+# Instead, training data is only a list of output fluorescence.
 # The model needs copy numbers, or at least some number correlated to copy numbers,
 # in order to compute the output.
 # One solution is to make sure there's always an invertible path that links some component of
@@ -1078,6 +1081,14 @@ class Network:
 # -> take a model, and find all invertible path from copy numbers to output
 # -> prepend the invertible paths to the model, define inputs from output
 
+DEFAULT_INVERSE_DICT = {
+    "translation": "inv_translation",
+    "transcription": "inv_transcription",
+    "numeric": "inv_numeric",
+    "aggregation": "inv_aggregation",
+    "source": "inv_source",
+}
+
 
 def get_invertible_paths(network, start_node_id, inverse_dict):
     def _is_invertible(node):
@@ -1086,38 +1097,36 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
 
     paths = []
     # we want ALL paths from start_node_id to output nodes that consist of invertible nodes
-    def _get_invertible_paths(network, start_node_id, path, visited):
+    # we store the path as a list of (this_node_id, this_output_id) tuples except for the last node
+    # (the output node), where we store (output_node_id, input_id) instead
+    def _get_invertible_paths(network, node_id, path, visited, input_slot=None):
         nonlocal paths
-        node = network.compute_graph.loc[start_node_id]
+        node = network.compute_graph.loc[node_id]
 
-        # we need to know how we are connected to the output node
-        # i.e we store the path as a list of (node_id, output_id) tuples except for the last node
-        # (the output node), where we store (output_id, input_id) instead
+        if node.type == 'output':
+            # we reached an output node, we store the path and stop the search
+            # output is a special case where the slot tells which output is used
+            assert input_slot is not None
+            paths.append(path + [(node_id, input_slot)])
+            return
 
-        assert node.type != 'output'
-
-        if start_node_id in visited or not _is_invertible(node):
-            return []
-        visited.add(start_node_id)
-
-        for o, (n, i) in enumerate(node['output_to']):
-            if network.compute_graph.loc[n].type == 'output':
-                paths.append(path + [(n, i)])
-            else:
-                _get_invertible_paths(network, n, path + [(n, o)], visited)
+        if node_id not in visited and _is_invertible(node):
+            visited.add(node_id)
+            for output_slot, (downstream_id, downstream_input_slot) in enumerate(node['output_to']):
+                _get_invertible_paths(
+                    network,
+                    downstream_id,
+                    path + [(node_id, output_slot)],
+                    visited,
+                    input_slot=downstream_input_slot,
+                )
 
     _get_invertible_paths(network, start_node_id, [], set())
 
     return paths
 
 
-DEFAULT_INVERSE_DICT = {
-    "translation": "inv_translation",
-    "transcription": "inv_transcription",
-    "numeric": "inv_numeric",
-    "aggregation": "inv_aggregation",
-    "source": "inv_source",
-}
+from rich import print as rprint
 
 
 def inverted_network(
@@ -1144,6 +1153,9 @@ def inverted_network(
     # we compute a list of invertible paths that link each start nodes to the output
     inv_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
 
+    # rprint(f'For net {network.name}, found {len(inv_paths)} invertible paths:')
+    # rprint(inv_paths)
+
     # For each start_node, we might have more than one path.
     # In 'shortest' mode, we just pick the shortest one.
     # In the 'all' mode, we want to return every possible combination of paths per start node
@@ -1162,26 +1174,36 @@ def inverted_network(
         new_network = network.copy()
         uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
         for start_n, path in paths.items():
-            # we start by replacing the start node by the first node of the path
-            new_network.compute_graph.loc[start_n, 'type'] = inverse_dict[
-                new_network.compute_graph.loc[start_n, 'type']
-            ]
-            prev = start_n
+            assert len(path) > 1, 'path should not be empty'
+            assert start_n == path[0][0], 'first node of path should be the start node'
 
-            for i, (node_id, slot) in enumerate(
-                path
-            ):  # slot is output_id for nodes, input_id for output
+            # first we remove the start node
+            original_node = new_network.compute_graph.loc[start_n]  # the non inverted start node
+            assert path[0][1] == 0, 'first node of path should have output slot 0'
+            # the output_to column is a list of tuples (node_id, slot_id). We just need the node_id
+            connected_node_id = original_node['output_to'][0][0]
+            new_network.compute_graph.drop(start_n, inplace=True)
+
+            prev = connected_node_id
+
+            for i, (node_id, output_slot) in enumerate(path[1:], 1):
+
+                # slot is output_id for nodes, input_id for output
                 original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
-                n_type = original_node['type']
-                nid = uidGen()
+                n_type = original_node['type']  # its type
+                nid = uidGen()  # the new node id
+
+                # rprint(f'Inverting node {node_id} ({n_type}) to {nid}')
 
                 if n_type == 'output':  # special case when we reach the output
                     assert i == len(path) - 1, 'output node should be the last node in the path'
                     # we add an input node
                     in_n = GraphComputeNode(nid, 'input', None, None)
-                    in_n.output_to = [(prev, 0)]
-                    in_n.input_from = []
-                    in_n.extra = {'input_from_output': slot, 'input_position': inputpos}
+                    in_n.output_to = [
+                        (prev, 0)
+                    ]  # the input node is connected to the last inverted node
+                    in_n.input_from = []  # the input node has no input
+                    in_n.extra = {'input_from_output': output_slot, 'input_position': inputpos}
                     inputpos += 1
                     new_network.compute_graph = pd.concat(
                         [new_network.compute_graph, pd.DataFrame([in_n.toDict()]).set_index('id')]
@@ -1191,11 +1213,12 @@ def inverted_network(
                 # General case, create a new node and prepend to prev
                 cdg_in = new_network.compute_graph.loc[prev, 'cdg_output']
                 if isinstance(cdg_in, list):
-                    cdg_in = cdg_in[slot]
+                    cdg_in = cdg_in[output_slot]
                 new_n = GraphComputeNode(
                     nid, inverse_dict[n_type], cdg_in, original_node.cdg_output
                 )
                 new_n.output_to = [(prev, 0)]
+
                 # inverse nodes always have only one input and one output
                 # but we need to store the original output slot id in the extra field
                 # so that we can use it when converting aggregation nodes for example
@@ -1203,7 +1226,7 @@ def inverted_network(
                 # but we need to know which path, i.e slot, to use)
                 new_n.is_inverse_of = node_id
                 new_n.extra = {
-                    'original_output_slot': slot,
+                    'original_output_slot': output_slot,
                     'original_output_len': len(original_node['output_to']),
                 }
 

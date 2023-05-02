@@ -1,5 +1,6 @@
 from biocomp import utils as ut
 from pathlib import Path
+import jax.numpy as jnp
 import jax
 import numpy as np
 import scriptutils as su
@@ -8,9 +9,15 @@ import biocomp.train as train
 
 prog = train.TrainingProgram()
 prog.add_argument('--subset', type=str, help=f'nets to train on')
-prog.parse_args(['--config', 'epochs=3'])
+# prog.parse_args(['--config', 'epochs=3'])
+prog.parse_args()
 
-# prog.parse_args()
+# nans with [281 228  33 126 307 207 287  73 127 125 282   1   3 165   6]
+# and [ 34 205 177 107  50   55 238 161 170 130 308  78 207  46  73  38]
+# intersection:
+# s0 = {281, 228, 33, 126, 307, 207, 287, 73, 127, 125, 282, 1, 3, 165, 6}
+# s1 = {34, 205, 177, 107, 50, 55, 238, 161, 170, 130, 308, 78, 207, 46, 73, 38}
+# intersection = s0.intersection(s1)
 
 ut.logger.debug(f'Using {prog.device} device')
 
@@ -32,17 +39,14 @@ with ut.timer(f'Loading data and building networks for {xpnames}'):
 all_networks = dman_full.get_networks()
 net_xp = [n.metadata['from_xp'] for n in all_networks]
 net_name = [n.name for n in all_networks]
-# su.plot_networks(all_networks[184:185])
 
-net_xp[50]
-net_name[50]
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{               --     training and validation sets     --
 
 # list net names that have cascade in the name:
 inert_nets = {n: i for i, n in enumerate(net_name) if 'inert' in n.lower()}
-inert_nets
 cascade_nets = {
     n: i for i, n in enumerate(net_name) if 'cascade' in n.lower() and 'inert' not in n.lower()
 }
@@ -58,20 +62,14 @@ validation_set = [
     i for i, _ in enumerate(net_name) if i not in inert_nets.values() and i in cascade_nets.values()
 ]
 
-net_name
-
 n_outputs = [n.get_nb_outputs() for n in all_networks]
 
-test_set = [0,10,len(all_networks)-1, 50, 60, 20, 40, 44, 42, 120, 250, 280, 300]
-
-validation_set
-net_name[50]
-[net_name[i] for i in validation_set]
+test_set = [0, 10, len(all_networks) - 1, 50, 60, 20, 40, 44, 42, 120, 250, 280, 300]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 if prog.args.subset == 'random':
-    nsub = 15 # we pick these from all the networks that are not inert
+    nsub = 15  # we pick these from all the networks that are not inert
     pool = [i for i in range(len(net_name)) if i not in inert_nets.values()]
     training_set = np.random.choice(pool, nsub, replace=False)
     ut.logger.info(f'Randomly selected {nsub} networks for training: {training_set}')
@@ -88,11 +86,61 @@ prog.start_training(dman_full.make_subset(training_set), validation)
 
 ##
 
+
+# net_name
+# net_name[73]
+# su.plot_networks([all_networks[73]], [(path/f'{net_name[73]}.pdf').as_posix()])
+
+##
+
+# BADNET_ID = 73
+# badnet = all_networks[BADNET_ID]
+# badnet.compute_graph
+# badman = dman_full.make_subset([BADNET_ID])
+# badman.build_compute_stack(prog.compute_config)
+# badstack = badman.get_compute_stack()
+# params = badstack.init(jax.random.PRNGKey(0))
+# badnet.compute_graph.loc[16].extra
+
+# from rich import print as pprint
+# for k in params.keys():
+    # if 'agg' in k:
+        # pprint(k, params[k])
+
+# # def tree_has_nan(tree):
+    # # for v in tree.values():
+        # # if np.isnan(v).any():
+            # # return True
+    # # return False
+
+# # tree_has_nan(params)
+
+# n_inputs = badnet.get_nb_inputs()
+# n_inputs
+# n_outputs = badnet.get_nb_outputs()
+# n_outputs
+# badnet.get_output_proteins()
+# badnet.get_inverted_input_proteins()
+
+# # apply(params, inputs, quantiles, key):
+
+# params
+
+# inputs = jnp.zeros(n_inputs)
+# quantiles = jnp.zeros(n_outputs)
+# badstack.apply(params, inputs, quantiles, jax.random.PRNGKey(0))
+
+
+# path = Path('~/Desktop/').expanduser()
+# su.plot_networks([all_networks[73]], [(path/f'{net_name[73]}.pdf').as_posix()])
+# all_networks[73].compute_graph
+# all_networks[73].central_dogma_graph
+
 # key = jax.random.PRNGKey(0)
 # vstack = validation.build_compute_stack(prog.compute_config)
 # base_params = vstack.init(key)
 
-# ## 
+# ##
 # testing = dman_full.make_subset(test_set)
 # tstack = testing.build_compute_stack(prog.compute_config)
 # t_params = tstack.init(key)
@@ -102,17 +150,15 @@ prog.start_training(dman_full.make_subset(training_set), validation)
 # tstack.shared_store
 # from rich import print as rprint
 # for k, v in t_params.items():
-    # if 'qvals' in k:
-        # rprint(f'{k}:{v}')
+# if 'qvals' in k:
+# rprint(f'{k}:{v}')
 # ##
 
-testing = dman_full.make_subset(test_set)
-stack = testing.build_compute_stack(prog.compute_config, max_t=1)
-key = jax.random.PRNGKey(0)
-with ut.timer('Stack initialization'):
-    params = stack.init(key)
-
-
+# testing = dman_full.make_subset(test_set)
+# stack = testing.build_compute_stack(prog.compute_config, max_t=1)
+# key = jax.random.PRNGKey(0)
+# with ut.timer('Stack initialization'):
+# params = stack.init(key)
 
 
 ##
@@ -128,31 +174,29 @@ with ut.timer('Stack initialization'):
 # fig, axes = du.mkfig(1, 4)
 # contours = np.linspace(0, 0.8, 5)
 # fig = du.network_plot(
-    # validation,
-    # mid,
-    # n_views=1,
-    # ax=None,
-    # axes=axes,
-    # # method='scatter',
-    # contours=contours,
-    # # kde=False,
-    # size=3,
-    # lw=0.001,
-    # radius=0.15,
-    # knn=1000,
-    # input_order=[0, 1, 2],
-    # slices=np.linspace(0.1, 0.8, 4),
+# validation,
+# mid,
+# n_views=1,
+# ax=None,
+# axes=axes,
+# # method='scatter',
+# contours=contours,
+# # kde=False,
+# size=3,
+# lw=0.001,
+# radius=0.15,
+# knn=1000,
+# input_order=[0, 1, 2],
+# slices=np.linspace(0.1, 0.8, 4),
 # )
 
 
-    # savepath = Path(f'~/Desktop/cascade_v3/{n.name}_3d.pdf').expanduser()
-    # if not savepath.parent.exists():
-    # savepath.parent.mkdir()
-    # fig.savefig(savepath, bbox_inches='tight')
+# savepath = Path(f'~/Desktop/cascade_v3/{n.name}_3d.pdf').expanduser()
+# if not savepath.parent.exists():
+# savepath.parent.mkdir()
+# fig.savefig(savepath, bbox_inches='tight')
 
 ##
-
-
 
 
 ##
