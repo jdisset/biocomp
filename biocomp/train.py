@@ -199,6 +199,7 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
                 return None, None
 
         pred = [plot_prediction(i) for i in tqdm(list(range(len(networks))))]
+        pred = [p for p in pred if p[0] is not None]
         predimg, prederr = zip(*pred)
 
         if log_key is None:
