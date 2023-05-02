@@ -146,6 +146,9 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
         assert len(X) == len(Y)
         assert len(X) == len(networks)
 
+        X = [np.expand_dims(arr, axis=1) if arr.ndim == 1 else arr for arr in X]
+        Y = [np.expand_dims(arr, axis=1) if arr.ndim == 1 else arr for arr in Y]
+
         ALLX = jnp.concatenate(X, axis=1)
         assert ALLX.shape == (
             N_SAMPLES,
