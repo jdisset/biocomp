@@ -143,8 +143,10 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
         N_SAMPLES_PER_CHUNK = 2000
         N_CHUNKS = 5
 
+        N_SAMPLES_TOTAL = N_SAMPLES_PER_CHUNK * N_CHUNKS
+
         key = jax.random.PRNGKey(0)
-        X, Y = dman.get_uniform_samples(key, N_SAMPLES_PER_CHUNK * N_CHUNKS)
+        X, Y = dman.get_uniform_samples(key, N_SAMPLES_TOTAL)
         assert len(X) == len(Y)
         assert len(X) == len(networks)
 
@@ -152,10 +154,11 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
         Y = [np.expand_dims(arr, axis=1) if arr.ndim == 1 else arr for arr in Y]
 
         ALLX = np.concatenate(X, axis=1)
+
         assert ALLX.shape == (
-            N_SAMPLES,
+            N_SAMPLES_TOTAL,
             stack.total_nb_of_inputs,
-        ), f"{ALLX.shape} != {(N_SAMPLES, stack.total_nb_of_inputs)}"
+        ), f"{ALLX.shape} != {(N_SAMPLES_TOTAL, stack.total_nb_of_inputs)}"
 
         def compute(params, XX, Q, keys):
             res, _ = stack.apply(params, XX, Q, keys)
@@ -377,7 +380,6 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         # they should be monotonically increasing so we add a loss term
         negative_grads = jnp.mean(jnp.where(grads < 0, -grads, 0))
         return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
-
 
     def training_step(params, opt_state, x, y, z, key):
         dynamic, static = ut.split_params(params, training_config['static_params'])
