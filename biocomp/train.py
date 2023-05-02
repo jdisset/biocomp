@@ -140,29 +140,38 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
         params = stack.use_shared_params(base_params, params)
 
     with ut.timer('wandb_plot_pred'):
-        N_SAMPLES = 20000
+        N_SAMPLES_PER_CHUNK = 2000
+        N_CHUNKS = 5
+
         key = jax.random.PRNGKey(0)
-        X, Y = dman.get_uniform_samples(key, N_SAMPLES)
+        X, Y = dman.get_uniform_samples(key, N_SAMPLES_PER_CHUNK * N_CHUNKS)
         assert len(X) == len(Y)
         assert len(X) == len(networks)
 
         X = [np.expand_dims(arr, axis=1) if arr.ndim == 1 else arr for arr in X]
         Y = [np.expand_dims(arr, axis=1) if arr.ndim == 1 else arr for arr in Y]
 
-        ALLX = jnp.concatenate(X, axis=1)
+        ALLX = np.concatenate(X, axis=1)
         assert ALLX.shape == (
             N_SAMPLES,
             stack.total_nb_of_inputs,
         ), f"{ALLX.shape} != {(N_SAMPLES, stack.total_nb_of_inputs)}"
 
-        Q = jax.random.uniform(key, (N_SAMPLES, stack.total_nb_of_outputs))
-        keys = jax.random.split(key, N_SAMPLES)
-
         def compute(params, XX, Q, keys):
             res, _ = stack.apply(params, XX, Q, keys)
             return res
 
-        YHAT = jit(vmap(compute, in_axes=(None, 0, 0, 0)))(params, ALLX, Q, keys)
+        ALLX_CHUNKS = np.split(ALLX, N_CHUNKS, axis=0)
+
+        YHAT = []
+
+        for chunk_id, XX in enumerate(tqdm(ALLX_CHUNKS, desc='wandb_plot_pred chunks')):
+            Q = jax.random.uniform(key, (N_SAMPLES_PER_CHUNK, stack.total_nb_of_outputs))
+            keys = jax.random.split(key, N_SAMPLES_PER_CHUNK)
+            yhat_chunk = jit(vmap(compute, in_axes=(None, 0, 0, 0)))(params, XX, Q, keys)
+            YHAT.append(np.array(yhat_chunk))
+
+        YHAT = np.concatenate(YHAT, axis=0)
 
         def plot_prediction(index):
             try:
@@ -171,7 +180,7 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
                 x, y = X[index], Y[index]
                 yhat = YHAT[: x.shape[0], out_id : out_id + n_out]
                 assert yhat.shape == y.shape, f"{yhat.shape} != {y.shape}"
-                error = jnp.abs(y - yhat).mean()
+                error = np.abs(y - yhat).mean()
                 fig, ax = du.report(params, dman, index, use_x_y_yhat=(x, y, yhat), res=64)
                 img = wb.Image(fig, caption=f'{networks[index].name}, error={error:.4f}')
                 plt.close(fig)
