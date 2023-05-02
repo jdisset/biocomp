@@ -1269,9 +1269,9 @@ def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
             contours = np.linspace(0, 0.8, 5)
             top_row_axes = axes[0, :]
             bottom_row_axes = axes[1, :]
-            slices=np.linspace(0.1, 0.8, 4),
+            slices = (np.linspace(0.1, 0.8, 4),)
             network_plot(
-                dman
+                dman,
                 id,
                 ax=None,
                 axes=top_row_axes,
