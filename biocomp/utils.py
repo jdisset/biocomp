@@ -76,6 +76,7 @@ def timer(name=None, use_logger=True):
 # {{{                    --     random misc stuff     --
 # ···············································································
 
+
 def apply_constraints(par, cons):
     newpar = par.copy()
     F = {'clip': jnp.clip}
@@ -191,8 +192,10 @@ def flatten_list(x):
 def str_to_int_array(s):
     return np.array([ord(c) for c in s], dtype=np.int32)
 
+
 def int_array_to_str(a):
     return ''.join([chr(int(c)) for c in a])
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -361,7 +364,6 @@ class ParamPath:
             key = key.path
         return ParamPath(self.path + key)
 
-
     def __repr__(self):
         return "/".join(self.path)
 
@@ -374,9 +376,6 @@ KEYS_PATH = STATIC_PATH / '__keys__'
 MASK_PATH = STATIC_PATH / 'qmasks'
 NAMED_VALUES = STATIC_PATH / 'named_values'
 QNAME_PATH = NAMED_VALUES / 'qnames'
-
-
-
 
 
 def at_path_nested(d: dict, path, val=None, defaultinit=lambda: None):
@@ -395,7 +394,8 @@ def at_path_nested(d: dict, path, val=None, defaultinit=lambda: None):
         d = d.setdefault(path[-1], defaultinit())
     return d
 
-def at_path(d: dict, path:ParamPath, val=None, defaultinit=lambda: None):
+
+def at_path(d: dict, path: ParamPath, val=None, defaultinit=lambda: None):
     return at_path_nested(d, path.path, val, defaultinit)
 
 
@@ -417,7 +417,7 @@ def delete_path_flat(d, path):
     del d[path]
 
 
-def delete_path(d:dict, path:ParamPath):
+def delete_path(d: dict, path: ParamPath):
     return delete_path_nested(d, path.path)
 
 
@@ -444,8 +444,10 @@ def split_params_flat(params, static_paths):
             dynamic[k] = v
     return dynamic, static
 
-def split_params(params:dict, static_paths:list[ParamPath]):
+
+def split_params(params: dict, static_paths: list[ParamPath]):
     return split_params_nested(params, [p.path for p in static_paths])
+
 
 DEFAULT_MIN_RATE = 0.0
 DEFAULT_MAX_RATE = 1.0
@@ -486,7 +488,6 @@ def path_contains_flat(params, path):
     return contains, doesnt_contain
 
 
-
 def merge_dicts(*dicts):
     res = {}
     for d in dicts:
@@ -506,8 +507,16 @@ def assemble_params_nested(dynamic, static):
     res = updated_dict(dynamic, static)
     return res
 
-def assemble_params(dynamic, static):
-    return assemble_params_nested(dynamic, static)
+
+# def assemble_params(dynamic, static):
+# return assemble_params_nested(dynamic, static)
+
+
+def assemble_params(*p):
+    res = p[0]
+    for d in p[1:]:
+        res = assemble_params_nested(res, d)
+    return res
 
 
 def flatten_params(params):
@@ -558,6 +567,7 @@ def params_to_jax(params):
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                        --     time utils     --
 # ···············································································
+
 
 class Timer:
     def __init__(self, name, console=None):
@@ -624,7 +634,6 @@ class TimeStore:
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
 
 
 # at_path = at_path_flat

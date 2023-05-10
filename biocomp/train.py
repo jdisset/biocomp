@@ -483,7 +483,7 @@ DEFAULT_TRAINING_CONFIG = {
     "rng_key": 42,
     "negative_grad_penalty": 0.1,
     "huber_quantile_loss_delta": 0.1,
-    "static_params": ['/__static__', '/node'],
+    "static_params": [ut.STATIC_PATH, ut.NODE_PATH],
     "cache_dir": "./.training_cache",
     'optimizer': 'adam',
     'epochs': 150,

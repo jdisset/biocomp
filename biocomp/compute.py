@@ -95,7 +95,7 @@ DEFAULT_COMPUTE_CONFIG.set_impl('translation', nodes.translation)
 DEFAULT_COMPUTE_CONFIG.set_impl('inv_transcription', nodes.inv_transcription)
 DEFAULT_COMPUTE_CONFIG.set_impl('inv_translation', nodes.inv_translation)
 DEFAULT_COMPUTE_CONFIG.set_impl('sequestron_ERN', nodes.ERN5p)
-# DEFAULT_COMPUTE_CONFIG.set_impl('sequestron_ERN3p', nodes.ERN3p)
+DEFAULT_COMPUTE_CONFIG.set_impl('sequestron_ERN3p', nodes.ERN3p)
 DEFAULT_COMPUTE_CONFIG.set_impl('source', nodes.source)
 DEFAULT_COMPUTE_CONFIG.set_impl('inv_source', nodes.inv_source)
 DEFAULT_COMPUTE_CONFIG.set_impl('numeric', nodes.numeric)
@@ -410,52 +410,6 @@ class ComputeStack:
         my_p = deepcopy(base_params)
         other_p = deepcopy(other_params)
 
-        # also things like __static__/quantile_variable_id -> 
-        # taken care of if we keep the static from base_params
-
-        # but one issue is that the quantization masks of a network are for 
-        # a certain number of quantization values (e.g. 1x to 8x uORFS)
-        # but the other params might come from a network that had more or 
-        # fewer available quantization values.
-        # The mask therefore wouldnt work.
-        # We need to use the values of the other params 
-
-        # There are actually 2 sets of special parameters:
-        # - quantized parameters: 
-        #       nodes use masks that depend on the order of the available quantization values
-        #       '/__static__/qnames/tc_rate: ['hef1a', ...]
-        #       '/shared/qvals/tc_rate': [[[0.3, ...]]]
-        #       (node id -> qmasks)
-
-        #
-        # - properties:
-        #       properties are learnt shared values that will be used to condition some nodes
-        #       For example, ERN affinity depends on the type of ERN (e.g Csy4, CasE, ...)
-        #       so we store the learnable affinity value for each type in the shared parameters,
-        #       at the ut.PROPERTY_PATH/property_id path.
-        #       Each node stores a property_id that tells which of the property value it should use
-        #       meaning the layer function can be vectorized over the nodes:
-        #       {__static__/properties/pname : [v0_name, v1_name, ...]}
-        #       {shared/ERN_affinity_values: [0.1, 0.2, 0.3, ...]}
-        #       (node_id -> nodes/property_id[node_id] -> shared/ERN_affinity_values[property_id])
-        #       we need to make sure that the property_id of the nodes is the same in both networks
-        #       
-
-        # with a reorder method?
-        # 
-        # Maybe I could make a special type of parameter that uses ordered named values
-        # 
-
-        # named_values/tc_rate/hef1a
-        # named_values/tl_rate/1xuorfs
-        # named_values/tl_rate/2xuorfs
-        # named_values/ERN_affinity/Csy4
-        # Now to access:
-        # @jit(static_argnums=0)
-        # get_v(dict, name):
-
-
-
         _, shared_p = ut.split_params(other_p, [ut.SHARED_PATH])
         _, this_static_p = ut.split_params(my_p, [ut.STATIC_PATH])
         _, other_static_p = ut.split_params(other_p, [ut.STATIC_PATH])
@@ -463,7 +417,7 @@ class ComputeStack:
 
         _, node_p = ut.split_params(my_p, [ut.NODE_PATH])
 
-        my_p = ut.merge_dicts(this_static_p, shared_p, node_p)
+        my_p = ut.assemble_params(this_static_p, shared_p, node_p)
         return my_p
 
     ##────────────────────────────────────────────────────────────────────────────}}}
