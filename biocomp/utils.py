@@ -446,7 +446,7 @@ def split_params_flat(params, static_paths):
 
 
 def split_params(params: dict, static_paths: list[ParamPath]):
-    return split_params_nested(params, [p.path for p in static_paths])
+    return split_params_nested(params, static_paths)
 
 
 DEFAULT_MIN_RATE = 0.0
