@@ -186,7 +186,7 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
                 yhat = YHAT[: x.shape[0], out_id : out_id + n_out]
                 assert yhat.shape == y.shape, f"{yhat.shape} != {y.shape}"
                 error = np.abs(y - yhat).mean()
-                fig, ax = du.report(params, dman, index, use_x_y_yhat=(x, y, yhat), res=64)
+                fig = du.report(params, dman, index, use_x_y_yhat=(x, y, yhat), res=64)
                 img = wb.Image(fig, caption=f'{networks[index].name}, error={error:.4f}')
                 plt.close()
                 plt.close(fig)
@@ -291,7 +291,7 @@ def setup_wandb_logging(
 ):
     import wandb as wb
 
-    full_config = {**training_config, **compute_config.get_config()}
+    full_config = {**training_config, **compute_config.config}
 
     wb.init(config=full_config, project=project, entity=entity, **kw)
     save_dir = Path(wb.run.dir)
@@ -318,7 +318,7 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
 
     ut.logger.debug(f"About to start training")
     ut.logger.debug(f"Training config: {training_config}")
-    ut.logger.debug(f"Compute config: {compute_config.get_config()}")
+    ut.logger.debug(f"Compute config: {compute_config.config}")
 
     if seed is not None:
         training_config['rng_key'] = seed

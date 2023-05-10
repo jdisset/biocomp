@@ -1255,17 +1255,19 @@ def plot_model_diff(params, dman, id, ax, **kw):
 
 def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
 
-    fig, ax = mkfig(1, 2, size=(4, 4))
     if use_x_y_yhat is not None:
         x, y, yhat = use_x_y_yhat
         assert len(x) == len(y), 'x and y must have the same length'
         assert y.shape == yhat.shape, 'y and yhat must have the same shape'
         ndim = y.ndim
         if ndim <= 2:
+            fig, ax = mkfig(1, 2, size=(4, 4))
             network_plot(dman, id, ax[0], use_xy=(x, y), kde=False, **kw)
             network_plot(dman, id, ax[1], use_xy=(x, yhat), kde=False, **kw)
+            ax[0].set_title(f'Original data (mean)')
+            ax[1].set_title(f'Predicted (mean)')
         elif ndim == 3:
-            fig, axes = mkfig(2, 4)
+            fig, axes = mkfig(2, 4, size=(4, 4))
             contours = np.linspace(0, 0.8, 5)
             top_row_axes = axes[0, :]
             bottom_row_axes = axes[1, :]
@@ -1290,16 +1292,21 @@ def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
                 use_xy=(x, yhat),
                 **kw,
             )
+            for ax in axes.flatten():
+                ax.set_title('')
+            axes[0, 0].set_title(f'Original data (mean)')
+            axes[1, 0].set_title(f'Predicted (mean)')
     else:
+        fig, ax = mkfig(1, 2, size=(4, 4))
         network_plot(dman, id, ax[0], **kw)
         plot_model_at_x(params, dman, id, ax[1], **kw)
+        ax[0].set_title(f'Original data (mean)')
+        ax[1].set_title(f'Predicted (mean)')
 
-    ax[0].set_title(f'Original data (mean)')
-    ax[1].set_title(f'Predicted (mean)')
     network = dman.get_networks()[id]
     fig.suptitle(f'{suptitle} {network.name}')
     fig.tight_layout()
-    return fig, ax
+    return fig
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -1331,20 +1338,36 @@ def inv_loglog(x):
     return jnp.where(x > 0, 10**x, jnp.where(x < 0, -(10**-x), 0))
 
 
-def fluo_scatter(rawx, pnames, title=None, types=None, fname=None, logscale=True):
+def fluo_scatter(
+    rawx,
+    pnames,
+    xmin=0,
+    xmax=None,
+    title=None,
+    types=None,
+    fname=None,
+    logscale=True,
+    alpha=0.04,
+    s=5,
+    **_,
+):
     fig, axes = plt.subplots(1, len(pnames), figsize=(1.25 * len(pnames), 10), sharey=True)
     if len(pnames) == 1:
         axes = [axes]
     if types is None:
         types = [''] * len(pnames)
+
+    xmin = rawx.min() if xmin is None else 10**xmin
+    xmax = rawx.max() if xmax is None else 10**xmax
+
     for xid, ax in enumerate(axes):
         color = get_bio_color(pnames[xid])
         xcoords = jax.random.normal(jax.random.PRNGKey(0), (rawx.shape[0],)) * 0.1
-        ax.scatter(xcoords, rawx[:, xid], color=color, alpha=0.03, s=5, zorder=10, lw=0)
+        ax.scatter(xcoords, rawx[:, xid], color=color, alpha=alpha, s=s, zorder=10, lw=0)
         if logscale:
             ax.set_yscale('symlog')
         ax.set_xlim(-0.5, 0.5)
-        ax.set_ylim(min(rawx.min(), 0), rawx.max())
+        ax.set_ylim(xmin, xmax)
         ax.set_xlabel(f'{pnames[xid]} {types[xid]}', rotation=0, labelpad=20, fontsize=10)
         remove_spines(ax)
         ax.set_xticks([])
@@ -1475,7 +1498,7 @@ def fluo_densities(
         fig.suptitle(
             title,
             fontsize=10,
-            y=0.85,
+            y=0.95,
             x=0.45,
         )
     fig.tight_layout()

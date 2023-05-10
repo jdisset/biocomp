@@ -57,7 +57,7 @@ def indirect_param_at(
 
     assert isinstance(params, dict), f'params must be a dict, not {type(params)}'
 
-    dpath = f'{base_path}/{name}'
+    dpath = base_path / name
 
     nparams = ut.at_path(params, dpath, None)
     nparams = nparams.shape[0] if nparams is not None else 0
@@ -115,21 +115,21 @@ def direct_param_at(
     if not isinstance(params, dict):
         raise TypeError(f'params must be a dict, not {type(params)}')
 
-    dpath = base_path + f'/{name}'
+    dpath = base_path / name
     p_array = ut.at_path(params, dpath, None)  # p_array is the parameter array (n_params, *shape)
 
     if not read_only:  # non-jittable path (only used for initialization)
         # first we will check if the param is already initialized
-        IS_INIT_PATH = ut.STATIC_PATH + "/is_init"
+        IS_INIT_PATH = ut.STATIC_PATH / 'is_init'
         # we store a boolean indicating if a param is initialized
-        is_init_array = ut.at_path(params, IS_INIT_PATH + dpath, None)
+        is_init_array = ut.at_path(params, IS_INIT_PATH / dpath, None)
         if is_init_array is None or is_init_array.shape[0] <= node_id:
             # extend is_init_array to fit node_id
             v = is_init_array if is_init_array is not None else np.zeros((0,), dtype=np.bool_)
             is_init_array = np.concatenate(
                 [v, np.full((node_id - v.shape[0] + 1,), False, dtype=np.bool_)]
             )
-            ut.at_path(params, IS_INIT_PATH + dpath, is_init_array)
+            ut.at_path(params, IS_INIT_PATH / dpath, is_init_array)
         param_is_init = is_init_array[node_id]
 
         if not param_is_init or overwrite_with is not None:
@@ -154,7 +154,7 @@ def direct_param_at(
             p = p_array[node_id]
             # and mark the param as initialized
             is_init_array[node_id] = True
-            ut.at_path(params, IS_INIT_PATH + dpath, is_init_array)
+            ut.at_path(params, IS_INIT_PATH / dpath, is_init_array)
 
     dtype = p_array.dtype
     p = p_array[node_id].astype(dtype)
@@ -264,7 +264,6 @@ def get_quantized(
     # initialization of both keys and values is done upstream. We assume both are already initialized
     # i.e there is a param called param_name in params, which is a vector (n_qvalues, ...)
     # of all the possible quantization values for this parameter.
-
     possible_values = get_param(params, param_name, base_path=ut.QVALS_PATH)
     possible_values = jnp.atleast_1d(possible_values.squeeze())
     # possible_values is a 1D array of shape (n_qvalues,) that contains all the possible
@@ -279,7 +278,6 @@ def get_quantized(
         f'Number of possible values ({len(possible_values)}) is different from the number of '
         f'masks ({len(masks[0])}) for node {node_id} and parameter {param_name}.'
     )
-
     # masks is a 2D array of shape (max_n_masks_per_node, n_qvalues) that tells us which
     # quantization values are allowed for this node.
     # max_n_masks_per_node is the maximum number of quantization values that can be used for
@@ -296,29 +294,12 @@ def get_quantized(
     )
 
 
-def set_quantization_values(params, pname, qnames, qvals):
-    """Initialize all the available quantization values for a given parameter."""
-    qnames = sorted(qnames)
-    assert len(qnames) == len(
-        set(qnames)
-    ), f'quantization names for {pname} must be unique, got {qnames}'
-    qname_path = ut.QNAME_PATH + [pname]
-    already = ut.at_path(params, qname_path)
-    if already is None:
-        assert len(qvals) == len(qnames)
-        ut.at_path(params, qname_path, qnames)
-        set_param(params, pname, qvals, base_path=ut.QVALS_PATH)
-    else:
-        assert (
-            qnames == already
-        ), f'qnames for {pname} already initialized to {already}, cannot change to {qnames}'
-
-
 def get_all_possible_quantization_params(network) -> dict[str, list[str]]:
     # returns a dictionary of all possible parameters
     # they can be found at each row of the central_dogma_graph, in the params column
     # which is a dict[str, list[str]] itself. We just want the exhaustive list of keys
     # and all possible values for each key
+    # example: {'tl_rate': ['1xuORF', '2xuORF']}
     all_params = {}
     for _, row in network.central_dogma_graph.iterrows():
         for k, v in row.params.items():
@@ -329,10 +310,12 @@ def get_all_possible_quantization_params(network) -> dict[str, list[str]]:
 
 
 def get_available_quantizations(param_name, cdg_node_id, cdg):
-    # returns the name of possible parts for a given cdg node, slot and param name
-    # example: get_possible_values('transcription_rate', ...) -> ['hEF1a', 'hEF1b', 'hEF1c']
-    #          get_possible_values('translation_rate', ...) -> [None, '1xuORF', '2xuORF', ...]
-    # params are stored in the params column of the cdg as a dict {param_name:[possiblevaluees]}
+    """
+    returns the name of possible parts for a given cdg node, slot and param name
+    example: get_possible_values('transcription_rate', ...) -> ['hEF1a', 'hEF1b', 'hEF1c']
+              get_possible_values('translation_rate', ...) -> [None, '1xuORF', '2xuORF', ...]
+    params are stored in the params column of the cdg as a dict {param_name:[possiblevaluees]}
+    """
     available_params = cdg.loc[cdg_node_id, 'params']
     if param_name not in available_params:
         raise ValueError(
@@ -346,14 +329,13 @@ def generate_quantization_masks(
 ):
     """
     generate the quantization masks for a given vnode and parameter. One mask per input.
-    - qnames: the ordered list of quantization names available for this parameter, for the whole stack
+    - qnames: the list of quantization names for this parameter (e.g. ['hEF1a', ...])
     - params: the parameters dictionnary, where only arrays can be used (because it'll be jitted)
     - pname: the name of the parameter we want to quantize (e.g. 'tl_rate')
     - vnode: the node we want to quantize
     - maximum_required_masks_per_node: basically the max number of inputs a node can have
     """
     # example: generate_quantization_masks(['hEF1a', 'hEF1b', 'hEF1c'], params, 'tc_rate', vnode)
-
     network = vnode.network
     cdf = network.compute_graph
     cdg = network.central_dogma_graph
@@ -371,13 +353,12 @@ def generate_quantization_masks(
         f'but only a max of {maximum_required_masks_per_node} masks are available'
     )
     # check that this_node_qnames is a subset of qnames
-    for q in this_node_qnames:
-        for qq in q:
-            if qq not in qnames:
-                raise ValueError(
-                    f'Quantization name {qq} not available for parameter {pname}. '
-                    f'Available: {qnames}'
-                )
+    should_be_in = [qq for q in this_node_qnames for qq in q if qq not in qnames]
+    if len(should_be_in) > 0:
+        raise ValueError(
+            f'Node {compute_node_id} has unknown quantization names {should_be_in} '
+            f'for parameter {pname} (available: {qnames})'
+        )
 
     # now create the mask array
     mask = np.zeros((maximum_required_masks_per_node, len(qnames)), dtype=bool)
@@ -542,7 +523,6 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
     assert n_outputs == 1, f'inverse_Aggregation expects 1 output, got {n_outputs}'
 
     def prepare(params, vnodelist, **_):
-        # affinity_id = int(property_id(stack.shared_store, prop_name, seq_name))
         for vnode in vnodelist:
             inv_vnode = vnode.get_inverse_vnode(stack)
             cnode = vnode.get_compute_node()
@@ -712,10 +692,14 @@ def transform_nn(
     inner_outsize=8,
     rate_dim=1,
     tr_namespace='',
+    quantization_names: list[str] = None,  # ordered list. ex: ['1xuorf', '2xuorf', ...]
     inner_activation_name=DEFAULT_ACTIVATION,
     outer_activation_name=DEFAULT_OUT_ACTIVATION,
     **_,
 ):
+
+    assert quantization_names is not None, 'quantization_names should be provided'
+
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
 
@@ -806,17 +790,18 @@ def transform_nn(
         # creates the parameters on the fly if they don't exist yet
 
         # qnames is a list of names for the rate values available in this stack (1xuORf, ...)
-        qnames = ut.at_path(stack.shared_store, ut.QNAME_PATH + f"/{rate_name}")
-        assert qnames is not None, f'quantization names for {rate_name} not initialized'
-
         # they all get an initial value that the rates will be quantized to
-        init = ut.continuous_initializer(key, (len(qnames), rate_dim))
+        init = ut.continuous_initializer(key, (len(quantization_names), rate_dim))
         init_param_if_needed(params, rate_name, init=init, base_path=ut.QVALS_PATH, node_id=0)
 
         for vnode in vnodelist:
             register_quantile_variable_ids(params, vnode, stack)
             generate_quantization_masks(
-                qnames, params, rate_name, vnode, number_of_nodes_at_least=stack.number_of_nodes
+                quantization_names,
+                params,
+                rate_name,
+                vnode,
+                number_of_nodes_at_least=stack.number_of_nodes,
             )
             key, _ = jax.random.split(key)
             val, rates = __node_impl(
@@ -851,14 +836,6 @@ def transform_nn(
     return prepare, apply, output_shape
 
 
-def property_id(store, prop_name, prop_value):
-    """Returns the id of the property value in the dict, or creates it if it doesn't exist"""
-    pvals = ut.at_path(store, ut.PROPERTIES_PATH + f'/{prop_name}', defaultinit=lambda: [])
-    if prop_value not in pvals:
-        pvals.append(prop_value)
-    return pvals.index(prop_value)
-
-
 def sequestron_ERN(
     input_shapes,
     n_outputs,
@@ -868,10 +845,14 @@ def sequestron_ERN(
     depth=4,
     out_dim=1,
     subtype='5p',
+    affinity_names=None,
     inner_activation_name=DEFAULT_ACTIVATION,
     outer_activation_name=DEFAULT_OUT_ACTIVATION,
     **_,
 ):
+
+
+    assert affinity_names is not None, 'affinity_names must be specified'
 
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
@@ -892,6 +873,7 @@ def sequestron_ERN(
             init=ut.continuous_initializer(rng_key, (affinity_dim,)),
             base_path=ut.SHARED_PATH,
             node_id=affinity_id,
+            number_of_nodes_at_least=len(affinity_names),
         )
 
         res = dense_multilevel(
@@ -913,11 +895,12 @@ def sequestron_ERN(
             # we need to know which affinity value to use for this node
             assert 'seq_name' in vnode.get_compute_node().extra
             seq_name = vnode.get_compute_node().extra['seq_name']  # ex: 'CasE5p'
-            prop_name = f'ERN_affinity_{subtype}'
-            affinity_id = int(property_id(stack.shared_store, prop_name, seq_name))
+            if seq_name not in affinity_names:
+                raise ValueError(f'Unknown affinity name {seq_name}. Available: {affinity_names}')
+            affinity_id = affinity_names.index(seq_name)
 
             # affinity_id is the index at which the affinity value is stored
-            # in the array of all affinity values. We cNone an store this index so that
+            # in the array of all affinity values. We store this index so that
             # we can retrieve the correct value during apply (vectorized on all node_ids)
             set_param(
                 params,
@@ -1015,13 +998,52 @@ def grouped_output(
     return prepare, apply, output_shape
 
 
-transcription = partial(transform_nn, transform_name='tc')
-translation = partial(transform_nn, transform_name='tl')
-inv_transcription = partial(transform_nn, transform_name='tc', tr_namespace='inv_')
-inv_translation = partial(transform_nn, transform_name='tl', tr_namespace='inv_')
+DEFAULT_AVAILABLE_TC_RATES = ['hEF1a']
 
-ERN5p = partial(sequestron_ERN, subtype='5p')
-ERN3p = partial(sequestron_ERN, subtype='3p')
+DEFAULT_AVAILABLE_TL_RATES = [
+    '00_empty_tc',
+    '1w_uORF',
+    '1x_uORF',
+    '2x_uORF',
+    '3x_uORF',
+    '4x_uORF',
+    '5x_uORF',
+    '6x_uORF',
+    '8x_uORF',
+    '9x_uORF',
+    '10x_uORF',
+    '11x_uORF',
+    '12x_uORF',
+]
+
+ERN_DEFAULT_NEG_PARTS = ['CasE', 'Csy4', 'PgU']
+ERN_DEFAULT_POS_PARTS = [['CasE_rec'], ['Csy4_rec'], ['PgU_rec']]
+DEFAULT_AVAILABLE_5P_AFFINITIES = []
+for i, positive_part in enumerate(ERN_DEFAULT_NEG_PARTS):
+    for negative_part in ERN_DEFAULT_POS_PARTS[i]:
+        DEFAULT_AVAILABLE_5P_AFFINITIES.append(f'ERN::{positive_part}#{negative_part}')
+
+
+transcription = partial(
+    transform_nn, transform_name='tc', quantization_names=DEFAULT_AVAILABLE_TC_RATES
+)
+translation = partial(
+    transform_nn, transform_name='tl', quantization_names=DEFAULT_AVAILABLE_TL_RATES
+)
+inv_transcription = partial(
+    transform_nn,
+    transform_name='tc',
+    tr_namespace='inv_',
+    quantization_names=DEFAULT_AVAILABLE_TC_RATES,
+)
+inv_translation = partial(
+    transform_nn,
+    transform_name='tl',
+    tr_namespace='inv_',
+    quantization_names=DEFAULT_AVAILABLE_TL_RATES,
+)
+
+ERN5p = partial(sequestron_ERN, subtype='5p', affinity_names=DEFAULT_AVAILABLE_5P_AFFINITIES)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

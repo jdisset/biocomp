@@ -40,7 +40,6 @@ all_networks = dman_full.get_networks()
 net_xp = [n.metadata['from_xp'] for n in all_networks]
 net_name = [n.name for n in all_networks]
 
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{               --     training and validation sets     --
@@ -64,7 +63,6 @@ validation_set = [
 
 n_outputs = [n.get_nb_outputs() for n in all_networks]
 
-test_set = [0, 10, len(all_networks) - 1, 50, 60, 20, 40, 44, 42, 120, 250, 280, 300]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -104,14 +102,14 @@ prog.start_training(dman_full.make_subset(training_set), validation)
 
 # from rich import print as pprint
 # for k in params.keys():
-    # if 'agg' in k:
-        # pprint(k, params[k])
+# if 'agg' in k:
+# pprint(k, params[k])
 
 # # def tree_has_nan(tree):
-    # # for v in tree.values():
-        # # if np.isnan(v).any():
-            # # return True
-    # # return False
+# # for v in tree.values():
+# # if np.isnan(v).any():
+# # return True
+# # return False
 
 # # tree_has_nan(params)
 
@@ -141,9 +139,92 @@ prog.start_training(dman_full.make_subset(training_set), validation)
 # base_params = vstack.init(key)
 
 # ##
+
+# from biocomp.compute import ComputeStack
+
+# test_set = [0, 10, 42, 300]
+
+# randomsubset = np.random.choice(range(len(all_networks)), 50, replace=False)
+# test_set = randomsubset
+
+# key = jax.random.PRNGKey(0)
 # testing = dman_full.make_subset(test_set)
 # tstack = testing.build_compute_stack(prog.compute_config)
 # t_params = tstack.init(key)
+# t_params = ut.params_to_jax(t_params)
+
+# vstack = validation.build_compute_stack(prog.compute_config)
+# v_params = vstack.init(key)
+# v_params = ut.params_to_jax(v_params)
+# params = ComputeStack.use_shared_params(v_params, t_params)
+# inputs = jnp.zeros(vstack.total_nb_of_inputs)
+# quantiles = jnp.zeros(vstack.total_nb_of_outputs)
+
+# jax.jit(vstack.apply)(v_params, inputs, quantiles, jax.random.PRNGKey(0))
+
+# a, _ = ut.path_contains(v_params, 'prop')
+# a.keys()
+# a.values()
+
+
+##
+
+# from jax import jit
+# from functools import partial
+
+# def str_to_int_array(s):
+# return np.array([ord(c) for c in s], dtype=np.int32)
+
+# def int_array_to_str(a):
+#     return ''.join([chr(int(c)) for c in a])
+# now compatible with jax jit:
+
+
+# p_dec = {'named_values': ['v1', 'v2', 'v3']}
+
+# p_enc = {k:[ut.str_to_int_array(v) for v in vs] for k, vs in p_dec.items()}
+
+# @partial(jit, static_argnums=(1,2))
+# def get_idx(p, k, v):
+    # return jnp.argmax(jnp.array(p[k]) == ut.str_to_int_array(v))
+
+# get_idx(p_enc, 'named_values', 'v2')
+
+# would require padding or limiting the length of the strings to the minimum denominator
+
+# 
+# '__static__/named_values_id/pname/v1': 0,
+# '__static__/named_values_id/pname/v2': 1,
+
+
+# p = ParamTree()
+# p.get_shared()
+# p.at(path,v, ...) -> v or None
+# p.named_value_id(namespace, name) -> idx
+
+
+
+
+
+##
+
+# Other approach:
+# before applying the layer, 
+# store that affinity = CasE
+
+
+# OTHER APPROACH
+# always store values for everything. As many values as possible. In the same order. 
+# Add a hash in the params to check that they have been trained with the same available values
+# Store part_name -> idx in the config
+
+# name parts with a number? i.e 00_CASE. Maybe with namespaces? i.e uorfs: named_value_id
+
+
+# get part UID from DB, store it in the network extra, use it as index for the named values
+# the masks will only go to the max id present
+
+
 
 # ##
 # vstack.shared_store

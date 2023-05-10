@@ -39,7 +39,7 @@ class ComputeConfigManager:
     def __init__(self):
         self.config = {'functions': {}}
 
-    def set(self, key, implementation, **kwargs):
+    def set_impl(self, key, implementation, **kwargs):
         implementation, partial_args = unwrap_partial_function(implementation)
         kwargs.update(partial_args)
 
@@ -59,7 +59,7 @@ class ComputeConfigManager:
             'parameters': parameters,
         }
 
-    def get(self, key):
+    def get_impl(self, key):
         assert key in self.config['functions'], f'No function named {key}'
         func_data = self.config['functions'][key]
         # take from node module
@@ -72,16 +72,9 @@ class ComputeConfigManager:
         with open(filename, 'w') as f:
             json.dump(self.config, f)
 
-    def get_config(self):
-        return self.config
-
     def load_file(self, filename):
         with open(filename, 'r') as f:
             self.config = json.load(f)
-
-    # access functions through [] operator:
-    def __getitem__(self, key):
-        return self.get(key)
 
     @classmethod
     def from_file(cls, filename):
@@ -95,21 +88,24 @@ class ComputeConfigManager:
 
 from . import nodes
 
+
 DEFAULT_COMPUTE_CONFIG = ComputeConfigManager()
-DEFAULT_COMPUTE_CONFIG.set('transcription', nodes.transcription)
-DEFAULT_COMPUTE_CONFIG.set('translation', nodes.translation)
-DEFAULT_COMPUTE_CONFIG.set('inv_transcription', nodes.inv_transcription)
-DEFAULT_COMPUTE_CONFIG.set('inv_translation', nodes.inv_translation)
-DEFAULT_COMPUTE_CONFIG.set('sequestron_ERN', nodes.ERN5p)
-DEFAULT_COMPUTE_CONFIG.set('sequestron_ERN3p', nodes.ERN3p)
-DEFAULT_COMPUTE_CONFIG.set('source', nodes.source)
-DEFAULT_COMPUTE_CONFIG.set('inv_source', nodes.inv_source)
-DEFAULT_COMPUTE_CONFIG.set('numeric', nodes.numeric)
-DEFAULT_COMPUTE_CONFIG.set('inv_numeric', nodes.inv_numeric)
-DEFAULT_COMPUTE_CONFIG.set('aggregation', nodes.aggregation)
-DEFAULT_COMPUTE_CONFIG.set('inv_aggregation', nodes.inv_aggregation)
-DEFAULT_COMPUTE_CONFIG.set('output', nodes.grouped_output)
-DEFAULT_COMPUTE_CONFIG.set('deadend', nodes.single_passthrough)
+DEFAULT_COMPUTE_CONFIG.set_impl('transcription', nodes.transcription)
+DEFAULT_COMPUTE_CONFIG.set_impl('translation', nodes.translation)
+DEFAULT_COMPUTE_CONFIG.set_impl('inv_transcription', nodes.inv_transcription)
+DEFAULT_COMPUTE_CONFIG.set_impl('inv_translation', nodes.inv_translation)
+DEFAULT_COMPUTE_CONFIG.set_impl('sequestron_ERN', nodes.ERN5p)
+# DEFAULT_COMPUTE_CONFIG.set_impl('sequestron_ERN3p', nodes.ERN3p)
+DEFAULT_COMPUTE_CONFIG.set_impl('source', nodes.source)
+DEFAULT_COMPUTE_CONFIG.set_impl('inv_source', nodes.inv_source)
+DEFAULT_COMPUTE_CONFIG.set_impl('numeric', nodes.numeric)
+DEFAULT_COMPUTE_CONFIG.set_impl('inv_numeric', nodes.inv_numeric)
+DEFAULT_COMPUTE_CONFIG.set_impl('aggregation', nodes.aggregation)
+DEFAULT_COMPUTE_CONFIG.set_impl('inv_aggregation', nodes.inv_aggregation)
+DEFAULT_COMPUTE_CONFIG.set_impl('output', nodes.grouped_output)
+DEFAULT_COMPUTE_CONFIG.set_impl('deadend', nodes.single_passthrough)
+
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -239,7 +235,7 @@ class ComputeLayer:
 
         n_outputs = len(first_node.output_to)
 
-        impl = config.get(self.f_type)(
+        impl = config.get_impl(self.f_type)(
             input_shapes=self.f_input_shapes, n_outputs=n_outputs, stack=stack
         )
         self.f_prepare, self.f_apply, self.f_out_shapes = impl
@@ -278,7 +274,7 @@ class ComputeStack:
     total_nb_of_inputs: int = None
     max_nb_of_outputs_per_network: int = None
 
-    shared_store: dict = None  # shared store for all the nodes.
+    # shared_store: dict = None  # shared store for all the nodes.
     # can be used to store things like the name of the parts for some quantized parameters
     # as they can't be stored in params (no strings allowed)
 
@@ -347,7 +343,7 @@ class ComputeStack:
             with ut.timer('assembling stack'):
                 self._assemble_stack(**kwargs)
             self._refresh()
-            self._init_quantization_params()
+            # self._init_quantization_params()
             with ut.timer('building layers'):
                 for layer in self.layers:
                     layer.setup(config, stack=self)
@@ -372,7 +368,6 @@ class ComputeStack:
         assert self.is_built, 'Stack not built'
         s = ComputeStack([self.networks[i] for i in network_ids])
         s.build(self.config)
-        s.shared_store = self.shared_store
 
         old_node_id = []
         for i, n in enumerate(s.each_node()):
@@ -415,11 +410,60 @@ class ComputeStack:
         my_p = deepcopy(base_params)
         other_p = deepcopy(other_params)
 
+        # also things like __static__/quantile_variable_id -> 
+        # taken care of if we keep the static from base_params
+
+        # but one issue is that the quantization masks of a network are for 
+        # a certain number of quantization values (e.g. 1x to 8x uORFS)
+        # but the other params might come from a network that had more or 
+        # fewer available quantization values.
+        # The mask therefore wouldnt work.
+        # We need to use the values of the other params 
+
+        # There are actually 2 sets of special parameters:
+        # - quantized parameters: 
+        #       nodes use masks that depend on the order of the available quantization values
+        #       '/__static__/qnames/tc_rate: ['hef1a', ...]
+        #       '/shared/qvals/tc_rate': [[[0.3, ...]]]
+        #       (node id -> qmasks)
+
+        #
+        # - properties:
+        #       properties are learnt shared values that will be used to condition some nodes
+        #       For example, ERN affinity depends on the type of ERN (e.g Csy4, CasE, ...)
+        #       so we store the learnable affinity value for each type in the shared parameters,
+        #       at the ut.PROPERTY_PATH/property_id path.
+        #       Each node stores a property_id that tells which of the property value it should use
+        #       meaning the layer function can be vectorized over the nodes:
+        #       {__static__/properties/pname : [v0_name, v1_name, ...]}
+        #       {shared/ERN_affinity_values: [0.1, 0.2, 0.3, ...]}
+        #       (node_id -> nodes/property_id[node_id] -> shared/ERN_affinity_values[property_id])
+        #       we need to make sure that the property_id of the nodes is the same in both networks
+        #       
+
+        # with a reorder method?
+        # 
+        # Maybe I could make a special type of parameter that uses ordered named values
+        # 
+
+        # named_values/tc_rate/hef1a
+        # named_values/tl_rate/1xuorfs
+        # named_values/tl_rate/2xuorfs
+        # named_values/ERN_affinity/Csy4
+        # Now to access:
+        # @jit(static_argnums=0)
+        # get_v(dict, name):
+
+
+
         _, shared_p = ut.split_params(other_p, [ut.SHARED_PATH])
-        _, static_p = ut.split_params(my_p, [ut.STATIC_PATH])
+        _, this_static_p = ut.split_params(my_p, [ut.STATIC_PATH])
+        _, other_static_p = ut.split_params(other_p, [ut.STATIC_PATH])
+
+
         _, node_p = ut.split_params(my_p, [ut.NODE_PATH])
 
-        my_p = ut.merge_dicts(static_p, shared_p, node_p)
+        my_p = ut.merge_dicts(this_static_p, shared_p, node_p)
         return my_p
 
     ##────────────────────────────────────────────────────────────────────────────}}}
@@ -897,16 +941,16 @@ class ComputeStack:
 
         self.is_assembled = allbuilt
 
-    def _init_quantization_params(self):
-        # first we need to store all quantizable parameter names
-        self.shared_store = {}
-        quantization_params = {}
-        for n in self.networks:
-            for qn, qv in nd.get_all_possible_quantization_params(n).items():
-                quantization_params[qn] = set(qv) | quantization_params.get(qn, set())
-        quantization_params = {k: sorted(v) for k, v in quantization_params.items()}
-        for pname, pv in quantization_params.items():
-            ut.at_path(self.shared_store, ut.QNAME_PATH + f"/{pname}", pv)
+    # def _init_quantization_params(self):
+        # # first we need to store all quantizable parameter names
+        # self.shared_store = {}
+        # quantization_params = {}
+        # for n in self.networks:
+            # for qn, qv in nd.get_all_possible_quantization_params(n).items():
+                # quantization_params[qn] = set(qv) | quantization_params.get(qn, set())
+        # quantization_params = {k: sorted(v) for k, v in quantization_params.items()}
+        # for pname, pv in quantization_params.items():
+            # ut.at_path(self.shared_store, ut.QNAME_PATH + f"/{pname}", pv)
 
     def _generate_apply_method(self, get_grads_for=('translation', 'transcription', 'output')):
 

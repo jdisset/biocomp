@@ -76,60 +76,6 @@ def timer(name=None, use_logger=True):
 # {{{                    --     random misc stuff     --
 # ···············································································
 
-# NODE_PATH = ['node']
-# SHARED_PATH = ['shared']
-# STATIC_PATH = ['__static__']
-# QVALS_PATH = SHARED_PATH + ['qvals']
-# KEYS_PATH = STATIC_PATH + ['__keys__']
-# MASK_PATH = STATIC_PATH + ['qmasks']
-# QNAME_PATH = ['qnames']
-# PROPERTIES_PATH = ['properties']
-
-NODE_PATH = '/node'
-SHARED_PATH = '/shared'
-STATIC_PATH = '/__static__'
-QVALS_PATH = SHARED_PATH + '/qvals'
-KEYS_PATH = STATIC_PATH + '/__keys__'
-MASK_PATH = STATIC_PATH + '/qmasks'
-QNAME_PATH = '/qnames'
-PROPERTIES_PATH = '/properties'
-
-
-def at_path_nested(d: dict, path, val=None, defaultinit=lambda: None):
-    for key in path[:-1]:
-        try:
-            d = d.setdefault(key, dict())
-        except AttributeError as e:
-            msg = (
-                f'Cannot set "{key}" at path {path}: {e}. Did you pass something other than a dict?'
-            )
-            raise AttributeError(msg)
-    if val is not None:
-        d[path[-1]] = val
-        d = d[path[-1]]
-    else:
-        d = d.setdefault(path[-1], defaultinit())
-    return d
-
-
-def at_path_flat(d: dict, path: str, val=None, defaultinit=lambda: None):
-    if val is None:
-        return d.setdefault(path, defaultinit())
-    else:
-        d[path] = val
-        return val
-
-
-def delete_path_nested(d, path):
-    for key in path[:-1]:
-        d = d[key]
-    del d[path[-1]]
-
-
-def delete_path_flat(d, path):
-    del d[path]
-
-
 def apply_constraints(par, cons):
     newpar = par.copy()
     F = {'clip': jnp.clip}
@@ -241,6 +187,12 @@ def flatten_list(x):
     else:
         return [x]
 
+
+def str_to_int_array(s):
+    return np.array([ord(c) for c in s], dtype=np.int32)
+
+def int_array_to_str(a):
+    return ''.join([chr(int(c)) for c in a])
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -396,6 +348,104 @@ def tree_unstack(t):
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                     --     parameters utils     --
 # ···············································································
+class ParamPath:
+    def __init__(self, path=None):
+        if isinstance(path, str):
+            path = path.strip("/").split("/")
+        self.path = path or []
+
+    def __truediv__(self, key):
+        if isinstance(key, str):
+            key = key.strip("/").split("/")
+        elif isinstance(key, ParamPath):
+            key = key.path
+        return ParamPath(self.path + key)
+
+
+    def __repr__(self):
+        return "/".join(self.path)
+
+
+NODE_PATH = ParamPath('node')
+SHARED_PATH = ParamPath('shared')
+STATIC_PATH = ParamPath('__static__')
+QVALS_PATH = SHARED_PATH / 'qvals'
+KEYS_PATH = STATIC_PATH / '__keys__'
+MASK_PATH = STATIC_PATH / 'qmasks'
+NAMED_VALUES = STATIC_PATH / 'named_values'
+QNAME_PATH = NAMED_VALUES / 'qnames'
+
+
+
+
+
+def at_path_nested(d: dict, path, val=None, defaultinit=lambda: None):
+    for key in path[:-1]:
+        try:
+            d = d.setdefault(key, dict())
+        except AttributeError as e:
+            msg = (
+                f'Cannot set "{key}" at path {path}: {e}. Did you pass something other than a dict?'
+            )
+            raise AttributeError(msg)
+    if val is not None:
+        d[path[-1]] = val
+        d = d[path[-1]]
+    else:
+        d = d.setdefault(path[-1], defaultinit())
+    return d
+
+def at_path(d: dict, path:ParamPath, val=None, defaultinit=lambda: None):
+    return at_path_nested(d, path.path, val, defaultinit)
+
+
+def at_path_flat(d: dict, path: str, val=None, defaultinit=lambda: None):
+    if val is None:
+        return d.setdefault(path, defaultinit())
+    else:
+        d[path] = val
+        return val
+
+
+def delete_path_nested(d, path):
+    for key in path[:-1]:
+        d = d[key]
+    del d[path[-1]]
+
+
+def delete_path_flat(d, path):
+    del d[path]
+
+
+def delete_path(d:dict, path:ParamPath):
+    return delete_path_nested(d, path.path)
+
+
+def split_params_nested(params, static_paths):
+    """Split params into static and dynamic parts."""
+    # any path that is not in static_paths is dynamic
+    dynamic = params.copy()
+    static = {}
+    for path in static_paths:
+        at_path(static, path, at_path(dynamic, path))
+        delete_path(dynamic, path)
+    return dynamic, static
+
+
+def split_params_flat(params, static_paths):
+    """Split params into static and dynamic parts."""
+    static = {}
+    dynamic = {}
+    for k, v in params.items():
+        # if k starts with any of the static_paths, it is static
+        if any(k.startswith(p) for p in static_paths):
+            static[k] = v
+        else:
+            dynamic[k] = v
+    return dynamic, static
+
+def split_params(params:dict, static_paths:list[ParamPath]):
+    return split_params_nested(params, [p.path for p in static_paths])
 
 DEFAULT_MIN_RATE = 0.0
 DEFAULT_MAX_RATE = 1.0
@@ -425,30 +475,6 @@ def he_initializer(rng, shape):
     return init
 
 
-def split_params_nested(params, static_paths):
-    """Split params into static and dynamic parts."""
-    # any path that is not in static_paths is dynamic
-    dynamic = params.copy()
-    static = {}
-    for path in static_paths:
-        at_path(static, path, at_path(dynamic, path))
-        delete_path(dynamic, path)
-    return dynamic, static
-
-
-def split_params_flat(params, static_paths):
-    """Split params into static and dynamic parts."""
-    static = {}
-    dynamic = {}
-    for k, v in params.items():
-        # if k starts with any of the static_paths, it is static
-        if any(k.startswith(p) for p in static_paths):
-            static[k] = v
-        else:
-            dynamic[k] = v
-    return dynamic, static
-
-
 def path_contains_flat(params, path):
     """returns the params with a path that contains the given path"""
     contains, doesnt_contain = {}, {}
@@ -458,6 +484,7 @@ def path_contains_flat(params, path):
         else:
             doesnt_contain[k] = v
     return contains, doesnt_contain
+
 
 
 def merge_dicts(*dicts):
@@ -478,6 +505,9 @@ def assemble_params_nested(dynamic, static):
     """Assemble params from static and dynamic parts."""
     res = updated_dict(dynamic, static)
     return res
+
+def assemble_params(dynamic, static):
+    return assemble_params_nested(dynamic, static)
 
 
 def flatten_params(params):
@@ -518,13 +548,16 @@ def params_to_numpy(params):
     return jax.tree_map(lambda x: x if isinstance(x, float) else np.array(x), params)
 
 
+def params_to_jax(params):
+    return jax.tree_map(lambda x: jnp.array(x) if isinstance(x, np.ndarray) else x, params)
+
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                        --     time utils     --
 # ···············································································
-
 
 class Timer:
     def __init__(self, name, console=None):
@@ -592,17 +625,13 @@ class TimeStore:
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-# at_path = at_path_nested
-# delete_path = delete_path_nested
-# split_params = split_params_nested
-# assemble_params = assemble_params_nested
 
 
-at_path = at_path_flat
-delete_path = delete_path_flat
-split_params = split_params_flat
-assemble_params = assemble_params_flat
-path_contains = path_contains_flat
+# at_path = at_path_flat
+# delete_path = delete_path_flat
+# split_params = split_params_flat
+# assemble_params = assemble_params_flat
+# path_contains = path_contains_flat
 
 # checks
 enable_checks = False
@@ -624,7 +653,9 @@ def check(*args, **kwargs):
         # replace by an assert of the same thing
         assert args[0](*args[1:], **kwargs)
 
+
 from jax.experimental.checkify import Error
+
 
 def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | checkify.float_checks)):
     global enable_checks
@@ -632,7 +663,9 @@ def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | check
         logger.info(f"checkwrap enabled for {func}")
         return jit(checkify.checkify(func, errors=errors))
     else:
+
         def wrapped_function(*args, **kwargs):
             result = func(*args, **kwargs)
             return Error({}, {}, {}, {}), result
+
         return wrapped_function
