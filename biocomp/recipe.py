@@ -255,7 +255,7 @@ class XP:
         lib,
         db_path=":memory:",
         inverse='shortest',
-        data_path='./data',
+        data_path='./data/calibrated_data',
     ):
         log.debug(f'Initializing XP {xp_name}')
         self.xp_path, self.recipe_path = Path(xp_path), Path(recipe_path)

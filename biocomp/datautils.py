@@ -630,6 +630,8 @@ def heatmap(
 def scatter(x, y, network, *args, **kw):
     ninputs = network.get_nb_inputs()
     if ninputs == 2:
+        return scatter_1d(x,y,network,*args, **kw)
+    if ninputs == 2:
         return scatter_2d(x, y, network, *args, **kw)
     if ninputs == 3:
         return scatter_3d_interactive(x, y, network, *args, **kw)
@@ -640,7 +642,7 @@ def scatter(x, y, network, *args, **kw):
 def smooth(x, y, network, rescale, ax, **kw):
     ninputs = network.get_nb_inputs()
     if ninputs == 1:
-        smooth_1d(x, y, network, rescale, ax, **kw)
+        scatter_1d(x, y, network, rescale, ax, **kw)
     elif ninputs == 2:
         smooth_2d(x, y, network, rescale, ax, **kw)
     elif ninputs == 3:
@@ -963,6 +965,68 @@ def scatter_2d(
     if ttle is not None:
         ax.set_title(ttle)
 
+def scatter_1d(
+    x,
+    y,
+    network,
+    rescaler,
+    ax,
+    xmin=0,
+    xmax=1,
+    title=None,
+    input_order=None,
+    max_n = 20000,
+    s=10,
+    alpha=0.1,
+    lw=0,
+    key=jax.random.PRNGKey(0),
+    use_y_as_x=True,
+    **kw,
+):
+    input_order, input_names, output_pos, output_name, ticks, ticklabels = network_ticks_and_labels(
+        network, rescaler, xmax=xmax, desired_order=input_order
+    )
+
+    assert input_order == [0]
+
+    random_order = jax.random.permutation(key, min(max_n, len(x)))
+    if use_y_as_x:
+        other_pos = 1 - output_pos
+        x = y[random_order, other_pos].squeeze()
+    else:
+        x = x[random_order].squeeze()
+
+    y = y[random_order, output_pos]
+
+    sc = ax.scatter(x, y, s=s, lw=lw, edgecolor='k', alpha=alpha, color='k')
+
+    ax.set_xlabel(input_names[0])
+    ax.set_ylabel(output_name)
+
+    # remove right and top spine
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+
+    # ticks:
+    if len(ticks) > 0:
+        sc_ticks = ticks
+        ax.set_xticks(sc_ticks)
+        ax.set_xticklabels(ticklabels)
+        ax.set_yticks(sc_ticks)
+        ax.set_yticklabels(ticklabels)
+
+    ttle = None
+
+    if title is True:
+        ttle = f'{network.name}'
+    elif title is not None:
+        ttle = title
+    if ttle is not None:
+        ax.set_title(ttle)
+
+
+
+
 
 def smooth_2d(
     x,
@@ -1259,7 +1323,7 @@ def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
         x, y, yhat = use_x_y_yhat
         assert len(x) == len(y), 'x and y must have the same length'
         assert y.shape == yhat.shape, 'y and yhat must have the same shape'
-        ndim = y.ndim
+        ndim = x.shape[1]
         if ndim <= 2:
             fig, ax = mkfig(1, 2, size=(4, 4))
             network_plot(dman, id, ax[0], use_xy=(x, y), kde=False, **kw)
@@ -1296,6 +1360,8 @@ def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
                 ax.set_title('')
             axes[0, 0].set_title(f'Original data (mean)')
             axes[1, 0].set_title(f'Predicted (mean)')
+        else:
+            raise ValueError(f'ndim={ndim} not supported')
     else:
         fig, ax = mkfig(1, 2, size=(4, 4))
         network_plot(dman, id, ax[0], **kw)
@@ -1503,6 +1569,78 @@ def fluo_densities(
         )
     fig.tight_layout()
 
+def get_best_run_id(losses, smooth_window=10, return_smooth_losses=False):
+
+    # smoothed_losses = [
+        # np.convolve(loss, np.ones(smooth_window) / smooth_window, mode='valid') for loss in losses
+    # ]
+    # and with gaussian smoothing:
+    from scipy.ndimage import gaussian_filter1d
+    smoothed_losses = [
+        gaussian_filter1d(loss, smooth_window) for loss in losses
+    ]
+    best_loss = np.argmin([loss[-1] for loss in smoothed_losses])
+    if return_smooth_losses:
+        return best_loss, smoothed_losses
+    return best_loss
+
+def losses_plot(losses, ax, smooth_window=200, runs=None):
+    best_loss, smoothed_losses = get_best_run_id(losses, smooth_window=smooth_window, return_smooth_losses=True)
+    for index, loss in enumerate(smoothed_losses):
+        # color = '#0897BA' if index == best_loss else 'k'
+        color = '#00A1D9' if index == best_loss else 'k'
+        # color = '#E70043' if index == best_loss else 'k'
+        alpha = 1 if index == best_loss else 0.125
+        size = 1.5 if index == best_loss else 0.25
+        ax.plot(loss, color=color, alpha=alpha, linewidth=size, label = 'Best run' if index == best_loss else None)
+        ax.set_yscale('log')
+    ax.set_xlabel('Batches seen')
+    ax.set_ylabel('Loss')
+    ax.set_ylim(
+        np.min([np.min(s) for s in smoothed_losses]) * 0.7
+    )
+    n_losses = sum(len(l) > 1 for l in smoothed_losses)
+    ax.set_title(f'Smoothed losses for {n_losses} runs')
+    ax.legend()
+    # add name of best run (centered)
+    if runs is not None:
+        best_run = runs[best_loss]
+        ax.text(
+            0.5,
+            0.01,
+            f'Best run: "{best_run.name}" with {smoothed_losses[best_loss][-1]:.1e}',
+            transform=ax.transAxes,
+            horizontalalignment='center',
+            verticalalignment='bottom',
+        )
+    return best_loss
+
+def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True):
+    import wandb
+    import pickle
+    from concurrent.futures import ThreadPoolExecutor
+
+    wandb.login()
+    api = wandb.Api()
+    project_path = f"{entity}/{project_name}" if entity else project_name
+    runs = api.runs(project_path)
+
+    if with_losses:
+        def get_loss_history(run):
+            if 'loss' in run.summary and run.summary['loss'] is not None:
+                history = run.scan_history(keys=['loss'], page_size=25000)
+                losses = [row["loss"] for row in history]
+                return np.array(losses)
+            else:
+                return np.array([np.inf])
+
+
+        with ThreadPoolExecutor() as executor:
+            full_losses = list(tqdm(executor.map(get_loss_history, runs), total=len(runs)))
+
+        return runs, full_losses
+
+    return runs
 
 def model_fluo_distributions(dman, model_id, method='scatter', **kwargs):
     model = dman.get_models()[model_id]

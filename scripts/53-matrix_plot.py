@@ -286,7 +286,7 @@ with ut.timer('plot 1'):
 
 ##
 mid = uorf_dict[(80,80)]
-mid = uorf_dict[(0,80)]
+mid = uorf_dict[(80,80)]
 # mid = uorf_dict[(0,0)]
 with ut.timer('ground truth'):
     fig, ax = du.mkfig(1, 1, (15,15))
