@@ -161,9 +161,9 @@ def direct_param_at(
     return p
 
 
-def set_param(params, name, value, node_id=0, base_path=ut.NODE_PATH, **_):
+def set_param(params, name, value, node_id=0, base_path=ut.NODE_PATH, **kw):
     return direct_param_at(
-        params, name, node_id, base_path, overwrite_with=jnp.asarray(value), read_only=False
+        params, name, node_id, base_path, overwrite_with=np.asarray(value), read_only=False, **kw
     )
 
 
@@ -171,8 +171,8 @@ def get_param(params, name, node_id=0, base_path=ut.NODE_PATH, **_):
     return direct_param_at(params, name, node_id, base_path)
 
 
-def init_param_if_needed(params, name, init, node_id=0, base_path=ut.NODE_PATH, **_):
-    return direct_param_at(params, name, node_id, base_path, init=init, read_only=False)
+def init_param_if_needed(params, name, init, node_id=0, base_path=ut.NODE_PATH, **kw):
+    return direct_param_at(params, name, node_id, base_path, init=init, read_only=False, **kw)
 
 
 def save_to_params(all_params, node_id, node_params):
@@ -239,12 +239,6 @@ def quantize_masked_impl(x, qvalues, mask):
     dist = jnp.where(mask, jnp.abs(qvalues - x), jnp.inf)
     amin = jnp.argmin(dist)
     res = zero + jax.lax.stop_gradient(qvalues[amin])
-    # jax.debug.print('----------')
-    # jax.debug.print('x: {x}', x=x)
-    # jax.debug.print('qvalues: {arr}', arr=qvalues)
-    # jax.debug.print('mask: {mask}', mask=mask)
-    # jax.debug.print('amin: {amin}', amin=amin)
-    # jax.debug.print('res: {res}', res=res)
     return res
 
 
@@ -370,8 +364,7 @@ def generate_quantization_masks(
 
 
 def register_quantile_variable_ids(params, vnode, stack):
-    # problem is that a node may use more than one quantile variable so we'll just pad with -1
-    # grapb qids:
+    # a node may use more than one quantile variable so we'll just pad with -1 grapb qids:
     comp_node = vnode.get_compute_node()
     assert 'quantile_variable_id' in comp_node.extra
     qid = np.array(comp_node.extra['quantile_variable_id']).astype(int)
@@ -384,7 +377,12 @@ def register_quantile_variable_ids(params, vnode, stack):
     assert qid_stack.shape[0] <= max_qsize
     qid_stack = np.pad(qid_stack, (0, max_qsize - qid_stack.shape[0]), constant_values=-1)
     set_param(
-        params, 'quantile_variable_id', qid_stack, node_id=vnode.node_id, base_path=ut.STATIC_PATH
+        params,
+        'quantile_variable_id',
+        qid_stack,
+        node_id=vnode.node_id,
+        base_path=ut.STATIC_PATH,
+        number_of_nodes_at_least=stack.number_of_nodes,
     )
 
 
@@ -460,9 +458,16 @@ def numeric(input_shapes, shape, **__):
     assert len(input_shapes) == 0
 
     def prepare(params, vnodelist, key, **_):
+        maxid = max([vnode.node_id for vnode in vnodelist])
         for vnode in vnodelist:
             init_val = jax.random.uniform(key, shape=shape, minval=0.0, maxval=1.0)
-            set_param(params, "numeric:value", init_val, node_id=vnode.node_id)
+            set_param(
+                params,
+                "numeric:value",
+                init_val,
+                node_id=vnode.node_id,
+                number_of_nodes_at_least=maxid,
+            )
 
     def apply(v, q, params, node_id, k):
         return get_param(params, "numeric:value", node_id=node_id)
@@ -493,6 +498,7 @@ def aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
         raise ValueError(f'Aggregation expects at most {max_agg_size} outputs, got {n_outputs}')
 
     def prepare(params, vnodelist, key, **_):
+        maxid = max([vnode.node_id for vnode in vnodelist])
         for vnode in vnodelist:
             extra = vnode.get_compute_node().extra
             if 'ratios' in extra:
@@ -502,7 +508,7 @@ def aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
                 ratio_v = jax.random.uniform(key, (n_outputs,))
             # pad to max_outputs if necessary
             ratio_v = jnp.pad(ratio_v, (0, max_agg_size - n_outputs), constant_values=0.0)
-            set_param(params, pname, ratio_v, node_id=vnode.node_id)
+            set_param(params, pname, ratio_v, node_id=vnode.node_id, number_of_nodes_at_least=maxid)
 
     def apply(input, quantiles, params, node_id, key):
         assert input.shape == input_shapes[0], f'Invalid input shape {input.shape}'
@@ -523,6 +529,7 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
     assert n_outputs == 1, f'inverse_Aggregation expects 1 output, got {n_outputs}'
 
     def prepare(params, vnodelist, **_):
+        maxid = max([vnode.node_id for vnode in vnodelist])
         for vnode in vnodelist:
             inv_vnode = vnode.get_inverse_vnode(stack)
             cnode = vnode.get_compute_node()
@@ -539,6 +546,7 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
                 jnp.asarray(extra['original_output_slot']),
                 node_id=vnode.node_id,
                 base_path=ut.STATIC_PATH,
+                number_of_nodes_at_least=maxid,
             )
 
             set_param(
@@ -547,6 +555,7 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
                 jnp.asarray(inv_vnode.node_id),
                 node_id=vnode.node_id,
                 base_path=ut.STATIC_PATH,
+                number_of_nodes_at_least=maxid,
             )
 
     def apply(inp, quantiles, params, node_id, key):
@@ -850,7 +859,6 @@ def sequestron_ERN(
     outer_activation_name=DEFAULT_OUT_ACTIVATION,
     **_,
 ):
-
 
     assert affinity_names is not None, 'affinity_names must be specified'
 

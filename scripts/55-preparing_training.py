@@ -41,7 +41,6 @@ net_xp = [n.metadata['from_xp'] for n in all_networks]
 net_name = [n.name for n in all_networks]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{               --     training and validation sets     --
 
 # list net names that have cascade in the name:

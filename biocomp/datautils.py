@@ -630,7 +630,7 @@ def heatmap(
 def scatter(x, y, network, *args, **kw):
     ninputs = network.get_nb_inputs()
     if ninputs == 2:
-        return scatter_1d(x,y,network,*args, **kw)
+        return scatter_1d(x, y, network, *args, **kw)
     if ninputs == 2:
         return scatter_2d(x, y, network, *args, **kw)
     if ninputs == 3:
@@ -965,6 +965,7 @@ def scatter_2d(
     if ttle is not None:
         ax.set_title(ttle)
 
+
 def scatter_1d(
     x,
     y,
@@ -975,7 +976,7 @@ def scatter_1d(
     xmax=1,
     title=None,
     input_order=None,
-    max_n = 20000,
+    max_n=20000,
     s=10,
     alpha=0.1,
     lw=0,
@@ -1023,9 +1024,6 @@ def scatter_1d(
         ttle = title
     if ttle is not None:
         ax.set_title(ttle)
-
-
-
 
 
 def smooth_2d(
@@ -1119,6 +1117,76 @@ def smooth_3d(x, y, network, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), 
     axes[0].set_title(
         f'{network.name}\n{network.get_output_proteins()[0]} smoothed mean', fontsize=8
     )
+
+
+def smooth_line_plots(
+    x,
+    y,
+    network,
+    rescaler,
+    ax,
+    res=200,
+    xmin=0,
+    xmax=1,
+    slice=None,
+    input_order=None,
+    title=True,
+    label=None,
+    color=None,
+    lw=1,
+    **kw,
+):
+    input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
+        network, rescaler, xmax=xmax, desired_order=input_order
+    )
+    y = y[:, output_pos]
+    x = x[:, input_order]
+    tree = cKDTree(x)
+
+
+    xquery = np.linspace(xmin, xmax, res).reshape(-1, 1)
+    if slice is None:
+        slice = np.array([])
+    slice = np.array(slice)
+
+    if x.shape[1] > 1:
+        assert slice.shape == (x.shape[1] - 1,)
+        xquery = np.concatenate([xquery, np.tile(slice, (xquery.shape[0], 1))], axis=1)
+
+    z, _ = get_knn_smooth(xquery, y, tree=tree, **kw)
+
+
+    if label is None:
+        label = ''
+        for i, s in enumerate(slice):
+            label += f'{input_names[i+1]} ≈ {s:.2f}\n'
+
+    ax.plot(xquery[:, 0], z, label=label, color=color, lw=lw)
+
+    ax.set_xlabel(input_names[0])
+    ax.set_ylabel(output_name)
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(0, 1)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.legend()
+
+    # ticks:
+    if len(ticks) > 0:
+        # rescale ticks to image coordinates (they are btwn 0 and 1 to start)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(tlabels)
+        ax.set_yticks(ticks)
+        ax.set_yticklabels(tlabels)
+
+    ttle = None
+    if title is True:
+        ttle = f'{network.name}\n{output_name} smoothed mean'
+    elif title is not None:
+        ttle = title
+    if ttle is not None:
+        ax.set_title(ttle)
+
 
 
 def setup_clean_fig(title):
@@ -1569,36 +1637,43 @@ def fluo_densities(
         )
     fig.tight_layout()
 
+
 def get_best_run_id(losses, smooth_window=10, return_smooth_losses=False):
 
     # smoothed_losses = [
-        # np.convolve(loss, np.ones(smooth_window) / smooth_window, mode='valid') for loss in losses
+    # np.convolve(loss, np.ones(smooth_window) / smooth_window, mode='valid') for loss in losses
     # ]
     # and with gaussian smoothing:
     from scipy.ndimage import gaussian_filter1d
-    smoothed_losses = [
-        gaussian_filter1d(loss, smooth_window) for loss in losses
-    ]
+
+    smoothed_losses = [gaussian_filter1d(loss, smooth_window) for loss in losses]
     best_loss = np.argmin([loss[-1] for loss in smoothed_losses])
     if return_smooth_losses:
         return best_loss, smoothed_losses
     return best_loss
 
+
 def losses_plot(losses, ax, smooth_window=200, runs=None):
-    best_loss, smoothed_losses = get_best_run_id(losses, smooth_window=smooth_window, return_smooth_losses=True)
+    best_loss, smoothed_losses = get_best_run_id(
+        losses, smooth_window=smooth_window, return_smooth_losses=True
+    )
     for index, loss in enumerate(smoothed_losses):
         # color = '#0897BA' if index == best_loss else 'k'
         color = '#00A1D9' if index == best_loss else 'k'
         # color = '#E70043' if index == best_loss else 'k'
         alpha = 1 if index == best_loss else 0.125
         size = 1.5 if index == best_loss else 0.25
-        ax.plot(loss, color=color, alpha=alpha, linewidth=size, label = 'Best run' if index == best_loss else None)
+        ax.plot(
+            loss,
+            color=color,
+            alpha=alpha,
+            linewidth=size,
+            label='Best run' if index == best_loss else None,
+        )
         ax.set_yscale('log')
     ax.set_xlabel('Batches seen')
     ax.set_ylabel('Loss')
-    ax.set_ylim(
-        np.min([np.min(s) for s in smoothed_losses]) * 0.7
-    )
+    ax.set_ylim(np.min([np.min(s) for s in smoothed_losses]) * 0.7)
     n_losses = sum(len(l) > 1 for l in smoothed_losses)
     ax.set_title(f'Smoothed losses for {n_losses} runs')
     ax.legend()
@@ -1615,6 +1690,7 @@ def losses_plot(losses, ax, smooth_window=200, runs=None):
         )
     return best_loss
 
+
 def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True):
     import wandb
     import pickle
@@ -1626,6 +1702,7 @@ def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True):
     runs = api.runs(project_path)
 
     if with_losses:
+
         def get_loss_history(run):
             if 'loss' in run.summary and run.summary['loss'] is not None:
                 history = run.scan_history(keys=['loss'], page_size=25000)
@@ -1634,13 +1711,13 @@ def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True):
             else:
                 return np.array([np.inf])
 
-
         with ThreadPoolExecutor() as executor:
             full_losses = list(tqdm(executor.map(get_loss_history, runs), total=len(runs)))
 
         return runs, full_losses
 
     return runs
+
 
 def model_fluo_distributions(dman, model_id, method='scatter', **kwargs):
     model = dman.get_models()[model_id]

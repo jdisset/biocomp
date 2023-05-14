@@ -273,10 +273,6 @@ class ComputeStack:
     total_nb_of_inputs: int = None
     max_nb_of_outputs_per_network: int = None
 
-    # shared_store: dict = None  # shared store for all the nodes.
-    # can be used to store things like the name of the parts for some quantized parameters
-    # as they can't be stored in params (no strings allowed)
-
     is_assembled = False
     is_built = False
     number_of_nodes = 0

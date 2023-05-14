@@ -455,10 +455,9 @@ DEFAULT_MAX_RATE = 1.0
 
 def continuous_initializer(rng, shape=(), minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
     def init():
-        res = jax.random.uniform(
+        return jax.random.uniform(
             key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32
         )
-        return res
 
     return init
 
