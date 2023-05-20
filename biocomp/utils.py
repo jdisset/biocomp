@@ -321,6 +321,20 @@ def progress_scan(num_samples, progress_type=TQDMProgress, message=None, print_r
 
     return _progress_bar_scan
 
+def freeze(struct):
+    # converts dict to frozendict, list to tuple and recursively
+    # freezes all nested dicts, lists, tuples, and sets.
+    import frozendict
+    if isinstance(struct, dict):
+        return frozendict.frozendict({k: freeze(v) for k, v in struct.items()})
+    elif isinstance(struct, list):
+        return tuple([freeze(v) for v in struct])
+    elif isinstance(struct, tuple):
+        return tuple([freeze(v) for v in struct])
+    elif isinstance(struct, set):
+        return frozenset([freeze(v) for v in struct])
+    else:
+        return struct
 
 def tree_shape(t):
     return pytree.tree_map(lambda x: x.shape, t)

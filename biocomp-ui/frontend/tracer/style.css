@@ -1,0 +1,57 @@
+.slideraxis {
+	margin: 20px;
+	width: 200px;
+	padding: 10px;
+	position: relative;
+}
+
+.axis {
+	width: 220px;
+	height: 30px;
+	margin: 0px -10px;
+}
+
+
+.slider-thumb {
+	cursor: pointer;
+	height: 20px;
+	width: 10px;
+	background: rgba(0,0,0,0);
+}
+
+.slider .slider-thumb-tick {
+	height: 15px;
+	width: 2px;
+	margin-left: 4px;
+}
+
+/*put slider on top of axis:*/
+.slider {
+	position: relative;
+	z-index: 1;
+	top: -25px;
+}
+
+
+.axis {
+	position: relative;
+	z-index: 0;
+	top: 22px;
+}
+
+.axis .point.selected {
+	height: 10px;
+	background: #F00;
+	color: #00F;
+	fill: #00F;
+}
+
+.traces {
+	position: absolute;
+	z-index: 0;
+	top: 0px;
+	left: 0px;
+	width: 100%;
+	height: 100%;
+}
+

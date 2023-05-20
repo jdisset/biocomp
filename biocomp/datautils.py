@@ -282,6 +282,7 @@ def _get_batches(
     return xbatches, ybatches
 
 
+DEFAULT_DENSITIES_CACHE_DIR = '../__cache/biocomp_densities_cache'
 class DataManager:
     """The DataManager handles XP data and their matching compute stacks"""
 
@@ -331,11 +332,18 @@ class DataManager:
         # actually returns a tuple of (stack, get_param_subset)
         return self.individual_compute_stacks[network_id]
 
-    def gen_kdes(self, bw=None, max_n=20000):
+    def gen_kdes(self, bw=None, max_n=None):
+
         if bw is None:
             bw = self.data_cfg['data_sampling_kde_bw_method']
+        if max_n is None:
+            max_n = int(self.data_cfg['data_sampling_max_density_samples'])
+
         # just grap max_n for each self._X using numpy
+        self._kde_bw = bw
+
         npoints = [min(x.shape[0], max_n) for x in self._X]
+        print(f'Using {npoints} points for KDE estimation')
         xindices = [
             np.random.choice(x.shape[0], size=n, replace=False) for x, n in zip(self._X, npoints)
         ]
@@ -347,10 +355,39 @@ class DataManager:
             for x, xi in zip(self._X, xindices)
         ]
 
-    def compute_densities(self, max_chunk=50000):
+    def compute_densities(self, max_chunk=50000, cache_dir=None):
+        import hashlib
+        from pathlib import Path
+        import base64
+
+        if cache_dir is None:
+            if 'densities_cache_dir' in self.data_cfg:
+                self.cache_dir = self.data_cfg['densities_cache_dir']
+            else:
+                self.cache_dir = DEFAULT_DENSITIES_CACHE_DIR
+
+        ut.logger.info(f'Using cache dir {self.cache_dir}')
+
+        def make_hash(x):
+            h = hashlib.md5()
+            h.update(x[:50].tobytes())
+            h.update(x[-50:].tobytes())
+            h.update(str(x.shape).encode())
+            h.update(str(self._kde_bw).encode())
+            return h.digest()
+
+
         def _compute_d(kde, x):
             # cut in chunks to avoid memory issues
             n = x.shape[0]
+            xhash = make_hash(x)
+            if self.cache_dir is not None:
+                b64hash = base64.b64encode(xhash).decode()
+                fname = f'.densitycache_{b64hash}.npy'.replace('/', '_').replace('=' , '')
+                cache_path = Path(self.cache_dir) / fname
+                if cache_path.exists():
+                    return np.load(cache_path)
+
             allarr = []
             i = 0
             while i < n:
@@ -358,6 +395,11 @@ class DataManager:
                 i += max_chunk
             res = np.concatenate(allarr)
             assert res.shape == (n,)
+
+            if self.cache_dir is not None:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                np.save(cache_path, res)
+
             return res
 
         self._densities = [
@@ -637,6 +679,42 @@ def scatter(x, y, network, *args, **kw):
         return scatter_3d_interactive(x, y, network, *args, **kw)
     else:
         raise NotImplementedError(f'Cannot scater plot {ninputs} inputs')
+
+
+def smooth_line_slices(x, y, network, rescale, axes, slices, input_order, xmin=0, xmax=1, **kwargs):
+    # slices is a list of list of slice values. (max 2 dimensions)
+    assert len(slice) <= 2, 'Can only slice maximum 2 dimensions'
+    outerslices = slices[1] if len(slices) > 1 else []
+    innerslices = slices[0] if len(slices) > 0 else []
+
+    input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
+        network, rescale, xmax=xmax, desired_order=input_order
+    )
+
+    assert len(axes) == len(outerslices), 'Number of axes must match number of outer slices'
+
+    for i, outsl in enumerate(outerslices):
+        ax = axes[i]
+        for insl in innerslices:
+            smooth_line_plots(
+                x,
+                y,
+                network,
+                rescale,
+                ax=ax,
+                slice=[insl, outsl],
+                input_order=input_order,
+                label=f'{input_names[input_order[1]]} ≈ {int(insl*100)}%',
+                **kwargs,
+            )
+        ax.text(
+            0.5,
+            0.75,
+            f'{input_names[input_order[2]]}={int(outsl*100)}%',
+            transform=ax.transAxes,
+            ha='center',
+            va='center',
+        )
 
 
 def smooth(x, y, network, rescale, ax, **kw):
@@ -1260,6 +1338,8 @@ def network_plot(
         return smooth(x, y, network, dman.rescale, *args, **kw)
     elif method == 'scatter':
         return scatter(x, y, network, dman.rescale, *args, **kw)
+    elif method == 'smooth_lines':
+        return smooth_lines(x, y, network, dman.rescale, *args, **kw)
 
 
 def eval_network_plot(

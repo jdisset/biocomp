@@ -501,6 +501,7 @@ DEFAULT_TRAINING_CONFIG = {
     "data_scaling_log_factor": 5e4,
     "data_scaling_max_value": 5e7,
     "data_sampling_kde_bw_method": 0.02,
+    "data_sampling_max_density_samples": 4000,
     "data_sampling_density_quantile_threshold": 0.025,  # threshold = min of both
     "data_sampling_coords_for_density_threshold": 0.15,  # threshold = min of both
 }

@@ -918,7 +918,7 @@ class ComputeStack:
 
         w_grads = [l.f_type in get_grads_for for l in self.layers]
 
-        def apply(params, inputs, quantiles, key):
+        def apply_impl(params, inputs, quantiles, key):
             assert len(inputs) == self.total_nb_of_inputs, 'Mismatch in number of inputs'
 
             out = inputs.reshape(-1)
@@ -955,9 +955,18 @@ class ComputeStack:
                 out = jnp.concatenate([out, layer_out.reshape(-1)])
                 grads = jnp.concatenate([grads, layer_grad.reshape(-1)])
 
-            return out[output_indices], grads
+            return out, grads
+
+        def apply(*args, **kwargs):
+            o, g = apply_impl(*args, **kwargs)
+            return o[output_indices], g
+
+        def apply_with_trace(*args, **kwargs):
+            o, g = apply_impl(*args, **kwargs)
+            return o
 
         self.apply = apply
+        self.apply_with_trace = apply_with_trace
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

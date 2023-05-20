@@ -68,11 +68,6 @@ net_name = [n.name for n in all_networks]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-savepath = Path(f'~/Desktop/predictions/lvl2_cascades_v1/nets').expanduser()
-savepath.mkdir(parents=True, exist_ok=True)
-plotid = range(len(all_networks))
-su.plot_networks([all_networks[i] for i in plotid], [(savepath/f'net_{i}.pdf').as_posix() for i in plotid])
-
 ### {{{               --     training and validation sets     --
 
 # list net names that have cascade in the name:
@@ -97,49 +92,77 @@ n_outputs = [n.get_nb_outputs() for n in all_networks]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+import joblib
 
-key = jax.random.PRNGKey(0)
-full_stack = dman_full.build_compute_stack(compute_config)
+with ut.timer('Building compute stack'):
+    key = jax.random.PRNGKey(0)
+    full_stack = dman_full.build_compute_stack(compute_config)
+    substack, _ = full_stack.make_subset([50])
 
-with ut.timer('Stack initialization'):
-    base_params = full_stack.init(key)
+try:
+    best_params = joblib.load(f'../__cache/best_params.pkl')
+    print('Loaded best params from cache')
+except FileNotFoundError:
+    with ut.timer('Stack initialization'):
+        base_params = full_stack.init(key)
 
-# 373s -> 359s ->
-##
+    tmp_dir = Path(f'./{project_name}')
+    param_file = best_run.file('latest_params.pkl').download(replace=True, root=tmp_dir)
+    with open(param_file.name, 'rb') as f:
+        trained_params = pickle.load(f)
 
-tmp_dir = Path(f'./{project_name}')
-param_file = best_run.file('latest_params.pkl').download(replace=True, root=tmp_dir)
-with open(param_file.name, 'rb') as f:
-    trained_params = pickle.load(f)
-
-best_params = full_stack.use_shared_params(base_params, trained_params)
-
-
-##
-
-# put back normal ipython matplotlib backend
-import matplotlib as plt
-# matplotlib.pyplot.switch_backend('Agg')
-
-fig, ax = du.mkfig(1, 1)
-du.network_plot(dman_full, 72, ax=ax)
-
-fig.savefig('/Users/jeandisset/Desktop/test.png')
-print('Network name:', dman_full.get_networks()[72].name)
+    best_params = full_stack.use_shared_params(base_params, trained_params)
+    joblib.dump(best_params, f'../__cache/best_params.pkl')
 
 ### {{{                    --     training data plots     --
 
 savepath = Path(f'~/Desktop/predictions/lvl2_cascades_v1').expanduser()
 savepath.mkdir(parents=True, exist_ok=True)
 
+# bash command to remove all files with "==" in the name:
+# find . -name "*==*" -type f -delete
 import matplotlib
-matplotlib.pyplot.switch_backend('Agg')
+import matplotlib as plt
+
+# matplotlib.pyplot.switch_backend('Agg')
+dman_full._densities = None
 
 networks = dman_full.get_networks()
 stack = full_stack
 params = best_params
 
-net_ids = list(range(len(networks)))[72:92]
+net_ids = list(range(len(networks)))[50:54]
+
+
+def smooth_line_plots_slices(
+    x, y, net, rescale, mkslices, ngslices, axes, input_order, input_names, **kwargs
+):
+    for i, ng in enumerate(ngslices):
+        ax = axes[i]
+        for mk in mkslices:
+            du.smooth_line_plots(
+                x,
+                y,
+                net,
+                rescale,
+                ax=ax,
+                slice=[mk, ng],
+                input_order=input_order,
+                radius=0.3,
+                label=f'{input_names[input_order[1]]} ≈ {int(mk*100)}%',
+                lw=2,
+            )
+        # symbol for approx equal is:
+        # add text for ng levl:
+        ax.text(
+            0.5,
+            0.75,
+            f'{input_names[input_order[2]]}={int(ng*100)}%',
+            transform=ax.transAxes,
+            ha='center',
+            va='center',
+        )
+
 
 with ut.timer('pred plot'):
     N_SAMPLES_PER_CHUNK = 5000
@@ -187,11 +210,46 @@ with ut.timer('pred plot'):
         yhat = YHAT[: x.shape[0], out_id : out_id + n_out]
         assert yhat.shape == y.shape, f"{yhat.shape} != {y.shape}"
         error = np.abs(y - yhat).mean()
-        fig = du.report(params, dman_full, index, use_x_y_yhat=(x, y, yhat), res=128)
+        input_order = [0, 1, 2]
+
+        # fig = du.report(params, dman_full, index, use_x_y_yhat=(x, y, yhat), res=128, input_order=input_order)
+        # fig.suptitle(f'{fig._suptitle.get_text()}\nerror: {error:.3f}\n{seen}')
+
+        ngslices = [0.25, 0.5, 0.75]
+        mkslices = [0.05, 0.3, 0.5]
+
+        fig, allaxes = du.mkfig(2, 3)
+        input_order = ([0, 1, 2],)
+        net = networks[index]
+        input_names = net.get_inverted_input_proteins()
+
+        smooth_line_plots_slices(
+            x,
+            y,
+            net=net,
+            rescale=dman_full.rescale,
+            mkslices=mkslices,
+            ngslices=ngslices,
+            axes=allaxes[0],
+            input_order=input_order,
+            input_names=input_names,
+        )
+
+        smooth_line_plots_slices(
+            x,
+            yhat,
+            net=net,
+            rescale=dman_full.rescale,
+            mkslices=mkslices,
+            ngslices=ngslices,
+            axes=allaxes[1],
+            input_order=input_order,
+            input_names=input_names,
+        )
+
         seen = index in training_set
         seen = '* not used for training *' if not seen else '(in training set)'
         # add error to title
-        fig.suptitle(f'{fig._suptitle.get_text()}\nerror: {error:.3f}\n{seen}')
         fig.tight_layout()
         return fig
 
@@ -199,79 +257,152 @@ with ut.timer('pred plot'):
         try:
             fig = plot_prediction(index)
             name = net_name[index]
-            fig.savefig(savepath / f'{index}_{name}.pdf', dpi=200)
-            plt.close(fig)
-            plt.close('all')
+            fig.savefig(savepath / f'{index}_{name}_wlines.pdf', dpi=200)
+            # plt.close(fig)
+            # plt.close('all')
         except Exception as e:
             # add traceback
             import traceback
+
             print(f'Error while plotting {index}: {e}')
             traceback.print_exc()
-    plt.close('all')
+    # plt.close('all')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-# plot per layer
-##
-
-networks = dman_full.get_networks()
-stack = full_stack
-params = best_params.copy()
-
-# fig, axes = du.mkfig(1, 4)
-# du.network_plot(dman_full, 50, ax=None, axes=axes, input_order=[0, 1, 2], xbin=[0.0, 0.9])
-
-X = dman_full.get_X()[nid]
-Y = dman_full.get_Y()[nid]
-net = networks[50]
-fig, ax = du.mkfig(1, 1)
-
-du.smooth_line_plots(
-    X,
-    Y,
-    net,
-    dman_full.rescale,
-    ax=ax,
-    slice=[0.45,0.5],
-    radius=0.2,
-    input_order=[0, 1, 2],
-)
-
-
-
-##
 nid = 50
-X = dman_full.get_X()[nid]
-Y = dman_full.get_Y()[nid]
-net = networks[50]
-net.get_inverted_input_proteins()
-net.get_output_proteins()
+# X = dman_full.get_X()[nid]
+# Y = dman_full.get_Y()[nid]
+# net = networks[nid]
 
-# neongreeen is 0
-# irfpout is 1
-# mkate is 2
-# tagbfp is 3
+# single_net_trace:
 
-# bins:
+dman = dman_full.make_subset([nid])
+stack = dman.build_compute_stack(compute_config)
 
-ngbin = [0.5, 0.6]
-mkatebin = [0.3, 0.4]
-binned_Y = Y[(Y[:, 0] > ngbin[0]) & (Y[:, 0] < ngbin[1]) & (Y[:, 2] > mkatebin[0]) & (Y[:, 2] < mkatebin[1])]
-
-# scatter plot of irfpout( yaxis) vs tagbfp (xaxis)
-fig, ax = du.mkfig(1,1)
-ax.scatter(binned_Y[:, 3], binned_Y[:, 1], s=1, c='k')
-# add regression from scipy
-from scipy.stats import linregress
-slope, intercept, r_value, p_value, std_err = linregress(binned_Y[:, 3], binned_Y[:, 1])
-ax.plot(binned_Y[:, 3], intercept + slope*binned_Y[:, 3], 'r', label='fitted line')
-ax.legend()
-ax.set_xlabel('tagbfp')
-ax.set_ylabel('irfpout')
+N_SAMPLES_PER_CHUNK = 10
+N_CHUNKS = 1
+N_SAMPLES_TOTAL = N_SAMPLES_PER_CHUNK * N_CHUNKS
+key = jax.random.PRNGKey(0)
+X, Y = dman.get_uniform_samples(key, N_SAMPLES_TOTAL)
+assert len(X) == len(Y)
+X = [np.expand_dims(arr, axis=1) if arr.ndim == 1 else arr for arr in X]
+Y = [np.expand_dims(arr, axis=1) if arr.ndim == 1 else arr for arr in Y]
+ALLX = np.concatenate(X, axis=1)
+assert ALLX.shape == (
+    N_SAMPLES_TOTAL,
+    stack.total_nb_of_inputs,
+), f"{ALLX.shape} != {(N_SAMPLES_TOTAL, stack.total_nb_of_inputs)}"
 
 
+@jit
+def compute(params, XX, Q, keys):
+    allres = stack.apply_with_trace(params, XX, Q, keys)
+    return allres
 
 
-# TODO
-# plot cascades as dosage response curves of the first ERN for several bins of ERN_2 and output_DNA
+ALLX_CHUNKS = np.split(ALLX, N_CHUNKS, axis=0)
+
+YHAT = []
+
+for chunk_id, XX in enumerate(tqdm(ALLX_CHUNKS, desc='plot_pred chunks')):
+    Q = jax.random.uniform(key, (N_SAMPLES_PER_CHUNK, stack.total_nb_of_outputs))
+    keys = jax.random.split(key, N_SAMPLES_PER_CHUNK)
+    key = keys[-1]
+    yhat_chunk = vmap(compute, in_axes=(None, 0, 0, 0))(params, XX, Q, keys)
+    YHAT.append(np.array(yhat_chunk))
+
+YHAT = np.concatenate(YHAT, axis=0)
+
+out_id = stack.get_network_global_output_id(0)
+n_out = networks[0].get_nb_outputs()
+x, y = X[0], Y[0]
+# yhat = YHAT[: x.shape[0], out_id : out_id + n_out]
+
+# stack.node_map is {(net_id, compute_node_id): (layer_id, node_position)}
+
+# net.compute_graph # pandas dataframe
+# for each row  in compute graph:
+# net_vnodes = {nid: stack.layers[lid].nodes[npos]
+
+# net_vnodes = {}
+# for nid, row in net.compute_graph.iterrows():
+# lid, npos = stack.node_map[(0, nid)]
+# net_vnodes[nid] = stack.layers[lid].nodes[npos]
+
+# using stack.get_node_output_start_index(node: VirtualNode, output_slot: int) -> int:
+
+# output_pos = {} # {nid: (start, end)}
+# for nid, vnode in net_vnodes.items():
+# cnode = net.compute_graph.loc[nid]
+# ntype = cnode['type']
+# n_inputs = len(cnode['input_from'])
+# n_outputs = len(cnode['output_to'])
+
+# data to generate:
+# - a list of list of vnodes. One list per layer, storing the type and the number of outputs
+
+##
+
+net = dman.get_networks()[0]
+
+vnode_data = []
+for lid, layer in enumerate(stack.layers):
+    obj = {
+        'type': layer.f_type,
+        'input_shapes': layer.f_input_shapes,
+        'output_shapes': layer.f_out_shapes,
+        'layer_id': lid,
+    }
+    layer_data = []
+    for p, n in enumerate(layer.nodes):
+        nid = n.node_id
+        # using stack.get_node_output_start_index(node: VirtualNode, output_slot: int) -> int:
+        output_start_indices = [
+            stack.get_node_output_start_index(n, slot) for slot, _ in enumerate(layer.f_out_shapes)
+        ]
+        output_length = [np.prod(shape) for shape in layer.f_out_shapes]
+        cnode = n.get_compute_node()
+        out_to = [stack.node_map[(0, oid)] for oid,_ in cnode['output_to']]
+        nobj = {
+            'node_id': nid,
+            'column': p,
+            'output_start': output_start_indices,
+            'output_length': output_length,
+            'output_to': out_to,
+            **obj,
+        }
+        layer_data.append(nobj)
+    vnode_data.append(layer_data)
+
+@partial(vmap, in_axes=(0, None), out_axes=0)
+@partial(jit, static_argnums=(1,))
+def trace_points(output_row, vnode_data):
+    trace = []
+    for layer in vnode_data:
+        ltrace = []
+        for v in layer:
+            outputs = [
+                output_row[start : start + length].reshape(shape)
+                for start, length, shape in zip(
+                    v["output_start"], v["output_length"], v["output_shapes"]
+                )
+            ]
+            ltrace.append(outputs)
+        trace.append(ltrace)
+
+    return trace
+
+frozen_vnode_data = ut.freeze(vnode_data)
+traces = trace_points(YHAT, frozen_vnode_data)
+
+import json
+jt = json.dumps(su.make_json_compatible(traces, float_precision=4), indent=2)
+jd = json.dumps(su.make_json_compatible(frozen_vnode_data), indent=2)
+# write to disk
+with open('layout.json', 'w') as f:
+    f.write(jd)
+jt
+jd
+
