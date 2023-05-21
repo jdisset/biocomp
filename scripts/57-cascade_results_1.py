@@ -271,7 +271,7 @@ with ut.timer('pred plot'):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-nid = 50
+nid = 216
 # X = dman_full.get_X()[nid]
 # Y = dman_full.get_Y()[nid]
 # net = networks[nid]
@@ -281,7 +281,7 @@ nid = 50
 dman = dman_full.make_subset([nid])
 stack = dman.build_compute_stack(compute_config)
 
-N_SAMPLES_PER_CHUNK = 10
+N_SAMPLES_PER_CHUNK = 200
 N_CHUNKS = 1
 N_SAMPLES_TOTAL = N_SAMPLES_PER_CHUNK * N_CHUNKS
 key = jax.random.PRNGKey(0)
@@ -350,7 +350,7 @@ net = dman.get_networks()[0]
 vnode_data = []
 for lid, layer in enumerate(stack.layers):
     obj = {
-        'type': layer.f_type,
+        'name': layer.f_type,
         'input_shapes': layer.f_input_shapes,
         'output_shapes': layer.f_out_shapes,
         'layer_id': lid,
@@ -403,6 +403,6 @@ jd = json.dumps(su.make_json_compatible(frozen_vnode_data), indent=2)
 # write to disk
 with open('layout.json', 'w') as f:
     f.write(jd)
-jt
-jd
+with open('data.json', 'w') as f:
+    f.write(jt)
 
