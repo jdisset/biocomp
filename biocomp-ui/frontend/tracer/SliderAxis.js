@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, forwardRef } from "react";
 import * as d3 from "d3";
 import { Range, getTrackBackground } from "react-range";
-import {COLORS} from "./constants";
+import { COLORS } from "./constants";
 
 const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style }, ref) => {
   const [values, setValues] = useState([0, 1]);
@@ -11,9 +11,9 @@ const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style }, re
 
   // Copy of TwoThumbs with `draggableTrack` prop added
   return (
-    <div className="slideraxis" ref={ref}  style={style}>
+    <div className="slideraxis" ref={ref} style={style}>
       <div className="slider-labels">
-        <div className="slider-label">{sliderData.name}</div>
+        <div className="name">{sliderData.name}</div>
       </div>
 
       <Range
@@ -27,11 +27,7 @@ const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style }, re
           setSliderRange(values);
         }}
         renderTrack={({ props, children }) => (
-          <div
-            className="slider"
-            onMouseDown={props.onMouseDown}
-            onTouchStart={props.onTouchStart}
-          >
+          <div className="slider" onMouseDown={props.onMouseDown} onTouchStart={props.onTouchStart}>
             <div
               ref={props.ref}
               style={{

@@ -281,7 +281,7 @@ nid = 216
 dman = dman_full.make_subset([nid])
 stack = dman.build_compute_stack(compute_config)
 
-N_SAMPLES_PER_CHUNK = 200
+N_SAMPLES_PER_CHUNK = 100
 N_CHUNKS = 1
 N_SAMPLES_TOTAL = N_SAMPLES_PER_CHUNK * N_CHUNKS
 key = jax.random.PRNGKey(0)
@@ -318,91 +318,126 @@ YHAT = np.concatenate(YHAT, axis=0)
 out_id = stack.get_network_global_output_id(0)
 n_out = networks[0].get_nb_outputs()
 x, y = X[0], Y[0]
-# yhat = YHAT[: x.shape[0], out_id : out_id + n_out]
 
-# stack.node_map is {(net_id, compute_node_id): (layer_id, node_position)}
-
-# net.compute_graph # pandas dataframe
-# for each row  in compute graph:
-# net_vnodes = {nid: stack.layers[lid].nodes[npos]
-
-# net_vnodes = {}
-# for nid, row in net.compute_graph.iterrows():
-# lid, npos = stack.node_map[(0, nid)]
-# net_vnodes[nid] = stack.layers[lid].nodes[npos]
-
-# using stack.get_node_output_start_index(node: VirtualNode, output_slot: int) -> int:
-
-# output_pos = {} # {nid: (start, end)}
-# for nid, vnode in net_vnodes.items():
-# cnode = net.compute_graph.loc[nid]
-# ntype = cnode['type']
-# n_inputs = len(cnode['input_from'])
-# n_outputs = len(cnode['output_to'])
-
-# data to generate:
-# - a list of list of vnodes. One list per layer, storing the type and the number of outputs
-
-##
 
 net = dman.get_networks()[0]
 
 vnode_data = []
+nid_to_row_column = {}
 for lid, layer in enumerate(stack.layers):
     obj = {
-        'name': layer.f_type,
+        'type': layer.f_type,
         'input_shapes': layer.f_input_shapes,
         'output_shapes': layer.f_out_shapes,
         'layer_id': lid,
     }
     layer_data = []
-    for p, n in enumerate(layer.nodes):
-        nid = n.node_id
+    actual_column = 0
+    for col, n in enumerate(layer.nodes):
         # using stack.get_node_output_start_index(node: VirtualNode, output_slot: int) -> int:
         output_start_indices = [
             stack.get_node_output_start_index(n, slot) for slot, _ in enumerate(layer.f_out_shapes)
         ]
         output_length = [np.prod(shape) for shape in layer.f_out_shapes]
         cnode = n.get_compute_node()
-        out_to = [stack.node_map[(0, oid)] for oid,_ in cnode['output_to']]
-        nobj = {
-            'node_id': nid,
-            'column': p,
-            'output_start': output_start_indices,
-            'output_length': output_length,
-            'output_to': out_to,
-            **obj,
-        }
-        layer_data.append(nobj)
+        nid = cnode.name
+        # let's create a node for each output
+        # we need to keep track of the column of each node for later
+        out_to = cnode['output_to'] if len(cnode['output_to']) > 0 else [(None, None)]
+        if cnode.type == 'output':
+            out_to = [(None, None)] * len(cnode['input_from'])
+        for slotid, (target_nid, target_slot) in enumerate(out_to):
+            nobj = {
+                'node_id': nid,
+                'original_column': col,
+                'column': actual_column,
+                'slot': slotid,
+                'target_nid': target_nid,
+                'target_slot': target_slot,
+                'output_start': output_start_indices,
+                'output_length': output_length,
+                'name': f'{nid} - {layer.f_type}{f"[{slotid}]" if len(layer.f_out_shapes) > 1 else ""}',
+                **obj,
+            }
+
+            # nid_to_row_column[nid].setdefault(slotid, []).append((lid, len(layer_data)))
+            nid_to_row_column.setdefault(nid, []).append((lid, actual_column))
+            layer_data.append(nobj)
+            actual_column += 1
     vnode_data.append(layer_data)
+
+vnode_data
+nid_to_row_column
+for layer in vnode_data:
+    for n in layer:
+        if n['target_nid'] is not None:
+            this_cnode = net.compute_graph.loc[n['node_id']]
+            n['output_to'] = nid_to_row_column[n['target_nid']]
+            target_cnode = net.compute_graph.loc[n['target_nid']]
+            if target_cnode['type'] == 'output':
+                # special case when we output to the output node
+                # as we actually split the output node into multiple nodes
+                n['output_to'] = [nid_to_row_column[n['target_nid']][n['target_slot']]]
+        else:
+            n['output_to'] = []
+
+vnode_data
+
 
 @partial(vmap, in_axes=(0, None), out_axes=0)
 @partial(jit, static_argnums=(1,))
 def trace_points(output_row, vnode_data):
     trace = []
+    currentnid = None
     for layer in vnode_data:
         ltrace = []
         for v in layer:
-            outputs = [
-                output_row[start : start + length].reshape(shape)
-                for start, length, shape in zip(
-                    v["output_start"], v["output_length"], v["output_shapes"]
-                )
-            ]
-            ltrace.append(outputs)
-        trace.append(ltrace)
+            if v["node_id"] != currentnid:
+                outputs = [
+                    output_row[start : start + length].reshape(shape)
+                    for start, length, shape in zip(
+                        v["output_start"], v["output_length"], v["output_shapes"]
+                    )
+                ]
+                ltrace += outputs
+                currentnid = v["node_id"]
 
+        trace.append(ltrace)
     return trace
+
 
 frozen_vnode_data = ut.freeze(vnode_data)
 traces = trace_points(YHAT, frozen_vnode_data)
 
-import json
-jt = json.dumps(su.make_json_compatible(traces, float_precision=4), indent=2)
-jd = json.dumps(su.make_json_compatible(frozen_vnode_data), indent=2)
-# write to disk
-with open('layout.json', 'w') as f:
-    f.write(jd)
-with open('data.json', 'w') as f:
-    f.write(jt)
+# check that vnode_data and traces have the same shape
+assert len(vnode_data) == len(traces)
+for layer, trace in zip(vnode_data, traces):
+    assert len(layer) == len(trace)
+    for vnode, t in zip(layer, trace):
+        print(vnode["name"], t.shape, vnode["output_shapes"])
 
+# remove output_start, outout_length, output_shapes
+for layer in vnode_data:
+    for v in layer:
+        del v["output_start"]
+        del v["output_length"]
+        del v["output_shapes"]
+
+
+import json
+
+jt = json.dumps(su.make_json_compatible(traces, float_precision=4), indent=2)
+jd = json.dumps(su.make_json_compatible(frozen_vnode_data))
+
+from jinja2 import Environment, FileSystemLoader
+
+template_folder_path = Path('../biocomp-ui/frontend/tracer/templates')
+env = Environment(loader=FileSystemLoader(template_folder_path))
+template = env.get_template('data_template.js')
+
+rendered = template.render(pointData=jt, layoutData=jd)
+
+with open('../biocomp-ui/frontend/tracer/data.js', 'w') as f:
+    f.write(rendered)
+
+print('done')

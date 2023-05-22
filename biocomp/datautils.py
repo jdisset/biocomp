@@ -1219,6 +1219,9 @@ def smooth_line_plots(
     )
     y = y[:, output_pos]
     x = x[:, input_order]
+    # # let's use x as y minus output_pos
+    # otherind = [i for i in range(y.shape[1]) if i != output_pos]
+    # x = y[:, otherind]
     tree = cKDTree(x)
 
 

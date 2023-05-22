@@ -105,7 +105,6 @@ DEFAULT_COMPUTE_CONFIG.set_impl('output', nodes.grouped_output)
 DEFAULT_COMPUTE_CONFIG.set_impl('deadend', nodes.single_passthrough)
 
 
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                       --     Virtual Node     --
@@ -396,7 +395,6 @@ class ComputeStack:
 
         return s, get_param_subset
 
-
     @staticmethod
     def use_shared_params(base_params, other_params):
         """Returns a copy of the base_params with the shared parameters
@@ -408,7 +406,6 @@ class ComputeStack:
         _, shared_p = ut.split_params(other_p, [ut.SHARED_PATH])
         _, this_static_p = ut.split_params(my_p, [ut.STATIC_PATH])
         _, other_static_p = ut.split_params(other_p, [ut.STATIC_PATH])
-
 
         _, node_p = ut.split_params(my_p, [ut.NODE_PATH])
 
@@ -446,7 +443,6 @@ class ComputeStack:
 
     def get_all_nodes(self):
         return [n for l in self.layers for n in l.nodes]
-
 
     def get_node_input_start_index(self, node: VirtualNode, input_slot: int) -> int:
         """Returns the start index of the input #input_slot for the given node
@@ -680,7 +676,6 @@ class ComputeStack:
             msg += f"Candidate stacks:\n{candidate_stacks}\n"
             raise RuntimeError(msg)
 
-
         # and we only keep the smallest stack
         minstack = min(candidate_stacks, key=lambda s: len(s.layers))
 
@@ -891,15 +886,15 @@ class ComputeStack:
         self.is_assembled = allbuilt
 
     # def _init_quantization_params(self):
-        # # first we need to store all quantizable parameter names
-        # self.shared_store = {}
-        # quantization_params = {}
-        # for n in self.networks:
-            # for qn, qv in nd.get_all_possible_quantization_params(n).items():
-                # quantization_params[qn] = set(qv) | quantization_params.get(qn, set())
-        # quantization_params = {k: sorted(v) for k, v in quantization_params.items()}
-        # for pname, pv in quantization_params.items():
-            # ut.at_path(self.shared_store, ut.QNAME_PATH + f"/{pname}", pv)
+    # # first we need to store all quantizable parameter names
+    # self.shared_store = {}
+    # quantization_params = {}
+    # for n in self.networks:
+    # for qn, qv in nd.get_all_possible_quantization_params(n).items():
+    # quantization_params[qn] = set(qv) | quantization_params.get(qn, set())
+    # quantization_params = {k: sorted(v) for k, v in quantization_params.items()}
+    # for pname, pv in quantization_params.items():
+    # ut.at_path(self.shared_store, ut.QNAME_PATH + f"/{pname}", pv)
 
     def _generate_apply_method(self, get_grads_for=('translation', 'transcription', 'output')):
 

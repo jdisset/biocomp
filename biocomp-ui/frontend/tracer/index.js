@@ -7,7 +7,7 @@ import * as d3 from "d3";
 import "./style.css";
 import dagre from "dagre";
 
-const AXIS_OFFSET = { x: 100, y: 20 };
+const AXIS_OFFSET = { x: 150, y: 20 };
 const AXIS_WIDTH = 200;
 
 function App() {
@@ -25,6 +25,7 @@ function App() {
       return [0, 1];
     });
   });
+  console.log(layoutData);
 
   const [ranges, setRanges] = useState(init_ranges);
 
@@ -84,7 +85,7 @@ function App() {
 
         const minVal = ranges[rowIndex][columnIndex][0];
         const maxVal = ranges[rowIndex][columnIndex][1];
-        const points = pointData[rowIndex][columnIndex][0];
+        const points = pointData[rowIndex][columnIndex];
 
         const pos = points.map((d, i) => {
           return {
