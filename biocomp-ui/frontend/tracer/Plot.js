@@ -1,15 +1,19 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
-import ReactDOM from "react-dom";
-import { layoutData, pointData } from "./data"; // import your data
-import { COLORS } from "./constants";
 import * as d3 from "d3";
 import "./style.css";
-import { select, line, scaleLinear, axisBottom, axisLeft } from "d3";
-import Draggable, { DraggableCore } from "react-draggable";
+import Draggable from "react-draggable";
+
+const CMAPS = {
+  YlGnBu: d3.interpolateYlGnBu,
+  Viridis: d3.interpolateViridis,
+  Inferno: d3.interpolateInferno,
+  YlOrRd: d3.interpolateYlOrRd,
+  Blues: d3.interpolateBlues,
+};
 
 /*──────────────────────────────▼     ScatterPlot    ▼──────────────────────────────*/
 
-const ScatterPlot = ({ points, axisInfo, selected, width, height }) => {
+const ScatterPlot = ({ points, axisInfo, selected, width, height, colorScale }) => {
   const ref = useRef();
 
   const getLabel = (axis) => {
@@ -42,7 +46,8 @@ const ScatterPlot = ({ points, axisInfo, selected, width, height }) => {
 
       let color;
       if (cData) {
-        color = d3.scaleSequential(d3.interpolateYlGnBu).domain(d3.extent(cData));
+        const cmap = colorScale ? CMAPS[colorScale] : d3.interpolateYlGnBu;
+        color = d3.scaleSequential(cmap).domain(d3.extent(cData));
       }
 
       const plot = svg.append("g").attr("transform", `translate(${margin.left}, ${margin.top})`);
@@ -86,10 +91,58 @@ const ScatterPlot = ({ points, axisInfo, selected, width, height }) => {
             .attr("fill", cData ? color(cData[i]) : "black");
         }
       });
-    }
-  }, [points, axisInfo, selected, width, height]);
 
-  return <svg ref={ref} width={width} height={height} />;
+      if (cData) {
+        // Colorbar position and dimensions
+        const colorbarX = pwidth + 10;
+        const colorbarY = 0;
+        const colorbarWidth = 20;
+        const colorbarHeight = pheight;
+
+        // Create a gradient for the colorbar
+        const colorbarGradient = svg
+          .append("defs")
+          .append("linearGradient")
+          .attr("id", "colorbarGradient")
+          .attr("x1", "0%")
+          .attr("y1", "100%")
+          .attr("x2", "0%")
+          .attr("y2", "0%");
+
+        // Add color stops to the gradient
+        const gradientSteps = 10; // Number of steps in the gradient
+        const colorDomain = d3.extent(cData);
+        for (let i = 0; i <= gradientSteps; i++) {
+          const value = colorDomain[0] + (colorDomain[1] - colorDomain[0]) * (i / gradientSteps);
+          colorbarGradient
+            .append("stop")
+            .attr("offset", `${100 * (i / gradientSteps)}%`)
+            .attr("stop-color", color(value));
+        }
+
+        // Add the colorbar
+        plot
+          .append("rect")
+          .attr("x", colorbarX)
+          .attr("y", colorbarY)
+          .attr("width", colorbarWidth)
+          .attr("height", colorbarHeight)
+          .style("fill", "url(#colorbarGradient)");
+
+        // Add an axis for the colorbar
+        const colorScale = d3.scaleLinear().domain(colorDomain).range([colorbarHeight, 0]);
+
+        const colorAxis = d3.axisRight(colorScale);
+
+        plot
+          .append("g")
+          .attr("transform", `translate(${colorbarX + colorbarWidth}, ${colorbarY})`)
+          .call(colorAxis);
+      }
+    }
+  }, [points, axisInfo, selected, width, height, colorScale]);
+
+  return <svg ref={ref} width={width} height={height} className="plot" />;
 };
 
 /*════════════════════════════════════════════════════════════════════════════════*/
@@ -105,11 +158,20 @@ const AxisSelector = ({ axislist, label, setAxis }) => {
     }
   }, [selectedAxis, setAxis]);
 
+  const orderedAxisList = useMemo(() => {
+    return axislist.sort((a, b) => {
+      if (a.node_id < b.node_id) return -1;
+      else if (a.node_id > b.node_id) return 1;
+      else return a.uid > b.uid ? -1 : 1;
+    });
+  }, [axislist]);
+
   return (
-    <div className="plot-axis-select-box">
-      <select value={selectedAxis} onChange={(e) => setSelectedAxis(e.target.value)}>
+    <div className="plot-select-box">
+      <select className="plot-select"
+        value={selectedAxis} onChange={(e) => setSelectedAxis(e.target.value)}>
         <option value="None">-- {label} --</option>
-        {axislist.map((axis) => (
+        {orderedAxisList.map((axis) => (
           <option key={axis.identifier} value={axis.identifier}>
             {axis.name}
           </option>
@@ -121,33 +183,26 @@ const AxisSelector = ({ axislist, label, setAxis }) => {
 
 /*════════════════════════════════════════════════════════════════════════════════*/
 
-//const Plot = ({ layoutData, pointData, pointInfo, rowColToIndexMap }) => {
-const Plot = React.forwardRef(({ layoutData, pointData, pointInfo, rowColToIndexMap, position }, ref) => {
-  /*────────────────────────────▼     getAxisInfo     ▼─────────────────────────────*/
+const Plot = React.forwardRef(({ layoutData, pointInfo, removePlot, scale }, ref) => {
+  /*────────────────────────────▼     getInfo     ▼─────────────────────────────*/
+  const axislist = useMemo(() => {
+    return layoutData.map((item, idx) => ({
+      name: `${item.node_id} ${item.type} ${item.n_outputs > 1 ? "[" + item.slot + "]" : ""}`,
+      identifier: `${idx}`,
+    }));
+  }, []);
 
   const getAxisInfo = (axisId) => {
-    const rowCol = axisId.split("-");
-    if (rowCol.length === 2) {
-      const row = parseInt(rowCol[0]);
-      const column = parseInt(rowCol[1]);
-      return layoutData[row][column];
-    }
-    return null;
+    if (axisId === "None") return null;
+    const idx = parseInt(axisId);
+    return layoutData[idx];
   };
-
-  /*════════════════════════════════════════════════════════════════════════════════*/
-
-  /*─────────────────────────────▼     getPoints     ▼──────────────────────────────*/
 
   const getPoints = (axisIdList) => {
     let values = [];
-    console.log("axisIdList", axisIdList);
     axisIdList.forEach((axisId) => {
-      const rowCol = axisId.split("-");
-      if (rowCol.length === 2) {
-        const row = parseInt(rowCol[0]);
-        const column = parseInt(rowCol[1]);
-        const idx = rowColToIndexMap[row][column];
+      if (axisId !== "None") {
+        const idx = parseInt(axisId);
         const points = pointInfo.points[idx];
         values.push(points.map((p) => p.value[0]));
       }
@@ -157,52 +212,44 @@ const Plot = React.forwardRef(({ layoutData, pointData, pointInfo, rowColToIndex
 
   /*════════════════════════════════════════════════════════════════════════════════*/
 
-  /*──────────────────────────────▼     axisList     ▼──────────────────────────────*/
-
-  const axislist = useMemo(() => {
-    const axislist = [];
-    layoutData.forEach((row, rowIndex) => {
-      row.forEach((item, columnIndex) => {
-        axislist.push({
-          name: `${item.type}-${item.node_id}-${item.slot}`,
-          identifier: `${rowIndex}-${columnIndex}`,
-        });
-      });
-    });
-    return axislist;
-  }, []);
-
-  /*════════════════════════════════════════════════════════════════════════════════*/
-
   const [xAxis, setXAxis] = useState("None");
   const [yAxis, setYAxis] = useState("None");
   const [colorAxis, setColorAxis] = useState("None");
   const [points, setPoints] = useState([]);
+  const [colorScale, setColorScale] = useState(null);
 
   useEffect(() => {
-    console.log("useEffect--------");
-    console.log("xAxis", xAxis);
-    console.log("yAxis", yAxis);
-    console.log("colorAxis", colorAxis);
-
     setPoints(getPoints([xAxis, yAxis, colorAxis]));
   }, [xAxis, yAxis, colorAxis]);
 
   return (
-    <Draggable>
-      <div className="nopan plot-container" ref={ref}>
-        <div className="nopan plot-axis-select">
+    <Draggable scale={scale}>
+      <div className="plot-container" ref={ref}>
+        <div className="plot-remove-button" onClick={removePlot}></div>
+        <div className="plot-ctrl-row">
           <AxisSelector axislist={axislist} label="X Axis" setAxis={setXAxis} />
           <AxisSelector axislist={axislist} label="Y Axis" setAxis={setYAxis} />
           <AxisSelector axislist={axislist} label="Color Axis" setAxis={setColorAxis} />
         </div>
-        <div className="nopan plot">
+        <div className="plot-ctrl-row">
+          <div className="plot-select-box">
+            <select onChange={(e) => setColorScale(e.target.value)}>
+              {Object.keys(CMAPS).map((cmap) => (
+                <option key={cmap} value={cmap}>
+                  {cmap}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="plot">
           <ScatterPlot
             points={points}
             axisInfo={[getAxisInfo(xAxis), getAxisInfo(yAxis), getAxisInfo(colorAxis)]}
             selected={pointInfo.selectedTraces}
-            width={500}
-            height={500}
+            colorScale={colorScale}
+            width={480}
+            height={480}
           />
         </div>
       </div>

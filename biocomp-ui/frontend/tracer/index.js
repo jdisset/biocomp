@@ -1,13 +1,11 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import ReactDOM from "react-dom";
 import SliderAxis from "./SliderAxis";
-import Menu from "./Menu";
 import { layoutData, pointData } from "./data";
 import { COLORS } from "./constants";
 import * as d3 from "d3";
 import "./style.css";
 import dagre from "dagre";
-import { select, line, scaleLinear, axisBottom, axisLeft } from "d3";
 import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 import Plot from "./Plot";
 
@@ -16,7 +14,6 @@ const AXIS_WIDTH = 200;
 
 const NODE_WIDTH = 400;
 const NODE_HEIGHT = 50;
-const INV_NODE_HEIGHT = 0;
 
 /*────────────────────────▼     plotting components     ▼─────────────────────────*/
 
@@ -88,62 +85,22 @@ const ScatterPlot = ({ points }) => {
 /*════════════════════════════════════════════════════════════════════════════════*/
 
 function App() {
-  const [settings, setSettings] = useState({ colorMode: "solid" });
   const [sceneTransform, setTransform] = useState();
-
-  /*─────────────────────────────▼     RowCol map     ▼─────────────────────────────*/
-
-  // maintain a map of row/column to index
-  // so that we can easily find the index of a slider.
-  const buildRowColToIndexMap = () => {
-    let index = 0;
-    let rowColToIndexMap = new Array(layoutData.length);
-    for (let rowIndex in layoutData) {
-      for (let columnIndex in layoutData[rowIndex]) {
-        rowColToIndexMap[rowIndex] = rowColToIndexMap[rowIndex] || [];
-        rowColToIndexMap[rowIndex][columnIndex] = index;
-        index++;
-      }
-    }
-    return rowColToIndexMap;
-  };
-
-  const [rowColToIndexMap, setRowColToIndexMap] = useState(buildRowColToIndexMap());
-
-  useEffect(() => {
-    setRowColToIndexMap(buildRowColToIndexMap());
-  }, [layoutData]);
-
-  /*════════════════════════════════════════════════════════════════════════════════*/
-
   const sliderRefs = useMemo(() => [], []);
 
-  // create ranges in a 2D list
-  const init_ranges = layoutData.map((row, rowIndex) => {
-    return row.map((item, columnIndex) => {
-      return [0, 1];
-    });
-  });
-
+  const init_ranges = new Array(layoutData.length).fill([0, 1]);
   const [ranges, setRanges] = useState(init_ranges);
-
-  const setSliderRange = (rowIndex, columnIndex, range) => {
+  const setSliderRange = (idx, range) => {
     setRanges((prev) => {
       const newRanges = [...prev];
-      newRanges[rowIndex][columnIndex] = range;
+      newRanges[idx] = range;
       return newRanges;
     });
   };
 
-  const init_selected = layoutData.map((row, rowIndex) => {
-    return row.map((item, columnIndex) => {
-      return false;
-    });
-  });
-
   const svgRef = useRef();
 
-  /*─────────────────▼     build selected and position infos     ▼──────────────────*/
+  /*─────────────▼     build position information for each point     ▼──────────────*/
 
   const buildPointInfo = () => {
     let pnts = [];
@@ -156,122 +113,85 @@ function App() {
       scale: sceneTransform ? sceneTransform.state.scale : 1,
     };
 
-    for (const rowIndex in pointData) {
-      for (const columnIndex in pointData[rowIndex]) {
-        if (
-          sliderRefs[rowIndex] === undefined ||
-          sliderRefs[rowIndex][columnIndex] === undefined ||
-          !sliderRefs[rowIndex][columnIndex].current
-        ) {
-          continue;
-        }
-        const ref = sliderRefs[rowIndex][columnIndex];
+    for (let idx = 0; idx < sliderRefs.length; idx++) {
+      const sliderRef = sliderRefs[idx].current;
+      if (!sliderRef) continue;
 
-        const rect = ref.current.getBoundingClientRect();
+      const minVal = ranges[idx][0];
+      const maxVal = ranges[idx][1];
 
-        const minVal = ranges[rowIndex][columnIndex][0];
-        const maxVal = ranges[rowIndex][columnIndex][1];
-        const points = pointData[rowIndex][columnIndex];
-        const svgRect = svgRefCurrent.getBoundingClientRect();
+      const sliderRect = sliderRef.getBoundingClientRect();
+      const svgRect = svgRefCurrent.getBoundingClientRect();
 
-        const axis_offset = {
-          x: AXIS_OFFSET.x * scene_state.scale,
-          y: AXIS_OFFSET.y * scene_state.scale,
+      const axis_offset = {
+        x: AXIS_OFFSET.x * scene_state.scale,
+        y: AXIS_OFFSET.y * scene_state.scale,
+      };
+      const axis_width = AXIS_WIDTH * scene_state.scale;
+
+      const pos = pointData[idx].map((d, i) => {
+        return {
+          x: (sliderRect.x + axis_offset.x + d * axis_width - svgRect.x) / scene_state.scale,
+          y: (sliderRect.y + axis_offset.y - svgRect.y) / scene_state.scale,
+          node_uid: idx,
+          inRange: d >= minVal && d <= maxVal,
+          value: d,
+          i: i,
         };
+      });
 
-        const axis_width = AXIS_WIDTH * scene_state.scale;
-        const pos = points.map((d, i) => {
-          return {
-            x: (rect.x + axis_offset.x + d * axis_width - svgRect.x) / scene_state.scale,
-            y: (rect.y + axis_offset.y - svgRect.y) / scene_state.scale,
-            row: rowIndex,
-            column: columnIndex,
-            inRange: d >= minVal && d <= maxVal,
-            value: d,
-            i: i,
-          };
-        });
+      if (pnts.length <= idx) pnts.push(pos);
+      else pnts[idx] = pos;
 
-        const idx = rowColToIndexMap[rowIndex][columnIndex];
-        if (pnts.length <= idx) {
-          pnts.push(pos);
-        } else {
-          pnts[idx] = pos;
-        }
-
-        const pointIsSelected = pos.map((d) => d.inRange);
-        if (selectedTraces.length === 0) {
-          selectedTraces = pointIsSelected;
-        }
-        selectedTraces = selectedTraces.map((d, i) => d && pointIsSelected[i]);
-      }
+      const pointIsSelected = pos.map((d) => d.inRange);
+      if (selectedTraces.length === 0) selectedTraces = pointIsSelected;
+      selectedTraces = selectedTraces.map((d, i) => d && pointIsSelected[i]);
     }
     return { points: pnts, selectedTraces: selectedTraces };
   };
 
+  /*════════════════════════════════════════════════════════════════════════════════*/
+
   const buildLineInfo = () => {
-    if (pointInfo.points.length === 0) {
-      return [];
-    }
+    if (pointInfo.points.length === 0) return [];
     let allLines = [];
-    for (let r = 0; r < layoutData.length; r++) {
-      for (let c = 0; c < layoutData[r].length; c++) {
-        const row = layoutData[r];
-        const item = row[c];
-        if (item.output_to.length === 0) {
-          continue;
-        }
-
-        const nextRow = item.output_to[0][0];
-        const nextColumn = item.output_to[0][1];
-        if (nextRow === undefined || nextColumn === undefined) {
-          continue;
-        }
-
-        const this_idx = rowColToIndexMap[r][c];
-        const next_idx = rowColToIndexMap[nextRow][nextColumn];
-        const pos1 = pointInfo.points[this_idx];
-        const pos2 = pointInfo.points[next_idx];
-        const linesData = pos1.map((p, i) => ({
-          x1: p.x,
-          y1: p.y,
-          x2: pos2[i].x,
-          y2: pos2[i].y,
-          row: r,
-          column: c,
-          nextRow: nextRow,
-          nextColumn: nextColumn,
-          i: i,
-        }));
-        allLines = allLines.concat(linesData);
-      }
+    for (let idx = 0; idx < layoutData.length; idx++) {
+      const item = layoutData[idx];
+      if (item.output_to.length === 0) continue;
+      const next_idx = item.output_to[0];
+      if (next_idx === undefined) continue;
+      const pos1 = pointInfo.points[idx];
+      const pos2 = pointInfo.points[next_idx];
+      const linesData = pos1.map((p, i) => ({
+        x1: p.x,
+        y1: p.y,
+        x2: pos2[i].x,
+        y2: pos2[i].y,
+        idx: idx,
+        next_idx: next_idx,
+        i: i,
+      }));
+      allLines = allLines.concat(linesData);
     }
     return allLines;
   };
 
-  const buildCalculatedPositions = () => {
+  const buildGraphLayout = () => {
     var g = new dagre.graphlib.Graph();
-
     g.setGraph({});
-
-    // Default to assigning a new object as a label for each new edge.
     g.setDefaultEdgeLabel(() => ({}));
 
     let virtualNodes = {};
-    for (let r = 0; r < layoutData.length; r++) {
-      for (let c = 0; c < layoutData[r].length; c++) {
-        let node = layoutData[r][c];
-        //const height = node.type.startsWith("in") ? INV_NODE_HEIGHT : NODE_HEIGHT;
-        const height = NODE_HEIGHT;
-        g.setNode(`${r}-${c}`, { width: NODE_WIDTH, height: height });
-
-        // we'll create virtual nodes for the ones that have multiple inputs
-        if (node.n_inputs > 1) {
-          const nid = node.node_id;
-          virtualNodes[nid] = node;
-        }
+    // for each node, idx in layout data:
+    layoutData.forEach((node, idx) => {
+      const height = NODE_HEIGHT;
+      g.setNode(idx, { width: NODE_WIDTH, height: height });
+      // we'll create virtual nodes for the ones that have multiple inputs
+      if (node.n_inputs > 1) {
+        const nid = node.node_id;
+        virtualNodes[nid] = node;
       }
-    }
+    });
 
     // create virtual nodes
     for (let nid in virtualNodes) {
@@ -280,50 +200,38 @@ function App() {
     }
 
     // Next, add edges to the graph.
-    for (let r = 0; r < layoutData.length; r++) {
-      for (let c = 0; c < layoutData[r].length; c++) {
-        const item = layoutData[r][c];
-        if (item.output_to.length === 0) {
-          continue;
-        }
+    layoutData.forEach((node, idx) => {
+      if (node.output_to.length === 0) return;
 
-        const nextRow = item.output_to[0][0];
-        const nextColumn = item.output_to[0][1];
-        if (nextRow === undefined || nextColumn === undefined) {
-          continue;
-        }
+      const next_idx = node.output_to[0];
+      if (next_idx === undefined) return;
 
-        let target_nid = item.target_nid;
-        // if in the virtual nodes, we'll link to the virtual node
-        if (target_nid in virtualNodes) {
-          target_nid = `virt-${target_nid}`;
-          g.setEdge(`${r}-${c}`, target_nid);
-          g.setEdge(target_nid, `${nextRow}-${nextColumn}`);
-        } else {
-          g.setEdge(`${r}-${c}`, `${nextRow}-${nextColumn}`); // Add edges to the graph
-        }
+      let target_nid = node.target_nid;
+      if (target_nid in virtualNodes) {
+        target_nid = `virt-${target_nid}`;
+        g.setEdge(idx, target_nid);
+        g.setEdge(target_nid, next_idx);
+      } else {
+        g.setEdge(idx, next_idx);
       }
-    }
+    });
 
     dagre.layout(g);
 
     const calculatedPositions = layoutData.map(() => []);
     g.nodes().forEach((nodeId) => {
       if (nodeId.startsWith("virt-")) return;
-
       const node = g.node(nodeId);
-      const [row, col] = nodeId.split("-").map(Number);
-
-      calculatedPositions[row][col] = { x: node.x, y: node.y };
+      const idx = parseInt(nodeId);
+      calculatedPositions[idx] = { x: node.x, y: node.y };
     });
-
     return calculatedPositions;
   };
 
-  const [calculatedPositions, setCalculatedPositions] = useState(buildCalculatedPositions());
+  const [calculatedPositions, setCalculatedPositions] = useState(buildGraphLayout());
 
   useEffect(() => {
-    setCalculatedPositions(buildCalculatedPositions());
+    setCalculatedPositions(buildGraphLayout());
   }, [layoutData]); // update calculatedPositions whenever layoutData changes
 
   const [isInitialRenderComplete, setIsInitialRenderComplete] = useState(false);
@@ -336,14 +244,13 @@ function App() {
   const lineInfo = useMemo(() => buildLineInfo(), [pointInfo, isInitialRenderComplete]);
 
   useEffect(() => {
-    for (let row of sliderRefs) {
-      for (let ref of row) {
-        if (!ref.current) {
-          return; // Exit early if a ref is not set
-        }
+    for (let idx = 0; idx < sliderRefs.length; idx++) {
+      const ref = sliderRefs[idx];
+      if (!ref.current) {
+        setIsInitialRenderComplete(false);
+        return;
       }
     }
-    // If this point is reached, all refs have been set
     setIsInitialRenderComplete(true);
   }, [sliderRefs]);
 
@@ -373,6 +280,11 @@ function App() {
   const generateGradients = (svg) => {
     const gradients = svg.selectAll("linearGradient").data(lineInfo, (d, i) => i);
 
+    // in order to filter only the selected traces, we have acess to pointInfo.selectedTraces
+    // which is an array of booleans, one for each trace.
+    // we can use this to filter the gradients
+    //
+
     gradients
       .enter()
       .append("linearGradient")
@@ -384,9 +296,9 @@ function App() {
       .attr("y2", (d) => d.y2)
       .selectAll("stop")
       .data((d) => {
-        const idx1 = rowColToIndexMap[d.row][d.column];
+        const idx1 = d.idx;
         const v1 = pointInfo.points[idx1][d.i].value[0];
-        const idx2 = rowColToIndexMap[d.nextRow][d.nextColumn];
+        const idx2 = d.next_idx;
         const v2 = pointInfo.points[idx2][d.i].value[0];
         const cmap = d3.scaleSequential(d3.interpolateYlGnBu).domain([0, 1]);
         return [
@@ -411,8 +323,7 @@ function App() {
 
   const oldKeys = useRef([]);
 
-  const lineClass = (r, c, nextRow, nextColumn, i) =>
-    `traceline-${r}-${c}-${nextRow}-${nextColumn}-${i}`;
+  const lineClass = (idx, nextidx, i) => `traceline-${idx}-${nextidx}-${i}`;
 
   const drawLines = (svg) => {
     let lines = svg.selectAll("line").data(lineInfo);
@@ -420,7 +331,7 @@ function App() {
     lines = lines.enter().append("line").merge(lines); // Apply to both new and existing lines
 
     lines // Update all lines
-      .attr("class", (l, i) => lineClass(l.row, l.column, l.nextRow, l.nextColumn, l.i))
+      .attr("class", (l, i) => lineClass(l.idx, l.next_idx, i))
       .attr("x1", (d) => d.x1)
       .attr("y1", (d) => d.y1)
       .attr("x2", (d) => d.x2)
@@ -461,22 +372,9 @@ function App() {
     setPlotRefs(newPlotRefs);
   };
 
-  //Plot = ({ layoutData, pointData, pointInfo, rowColToIndexMap }) => {
-
   return (
     <>
       <button onClick={addPlot}>Add Plot</button>
-      {plotRefs.map((ref, index) => (
-        <Plot
-          key={`plot-${index}`}
-          ref={ref}
-          layoutData={layoutData}
-          pointData={pointData}
-          pointInfo={pointInfo}
-          rowColToIndexMap={rowColToIndexMap}
-          position={{ x: index * 100, y: index * 100 }}
-        />
-      ))}
 
       <TransformWrapper
         minScale={0.4}
@@ -485,7 +383,6 @@ function App() {
         panning={{
           excluded: [
             "plot-container",
-            "nopan",
             "range-slider",
             "slider-track",
             "slider-thumb",
@@ -493,7 +390,12 @@ function App() {
             "plot",
             "plotcont",
             "react-draggable",
+            "select",
             "plot-axis-select",
+            "plot-ctrl-row",
+            "plot-ctrls",
+            "plot-select",
+            "plot-select-box",
           ],
         }}
         wheel={{ step: 0.05 }}
@@ -506,24 +408,32 @@ function App() {
             <TransformComponent>
               <svg className="traces" ref={svgRef} />
 
-              {layoutData.map((row, rowIndex) =>
-                row.map((item, columnIndex) => {
-                  if (!sliderRefs[rowIndex]) sliderRefs[rowIndex] = [];
-                  if (!sliderRefs[rowIndex][columnIndex])
-                    sliderRefs[rowIndex][columnIndex] = React.createRef();
-                  const { x, y } = calculatedPositions[rowIndex][columnIndex];
-                  return (
-                    <SliderAxis
-                      key={`slider-${rowIndex}-${columnIndex}`}
-                      sliderData={item}
-                      points={pointData[rowIndex][columnIndex]}
-                      ref={sliderRefs[rowIndex][columnIndex]}
-                      setSliderRange={(range) => setSliderRange(rowIndex, columnIndex, range)}
-                      style={{ position: "absolute", left: x, top: y }}
-                    />
-                  );
-                })
-              )}
+              {layoutData.map((item, idx) => {
+                if (!sliderRefs[idx]) sliderRefs[idx] = React.createRef();
+                const { x, y } = calculatedPositions[idx];
+                return (
+                  <SliderAxis
+                    key={`slider-${idx}`}
+                    sliderData={item}
+                    scale={sceneTransform && sceneTransform.state ? sceneTransform.state.scale : 1}
+                    points={pointData[idx]}
+                    ref={sliderRefs[idx]}
+                    setSliderRange={(range) => setSliderRange(idx, range)}
+                    style={{ position: "absolute", left: x, top: y }}
+                  />
+                );
+              })}
+
+              {plotRefs.map((ref, index) => (
+                <Plot
+                  key={`plot-${index}`}
+                  ref={ref}
+                  layoutData={layoutData}
+                  pointInfo={pointInfo}
+                  scale={sceneTransform && sceneTransform.state ? sceneTransform.state.scale : 1}
+                  removePlot={() => removePlot(index)}
+                />
+              ))}
             </TransformComponent>
           </>
         )}

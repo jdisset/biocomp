@@ -140,7 +140,6 @@ params = full_stack.use_shared_params(base_params, best_params)
 networks = dman.get_networks()
 
 
-
 def smooth_line_plots_slices(
     x, y, net, rescale, mkslices, ngslices, axes, input_order, input_names, **kwargs
 ):
@@ -171,6 +170,7 @@ def smooth_line_plots_slices(
         )
 
         net.get_output_proteins()
+
 
 with ut.timer('pred plot'):
     N_SAMPLES_PER_CHUNK = 5000
@@ -222,8 +222,15 @@ with ut.timer('pred plot'):
         ninputs = networks[index].get_nb_inputs()
         input_order = [0, 1, 2, 3][:ninputs]
 
-
-        fig = du.report(params, dman, index, use_x_y_yhat=(x, y, yhat), res=128, input_order=input_order, use_y_as_x=True)
+        fig = du.report(
+            params,
+            dman,
+            index,
+            use_x_y_yhat=(x, y, yhat),
+            res=128,
+            input_order=input_order,
+            use_y_as_x=True,
+        )
         fig.suptitle(f'{fig._suptitle.get_text()} using y as x\nerror: {error:.3f}')
 
         # ngslices = [0.25, 0.5, 0.75]
@@ -235,27 +242,27 @@ with ut.timer('pred plot'):
         # input_names = net.get_inverted_input_proteins()
 
         # smooth_line_plots_slices(
-            # x,
-            # y,
-            # net=net,
-            # rescale=dman.rescale,
-            # mkslices=mkslices,
-            # ngslices=ngslices,
-            # axes=allaxes[0],
-            # input_order=input_order,
-            # input_names=input_names,
+        # x,
+        # y,
+        # net=net,
+        # rescale=dman.rescale,
+        # mkslices=mkslices,
+        # ngslices=ngslices,
+        # axes=allaxes[0],
+        # input_order=input_order,
+        # input_names=input_names,
         # )
 
         # smooth_line_plots_slices(
-            # x,
-            # yhat,
-            # net=net,
-            # rescale=dman.rescale,
-            # mkslices=mkslices,
-            # ngslices=ngslices,
-            # axes=allaxes[1],
-            # input_order=input_order,
-            # input_names=input_names,
+        # x,
+        # yhat,
+        # net=net,
+        # rescale=dman.rescale,
+        # mkslices=mkslices,
+        # ngslices=ngslices,
+        # axes=allaxes[1],
+        # input_order=input_order,
+        # input_names=input_names,
         # )
 
         seen = index in training_set
@@ -362,14 +369,14 @@ def get_node_info(network, node, outslot):
     return info
 
 
-
 net = dman.get_networks()[0]
 
 net.compute_graph
 net.central_dogma_graph
 
 vnode_data = []
-nid_to_row_column = {}
+nid_to_uid = {}
+uid = 0
 for lid, layer in enumerate(stack.layers):
     obj = {
         'type': layer.f_type,
@@ -405,75 +412,64 @@ for lid, layer in enumerate(stack.layers):
                 'n_inputs': len(layer.f_input_shapes),
                 'n_outputs': len(layer.f_out_shapes),
                 'info': get_node_info(net, cnode, slotid),
+                'uid': uid,
                 **obj,
             }
-
-            # nid_to_row_column[nid].setdefault(slotid, []).append((lid, len(layer_data)))
-            nid_to_row_column.setdefault(nid, []).append((lid, actual_column))
-            layer_data.append(nobj)
+            nid_to_uid.setdefault(nid, []).append(uid)
+            vnode_data.append(nobj)
             actual_column += 1
-    vnode_data.append(layer_data)
+            uid += 1
 
-vnode_data
-nid_to_row_column
-for layer in vnode_data:
-    for n in layer:
-        if n['target_nid'] is not None:
-            this_cnode = net.compute_graph.loc[n['node_id']]
-            n['output_to'] = nid_to_row_column[n['target_nid']]
-            target_cnode = net.compute_graph.loc[n['target_nid']]
-            if target_cnode['type'] == 'output':
-                # special case when we output to the output node
-                # as we actually split the output node into multiple nodes
-                n['output_to'] = [nid_to_row_column[n['target_nid']][n['target_slot']]]
-        else:
-            n['output_to'] = []
+for n in vnode_data:
+    if n['target_nid'] is not None:
+        this_cnode = net.compute_graph.loc[n['node_id']]
+        n['output_to'] = nid_to_uid[n['target_nid']]
+        target_cnode = net.compute_graph.loc[n['target_nid']]
+        if target_cnode['type'] == 'output':
+            n['output_to'] = [nid_to_uid[n['target_nid']][n['target_slot']]]
+    else:
+        n['output_to'] = []
 
-vnode_data
 
+len(vnode_data)
 
 @partial(vmap, in_axes=(0, None), out_axes=0)
 @partial(jit, static_argnums=(1,))
 def trace_points(output_row, vnode_data):
     trace = []
-    currentnid = None
-    for layer in vnode_data:
-        ltrace = []
-        for v in layer:
-            if v["node_id"] != currentnid:
-                outputs = [
-                    output_row[start : start + length].reshape(shape)
-                    for start, length, shape in zip(
-                        v["output_start"], v["output_length"], v["output_shapes"]
-                    )
-                ]
-                ltrace += outputs
-                currentnid = v["node_id"]
-
-        trace.append(ltrace)
+    current_nid = -1
+    for vnode in vnode_data:
+        if vnode['node_id'] != current_nid:
+            outputs = [
+                output_row[start : start + length].reshape(shape)
+                for start, length, shape in zip(
+                    vnode["output_start"], vnode["output_length"], vnode["output_shapes"]
+                )
+            ]
+            trace.extend(outputs)
+            current_nid = vnode['node_id']
     return trace
-
 
 frozen_vnode_data = ut.freeze(vnode_data)
 traces = trace_points(YHAT, frozen_vnode_data)
 
-# check that vnode_data and traces have the same shape
+frozen_vnode_data
+
+[n.uid for n in vnode_data.values()]
+
 assert len(vnode_data) == len(traces)
-for layer, trace in zip(vnode_data, traces):
-    assert len(layer) == len(trace)
 
 # remove output_start, outout_length, output_shapes
-for layer in vnode_data:
-    for v in layer:
-        del v["output_start"]
-        del v["output_length"]
-        del v["output_shapes"]
+for v in vnode_data:
+    del v["output_start"]
+    del v["output_length"]
+    del v["output_shapes"]
 
 
 import json
 
 jt = json.dumps(su.make_json_compatible(traces, float_precision=4), indent=2)
-jd = json.dumps(su.make_json_compatible(frozen_vnode_data))
+jd = json.dumps(su.make_json_compatible(vnode_data))
 
 from jinja2 import Environment, FileSystemLoader
 

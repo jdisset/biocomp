@@ -4,7 +4,7 @@ import { COLORS } from "./constants";
 
 import Draggable, { DraggableCore } from "react-draggable";
 
-const RangeSlider = ({ values, step, min, max, onChange, width }) => {
+const RangeSlider = ({ values, step, min, max, onChange, width, scale }) => {
   const [value1, setValue1] = useState(values[0]);
   const [value2, setValue2] = useState(values[1]);
 
@@ -23,6 +23,7 @@ const RangeSlider = ({ values, step, min, max, onChange, width }) => {
     setValue1(newValue1);
     setValue2(newValue2);
     onChange([newValue1, newValue2]);
+    console.log("scale", scale);
     console.log("dx", dx, "newValue1", newValue1, "newValue2", newValue2);
   };
 
@@ -39,6 +40,7 @@ const RangeSlider = ({ values, step, min, max, onChange, width }) => {
         grid={[gridstep, 0]}
         bounds={{ left: 0, right: width - (thumb2Pos - thumb1Pos) }}
         position={{ x: thumb1Pos, y: 0 }}
+        scale={scale}
       >
         <div className="slider-thumb range-thumb" style={{ width: thumb2Pos - thumb1Pos }}></div>
       </Draggable>
@@ -48,6 +50,7 @@ const RangeSlider = ({ values, step, min, max, onChange, width }) => {
         grid={[gridstep, 0]}
         bounds={{ left: 0, right: thumb2Pos }}
         position={{ x: thumb1Pos, y: 0 }}
+        scale={scale}
       >
         <div className="slider-thumb min-thumb"></div>
       </Draggable>
@@ -58,6 +61,7 @@ const RangeSlider = ({ values, step, min, max, onChange, width }) => {
         bounds={{ left: thumb1Pos, right: width }}
         grid={[gridstep, 0]}
         position={{ x: thumb2Pos, y: 0 }}
+        scale={scale}
       >
         <div className="slider-thumb max-thumb"></div>
       </Draggable>
@@ -65,7 +69,7 @@ const RangeSlider = ({ values, step, min, max, onChange, width }) => {
   );
 };
 
-const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style }, ref) => {
+const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style, scale }, ref) => {
   const STEP = 0.001;
   const MIN = 0;
   // max is the max between 1 and the max of the points
@@ -101,6 +105,7 @@ const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style }, re
         min={MIN}
         max={MAX}
         width={200}
+        scale={scale}
         onChange={(values) => {
         setValues(values);
         setSliderRange(values);
