@@ -1,83 +1,231 @@
+body {
+  background-color: #f0f0f0;
+  /* let's use roboto */
+  font-family: "Roboto", sans-serif;
+  font-size: 14px;
+  color: #212529;
+  background-color: #f8f9fa;
+  overflow: hidden;
+}
+
+.traces {
+  width: 3000px;
+  height: 3000px;
+}
+
+.plot-container {
+  width: 500px;
+  height: 550px;
+  background-color: #eee;
+  position: absolute;
+  z-index: 3;
+}
+
+.plot-axis-select {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding-top: 10px;
+}
+
+.plot-axis-select-box {
+  width: 200px;
+  font-size: 0.8em;
+}
+
+.plot-axis-select-box select {
+	border: 1px solid #ccc;
+	border-radius: 4px;
+	padding: 2px;
+	font-size: 0.8em;
+}
+.plot {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  left: 0px;
+}
+
+/*--- slideraxis ---*/
+
 .slideraxis {
   margin: 20px;
   width: 350px;
-  height: 40px;
+  height: 20px;
   padding: 10px;
   position: relative;
 }
 
-.slider-thumb {
-  cursor: pointer;
-  height: 20px;
-  width: 10px;
-  background: rgba(0, 0, 0, 0);
-}
-
-.slider .slider-thumb-tick {
-  height: 15px;
-  width: 2px;
-  margin-left: 4px;
-}
-
-.slider {
+.range-slider {
   position: absolute;
   z-index: 1;
   width: 200px;
   height: 20px;
-  top: 20px;
-  left: 150px;
+  top: 10px;
+  right: 0px;
 }
 
-.slider-labels{
+.range-slider .slider-thumb {
+  cursor: pointer;
+  height: 20px;
+  width: 7px;
   position: absolute;
-  top: 0px;
-  left: 15px;
-  width: 120px;
 }
 
-.slider-labels .name{
-  text-decoration: none;
-  text-transform: uppercase;
-  text-align: center;
-  margin-top:12px;
-  font-family: Arial, Helvetica, sans-serif;
-  font-weight: 100;
-  font-size: 8px;
-  padding: 3px;
-  background: #222;
-  border-radius: 3px;
-  color: #fff;
+.slider-thumb.range-thumb {
+  background: #2222;
+  height: 10px;
+  top: 5px;
 }
 
+.range-slider .slider-track {
+  height: 0.5px;
+  background: #555a;
+  position: absolute;
+  top: 10px;
+  width: 100%;
+}
 
-.slider-labels .name:before{
+.slider-track:before {
   content: "";
   position: absolute;
-  top: 12px;
-  right: -8px;
-  border-top: 8px solid transparent;
-  border-bottom: 8px solid transparent;
-  border-left: 10px solid #222;
-}
-
-
-
-
-.traces {
-  position: absolute;
-  z-index: 0;
-  top: 0px;
+  top: -5px;
   left: 0px;
-  width: 1500px;
-  height: 3000px;
+  width: 1px;
+  height: 10px;
+  background: #555a;
 }
 
-.settings {
+.slider-track:after {
+  content: "";
   position: absolute;
-  z-index: 2;
-  top: 0px;
-  left: 0px;
+  top: -5px;
+  right: -1px;
+  width: 1px;
+  height: 10px;
+  background: #555a;
 }
 
-/* General Button Style */
+.range-slider .slider-thumb.min-thumb,
+.range-slider .slider-thumb.max-thumb {
+  width: 10px;
+}
+.range-slider .slider-thumb.min-thumb {
+  left: -10px;
+}
 
+.range-slider .slider-thumb.min-thumb::after,
+.range-slider .slider-thumb.max-thumb::after {
+  content: "";
+  position: absolute;
+  top: 0px;
+  width: 1px;
+  height: 20px;
+  background: #222;
+}
+
+.range-slider .slider-thumb.min-thumb::after {
+  left: 10px;
+}
+
+/*---  main menu ---*/
+
+.mainmenu {
+  position: fixed;
+  top: 20px;
+  left: 20px;
+  width: 300px;
+  min-height: 100px;
+  overflow: hidden;
+  background-color: #e9ecef;
+  border-right: 1px solid #dee2e6;
+  padding: 1rem;
+  padding-top: 60px; /* space for the menu button */
+  transition: all 0.3s; /* animate changes */
+}
+
+.menu-button {
+  position: fixed;
+  top: 25px;
+  left: 25px;
+  height: 40px;
+  width: 40px;
+  transition: all 0.3s;
+  cursor: pointer;
+}
+
+.mainmenu.collapsed {
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+.slider-labels {
+  color: #333;
+  margin-left: 20px;
+}
+
+.color-mode {
+  margin-left: 20px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  width: 200px;
+}
+
+.plot-axis-select-box {
+  display: block;
+  margin-left: 20px;
+  width: 300px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.nid,
+.type {
+  font-size: 0.8em;
+  display: inline-block;
+  margin-right: 5px;
+  letter-spacing: 1px;
+  width: auto;
+  border-radius: 50px;
+  padding: 0px 15px;
+  background: #777;
+  color: #fff;
+  position: relative;
+  height: 20px;
+  line-height: 20px;
+  padding-left: 27px;
+}
+
+.type span {
+  color: #ddd;
+  margin-right: 5px;
+  font-weight: bold;
+  font-size: 0.8em;
+  background: #222;
+  border-radius: 50px 0 0 50px;
+  display: inline-block;
+  position: absolute;
+  top: 0px;
+  left: -5px;
+  height: 100%;
+  min-width: 20px;
+  padding-left: 5px;
+  padding-right: 2px;
+  text-align: center;
+}
+
+.info {
+  color: #888;
+  font-size: 0.65em;
+  display: block;
+  font-family: monospace;
+  margin-top: 5px;
+}

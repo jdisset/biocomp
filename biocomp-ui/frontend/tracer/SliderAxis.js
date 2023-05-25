@@ -1,62 +1,110 @@
 import React, { useEffect, useRef, useState, forwardRef } from "react";
 import * as d3 from "d3";
-import { Range, getTrackBackground } from "react-range";
 import { COLORS } from "./constants";
 
+import Draggable, { DraggableCore } from "react-draggable";
+
+const RangeSlider = ({ values, step, min, max, onChange, width }) => {
+  const [value1, setValue1] = useState(values[0]);
+  const [value2, setValue2] = useState(values[1]);
+
+  const scaler = (max - min) / width;
+
+  const onDrag = (e, ui, handleType) => {
+    let newValue1 = value1;
+    let newValue2 = value2;
+    let dx = ui.deltaX * scaler;
+
+    if (handleType === "min" || handleType === "range") newValue1 += dx;
+    if (handleType === "max" || handleType === "range") newValue2 += dx;
+
+    newValue1 = Math.max(min, newValue1);
+    newValue1 = Math.min(newValue1, value2 - step);
+    setValue1(newValue1);
+    setValue2(newValue2);
+    onChange([newValue1, newValue2]);
+    console.log("dx", dx, "newValue1", newValue1, "newValue2", newValue2);
+  };
+
+  const thumb1Pos = (value1 - min) / scaler;
+  const thumb2Pos = (value2 - min) / scaler;
+  const gridstep = step / scaler;
+
+  return (
+    <div className="range-slider">
+      <div className="slider-track" style={{ width: width }}></div>
+      <Draggable
+        onDrag={(e, ui) => onDrag(e, ui, "range")}
+        axis="x"
+        grid={[gridstep, 0]}
+        bounds={{ left: 0, right: width - (thumb2Pos - thumb1Pos) }}
+        position={{ x: thumb1Pos, y: 0 }}
+      >
+        <div className="slider-thumb range-thumb" style={{ width: thumb2Pos - thumb1Pos }}></div>
+      </Draggable>
+      <Draggable
+        onDrag={(e, ui) => onDrag(e, ui, "min")}
+        axis="x"
+        grid={[gridstep, 0]}
+        bounds={{ left: 0, right: thumb2Pos }}
+        position={{ x: thumb1Pos, y: 0 }}
+      >
+        <div className="slider-thumb min-thumb"></div>
+      </Draggable>
+
+      <Draggable
+        onDrag={(e, ui) => onDrag(e, ui, "max")}
+        axis="x"
+        bounds={{ left: thumb1Pos, right: width }}
+        grid={[gridstep, 0]}
+        position={{ x: thumb2Pos, y: 0 }}
+      >
+        <div className="slider-thumb max-thumb"></div>
+      </Draggable>
+    </div>
+  );
+};
+
 const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style }, ref) => {
-  const [values, setValues] = useState([0, 1]);
-  const STEP = 0.005;
+  const STEP = 0.001;
   const MIN = 0;
-  const MAX = 1;
+  // max is the max between 1 and the max of the points
+  const MAX = Math.max(
+    1,
+    d3.max(points, (d) => d[0]+0.01)
+  );
+  const [values, setValues] = useState([MIN, MAX]);
+
+  const width = 200 * MAX;
+
+  const truncateStr = (str, max) => {
+    if (str === "sequestron_ERN") return "ERN";
+    if (str.length > max) return str.substring(0, max - 3) + "...";
+    return str;
+  };
 
   // Copy of TwoThumbs with `draggableTrack` prop added
   return (
     <div className="slideraxis" ref={ref} style={style}>
-      <div className="slider-labels">
-        <div className="name">{sliderData.name}</div>
+      <div className={`slider-labels ${sliderData.type}`}>
+        <div className="type" style={{ background: COLORS[sliderData.type] }}>
+          <span> {sliderData.node_id} </span>
+          {truncateStr(sliderData.type, 14)}
+          {sliderData.n_outputs > 1 ? ` [${sliderData.slot}]` : ""}
+        </div>
+        {sliderData.info && <div className="info">{sliderData.info}</div>}
       </div>
-
-      <Range
+      <RangeSlider
         draggableTrack
         values={values}
         step={STEP}
         min={MIN}
         max={MAX}
+        width={200}
         onChange={(values) => {
-          setValues(values);
-          setSliderRange(values);
+        setValues(values);
+        setSliderRange(values);
         }}
-        renderTrack={({ props, children }) => (
-          <div className="slider" onMouseDown={props.onMouseDown} onTouchStart={props.onTouchStart}>
-            <div
-              ref={props.ref}
-              style={{
-                height: "1px",
-                width: "100%",
-                borderRadius: "4px",
-                background: getTrackBackground({
-                  values,
-                  colors: [COLORS.out_of_range, COLORS.in_range, COLORS.out_of_range],
-                  min: MIN,
-                  max: MAX,
-                }),
-                alignSelf: "center",
-              }}
-            >
-              {children}
-            </div>
-          </div>
-        )}
-        renderThumb={({ props, isDragged }) => (
-          <div className="slider-thumb" {...props}>
-            <div
-              className="slider-thumb-tick"
-              style={{
-                backgroundColor: isDragged ? "#548BF4" : "#444",
-              }}
-            />
-          </div>
-        )}
       />
     </div>
   );

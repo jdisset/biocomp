@@ -781,6 +781,7 @@ def network_ticks_and_labels(network, rescaler, xmax=1, desired_order=None):
     output_names = network.get_output_proteins()
 
     if desired_order is not None:
+        assert len(desired_order) == len(input_names), f'Wrong number of inputs: {desired_order}'
         reordered_input_names = [input_names[i] for i in desired_order]
         input_order = desired_order
     else:
@@ -1119,13 +1120,24 @@ def smooth_2d(
     density_plot=False,
     density_as_alpha=False,
     density_threshold=10,
+    use_y_as_x=False,
     **kw,
 ):
     input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
+
+
+    if use_y_as_x:
+        output_names = network.get_output_proteins()
+        # find input_names in output_names
+        xind = [output_names.index(i) for i in input_names]
+        x = y[:, xind]
+    else:
+        x = x[:, input_order]
+
     y = y[:, output_pos]
-    x = x[:, input_order]
+
     tree = cKDTree(x)
     xx = jnp.linspace(xmin, xmax, res)
     xygrid = jnp.array(np.meshgrid(xx, xx)).T.reshape(-1, 2)

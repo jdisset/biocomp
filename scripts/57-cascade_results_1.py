@@ -125,13 +125,20 @@ import matplotlib
 import matplotlib as plt
 
 # matplotlib.pyplot.switch_backend('Agg')
-dman_full._densities = None
+# dman_full._densities = None
 
 networks = dman_full.get_networks()
 stack = full_stack
-params = best_params
 
-net_ids = list(range(len(networks)))[50:54]
+net_ids = list(range(len(networks)))[214:220]
+
+dman = dman_full.make_subset(net_ids)
+stack = dman.build_compute_stack(compute_config)
+
+base_params = stack.init(key)
+params = full_stack.use_shared_params(base_params, best_params)
+networks = dman.get_networks()
+
 
 
 def smooth_line_plots_slices(
@@ -163,6 +170,7 @@ def smooth_line_plots_slices(
             va='center',
         )
 
+        net.get_output_proteins()
 
 with ut.timer('pred plot'):
     N_SAMPLES_PER_CHUNK = 5000
@@ -171,7 +179,7 @@ with ut.timer('pred plot'):
     N_SAMPLES_TOTAL = N_SAMPLES_PER_CHUNK * N_CHUNKS
 
     key = jax.random.PRNGKey(0)
-    X, Y = dman_full.get_uniform_samples(key, N_SAMPLES_TOTAL)
+    X, Y = dman.get_uniform_samples(key, N_SAMPLES_TOTAL)
     assert len(X) == len(Y)
     assert len(X) == len(networks)
 
@@ -210,42 +218,45 @@ with ut.timer('pred plot'):
         yhat = YHAT[: x.shape[0], out_id : out_id + n_out]
         assert yhat.shape == y.shape, f"{yhat.shape} != {y.shape}"
         error = np.abs(y - yhat).mean()
-        input_order = [0, 1, 2]
 
-        # fig = du.report(params, dman_full, index, use_x_y_yhat=(x, y, yhat), res=128, input_order=input_order)
-        # fig.suptitle(f'{fig._suptitle.get_text()}\nerror: {error:.3f}\n{seen}')
+        ninputs = networks[index].get_nb_inputs()
+        input_order = [0, 1, 2, 3][:ninputs]
 
-        ngslices = [0.25, 0.5, 0.75]
-        mkslices = [0.05, 0.3, 0.5]
 
-        fig, allaxes = du.mkfig(2, 3)
-        input_order = ([0, 1, 2],)
-        net = networks[index]
-        input_names = net.get_inverted_input_proteins()
+        fig = du.report(params, dman, index, use_x_y_yhat=(x, y, yhat), res=128, input_order=input_order, use_y_as_x=True)
+        fig.suptitle(f'{fig._suptitle.get_text()} using y as x\nerror: {error:.3f}')
 
-        smooth_line_plots_slices(
-            x,
-            y,
-            net=net,
-            rescale=dman_full.rescale,
-            mkslices=mkslices,
-            ngslices=ngslices,
-            axes=allaxes[0],
-            input_order=input_order,
-            input_names=input_names,
-        )
+        # ngslices = [0.25, 0.5, 0.75]
+        # mkslices = [0.05, 0.3, 0.5]
 
-        smooth_line_plots_slices(
-            x,
-            yhat,
-            net=net,
-            rescale=dman_full.rescale,
-            mkslices=mkslices,
-            ngslices=ngslices,
-            axes=allaxes[1],
-            input_order=input_order,
-            input_names=input_names,
-        )
+        # fig, allaxes = du.mkfig(2, 3)
+        # input_order = ([0, 1, 2],)
+        # net = networks[index]
+        # input_names = net.get_inverted_input_proteins()
+
+        # smooth_line_plots_slices(
+            # x,
+            # y,
+            # net=net,
+            # rescale=dman.rescale,
+            # mkslices=mkslices,
+            # ngslices=ngslices,
+            # axes=allaxes[0],
+            # input_order=input_order,
+            # input_names=input_names,
+        # )
+
+        # smooth_line_plots_slices(
+            # x,
+            # yhat,
+            # net=net,
+            # rescale=dman.rescale,
+            # mkslices=mkslices,
+            # ngslices=ngslices,
+            # axes=allaxes[1],
+            # input_order=input_order,
+            # input_names=input_names,
+        # )
 
         seen = index in training_set
         seen = '* not used for training *' if not seen else '(in training set)'
@@ -253,11 +264,12 @@ with ut.timer('pred plot'):
         fig.tight_layout()
         return fig
 
-    for index in net_ids:
+    for index in tqdm(range(len(networks)), desc='plot_pred'):
         try:
             fig = plot_prediction(index)
             name = net_name[index]
-            fig.savefig(savepath / f'{index}_{name}_wlines.pdf', dpi=200)
+            fig.savefig(savepath / f'{index}_{name}_y_as_x.pdf', dpi=200)
+            print(f'saved {index} {name}')
             # plt.close(fig)
             # plt.close('all')
         except Exception as e:
@@ -267,11 +279,12 @@ with ut.timer('pred plot'):
             print(f'Error while plotting {index}: {e}')
             traceback.print_exc()
     # plt.close('all')
+    print(savepath)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-nid = 216
+nid = 50
 # X = dman_full.get_X()[nid]
 # Y = dman_full.get_Y()[nid]
 # net = networks[nid]
@@ -280,6 +293,9 @@ nid = 216
 
 dman = dman_full.make_subset([nid])
 stack = dman.build_compute_stack(compute_config)
+
+base_params = stack.init(key)
+params = full_stack.use_shared_params(base_params, best_params)
 
 N_SAMPLES_PER_CHUNK = 100
 N_CHUNKS = 1
@@ -320,7 +336,37 @@ n_out = networks[0].get_nb_outputs()
 x, y = X[0], Y[0]
 
 
+def get_node_info(network, node, outslot):
+    info = ''
+    nid = node.name
+    if node.type == 'output':
+        cdgin = network.central_dogma_graph.iloc[node.cdg_input[outslot]]
+        content = cdgin['content']
+        info = f'{content[0]}'
+    elif node.type == 'input':
+        input_from_output = node.extra['input_from_output']
+        if input_from_output is not None:
+            output_names = network.get_output_proteins()
+            info = f'{output_names[input_from_output]}'
+
+    elif node.type.startswith('sequestron_ERN'):
+        cdgin = network.central_dogma_graph.iloc[node.cdg_input[0]]
+        content = cdgin['content']
+        info = f'{content[0]}'
+
+    if node.source_id is not None:
+        n = node.source_id.split('_')[:-1]
+        n = '_'.join(n)
+        info += f'({n})'
+
+    return info
+
+
+
 net = dman.get_networks()[0]
+
+net.compute_graph
+net.central_dogma_graph
 
 vnode_data = []
 nid_to_row_column = {}
@@ -356,7 +402,9 @@ for lid, layer in enumerate(stack.layers):
                 'target_slot': target_slot,
                 'output_start': output_start_indices,
                 'output_length': output_length,
-                'name': f'{nid} - {layer.f_type}{f"[{slotid}]" if len(layer.f_out_shapes) > 1 else ""}',
+                'n_inputs': len(layer.f_input_shapes),
+                'n_outputs': len(layer.f_out_shapes),
+                'info': get_node_info(net, cnode, slotid),
                 **obj,
             }
 
@@ -413,8 +461,6 @@ traces = trace_points(YHAT, frozen_vnode_data)
 assert len(vnode_data) == len(traces)
 for layer, trace in zip(vnode_data, traces):
     assert len(layer) == len(trace)
-    for vnode, t in zip(layer, trace):
-        print(vnode["name"], t.shape, vnode["output_shapes"])
 
 # remove output_start, outout_length, output_shapes
 for layer in vnode_data:

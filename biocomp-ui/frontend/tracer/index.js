@@ -1,49 +1,100 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import ReactDOM from "react-dom";
-import SliderAxis from "./SliderAxis"; // import the SliderAxis component
-import { layoutData, pointData } from "./data"; // import your data
+import SliderAxis from "./SliderAxis";
+import Menu from "./Menu";
+import { layoutData, pointData } from "./data";
 import { COLORS } from "./constants";
 import * as d3 from "d3";
 import "./style.css";
 import dagre from "dagre";
+import { select, line, scaleLinear, axisBottom, axisLeft } from "d3";
+import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
+import Plot from "./Plot";
 
-const AXIS_OFFSET = { x: 150, y: 20 };
+const AXIS_OFFSET = { x: 170, y: 20 };
 const AXIS_WIDTH = 200;
 
+const NODE_WIDTH = 400;
+const NODE_HEIGHT = 50;
+const INV_NODE_HEIGHT = 0;
+
+/*────────────────────────▼     plotting components     ▼─────────────────────────*/
+
+const LinePlot = ({ points }) => {
+  const width = 200;
+  const height = 200;
+  const ref = useRef();
+
+  useEffect(() => {
+    if (points && points.length > 0) {
+      const svg = d3.select(ref.current);
+      const xScale = d3
+        .scaleLinear()
+        .domain(d3.extent(points, (d) => d[0]))
+        .range([0, width]);
+      const yScale = d3
+        .scaleLinear()
+        .domain(d3.extent(points, (d) => d[1]))
+        .range([height, 0]);
+
+      const line = d3
+        .line()
+        .x((d) => xScale(d[0]))
+        .y((d) => yScale(d[1]));
+
+      svg.append("path").data([points]).attr("d", line).attr("fill", "none").attr("stroke", "blue");
+    }
+  }, [points]);
+
+  return <div ref={ref}></div>;
+};
+
+const ScatterPlot = ({ points }) => {
+  const ref = useRef();
+  const width = 200;
+  const height = 200;
+
+  useEffect(() => {
+    if (points && points.length > 0) {
+      const svg = d3.select(ref.current);
+      const xScale = d3
+        .scaleLinear()
+        .domain(d3.extent(points, (d) => d[0]))
+        .range([0, width]);
+      const yScale = d3
+        .scaleLinear()
+        .domain(d3.extent(points, (d) => d[1]))
+        .range([height, 0]);
+      const colorScale = d3
+        .scaleSequential()
+        .domain(d3.extent(points, (d) => d[2]))
+        .interpolator(d3.interpolateCool);
+
+      svg
+        .selectAll("circle")
+        .data(points)
+        .enter()
+        .append("circle")
+        .attr("cx", (d) => xScale(d[0]))
+        .attr("cy", (d) => yScale(d[1]))
+        .attr("r", 5)
+        .attr("fill", (d) => colorScale(d[2]));
+    }
+  }, [points]);
+
+  return <div ref={ref}></div>;
+};
+
+/*════════════════════════════════════════════════════════════════════════════════*/
+
 function App() {
-  //const sliderRefs = layoutData.map((row, rowIndex) => {
-  //return row.map((item, columnIndex) => {
-  //return React.createRef();
-  //});
-  //});
-
-  const sliderRefs = useMemo(() => [], []);
-
-  // create ranges in a 2D list
-  const init_ranges = layoutData.map((row, rowIndex) => {
-    return row.map((item, columnIndex) => {
-      return [0, 1];
-    });
-  });
-  console.log(layoutData);
-
-  const [ranges, setRanges] = useState(init_ranges);
-
-  const setSliderRange = (rowIndex, columnIndex, range) => {
-    setRanges((prev) => {
-      const newRanges = [...prev];
-      newRanges[rowIndex][columnIndex] = range;
-      return newRanges;
-    });
-  };
-
-  const svgRef = useRef();
+  const [settings, setSettings] = useState({ colorMode: "solid" });
+  const [sceneTransform, setTransform] = useState();
 
   /*─────────────────────────────▼     RowCol map     ▼─────────────────────────────*/
 
   // maintain a map of row/column to index
   // so that we can easily find the index of a slider.
-  // We want to update it if the layoutData changes
   const buildRowColToIndexMap = () => {
     let index = 0;
     let rowColToIndexMap = new Array(layoutData.length);
@@ -65,11 +116,46 @@ function App() {
 
   /*════════════════════════════════════════════════════════════════════════════════*/
 
+  const sliderRefs = useMemo(() => [], []);
+
+  // create ranges in a 2D list
+  const init_ranges = layoutData.map((row, rowIndex) => {
+    return row.map((item, columnIndex) => {
+      return [0, 1];
+    });
+  });
+
+  const [ranges, setRanges] = useState(init_ranges);
+
+  const setSliderRange = (rowIndex, columnIndex, range) => {
+    setRanges((prev) => {
+      const newRanges = [...prev];
+      newRanges[rowIndex][columnIndex] = range;
+      return newRanges;
+    });
+  };
+
+  const init_selected = layoutData.map((row, rowIndex) => {
+    return row.map((item, columnIndex) => {
+      return false;
+    });
+  });
+
+  const svgRef = useRef();
+
   /*─────────────────▼     build selected and position infos     ▼──────────────────*/
 
   const buildPointInfo = () => {
     let pnts = [];
     let selectedTraces = [];
+    const svgRefCurrent = svgRef.current;
+
+    const scene_state = {
+      x: sceneTransform ? sceneTransform.state.positionX : 0,
+      y: sceneTransform ? sceneTransform.state.positionY : 0,
+      scale: sceneTransform ? sceneTransform.state.scale : 1,
+    };
+
     for (const rowIndex in pointData) {
       for (const columnIndex in pointData[rowIndex]) {
         if (
@@ -86,11 +172,18 @@ function App() {
         const minVal = ranges[rowIndex][columnIndex][0];
         const maxVal = ranges[rowIndex][columnIndex][1];
         const points = pointData[rowIndex][columnIndex];
+        const svgRect = svgRefCurrent.getBoundingClientRect();
 
+        const axis_offset = {
+          x: AXIS_OFFSET.x * scene_state.scale,
+          y: AXIS_OFFSET.y * scene_state.scale,
+        };
+
+        const axis_width = AXIS_WIDTH * scene_state.scale;
         const pos = points.map((d, i) => {
           return {
-            x: rect.x + AXIS_OFFSET.x + d * AXIS_WIDTH + window.scrollX,
-            y: rect.y + AXIS_OFFSET.y + window.scrollY,
+            x: (rect.x + axis_offset.x + d * axis_width - svgRect.x) / scene_state.scale,
+            y: (rect.y + axis_offset.y - svgRect.y) / scene_state.scale,
             row: rowIndex,
             column: columnIndex,
             inRange: d >= minVal && d <= maxVal,
@@ -137,7 +230,6 @@ function App() {
 
         const this_idx = rowColToIndexMap[r][c];
         const next_idx = rowColToIndexMap[nextRow][nextColumn];
-        //console.log(pointInfo);
         const pos1 = pointInfo.points[this_idx];
         const pos2 = pointInfo.points[next_idx];
         const linesData = pos1.map((p, i) => ({
@@ -165,10 +257,26 @@ function App() {
     // Default to assigning a new object as a label for each new edge.
     g.setDefaultEdgeLabel(() => ({}));
 
+    let virtualNodes = {};
     for (let r = 0; r < layoutData.length; r++) {
       for (let c = 0; c < layoutData[r].length; c++) {
-        g.setNode(`${r}-${c}`, { width: 300, height: 50 });
+        let node = layoutData[r][c];
+        //const height = node.type.startsWith("in") ? INV_NODE_HEIGHT : NODE_HEIGHT;
+        const height = NODE_HEIGHT;
+        g.setNode(`${r}-${c}`, { width: NODE_WIDTH, height: height });
+
+        // we'll create virtual nodes for the ones that have multiple inputs
+        if (node.n_inputs > 1) {
+          const nid = node.node_id;
+          virtualNodes[nid] = node;
+        }
       }
+    }
+
+    // create virtual nodes
+    for (let nid in virtualNodes) {
+      const node_name = `virt-${nid}`;
+      g.setNode(node_name, { width: 0, height: 0 });
     }
 
     // Next, add edges to the graph.
@@ -185,7 +293,15 @@ function App() {
           continue;
         }
 
-        g.setEdge(`${r}-${c}`, `${nextRow}-${nextColumn}`); // Add edges to the graph
+        let target_nid = item.target_nid;
+        // if in the virtual nodes, we'll link to the virtual node
+        if (target_nid in virtualNodes) {
+          target_nid = `virt-${target_nid}`;
+          g.setEdge(`${r}-${c}`, target_nid);
+          g.setEdge(target_nid, `${nextRow}-${nextColumn}`);
+        } else {
+          g.setEdge(`${r}-${c}`, `${nextRow}-${nextColumn}`); // Add edges to the graph
+        }
       }
     }
 
@@ -193,6 +309,8 @@ function App() {
 
     const calculatedPositions = layoutData.map(() => []);
     g.nodes().forEach((nodeId) => {
+      if (nodeId.startsWith("virt-")) return;
+
       const node = g.node(nodeId);
       const [row, col] = nodeId.split("-").map(Number);
 
@@ -245,14 +363,9 @@ function App() {
         }
 
       case "selectedAxis":
-      // Use a color depending on the selected axis
-      // Again, this is a simplified example
-      //const selectedAxisColor = [>...<];
-      //return selectedAxisColor;
 
       case "solid":
       default:
-        // By default, use solid color
         return pointInfo.selectedTraces[l.i] ? COLORS.selected_trace : COLORS.unselected_trace;
     }
   };
@@ -302,7 +415,6 @@ function App() {
     `traceline-${r}-${c}-${nextRow}-${nextColumn}-${i}`;
 
   const drawLines = (svg) => {
-
     let lines = svg.selectAll("line").data(lineInfo);
 
     lines = lines.enter().append("line").merge(lines); // Apply to both new and existing lines
@@ -333,40 +445,90 @@ function App() {
 
   /*════════════════════════════════════════════════════════════════════════════════*/
 
+  // we want to be able to add new plots by clicking a + button
+
+  const [plotRefs, setPlotRefs] = useState([]);
+
+  const addPlot = () => {
+    const newPlotRefs = [...plotRefs];
+    newPlotRefs.push(React.createRef());
+    setPlotRefs(newPlotRefs);
+  };
+
+  const removePlot = (index) => {
+    const newPlotRefs = [...plotRefs];
+    newPlotRefs.splice(index, 1);
+    setPlotRefs(newPlotRefs);
+  };
+
+  //Plot = ({ layoutData, pointData, pointInfo, rowColToIndexMap }) => {
+
   return (
-    <div>
-      <svg className="traces" ref={svgRef} />
-      {layoutData.map((row, rowIndex) => (
-        <div key={`row-${rowIndex}`} style={{ display: "flex", flexDirection: "row" }}>
-          {row.map((item, columnIndex) => {
-            if (!sliderRefs[rowIndex]) {
-              sliderRefs[rowIndex] = [];
-            }
-            if (!sliderRefs[rowIndex][columnIndex]) {
-              sliderRefs[rowIndex][columnIndex] = React.createRef();
-            }
-            const { x, y } = calculatedPositions[rowIndex][columnIndex]; // assuming calculatedPositions is the result of your dagre layout
-            return (
-              <SliderAxis
-                key={`slider-${rowIndex}-${columnIndex}`}
-                sliderData={item}
-                points={pointData[rowIndex][columnIndex]}
-                ref={sliderRefs[rowIndex][columnIndex]}
-                setSliderRange={(range) => setSliderRange(rowIndex, columnIndex, range)}
-                style={{ position: "absolute", left: x, top: y }}
-              />
-            );
-          })}
-        </div>
+    <>
+      <button onClick={addPlot}>Add Plot</button>
+      {plotRefs.map((ref, index) => (
+        <Plot
+          key={`plot-${index}`}
+          ref={ref}
+          layoutData={layoutData}
+          pointData={pointData}
+          pointInfo={pointInfo}
+          rowColToIndexMap={rowColToIndexMap}
+          position={{ x: index * 100, y: index * 100 }}
+        />
       ))}
-      <div className="settings">
-        <select value={colorMode} onChange={(e) => setColorMode(e.target.value)}>
-          <option value="solid">Solid</option>
-          <option value="gradient">Gradient</option>
-          <option value="selectedAxis">Selected Axis</option>
-        </select>
-      </div>
-    </div>
+
+      <TransformWrapper
+        minScale={0.4}
+        maxScale={2.5}
+        limitToBounds={false}
+        panning={{
+          excluded: [
+            "plot-container",
+            "nopan",
+            "range-slider",
+            "slider-track",
+            "slider-thumb",
+            "slideraxis",
+            "plot",
+            "plotcont",
+            "react-draggable",
+            "plot-axis-select",
+          ],
+        }}
+        wheel={{ step: 0.05 }}
+        onTransformed={setTransform}
+        initialPositionX={-500}
+        initialPositionY={-500}
+      >
+        {({ zoomIn, zoomOut, resetTransform, ...rest }) => (
+          <>
+            <TransformComponent>
+              <svg className="traces" ref={svgRef} />
+
+              {layoutData.map((row, rowIndex) =>
+                row.map((item, columnIndex) => {
+                  if (!sliderRefs[rowIndex]) sliderRefs[rowIndex] = [];
+                  if (!sliderRefs[rowIndex][columnIndex])
+                    sliderRefs[rowIndex][columnIndex] = React.createRef();
+                  const { x, y } = calculatedPositions[rowIndex][columnIndex];
+                  return (
+                    <SliderAxis
+                      key={`slider-${rowIndex}-${columnIndex}`}
+                      sliderData={item}
+                      points={pointData[rowIndex][columnIndex]}
+                      ref={sliderRefs[rowIndex][columnIndex]}
+                      setSliderRange={(range) => setSliderRange(rowIndex, columnIndex, range)}
+                      style={{ position: "absolute", left: x, top: y }}
+                    />
+                  );
+                })
+              )}
+            </TransformComponent>
+          </>
+        )}
+      </TransformWrapper>
+    </>
   );
 }
 

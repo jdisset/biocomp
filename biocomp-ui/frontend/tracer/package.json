@@ -11,9 +11,18 @@
   "license": "ISC",
   "dependencies": {
     "d3": "^7.8.4",
+    "d3-interpolate": "^3.0.1",
+    "d3-scale-chromatic": "^3.0.0",
+    "prop-types": "^15.8.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-draggable": "^4.4.5",
+    "react-icons": "^4.8.0",
+    "react-map-interaction": "^2.1.0",
+    "react-quick-pinch-zoom": "^4.9.0",
     "react-range": "^1.8.14",
-    "style.css": "^1.0.3"
+    "react-zoom-pan-pinch": "^3.0.7",
+    "style.css": "^1.0.3",
+    "styled-components": "^5.3.10"
   }
 }
