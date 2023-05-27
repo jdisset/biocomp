@@ -8,11 +8,6 @@ body {
   overflow: hidden;
 }
 
-.traces {
-  width: 3000px;
-  height: 3000px;
-}
-
 .plot-container {
   width: 500px;
   height: 550px;
@@ -22,32 +17,66 @@ body {
   border-radius: 5px;
   padding-top: 15px;
 
-  box-shadow: -20px -20px 40px #FFFFFF70, 20px 20px 40px #5c5c5c36;
+  box-shadow: -20px -20px 40px #ffffff70, 20px 20px 40px #5c5c5c36;
 }
 
 .plot-container .plot-remove-button {
-	position: absolute;
-	top: 0px;
-	right: 0px;
-	width: 20px;
-	height: 20px;
-	border-radius: 50%;
-	text-align: center;
-	line-height: 20px;
-	cursor: pointer;
+  position: absolute;
+  top: 0px;
+  right: 0px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  text-align: center;
+  line-height: 20px;
+  cursor: pointer;
 }
 
-.plot-container .plot-remove-button:after{
+.network-info{
+	color: #3338;
+	font-weight: 300;
+}
+
+.plot-container .plot-remove-button:after {
   color: #777;
   display: inline-block;
   font-size: 1.2em;
   content: "\00d7"; /* This will render the 'X' */
   font-weight: 300;
 }
-.plot-container .plot-remove-button:hover:after{
+.plot-container .plot-remove-button:hover:after {
   color: #333;
 }
 
+.add-plot-btn {
+	position: absolute;
+	top: 20px;
+	left: 20px;
+	z-index: 2;
+
+  display: inline-block;
+  outline: 0;
+  border: 0;
+  cursor: pointer;
+  font-weight: 600;
+  color: rgb(72, 76, 122);
+  font-size: 14px;
+  height: 38px;
+  padding: 8px 24px;
+  border-radius: 50px;
+  background-image: linear-gradient(180deg, #fff, #f5f5fa);
+  box-shadow: 0 4px 11px 0 rgb(37 44 97 / 15%),
+    0 1px 3px 0 rgb(93 100 148 / 20%);
+  transition: all 0.2s ease-out;
+}
+.add-plot-btn:hover {
+  box-shadow: 0 8px 22px 0 rgb(37 44 97 / 15%),
+    0 4px 6px 0 rgb(93 100 148 / 20%);
+}
+.add-plot-btn:active {
+  box-shadow: inset 0px 3px 7px #d6d6e7;
+  transform: translateY(2px);
+}
 
 .plot-ctrl-row {
   display: flex;
@@ -64,10 +93,10 @@ body {
 }
 
 .plot-select-box select {
-	border: 1px solid #ccc;
-	border-radius: 4px;
-	padding: 2px;
-	font-size: 0.8em;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 2px;
+  font-size: 0.8em;
 }
 .plot {
   width: 100%;

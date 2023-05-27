@@ -8,32 +8,52 @@ import dagre from "dagre";
 import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 import Plot from "./Plot";
 import * as msgpack from "@msgpack/msgpack";
+import shortid from "shortid";
 import fs from "fs";
 
+import { useWhatChanged } from "@simbathesailor/use-what-changed";
+
 const layoutDataBuffer = fs.readFileSync(__dirname + "/layoutData.bin");
-const layoutData = msgpack.decode(new Uint8Array(layoutDataBuffer));
+
+const layoutInfo = msgpack.decode(new Uint8Array(layoutDataBuffer));
+const layoutData = layoutInfo.layout;
+const networkName = layoutInfo.network_name;
 const pointDataBuffer = fs.readFileSync(__dirname + "/pointData.bin");
 const pointData = msgpack.decode(new Uint8Array(pointDataBuffer));
-
+const NTRACES = pointData.length === 0 ? 0 : pointData[0].length;
+const NNODES = layoutData.length;
 const AXIS_OFFSET = { x: 170, y: 20 };
 const AXIS_WIDTH = 200;
 
 const NODE_WIDTH = 400;
 const NODE_HEIGHT = 50;
 
-const NSAMPLE = 50;
+const NSAMPLE_IN = 70;
+const NSAMPLE_OUT = 30;
+
+const init_ranges = () => {
+  let ranges = [];
+  for (let i = 0; i < NNODES; i++) {
+    const min = 0;
+    const max = Math.max(...pointData[i]);
+
+    ranges.push([min, Math.max(1, max)]);
+  }
+  return ranges;
+};
+const initial_ranges = init_ranges();
 
 function App() {
   const [sceneTransform, setTransform] = useState();
   const sliderRefs = useMemo(() => [], []);
 
-  const init_ranges = new Array(layoutData.length).fill([0, 1]);
-  const [ranges, setRanges] = useState(init_ranges);
+  const [ranges, setRanges] = useState(initial_ranges);
 
   const svgRef = useRef();
 
   /*─────────────▼     build position information for each point     ▼──────────────*/
   const buildPointInfo = () => {
+    console.log("buildPointInfo");
     let pnts = [];
     const svgRefCurrent = svgRef.current;
 
@@ -46,9 +66,10 @@ function App() {
       x: AXIS_OFFSET.x * scene_state.scale,
       y: AXIS_OFFSET.y * scene_state.scale,
     };
-    const axis_width = AXIS_WIDTH * scene_state.scale;
 
     for (let idx = 0; idx < sliderRefs.length; idx++) {
+      const range_len = initial_ranges[idx][1] - initial_ranges[idx][0];
+      const axis_width = (AXIS_WIDTH * scene_state.scale) / range_len;
       const sliderRef = sliderRefs[idx].current;
       if (!sliderRef) continue;
       const sliderRect = sliderRef.getBoundingClientRect();
@@ -68,66 +89,95 @@ function App() {
     return pnts;
   };
 
-  const [pointInfo, setPointInfo] = useState(buildPointInfo());
+  const [pointInfo, setPointInfo] = useState();
 
-  const buildSelectedTraces = () => {
+  const [selectedCounts, setSelectedCounts] = useState();
+
+  const buildSelectedCounts = () => {
+    console.log("buildSelectedCounts");
     if (pointData.length === 0) return;
     if (ranges.length === 0) return;
 
-    const NPOINTS = pointData[0].length;
-    let selected = new Array(NPOINTS).fill(true);
+    let selected = Array.from({ length: NTRACES }, () =>
+      Array.from({ length: NNODES }, () => false)
+    );
     for (let idx = 0; idx < pointData.length; idx++) {
       const p = pointData[idx];
-      const inRange = p.map((d, i) => {
-        const range = ranges[idx];
-        const inrange = (d >= range[0]) && (d <= range[1]);
+      const range = ranges[idx];
+      const inRange = p.map((d) => {
+        const inrange = d >= range[0] && d <= range[1];
         return inrange;
       });
-      selected = selected.map((d, i) => d && inRange[i]);
+      for (let i = 0; i < inRange.length; i++) {
+        selected[i][idx] = inRange[i];
+      }
     }
     return selected;
   };
+
+  const buildAllSelectedTraces = () => {
+    console.log("buildAllSelectedTraces");
+    if (selectedCounts === undefined) return;
+    const selected = selectedCounts.map((d) => d.every((dd) => dd));
+    return selected;
+  };
+
   const [selectedTraces, setSelectedTraces] = useState();
 
   const buildVisibleTraces = () => {
+    console.log("buildVisibleTraces");
     if (selectedTraces === undefined) return;
     // simply put the first NSAMPLES selected traces to true
     let visibleTraces = new Array(selectedTraces.length).fill(false);
-    let n = 0;
+    let n_in = 0;
+    let n_out = 0;
     for (let idx = 0; idx < selectedTraces.length; idx++) {
-      if (selectedTraces[idx]) {
+      if (selectedTraces[idx] && n_in < NSAMPLE_IN) {
         visibleTraces[idx] = true;
-        n++;
+        n_in++;
       }
-      if (n === NSAMPLE) break;
+      if (!selectedTraces[idx] && n_out < NSAMPLE_OUT) {
+        visibleTraces[idx] = true;
+        n_out++;
+      }
+      if (n_in >= NSAMPLE_IN && n_out >= NSAMPLE_OUT) break;
     }
     return visibleTraces;
   };
+
   const [visibleTraces, setVisibleTraces] = useState();
 
   const buildLineInfo = () => {
+    console.log("buildLineInfo");
     if (!visibleTraces) return [];
     if (pointInfo.length === 0) return [];
+
+    // filter out invisible traces
+    let vtraces = [];
+    visibleTraces.map((d, i) => {
+      if (d) vtraces.push(i);
+    });
+
     let allLines = [];
     for (let idx = 0; idx < layoutData.length; idx++) {
       const item = layoutData[idx];
       if (item.output_to.length === 0) continue;
       const next_idx = item.output_to[0];
       if (next_idx === undefined) continue;
-      const pos1 = pointInfo[idx];
-      const pos2 = pointInfo[next_idx];
-      const linesData = pos1.map((p, i) => {
-        if (visibleTraces[i])
-          return {
-            x1: p.x,
-            y1: p.y,
-            x2: pos2[i].x,
-            y2: pos2[i].y,
-            idx: idx,
-            next_idx: next_idx,
-            i: i,
-          };
+      const linesData = vtraces.map((i) => {
+        const p1 = pointInfo[idx][i];
+        const p2 = pointInfo[next_idx][i];
+        return {
+          x1: p1.x,
+          y1: p1.y,
+          x2: p2.x,
+          y2: p2.y,
+          idx: idx,
+          next_idx: next_idx,
+          i: i,
+        };
       });
+
       allLines = allLines.concat(linesData.filter((d) => d !== undefined));
     }
     return allLines;
@@ -136,6 +186,7 @@ function App() {
   /*════════════════════════════════════════════════════════════════════════════════*/
 
   const buildGraphLayout = () => {
+    console.log("buildGraphLayout");
     var g = new dagre.graphlib.Graph();
     g.setGraph({});
     g.setDefaultEdgeLabel(() => ({}));
@@ -187,11 +238,12 @@ function App() {
     return calculatedPositions;
   };
 
-  const [calculatedPositions, setCalculatedPositions] = useState(buildGraphLayout());
+  // use a memo to avoid re-calculating the layoutk
+  const calculatedPositions = useMemo(() => buildGraphLayout(), [layoutData]);
 
   const [isInitialRenderComplete, setIsInitialRenderComplete] = useState(false);
 
-  const [lineInfo, setLineInfo] = useState(buildLineInfo());
+  const [lineInfo, setLineInfo] = useState();
 
   /*════════════════════════════════════════════════════════════════════════════════*/
 
@@ -210,6 +262,7 @@ function App() {
   const lineClass = (idx, nextidx, i) => `traceline-${idx}-${nextidx}-${i}`;
 
   const drawLines = (svg) => {
+    console.log("drawLines");
     if (!isInitialRenderComplete) return;
     if (pointInfo.length === 0) return;
     if (lineInfo.length === 0) return;
@@ -242,19 +295,16 @@ function App() {
     if (!svgRef.current) return;
     const svg = d3.select(svgRef.current);
     drawLines(svg);
-  }, [lineInfo, colorMode, isInitialRenderComplete, pointInfo, visibleTraces, calculatedPositions, selectedTraces, ranges]);
+  }, [lineInfo, colorMode, isInitialRenderComplete]);
 
   useEffect(() => {
     setVisibleTraces(buildVisibleTraces());
-  }, [selectedTraces, NSAMPLE, isInitialRenderComplete]);
+  }, [selectedTraces, NSAMPLE_IN, NSAMPLE_OUT, isInitialRenderComplete]);
 
   useEffect(() => {
-    setSelectedTraces(buildSelectedTraces());
-  }, [ranges, pointInfo, isInitialRenderComplete, calculatedPositions]);
-
-  useEffect(() => {
-    setCalculatedPositions(buildGraphLayout());
-  }, [layoutData]); // update calculatedPositions whenever layoutData changes
+    setSelectedCounts(buildSelectedCounts());
+    setSelectedTraces(buildAllSelectedTraces());
+  }, [isInitialRenderComplete, calculatedPositions]);
 
   useEffect(() => {
     setPointInfo(buildPointInfo());
@@ -276,52 +326,71 @@ function App() {
   }, [sliderRefs]);
 
   const setSliderRange = (idx, range) => {
-    // update selected traces when a slider is moved
-    // called by Slider component
-    //if (pointInfo.length === 0) return;
-    //for (let i = 0; i < pointInfo[idx].length; i++) {
-      //const p = pointInfo[idx][i];
-      //const wasInRange = p.value >= ranges[idx][0] && p.value <= ranges[idx][1];
-      //if (wasInRange && (p.value < range[0] || p.value > range[1])) becameOutOfFocus.push(i);
-      //else if (wasInRange && p.value >= range[0] && p.value <= range[1]) becameInFocus.push(i);
-    //}
+    if (!pointInfo || pointInfo.length === 0) return;
 
-    //let newSelectedTraces = [...selectedTraces];
-    //for (let i = 0; i < becameInFocus.length; i++) newSelectedTraces[becameInFocus[i]] = true;
-    //for (let i = 0; i < becameOutOfFocus.length; i++)
-      //newSelectedTraces[becameOutOfFocus[i]] = false;
+    let becameInFocus = [];
+    let becameOutOfFocus = [];
 
-    setRanges((prevRanges) => {
-      const newRanges = [...prevRanges];
-      newRanges[idx] = range;
-      return newRanges;
-    });
-    //setSelectedTraces(buildSelectedTraces());
-    //setVisibleTraces(buildVisibleTraces());
+    for (let i = 0; i < pointInfo[idx].length; i++) {
+      const p = pointInfo[idx][i];
+      const wasInRange = p.value >= ranges[idx][0] && p.value <= ranges[idx][1];
+      const isInRange = p.value >= range[0] && p.value <= range[1];
+      if (wasInRange && !isInRange) {
+        becameOutOfFocus.push(i);
+      }
+      if (!wasInRange && isInRange) {
+        becameInFocus.push(i);
+      }
+    }
+    let newSelectedTraces = [...selectedTraces];
+    let newSelectedCounts = [...selectedCounts];
+    for (let i = 0; i < becameInFocus.length; i++) {
+      const p = pointInfo[idx][becameInFocus[i]];
+      newSelectedCounts[p.i][idx] = true;
+      newSelectedTraces[p.i] = newSelectedCounts[p.i].every((v) => v);
+    }
+    for (let i = 0; i < becameOutOfFocus.length; i++) {
+      const p = pointInfo[idx][becameOutOfFocus[i]];
+      newSelectedCounts[p.i][idx] = false;
+      newSelectedTraces[p.i] = false;
+    }
+
+    setSelectedCounts(newSelectedCounts);
+    setSelectedTraces(newSelectedTraces);
+
+    let newRanges = [...ranges];
+    newRanges[idx] = range;
+    setRanges(newRanges);
   };
 
-  // we want to be able to add new plots by clicking a + button
-  //
-  //
-  //
+  const [bbox, setBbox] = useState({ x: 0, y: 0, width: 0, height: 0 });
+  useEffect(() => {
+    let max_x = 0;
+    let max_y = 0;
+    for (let i = 0; i < calculatedPositions.length; i++) {
+      const p = calculatedPositions[i];
+      max_x = Math.max(max_x, p.x);
+      max_y = Math.max(max_y, p.y);
+    }
+    setBbox({ x: 0, y: 0, width: max_x + 500, height: max_y + 500 });
+  }, [calculatedPositions]);
 
-  const [plotRefs, setPlotRefs] = useState([]);
+  const [plots, setPlots] = useState([]);
 
   const addPlot = () => {
-    const newPlotRefs = [...plotRefs];
-    newPlotRefs.push(React.createRef());
-    setPlotRefs(newPlotRefs);
+    setPlots((prevPlots) => [...prevPlots, { id: shortid.generate(), ref: React.createRef() }]);
   };
 
-  const removePlot = (index) => {
-    const newPlotRefs = [...plotRefs];
-    newPlotRefs.splice(index, 1);
-    setPlotRefs(newPlotRefs);
+  const removePlot = (id) => {
+    setPlots((prevPlots) => prevPlots.filter((plot) => plot.id !== id));
   };
 
   return (
     <>
-      <button onClick={addPlot}>Add Plot</button>
+      <button onClick={addPlot} className="add-plot-btn">
+        {" "}
+        Add Plot
+      </button>
 
       <TransformWrapper
         minScale={0.4}
@@ -353,7 +422,13 @@ function App() {
         {({ zoomIn, zoomOut, resetTransform, ...rest }) => (
           <>
             <TransformComponent>
-              <svg className="traces" ref={svgRef} />
+              <div
+                className="network-info"
+                style={{ position: "absolute", top: -300, left: bbox.width / 3 }}
+              >
+                 "{networkName}" ({NTRACES} traces)
+              </div>
+              <svg className="traces" ref={svgRef} width={bbox.width} height={bbox.height} />
 
               {layoutData.map((item, idx) => {
                 if (!sliderRefs[idx]) sliderRefs[idx] = React.createRef();
@@ -365,21 +440,24 @@ function App() {
                     scale={sceneTransform && sceneTransform.state ? sceneTransform.state.scale : 1}
                     points={pointData[idx]}
                     ref={sliderRefs[idx]}
+                    min={initial_ranges[idx][0]}
+                    max={initial_ranges[idx][1]}
                     setSliderRange={(range) => setSliderRange(idx, range)}
                     style={{ position: "absolute", left: x, top: y }}
                   />
                 );
               })}
 
-              {plotRefs.map((ref, index) => (
+              {plots.map((plot) => (
                 <Plot
-                  key={`plot-${index}`}
-                  ref={ref}
+                  key={plot.id}
+                  ref={plot.ref}
                   layoutData={layoutData}
                   pointInfo={pointInfo}
                   selectedTraces={selectedTraces}
+                  defaultPosition={{ x: bbox.width / 3, y: bbox.height / 3 }}
                   scale={sceneTransform && sceneTransform.state ? sceneTransform.state.scale : 1}
-                  removePlot={() => removePlot(index)}
+                  removePlot={() => removePlot(plot.id)}
                 />
               ))}
             </TransformComponent>

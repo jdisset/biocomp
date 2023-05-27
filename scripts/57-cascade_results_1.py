@@ -65,6 +65,8 @@ with ut.timer(f'Loading data and building networks for {xpnames}'):
 all_networks = dman_full.get_networks()
 net_xp = [n.metadata['from_xp'] for n in all_networks]
 net_name = [n.name for n in all_networks]
+net_name[35]
+net_xp[35]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -291,7 +293,8 @@ with ut.timer('pred plot'):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-nid = 215
+networks = dman.get_networks()
+nid = 35
 # X = dman_full.get_X()[nid]
 # Y = dman_full.get_Y()[nid]
 # net = networks[nid]
@@ -304,7 +307,7 @@ stack = dman.build_compute_stack(compute_config)
 base_params = stack.init(key)
 params = full_stack.use_shared_params(base_params, best_params)
 
-N_SAMPLES_PER_CHUNK = 2500
+N_SAMPLES_PER_CHUNK = 5000
 N_CHUNKS = 1
 N_SAMPLES_TOTAL = N_SAMPLES_PER_CHUNK * N_CHUNKS
 key = jax.random.PRNGKey(0)
@@ -346,10 +349,12 @@ x, y = X[0], Y[0]
 def get_node_info(network, node, outslot):
     info = ''
     nid = node.name
+
     if node.type == 'output':
         cdgin = network.central_dogma_graph.iloc[node.cdg_input[outslot]]
         content = cdgin['content']
         info = f'{content[0]}'
+
     elif node.type == 'input':
         input_from_output = node.extra['input_from_output']
         if input_from_output is not None:
@@ -361,10 +366,22 @@ def get_node_info(network, node, outslot):
         content = cdgin['content']
         info = f'{content[0]}'
 
+    elif node.type.startswith('aggregation'):
+        # extra has 'ratio'
+        info = f'ratio: {100.0*node.extra["ratios"][outslot]:.1f} %'
+
+    elif node.type == 'transcription' or node.type == 'translation':
+        if isinstance(node.cdg_output, int):
+            cdg = network.central_dogma_graph.iloc[node.cdg_output]
+            if cdg['content'] is not None:
+                content = ', '.join([c for c in cdg['content']])
+                info = f'{content}'
+
+
     if node.source_id is not None:
         n = node.source_id.split('_')[:-1]
         n = '_'.join(n)
-        info += f'({n})'
+        info += f'{n}'
 
     return info
 
@@ -465,15 +482,16 @@ for v in vnode_data:
     del v["output_length"]
     del v["output_shapes"]
 
-
-import json
-
-jt = json.dumps(su.make_json_compatible(traces, float_precision=4), indent=2)
-jd = json.dumps(su.make_json_compatible(vnode_data))
-
 import msgpack
 mt = msgpack.packb(su.make_json_compatible(traces))
-md = msgpack.packb(su.make_json_compatible(vnode_data))
+
+layoutinfo = {
+    'network_name': net.name,
+    'layout': vnode_data
+}
+
+
+md = msgpack.packb(su.make_json_compatible(layoutinfo))
 
 with open('../biocomp-ui/frontend/tracer/layoutData.bin', 'wb') as f:
     f.write(md)

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useMemo } from "react";
 import * as d3 from "d3";
 import "./style.css";
 import Draggable from "react-draggable";
+import { useWhatChanged } from "@simbathesailor/use-what-changed";
 
 const CMAPS = {
   YlGnBu: d3.interpolateYlGnBu,
@@ -20,6 +21,7 @@ const ScatterPlot = ({ points, axisInfo, selected, width, height, colorScale }) 
     return `${axis.type} - ${axis.node_id}${axis.info ? " - " + axis.info : ""}`;
   };
 
+  const deps = [points, axisInfo, selected, width, height, colorScale];
   useEffect(() => {
     if (points && points.length > 0 && axisInfo) {
       const svg = d3.select(ref.current);
@@ -73,25 +75,48 @@ const ScatterPlot = ({ points, axisInfo, selected, width, height, colorScale }) 
         .attr("transform", "rotate(-90)")
         .attr("text-anchor", "middle")
         .text(getLabel(axisInfo[1]));
+      // Create a group for the points.
+      const pointsGroup = plot.append("g").classed("points-group", true);
 
-      xData.forEach((xVal, i) => {
-        const yVal = yData[i];
-        const selectedPoint = selected[i];
-        const point = plot.append("g").attr("transform", `translate(${x(xVal)}, ${y(yVal)})`);
+      // Key function to identify data points.
+      const keyFn = (d, i) => `point-${i}`;
 
-        if (selectedPoint) {
-          point
-            .append("circle")
-            .attr("r", 4)
-            .attr("fill", cData ? color(cData[i]) : "black").raise();
-        } else {
-          point
-            .append("circle")
-            .attr("r", 1)
-            .attr("fill", "#aaaa").lower();
-        }
-      });
+      // Create a data join.
+      const pointsSelection = pointsGroup.selectAll(".point").data(xData, keyFn);
 
+      // Handle the enter selection.
+      pointsSelection
+        .enter()
+        .append("g")
+        .classed("point", true)
+        .attr("transform", (d, i) => `translate(${x(d)}, ${y(yData[i])})`)
+        .append("circle")
+        .attr("r", (d, i) => (selected[i] ? 3 : 0.5))
+        .attr("fill", (d, i) =>  selected[i] ? (cData ? color(cData[i]) : "black") : "#aaaa")
+        .each(function (d, i) {
+          if (selected[i]) {
+            d3.select(this).raise();
+          } else {
+            d3.select(this).lower();
+          }
+        });
+
+      // Handle the update selection.
+      pointsSelection
+        .attr("transform", (d, i) => `translate(${x(d)}, ${y(yData[i])})`)
+        .select("circle")
+        .attr("r", (d, i) => (selected[i] ? 3 : 0.5))
+        .attr("fill", (d, i) =>  selected[i] ? (cData ? color(cData[i]) : "black") : "#aaaa")
+        .each(function (d, i) {
+          if (selected[i]) {
+            d3.select(this).raise();
+          } else {
+            d3.select(this).lower();
+          }
+        });
+
+      // Handle the exit selection.
+      pointsSelection.exit().remove();
       if (cData) {
         // Colorbar position and dimensions
         const colorbarX = pwidth + 10;
@@ -140,7 +165,7 @@ const ScatterPlot = ({ points, axisInfo, selected, width, height, colorScale }) 
           .call(colorAxis);
       }
     }
-  }, [points, axisInfo, selected, width, height, colorScale]);
+  }, deps);
 
   return <svg ref={ref} width={width} height={height} className="plot" />;
 };
@@ -159,18 +184,19 @@ const AxisSelector = ({ axislist, label, setAxis }) => {
   }, [selectedAxis, setAxis]);
 
   const orderedAxisList = useMemo(() => {
-    return axislist.sort((a,b) => a.node_id - b.node_id);
+    return axislist.sort((a, b) => a.node_id - b.node_id);
   }, [axislist]);
 
   return (
     <div className="plot-select-box">
-      <select className="plot-select"
-        value={selectedAxis} onChange={(e) => setSelectedAxis(e.target.value)}>
+      <select
+        className="plot-select"
+        value={selectedAxis}
+        onChange={(e) => setSelectedAxis(e.target.value)}
+      >
         <option value="None">-- {label} --</option>
         {orderedAxisList.map((axis) => (
-          <option value={axis.identifier}>
-            {axis.name}
-          </option>
+          <option value={axis.identifier}>{axis.name}</option>
         ))}
       </select>
     </div>
@@ -179,79 +205,84 @@ const AxisSelector = ({ axislist, label, setAxis }) => {
 
 /*════════════════════════════════════════════════════════════════════════════════*/
 
-const Plot = React.forwardRef(({ layoutData, pointInfo, selectedTraces, removePlot, scale }, ref) => {
-  /*────────────────────────────▼     getInfo     ▼─────────────────────────────*/
-  const axislist = useMemo(() => {
-    return layoutData.map((item, idx) => ({
-      name: `${item.node_id} ${item.type} ${item.n_outputs > 1 ? "[" + item.slot + "]" : ""}`,
-      identifier: `${idx}`,
-      node_id: item.node_id,
-    }));
-  }, []);
+const Plot = React.forwardRef(
+  ({ layoutData, pointInfo, selectedTraces, removePlot, scale, defaultPosition }, ref) => {
+    /*────────────────────────────▼     getInfo     ▼─────────────────────────────*/
+    const axislist = useMemo(() => {
+      return layoutData.map((item, idx) => ({
+        name: `${item.node_id}${item.n_outputs > 1 ? "." + item.slot : ""} ${item.type}`,
+        identifier: `${idx}`,
+        node_id: item.node_id,
+      }));
+    }, []);
 
-  const getAxisInfo = (axisId) => {
-    if (axisId === "None") return null;
-    const idx = parseInt(axisId);
-    return layoutData[idx];
-  };
+    const getAxisInfo = (axisId) => {
+      if (axisId === "None") return null;
+      const idx = parseInt(axisId);
+      return layoutData[idx];
+    };
 
-  const getPoints = (axisIdList) => {
-    let values = [];
-    axisIdList.forEach((axisId) => {
-      if (axisId !== "None") {
-        const idx = parseInt(axisId);
-        const points = pointInfo[idx];
-        values.push(points.map((p) => p.value[0]));
-      }
-    });
-    return values;
-  };
+    const getPoints = (axisIdList) => {
+      let values = [];
+      axisIdList.forEach((axisId) => {
+        if (axisId !== "None") {
+          const idx = parseInt(axisId);
+          const points = pointInfo[idx];
+          values.push(points.map((p) => p.value[0]));
+        }
+      });
+      return values;
+    };
 
-  /*════════════════════════════════════════════════════════════════════════════════*/
+    /*════════════════════════════════════════════════════════════════════════════════*/
 
-  const [xAxis, setXAxis] = useState("None");
-  const [yAxis, setYAxis] = useState("None");
-  const [colorAxis, setColorAxis] = useState("None");
-  const [points, setPoints] = useState([]);
-  const [colorScale, setColorScale] = useState(null);
+    const [xAxis, setXAxis] = useState("None");
+    const [yAxis, setYAxis] = useState("None");
+    const [colorAxis, setColorAxis] = useState("None");
+    const [points, setPoints] = useState([]);
+    const [colorScale, setColorScale] = useState(null);
 
-  useEffect(() => {
-    setPoints(getPoints([xAxis, yAxis, colorAxis]));
-  }, [xAxis, yAxis, colorAxis]);
+    const axisInfo = useMemo(() => {
+      return [getAxisInfo(xAxis), getAxisInfo(yAxis), getAxisInfo(colorAxis)];
+    }, [xAxis, yAxis, colorAxis]);
+    useEffect(() => {
+      setPoints(getPoints([xAxis, yAxis, colorAxis]));
+    }, [xAxis, yAxis, colorAxis]);
 
-  return (
-    <Draggable scale={scale}>
-      <div className="plot-container" ref={ref}>
-        <div className="plot-remove-button" onClick={removePlot}></div>
-        <div className="plot-ctrl-row">
-          <AxisSelector axislist={axislist} label="X Axis" setAxis={setXAxis} />
-          <AxisSelector axislist={axislist} label="Y Axis" setAxis={setYAxis} />
-          <AxisSelector axislist={axislist} label="Color Axis" setAxis={setColorAxis} />
-        </div>
-        <div className="plot-ctrl-row">
-          <div className="plot-select-box">
-            <select onChange={(e) => setColorScale(e.target.value)}>
-              {Object.keys(CMAPS).map((cmap) => (
-                <option key={cmap} value={cmap}>
-                  {cmap}
-                </option>
-              ))}
-            </select>
+    return (
+      <Draggable scale={scale} defaultPosition={defaultPosition}>
+        <div className="plot-container" ref={ref}>
+          <div className="plot-remove-button" onClick={removePlot}></div>
+          <div className="plot-ctrl-row">
+            <AxisSelector axislist={axislist} label="X Axis" setAxis={setXAxis} />
+            <AxisSelector axislist={axislist} label="Y Axis" setAxis={setYAxis} />
+            <AxisSelector axislist={axislist} label="Color Axis" setAxis={setColorAxis} />
+          </div>
+          <div className="plot-ctrl-row">
+            <div className="plot-select-box">
+              <select onChange={(e) => setColorScale(e.target.value)}>
+                {Object.keys(CMAPS).map((cmap) => (
+                  <option key={cmap} value={cmap}>
+                    {cmap}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="plot">
+            <ScatterPlot
+              points={points}
+              axisInfo={axisInfo}
+              selected={selectedTraces}
+              colorScale={colorScale}
+              width={480}
+              height={480}
+            />
           </div>
         </div>
-        <div className="plot">
-          <ScatterPlot
-            points={points}
-            axisInfo={[getAxisInfo(xAxis), getAxisInfo(yAxis), getAxisInfo(colorAxis)]}
-            selected={selectedTraces}
-            colorScale={colorScale}
-            width={480}
-            height={480}
-          />
-        </div>
-      </div>
-    </Draggable>
-  );
-});
+      </Draggable>
+    );
+  }
+);
 
 export default Plot;

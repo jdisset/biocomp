@@ -67,17 +67,11 @@ const RangeSlider = ({ values, step, min, max, onChange, width, scale }) => {
   );
 };
 
-const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style, scale }, ref) => {
+const SliderAxis = forwardRef(({ sliderData, min, max, setSliderRange, style, scale }, ref) => {
   const STEP = 0.001;
-  const MIN = 0;
-  // max is the max between 1 and the max of the points
-  const MAX = Math.max(
-    1,
-    d3.max(points, (d) => d[0] + 0.01)
-  );
-  const [values, setValues] = useState([MIN, MAX]);
+  const [values, setValues] = useState([min, max]);
 
-  const width = 200 * MAX;
+  const width = 200;
 
   const truncateStr = (str, max) => {
     if (str === "sequestron_ERN") return "ERN";
@@ -103,9 +97,9 @@ const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style, scal
         draggableTrack
         values={values}
         step={STEP}
-        min={MIN}
-        max={MAX}
-        width={200}
+        min={min}
+        max={max}
+        width={width}
         scale={scale}
         onChange={(values) => {
           setValues(values);
