@@ -10,7 +10,7 @@ const BASE_COLORS = {
 };
 
 const COLORS = {
-  selected_trace: "#e0000090",
+  selected_trace: "#ffca3a80",
   unselected_trace: BASE_COLORS.grey+ "25",
 
   unselected_point: BASE_COLORS.grey,

@@ -83,12 +83,12 @@ const ScatterPlot = ({ points, axisInfo, selected, width, height, colorScale }) 
           point
             .append("circle")
             .attr("r", 4)
-            .attr("fill", cData ? color(cData[i]) : "black");
+            .attr("fill", cData ? color(cData[i]) : "black").raise();
         } else {
           point
-            .append("text")
-            .text("+")
-            .attr("fill", cData ? color(cData[i]) : "black");
+            .append("circle")
+            .attr("r", 1)
+            .attr("fill", "#aaaa").lower();
         }
       });
 
@@ -159,11 +159,7 @@ const AxisSelector = ({ axislist, label, setAxis }) => {
   }, [selectedAxis, setAxis]);
 
   const orderedAxisList = useMemo(() => {
-    return axislist.sort((a, b) => {
-      if (a.node_id < b.node_id) return -1;
-      else if (a.node_id > b.node_id) return 1;
-      else return a.uid > b.uid ? -1 : 1;
-    });
+    return axislist.sort((a,b) => a.node_id - b.node_id);
   }, [axislist]);
 
   return (
@@ -172,7 +168,7 @@ const AxisSelector = ({ axislist, label, setAxis }) => {
         value={selectedAxis} onChange={(e) => setSelectedAxis(e.target.value)}>
         <option value="None">-- {label} --</option>
         {orderedAxisList.map((axis) => (
-          <option key={axis.identifier} value={axis.identifier}>
+          <option value={axis.identifier}>
             {axis.name}
           </option>
         ))}
@@ -183,12 +179,13 @@ const AxisSelector = ({ axislist, label, setAxis }) => {
 
 /*════════════════════════════════════════════════════════════════════════════════*/
 
-const Plot = React.forwardRef(({ layoutData, pointInfo, removePlot, scale }, ref) => {
+const Plot = React.forwardRef(({ layoutData, pointInfo, selectedTraces, removePlot, scale }, ref) => {
   /*────────────────────────────▼     getInfo     ▼─────────────────────────────*/
   const axislist = useMemo(() => {
     return layoutData.map((item, idx) => ({
       name: `${item.node_id} ${item.type} ${item.n_outputs > 1 ? "[" + item.slot + "]" : ""}`,
       identifier: `${idx}`,
+      node_id: item.node_id,
     }));
   }, []);
 
@@ -203,7 +200,7 @@ const Plot = React.forwardRef(({ layoutData, pointInfo, removePlot, scale }, ref
     axisIdList.forEach((axisId) => {
       if (axisId !== "None") {
         const idx = parseInt(axisId);
-        const points = pointInfo.points[idx];
+        const points = pointInfo[idx];
         values.push(points.map((p) => p.value[0]));
       }
     });
@@ -246,7 +243,7 @@ const Plot = React.forwardRef(({ layoutData, pointInfo, removePlot, scale }, ref
           <ScatterPlot
             points={points}
             axisInfo={[getAxisInfo(xAxis), getAxisInfo(yAxis), getAxisInfo(colorAxis)]}
-            selected={pointInfo.selectedTraces}
+            selected={selectedTraces}
             colorScale={colorScale}
             width={480}
             height={480}

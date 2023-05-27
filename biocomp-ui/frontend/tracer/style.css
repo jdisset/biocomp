@@ -20,8 +20,9 @@ body {
   position: absolute;
   z-index: 3;
   border-radius: 5px;
-  box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.2);
   padding-top: 15px;
+
+  box-shadow: -20px -20px 40px #FFFFFF70, 20px 20px 40px #5c5c5c36;
 }
 
 .plot-container .plot-remove-button {
@@ -221,14 +222,15 @@ body {
   margin-right: 5px;
   letter-spacing: 1px;
   width: auto;
-  border-radius: 50px;
+  border-radius: 8px;
   padding: 0px 15px;
   background: #777;
   color: #fff;
   position: relative;
   height: 20px;
   line-height: 20px;
-  padding-left: 27px;
+  padding-left: 30px;
+  box-shadow: -2px -2px 3px #fff, 1px 1px 3px #0000003d;
 }
 
 .type span {
@@ -237,15 +239,15 @@ body {
   font-weight: bold;
   font-size: 0.8em;
   background: #222;
-  border-radius: 50px 0 0 50px;
+  border-radius: 8px 0 0 8px;
   display: inline-block;
   position: absolute;
   top: 0px;
-  left: -5px;
+  left: -1px;
   height: 100%;
   min-width: 20px;
-  padding-left: 5px;
-  padding-right: 2px;
+  padding-left: 3px;
+  padding-right: 1px;
   text-align: center;
 }
 

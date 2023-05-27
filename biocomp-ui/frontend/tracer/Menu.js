@@ -1,7 +1,4 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
-import ReactDOM from "react-dom";
-import { layoutData, pointData } from "./data"; // import your data
-import { COLORS } from "./constants";
 import "./style.css";
 import { FiMenu } from "react-icons/fi"; // import an icon for the button
 

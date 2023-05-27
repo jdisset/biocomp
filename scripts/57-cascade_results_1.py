@@ -291,7 +291,7 @@ with ut.timer('pred plot'):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-nid = 50
+nid = 215
 # X = dman_full.get_X()[nid]
 # Y = dman_full.get_Y()[nid]
 # net = networks[nid]
@@ -304,7 +304,7 @@ stack = dman.build_compute_stack(compute_config)
 base_params = stack.init(key)
 params = full_stack.use_shared_params(base_params, best_params)
 
-N_SAMPLES_PER_CHUNK = 100
+N_SAMPLES_PER_CHUNK = 2500
 N_CHUNKS = 1
 N_SAMPLES_TOTAL = N_SAMPLES_PER_CHUNK * N_CHUNKS
 key = jax.random.PRNGKey(0)
@@ -455,7 +455,7 @@ traces = trace_points(YHAT, frozen_vnode_data)
 
 frozen_vnode_data
 
-[n.uid for n in vnode_data.values()]
+[n['uid'] for n in vnode_data]
 
 assert len(vnode_data) == len(traces)
 
@@ -471,15 +471,27 @@ import json
 jt = json.dumps(su.make_json_compatible(traces, float_precision=4), indent=2)
 jd = json.dumps(su.make_json_compatible(vnode_data))
 
-from jinja2 import Environment, FileSystemLoader
+import msgpack
+mt = msgpack.packb(su.make_json_compatible(traces))
+md = msgpack.packb(su.make_json_compatible(vnode_data))
 
-template_folder_path = Path('../biocomp-ui/frontend/tracer/templates')
-env = Environment(loader=FileSystemLoader(template_folder_path))
-template = env.get_template('data_template.js')
+with open('../biocomp-ui/frontend/tracer/layoutData.bin', 'wb') as f:
+    f.write(md)
 
-rendered = template.render(pointData=jt, layoutData=jd)
-
-with open('../biocomp-ui/frontend/tracer/data.js', 'w') as f:
-    f.write(rendered)
+with open('../biocomp-ui/frontend/tracer/pointData.bin', 'wb') as f:
+    f.write(mt)
 
 print('done')
+##
+
+# from jinja2 import Environment, FileSystemLoader
+
+# template_folder_path = Path('../biocomp-ui/frontend/tracer/templates')
+# env = Environment(loader=FileSystemLoader(template_folder_path))
+# template = env.get_template('data_template.js')
+
+# rendered = template.render(pointData=jt, layoutData=jd)
+
+# with open('../biocomp-ui/frontend/tracer/data.js', 'w') as f:
+    # f.write(rendered)
+

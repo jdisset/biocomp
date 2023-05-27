@@ -23,8 +23,6 @@ const RangeSlider = ({ values, step, min, max, onChange, width, scale }) => {
     setValue1(newValue1);
     setValue2(newValue2);
     onChange([newValue1, newValue2]);
-    console.log("scale", scale);
-    console.log("dx", dx, "newValue1", newValue1, "newValue2", newValue2);
   };
 
   const thumb1Pos = (value1 - min) / scaler;
@@ -75,7 +73,7 @@ const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style, scal
   // max is the max between 1 and the max of the points
   const MAX = Math.max(
     1,
-    d3.max(points, (d) => d[0]+0.01)
+    d3.max(points, (d) => d[0] + 0.01)
   );
   const [values, setValues] = useState([MIN, MAX]);
 
@@ -87,14 +85,17 @@ const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style, scal
     return str;
   };
 
+  useEffect(() => {
+    setSliderRange(values);
+  }, [values]);
+
   // Copy of TwoThumbs with `draggableTrack` prop added
   return (
     <div className="slideraxis" ref={ref} style={style}>
       <div className={`slider-labels ${sliderData.type}`}>
         <div className="type" style={{ background: COLORS[sliderData.type] }}>
-          <span> {sliderData.node_id} </span>
+          <span> {sliderData.node_id}{sliderData.n_outputs > 1 ? `.${sliderData.slot}` : ""} </span>
           {truncateStr(sliderData.type, 14)}
-          {sliderData.n_outputs > 1 ? ` [${sliderData.slot}]` : ""}
         </div>
         {sliderData.info && <div className="info">{sliderData.info}</div>}
       </div>
@@ -107,8 +108,7 @@ const SliderAxis = forwardRef(({ sliderData, points, setSliderRange, style, scal
         width={200}
         scale={scale}
         onChange={(values) => {
-        setValues(values);
-        setSliderRange(values);
+          setValues(values);
         }}
       />
     </div>
