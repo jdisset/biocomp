@@ -33,7 +33,10 @@ xpnames = ['bt', 'cascades', 'csy4matrix', 'casematrix']
 
 with ut.timer(f'Loading data and building networks for {xpnames}'):
     lib = su.load_lib()
-    loadedxp = {xpname: su.load_xp(XP[xpname], lib, data_path=prog.data_path) for xpname in xpnames}
+    loadedxp = {
+        xpname: su.load_xp(XP[xpname], lib, data_path='./data/calibrated_data_v2')
+        for xpname in xpnames
+    }
     dman_full = du.DataManager.from_xps(loadedxp.values(), prog.training_config, inverse='all')
 
 all_networks = dman_full.get_networks()

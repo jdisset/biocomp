@@ -257,6 +257,10 @@ class XP:
         inverse='shortest',
         data_path='./data/calibrated_data',
     ):
+        """
+        Reads the xp file, and loads both the recipes (into an instance-level sqlite db)
+        and the raw data (into a dict of pandas dataframes)
+        """
         log.debug(f'Initializing XP {xp_name}')
         self.xp_path, self.recipe_path = Path(xp_path), Path(recipe_path)
         self.samples: list  # [{name, recipe, notes}]
@@ -294,10 +298,10 @@ class XP:
         import_recipes_to_sql(
             [recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], self.dbconn, lib
         )
-        self.load_raw_data()
+        self.load_raw_data() # will populate the self.raw_data dict
 
     def load_raw_data(self):
-        """Load the raw data for each sample in the xp"""
+        """Load the raw data for each sample in the xp, and store it in a dict [sample name] -> pandas dataframe"""
         datafiles = [self.datapath / f"{s['name']}.{self.name}.csv" for s in self.samples]
         df_data: dict[str, pd.DataFrame] = {}
         for s, f in tqdm(
@@ -310,7 +314,10 @@ class XP:
 
     def build_networks(self, inverse='shortest'):
         """Build the networks for each sample in the xp,
-        returns two lists: (networks, sample names)"""
+        returns two lists: (networks, sample names)
+        although several networks could in theory share the same sample name
+        here we return a list of pairs (network, sample name) to avoid confusion
+        """
 
         # first build each network for each recipe
         unique_recipe_names = list(set(self.recipe_names))
@@ -339,7 +346,9 @@ class XP:
         return tuple(zip(*networks))
 
     def get_Y(self, networks, sample_names):
+        """Returns the Y data (the dependent variables) for each network and sample"""
         assert self.raw_data is not None
+        assert len(networks) == len(sample_names)
         # we want to reorder data columns to match the network's output
         out_prots = [net.get_output_proteins() for net in networks]
         out_channels = [[self.color_names[k] for k in out_prot] for out_prot in out_prots]
@@ -350,6 +359,7 @@ class XP:
         return Y
 
     def get_XY(self, networks, sample_names):
+        """Returns the X and Y data (the independent and dependent variables) for each network and sample"""
         Y = self.get_Y(networks, sample_names)
         X = [net.get_input_from_output(y) for net, y in zip(networks, Y)]
         return X, Y

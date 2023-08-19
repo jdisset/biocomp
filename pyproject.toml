@@ -6,3 +6,8 @@ build-backend = "setuptools.build_meta"
 reportMissingImports = true
 reportMissingTypeStubs = false
 typeCheckingMode = "off"
+
+[tool.ruff]
+ignore = ["E741"]
+line-length = 100
+target-version = "py311" # Assume Python 3.11.

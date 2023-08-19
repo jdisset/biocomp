@@ -495,11 +495,22 @@ DEFAULT_TRAINING_CONFIG = {
     'decay_epochs': 130,
     'adam_w_decay': 0.001,
     'max_gradient_norm': 1.0,
+
     # -------- data config --------
+
+    # batches
     "batch_size": 32,
     "n_batches": 2048,
-    "data_scaling_log_factor": 5e4,
-    "data_scaling_max_value": 5e7,
+
+    # log transform:
+    "data_min_value": 500,
+    "data_max_value": 1e8,
+    "data_log_offset": 3e3,
+    "data_log_factor": 100,
+    "data_log_poly_threshold": 300,
+    "data_log_poly_compression": 0.4,
+
+    # resampling:
     "data_sampling_kde_bw_method": 0.02,
     "data_sampling_max_density_samples": 4000,
     "data_sampling_density_quantile_threshold": 0.025,  # threshold = min of both

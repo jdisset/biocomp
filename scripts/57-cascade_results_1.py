@@ -59,7 +59,10 @@ xpnames = ['bt', 'cascades', 'csy4matrix', 'casematrix']
 
 with ut.timer(f'Loading data and building networks for {xpnames}'):
     lib = su.load_lib()
-    loadedxp = {xpname: su.load_xp(XP[xpname], lib) for xpname in xpnames}
+    loadedxp = {
+        xpname: su.load_xp(XP[xpname], lib, data_path='./data/calibrated_data_v2')
+        for xpname in xpnames
+    }
     dman_full = du.DataManager.from_xps(loadedxp.values(), training_config, inverse='all')
 
 all_networks = dman_full.get_networks()
@@ -67,7 +70,7 @@ net_xp = [n.metadata['from_xp'] for n in all_networks]
 net_name = [n.name for n in all_networks]
 net_name[35]
 net_xp[35]
-
+print('done')
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{               --     training and validation sets     --
@@ -90,6 +93,7 @@ validation_set = [
 ]
 
 n_outputs = [n.get_nb_outputs() for n in all_networks]
+print('done')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -115,10 +119,73 @@ except FileNotFoundError:
 
     best_params = full_stack.use_shared_params(base_params, trained_params)
     joblib.dump(best_params, f'../__cache/best_params.pkl')
+print('done')
 
+
+### {{{               --     experimenting with rescaling     --
+netid = 0
+n = dman_full.get_network(netid)
+pnames = n.get_inverted_input_proteins()
+pnames
+rx = dman_full._raw_X[netid]
+x = dman_full._X[netid]
+above = (rx > 800).all(axis=1)
+rx = rx[above]
+x = x[above]
+
+##
+factor = dman_full.data_cfg['data_scaling_log_factor']
+maxv = dman_full.data_cfg['data_scaling_max_value']
+offset = 3e3
+factor = 100
+maxv = 5e7
+current_tr = lambda x: (np.log10(1 + np.clip(x / factor, 0, None))) - np.log10(offset / factor)
+# / np.log10(maxv / factor)
+
+DEFAULT_LOG_RESCALE = 0.1
+DEFAULT_LOG_OFFSET = 5000
+
+
+def logoffset(x, scale=DEFAULT_LOG_RESCALE, offset=DEFAULT_LOG_OFFSET):
+    return jnp.log(jnp.clip(x + offset, 1, None)) - jnp.log(offset)
+
+
+def tr(x, offset=3e3, maxv=5e7, factor=50, threshold=300, compression=0.4):
+    loff = ut.log_poly_log(offset / factor, threshold=threshold, compression=compression)
+    lmv = ut.log_poly_log(maxv / factor, threshold=threshold, compression=compression)
+    xp = ut.log_poly_log(1 + x / factor, threshold=threshold, compression=compression) - loff
+    y = xp / (lmv - loff)
+    return y
+
+def inv_tr(y, offset=3e3, maxv=5e7, factor=50, threshold=300, compression=0.4):
+    loff = ut.log_poly_log(offset / factor, threshold=threshold, compression=compression)
+    lmv = ut.log_poly_log(maxv / factor, threshold=threshold, compression=compression)
+    yp = y * (lmv - loff) + loff
+    ypinv = ut.inverse_log_poly_log(yp , threshold=threshold, compression=compression)
+    x = factor * (ypinv  - 1)
+    return x
+
+
+# du.fluo_scatter(new_tr(rx), pnames, xmin=0, xmax=1.5, logscale=False)
+du.fluo_scatter(tr(rx), pnames, logscale=False, xmin=-0.3, xmax=1.5)
+# du.fluo_scatter(rx, pnames, logscale=True)
+# du.fluo_scatter(x2, pnames, logscale=True)
+# du.fluo_scatter(logoffset(rx), pnames, logscale=False)
+##
+
+
+du.fluo_scatter(rx, pnames, xmin=0, xmax=1e7, logscale=True)
+du.fluo_scatter(x, pnames, logscale=False)
+
+
+# count nans in x:
+np.isnan(x).sum(axis=0)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                    --     training data plots     --
 
-savepath = Path(f'~/Desktop/predictions/lvl2_cascades_v1').expanduser()
+savepath = Path(f'~/Desktop/predictions/lvl2_cascades_newcalibry_v2').expanduser()
 savepath.mkdir(parents=True, exist_ok=True)
 
 # bash command to remove all files with "==" in the name:
@@ -132,7 +199,8 @@ import matplotlib as plt
 networks = dman_full.get_networks()
 stack = full_stack
 
-net_ids = list(range(len(networks)))[214:220]
+# net_ids = list(range(len(networks)))[214:220]
+net_ids = list(range(len(networks)))
 
 dman = dman_full.make_subset(net_ids)
 stack = dman.build_compute_stack(compute_config)
@@ -140,6 +208,9 @@ stack = dman.build_compute_stack(compute_config)
 base_params = stack.init(key)
 params = full_stack.use_shared_params(base_params, best_params)
 networks = dman.get_networks()
+
+print('done')
+##
 
 
 def smooth_line_plots_slices(
@@ -293,11 +364,6 @@ with ut.timer('pred plot'):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-networks = dman.get_networks()
-nid = 35
-# X = dman_full.get_X()[nid]
-# Y = dman_full.get_Y()[nid]
-# net = networks[nid]
 
 # single_net_trace:
 
@@ -377,7 +443,6 @@ def get_node_info(network, node, outslot):
                 content = ', '.join([c for c in cdg['content']])
                 info = f'{content}'
 
-
     if node.source_id is not None:
         n = node.source_id.split('_')[:-1]
         n = '_'.join(n)
@@ -450,6 +515,7 @@ for n in vnode_data:
 
 len(vnode_data)
 
+
 @partial(vmap, in_axes=(0, None), out_axes=0)
 @partial(jit, static_argnums=(1,))
 def trace_points(output_row, vnode_data):
@@ -467,6 +533,7 @@ def trace_points(output_row, vnode_data):
             current_nid = vnode['node_id']
     return trace
 
+
 frozen_vnode_data = ut.freeze(vnode_data)
 traces = trace_points(YHAT, frozen_vnode_data)
 
@@ -483,12 +550,10 @@ for v in vnode_data:
     del v["output_shapes"]
 
 import msgpack
+
 mt = msgpack.packb(su.make_json_compatible(traces))
 
-layoutinfo = {
-    'network_name': net.name,
-    'layout': vnode_data
-}
+layoutinfo = {'network_name': net.name, 'layout': vnode_data}
 
 
 md = msgpack.packb(su.make_json_compatible(layoutinfo))
@@ -511,5 +576,4 @@ print('done')
 # rendered = template.render(pointData=jt, layoutData=jd)
 
 # with open('../biocomp-ui/frontend/tracer/data.js', 'w') as f:
-    # f.write(rendered)
-
+# f.write(rendered)

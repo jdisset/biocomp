@@ -18,6 +18,9 @@ import matplotlib.pyplot as plt
 from jax.scipy.stats import gaussian_kde
 import itertools
 
+from matplotlib.ticker import FixedLocator, FuncFormatter
+import matplotlib.ticker as ticker
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -283,6 +286,25 @@ def _get_batches(
 
 
 DEFAULT_DENSITIES_CACHE_DIR = '../__cache/biocomp_densities_cache'
+
+
+def tr(x, offset=3e3, maxv=5e7, factor=50, threshold=300, compression=0.4):
+    loff = ut.log_poly_log(offset / factor, threshold=threshold, compression=compression)
+    lmv = ut.log_poly_log(maxv / factor, threshold=threshold, compression=compression)
+    xp = ut.log_poly_log(1 + x / factor, threshold=threshold, compression=compression) - loff
+    y = xp / (lmv - loff)
+    return y
+
+
+def inv_tr(y, offset=3e3, maxv=5e7, factor=50, threshold=300, compression=0.4):
+    loff = ut.log_poly_log(offset / factor, threshold=threshold, compression=compression)
+    lmv = ut.log_poly_log(maxv / factor, threshold=threshold, compression=compression)
+    yp = y * (lmv - loff) + loff
+    ypinv = ut.inverse_log_poly_log(yp, threshold=threshold, compression=compression)
+    x = factor * (ypinv - 1)
+    return x
+
+
 class DataManager:
     """The DataManager handles XP data and their matching compute stacks"""
 
@@ -296,12 +318,28 @@ class DataManager:
         self.data_cfg = data_cfg
         self._raw_X = [np.array(x) for x in X]
         self._raw_Y = [np.array(y) for y in Y]
+
+        # remove invalid values:
+        for i in range(len(self._raw_X)):
+            invalid_at = np.isnan(self._raw_X[i]).any(axis=1)
+            invalid_at = invalid_at | (np.isnan(self._raw_Y[i]).any(axis=1))
+            invalid_at = invalid_at | (self._raw_X[i] < data_cfg['data_min_value']).any(axis=1)
+            invalid_at = invalid_at | (self._raw_Y[i] > data_cfg['data_max_value']).any(axis=1)
+            percentnan = 100.0 * invalid_at.sum() / len(invalid_at)
+            if percentnan > 0.0:
+                ut.logger.warning(
+                    f'Removing {invalid_at.sum()} invalid poitns for net {i} ({percentnan:.2f} %)'
+                )
+                self._raw_X[i] = self._raw_X[i][~invalid_at]
+                self._raw_Y[i] = self._raw_Y[i][~invalid_at]
+
         self._networks = networks
         self._X = self.rescale(self._raw_X)
         self._Y = self.rescale(self._raw_Y)
-        MAX_VAL = 1.5
-        assert max([x.max() for x in self._X]) < MAX_VAL
-        assert max([y.max() for y in self._Y]) < MAX_VAL
+
+        # MAX_VAL = 1.25
+        # assert max([x.max() for x in self._X]) < MAX_VAL, max([x.max() for x in self._X])
+        # assert max([y.max() for y in self._Y]) < MAX_VAL, max([y.max() for y in self._Y])
         self.gen_kdes()
         self.compute_stack = None
         self._densities = None
@@ -315,6 +353,7 @@ class DataManager:
         return DataManager(sub_x, sub_y, sub_networks, self.data_cfg)
 
     def build_compute_stack(self, compute_cfg, **kwargs):
+        """Build/Get the composite compute stack of all networks"""
         self.compute_stack = ComputeStack(self._networks)
         self.compute_stack.build(compute_cfg, **kwargs)
         return self.compute_stack
@@ -325,6 +364,7 @@ class DataManager:
         return self.compute_stack
 
     def get_individual_compute_stack(self, network_id):
+        """Build/Get a compute stack for a single network"""
         if network_id not in self.individual_compute_stacks:
             self.individual_compute_stacks[network_id] = self.compute_stack.make_subset(
                 [network_id]
@@ -333,6 +373,7 @@ class DataManager:
         return self.individual_compute_stacks[network_id]
 
     def gen_kdes(self, bw=None, max_n=None):
+        """Generate KDEs to get the data densities of each sample"""
 
         if bw is None:
             bw = self.data_cfg['data_sampling_kde_bw_method']
@@ -356,6 +397,7 @@ class DataManager:
         ]
 
     def compute_densities(self, max_chunk=50000, cache_dir=None):
+        """Compute the densities at each data point in the dataset, for each sample"""
         import hashlib
         from pathlib import Path
         import base64
@@ -376,14 +418,13 @@ class DataManager:
             h.update(str(self._kde_bw).encode())
             return h.digest()
 
-
         def _compute_d(kde, x):
             # cut in chunks to avoid memory issues
             n = x.shape[0]
             xhash = make_hash(x)
             if self.cache_dir is not None:
                 b64hash = base64.b64encode(xhash).decode()
-                fname = f'.densitycache_{b64hash}.npy'.replace('/', '_').replace('=' , '')
+                fname = f'.densitycache_{b64hash}.npy'.replace('/', '_').replace('=', '')
                 cache_path = Path(self.cache_dir) / fname
                 if cache_path.exists():
                     return np.load(cache_path)
@@ -407,19 +448,31 @@ class DataManager:
             for kde, x in tqdm(list(zip(self._kdes, self._X)), desc='computing densities')
         ]
 
-    def rescale(self, X, factor=None, maxv=None):
-        if factor is None:
-            factor = self.data_cfg['data_scaling_log_factor']
-        if maxv is None:
-            maxv = self.data_cfg['data_scaling_max_value']
-        return [np.log10(1 + (x / factor)) / np.log10(maxv / factor) for x in X]
+    def rescale(self, X):
+        return [
+            tr(
+                x,
+                offset=self.data_cfg['data_log_offset'],
+                maxv=self.data_cfg['data_max_value'],
+                factor=self.data_cfg['data_log_factor'],
+                threshold=self.data_cfg['data_log_poly_threshold'],
+                compression=self.data_cfg['data_log_poly_compression'],
+            )
+            for x in X
+        ]
 
-    def unscale(self, X, factor=None, maxv=None):
-        if factor is None:
-            factor = self.data_cfg['data_scaling_log_factor']
-        if maxv is None:
-            maxv = self.data_cfg['data_scaling_max_value']
-        return [factor * (np.power(maxv / factor, x) - 1) for x in X]
+    def unscale(self, X):
+        return [
+            inv_tr(
+                x,
+                offset=self.data_cfg['data_log_offset'],
+                maxv=self.data_cfg['data_max_value'],
+                factor=self.data_cfg['data_log_factor'],
+                threshold=self.data_cfg['data_log_poly_threshold'],
+                compression=self.data_cfg['data_log_poly_compression'],
+            )
+            for x in X
+        ]
 
     def get_batches(self, rng_key):
         if self._densities is None:
@@ -490,13 +543,20 @@ class DataManager:
 
     @classmethod
     def from_xps(cls, xplist, config=cmp.DEFAULT_COMPUTE_CONFIG, **kw):
+
+        # build all networks and gat all sample names, for each xp
         networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
-        X, Y = zip(*[xp.get_XY(m, s) for xp, m, s in zip(xplist, networks, samples)])
+
+        # get all X (independent vars) and Y (dependent vars) for each xp
+        X, Y = zip(*[xp.get_XY(n, s) for xp, n, s in zip(xplist, networks, samples)])
+
+        # get everything as a long concatenated list
         X, Y, networks = (
             list(itertools.chain(*X)),
             list(itertools.chain(*Y)),
             list(itertools.chain(*networks)),
         )
+
         return cls(X, Y, networks, config)
 
 
@@ -1127,7 +1187,6 @@ def smooth_2d(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
 
-
     if use_y_as_x:
         output_names = network.get_output_proteins()
         # find input_names in output_names
@@ -1236,7 +1295,6 @@ def smooth_line_plots(
     # x = y[:, otherind]
     tree = cKDTree(x)
 
-
     xquery = np.linspace(xmin, xmax, res).reshape(-1, 1)
     if slice is None:
         slice = np.array([])
@@ -1247,7 +1305,6 @@ def smooth_line_plots(
         xquery = np.concatenate([xquery, np.tile(slice, (xquery.shape[0], 1))], axis=1)
 
     z, _ = get_knn_smooth(xquery, y, tree=tree, **kw)
-
 
     if label is None:
         label = ''
@@ -1279,7 +1336,6 @@ def smooth_line_plots(
         ttle = title
     if ttle is not None:
         ax.set_title(ttle)
-
 
 
 def setup_clean_fig(title):
@@ -1542,6 +1598,74 @@ def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
 ### {{{                  --     Fluo distribution plots     --
 
 
+def powers_of_ten(xmin, xmax, skip_10=False):
+    bounds = np.array([xmin, xmax])
+    logbounds = np.sign(bounds) * np.floor(
+        np.maximum(np.log10(np.maximum(np.abs(bounds), 0.1)), 0)
+    ).astype(int)
+    powers = np.arange(logbounds[0], logbounds[1] + 1)
+    if skip_10:
+        powers = np.delete(powers, np.where(np.abs(powers) == 1))
+    return np.power(10, np.abs(powers)) * np.sign(powers)
+
+
+def format_powers(x, _):
+    abs_x = abs(x)
+    if abs_x < 1000:
+        if x == int(x):
+            return f'{x:.0f}'  # No decimal point
+        else:
+            return f'{x:.1f}'  # Up to 1 decimal point
+    else:
+        E = int(np.log10(abs_x))
+        if x == int(x):
+            return r'${0:.0f}e{1}$'.format(x // 10**E, E)
+        else:
+            return r'${0:.1f}e{1}$'.format(x / 10**E, E)
+
+
+class PowerFormatter(ticker.Formatter):
+    def __init__(self, values, skip10=False):
+        self.values = values
+        self.skip10 = skip10
+
+    def __call__(self, x, pos):
+        v = self.values[pos]
+        if self.skip10 and abs(v) == 10:
+            return ''
+        return format_powers(v, None)
+
+
+def make_symlog_ax(
+    ax, xlims=None, ylims=None, linthresh=200, linscale=0.4, skip10=True, margins=0.05
+):
+    # ticks at all powers of 10:
+    # tr = partial(symlog, linthresh=linthresh, linscale=linscale)
+    # invtr = partial(inverse_symlog, linthresh=linthresh, linscale=linscale)
+    tr = partial(ut.log_poly_log, threshold=linthresh, compression=linscale)
+    invtr = partial(ut.inverse_log_poly_log, threshold=linthresh, compression=linscale)
+
+    xlims_tr, ylims_tr = None, None
+
+    if xlims is not None:
+        xlims_tr = tr(np.asarray(xlims))
+        xp10 = powers_of_ten(*xlims)
+        xlims_margin = xlims_tr + np.array([-1, 1]) * margins * np.diff(xlims_tr)
+        ax.set_xlim(xlims_margin)
+        ax.set_xticks(tr(xp10))
+        ax.xaxis.set_major_formatter(PowerFormatter(xp10, skip10=skip10))
+
+    if ylims is not None:
+        ylims_tr = tr(np.asarray(ylims))
+        yp10 = powers_of_ten(*ylims)
+        ylims_margin = ylims_tr + np.array([-1, 1]) * margins * np.diff(ylims_tr)
+        ax.set_ylim(ylims_margin)
+        ax.set_yticks(tr(yp10))
+        ax.yaxis.set_major_formatter(PowerFormatter(yp10, skip10=skip10))
+
+    return tr, invtr, xlims_tr, ylims_tr
+
+
 def get_bio_color(name, default='k'):
     import difflib
 
@@ -1576,35 +1700,48 @@ def fluo_scatter(
     types=None,
     fname=None,
     logscale=True,
-    alpha=0.04,
-    s=5,
+    alpha=0.1,
+    maxn=50000,
+    s=2,
     **_,
 ):
+
     fig, axes = plt.subplots(1, len(pnames), figsize=(1.25 * len(pnames), 10), sharey=True)
+
     if len(pnames) == 1:
         axes = [axes]
+
     if types is None:
         types = [''] * len(pnames)
 
-    xmin = rawx.min() if xmin is None else 10**xmin
-    xmax = rawx.max() if xmax is None else 10**xmax
+    if xmin is None:
+        xmin = rawx.min()
+    if xmax is None:
+        xmax = rawx.max()
 
+    X = rawx.copy()
+    if len(X) > maxn:
+        X = X[np.random.choice(len(X), maxn, replace=False)]
+
+    tr = lambda x: x
+    itr = tr
     for xid, ax in enumerate(axes):
         color = get_bio_color(pnames[xid])
-        xcoords = jax.random.normal(jax.random.PRNGKey(0), (rawx.shape[0],)) * 0.1
-        ax.scatter(xcoords, rawx[:, xid], color=color, alpha=alpha, s=s, zorder=10, lw=0)
+        xcoords = np.random.normal(0, 0.1, (X.shape[0],))
         if logscale:
-            ax.set_yscale('symlog')
-        ax.set_xlim(-0.5, 0.5)
-        ax.set_ylim(xmin, xmax)
-        ax.set_xlabel(f'{pnames[xid]} {types[xid]}', rotation=0, labelpad=20, fontsize=10)
+            tr, itr, _, ytr = make_symlog_ax(ax, None, ylims=[xmin, xmax])
+        else:
+            ax.set_ylim(xmin, xmax)
+        ax.scatter(xcoords, tr(X[:, xid]), color=color, alpha=alpha, s=s, zorder=10, lw=0)
+
         remove_spines(ax)
+        ax.set_xlim(-0.5, 0.5)
+        ax.set_xlabel(f'{pnames[xid]} {types[xid]}', rotation=0, labelpad=20, fontsize=10)
         ax.set_xticks([])
 
     if title is not None:
         fig.suptitle(title, fontsize=12)
     fig.tight_layout()
-
     if fname is not None:
         fig.savefig(fname)
 
@@ -1678,7 +1815,6 @@ def density_plot_1d(
                 dashes=(10, 20),
                 dash_capstyle='round',
             )
-
         if ticks_labels is not None:
             ax.set_yticks(ticks)
             ax.set_yticklabels(ticks_labels)
@@ -1689,7 +1825,7 @@ def density_plot_1d(
 
 
 def fluo_densities(
-    rawx, pnames, xmin=None, xmax=None, res=2000, title=None, types=None, logscale=True, **kw
+    rawx, pnames, xmin=None, xmax=None, res=1000, title=None, types=None, logscale=False, **kw
 ):
     fig, axes = plt.subplots(1, len(pnames), figsize=(1.5 * len(pnames), 10))
 
@@ -1702,6 +1838,7 @@ def fluo_densities(
 
     ticks = np.arange(xmin, xmax + 1, 1)
     sample_at = jnp.linspace(xmin, xmax, res)
+
     if logscale:
         ylabels = [scformat.format("{:m}", x) for x in inv_loglog(ticks)]
     else:
