@@ -20,16 +20,21 @@ from rich.console import Console
 from rich.progress import track
 from typing import List
 
+
 class ddict(dict):
     def __getattr__(*args):
         val = dict.get(*args)
         return ddict(val) if type(val) is dict else val
+
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
+
 def is_interactive():
     import matplotlib as mpl
+
     return mpl.is_interactive()
+
 
 DEFAULT_DATA_PATH = Path("~/Dropbox (MIT)/Biocomp/").expanduser()
 DEFAULT_XP_PATH = DEFAULT_DATA_PATH / "Experiments"
@@ -385,7 +390,17 @@ def screenCaptures(
     print(f'Saved all screenshots in {end-start}s')
 
 
-def plot_networks(nets: List[bc.Network], filenames=None, axes=None, H=2000, W=800, outputs=None, figsize=(10, 10), show=False, show_title=True):
+def plot_networks(
+    nets: List[bc.Network],
+    filenames=None,
+    axes=None,
+    H=2000,
+    W=800,
+    outputs=None,
+    figsize=(10, 10),
+    show=False,
+    show_title=True,
+):
     import nest_asyncio
 
     nest_asyncio.apply()
@@ -398,10 +413,11 @@ def plot_networks(nets: List[bc.Network], filenames=None, axes=None, H=2000, W=8
     if filenames is None:
         show = True
         import tempfile
+
         filenames = [tempfile.mktemp(suffix='.png') for _ in nets]
 
     if outputs is not None:
-        assert(len(outputs) == len(nets))
+        assert len(outputs) == len(nets)
         # make a copy of all nets:
         nets = [net.copy() for net in nets]
         for net, output in zip(nets, outputs):
@@ -410,7 +426,6 @@ def plot_networks(nets: List[bc.Network], filenames=None, axes=None, H=2000, W=8
             for node_id, o in output.items():
                 outp = o if o.ndim > 0 else [o]
                 net.compute_graph['output_values'][node_id] = np.array(outp)
-
 
     screenCaptures(
         draw_network,
@@ -423,8 +438,9 @@ def plot_networks(nets: List[bc.Network], filenames=None, axes=None, H=2000, W=8
     if show:
         import matplotlib.pyplot as plt
         import matplotlib.image as mpimg
+
         if axes is None:
-             axes = [plt.subplots(figsize=figsize)[1] for _ in nets]
+            axes = [plt.subplots(figsize=figsize)[1] for _ in nets]
         for f, n, (ax) in zip(filenames, nets, axes):
             img = mpimg.imread(f)
             # we want no border, nothing other than the image
@@ -440,8 +456,6 @@ def plot_networks(nets: List[bc.Network], filenames=None, axes=None, H=2000, W=8
                     transform=ax.transAxes,
                 )
             ax.patch.set_facecolor('white')
-
-
 
 
 def plot_cdg(nets: List[bc.Network], filenames):
@@ -648,7 +662,6 @@ def plot_node(
             if k[4:] in quantized_per_type:
                 quantized_per_type[k].update(quantized_per_type[k[4:]])
 
-
     def get_q(__, v, **_):
         return v
 
@@ -686,7 +699,6 @@ def plot_node(
         # set correct ratio (depends on xlim and ylim)
         ax.set_aspect('equal')
 
-
     elif n_inputs == 2:
         # we will have a grid of n_combinations heatmaps
         n_rows = int(np.ceil(np.sqrt(n_combinations)))
@@ -702,7 +714,7 @@ def plot_node(
 
     while True:
 
-        def vf(x,z):
+        def vf(x, z):
             if extra_args is not None:
                 f = model.node_impl[ntype](partial(get_p, index=counter_val), get_q, **extra_args)
             else:
@@ -806,6 +818,7 @@ def plot_node(
 
 def get_jaxpr(fun, *args, **kwargs):
     import jax
+
     return jax.make_jaxpr(fun)(*args, **kwargs)
 
 
@@ -849,20 +862,28 @@ def readimg(p, threshold=None, size=None):
 
 
 def np_converter(obj):
-    if isinstance(obj, np.integer):
+    import jax.numpy as jnp
+
+    if isinstance(obj, (np.integer, jnp.integer)):
         return int(obj)
-    elif isinstance(obj, np.floating):
+    elif isinstance(obj, (np.floating, jnp.floating)):
         return float(obj)
-    elif isinstance(obj, np.ndarray):
+    elif isinstance(obj, (np.ndarray, jnp.ndarray)):
         return obj.tolist()
-    elif isinstance(obj, np.bool_):
+    elif isinstance(obj, np.bool_) or isinstance(obj, jnp.bool_):
         return bool(obj)
-    elif np.isnan(obj):
+    elif np.isnan(obj) or jnp.isnan(obj):
         return None
 
 
-def make_json_compatible(o):
-    return json.loads(json.dumps(o, default=np_converter))
+# parse_float=lambda x: round(float(x), 3)
+def make_json_compatible(o, converter=np_converter, float_precision=None):
+    if float_precision is not None:
+        return json.loads(
+            json.dumps(o, default=converter), parse_float=lambda x: round(float(x), float_precision)
+        )
+    else:
+        return json.loads(json.dumps(o, default=converter))
 
 
 #                                                                            }}}

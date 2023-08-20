@@ -26,16 +26,26 @@ import logging
 from rich.logging import RichHandler
 
 
-def setup_logger(lname=None, level=logging.INFO):
-    root_logger = logging.getLogger(lname)
-    root_logger.setLevel(level)
-    ch = RichHandler(rich_tracebacks=True)
-    ch.setFormatter(logging.Formatter("%(message)s"))
-    ch.setLevel(level)
-    root_logger.handlers = [ch]
-    root_logger.propagate = False
-    return root_logger
+# def setup_logger(lname=None, level=logging.INFO):
+    # root_logger = logging.getLogger(lname)
+    # root_logger.setLevel(level)
+    # ch = RichHandler(rich_tracebacks=True)
+    # ch.setFormatter(logging.Formatter("%(message)s"))
+    # ch.setLevel(level)
+    # root_logger.handlers = [ch]
+    # root_logger.propagate = False
+    # return root_logger
 
+def setup_logger(lname=None, level=logging.INFO):
+    log = logging.getLogger(lname)
+    if log.hasHandlers():
+        log.handlers.clear()
+    logging_handler = RichHandler()
+    logging_handler.setFormatter(logging.Formatter(datefmt="%Y-%m-%dT%H:%M:%S%z "))
+    logging_handler._log_render.show_path = False
+    log.addHandler(logging_handler)
+    log.setLevel(level)
+    return log
 
 setup_logger()
 setup_logger('jax')
@@ -206,12 +216,12 @@ def int_array_to_str(a):
 
 
 def get_looped_slice(a, start, end):
-    """Get a slice of an array that loops around the end of the array."""
+    """Get a slice of an array that loops around the end of the array if end > a.shape[0]"""
     offset = start // a.shape[0]
     start = start % a.shape[0]
     end = end - offset * a.shape[0]
     if end > a.shape[0]:  # loop around
-        return jnp.concatenate([a[start:], get_looped_slice(a, 0, end - a.shape[0])])
+        return np.concatenate([a[start:], get_looped_slice(a, 0, end - a.shape[0])])
     else:
         return a[start:end]
 

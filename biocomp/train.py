@@ -343,12 +343,15 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
 
     stack, params = init_stack(dman, key)
     xbatches, ybatches = generate_batches(dman, key)
+    ut.logger.info(f"Generated {xbatches.shape[0]} batches")
     optimizer = get_optimizer(training_config)
     dynamic, _ = ut.split_params(params, training_config['static_params'])
+    ut.logger.info(f"Split params between dynamic and static. Now intializing optimizer.")
     opt_state = optimizer.init(dynamic)
     total_batches = training_config['n_batches']
     assert total_batches == xbatches.shape[0] == ybatches.shape[0]
     steps_per_epoch = max(1, int(training_config['steps_per_epoch']))
+    ut.logger.info(f"Done initializing optimizer, total batches: {total_batches}, steps per epoch: {steps_per_epoch}")
 
     # --- loss & update functions
 
@@ -562,11 +565,11 @@ class TrainingProgram:
             help='enable checks (default: False)',
         )
         self.parser.add_argument(
-            '--loglevel', type=str, default='info', help='log level (default: info)'
+            '--loglevel', type=str, default='debug', help='log level (default: debug)'
         )
-        self.parser.add_argument(
-            '--device', type=str, default='cpu', help='jax device (default: cpu)'
-        )
+        # self.parser.add_argument(
+            # '--device', type=str, default='cpu', help='jax device (default: cpu)'
+        # )
         self.parser.add_argument(
             '--data_path',
             type=str,
@@ -645,7 +648,7 @@ class TrainingProgram:
         ut.set_loglevel(self.args.loglevel)
 
         # device
-        self.device = jax.devices(self.args.device)[0]
+        # self.device = jax.devices(self.args.device)[0]
 
         if self.args.seed is not None:
             self.seed = self.args.seed

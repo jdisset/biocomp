@@ -327,7 +327,7 @@ class DataManager:
             invalid_at = invalid_at | (self._raw_Y[i] > data_cfg['data_max_value']).any(axis=1)
             percentnan = 100.0 * invalid_at.sum() / len(invalid_at)
             if percentnan > 0.0:
-                ut.logger.warning(
+                ut.logger.info(
                     f'Removing {invalid_at.sum()} invalid poitns for net {i} ({percentnan:.2f} %)'
                 )
                 self._raw_X[i] = self._raw_X[i][~invalid_at]
@@ -375,6 +375,8 @@ class DataManager:
     def gen_kdes(self, bw=None, max_n=None):
         """Generate KDEs to get the data densities of each sample"""
 
+        ut.logger.debug('Generating KDEs for data density estimation')
+
         if bw is None:
             bw = self.data_cfg['data_sampling_kde_bw_method']
         if max_n is None:
@@ -384,7 +386,7 @@ class DataManager:
         self._kde_bw = bw
 
         npoints = [min(x.shape[0], max_n) for x in self._X]
-        print(f'Using {npoints} points for KDE estimation')
+        ut.logger.debug(f'Using {npoints} points for KDE estimation')
         xindices = [
             np.random.choice(x.shape[0], size=n, replace=False) for x, n in zip(self._X, npoints)
         ]
@@ -395,12 +397,14 @@ class DataManager:
             )
             for x, xi in zip(self._X, xindices)
         ]
+        ut.logger.debug('Done generating KDEs')
 
     def compute_densities(self, max_chunk=50000, cache_dir=None):
         """Compute the densities at each data point in the dataset, for each sample"""
         import hashlib
         from pathlib import Path
         import base64
+        ut.logger.debug('Computing densities')
 
         if cache_dir is None:
             if 'densities_cache_dir' in self.data_cfg:
@@ -408,7 +412,7 @@ class DataManager:
             else:
                 self.cache_dir = DEFAULT_DENSITIES_CACHE_DIR
 
-        ut.logger.info(f'Using cache dir {self.cache_dir}')
+        ut.logger.debug(f'Using cache dir {self.cache_dir}')
 
         def make_hash(x):
             h = hashlib.md5()
@@ -427,6 +431,7 @@ class DataManager:
                 fname = f'.densitycache_{b64hash}.npy'.replace('/', '_').replace('=', '')
                 cache_path = Path(self.cache_dir) / fname
                 if cache_path.exists():
+                    ut.logger.debug(f'Loading density cache from {cache_path}')
                     return np.load(cache_path)
 
             allarr = []
@@ -447,6 +452,9 @@ class DataManager:
             _compute_d(kde, x)
             for kde, x in tqdm(list(zip(self._kdes, self._X)), desc='computing densities')
         ]
+
+        ut.logger.debug(f'Done computing {len(self._densities)} densities')
+
 
     def rescale(self, X):
         return [
