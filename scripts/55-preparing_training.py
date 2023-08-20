@@ -19,7 +19,7 @@ prog.parse_args()
 # s1 = {34, 205, 177, 107, 50, 55, 238, 161, 170, 130, 308, 78, 207, 46, 73, 38}
 # intersection = s0.intersection(s1)
 
-ut.logger.debug(f'Using {prog.device} device')
+# ut.logger.debug(f'Using {prog.device} device')
 
 ### {{{                      --     loading xp     --
 
