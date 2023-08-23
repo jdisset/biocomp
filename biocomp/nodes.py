@@ -43,10 +43,12 @@ def indirect_param_at(
     # res = params[node_id] as this requires branching
     # Indexing an array is fine though, so we could simply create
     # an array of params for each node that is as big as the largest
-    # node_id, and then index it with the node_id. However, this would be wasteful
-    # for params that have large shapes but are only used by a few nodes.
+    # node_id, and then index it with the node_id, which is exactly what we do in
+    # direct_param_at.
+    # However, this is wasteful for params that have large shapes
+    # but are only used by a few nodes (most params are like this).
 
-    # So instead I add one layer of indirection:
+    # So instead I add one layer of indirection to have a sparse array of params:
     # we save a key_vec which will contain -1 for all nodes that don't use
     # the given parameter, and an actual parameter_id for the nodes that do.
     # This way we can use the key_vec to index a parameter array that contains
@@ -111,6 +113,11 @@ def direct_param_at(
     number_of_nodes_at_least=1,
     **_,
 ):
+
+    """
+    Similar to indirect_param_at, but doesn't use key_vec: it's a dense param array
+    instead of a sparse one. Potentially VERY wasteful, but faster to access.
+    """
 
     if not isinstance(params, dict):
         raise TypeError(f'params must be a dict, not {type(params)}')
@@ -828,9 +835,7 @@ def transform_nn(
             rates,
             quantile=0,
             key=key,
-            param_f=partial(
-                init_param_if_needed, params, number_of_nodes_at_least=stack.number_of_nodes
-            ),
+            param_f=partial( init_param_if_needed, params),
         )
 
     def apply(*values, quantiles, params, node_id, key):
@@ -923,9 +928,7 @@ def sequestron_ERN(
             *[np.zeros(shape) for shape in input_shapes],
             quantile=0,
             rng_key=key,
-            param_f=partial(
-                init_param_if_needed, params, number_of_nodes_at_least=stack.number_of_nodes
-            ),
+            param_f=partial( init_param_if_needed, params),
             affinity_id=affinity_id,
         )
 
@@ -992,9 +995,7 @@ def grouped_output(
             *[np.zeros(shape) for shape in input_shapes],
             quantiles=np.zeros((len(input_shapes),)),
             rng_key=key,
-            param_f=partial(
-                init_param_if_needed, params, number_of_nodes_at_least=stack.number_of_nodes
-            ),
+            param_f=partial( init_param_if_needed, params),
         )
 
     def apply(*inputs, quantiles, params, node_id, key):

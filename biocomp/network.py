@@ -1002,7 +1002,7 @@ class Network:
         N.compute_graph = self.compute_graph.copy()
         N.tu_in_sources = self.tu_in_sources.copy()
         N.aggregations = self.aggregations.copy()
-        N.metadata = self.metadata.copy()
+        N.metadata = self.metadata.copy() if self.metadata is not None else None
         return N
 
     def _assign_quantile_variable(self):
