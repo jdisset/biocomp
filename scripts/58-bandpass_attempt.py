@@ -119,7 +119,7 @@ networks = [single_net, bp_net]
 # dirname = Path('~/Desktop/bandpass_attempt/v0/networks/').expanduser()
 # dirname.mkdir(parents=True, exist_ok=True)
 # su.plot_networks(networks, filenames=[f'{dirname}/network_{i}.pdf' for i in range(len(networks))])
-su.plot_networks(networks, W=2000, H=2200)
+# su.plot_networks(networks, W=2000, H=2200)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
