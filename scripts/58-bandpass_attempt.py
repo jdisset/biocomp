@@ -126,8 +126,8 @@ su.plot_networks(networks, W=2000, H=2200)
 
 ### {{{                       --     evo settings     --
 cfg = {
-    'generations': 30,
-    'popsize': 25,
+    'generations': 130,
+    'popsize': 75,
     'init_min': 0.1,
     'init_max': 1.0,
     'rng_key': 0,
@@ -376,7 +376,7 @@ x, y, _ = bandpasses[2]
     flat_params_size,
     compute,
     reconstruct_params_and_biases,
-) = generate_fitness(x, y, networks[0], cfg, compute_config, training_params, rng, bias_protein=None)
+) = generate_fitness(x, y, networks[1], cfg, compute_config, training_params, rng)#, bias_protein=None)
 
 # fpar = jax.random.uniform(k, flat_params_shape, minval=cfg['init_min'], maxval=cfg['init_max'])
 
@@ -417,13 +417,14 @@ savedir = Path('./results')
 savedir.mkdir(exist_ok=True)
 
 # save the best network
-best_params, _ = reconstruct_params_and_biases(best_params)
-best_params = ut.tree_to_numpy(best_params)
+full_best_params, _ = reconstruct_params_and_biases(best_params)
+full_best_params = ut.tree_to_np(full_best_params)
 # save
 fname = f'{network.name}_cmaes_{cfg["popsize"]}_{cfg["generations"]}_best_params_f={best_fitness:.4f}.pkl'
 with open(savedir / fname, 'wb') as f:
     pickle.dump(best_params, f)
 
+##
 
 # plot fitness history
 allfitnesses = np.asarray(history['fitnesses'])
@@ -447,8 +448,8 @@ fig.savefig(savedir / fname, dpi=300)
 
 ##
 # reconstruct the best network
-network = networks[0]
-x, y, _ = bandpasses[0]
+network = networks[1]
+x, y, _ = bandpasses[2]
 Q = jax.random.uniform(rng, (x.shape[0], 4))
 
 yhat = jit(compute)(best_params, x, Q, rng)
