@@ -271,7 +271,7 @@ bandpasses = [gen_bandpass_xz(vlims_log, k, nsamples=10000) for k in jax.random.
 
 for x, z, _ in bandpasses:
     fig, ax = plt.subplots()
-    ax.scatter(x[:, 0], x[:, 1], c=z, s=1, cmap='RdYlGn', alpha=0.5)
+    ax.scatter(x[:, 0], x[:, 1], c=z, s=2, cmap='inferno', alpha=0.75, vmin=0, vmax=1.3)
     ax.set_xlim(vlims_log)
     ax.set_ylim(vlims_log)
 
@@ -315,13 +315,13 @@ def generate_fitness(
 
     nbias = len(bias_indices)
 
-    Q = jax.random.uniform(k0, (x.shape[0], 4))
-    keys = jax.random.split(k1, x.shape[0])
     vcompute = jax.vmap(compute_stack.apply, in_axes=(None, 0, 0, 0))
 
     flat_params_size = len(compressed_params) + nbias
 
     outside_penalty = 1
+
+    Q = jax.random.uniform(k0, (x.shape[0], 4))
 
     def make_full_x(x, extra_x):
         if nbias > 0:
@@ -344,18 +344,20 @@ def generate_fitness(
         params = ut.tree_to_jax(params)
         return params, partial(make_full_x, extra_x=extra_x)
 
-    def fitness_fn(flat_params):
-
+    def compute(flat_params, x, Q, k):
         clipped_params = jnp.clip(flat_params, 0, 1.2)
         params, make_full_x = reconstruct_params_and_biases(clipped_params)
-
         full_x = make_full_x(x)
-
+        keys = jax.random.split(k, x.shape[0])
         yhat, _ = vcompute(params, full_x, Q, keys)
         yhat = yhat[:, output_id]
+        return yhat
 
+
+    def fitness_fn(flat_params):
+
+        yhat = compute(flat_params, x, Q, k1)
         score = jnp.mean((yhat - y) ** 2)
-
         # anything outside of 0, 1 is penalized
         under = (flat_params < 0)
         over = (flat_params > 1)
@@ -364,15 +366,15 @@ def generate_fitness(
 
         return score + outside * outside_penalty
 
-    return fitness_fn, flat_params_size, compute_stack, reconstruct_params_and_biases
+    return fitness_fn, flat_params_size, compute, reconstruct_params_and_biases
 
 
-x, y, _ = bandpasses[0]
+x, y, _ = bandpasses[2]
 
 (
     fitness_fn,
     flat_params_size,
-    compute_stack,
+    compute,
     reconstruct_params_and_biases,
 ) = generate_fitness(x, y, networks[0], cfg, compute_config, training_params, rng, bias_protein=None)
 
@@ -411,6 +413,17 @@ for g in tqdm(list(range(cfg['generations'])), desc='generations'):
 best_fitness = state.best_fitness
 best_params = state.best_member
 
+savedir = Path('./results')
+savedir.mkdir(exist_ok=True)
+
+# save the best network
+best_params, _ = reconstruct_params_and_biases(best_params)
+best_params = ut.tree_to_numpy(best_params)
+# save
+fname = f'{network.name}_cmaes_{cfg["popsize"]}_{cfg["generations"]}_best_params_f={best_fitness:.4f}.pkl'
+with open(savedir / fname, 'wb') as f:
+    pickle.dump(best_params, f)
+
 
 # plot fitness history
 allfitnesses = np.asarray(history['fitnesses'])
@@ -428,42 +441,25 @@ ax.set_xlabel('generation')
 ax.set_ylabel('fitness')
 ax.set_yscale('log')
 ax.set_title('fitness history')
+fname = f'{network.name}_cmaes_{cfg["popsize"]}_{cfg["generations"]}_run_plot.png'
+fig.savefig(savedir / fname, dpi=300)
 
 
 ##
 # reconstruct the best network
 network = networks[0]
 x, y, _ = bandpasses[0]
-vcompute = jax.vmap(compute_stack.apply, in_axes=(None, 0, 0, 0))
 Q = jax.random.uniform(rng, (x.shape[0], 4))
-keys = jax.random.split(rng, x.shape[0])
 
-##
-best_fitness
+yhat = jit(compute)(best_params, x, Q, rng)
 
-simple_params = jnp.ones_like(best_params) * 0.75
-clamped_best = jnp.clip(best_params, 0, 1.2)
-
-best_params
-
-output_id = network.get_output_proteins().index('iRFP720')
-params, make_full_x = reconstruct_params_and_biases(clamped_best)
-full_x = make_full_x(x)
-yhat, _ = jit(vcompute)(params, full_x, Q, keys)
-
-fitness = jit(fitness_fn)(best_params)
-print(f'fitness: {fitness:.3f}')
-
-yout = yhat[:, output_id]
 fig, axes = plt.subplots(1, 2, figsize=(20, 10))
 axes[0].scatter(x[:, 0], x[:, 1], c=y, s=10)
-axes[1].scatter(x[:, 0], x[:, 1], c=yout, s=10)
+axes[1].scatter(x[:, 0], x[:, 1], c=yhat, s=10)
 axes[0].set_title('Target')
 axes[1].set_title('Predicted')
-savedir = Path('./results')
-savedir.mkdir(exist_ok=True)
 fname = f'{network.name}_cmaes_{cfg["popsize"]}_{cfg["generations"]}_fitness{best_fitness:.3f}.png'
-# fig.savefig(savedir / fname, dpi=300)
+fig.savefig(savedir / fname, dpi=300)
 
 
 
