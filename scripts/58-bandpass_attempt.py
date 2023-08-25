@@ -234,7 +234,7 @@ def inside_all(x, pvec, nvec):
     return jnp.all(vmap(is_inside, in_axes=(None, 0, 0))(x, pvec, nvec), axis=0)
 
 
-k, _ = jax.random.split(k)
+k, _ = jax.random.split(rng)
 
 
 @jit
