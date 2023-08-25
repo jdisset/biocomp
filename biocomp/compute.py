@@ -318,6 +318,10 @@ class ComputeStack:
             )
             if layer.f_prepare is not None:
                 layer.f_prepare(params, vnodelist=layer.nodes, key=rng_key)
+
+            #TODO:
+            # recursive conversion of jnp arrays (in params) into np to avoid bloating GPU memory
+
         return params
 
     def copy(self):
@@ -396,12 +400,12 @@ class ComputeStack:
         return s, get_param_subset
 
     @staticmethod
-    def use_shared_params(base_params, other_params):
-        """Returns a copy of the base_params with the shared parameters
-        replaced by the ones in other_params"""
+    def use_shared_params(params, params_to_use_shared_from):
+        """Returns a copy of the params with the shared parameters
+        replaced by the ones in params_to_use_shared_from"""
         # grab a copy of the shared parameters
-        my_p = deepcopy(base_params)
-        other_p = deepcopy(other_params)
+        my_p = deepcopy(params)
+        other_p = deepcopy(params_to_use_shared_from)
 
         _, shared_p = ut.split_params(other_p, [ut.SHARED_PATH])
         _, this_static_p = ut.split_params(my_p, [ut.STATIC_PATH])

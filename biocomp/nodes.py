@@ -473,7 +473,7 @@ def numeric(input_shapes, shape, **__):
                 "numeric:value",
                 init_val,
                 node_id=vnode.node_id,
-                number_of_nodes_at_least=maxid,
+                number_of_nodes_at_least=maxid + 1,
             )
 
     def apply(v, q, params, node_id, k):
@@ -515,7 +515,9 @@ def aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
                 ratio_v = jax.random.uniform(key, (n_outputs,))
             # pad to max_outputs if necessary
             ratio_v = jnp.pad(ratio_v, (0, max_agg_size - n_outputs), constant_values=0.0)
-            set_param(params, pname, ratio_v, node_id=vnode.node_id, number_of_nodes_at_least=maxid)
+            set_param(
+                params, pname, ratio_v, node_id=vnode.node_id, number_of_nodes_at_least=maxid + 1
+            )
 
     def apply(input, quantiles, params, node_id, key):
         assert input.shape == input_shapes[0], f'Invalid input shape {input.shape}'
@@ -553,7 +555,7 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
                 jnp.asarray(extra['original_output_slot']),
                 node_id=vnode.node_id,
                 base_path=ut.STATIC_PATH,
-                number_of_nodes_at_least=maxid,
+                number_of_nodes_at_least=maxid + 1,
             )
 
             set_param(
@@ -562,7 +564,7 @@ def inv_aggregation(input_shapes, n_outputs, stack, normalize=False, **_):
                 jnp.asarray(inv_vnode.node_id),
                 node_id=vnode.node_id,
                 base_path=ut.STATIC_PATH,
-                number_of_nodes_at_least=maxid,
+                number_of_nodes_at_least=maxid + 1,
             )
 
     def apply(inp, quantiles, params, node_id, key):
@@ -810,6 +812,7 @@ def transform_nn(
         init = ut.continuous_initializer(key, (len(quantization_names), rate_dim))
         init_param_if_needed(params, rate_name, init=init, base_path=ut.QVALS_PATH, node_id=0)
 
+        maxid = max([vnode.node_id for vnode in vnodelist])
         for vnode in vnodelist:
             register_quantile_variable_ids(params, vnode, stack)
             generate_quantization_masks(
@@ -817,15 +820,13 @@ def transform_nn(
                 params,
                 rate_name,
                 vnode,
-                number_of_nodes_at_least=stack.number_of_nodes,
+                number_of_nodes_at_least=maxid + 1,
             )
             key, _ = jax.random.split(key)
             val, rates = __node_impl(
                 *[np.zeros(shape) for shape in input_shapes],
                 key=key,
-                param_f=partial(
-                    init_param_if_needed, params, number_of_nodes_at_least=stack.number_of_nodes
-                ),
+                param_f=partial(init_param_if_needed, params, number_of_nodes_at_least=maxid + 1),
                 params=params,
                 node_id=vnode.node_id,
             )
@@ -835,7 +836,7 @@ def transform_nn(
             rates,
             quantile=0,
             key=key,
-            param_f=partial( init_param_if_needed, params),
+            param_f=partial(init_param_if_needed, params),
         )
 
     def apply(*values, quantiles, params, node_id, key):
@@ -903,6 +904,7 @@ def sequestron_ERN(
         return outer_activation(jnp.squeeze(res))
 
     def prepare(params, vnodelist, key):
+        maxid = max([vnode.node_id for vnode in vnodelist])
         for vnode in vnodelist:
             register_quantile_variable_ids(params, vnode, stack)
             # we need to know which affinity value to use for this node
@@ -920,7 +922,7 @@ def sequestron_ERN(
                 ERN_AFFINITY_ID_NAME,
                 affinity_id,
                 node_id=vnode.node_id,
-                number_of_nodes_at_least=stack.number_of_nodes,
+                number_of_nodes_at_least=maxid + 1,
                 base_path=ut.STATIC_PATH,
             )
 
@@ -928,7 +930,7 @@ def sequestron_ERN(
             *[np.zeros(shape) for shape in input_shapes],
             quantile=0,
             rng_key=key,
-            param_f=partial( init_param_if_needed, params),
+            param_f=partial(init_param_if_needed, params),
             affinity_id=affinity_id,
         )
 
@@ -995,7 +997,7 @@ def grouped_output(
             *[np.zeros(shape) for shape in input_shapes],
             quantiles=np.zeros((len(input_shapes),)),
             rng_key=key,
-            param_f=partial( init_param_if_needed, params),
+            param_f=partial(init_param_if_needed, params),
         )
 
     def apply(*inputs, quantiles, params, node_id, key):

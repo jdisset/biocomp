@@ -27,7 +27,7 @@ matplotlib.rcParams['figure.dpi'] = 200
 
 ### {{{                --     retrieving runs and losses     --
 
-project_name = 'cascades_v1'
+project_name = 'cascades_v2'
 runs, losses = du.retrieve_wandb_results(project_name)
 
 ##
@@ -38,7 +38,7 @@ runs, losses = du.retrieve_wandb_results(project_name)
 fig, ax = du.mkfig(1, 1, (7, 5))
 with ut.timer('Loss plot'):
     du.losses_plot(losses, ax, runs=runs)
-fig.savefig('/Users/jeandisset/Desktop/bestloss.pdf')
+fig.savefig('/Users/jeandisset/Desktop/bestloss_v2.pdf')
 best_run = runs[du.get_best_run_id(losses)]
 print('Best run:', best_run.name)
 
@@ -68,9 +68,16 @@ with ut.timer(f'Loading data and building networks for {xpnames}'):
 all_networks = dman_full.get_networks()
 net_xp = [n.metadata['from_xp'] for n in all_networks]
 net_name = [n.name for n in all_networks]
-net_name[35]
-net_xp[35]
 print('done')
+
+##
+dirname = Path('~/Desktop/predictions/lvl2_cascades_newcalibry_v3/networks').expanduser()
+dirname.mkdir(parents=True, exist_ok=True)
+
+fnames = [f'{dirname}/{i}_{n}.pdf' for i, n in enumerate(net_name)]
+
+su.plot_networks(all_networks, filenames=fnames)
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{               --     training and validation sets     --
@@ -105,15 +112,19 @@ with ut.timer('Building compute stack'):
     full_stack = dman_full.build_compute_stack(compute_config)
     substack, _ = full_stack.make_subset([50])
 
+##
+
 try:
     best_params = joblib.load(f'../__cache/best_params.pkl')
     print('Loaded best params from cache')
 except FileNotFoundError:
-    with ut.timer('Stack initialization'):
-        base_params = full_stack.init(key)
+
+    # with ut.timer('Stack initialization'):
+        # base_params = full_stack.init(key)
 
     tmp_dir = Path(f'./{project_name}')
     param_file = best_run.file('latest_params.pkl').download(replace=True, root=tmp_dir)
+
     with open(param_file.name, 'rb') as f:
         trained_params = pickle.load(f)
 
@@ -122,70 +133,9 @@ except FileNotFoundError:
 print('done')
 
 
-### {{{               --     experimenting with rescaling     --
-netid = 0
-n = dman_full.get_network(netid)
-pnames = n.get_inverted_input_proteins()
-pnames
-rx = dman_full._raw_X[netid]
-x = dman_full._X[netid]
-above = (rx > 800).all(axis=1)
-rx = rx[above]
-x = x[above]
-
-##
-factor = dman_full.data_cfg['data_scaling_log_factor']
-maxv = dman_full.data_cfg['data_scaling_max_value']
-offset = 3e3
-factor = 100
-maxv = 5e7
-current_tr = lambda x: (np.log10(1 + np.clip(x / factor, 0, None))) - np.log10(offset / factor)
-# / np.log10(maxv / factor)
-
-DEFAULT_LOG_RESCALE = 0.1
-DEFAULT_LOG_OFFSET = 5000
-
-
-def logoffset(x, scale=DEFAULT_LOG_RESCALE, offset=DEFAULT_LOG_OFFSET):
-    return jnp.log(jnp.clip(x + offset, 1, None)) - jnp.log(offset)
-
-
-def tr(x, offset=3e3, maxv=5e7, factor=50, threshold=300, compression=0.4):
-    loff = ut.log_poly_log(offset / factor, threshold=threshold, compression=compression)
-    lmv = ut.log_poly_log(maxv / factor, threshold=threshold, compression=compression)
-    xp = ut.log_poly_log(1 + x / factor, threshold=threshold, compression=compression) - loff
-    y = xp / (lmv - loff)
-    return y
-
-def inv_tr(y, offset=3e3, maxv=5e7, factor=50, threshold=300, compression=0.4):
-    loff = ut.log_poly_log(offset / factor, threshold=threshold, compression=compression)
-    lmv = ut.log_poly_log(maxv / factor, threshold=threshold, compression=compression)
-    yp = y * (lmv - loff) + loff
-    ypinv = ut.inverse_log_poly_log(yp , threshold=threshold, compression=compression)
-    x = factor * (ypinv  - 1)
-    return x
-
-
-# du.fluo_scatter(new_tr(rx), pnames, xmin=0, xmax=1.5, logscale=False)
-du.fluo_scatter(tr(rx), pnames, logscale=False, xmin=-0.3, xmax=1.5)
-# du.fluo_scatter(rx, pnames, logscale=True)
-# du.fluo_scatter(x2, pnames, logscale=True)
-# du.fluo_scatter(logoffset(rx), pnames, logscale=False)
-##
-
-
-du.fluo_scatter(rx, pnames, xmin=0, xmax=1e7, logscale=True)
-du.fluo_scatter(x, pnames, logscale=False)
-
-
-# count nans in x:
-np.isnan(x).sum(axis=0)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                    --     training data plots     --
 
-savepath = Path(f'~/Desktop/predictions/lvl2_cascades_newcalibry_v2').expanduser()
+savepath = Path(f'~/Desktop/predictions/lvl2_cascades_newcalibry_v3').expanduser()
 savepath.mkdir(parents=True, exist_ok=True)
 
 # bash command to remove all files with "==" in the name:
@@ -344,14 +294,15 @@ with ut.timer('pred plot'):
         fig.tight_layout()
         return fig
 
+    # # for index in [103, 104, 105, 106]:
+    # for index in range(50, 60):
     for index in tqdm(range(len(networks)), desc='plot_pred'):
         try:
             fig = plot_prediction(index)
             name = net_name[index]
             fig.savefig(savepath / f'{index}_{name}_y_as_x.pdf', dpi=200)
             print(f'saved {index} {name}')
-            # plt.close(fig)
-            # plt.close('all')
+            plt.close('all')
         except Exception as e:
             # add traceback
             import traceback
@@ -360,6 +311,8 @@ with ut.timer('pred plot'):
             traceback.print_exc()
     # plt.close('all')
     print(savepath)
+
+print('done')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -577,3 +530,65 @@ print('done')
 
 # with open('../biocomp-ui/frontend/tracer/data.js', 'w') as f:
 # f.write(rendered)
+
+### {{{               --     experimenting with rescaling     --
+netid = 0
+n = dman_full.get_network(netid)
+pnames = n.get_inverted_input_proteins()
+pnames
+rx = dman_full._raw_X[netid]
+x = dman_full._X[netid]
+above = (rx > 800).all(axis=1)
+rx = rx[above]
+x = x[above]
+
+##
+factor = dman_full.data_cfg['data_scaling_log_factor']
+maxv = dman_full.data_cfg['data_scaling_max_value']
+offset = 3e3
+factor = 100
+maxv = 5e7
+current_tr = lambda x: (np.log10(1 + np.clip(x / factor, 0, None))) - np.log10(offset / factor)
+# / np.log10(maxv / factor)
+
+DEFAULT_LOG_RESCALE = 0.1
+DEFAULT_LOG_OFFSET = 5000
+
+
+def logoffset(x, scale=DEFAULT_LOG_RESCALE, offset=DEFAULT_LOG_OFFSET):
+    return jnp.log(jnp.clip(x + offset, 1, None)) - jnp.log(offset)
+
+
+def tr(x, offset=3e3, maxv=5e7, factor=50, threshold=300, compression=0.4):
+    loff = ut.log_poly_log(offset / factor, threshold=threshold, compression=compression)
+    lmv = ut.log_poly_log(maxv / factor, threshold=threshold, compression=compression)
+    xp = ut.log_poly_log(1 + x / factor, threshold=threshold, compression=compression) - loff
+    y = xp / (lmv - loff)
+    return y
+
+def inv_tr(y, offset=3e3, maxv=5e7, factor=50, threshold=300, compression=0.4):
+    loff = ut.log_poly_log(offset / factor, threshold=threshold, compression=compression)
+    lmv = ut.log_poly_log(maxv / factor, threshold=threshold, compression=compression)
+    yp = y * (lmv - loff) + loff
+    ypinv = ut.inverse_log_poly_log(yp , threshold=threshold, compression=compression)
+    x = factor * (ypinv  - 1)
+    return x
+
+
+# du.fluo_scatter(new_tr(rx), pnames, xmin=0, xmax=1.5, logscale=False)
+du.fluo_scatter(tr(rx), pnames, logscale=False, xmin=-0.3, xmax=1.5)
+# du.fluo_scatter(rx, pnames, logscale=True)
+# du.fluo_scatter(x2, pnames, logscale=True)
+# du.fluo_scatter(logoffset(rx), pnames, logscale=False)
+##
+
+
+du.fluo_scatter(rx, pnames, xmin=0, xmax=1e7, logscale=True)
+du.fluo_scatter(x, pnames, logscale=False)
+
+
+# count nans in x:
+np.isnan(x).sum(axis=0)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}

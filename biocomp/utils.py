@@ -206,6 +206,13 @@ def str_to_int_array(s):
 def int_array_to_str(a):
     return ''.join([chr(int(c)) for c in a])
 
+def tree_to_jax(params):
+    return jax.tree_map(lambda x: jnp.asarray(x), params)
+
+def tree_to_np(params):
+    return jax.tree_map(lambda x: np.asarray(x), params)
+
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
