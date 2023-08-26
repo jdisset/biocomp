@@ -71,48 +71,59 @@ colors = [P('mKate'), P('eBFP'), P('NeonGreen'), P('iRFP720')]
 
 tus_bp = {
     # node A
-    'A_pos': TU(rec[0], uorfs, ern[2]),
-    'A_neg': TU(ern[0]),
-    'A_bias': TU(ern[0]),
+    'A_pos_0': TU(rec[0], uorfs, ern[2]),
+    'A_pos_1': TU(rec[0], uorfs, ern[2]),
+    'A_pos_2': TU(rec[0], uorfs, ern[2]),
+    'A_neg_0': TU(ern[0]),
+    'A_neg_1': TU(ern[0]),
+    'A_neg_2': TU(ern[0]),
     # node B
-    'B_pos': TU(rec[1], uorfs, ern[2]),
-    'B_neg': TU(ern[1]),
-    'B_bias': TU(ern[1]),
+    'B_pos_0': TU(rec[1], uorfs, ern[2]),
+    'B_pos_1': TU(rec[1], uorfs, ern[2]),
+    'B_pos_2': TU(rec[1], uorfs, ern[2]),
+    'B_neg_0': TU(ern[1]),
+    'B_neg_1': TU(ern[1]),
+    'B_neg_2': TU(ern[1]),
     # colors
     'x0color': TU(colors[0]),
     'x1color': TU(colors[1]),
     'biascolor': TU(colors[2]),
     # output node
-    'out': TU(rec[2], colors[3]),
-    'C_bias': TU(ern[2]),
+    'C_pos': TU(rec[2], colors[3]),
+    'C_neg': TU(ern[2]),
 }
+
 aggregations_bp = [
-    ['A_neg', 'B_pos', 'x0color'],  # x0
-    ['A_pos', 'B_neg', 'x1color'],  # x1
-    ['out', 'A_bias', 'B_bias', 'C_bias', 'biascolor'],  # biases
+    ['A_pos_0', 'A_neg_0', 'B_pos_0', 'B_neg_0', 'x0color'],  # x0
+    ['A_pos_1', 'A_neg_1', 'B_pos_1', 'B_neg_1', 'x1color'],  # x0
+    ['C_pos', 'C_neg', 'A_pos_2', 'A_neg_2', 'B_pos_2', 'B_neg_2', 'biascolor'],  # biases
 ]
 
-sources_bp = {tu_name: [tu_name] for tu_name, tu in tus_bp.items()}
 
-n_bp = bc.Network.from_dict(lib, 'bp_attempt', tus_bp, sources_bp, aggregations_bp)
+
+
+
+sources_bp = {tu_name: [tu_name] for tu_name, tu in tus_bp.items() if tu_name in ut.flatten(aggregations_bp)}
+used_tus_bp = {tu_name: tu for tu_name, tu in tus_bp.items() if tu_name in ut.flatten(aggregations_bp)}
+
+n_bp = bc.Network.from_dict(lib, 'bp_attempt', used_tus_bp, sources_bp, aggregations_bp)
+
 bp_net = bc.inverted_network(n_bp)[0]
 
 
-tus_single = {
-    'A_pos': TU(rec[0], colors[3]),
-    'A_neg': TU(ern[0]),
-    'x0color': TU(colors[0]),
-    'x1color': TU(colors[1]),
-}
-aggregations_single = [
-    ['A_neg', 'x0color'],  # x0
-    ['A_pos', 'x1color'],  # x1
-]
-
-sources_single = {tu_name: [tu_name] for tu_name, tu in tus_single.items()}
-
-n_single = bc.Network.from_dict(lib, 'single_ERN', tus_single, sources_single, aggregations_single)
-single_net = bc.inverted_network(n_single)[0]
+# tus_single = {
+    # 'A_pos': TU(rec[0], colors[3]),
+    # 'A_neg': TU(ern[0]),
+    # 'x0color': TU(colors[0]),
+    # 'x1color': TU(colors[1]),
+# }
+# aggregations_single = [
+    # ['A_neg', 'x0color'],  # x0
+    # ['A_pos', 'x1color'],  # x1
+# ]
+# sources_single = {tu_name: [tu_name] for tu_name, tu in tus_single.items()}
+# n_single = bc.Network.from_dict(lib, 'single_ERN', tus_single, sources_single, aggregations_single)
+# single_net = bc.inverted_network(n_single)[0]
 
 networks = [single_net, bp_net]
 
@@ -126,14 +137,15 @@ networks = [single_net, bp_net]
 
 ### {{{                       --     evo settings     --
 cfg = {
-    'generations': 130,
-    'popsize': 75,
+    'generations': 150,
+    'popsize': 150,
     'init_min': 0.1,
     'init_max': 1.0,
     'rng_key': 0,
     'static_params': [ut.STATIC_PATH, ut.SHARED_PATH],
 }
 rng = jax.random.PRNGKey(cfg['rng_key'])
+k, _ = jax.random.split(rng)
 compute_config = cmp.DEFAULT_COMPUTE_CONFIG
 training_params = joblib.load(f'../__cache/best_params.pkl')
 
@@ -234,8 +246,6 @@ def inside_all(x, pvec, nvec):
     return jnp.all(vmap(is_inside, in_axes=(None, 0, 0))(x, pvec, nvec), axis=0)
 
 
-k, _ = jax.random.split(rng)
-
 
 @jit
 def gen_bandpass(key):
@@ -267,7 +277,7 @@ def gen_bandpass_xz(vlims, key, nsamples=10000):
 
 
 NBP = 10
-bandpasses = [gen_bandpass_xz(vlims_log, k, nsamples=10000) for k in jax.random.split(k, NBP)]
+bandpasses = [gen_bandpass_xz(vlims_log, k, nsamples=10000) for k in jax.random.split(rng, NBP)]
 
 for x, z, _ in bandpasses:
     fig, ax = plt.subplots()
@@ -319,9 +329,11 @@ def generate_fitness(
 
     flat_params_size = len(compressed_params) + nbias
 
-    outside_penalty = 1
+    outside_penalty = 0.1
 
-    Q = jax.random.uniform(k0, (x.shape[0], 4))
+    # Q = jax.random.uniform(k0, (x.shape[0], 4))
+    Q_std = 0.1
+    Q = jnp.clip(jax.random.normal(rng, (x.shape[0], 4)) * Q_std + 0.5, 0.1, 0.9)
 
     def make_full_x(x, extra_x):
         if nbias > 0:
@@ -353,15 +365,17 @@ def generate_fitness(
         yhat = yhat[:, output_id]
         return yhat
 
+    MIN_PARAM = -0.1
+    MAX_PARAM = 1.1
 
     def fitness_fn(flat_params):
 
         yhat = compute(flat_params, x, Q, k1)
         score = jnp.mean((yhat - y) ** 2)
         # anything outside of 0, 1 is penalized
-        under = (flat_params < 0)
-        over = (flat_params > 1)
-        outside = jnp.where(under, jnp.abs(flat_params), jnp.where(over, flat_params - 1, 0))
+        under = (flat_params < MIN_PARAM)
+        over = (flat_params > MAX_PARAM)
+        outside = jnp.where(under, MIN_PARAM - flat_params, jnp.where(over, flat_params - MAX_PARAM, 0))
         outside = jnp.sum(outside) / jnp.sum(under + over)
 
         return score + outside * outside_penalty
@@ -369,14 +383,19 @@ def generate_fitness(
     return fitness_fn, flat_params_size, compute, reconstruct_params_and_biases
 
 
-x, y, _ = bandpasses[2]
+
+BP = bandpasses[4]
+NETWORK = networks[1]
+
+
+x, y, _ = BP
 
 (
     fitness_fn,
     flat_params_size,
     compute,
     reconstruct_params_and_biases,
-) = generate_fitness(x, y, networks[1], cfg, compute_config, training_params, rng)#, bias_protein=None)
+) = generate_fitness(x, y, NETWORK, cfg, compute_config, training_params, rng)#, bias_protein=None)
 
 # fpar = jax.random.uniform(k, flat_params_shape, minval=cfg['init_min'], maxval=cfg['init_max'])
 
@@ -420,7 +439,7 @@ savedir.mkdir(exist_ok=True)
 full_best_params, _ = reconstruct_params_and_biases(best_params)
 full_best_params = ut.tree_to_np(full_best_params)
 # save
-fname = f'{network.name}_cmaes_{cfg["popsize"]}_{cfg["generations"]}_best_params_f={best_fitness:.4f}.pkl'
+fname = f'{NETWORK.name}_cmaes_{cfg["popsize"]}_{cfg["generations"]}_best_params_f={best_fitness:.4f}.pkl'
 with open(savedir / fname, 'wb') as f:
     pickle.dump(best_params, f)
 
@@ -442,15 +461,17 @@ ax.set_xlabel('generation')
 ax.set_ylabel('fitness')
 ax.set_yscale('log')
 ax.set_title('fitness history')
-fname = f'{network.name}_cmaes_{cfg["popsize"]}_{cfg["generations"]}_run_plot.png'
+fname = f'{NETWORK.name}_cmaes_{cfg["popsize"]}_{cfg["generations"]}_run_plot.png'
 fig.savefig(savedir / fname, dpi=300)
 
+best_params
 
 ##
 # reconstruct the best network
-network = networks[1]
-x, y, _ = bandpasses[2]
+x, y, _ = BP
 Q = jax.random.uniform(rng, (x.shape[0], 4))
+Q = jnp.ones((x.shape[0], 4))*0.5
+Q = jnp.clip(jax.random.normal(rng, (x.shape[0], 4)) * 0.15 + 0.5, 0, 1)
 
 yhat = jit(compute)(best_params, x, Q, rng)
 
@@ -459,10 +480,11 @@ axes[0].scatter(x[:, 0], x[:, 1], c=y, s=10)
 axes[1].scatter(x[:, 0], x[:, 1], c=yhat, s=10)
 axes[0].set_title('Target')
 axes[1].set_title('Predicted')
-fname = f'{network.name}_cmaes_{cfg["popsize"]}_{cfg["generations"]}_fitness{best_fitness:.3f}.png'
+fname = f'{NETWORK.name}_cmaes_{cfg["popsize"]}_{cfg["generations"]}_fitness{best_fitness:.3f}.png'
 fig.savefig(savedir / fname, dpi=300)
 
 
+yhat
 
 ### {{{                          --     archive     --
 # mask = new_params['__static__']['is_init']
