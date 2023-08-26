@@ -125,7 +125,7 @@ bp_net = bc.inverted_network(n_bp)[0]
 # n_single = bc.Network.from_dict(lib, 'single_ERN', tus_single, sources_single, aggregations_single)
 # single_net = bc.inverted_network(n_single)[0]
 
-networks = [single_net, bp_net]
+networks = [bp_net]
 
 # dirname = Path('~/Desktop/bandpass_attempt/v0/networks/').expanduser()
 # dirname.mkdir(parents=True, exist_ok=True)
@@ -385,7 +385,7 @@ def generate_fitness(
 
 
 BP = bandpasses[4]
-NETWORK = networks[1]
+NETWORK = networks[0]
 
 
 x, y, _ = BP
