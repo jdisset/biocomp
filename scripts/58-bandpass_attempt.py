@@ -38,7 +38,6 @@ matplotlib.rcParams['figure.dpi'] = 200
 
 lib = su.load_lib()
 
-
 def sequestron_ERN3p(get_param, get_quantized, **_):
     def apply(rna, ern, **_):
         # return rna * (1.0 - jnp.exp(-ern))
@@ -99,10 +98,6 @@ aggregations_bp = [
     ['C_pos', 'C_neg', 'A_pos_2', 'A_neg_2', 'B_pos_2', 'B_neg_2', 'biascolor'],  # biases
 ]
 
-
-
-
-
 sources_bp = {tu_name: [tu_name] for tu_name, tu in tus_bp.items() if tu_name in ut.flatten(aggregations_bp)}
 used_tus_bp = {tu_name: tu for tu_name, tu in tus_bp.items() if tu_name in ut.flatten(aggregations_bp)}
 
@@ -147,7 +142,7 @@ cfg = {
 rng = jax.random.PRNGKey(cfg['rng_key'])
 k, _ = jax.random.split(rng)
 compute_config = cmp.DEFAULT_COMPUTE_CONFIG
-training_params = joblib.load(f'../__cache/best_params.pkl')
+training_params = ut.tree_to_np(joblib.load(f'../__cache/best_params.pkl'))
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
