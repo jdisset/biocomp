@@ -2,6 +2,7 @@ from jax.tree_util import register_pytree_node_class
 from collections.abc import Mapping
 from copy import deepcopy
 
+from .utils import ParamPath
 
 @register_pytree_node_class
 class ParamTree:

@@ -20,6 +20,7 @@ from . import nodes as nd
 from .network import Network
 from . import utils as ut
 from .utils import check, checkwrap
+from . import nodes
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -37,7 +38,11 @@ def unwrap_partial_function(implementation):
 
 class ComputeConfigManager:
     def __init__(self):
-        self.config = {'functions': {}}
+        self.config = {
+            'biocomp_version': ut.get_biocomp_version(),
+            'commit_hash': ut.get_git_commit_hash(),
+            'functions': {},
+        }
 
     def set_impl(self, key, implementation, **kwargs):
         implementation, partial_args = unwrap_partial_function(implementation)
@@ -86,9 +91,6 @@ class ComputeConfigManager:
         self.config = config
 
 
-from . import nodes
-
-
 DEFAULT_COMPUTE_CONFIG = ComputeConfigManager()
 DEFAULT_COMPUTE_CONFIG.set_impl('transcription', nodes.transcription)
 DEFAULT_COMPUTE_CONFIG.set_impl('translation', nodes.translation)
@@ -103,7 +105,6 @@ DEFAULT_COMPUTE_CONFIG.set_impl('aggregation', nodes.aggregation)
 DEFAULT_COMPUTE_CONFIG.set_impl('inv_aggregation', nodes.inv_aggregation)
 DEFAULT_COMPUTE_CONFIG.set_impl('output', nodes.grouped_output)
 DEFAULT_COMPUTE_CONFIG.set_impl('deadend', nodes.single_passthrough)
-
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -147,9 +148,13 @@ class VirtualNode:
         )
 
     def get_compute_node(self):
+        if self.network is None:
+            return None
         return self.network.compute_graph.loc[self.compute_node_id]
 
     def get_inverse_vnode(self, stack):
+        if stack is None:
+            return None
         cnode = self.get_compute_node()
         assert cnode.is_inverse_of is not None, 'Node is not an inverse'
         inv = stack.get_vnode_from_net_and_compute_id(self.network_id, cnode.is_inverse_of)
@@ -257,8 +262,6 @@ class ComputeLayer:
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                       --     Compute Stack     --
-
-
 @dataclass
 class ComputeStack:
     networks: list[Network]
@@ -280,8 +283,52 @@ class ComputeStack:
     apply = None
 
     ### {{{                     --     public interface     --
+
+    def build(self, config: ComputeConfigManager, **kwargs):
+        """
+        Split apart all the networks into their constituent nodes
+        and put these nodes into ordered layers, maximizing parallelism by ensuring same-type nodes
+        (potentially from different networks) are in the same layer.
+        Then generates the apply method for the stack, which will handle the parallel execution
+        of all nodes in each layers, as well as the correct mapping and chaining of
+        their inputs and outputs.
+        """
+        with ut.timer('Building compute stack'):
+            self.config = config
+            with ut.timer('assembling stack'):
+                self._assemble_stack(**kwargs)
+            self._refresh()
+            with ut.timer('building layers'):
+                for layer in self.layers:
+                    layer.setup(config, stack=self)
+                    self._refresh()
+            self._generate_apply_method()
+            self.check()
+            self.is_built = True
+
+    def init(self, rng_key):
+        """
+        Generates a randomly initilized dictionary of parameters for the stack
+        """
+        assert self.is_built, 'Stack not built'
+        params = {}
+        for l_id, layer in enumerate(self.layers):
+            assert layer.is_built, 'Layer not built'
+            assert l_id == layer.layer_id, 'Layer id mismatch'
+            rng_key, _ = jax.random.split(rng_key)
+            ut.logger.info(
+                f'Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}'
+            )
+            if layer.f_prepare is not None:
+                layer.f_prepare(params, vnodelist=layer.nodes, key=rng_key)
+            # TODO:
+            # recursive conversion of jnp arrays (in params) into np to avoid bloating GPU memory
+        return params
+
     def get_network_output_indices(self, network_id: int):
-        """Returns the start index and shape of the output of the given network"""
+        """Returns the start index and shape of the output of the given network in
+        the flattened array of all outputs of all nodes in the stack.
+        """
         output_node = self.networks[
             network_id
         ].get_output_compute_node()  # a row from the compute df
@@ -294,35 +341,24 @@ class ComputeStack:
         return int(start_index), out_shape
 
     def get_network_global_output_id(self, network_id: int, output_id: int = 0):
-        """Considering every network's outputs ordered by network id,
-        returns the global id of the given output for the given network.
-        Useful to convert quantile ids from a network to the global quantile ids"""
+        """
+        From the array of all the concatenated outputs of all networks (ordered by network id),
+        this method returns the id of the given output.
+        Useful to convert local quantile ids from a network to a global (stack-wide) quantile ids.
+        Indeed, we need to inform each node of a network which quantile it should compute,
+        and that's determined by knowing which output it is linked to. In a given network, that's what
+        I call the local quantile id. But in the stack, we need to have a global quantile id,
+        which we define as the position of the output in the array of all outputs of all networks.
+        """
         assert network_id < len(self.networks)
         return sum(n.get_nb_outputs() for n in self.networks[:network_id]) + output_id
 
     def get_vnode_from_net_and_compute_id(
         self, network_id: int, compute_node_id: int
     ) -> VirtualNode:
+        """Returns the virtual node corresponding to the given network and compute node ids"""
         layer_id, node_loc = self.node_map[(network_id, compute_node_id)]
         return self.layers[layer_id].nodes[node_loc]
-
-    def init(self, rng_key):
-        assert self.is_built, 'Stack not built'
-        params = {}
-        for l_id, layer in enumerate(self.layers):
-            assert layer.is_built, 'Layer not built'
-            assert l_id == layer.layer_id, 'Layer id mismatch'
-            rng_key, _ = jax.random.split(rng_key)
-            ut.logger.info(
-                f'Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}'
-            )
-            if layer.f_prepare is not None:
-                layer.f_prepare(params, vnodelist=layer.nodes, key=rng_key)
-
-            #TODO:
-            # recursive conversion of jnp arrays (in params) into np to avoid bloating GPU memory
-
-        return params
 
     def copy(self):
         # we only deepcopy the layers, not the networks
@@ -334,21 +370,6 @@ class ComputeStack:
 
     def __hash__(self):
         return hash((tuple(self.networks), tuple(self.layers)))
-
-    def build(self, config: ComputeConfigManager, **kwargs):
-        with ut.timer('Building compute stack'):
-            self.config = config
-            with ut.timer('assembling stack'):
-                self._assemble_stack(**kwargs)
-            self._refresh()
-            # self._init_quantization_params()
-            with ut.timer('building layers'):
-                for layer in self.layers:
-                    layer.setup(config, stack=self)
-                    self._refresh()
-            self._generate_apply_method()
-            self.check()
-            self.is_built = True
 
     def __call__(self, *args, **kwargs):
         if not self.is_built:
@@ -382,6 +403,8 @@ class ComputeStack:
             _, captured_static_p = ut.split_params(s.init(jax.random.PRNGKey(0)), [ut.STATIC_PATH])
 
         def get_param_subset(params):
+            """Helper function that returns a subset of the given full-stack parameters,
+            corresponding to the subset of networks"""
             static_p = captured_static_p
             if not pre_init:
                 # new init to generate valid static parameters
@@ -450,7 +473,7 @@ class ComputeStack:
 
     def get_node_input_start_index(self, node: VirtualNode, input_slot: int) -> int:
         """Returns the start index of the input #input_slot for the given node
-        in the flattened output array"""
+        in the flattened full-stack output array"""
         assert self.node_map is not None
 
         input_compute_node_id, input_compute_node_outslot = node.get_compute_node().input_from[
@@ -483,7 +506,8 @@ class ComputeStack:
         return int(outslot_start)
 
     def get_node_output_start_index(self, node: VirtualNode, output_slot: int) -> int:
-        """Returns the start index of the output #output_slot for the given node"""
+        """Returns the start index of the output #output_slot for the given node
+        in the flattened full-stack output array"""
         assert self.node_map is not None
 
         this_node_layer_id, this_node_pos = self.node_map[(node.network_id, node.compute_node_id)]
@@ -567,13 +591,13 @@ class ComputeStack:
             current_batches = ComputeStack.get_networks_current_batch_number(
                 current_stack, current_type_dict
             )
-            # pprint(f'current_batches: {current_batches}, depth: {depth}, path: {path}')
 
             if all(b is None for b in current_batches):  # no nodes left to compute
                 return current_stack
 
-            # possible_next_types is a list of types that are candidates for the next layer, i.e they contain
-            # nodes that that have a batch_order == current_batches[network_id] for at least one network
+            # possible_next_types is a list of types that are candidates for the next layer,
+            # i.e they contain nodes that that have a batch_order == current_batches[network_id]
+            # for at least one network
             possible_next_types = []
             for t, nodes in current_type_dict.items():
                 for n in nodes:
@@ -584,16 +608,12 @@ class ComputeStack:
                         possible_next_types.append((t, len(can_be_computed)))
                         break
 
-            total_nodes_left = sum([len(nodes) for nodes in current_type_dict.values()])
-            # pprint(f'total_nodes_left: {total_nodes_left}')
-
             if max_t is not None:
                 # sort by decreasing number of nodes
                 possible_next_types = sorted(possible_next_types, key=lambda x: x[1], reverse=True)
                 possible_next_types = possible_next_types[:max_t]
 
             assert possible_next_types, "No possible next type"
-            # pprint(f'possible_next_types: {possible_next_types}')
 
             # we try every possible type for the next layer
             for t, n in possible_next_types:
@@ -611,7 +631,6 @@ class ComputeStack:
                 assert n == node_diff, f'{n} != {node_diff}'
 
                 bfs_queue.append((substack, new_type_dict, path + [path_entry], depth + 1))
-                # pprint(f'bfs_queue size: {len(bfs_queue)}')
 
         # If we reach here, we didn't find a solution
         raise RuntimeError("No solution found")
@@ -641,9 +660,6 @@ class ComputeStack:
                 if can_be_computed:
                     possible_next_types.append((t, len(can_be_computed)))
                     break
-
-        # total_nodes_left = sum([len(nodes) for nodes in type_dict.values()])
-        # pprint(f'total_nodes_left: {total_nodes_left}')
 
         if max_t is not None:
             # we're basically doing beam search here, by only keeping the max_t types with the most nodes
@@ -793,7 +809,7 @@ class ComputeStack:
         self.layers = minstack.layers
 
     def _make_layer_input_getters(self, layer_id):
-        """Returns a list of functions that return the input values for each node in the given layer
+        """Returns a list of input_getter functions that return the input values for each node in the given layer
         from the flattened output array"""
 
         layer = self.layers[layer_id]
@@ -889,21 +905,30 @@ class ComputeStack:
 
         self.is_assembled = allbuilt
 
-    # def _init_quantization_params(self):
-    # # first we need to store all quantizable parameter names
-    # self.shared_store = {}
-    # quantization_params = {}
-    # for n in self.networks:
-    # for qn, qv in nd.get_all_possible_quantization_params(n).items():
-    # quantization_params[qn] = set(qv) | quantization_params.get(qn, set())
-    # quantization_params = {k: sorted(v) for k, v in quantization_params.items()}
-    # for pname, pv in quantization_params.items():
-    # ut.at_path(self.shared_store, ut.QNAME_PATH + f"/{pname}", pv)
-
     def _generate_apply_method(self, get_grads_for=('translation', 'transcription', 'output')):
+        """
+        Generates the apply method, which will call the apply of all layers of the stack
+        with the correct chaining of input/outputs.
 
+        During an apply pass, we maintain and update a stack output array, which is a flat array
+        of all the outputs of all the nodes in the stack. The output array is updated in place
+        during the apply pass.
+
+        All nodes in a layer are applied in parallel (using vmap)
+        and write their outputs to the stack output array at the correct position.
+        The correct inputs to the next layers are fetched from the stack output array
+        using the input_getters_f functions.
+
+        get_grads_for is a list of node types for which we want to compute gradients wrt their inputs,
+        which is useful to enforce monotonicity of certain node types (e.g. translation, transcription)
+
+        """
+
+        # input_getters_f is a list of functions that return the input values for each node in a layer
         input_getters_f = [self._make_layer_input_getters(l_id) for l_id in range(len(self.layers))]
-        node_ids = [jnp.array([n.node_id for n in l.nodes]) for l in self.layers]
+
+        global_node_ids = [jnp.array([n.node_id for n in l.nodes]) for l in self.layers]
+        local_node_ids = [jnp.arange(len(l.nodes)) for l in self.layers]
 
         out_indices_and_shapes = [
             self.get_network_output_indices(n_id) for n_id in range(len(self.networks))
@@ -927,9 +952,15 @@ class ComputeStack:
 
                 assert out.shape[0] == self.layers_start_index[lid]
 
+                n_nodes = len(self.layers[lid].nodes)
+
                 n_inputs = len(self.layers[lid].f_input_shapes)
                 layer_inputs = [input_getters_f[lid][i](out) for i in range(n_inputs)]
-                keys = jax.random.split(key, len(layer_inputs[0]))
+
+                assert len(layer_inputs) == n_inputs
+                assert len(layer_inputs[0]) == n_nodes
+
+                keys = jax.random.split(key, n_nodes)
 
                 l_apply = self.layers[lid].f_apply
 
@@ -947,7 +978,12 @@ class ComputeStack:
                     return res, grad
 
                 def vmapped(*inputs):
-                    return vmap(f)(node_ids[lid], keys, *inputs)
+                    # TODO:
+                    # use local node ids to avoid sparse parameter array
+                    # which means we also need to init each layer with a local node id
+                    # instead of a global node id (and use the layerid as namespace)
+                    # return vmap(f)(local_node_ids, keys, *inputs)
+                    return vmap(f)(global_node_ids[lid], keys, *inputs)
 
                 layer_out, layer_grad = vmapped(*layer_inputs)
 

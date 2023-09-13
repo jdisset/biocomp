@@ -16,7 +16,17 @@ import logging
 from rich.logging import RichHandler
 from jax.tree_util import Partial as partial
 from contextlib import contextmanager
+from pkg_resources import get_distribution
 import rich
+import subprocess
+
+
+def get_git_commit_hash():
+    return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+
+def get_biocomp_version():
+    return get_distribution('biocomp').version
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     logging utils     --

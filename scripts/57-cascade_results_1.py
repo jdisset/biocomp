@@ -155,8 +155,8 @@ net_ids = list(range(len(networks)))
 dman = dman_full.make_subset(net_ids)
 stack = dman.build_compute_stack(compute_config)
 
-base_params = stack.init(key)
-params = full_stack.use_shared_params(base_params, best_params)
+params = stack.init(key)
+params = full_stack.use_shared_params(params, best_params)
 networks = dman.get_networks()
 
 print('done')
@@ -323,8 +323,8 @@ print('done')
 dman = dman_full.make_subset([nid])
 stack = dman.build_compute_stack(compute_config)
 
-base_params = stack.init(key)
-params = full_stack.use_shared_params(base_params, best_params)
+params = stack.init(key)
+params = full_stack.use_shared_params(params, best_params)
 
 N_SAMPLES_PER_CHUNK = 5000
 N_CHUNKS = 1

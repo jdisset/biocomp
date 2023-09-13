@@ -49,7 +49,7 @@ with ut.timer(f'Loading data and building networks for {XP[xpname]}'):
 key = jax.random.PRNGKey(0)
 stack = dman_full.build_compute_stack(compute_config)
 with ut.timer('Stack initialization'):
-    base_params = stack.init(key)
+    params = stack.init(key)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -233,7 +233,7 @@ for tset in TRAINING_SETS.keys():
         with open(param_file.name, 'rb') as f:
             trained_params = pickle.load(f)
 
-        best_params = stack.use_shared_params(base_params, trained_params)
+        best_params = stack.use_shared_params(params, trained_params)
 
         train_subset = single_uorfs + [uorf_dict[i] for i in TRAINING_SETS[tset]]
 
@@ -272,7 +272,7 @@ param_file = bestrun.file('latest_params.pkl').download(replace=True, root=tmp_d
 with open(param_file.name, 'rb') as f:
     trained_params = pickle.load(f)
 
-best_params = stack.use_shared_params(base_params, trained_params)
+best_params = stack.use_shared_params(params, trained_params)
 
 ##
 mid = uorf_dict[(80,80)]
