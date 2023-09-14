@@ -161,6 +161,11 @@ class VirtualNode:
         assert inv is not None, 'Inverse not found'
         return inv
 
+    def get_layer_and_local_id(self, stack):
+        if stack is None:
+            return None, None
+        return stack.node_map((self.network_id, self.node_id))
+
     def __repr__(self):
         out = f'{self.network_id}/{self.compute_node_id}/{self.node_id if self.node_id is not None else self.batch_order}-{self.type_signature}'
         return f'{out}'
@@ -269,6 +274,9 @@ class ComputeStack:
 
     layers_start_index: list[int] = None
     output_shape: tuple[int] = None
+
+
+    # node_map is (network_id, compute_node_id) -> (layer_id, node_loc)
     node_map: dict[tuple[int, int], tuple[int, int]] = None
 
     total_nb_of_outputs: int = None

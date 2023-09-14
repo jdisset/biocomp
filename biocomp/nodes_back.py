@@ -12,16 +12,34 @@ from . import utils as ut
 from .utils import check
 
 from .parameters import (
-    ParamPath,
-    PTree,
-    TreeRef,
-    ArrayRef,
-    ParameterTree
+    get_param,
+    set_param,
+    init_param_if_needed,
+    get_quantized,
+    generate_quantization_masks,
+    register_quantile_variable_ids,
+    get_quantile_variables,
 )
 
 from tqdm import tqdm
 
 
+# TODO:
+# to make inits much faster, I should implement something like this:
+# set_row(params, "inv_aggregation:original_output_slot", outslots)
+# or, if I find the time to implement a proper paramtree
+# params.set_row("inv_aggregation_original_output_slot", outslots)
+#
+# About the paramtree, I think I should implement it as a class
+# and allow arbitrary namespaces - static being the only default.
+# and maybe a tag system to allow for easy filtering:
+# params.set_param("local", "inv_aggregation_original_output_slot", tags=[nograd])
+#
+# nogradparams = params.filter(tags=["nograd"])
+# localparams = params.filter(namespaces=["local"])
+# nogradlocalparams = params.filter(tags=["nograd"], namespaces=["local"])
+# inverse logic (select all params that are not tagged "nograd"):
+# gradparams = params.filter(tags=["nograd"], inverse=True)
 
 ### {{{                   --     general compute implementations    --
 
@@ -78,17 +96,24 @@ def inv_source(*args, **kwargs):
     return single_passthrough(*args, **kwargs)
 
 
-def numeric(input_shapes, shape, layer_id, **__):
+def numeric(input_shapes, shape, **__):
 
     assert len(input_shapes) == 0
-    namespace = f'local/num_{layer_id}'
 
     def prepare(params, vnodelist, key, **_):
-        params[f'{namespace}/numeric:value'] = jax.random.uniform(key, (len(vnodelist), *shape))
+        maxid = max([vnode.node_id for vnode in vnodelist])
+        for vnode in vnodelist:
+            init_val = ut.continuous_initializer(key, shape)()
+            set_param(
+                params,
+                "numeric:value",
+                init_val,
+                node_id=vnode.node_id,
+                number_of_nodes_at_least=maxid + 1,
+            )
 
     def apply(v, q, params, node_id, k):
-        return params[f'{namespace}/numeric:value'][node_id]
-
+        return get_param(params, "numeric:value", node_id=node_id)
 
     output_shapes = [shape]
 
@@ -100,12 +125,11 @@ def inv_numeric(*args, **kwargs):
     return single_passthrough(*args, **kwargs)
 
 
-def aggregation(input_shapes, n_outputs, layer_id, stack=None, normalize=False, **_):
+def aggregation(input_shapes, n_outputs, stack=None, normalize=False, **_):
 
     assert len(input_shapes) == 1, f'Aggregation expects 1 input, got {len(input_shapes)}'
 
-    namespace = f'local/agg_{layer_id}'
-    pname = f"ratios"
+    pname = f"aggregation:ratios"
 
     max_agg_size = 0
 
@@ -119,8 +143,8 @@ def aggregation(input_shapes, n_outputs, layer_id, stack=None, normalize=False, 
         raise ValueError(f'Aggregation expects at most {max_agg_size} outputs, got {n_outputs}')
 
     def prepare(params, vnodelist, key, **_):
-        ratios = []
-        for i, vnode in enumerate(vnodelist):
+        maxid = max([vnode.node_id for vnode in vnodelist])
+        for vnode in vnodelist:
             extra = vnode.get_compute_node().extra
             if 'ratios' in extra:
                 assert len(extra['ratios']) == n_outputs
@@ -129,16 +153,13 @@ def aggregation(input_shapes, n_outputs, layer_id, stack=None, normalize=False, 
                 ratio_v = jax.random.uniform(key, (n_outputs,))
             # pad to max_outputs if necessary
             ratio_v = jnp.pad(ratio_v, (0, max_agg_size - n_outputs), constant_values=0.0)
-            ratios.append(ratio_v)
-
-        ratios = jnp.stack(ratios)
-        assert ratios.shape == (len(vnodelist), max_agg_size))
-        params[f'{namespace}/{pname}'] = ratios
-
+            set_param(
+                params, pname, ratio_v, node_id=vnode.node_id, number_of_nodes_at_least=maxid + 1
+            )
 
     def apply(input, quantiles, params, node_id, key):
         assert input.shape == input_shapes[0], f'Invalid input shape {input.shape}'
-        ratios = params[f'{namespace}/{pname}'][node_id][:n_outputs]
+        ratios = get_param(params, pname, node_id)[:n_outputs]
         if normalize:
             ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
         return jnp.array(ratios) * input
@@ -152,7 +173,7 @@ def inv_aggregation(
     input_shapes,
     n_outputs,
     stack,
-    layer_id,
+    # layer_id,
     normalize=False,
     **_,
 ):
@@ -163,36 +184,48 @@ def inv_aggregation(
 
     EPSILON = 1e-12
 
-    namespace = f'local/inv_agg_{layer_id}'
-
     def prepare(params, vnodelist, **_):
-
-        original_slots= []
+        maxid = max([vnode.node_id for vnode in vnodelist])
 
         for vnode in vnodelist:
             cnode = vnode.get_compute_node()
+
             extra = cnode.extra
             assert 'original_output_len' in extra
             assert 'original_output_slot' in extra
             assert extra['original_output_len'] > 0
             assert extra['original_output_slot'] < extra['original_output_len']
-            original_slots.append(np.asarray(extra['original_output_slot']))
-        params.at(f'{namespace}/original_output_slot', np.stack(original_slots), tags=['static'])
 
-        if stack is not None:
-            params[f'{namespace}/ratios'] = ArrayRef(params.data)
-            for vnode in vnodelist:
+            set_param(
+                params,
+                "inv_aggregation:original_output_slot",
+                np.asarray(extra['original_output_slot']),
+                node_id=vnode.node_id,
+                base_path=ut.STATIC_PATH,
+                number_of_nodes_at_least=maxid + 1,
+            )
+
+            if stack is not None:
                 inv_vnode = vnode.get_inverse_vnode(stack)
-                inv_layer, inv_loc = inv_vnode.get_layer_and_local_id(stack)
-                params[f'{namespace}/ratios'].push_back(f'local/agg_{inv_layer}/ratios', inv_loc)
-
+                set_param(
+                    params,
+                    "inv_aggregation:inv_node_id",
+                    np.asarray(inv_vnode.node_id),
+                    node_id=vnode.node_id,
+                    base_path=ut.STATIC_PATH,
+                    number_of_nodes_at_least=maxid + 1,
+                )
 
     def apply(inp, quantiles, params, node_id, key):
-
-        original_output_slot = jnp.asarray(params[f'{namespace}/original_output_slot'][node_id], dtype=jnp.int32)
+        original_output_slot = get_param(
+            params, "inv_aggregation:original_output_slot", node_id, base_path=ut.STATIC_PATH
+        ).astype(jnp.int32)
 
         if stack is not None:
-            ratios = params[f'{namespace}/ratios'][node_id][:n_outputs]
+            inv_id = get_param(
+                params, "inv_aggregation:inv_node_id", node_id, base_path=ut.STATIC_PATH
+            ).astype(jnp.int32)
+            ratios = get_param(params, "aggregation:ratios", inv_id)
         else:
             ratios = jnp.ones((n_outputs,))
 
@@ -209,6 +242,7 @@ def inv_aggregation(
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                    --     neural utils     --
+
 
 def leaky_relu(x, alpha=0.2):
     return jnp.where(x > 0, x, alpha * x)
@@ -321,7 +355,7 @@ def transform_nn(
     input_shapes,
     n_outputs,
     stack,
-    layer_id,
+    # layer_id,
     transform_name,
     outer_wsize=64,
     outer_depth=4,
@@ -330,7 +364,6 @@ def transform_nn(
     inner_outsize=8,
     rate_dim=1,
     tr_namespace='',
-    is_inverse = False,
     quantization_names: list[str] = None,  # ordered list. ex: ['1xuorf', '2xuorf', ...]
     inner_activation_name=DEFAULT_ACTIVATION,
     outer_activation_name=DEFAULT_OUT_ACTIVATION,
@@ -348,26 +381,6 @@ def transform_nn(
 
     # we separate between node_impl and shared_impl for performance during prepare
     # only node_impl has to be called for each node_id
-
-    # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    # AM I ACTUALLY SHARING THE RATES ???? I THINK I AM NOT
-    # I NEED TO SHARE THE RATES BETWEEN FWD AND INV NODES!!!!!
-    # JUST USE AN ARRAYREF
-    # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO 
-    # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     def __node_impl(*values, key, param_f, params, node_id):
         val = jnp.array(values)
@@ -691,20 +704,16 @@ transcription = partial(
 translation = partial(
     transform_nn, transform_name='tl', quantization_names=DEFAULT_AVAILABLE_TL_RATES
 )
-
-# TODO: AM I ACTUALLY SHARING THE RATES ??????????
 inv_transcription = partial(
     transform_nn,
     transform_name='tc',
     tr_namespace='inv_',
-    is_inverse=True,
     quantization_names=DEFAULT_AVAILABLE_TC_RATES,
 )
 inv_translation = partial(
     transform_nn,
     transform_name='tl',
     tr_namespace='inv_',
-    is_inverse=True,
     quantization_names=DEFAULT_AVAILABLE_TL_RATES,
 )
 
