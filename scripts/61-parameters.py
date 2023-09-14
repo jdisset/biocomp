@@ -38,6 +38,22 @@ dirname = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 # matplotlib.use('agg')
 matplotlib.rcParams['figure.dpi'] = 200
 
+from io import StringIO
+import sys
+
+
+class Capturing(list):
+    def __enter__(self):
+        self._stdout = sys.stdout
+        sys.stdout = self._stringio = StringIO()
+        return self
+
+    def __exit__(self, *args):
+        self.extend(self._stringio.getvalue().splitlines())
+        del self._stringio  # free up some memory
+        sys.stdout = self._stdout
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                     --     generate networks     --
 
@@ -408,12 +424,13 @@ class PTree:
         self.value = value
         self.set_read_only(read_only)
 
-    def is_leaf(self):
-        if not isinstance(self.value, dict):
+    @classmethod
+    def is_leaf(cls, tree, count_none_as_leaf=True):
+        if tree.value is None:
+            return count_none_as_leaf
+        if not isinstance(tree.value, dict):
             return True
-        if len(self.value) == 0:
-            return True
-        if any(not isinstance(v, PTree) for v in self.value.values()):
+        if len(tree.value) == 0:
             return True
         return False
 
@@ -430,7 +447,7 @@ class PTree:
         else:
             other_branches = [' │  ' if l else '    ' for l in levels]
             lineheader = f"\n{''.join(other_branches)}"
-            if self.is_leaf():
+            if PTree.is_leaf(self):
                 keylen = len(key) if key is not None else 0
                 valstr = str(self.value) if self.value is not None else "∅"
                 valstr = valstr.replace("\n", f'{lineheader}{" " * keylen}     ')
@@ -449,36 +466,54 @@ class PTree:
     def __repr__(self):
         return self.pretty()
 
+    def get(self):
+        if PTree.is_leaf(self, count_none_as_leaf=False):
+            # does this value itself have a get method? (e.g. TreeReferences do...)
+            if hasattr(self.value, "get"):
+                return self.value.get()  # alows to follow references
+            return self.value
+        return self
+
     def __getitem__(self, path):
         if not isinstance(path, ParamPath):
             path = ParamPath(path)
-        if len(path) == 0:
-            if self.is_leaf():
-                return self.value
-            else:
-                return self
+        # print(f"PTree {id(self)} GET at path {path}")
         if self.value is None:
-            raise KeyError(f"ParamTree is empty, cannot get {path}")
-        return self.value[path[0]][path[1:]]
+            raise KeyError(f"PTree is empty, cannot get {path}")
+        if len(path) == 0:
+            raise KeyError(f"PTree getitem called with empty path")
+        if PTree.is_leaf(self):
+            raise KeyError(f"PTree is a leaf, cannot get {path}")
+
+        p, rest = path[0], path[1:]
+        if p not in self.value:
+            raise KeyError(f"Path {path} not found in ParamTree")
+
+        if len(rest) == 0:
+            return self.value[p].get()
+
+        return self.value[p].get()[rest]
 
     def __setitem__(self, path, value):
         if self.read_only:
             raise RuntimeError("Cannot set value on read-only ParamTree")
         if not isinstance(path, ParamPath):
             path = ParamPath(path)
-        # we'll create the path if it doesn't exist
+        # print(f"PTree SET item called with path {path} and value {value}")
         if len(path) == 0:
-            self.value = value
-            return
+            raise KeyError(f"Path is empty")
+
+        p, rest = path[0], path[1:]
         if self.value is None:
             self.value = {}
-            self.tags = {}
+        if p not in self.value:
+            self.value[p] = PTree(read_only=self.read_only)
+        if len(rest) == 0:
+            # if not PTree.is_leaf(self.value[p], count_none_as_leaf=True):
+                # raise KeyError(f"Trying to assign value on non-leaf node!")
+            self.value[p].value = value
         else:
-            if self.is_leaf():
-                raise KeyError(f"Trying to create path {path} on leaf node")
-        if path[0] not in self.value:
-            self.value[path[0]] = PTree(read_only=self.read_only)
-        self.value[path[0]][path[1:]] = value
+            self.value[p].get()[rest] = value
 
     def at(self, path, value=None, overwrite=False):
         if self.read_only or value is None:
@@ -507,24 +542,32 @@ class PTree:
 
     def set_read_only(self, ro=True):
         self.read_only = ro
-        if not self.is_leaf():
+        if not PTree.is_leaf(self):
             for v in self.value.values():
                 v.set_read_only(ro)
 
     def all_leaves_are_none(self):
-        return jax.tree_util.tree_all(jax.tree_util.tree_map(lambda x: x is None, self))
+        # return jtu.tree_all(jtu.tree_map(lambda x: x is None, self))
+        for _, v in self.iter_leaves():
+            if v is not None:
+                return False
+        return True
 
     def remove_empty_leaves(self):
         newvals = {}
-        if self.is_leaf():
+
+        if PTree.is_leaf(self, count_none_as_leaf=False):
             return self
-        for k, v in self.value.items():
-            if not v.all_leaves_are_none():
-                newvals[k] = v.remove_empty_leaves()
+        if self.value is not None:
+            for k, v in self.value.items():
+                print(f"PTree remove_empty_leaves: {k} {v}")
+                if not v.all_leaves_are_none():
+                    newvals[k] = v.remove_empty_leaves()
+
         return PTree(value=newvals, read_only=self.read_only)
 
     def iter_leaves(self, path=ParamPath()):
-        if self.is_leaf():
+        if PTree.is_leaf(self):
             yield path, self.value
         else:
             for k, v in self.value.items():
@@ -540,17 +583,34 @@ class PTree:
         return self.value == other.value
 
 
+
 class TreeRef:
     # a reference to a subtree
     def __init__(self, path, tree):
-        self.path = path
+        # print(f"TreeRef {id(self)} __init__ with path {path}")
+        self.path = path  # the parampath pointing to the subtree
         self.tree = tree
 
     def __repr__(self):
         return f"TreeRef* ({self.path}): {self.tree[self.path]}"
 
     def get(self):
+        # print(f"TreeRef {id(self)} *-> {id(self.tree)}[{self.path}] :: GET()")
         return self.tree[self.path]
+
+    def __getitem__(self, path):
+        # print(f"TreeRef {id(self)} GET for path:{path} (self.path={self.path})")
+        subtree = self.tree[self.path]
+        return subtree.__getitem__(path)
+
+    def __setitem__(self, path, value):
+        # print(f"TreeRef {id(self)} SET for path:{path} (self.path={self.path})")
+        self.tree[self.path / path] = value
+
+    def __eq__(self, other):
+        if not isinstance(other, TreeRef):
+            return False
+        return self.path == other.path and self.tree[self.path] == other.tree[other.path]
 
 
 class ArrayRef:
@@ -604,23 +664,24 @@ class ArrayRef:
             ids_in_array = idx[positions, 1]
             self.map += ((a, positions, ids_in_array),)
 
-
-    # @partial(jax.jit, static_argnums=(0,))
     def get(self):
-        # how expensive is this?
-        # is it actually doing that every time?
-        # are the gradients correctly propagated?
-
         N = len(self.indices)
         if N == 0:
             return jnp.array([])
 
         conc = jnp.zeros((N, *self.shape[1:]))
-        for a,p,i in self.map:
+        for a, p, i in self.map:
             conc = conc.at[p].set(self.arrays[a][i])
 
         return conc
 
+    def __eq__(self, other):
+        if not isinstance(other, ArrayRef):
+            return False
+        return np.all(self.get() == other.get())
+
+    def __hash__(self):
+        return hash(self.get().tobytes())
 
 
 @dataclass
@@ -636,12 +697,8 @@ class ArrayRefPath:
     indices: List[Tuple[int, int]]
 
 
-# jax.tree_util.register_pytree_node(ParamRef, flatten_paramref, unflatten_paramref)
-
-# if we are to use reference, I think I have to write my own manual flatten...
-
-
-def flatten_PTree_manual(ptree):
+# I have to write my own manual (non-recursive) flatten to handle the references
+def flatten_PTree(ptree):
     keys, values = [], []
     for k, v in ptree.iter_leaves():
         if isinstance(v, TreeRef):
@@ -658,7 +715,7 @@ def flatten_PTree_manual(ptree):
     return (values, aux_data)
 
 
-def unflatten_PTree_manual(aux_data, content):
+def unflatten_PTree(aux_data, content):
     keys = aux_data[0]
     read_only = aux_data[1]
     ptree = PTree(read_only=read_only)
@@ -666,60 +723,61 @@ def unflatten_PTree_manual(aux_data, content):
         if isinstance(k, RefPath):
             ptree[k.actual_path] = TreeRef(k.points_to, ptree)
         elif isinstance(k, ArrayRefPath):
-            a = ArrayRef(ptree, k.paths, k.indices)
+            ptree[k.actual_path] = ArrayRef(ptree, k.paths, k.indices)
         else:
             ptree[k] = v
     ptree.set_read_only(read_only)
     return ptree
 
 
-jax.tree_util.register_pytree_node(PTree, flatten_PTree_manual, unflatten_PTree_manual)
+jtu.register_pytree_node(PTree, flatten_PTree, unflatten_PTree)
 
-# def flatten_PTree(ptree):
-# flat_contents = (ptree.value,)
-# aux_data = (ptree.read_only,)
-# return (flat_contents, aux_data)
-
-
-# def unflatten_PTree(aux_data, flat_contents):
-# value = flat_contents[0]
-# read_only = aux_data[0]
-# return PTree(value=value, read_only=read_only)
-
-
-# jax.tree_util.register_pytree_node(PTree, flatten_PTree, unflatten_PTree)
+# jtu.tree_leaves(ptree)
+# make_jaxpr(ArrayRef.get, static_argnums=(0,))(ptree['arr/ref'])
+# print(jit(ArrayRef.get, static_argnums=(0,)).lower(ptree['arr/ref']).compile().as_text())
 
 ptree = PTree()
-ptree['a/c'] = 2
-ptree['a/b0'] = np.array([1, 2, 3])
-ptree['a/b1'] = np.array([4, 5])
-ptree.at('a/b/yo', np.array([5, 6, 7]))
-ptree['a/r'] = TreeRef('a/b', ptree)
-ptree['a/r'].get()['newbranch'] = 3
+ptree['a/c'] = 2.0
+ptree['a/b0'] = np.array([1, 2, 3], dtype=np.float32)
+ptree['a/b1'] = np.array([4, 5], dtype=np.float32)
+ptree.at('a/b/yo', np.array([5, 6, 7], np.float32))
+assert ptree['a/b/yo'][1] == 6
+assert ptree['a/c'] == 2.0
+assert ptree['a']['c'] == 2.0
 
-ptree
+ptree['a/r'] = TreeRef('a/b', ptree)
+ptree['a/r'].get()['newbranch'] = 3.0
+ptree['a/r/newbranch'] = 2.2
+assert ptree['a/r']['newbranch'] == 2.2
+assert ptree['a/b']['newbranch'] == 2.2
+assert ptree['a/b/newbranch'] == 2.2
 
 ptree['arr/ref'] = ArrayRef(ptree, ['a/b0', 'a/b1'], [(0, 1), (1, 0)])
-
-ptree['arr/ref'].get()
-
-make_jaxpr(ArrayRef.get, static_argnums=(0,))(ptree['arr/ref'])
-print(jit(ArrayRef.get, static_argnums=(0,)).lower(ptree['arr/ref']).compile().as_text())
+assert np.all(ptree['arr/ref'] == np.array([2, 4], dtype=np.float32))
+ptree['a/b0'][1] = 42
+assert np.all(ptree['arr/ref'] == np.array([42, 4], dtype=np.float32))
 
 
-jax.tree_util.tree_structure(ptree)
-jax.tree_util.tree_leaves(ptree)
+l, s = jtu.tree_flatten(ptree)
+reconstructed = jtu.tree_unflatten(s, l)
+assert reconstructed == ptree
+assert np.all(reconstructed['arr/ref'] == np.array([42, 4], dtype=np.float32))
 
-jax.tree_util.tree_flatten(ptree)
+assert np.all(ptree['a/r']['yo'] == ptree['a/b/yo'])
 
 
-# l, s = jtu.tree_flatten(ptree)
+def test_f(params, x):
+    arr = params['arr/ref']
+    return jnp.prod(arr) * x
 
-# ptree_reconstruct = jtu.tree_unflatten(s, l)
-# ptree
 
-# ptree_reconstruct
+g = jax.jit(jax.grad(test_f))(ptree, 2.0)
 
+assert g['arr/ref'][0] > 0
+assert g['arr/ref'][0] == g['a/b0'][1]
+assert g['arr/ref'][1] == g['a/b1'][0]
+
+print('Passed!')
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -743,6 +801,12 @@ class ParameterTree:
         self.data.set_read_only(read_only)
         if tags is not None:
             self.tags.set_read_only(read_only)
+
+    def createReference(self, path, to):
+        if self.read_only:
+            raise RuntimeError("Cannot set value on read-only ParameterTree")
+        self.data[path] = TreeRef(to, self.data)
+        self.tags[path] = TreeRef(to, self.tags)
 
     def __setitem__(self, path, value):
         if self.read_only:
@@ -821,24 +885,25 @@ class ParameterTree:
         self.__tagdict = {name: i for i, name in enumerate(self.tagnames)}
 
         if self.tags is None or self.tags.is_empty():
-            self.tags = jax.tree_util.tree_map(lambda _: np.array([False]), self.data)
+            self.tags = jtu.tree_map(lambda _: np.array([False]), self.data)
         else:
             insert_idx = self.__tagdict[tag]
-            self.tags = jax.tree_util.tree_map(lambda t: np.insert(t, insert_idx, False), self.tags)
+            self.tags = jtu.tree_map(lambda t: np.insert(t, insert_idx, False), self.tags)
 
     def tag(self, path, tags, overwrite=False):
         if self.read_only:
-            raise RuntimeError("Cannot add tag read-only ParameterTree")
+            raise RuntimeError("Cannot tag read-only ParameterTree")
         self.create_tags_if_required(tags)
         if not self.data.has_leaf(path):
             raise KeyError(f"Trying to tag non-leaf node {path}")
-
         if isinstance(tags, str):
             tags = [tags]
 
         self.create_tags_if_required(tags)
 
         assert self.tags[path].shape == (len(self.tagnames),)
+        print(f"tagging {path} with {tags}")
+        print(f"current tags: {self.tags}")
 
         tag_ids = [self.__tagdict[tag] for tag in tags]
         tag_flags = np.zeros(len(self.tagnames), dtype=bool)
@@ -866,21 +931,13 @@ class ParameterTree:
                 raise KeyError(f"Tag {t} not found in ParameterTree")
 
         tag_ids = [self.__tagdict[tag] for tag in tags]
-        is_valid = jax.tree_util.tree_map(lambda x: np.all(x[tag_ids]), self.tags)
+        is_valid = jtu.tree_map(lambda x: np.all(x[tag_ids]), self.tags)
 
-        left_data_tree = jax.tree_util.tree_map(
-            lambda mask, x: x if mask else None, is_valid, self.data
-        )
-        right_data_tree = jax.tree_util.tree_map(
-            lambda mask, x: x if not mask else None, is_valid, self.data
-        )
+        left_data_tree = jtu.tree_map(lambda mask, x: x if mask else None, is_valid, self.data)
+        right_data_tree = jtu.tree_map(lambda mask, x: x if not mask else None, is_valid, self.data)
 
-        left_tag_tree = jax.tree_util.tree_map(
-            lambda mask, x: x if mask else None, is_valid, self.tags
-        )
-        right_tag_tree = jax.tree_util.tree_map(
-            lambda mask, x: x if not mask else None, is_valid, self.tags
-        )
+        left_tag_tree = jtu.tree_map(lambda mask, x: x if mask else None, is_valid, self.tags)
+        right_tag_tree = jtu.tree_map(lambda mask, x: x if not mask else None, is_valid, self.tags)
 
         left_param_tree = ParameterTree(
             data=left_data_tree,
@@ -913,11 +970,11 @@ class ParameterTree:
 
     @classmethod
     def merge(cls, left, right):
-        is_leaf = lambda x: x is None
-        left_struct = jtu.tree_structure(left, is_leaf=is_leaf)
-        right_struct = jtu.tree_structure(right, is_leaf=is_leaf)
+        jax_leaf = lambda x: x is None
+        left_struct = jtu.tree_structure(left, is_leaf=jax_leaf)
+        right_struct = jtu.tree_structure(right, is_leaf=jax_leaf)
         if left_struct == right_struct:
-            return jtu.tree_map(lambda l, r: l if r is None else r, left, right, is_leaf=is_leaf)
+            return jtu.tree_map(lambda l, r: l if r is None else r, left, right, is_leaf=jax_leaf)
         else:
             return cls.sparse_merge(left, right)
 
@@ -945,17 +1002,6 @@ class ParameterTree:
             )
 
 
-# let's try to add references
-
-
-params = ParameterTree()
-params['a/x'] = 2
-params['a/b/c/d'] = 3
-params.at('a/b/yo', np.array([1, 2, 4]))
-# ex usage:
-# params['a/b/c'] = ParamRef('a/b/d')
-
-
 def flatten_ParameterTree(ptree):
     flat_contents = (ptree.data, ptree.tags)
     aux_data = (ptree.read_only, ptree.tagnames)
@@ -968,25 +1014,55 @@ def unflatten_ParameterTree(aux_data, flat_contents):
     return ParameterTree(data=data, read_only=read_only, tags=tags, tagnames=tagnames)
 
 
-jax.tree_util.register_pytree_node(ParameterTree, flatten_ParameterTree, unflatten_ParameterTree)
+jtu.register_pytree_node(ParameterTree, flatten_ParameterTree, unflatten_ParameterTree)
 
 
-jax.tree_util.tree_leaves(params)
-
-jax.tree_util.tree_flatten_with_path(params)
+params = ParameterTree()
+params['a/x'] = 2
+params['a/b/c/d'] = 3
+params.at('a/b/yo', np.array([1, 2, 4]))
+assert params['a/b/c/d'] == 3
+assert params['a/b/yo'][2] == 4
 
 params.tag('a/b/c/d', ['test', 'b'])
+assert np.all(params.tags['a/b/c/d'] == np.array([True, True]))
+assert params.tagnames == ['b', 'test']
+
 params.tag('a/x', ['othertag', 'aha'])
 params.tag('a/b/yo', ['b'])
+params
+
+jtu.tree_leaves(params)
+l, s = jtu.tree_flatten(params)
+reconstructed = jtu.tree_unflatten(s, l)
 
 a, b = params.filter_by_tag('aha')
-
-a_noempty = a.remove_empty_leaves()
+a
+b
+assert a != b
+b.remove_empty_leaves()
+a.remove_empty_leaves()
 
 m = ParameterTree.merge(a, b)
 m_noempty = ParameterTree.merge(a.remove_empty_leaves(), b.remove_empty_leaves())
+m
+m_noempty
+assert m_noempty == m
 
 # let's try to add references
+
+params.createReference('a/ref', 'a/b')
+params['a/ref/c/d']
+params.tag('a/ref/c/d', ['ref'])
+
+assert params.tagnames == ['aha', 'b', 'othertag', 'ref', 'test']
+
+assert np.all(params.tags['a/b/c/d'] == np.array([False, True, False, True, True]))
+params.tags['a/b/c/d'] = np.array([False, False, False, True, True])
+assert np.all(params.tags['a/ref/c/d/'] == np.array([False, False, False, True, True]))
+
+print(params)
+print('ParameterTree passed all assertions!')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -1003,11 +1079,11 @@ class ParamRow:
     def generate_all(self):
         self.data = vmap(self.init_f)(np.arange(self.n_elems))
 
+    def get(self):
+        return self.data
+
     def __getitem__(self, node_id):
-        if self.data is None:
-            self.n_elems = max(node_id + 1, self.n_elems)
-        else:
-            return self.data[node_id]
+        return self.data[node_id]
 
     def __setitem__(self, node_id, value):
         assert self.init_f is None
@@ -1017,6 +1093,9 @@ class ParamRow:
         if self.data.shape[0] < self.n_elems:
             self.data = np.concatenate([self.data, np.zeros(self.n_elems - self.data.shape[0])])
         self.data[node_id] = value
+
+    def __repr__(self):
+        return f'ParamRow({self.data})'
 
 
 def flatten_ParamRow(prow):
@@ -1032,6 +1111,10 @@ def unflatten_ParamRow(aux_data, flat_contents):
 
 
 jtu.register_pytree_node(ParamRow, flatten_ParamRow, unflatten_ParamRow)
+
+
+params['paramrow'] = ParamRow()
+params['paramrow']
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
