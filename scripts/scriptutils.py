@@ -397,7 +397,7 @@ def plot_networks(
     H=2000,
     W=800,
     outputs=None,
-    figsize=(10, 10),
+    figsize=(20, 20),
     show=False,
     show_title=True,
 ):
@@ -826,12 +826,11 @@ def print_jaxpr(fun, *args, **kwargs):
     get_jaxpr(fun, *args, **kwargs).pretty_print()
 
 
-def get_xla(fun, *args, **kwargs):
+def get_xla(fun, *args, static_argnums=(), **kwargs):
     import jax
     import jaxlib.xla_extension as xla_ext
-
     console = Console(highlighter=rich.highlighter.ReprHighlighter())
-    c = jax.xla_computation(fun)(*args, **kwargs)
+    c = jax.xla_computation(fun, static_argnums=static_argnums)(*args, **kwargs)
     backend = jax.lib.xla_bridge.get_backend()
     e = backend.compile(c)
     option = xla_ext.HloPrintOptions.short_parsable()
@@ -839,8 +838,8 @@ def get_xla(fun, *args, **kwargs):
     return out
 
 
-def print_xla(fun, *args, **kwargs):
-    print(get_xla(fun, *args, **kwargs))
+def print_xla(fun, *args, static_argnums=(), **kwargs):
+    print(get_xla(fun, *args, static_argnums=static_argnums, **kwargs))
 
 
 #                                                                            }}}

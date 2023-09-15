@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Union, Tuple, Any, Dict, List
+from typing import Callable, Optional, Union, Tuple, Any, Dict, List, Sequence, Iterable
 
 import jax
 import jax.numpy as jnp
@@ -9,6 +9,7 @@ import numpy as np
 from dataclasses import dataclass
 from jax.tree_util import register_pytree_node_class
 from copy import deepcopy
+
 
 ### {{{                         --     ParamPath     --
 class ParamPath:
@@ -72,6 +73,7 @@ class ParamPath:
         elif isinstance(key, ParamPath):
             key = key.path
         return key in self.path
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -167,7 +169,7 @@ class PTree:
             self.value[p] = PTree(read_only=self.read_only)
         if len(rest) == 0:
             # if not PTree.is_leaf(self.value[p], count_none_as_leaf=True):
-                # raise KeyError(f"Trying to assign value on non-leaf node!")
+            # raise KeyError(f"Trying to assign value on non-leaf node!")
             self.value[p].value = value
         else:
             self.value[p].get()[rest] = value
@@ -239,11 +241,13 @@ class PTree:
             return np.all(self.value == other.value)
         return self.value == other.value
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                          --     TreeRef     --
 class TreeRef:
-    """ A reference to a subtree of a ParamTree """
+    """A reference to a subtree of a ParamTree"""
+
     def __init__(self, path, tree):
         self.path = path  # the parampath pointing to the subtree
         self.tree = tree
@@ -266,14 +270,16 @@ class TreeRef:
             return False
         return self.path == other.path and self.tree[self.path] == other.tree[other.path]
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                         --     ArrayRef     --
 
+
 class ArrayRef:
 
-    """ An array of references to some other arrays values
-        aka a view, but over potentially several different arrays
+    """An array of references to some other arrays values
+    aka a view, but over potentially several different arrays
     """
 
     def __init__(self, tree, paths=None, indices=None):
@@ -293,16 +299,6 @@ class ArrayRef:
         self.indices += ((self._pathdict[array_path], id),)
         self.make_map()
 
-    def make_map(self):
-        idx = np.asarray(self.indices)
-        self.arrays = tuple([self.tree[p] for p in self.paths])
-        self.shape = self.tree[self.paths[0]].shape
-        self.map = ()
-        for a in np.unique(idx[:, 0]):
-            positions = np.where(idx[:, 0] == a)[0]
-            ids_in_array = idx[positions, 1]
-            self.map += ((a, positions, ids_in_array),)
-
     def get(self):
         N = len(self.indices)
         if N == 0:
@@ -313,6 +309,21 @@ class ArrayRef:
             conc = conc.at[p].set(self.arrays[a][i])
 
         return conc
+
+    def make_map(self):
+        if len(self.indices) == 0:
+            self.arrays = ()
+            self.shape = ()
+            self.map = ()
+            return
+        idx = np.asarray(self.indices)
+        self.arrays = tuple([self.tree[p] for p in self.paths])
+        self.shape = self.tree[self.paths[0]].shape
+        self.map = ()
+        for a in np.unique(idx[:, 0]):
+            positions = np.where(idx[:, 0] == a)[0]
+            ids_in_array = idx[positions, 1]
+            self.map += ((a, positions, ids_in_array),)
 
     def __eq__(self, other):
         if not isinstance(other, ArrayRef):
@@ -327,10 +338,12 @@ class ArrayRef:
 
 ### {{{                 --     jax [un]flattening of Ptrees     --
 
+
 @dataclass
 class RefPath:
     actual_path: ParamPath
     points_to: ParamPath
+
 
 @dataclass
 class ArrayRefPath:
@@ -378,8 +391,9 @@ jtu.register_pytree_node(PTree, flatten_PTree, unflatten_PTree)
 
 ### {{{                        --     ParameterTree     --
 
+
 class ParameterTree:
-    """ A tree of parameters, with a separate tree of tags + some convenience partitionning methods"""
+    """A tree of parameters, with a separate tree of tags + some convenience partitionning methods"""
 
     def __init__(
         self, data: PTree = None, tags: PTree = None, tagnames: list = None, read_only=False
@@ -427,12 +441,7 @@ class ParameterTree:
                 raise KeyError(f"Path {path} already exists, cant overwrite without overwrite=True")
             if overwrite or not exists:
                 self.data[path] = value
-                if tags is not None:
-                    self.create_tags_if_required(tags)
-                    tag_ids = [self.__tagdict[tag] for tag in tags]
-                    tag_flags = np.zeros(len(self.tagnames), dtype=bool)
-                    tag_flags[tag_ids] = True
-                    self.tags[path] = tag_flags
+                self.tag(path, tags, True)
             return self.data[path]
 
     def __repr__(self):
@@ -482,6 +491,8 @@ class ParameterTree:
             self.tags = jtu.tree_map(lambda t: np.insert(t, insert_idx, False), self.tags)
 
     def tag(self, path, tags, overwrite=False):
+        if tags is None:
+            return
         if self.read_only:
             raise RuntimeError("Cannot tag read-only ParameterTree")
         self.create_tags_if_required(tags)
@@ -608,4 +619,27 @@ def unflatten_ParameterTree(aux_data, flat_contents):
 jtu.register_pytree_node(ParameterTree, flatten_ParameterTree, unflatten_ParameterTree)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+def init_if_needed(params, path, init_f, base_path=''):
+    try:
+        return params[f'{base_path}/{path}']
+    except KeyError:
+        params[f'{base_path}/{path}'] = init_f()
+        return params[f'{base_path}/{path}']
+
+def get_param(params, path, base_path='', **_):
+    return params[f'{base_path}/{path}']
+
+def make_view(
+    params: ParameterTree,
+    at_path: ParamPath,
+    from_paths: Sequence[ParamPath],
+    from_ids: Sequence[int],
+    leaves: Sequence[ParamPath],
+):
+    for leaf in leaves:
+        leafpath = ParamPath(at_path) / leaf
+        params[leafpath] = ArrayRef(params.data)
+        for from_path, from_id in zip(from_paths, from_ids):
+            params[leafpath].push_back(f'{from_path}/{leaf}', from_id)
 

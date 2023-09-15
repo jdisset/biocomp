@@ -389,7 +389,6 @@ def get_quantile_variables(params, node_id, quantiles, n):
     ).astype(int)
     assert qid.ndim == 1
     q = jnp.where(qid == -1, 0, quantiles[qid])[:n]
-
     return q.squeeze()
 
 ##────────────────────────────────────────────────────────────────────────────}}}

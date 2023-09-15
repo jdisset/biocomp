@@ -55,278 +55,6 @@ class Capturing(list):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                     --     generate networks     --
-
-lib = su.load_lib()
-
-
-def sequestron_ERN3p(get_param, get_quantized, **_):
-    def apply(rna, ern, **_):
-        # return rna * (1.0 - jnp.exp(-ern))
-        return jnp.relu(ern - rna)
-
-    return apply
-
-
-def any_uorf(lib, *_, **__):
-    all_uORFs = lib.pc[lib.pc.category == 'uORF_group'].index.tolist()
-    return [all_uORFs]
-
-
-def P(name):
-    return bc.Slot(lib, name)
-
-
-def TU(*parts):
-    partlist = [P('hEF1a')] + list(parts)
-    return bc.TranscriptionUnit(partlist)
-
-
-uorfs = P(any_uorf(lib)[0][:8])
-# 'Csy4+uOrfs': bc.TranscriptionUnit([promoter, P('Csy4'), P(any_uorf(lib)[0])]),
-
-ERNs = ['CasE', 'Csy4', 'PgU']
-ern = [P(ern) for ern in ERNs]
-rec = [P(ern + '_rec') for ern in ERNs]
-colors = [P('mKate'), P('eBFP'), P('NeonGreen'), P('iRFP720')]
-
-tus_bp = {
-    # node A
-    'A_pos_0': TU(rec[0], uorfs, ern[2]),
-    'A_pos_1': TU(rec[0], uorfs, ern[2]),
-    'A_pos_2': TU(rec[0], uorfs, ern[2]),
-    'A_neg_0': TU(ern[0]),
-    'A_neg_1': TU(ern[0]),
-    'A_neg_2': TU(ern[0]),
-    # node B
-    'B_pos_0': TU(rec[1], uorfs, ern[2]),
-    'B_pos_1': TU(rec[1], uorfs, ern[2]),
-    'B_pos_2': TU(rec[1], uorfs, ern[2]),
-    'B_neg_0': TU(ern[1]),
-    'B_neg_1': TU(ern[1]),
-    'B_neg_2': TU(ern[1]),
-    # colors
-    'x0color': TU(colors[0]),
-    'x1color': TU(colors[1]),
-    'biascolor': TU(colors[2]),
-    # output node
-    'C_pos': TU(rec[2], colors[3]),
-    'C_neg': TU(ern[2]),
-}
-
-
-# everything everywhere all at once:
-aggregations_bp = [
-    ['A_pos_0', 'A_neg_0', 'B_pos_0', 'B_neg_0', 'x0color'],  # x0
-    ['A_pos_1', 'A_neg_1', 'B_pos_1', 'B_neg_1', 'x1color'],  # x1
-    ['A_pos_2', 'A_neg_2', 'B_pos_2', 'B_neg_2', 'C_pos', 'C_neg', 'biascolor'],  # biases
-]
-
-
-sources_bp = {
-    tu_name: [tu_name] for tu_name, tu in tus_bp.items() if tu_name in ut.flatten(aggregations_bp)
-}
-used_tus_bp = {
-    tu_name: tu for tu_name, tu in tus_bp.items() if tu_name in ut.flatten(aggregations_bp)
-}
-
-n_bp = bc.Network.from_dict(lib, 'bp_attempt', used_tus_bp, sources_bp, aggregations_bp)
-bp_net = bc.inverted_network(n_bp)[0]
-
-
-tus_single = {
-    'A_pos': TU(rec[0], colors[3]),
-    'A_neg': TU(ern[0]),
-    'x0color': TU(colors[0]),
-    'x1color': TU(colors[1]),
-}
-aggregations_single = [
-    ['A_pos', 'x0color'],  # x0
-    ['A_neg', 'x1color'],  # x1
-]
-sources_single = {tu_name: [tu_name] for tu_name, tu in tus_single.items()}
-n_single = bc.Network.from_dict(lib, 'single_ERN', tus_single, sources_single, aggregations_single)
-single_net = bc.inverted_network(n_single)[0]
-
-networks = [bp_net]
-su.plot_networks(networks, W=4500, H=4000, show=True, figsize=(22, 20))
-NETWORK = networks[0]
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{                     --     old school params     --
-def indirect_param_at(
-    params,
-    name,
-    node_id=0,
-    base_path=ut.NODE_PATH,
-    init=None,
-    overwrite_with=None,
-    read_only=True,
-    number_of_nodes_at_least=1,
-    **_,
-):
-
-    """
-    Retrieves or sets a parameter from the given params dictionary.
-    Vectorizable across the node_id axis.
-    If the parameter is not found, it is created and added to the params dict. (unless read_only is True)
-    - params: the dictionary of parameters
-    - name: the name of the parameter
-    - node_id: the id of the node that owns this parameter
-    - base_path: the path to the node in the params dict, which acts as a namespace ("node", "shared", "static", ...)
-    - init: the initialization function to use if the parameter is not found
-    - overwrite_with: if not None, the parameter will be overwritten with this value wether it exists or not
-    - read_only: if True, the parameter will not be created if it is not found (and not overwritten)
-    """
-
-    # We can't jit/vectorize a dictionnary lookup. i.e we can't do:
-    # res = params[node_id] as this requires branching
-    # Indexing an array is fine though, so we could simply create
-    # an array of params for each node that is as big as the largest
-    # node_id, and then index it with the node_id, which is exactly what we do in
-    # direct_param_at.
-    # However, this is wasteful for params that have large shapes
-    # but are only used by a few nodes (most params are like this).
-
-    # So instead I add one layer of indirection to have a sparse array of params:
-    # we save a key_vec which will contain -1 for all nodes that don't use
-    # the given parameter, and an actual parameter_id for the nodes that do.
-    # This way we can use the key_vec to index a parameter array that contains
-    # only the parameters that are actually used by the network.
-
-    # I think in theory we can also use node_id with base_path = shared
-    # to vectorize tl vs tx by accessing different weights!
-
-    assert isinstance(params, dict), f'params must be a dict, not {type(params)}'
-
-    dpath = base_path / name
-
-    nparams = ut.at_path(params, dpath, None)
-    nparams = nparams.shape[0] if nparams is not None else 0
-
-    keys_path = ut.KEYS_PATH + dpath
-    key_vec = ut.at_path(params, keys_path, None)  # key_vec is an integer vector (n_nodes,)
-
-    if not read_only:  # non-jittable path (only used for initialization)
-        N_NODES = max(node_id, number_of_nodes_at_least - 1) + 1
-        if key_vec is None or key_vec.shape[0] <= N_NODES:
-            # extend key_vec to fit node_id
-            v = key_vec if key_vec is not None else jnp.zeros((0,), dtype=jnp.int32)
-            key_vec = jnp.concatenate(
-                [v, jnp.full((N_NODES - v.shape[0] + 1,), -1, dtype=jnp.int32)]
-            )
-        if int(key_vec[node_id]) == -1:  # param doesn't exist yet
-            try:
-                new_param_value = overwrite_with if overwrite_with is not None else init()
-                p = ut.at_path(params, dpath)  # get existing parameter array
-                if p is None:  # first param ever for this path
-                    p = jnp.expand_dims(new_param_value, axis=0)
-                else:  # add new param to existing array
-                    p = jnp.concatenate([p, jnp.expand_dims(new_param_value, axis=0)])
-                ut.at_path(params, dpath, p)  # update params
-                # update and save key_vec:
-                key_vec = ut.at_path(params, keys_path, key_vec.at[node_id].set(nparams))
-            except Exception as e:
-                msg = f'Error initializing param "{name}" from node {node_id}: {e}'
-                raise RuntimeError(msg) from e
-
-    param_id = key_vec[node_id]
-
-    if overwrite_with is not None and not read_only:  # also non-jittable
-        allp = ut.at_path(params, dpath).at[param_id].set(overwrite_with)
-        ut.at_path(params, dpath, allp)
-
-    res = ut.at_path(params, dpath)[param_id]
-
-    return res
-
-
-def direct_param_at(
-    params,
-    name,
-    node_id=0,
-    base_path=ut.NODE_PATH,
-    init=None,
-    overwrite_with=None,
-    read_only=True,
-    number_of_nodes_at_least=1,
-    **_,
-):
-
-    """
-    Similar to indirect_param_at, but doesn't use key_vec: it's a dense param array
-    instead of a sparse one. Potentially VERY wasteful, but faster to access.
-    """
-
-    if not isinstance(params, dict):
-        raise TypeError(f'params must be a dict, not {type(params)}')
-
-    dpath = base_path / name
-    p_array = ut.at_path(params, dpath, None)  # p_array is the parameter array (n_params, *shape)
-
-    if not read_only:  # non-jittable path (only used for initialization)
-        # first we will check if the param is already initialized
-        IS_INIT_PATH = ut.STATIC_PATH / 'is_init'
-        # we store a boolean indicating if a param is initialized
-        is_init_array = ut.at_path(params, IS_INIT_PATH / dpath, None)
-        if is_init_array is None or is_init_array.shape[0] <= node_id:
-            # extend is_init_array to fit node_id
-            v = is_init_array if is_init_array is not None else np.zeros((0,), dtype=np.bool_)
-            is_init_array = np.concatenate(
-                [v, np.full((node_id - v.shape[0] + 1,), False, dtype=np.bool_)]
-            )
-            ut.at_path(params, IS_INIT_PATH / dpath, is_init_array)
-        param_is_init = is_init_array[node_id]
-
-        if not param_is_init or overwrite_with is not None:
-            new_value = overwrite_with if overwrite_with is not None else init()
-            if p_array is not None and p_array.shape[1:] != new_value.shape:
-                raise ValueError(
-                    f'Param "{name}" has shape {p_array.shape[1:]}, but '
-                    f'new value has shape {new_value.shape}.'
-                )
-            # then let's make sure the param array is big enough
-            REQUIRED_LENGTH = max(node_id, number_of_nodes_at_least - 1) + 1
-            if p_array is None:
-                p_array = np.zeros((REQUIRED_LENGTH,) + new_value.shape, dtype=new_value.dtype)
-            elif p_array.shape[0] < REQUIRED_LENGTH:
-                p_array = np.concatenate(
-                    [p_array, np.zeros((REQUIRED_LENGTH - p_array.shape[0],) + new_value.shape)]
-                ).astype(new_value.dtype)
-
-            # finally we can set the param
-            p_array[node_id] = new_value
-            p_array = ut.at_path(params, dpath, p_array)
-            p = p_array[node_id]
-            # and mark the param as initialized
-            is_init_array[node_id] = True
-            ut.at_path(params, IS_INIT_PATH / dpath, is_init_array)
-
-    dtype = p_array.dtype
-    p = p_array[node_id].astype(dtype)
-    return p
-
-
-PARAM_AT = direct_param_at
-
-
-def set_param(params, name, value, node_id=0, base_path=ut.NODE_PATH, **kw):
-    return PARAM_AT(
-        params, name, node_id, base_path, overwrite_with=np.asarray(value), read_only=False, **kw
-    )
-
-
-def get_param(params, name, node_id=0, base_path=ut.NODE_PATH, **_):
-    return PARAM_AT(params, name, node_id, base_path, read_only=True)
-
-
-def init_param_if_needed(params, name, init, node_id=0, base_path=ut.NODE_PATH, **kw):
-    return PARAM_AT(params, name, node_id, base_path, init=init, read_only=False, **kw)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                        --     Ptree     --
 
@@ -655,6 +383,11 @@ class ArrayRef:
         self.make_map()
 
     def make_map(self):
+        if len(self.indices) == 0:
+            self.arrays = ()
+            self.shape = ()
+            self.map = ()
+            return
         idx = np.asarray(self.indices)
         self.arrays = tuple([self.tree[p] for p in self.paths])
         self.shape = self.tree[self.paths[0]].shape
@@ -776,6 +509,12 @@ g = jax.jit(jax.grad(test_f))(ptree, 2.0)
 assert g['arr/ref'][0] > 0
 assert g['arr/ref'][0] == g['a/b0'][1]
 assert g['arr/ref'][1] == g['a/b1'][0]
+
+ref = ArrayRef(ptree)
+ptree['other/arrayref'] = ref
+ref.push_back('a/b0', 2)
+ptree
+ref.push_back('a/b1', 1)
 
 print('Passed!')
 
@@ -1173,3 +912,29 @@ vf = jit(vmap(test_apply))
 vf(trees.get_read_only_tree(), np.array([1, 2, 1]))
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+
+
+##
+
+
+params = ParameterTree()
+
+# set_param(
+    # params,
+    # "numeric:value",
+    # init_val,
+    # node_id=vnode.node_id,
+    # number_of_nodes_at_least=maxid + 1,
+# )
+
+# def set_param(params, name, value, node_id=0, base_path=ut.NODE_PATH, **kw):
+    # return PARAM_AT(
+        # params, name, node_id, base_path, overwrite_with=np.asarray(value), read_only=False, **kw
+    # )
+
+
+params
+
+params['numeric:value'] = 1
+
