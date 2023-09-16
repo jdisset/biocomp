@@ -327,8 +327,8 @@ class DataManager:
             invalid_at = invalid_at | (self._raw_Y[i] > data_cfg['data_max_value']).any(axis=1)
             percentnan = 100.0 * invalid_at.sum() / len(invalid_at)
             if percentnan > 0.0:
-                ut.logger.info(
-                    f'Removing {invalid_at.sum()} invalid poitns for net {i} ({percentnan:.2f} %)'
+                ut.logger.debug(
+                    f'Removing {invalid_at.sum()} invalid points for net {i} ({percentnan:.2f} %)'
                 )
                 self._raw_X[i] = self._raw_X[i][~invalid_at]
                 self._raw_Y[i] = self._raw_Y[i][~invalid_at]
@@ -404,6 +404,7 @@ class DataManager:
         import hashlib
         from pathlib import Path
         import base64
+
         ut.logger.debug('Computing densities')
 
         if cache_dir is None:
@@ -454,7 +455,6 @@ class DataManager:
         ]
 
         ut.logger.debug(f'Done computing {len(self._densities)} densities')
-
 
     def rescale(self, X):
         return [

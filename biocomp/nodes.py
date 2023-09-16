@@ -12,6 +12,7 @@ from . import quantization as qz
 from .parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
 
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from .compute import ComputeNode, ComputeStack
 
@@ -19,11 +20,22 @@ from jax.typing import ArrayLike
 from typing import Callable, Tuple, Sequence
 from typing import NewType
 
-LayerInstance = NewType("LayerInstance", Tuple[Callable, Callable, Sequence[Tuple[int]]])
-PRNGKey = NewType("PRNGKey", ArrayLike)
+# LayerInstance = NewType("LayerInstance", Tuple[Callable, Callable, Sequence[Tuple[int]]])
+
+LayerInstance = Tuple[Callable, Callable, Sequence[Tuple[int]]]
+PRNGKey = ArrayLike
 
 
 # =========================== Utils ===========================
+def generate_layer_name(stack, layer_id, name):
+    if stack is None:
+        return f'l{layer_id}::{name}'
+    else:
+        n_nodes = len(stack.layers[layer_id].nodes)
+        n_layers = len(stack.layers)
+        return f'l{layer_id} {name} ({n_nodes})'
+
+
 ### {{{                 --     quantile variable helpers     --
 
 
@@ -42,7 +54,7 @@ def get_quantile_variable_ids(node, stack):
         ).astype(int)
         assert qid.ndim == 1
 
-    return qid
+    return qid.squeeze()
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -73,8 +85,8 @@ def dense_layer(
     assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
     input_size = 1 if input_values.shape == () else input_values.shape[0]
 
-    w = param_f(f'{name}_w', init=ut.he_initializer(key, (input_size, output_size)))
-    b = param_f(f'{name}_b', init=lambda: np.zeros((output_size,)))
+    w = param_f(f'{name}/w', init_f=ut.he_initializer(key, (input_size, output_size)))
+    b = param_f(f'{name}/b', init_f=lambda: np.zeros((output_size,)))
 
     assert input_values.shape == (
         input_size,
@@ -119,10 +131,10 @@ def dense_multilevel(
     res = input_values
     keys = jax.random.split(key, depth)
     for i in range(depth - 1):
-        res = activation(dense_layer(res, hidden_s, param_f, keys[i], f'{name}_{i}'))
+        res = activation(dense_layer(res, hidden_s, param_f, keys[i], f'{name}/l{i}'))
         assert res.shape == (hidden_s,), f'In {name}: {res.shape} != {(hidden_s,)}'
 
-    res = dense_layer(res, output_s, param_f, keys[-1], f'{name}_{depth - 1}')
+    res = dense_layer(res, output_s, param_f, keys[-1], f'{name}/l{depth - 1}')
     assert res.shape == (output_s,), f'In {name}: {res.shape} != {(output_s,)}'
     return res
 
@@ -186,12 +198,14 @@ def inv_source(*args, **kwargs):
 
 
 def numeric(
-    input_shapes: Sequence[Tuple[int]], n_outputs: int, layer_id: int, shape: Tuple[int] = (1,), **_
+    input_shapes: Sequence[Tuple[int]], n_outputs: int, layer_id: int, stack, shape: Tuple[int] = (1,),**_
 ) -> LayerInstance:
 
     assert n_outputs == 1, f'Numeric node should have 1 output, got {n_outputs}'
     assert len(input_shapes) == 0
-    namespace = f'local/num_{layer_id}'
+
+    local_layer_name = generate_layer_name(stack, layer_id, 'numeric')
+    namespace = f'local/{local_layer_name}'
 
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key, **_):
         params[f'{namespace}/numeric:value'] = jax.random.uniform(key, (len(nodelist), *shape))
@@ -224,7 +238,8 @@ def aggregation(
 
     assert len(input_shapes) == 1, f'Aggregation expects 1 input, got {len(input_shapes)}'
 
-    namespace = f'local/agg_{layer_id}'
+    local_layer_name = generate_layer_name(stack, layer_id, 'aggregation')
+    namespace = f'local/{local_layer_name}'
     pname = f"ratios"
 
     max_agg_size = 0
@@ -288,7 +303,9 @@ def inv_aggregation(
 
     EPSILON = 1e-12
 
-    namespace = f'local/inv_agg_{layer_id}'
+    local_layer_name = generate_layer_name(stack, layer_id, 'inverse_aggregation')
+    namespace = f'local/{local_layer_name}'
+
 
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
 
@@ -309,7 +326,8 @@ def inv_aggregation(
             for node in nodelist:
                 inv_node = node.get_inverse_node(stack)
                 inv_layer, inv_loc = inv_node.get_layer_and_local_id(stack)
-                ref.push_back(f'local/agg_{inv_layer}/ratios', inv_loc)
+                fwd_namespace = f'local/{generate_layer_name(stack, inv_layer, "aggregation")}'
+                ref.push_back(f'{fwd_namespace}/ratios', inv_loc)
             params.at(f'{namespace}/ratios', ref, overwrite=None)
 
     def apply(
@@ -375,12 +393,13 @@ def transform_nn(
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
 
     def make_layer_name(l_id, is_inv):
-        return f"{'inv_' if is_inv else ''}{transform_name}_{l_id}"
+        return  generate_layer_name(stack, l_id, f"{'inverse_' if is_inv else ''}{transform_name}")
 
     rate_shape = (len(input_shapes), rate_dim)
-    rate_name = f'{transform_name}_rate_x{len(input_shapes)}'
+    rate_name = f'{transform_name}_rate'  # _x{len(input_shapes)}'
     shared_layer_name = f"{'inv' if is_inverse else 'fwd'}_{transform_name}"
     layer_name = make_layer_name(layer_id, is_inverse)
+
     quantization_values_path = f'shared/quantization/{rate_name}_values'
     quantization_names_path = f'shared/quantization/{rate_name}_names'  # for sanity check
     mask_name = f'{rate_name}_quantization_mask'
@@ -389,6 +408,7 @@ def transform_nn(
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey):
 
         key0, key1 = jax.random.split(key, 2)
+        n_nodes = len(nodelist)
 
         # --------- quantization
         # First, initializing quantization values for the rates (if not already done)
@@ -417,10 +437,10 @@ def transform_nn(
                 )
                 for node in nodelist
             ]
-            params.at(quantization_mask_path, np.array(qmasks), tags=['non_grad'])
+            params.at(f'{quantization_mask_path}', np.array(qmasks), tags=['non_grad'])
 
             # And we also initialize the quantized rates
-            params[f'local/{layer_name}/{rate_name}'] = jax.random.uniform(key1, rate_shape)
+            params[f'local/{layer_name}/{rate_name}'] = jax.random.uniform(key1, (n_nodes, *rate_shape))
 
         else:
             # For inverse nodes, we will use a view (a subtree of ArrayRef that mirrors the original subtree)
@@ -429,23 +449,28 @@ def transform_nn(
             def get_fwd(node):
                 fwd_node = node.get_inverse_node(stack)
                 fwd_layer_id, fwd_loc = fwd_node.get_layer_and_local_id(stack)
-                fwd_layer_name = make_layer_name(fwd_layer_id, is_inverse=False)
+                fwd_layer_name = make_layer_name(fwd_layer_id, is_inv=False)
                 return f'local/{fwd_layer_name}', fwd_loc
 
             fwd_paths, fwd_loc = zip(*[get_fwd(node) for node in nodelist])
 
             # make view will create 2 subtrees of ArrayRef, one for the rates and one for the masks
             # that point to the same underlying data as the forward nodes
-            make_view(params, layer_name, fwd_paths, fwd_loc, leaves=[rate_name, mask_name])
+            make_view(params, f'local/{layer_name}', fwd_paths, fwd_loc, leaves=[rate_name, mask_name])
 
         # --------- quantile var
         quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
-        assert quantile_var_ids.shape == (len(input_shapes),)
+        # assert quantile_var_ids.shape == (len(nodelist),), quantile_var_ids
         params.at(
             f'local/{layer_name}/quantile_variable_id',
             quantile_var_ids,
             tags=['non_grad'],
         )
+
+        fake_vals = [np.zeros(s) for s in input_shapes]
+        maxq = np.max(quantile_var_ids)
+
+        apply(*fake_vals, quantiles=np.zeros(maxq+1), params=params, node_id=0, key=key1)
 
     def apply(
         *values: ArrayLike,
@@ -492,7 +517,7 @@ def transform_nn(
                     activation=inner_activation,
                     key=key,
                     param_f=partial(init_if_needed, params, base_path='shared'),
-                    name=f'{shared_layer_name}/inner',
+                    name=f'NN/{shared_layer_name}/inner',
                 )
             )
 
@@ -516,7 +541,7 @@ def transform_nn(
                 depth=outer_depth,
                 param_f=partial(init_if_needed, params, base_path='shared'),
                 key=k2,
-                name=f'{shared_layer_name}/outer',
+                name=f'NN/{shared_layer_name}/outer',
                 activation=inner_activation,
             )
         )
@@ -555,7 +580,7 @@ def sequestron_ERN(
     assert n_outputs == 1, f'ERN only supports 1 output, got {n_outputs}'
 
     shared_layer_name = f'ERN_{subtype}'
-    local_layer_name = f'ERN_{subtype}_{layer_id}'
+    local_layer_name = generate_layer_name(stack, layer_id, f'ERN_{subtype}')
 
     def MLP(
         neg: ArrayLike,
@@ -572,7 +597,7 @@ def sequestron_ERN(
             depth,
             param_f=param_f,
             key=key,
-            name=f'ERN_{subtype}',
+            name=f'NN/ERN_{subtype}',
             activation=inner_activation,
         )
         return outer_activation(res)
@@ -619,7 +644,7 @@ def sequestron_ERN(
             affinity=np.zeros((affinity_dim,)),
             quantile=0,
             param_f=partial(init_if_needed, params, base_path='shared'),
-            rng_key=key,
+            key=key,
         )
 
     def apply(
@@ -652,12 +677,11 @@ def sequestron_ERN(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 ### {{{                    --     output (fluorescence) node     --
-
-
 def grouped_output(
     input_shapes: Sequence[Tuple[int, ...]],
-    n_outputs: int,
+    n_outputs: int,  # unused
     stack: ComputeStack,
     layer_id: int,
     wsize: int = 64,
@@ -666,13 +690,13 @@ def grouped_output(
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
     **_,
 ):
+    del n_outputs
 
-    assert n_outputs == len(input_shapes)
     assert all(shape == input_shapes[0] for shape in input_shapes)
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
 
-    layer_name = f'output_{layer_id}'
+    layer_name = generate_layer_name(stack, layer_id, 'grouped_output')
 
     def MLP_head(x, q, rng_key, params):
         return dense_multilevel(
@@ -682,7 +706,7 @@ def grouped_output(
             depth,
             param_f=partial(init_if_needed, params, base_path='shared'),
             key=rng_key,
-            name='grouped_output',
+            name='NN/grouped_output',
             activation=inner_activation,
         )
 
@@ -690,7 +714,11 @@ def grouped_output(
 
         # --------- quantile var
         quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
-        assert quantile_var_ids.shape == (len(input_shapes),)
+
+        # assert quantile_var_ids.shape == (
+        # len(input_shapes),
+        # ), f'{quantile_var_ids.shape} != {len(input_shapes)}'
+
         params.at(
             f'local/{layer_name}/quantile_variable_id',
             quantile_var_ids,

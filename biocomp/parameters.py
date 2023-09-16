@@ -9,18 +9,59 @@ import numpy as np
 from dataclasses import dataclass
 from jax.tree_util import register_pytree_node_class
 from copy import deepcopy
+from . import utils as ut
+
+import re
+
+
+### {{{                           --     utils     --
+
+
+def pretty_str(x):
+    msg = ''
+    if isinstance(x, str):
+        msg = x
+    elif isinstance(x, (np.ndarray, jnp.ndarray)):
+        if x.size <= 15:
+            with np.printoptions(precision=3):
+                msg = str(x)
+        else:
+            with np.printoptions(precision=3, edgeitems=2, threshold=5):
+                typestr = "jax" if isinstance(x, jnp.ndarray) else "numpy"
+                msg = f"{x.shape} {x.dtype} {typestr} array:\n{np.asarray(x)}"
+
+    elif isinstance(x, (list, tuple)):
+        max_linewidth = 60
+        msg = str(x)
+        if len(msg) > max_linewidth:
+            extra = len(msg) - max_linewidth
+            msg = msg[: -extra - 20] + " ... " + msg[-20:]
+        msg = msg + f" (len={len(x)})"
+
+    else:
+        msg = str(x)
+
+    return msg + "\n"
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ### {{{                         --     ParamPath     --
+
+
 class ParamPath:
+    def split(self, key):
+        if isinstance(key, str):
+            return key.strip("/").split("/")
+        return key
+
     def __init__(self, path=None):
-        if isinstance(path, str):
-            path = path.strip("/").split("/")
-        self.path = path or []
+        self.path = self.split(path) or []
 
     def __truediv__(self, key):
         if isinstance(key, str):
-            key = key.strip("/").split("/")
+            key = self.split(key)
         elif isinstance(key, ParamPath):
             key = key.path
         return ParamPath(self.path + key)
@@ -45,21 +86,24 @@ class ParamPath:
 
     def __eq__(self, other):
         if isinstance(other, str):
-            other = other.strip("/").split("/")
+            # other = other.strip("/").split("/")
+            other = self.split(other)
         elif isinstance(other, ParamPath):
             other = other.path
         return self.path == other
 
     def __lt__(self, other):
         if isinstance(other, str):
-            other = other.strip("/").split("/")
+            # other = other.strip("/").split("/")
+            other = self.split(other)
         elif isinstance(other, ParamPath):
             other = other.path
         return self.path < other
 
     def __gt__(self, other):
         if isinstance(other, str):
-            other = other.strip("/").split("/")
+            # other = other.strip("/").split("/")
+            other = self.split(other)
         elif isinstance(other, ParamPath):
             other = other.path
         return self.path > other
@@ -69,7 +113,8 @@ class ParamPath:
 
     def __contains__(self, key):
         if isinstance(key, str):
-            key = key.strip("/").split("/")
+            # key = key.strip("/").split("/")
+            key = self.split(key)
         elif isinstance(key, ParamPath):
             key = key.path
         return key in self.path
@@ -85,6 +130,8 @@ class PTree:
 
     @classmethod
     def is_leaf(cls, tree, count_none_as_leaf=True):
+        if not isinstance(tree, PTree):
+            return True
         if tree.value is None:
             return count_none_as_leaf
         if not isinstance(tree.value, dict):
@@ -108,7 +155,7 @@ class PTree:
             lineheader = f"\n{''.join(other_branches)}"
             if PTree.is_leaf(self):
                 keylen = len(key) if key is not None else 0
-                valstr = str(self.value) if self.value is not None else "∅"
+                valstr = pretty_str(self.value) if self.value is not None else "∅"
                 valstr = valstr.replace("\n", f'{lineheader}{" " * keylen}     ')
                 s += f" ⟶ {valstr}"
             else:
@@ -136,7 +183,6 @@ class PTree:
     def __getitem__(self, path):
         if not isinstance(path, ParamPath):
             path = ParamPath(path)
-        # print(f"PTree {id(self)} GET at path {path}")
         if self.value is None:
             raise KeyError(f"PTree is empty, cannot get {path}")
         if len(path) == 0:
@@ -158,7 +204,6 @@ class PTree:
             raise RuntimeError("Cannot set value on read-only ParamTree")
         if not isinstance(path, ParamPath):
             path = ParamPath(path)
-        # print(f"PTree SET item called with path {path} and value {value}")
         if len(path) == 0:
             raise KeyError(f"Path is empty")
 
@@ -219,7 +264,6 @@ class PTree:
             return self
         if self.value is not None:
             for k, v in self.value.items():
-                print(f"PTree remove_empty_leaves: {k} {v}")
                 if not v.all_leaves_are_none():
                     newvals[k] = v.remove_empty_leaves()
 
@@ -290,7 +334,7 @@ class ArrayRef:
         self.make_map()
 
     def __repr__(self):
-        return f"RefArray[]: {self.get()}"
+        return f"RefArray from {len(self.paths)} pointed arrays:\n{pretty_str(self.get())}"
 
     def push_back(self, array_path, id):
         if array_path not in self.paths:
@@ -304,7 +348,7 @@ class ArrayRef:
         if N == 0:
             return jnp.array([])
 
-        conc = jnp.zeros((N, *self.shape[1:]))
+        conc = jnp.zeros((N, *self.shape[1:]), dtype=self.arrays[0].dtype)
         for a, p, i in self.map:
             conc = conc.at[p].set(self.arrays[a][i])
 
@@ -440,7 +484,7 @@ class ParameterTree:
             if overwrite is None and exists:
                 raise KeyError(f"Path {path} already exists, cant overwrite without overwrite=True")
             if overwrite or not exists:
-                self.data[path] = value
+                self[path] = value
                 self.tag(path, tags, True)
             return self.data[path]
 
@@ -483,12 +527,23 @@ class ParameterTree:
     def add_new_tag(self, tag):
         self.tagnames = sorted(self.tagnames + [tag])
         self.__tagdict = {name: i for i, name in enumerate(self.tagnames)}
+        is_leaf = lambda x: PTree.is_leaf(x) and not isinstance(x, ParameterTree)
 
         if self.tags is None or self.tags.is_empty():
-            self.tags = jtu.tree_map(lambda _: np.array([False]), self.data)
+            self.tags = jtu.tree_map(lambda _: np.array([False]), self.data, is_leaf=is_leaf)
         else:
             insert_idx = self.__tagdict[tag]
-            self.tags = jtu.tree_map(lambda t: np.insert(t, insert_idx, False), self.tags)
+            self.tags = jtu.tree_map(
+                lambda t: np.insert(t, insert_idx, False), self.tags, is_leaf=is_leaf
+            )
+
+    def get_tag_flags(self, tags):
+        if isinstance(tags, str):
+            tags = [tags]
+        tag_ids = [self.__tagdict[tag] for tag in tags]
+        tag_flags = np.zeros(len(self.tagnames), dtype=bool)
+        tag_flags[tag_ids] = True
+        return tag_flags
 
     def tag(self, path, tags, overwrite=False):
         if tags is None:
@@ -504,12 +559,9 @@ class ParameterTree:
         self.create_tags_if_required(tags)
 
         assert self.tags[path].shape == (len(self.tagnames),)
-        print(f"tagging {path} with {tags}")
-        print(f"current tags: {self.tags}")
 
-        tag_ids = [self.__tagdict[tag] for tag in tags]
-        tag_flags = np.zeros(len(self.tagnames), dtype=bool)
-        tag_flags[tag_ids] = True
+        tag_flags = self.get_tag_flags(tags)
+
         if overwrite:
             self.tags[path] = tag_flags
         else:
@@ -620,6 +672,7 @@ jtu.register_pytree_node(ParameterTree, flatten_ParameterTree, unflatten_Paramet
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 def init_if_needed(params, path, init_f, base_path=''):
     try:
         return params[f'{base_path}/{path}']
@@ -627,8 +680,10 @@ def init_if_needed(params, path, init_f, base_path=''):
         params[f'{base_path}/{path}'] = init_f()
         return params[f'{base_path}/{path}']
 
+
 def get_param(params, path, base_path='', **_):
     return params[f'{base_path}/{path}']
+
 
 def make_view(
     params: ParameterTree,
@@ -639,7 +694,7 @@ def make_view(
 ):
     for leaf in leaves:
         leafpath = ParamPath(at_path) / leaf
-        params[leafpath] = ArrayRef(params.data)
+        ref = ArrayRef(params.data)
         for from_path, from_id in zip(from_paths, from_ids):
-            params[leafpath].push_back(f'{from_path}/{leaf}', from_id)
-
+            ref.push_back(f'{from_path}/{leaf}', from_id)
+        params[leafpath] = ref

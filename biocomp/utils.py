@@ -60,11 +60,14 @@ def setup_logger(lname=None, level=logging.INFO):
 setup_logger()
 setup_logger('jax')
 logger = setup_logger('biocomp')
+logger.propagate = False
+
 
 
 def set_loglevel(level: str):
     global logger
     level = level.upper()
+    logger.propagate = False
     logger.setLevel(level)
     logger.info(f"Log level set to {level}")
     return level

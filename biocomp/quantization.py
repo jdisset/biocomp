@@ -56,7 +56,7 @@ def round_to_int(x):
 def get_quantized(
     values_to_quantize,
     params:ParameterTree,
-    quantization_value_path,
+    quantization_values_path,
     quantization_mask_path,
     node_id,
 ):
@@ -64,7 +64,7 @@ def get_quantized(
     # initialization of both keys and values is done upstream. We assume both are already initialized
     # i.e there is a param called param_name in params, which is a vector (n_qvalues, ...)
     # of all the possible quantization values for this parameter.
-    possible_values = jnp.atleast_1d(params[quantization_value_path]).squeeze()
+    possible_values = jnp.atleast_1d(params[quantization_values_path].squeeze())
 
     # possible_values is a 1D array of shape (n_qvalues,) that contains all the possible
     # quantization values for this parameter. Possible values for the whole stack,
@@ -111,7 +111,7 @@ def get_available_quantizations(param_name, cdg_node_id, cdg):
     return available_params[param_name]
 
 
-def get_quantization_masks(
+def get_quantization_mask(
     qnames, pname, vnode, masks_per_node=1, **kwargs
 ):
     """

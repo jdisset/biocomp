@@ -169,7 +169,7 @@ class VirtualNode:
     def get_layer_and_local_id(self, stack):
         if stack is None:
             return None, None
-        return stack.node_map((self.network_id, self.node_id))
+        return stack.node_map[(self.network_id, self.compute_node_id)]
 
     def __repr__(self):
         out = f'{self.network_id}/{self.compute_node_id}/{self.node_id if self.node_id is not None else self.batch_order}-{self.type_signature}'
@@ -326,7 +326,10 @@ class ComputeStack:
         """
         assert self.is_built, 'Stack not built'
         params = ParameterTree()
-        for l_id, layer in enumerate(self.layers):
+        # for l_id, layer in enumerate(self.layers):
+        # let's initialize the stacj it in reverse order 
+        # so that the inverse nodes can reference fwd ones after init
+        for l_id, layer in reversed(list(enumerate(self.layers))):
             assert layer.is_built, 'Layer not built'
             assert l_id == layer.layer_id, 'Layer id mismatch'
             rng_key, _ = jax.random.split(rng_key)
@@ -559,7 +562,7 @@ class ComputeStack:
 
     @staticmethod
     def get_networks_current_batch_number(
-        cls, stack: ComputeStack, type_dict: dict[str, list[VirtualNode]]
+        stack: ComputeStack, type_dict: dict[str, list[VirtualNode]]
     ):
         """Determines the current (minimum) batch number for each network in the stack.
         The batch number is the order in which a node should be computed (topological order of a network).
@@ -583,7 +586,7 @@ class ComputeStack:
 
     @staticmethod
     def make_smallest_stack(
-        cls, stack: ComputeStack, type_dict: Dict[str, List[VirtualNode]], max_t: int = 1
+        stack: ComputeStack, type_dict: Dict[str, List[VirtualNode]], max_t: int = 1
     ):
         # Initialize the BFS queue with the initial state
         bfs_queue = deque([(stack, type_dict, [], 0)])
@@ -644,7 +647,6 @@ class ComputeStack:
 
     @staticmethod
     def make_smallest_stack_dfs(
-        cls,
         stack: ComputeStack,
         type_dict: Dict[str, List[VirtualNode]],
         path=None,
@@ -789,7 +791,7 @@ class ComputeStack:
 
     @staticmethod
     def make_layer_from_current_batches(
-        cls, current_batches, type_dict: dict[str, list[VirtualNode]], t: str
+        current_batches, type_dict: dict[str, list[VirtualNode]], t: str
     ):
         """
         Creates a ComputeLayer from the nodes of type t that have a batch_order <= current_batches[network_id]
