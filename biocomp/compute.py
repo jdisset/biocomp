@@ -152,17 +152,20 @@ class VirtualNode:
             batch_order=batch_order,
         )
 
-    def get_compute_node(self):
+    def get_compute_node(self, col=None):
         if self.network is None:
             return None
-        return self.network.compute_graph.loc[self.compute_node_id]
+        if col is None:
+            return self.network.compute_graph.loc[self.compute_node_id]
+        else:
+            return self.network.compute_graph.at[self.compute_node_id, col]
 
     def get_inverse_node(self, stack):
         if stack is None:
             return None
-        cnode = self.get_compute_node()
-        assert cnode.is_inverse_of is not None, 'Node is not an inverse'
-        inv = stack.get_node_from_net_and_compute_id(self.network_id, cnode.is_inverse_of)
+        is_inverse_of = self.get_compute_node('is_inverse_of')
+        assert is_inverse_of is not None, 'Node is not an inverse'
+        inv = stack.get_node_from_net_and_compute_id(self.network_id, is_inverse_of)
         assert inv is not None, 'Inverse not found'
         return inv
 
@@ -212,8 +215,7 @@ class ComputeLayer:
 
         self.check()
 
-        first_node = self.nodes[0].get_compute_node()
-        self.f_type = first_node.type
+        self.f_type = self.nodes[0].get_compute_node('type')
 
         if self.f_type == 'input':
             self.f_out_shapes = [(1,)]
@@ -225,7 +227,7 @@ class ComputeLayer:
         # to make sure they are all the same
         node_inputs = []  # list of list of (net_id, compute_node_id, slot_id)
         for n in self.nodes:
-            ninp = n.get_compute_node().input_from
+            ninp = n.get_compute_node('input_from')
             node_inputs.append([(n.network_id, *i) for i in ninp])
 
         # get the shapes of the inputs
@@ -246,7 +248,7 @@ class ComputeLayer:
         assert len(set(all_input_shapes)) == 1
         self.f_input_shapes = all_input_shapes[0]
 
-        n_outputs = len(first_node.output_to)
+        n_outputs = self.get_n_outputs()
 
         impl = config.get_impl(self.f_type)(
             input_shapes=self.f_input_shapes,
@@ -257,12 +259,15 @@ class ComputeLayer:
         self.f_prepare, self.f_apply, self.f_out_shapes = impl
         self.is_built = True
 
+    def get_n_outputs(self):
+        output_to = self.nodes[0].get_compute_node('output_to')
+        return len(output_to)
+
     def flattened_output_shape(self):
         return int(len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes]))
 
     def __repr__(self):
-        first_node = self.nodes[0].get_compute_node()
-        ftype = first_node.type
+        ftype = self.nodes[0].get_compute_node('type')
         return f'Layer {self.layer_id} ({ftype}) with {len(self.nodes)} nodes'
 
     def __hash__(self):
@@ -482,7 +487,7 @@ class ComputeStack:
         in the flattened full-stack output array"""
         assert self.node_map is not None
 
-        input_compute_node_id, input_compute_node_outslot = node.get_compute_node().input_from[
+        input_compute_node_id, input_compute_node_outslot = node.get_compute_node('input_from')[
             input_slot
         ]
 

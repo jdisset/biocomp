@@ -217,6 +217,7 @@ class GraphComputeNode:
         self.output_to = []
         self.extra = {}
         self.is_inverse_of = None
+        self.n_outputs = None
 
     def removeOutput(self, other):
         other.input_from.remove(self.id)
@@ -257,6 +258,10 @@ class Network:
         self.tu_inputs: Optional[pd.DataFrame] = None
         self.db = recipe_db
         self.metadata = metadata
+
+        self.n_inputs = None
+        self.n_outputs = None
+
         if recipe_db is not None:
             self.db.commit()
             self.__build_from_db()
@@ -364,7 +369,6 @@ class Network:
         return n
 
     def build(self):
-
         assert len(self.transcription_units) > 0, f'No transcription units in recipe {self.name}'
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
@@ -896,7 +900,9 @@ class Network:
         return [self.central_dogma_graph.loc[cdg_id]['content'][0] for cdg_id in onode['cdg_input']]
 
     def get_nb_outputs(self):
-        return len(self.get_output_proteins())
+        if self.n_outputs is None:
+            self.n_outputs = len(self.get_output_proteins())
+        return self.n_outputs
 
     def get_input_from_output(self, output_arr):
         """Given an array of output values, returns the columns that are inputs of the inverted network,
@@ -928,7 +934,9 @@ class Network:
         return mapping
 
     def get_nb_inputs(self):
-        return len(self.get_inverted_input_proteins())
+        if self.n_inputs is None:
+            self.n_inputs = len(self.get_inverted_input_proteins())
+        return self.n_inputs
 
     def cleanup(self):
         if self.compute_graph is not None:
@@ -1051,6 +1059,7 @@ class Network:
         output_node = cg[cg.type == 'output'].iloc[0]
         # add the quantile variable to the output node
         output_node['extra']['quantile_variable_id'] = list(range(len(output_node.input_from)))
+        self.n_outputs = len(output_node.input_from)
         for i, (nid, oid) in enumerate(output_node.input_from):
             propagate_upstream(cg.loc[nid], i, oid)
 

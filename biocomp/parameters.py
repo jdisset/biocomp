@@ -17,6 +17,14 @@ import re
 ### {{{                           --     utils     --
 
 
+def is_equal(a, b):
+    if not type(a) == type(b):
+        return False
+    if isinstance(a, (np.ndarray, jnp.ndarray)):
+        return np.all(a == b)
+    return a == b
+
+
 def pretty_str(x):
     msg = ''
     if isinstance(x, str):
@@ -31,12 +39,16 @@ def pretty_str(x):
                 msg = f"{x.shape} {x.dtype} {typestr} array:\n{np.asarray(x)}"
 
     elif isinstance(x, (list, tuple)):
-        max_linewidth = 60
-        msg = str(x)
-        if len(msg) > max_linewidth:
-            extra = len(msg) - max_linewidth
-            msg = msg[: -extra - 20] + " ... " + msg[-20:]
-        msg = msg + f" (len={len(x)})"
+        chars = '()' if isinstance(x, tuple) else '[]'
+        max_lines = 5
+        max_elem_per_line = 3
+        # xspl = x[:::max_elem_per_line]
+        # make chunks of max_elem_per_line
+        xspl = [x[i : i + max_elem_per_line] for i in range(0, len(x), max_elem_per_line)]
+        msg = chars[0] + '\n'.join([', '.join(x) for x in xspl[:max_lines]])
+        if len(xspl) > max_lines:
+            msg += f"\n... {len(xspl) - max_lines} more elements"
+        msg += chars[1]
 
     else:
         msg = str(x)
@@ -51,17 +63,25 @@ def pretty_str(x):
 
 
 class ParamPath:
-    def split(self, key):
+    @staticmethod
+    def psplit(key):
         if isinstance(key, str):
             return key.strip("/").split("/")
         return key
 
+    @staticmethod
+    def tostr(key):
+        if isinstance(key, str):
+            return key
+        return "/".join(key)
+
     def __init__(self, path=None):
-        self.path = self.split(path) or []
+        self.path = ParamPath.psplit(path) or []
+        self._str = ParamPath.tostr(self.path)
 
     def __truediv__(self, key):
         if isinstance(key, str):
-            key = self.split(key)
+            key = ParamPath.psplit(key)
         elif isinstance(key, ParamPath):
             key = key.path
         return ParamPath(self.path + key)
@@ -70,10 +90,10 @@ class ParamPath:
         return self.__truediv__(key)
 
     def __repr__(self):
-        return "/".join(self.path)
+        return self._str
 
     def __str__(self):
-        return self.__repr__()
+        return self._str
 
     def __getitem__(self, key):
         return self.path[key]
@@ -85,36 +105,20 @@ class ParamPath:
         return iter(self.path)
 
     def __eq__(self, other):
-        if isinstance(other, str):
-            # other = other.strip("/").split("/")
-            other = self.split(other)
-        elif isinstance(other, ParamPath):
-            other = other.path
-        return self.path == other
+        return str(self) == str(other)
 
     def __lt__(self, other):
-        if isinstance(other, str):
-            # other = other.strip("/").split("/")
-            other = self.split(other)
-        elif isinstance(other, ParamPath):
-            other = other.path
-        return self.path < other
+        return str(self) < str(other)
 
     def __gt__(self, other):
-        if isinstance(other, str):
-            # other = other.strip("/").split("/")
-            other = self.split(other)
-        elif isinstance(other, ParamPath):
-            other = other.path
-        return self.path > other
+        return str(self) > str(other)
 
     def __hash__(self):
-        return hash(tuple(self.path))
+        return hash(str(self))
 
     def __contains__(self, key):
         if isinstance(key, str):
-            # key = key.strip("/").split("/")
-            key = self.split(key)
+            key = ParamPath.psplit(key)
         elif isinstance(key, ParamPath):
             key = key.path
         return key in self.path
@@ -128,8 +132,8 @@ class PTree:
         self.value = value
         self.set_read_only(read_only)
 
-    @classmethod
-    def is_leaf(cls, tree, count_none_as_leaf=True):
+    @staticmethod
+    def is_leaf(tree, count_none_as_leaf=True):
         if not isinstance(tree, PTree):
             return True
         if tree.value is None:
@@ -141,7 +145,13 @@ class PTree:
         return False
 
     def __contains__(self, key):
-        return key in self.value
+        if PTree.is_leaf(self):
+            return False
+        try:
+            self[key]
+            return True
+        except KeyError:
+            return False
 
     def pretty(self, levels=None, key=None):
         s = ""
@@ -172,15 +182,15 @@ class PTree:
     def __repr__(self):
         return self.pretty()
 
-    def get(self):
+    def get(self, follow_ref=True):
         if PTree.is_leaf(self, count_none_as_leaf=False):
             # does this value itself have a get method? (e.g. TreeReferences do...)
-            if hasattr(self.value, "get"):
+            if follow_ref and hasattr(self.value, "get"):
                 return self.value.get()  # alows to follow references
             return self.value
         return self
 
-    def __getitem__(self, path):
+    def get_at(self, path, follow_ref=True):
         if not isinstance(path, ParamPath):
             path = ParamPath(path)
         if self.value is None:
@@ -193,11 +203,13 @@ class PTree:
         p, rest = path[0], path[1:]
         if p not in self.value:
             raise KeyError(f"Path {path} not found in ParamTree")
-
         if len(rest) == 0:
-            return self.value[p].get()
+            return self.value[p].get(follow_ref)
 
-        return self.value[p].get()[rest]
+        return self.value[p].get_at(rest, follow_ref)
+
+    def __getitem__(self, path):
+        return self.get_at(path, follow_ref=True)
 
     def __setitem__(self, path, value):
         if self.read_only:
@@ -219,9 +231,9 @@ class PTree:
         else:
             self.value[p].get()[rest] = value
 
-    def at(self, path, value=None, overwrite=False):
+    def at(self, path, value=None, overwrite=False, follow_ref=True):
         if self.read_only or value is None:
-            return self[path]
+            return self.get_at(path, follow_ref)
         else:
             try:
                 self[path]
@@ -229,7 +241,7 @@ class PTree:
                 overwrite = True
             if overwrite:
                 self[path] = value
-            return self[path]
+            return self.get_at(path, follow_ref)
 
     def has_leaf(self, path):
         return not isinstance(self[path], PTree)
@@ -269,9 +281,12 @@ class PTree:
 
         return PTree(value=newvals, read_only=self.read_only)
 
-    def iter_leaves(self, path=ParamPath()):
+    def iter_leaves(self, path=ParamPath(), path_as_str=False):
         if PTree.is_leaf(self):
-            yield path, self.value
+            if path_as_str:
+                yield str(path), self.value
+            else:
+                yield path, self.value
         else:
             for k, v in self.value.items():
                 yield from v.iter_leaves(path / k)
@@ -279,11 +294,13 @@ class PTree:
     def __eq__(self, other):
         if not isinstance(other, PTree):
             return False
-        if not type(self.value) == type(other.value):
+        k1, k2 = set(self.value.keys()), set(other.value.keys())
+        if k1 != k2:
             return False
-        if isinstance(self.value, (np.ndarray, jnp.ndarray)):
-            return np.all(self.value == other.value)
-        return self.value == other.value
+        for k in k1:
+            if not is_equal(self.get_at(k, follow_ref=False), other.get_at(k, follow_ref=False)):
+                return False
+        return True
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -328,7 +345,7 @@ class ArrayRef:
 
     def __init__(self, tree, paths=None, indices=None):
         self.tree = tree
-        self.indices = indices or ()  # tuple of (array_num, index) coordinates
+        self.indices = indices or ()  # tuple of (array_num, index0, index1, ...) coordinates
         self.paths = paths or ()  # tuple of paths to the referenced arrays
         self._pathdict = {p: i for i, p in enumerate(self.paths)}
         self.make_map()
@@ -337,10 +354,15 @@ class ArrayRef:
         return f"RefArray from {len(self.paths)} pointed arrays:\n{pretty_str(self.get())}"
 
     def push_back(self, array_path, id):
+
+        if not isinstance(id, (list, tuple)):
+            id = (id,)
+
         if array_path not in self.paths:
             self.paths += (array_path,)
             self._pathdict[array_path] = len(self.paths) - 1
-        self.indices += ((self._pathdict[array_path], id),)
+
+        self.indices += ((self._pathdict[array_path], *id),)
         self.make_map()
 
     def get(self):
@@ -348,37 +370,53 @@ class ArrayRef:
         if N == 0:
             return jnp.array([])
 
-        conc = jnp.zeros((N, *self.shape[1:]), dtype=self.arrays[0].dtype)
+        arrays = tuple([self.tree[p] for p in self.paths])
+
+        a0, _, i0 = self.map[0]
+        shape = arrays[a0][i0][0].shape
+
+        conc = jnp.zeros((N, *shape), dtype=arrays[0].dtype)
+
         for a, p, i in self.map:
-            conc = conc.at[p].set(self.arrays[a][i])
+            # print(f'a shape: {arrays[a][i].shape}')
+            # print(f'conc shape: {conc.shape}')
+            # print(f'p: {p}')
+            # print(f'i: {i}')
+            # a is the array number
+            # p is the position in the concatenated array
+            # i are the coordinates of the value in the array)
+            conc = conc.at[p].set(arrays[a][i])
 
         return conc
 
     def make_map(self):
         if len(self.indices) == 0:
-            self.arrays = ()
-            self.shape = ()
             self.map = ()
             return
         idx = np.asarray(self.indices)
-        self.arrays = tuple([self.tree[p] for p in self.paths])
-        self.shape = self.tree[self.paths[0]].shape
         self.map = ()
         for a in np.unique(idx[:, 0]):
             positions = np.where(idx[:, 0] == a)[0]
-            ids_in_array = idx[positions, 1]
-            self.map += ((a, positions, ids_in_array),)
+            ids_in_array = idx[positions, 1:]
+            idtup = tuple(ids_in_array.T) # transpose to get a tuple of arrays of indices
+            self.map += ((a, positions, idtup),)
+
 
     def __eq__(self, other):
         if not isinstance(other, ArrayRef):
             return False
-        return np.all(self.get() == other.get())
+        return self.indices == other.indices and self.paths == other.paths
 
     def __hash__(self):
         return hash(self.get().tobytes())
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+
+def isRef(x):
+    return isinstance(x, (TreeRef, ArrayRef))
+
 
 ### {{{                 --     jax [un]flattening of Ptrees     --
 
@@ -388,6 +426,21 @@ class RefPath:
     actual_path: ParamPath
     points_to: ParamPath
 
+    def __eq__(self, other):
+        if not isinstance(other, RefPath):
+            return False
+        return self.actual_path == other.actual_path and self.points_to == other.points_to
+
+    def __lt__(self, other):
+        if isinstance(other, ParamPath):
+            return self.actual_path < other
+        return self.actual_path < other.actual_path
+
+    def __gt__(self, other):
+        if isinstance(other, ParamPath):
+            return self.actual_path > other
+        return self.actual_path > other.actual_path
+
 
 @dataclass
 class ArrayRefPath:
@@ -395,8 +448,33 @@ class ArrayRefPath:
     paths: List[ParamPath]
     indices: List[Tuple[int, int]]
 
+    def __eq__(self, other):
+        if not isinstance(other, ArrayRefPath):
+            return False
+        return (
+            self.actual_path == other.actual_path
+            and self.paths == other.paths
+            and self.indices == other.indices
+        )
 
-# I have to write my own manual (non-recursive) flatten to handle the references
+    def __lt__(self, other):
+        if isinstance(other, ParamPath):
+            return self.actual_path < other
+        return self.actual_path < other.actual_path
+
+    def __gt__(self, other):
+        print("gt", self.actual_path, other)
+        if isinstance(other, ParamPath):
+            return self.actual_path > other
+        return self.actual_path > other.actual_path
+
+
+# I have to write my own manual (non-recursive) flatten function to handle the references
+# As a result, this is VERY SLOW compared to a normal jax tree flatten
+# (which calls the c++ xla implementation)
+# one way around this would be to wrap the flatten and
+# flag the references in the tree as leaves before postprocessing
+# but for now I'll just use this slow version
 def flatten_PTree(ptree):
     keys, values = [], []
     for k, v in ptree.iter_leaves():
@@ -410,8 +488,12 @@ def flatten_PTree(ptree):
             values.append(v)
             keys.append(k)
 
-    aux_data = (keys, ptree.read_only)
-    return (values, aux_data)
+    order = sorted(range(len(keys)), key=lambda i: keys[i])
+    sorted_keys = [keys[i] for i in order]
+    sorted_values = [values[i] for i in order]
+
+    aux_data = (sorted_keys, ptree.read_only)
+    return (sorted_values, aux_data)
 
 
 def unflatten_PTree(aux_data, content):
@@ -446,9 +528,12 @@ class ParameterTree:
         self.tags = tags or PTree()
         self.tagnames = tagnames or []
         self.__tagdict = {name: i for i, name in enumerate(self.tagnames)}
+        self.set_read_only(read_only)
+
+    def set_read_only(self, read_only):
         self.read_only = read_only
         self.data.set_read_only(read_only)
-        if tags is not None:
+        if self.tags is not None:
             self.tags.set_read_only(read_only)
 
     def createReference(self, path, to):
@@ -577,34 +662,69 @@ class ParameterTree:
             read_only=True,
         )
 
+    # def filter_by_tag(self, tags):
+    # if isinstance(tags, str):
+    # tags = [tags]
+    # for t in tags:
+    # if t not in self.tagnames:
+    # raise KeyError(f"Tag {t} not found in ParameterTree")
+    # tag_ids = [self.__tagdict[tag] for tag in tags]
+    # is_valid = jtu.tree_map(lambda x: np.all(x[tag_ids]), self.tags)
+    # left_data_tree = jtu.tree_map(lambda mask, x: x if mask else None, is_valid, self.data)
+    # right_data_tree = jtu.tree_map(lambda mask, x: x if not mask else None, is_valid, self.data)
+    # left_tag_tree = jtu.tree_map(lambda mask, x: x if mask else None, is_valid, self.tags)
+    # right_tag_tree = jtu.tree_map(lambda mask, x: x if not mask else None, is_valid, self.tags)
+    # left_param_tree = ParameterTree(
+    # data=left_data_tree,
+    # tags=left_tag_tree,
+    # tagnames=self.tagnames,
+    # read_only=self.read_only,
+    # )
+    # right_param_tree = ParameterTree(
+    # data=right_data_tree,
+    # tags=right_tag_tree,
+    # tagnames=self.tagnames,
+    # read_only=self.read_only,
+    # )
+    # return left_param_tree, right_param_tree
+
+    # @classmethod
+    # def merge(cls, left, right):
+    # jax_leaf = lambda x: x is None
+    # left_struct = jtu.tree_structure(left, is_leaf=jax_leaf)
+    # right_struct = jtu.tree_structure(right, is_leaf=jax_leaf)
+    # if left_struct == right_struct:
+    # return jtu.tree_map(lambda l, r: l if r is None else r, left, right, is_leaf=jax_leaf)
+    # else:
+    # return cls.sparse_merge(left, right)
+
     def filter_by_tag(self, tags):
         if isinstance(tags, str):
             tags = [tags]
         for t in tags:
             if t not in self.tagnames:
                 raise KeyError(f"Tag {t} not found in ParameterTree")
-
         tag_ids = [self.__tagdict[tag] for tag in tags]
-        is_valid = jtu.tree_map(lambda x: np.all(x[tag_ids]), self.tags)
-
-        left_data_tree = jtu.tree_map(lambda mask, x: x if mask else None, is_valid, self.data)
-        right_data_tree = jtu.tree_map(lambda mask, x: x if not mask else None, is_valid, self.data)
-
-        left_tag_tree = jtu.tree_map(lambda mask, x: x if mask else None, is_valid, self.tags)
-        right_tag_tree = jtu.tree_map(lambda mask, x: x if not mask else None, is_valid, self.tags)
-
         left_param_tree = ParameterTree(
-            data=left_data_tree,
-            tags=left_tag_tree,
             tagnames=self.tagnames,
-            read_only=self.read_only,
+            read_only=False,
         )
         right_param_tree = ParameterTree(
-            data=right_data_tree,
-            tags=right_tag_tree,
             tagnames=self.tagnames,
-            read_only=self.read_only,
+            read_only=False,
         )
+
+        for path, data in self.data.iter_leaves():
+            tag_flags = self.tags[path]
+            if np.all(tag_flags[tag_ids]):
+                left_param_tree.data[path] = data
+                left_param_tree.tags[path] = tag_flags
+            else:
+                right_param_tree.data[path] = data
+                right_param_tree.tags[path] = tag_flags
+
+        left_param_tree.set_read_only(self.read_only)
+        right_param_tree.set_read_only(self.read_only)
 
         return left_param_tree, right_param_tree
 
@@ -622,18 +742,27 @@ class ParameterTree:
         else:
             return [self.tagnames[i] for i in np.where(self.tags[path])[0]]
 
-    @classmethod
-    def merge(cls, left, right):
-        jax_leaf = lambda x: x is None
-        left_struct = jtu.tree_structure(left, is_leaf=jax_leaf)
-        right_struct = jtu.tree_structure(right, is_leaf=jax_leaf)
-        if left_struct == right_struct:
-            return jtu.tree_map(lambda l, r: l if r is None else r, left, right, is_leaf=jax_leaf)
-        else:
-            return cls.sparse_merge(left, right)
+    @staticmethod
+    def datadiff(left, right):
+        paths = set()
+        for path, left_data in left.data.iter_leaves():
+            if path not in right.data:
+                paths.add(path)
+                continue
+            right_data = right.data.get_at(path, follow_ref=False)
+            if not is_equal(left_data, right_data):
+                print('diff')
+                print(f"left: {left_data}")
+                print(f"right: {right_data}")
+                paths.add(path)
+        for path, right_data in right.data.iter_leaves():
+            if path not in left.data:
+                paths.add(path)
+                continue
+        return paths
 
-    @classmethod
-    def sparse_merge(cls, left, right):
+    @staticmethod
+    def merge(left, right):
         merged = deepcopy(left)
         for right_tag_name in right.tagnames:
             if right_tag_name not in merged.tagnames:

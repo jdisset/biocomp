@@ -40,10 +40,10 @@ def generate_layer_name(stack, layer_id, name):
 
 
 def get_quantile_variable_ids(node, stack):
-    comp_node = node.get_compute_node()
-    if comp_node is not None:
-        assert 'quantile_variable_id' in comp_node.extra
-        qid = np.array(comp_node.extra['quantile_variable_id']).astype(int)
+    extra = node.get_compute_node('extra')
+    if extra is not None:
+        assert 'quantile_variable_id' in extra
+        qid = np.array(extra['quantile_variable_id']).astype(int)
     else:
         # it's a purely virtual node, we're probably just in the tracer or analyzer...
         qid = np.zeros(1, dtype=int)
@@ -232,42 +232,29 @@ def aggregation(
     n_outputs: int,
     layer_id: int,
     stack: ComputeStack = None,
-    normalize: bool = False,
     **_,
 ) -> LayerInstance:
 
     assert len(input_shapes) == 1, f'Aggregation expects 1 input, got {len(input_shapes)}'
 
-    local_layer_name = generate_layer_name(stack, layer_id, 'aggregation')
+    local_layer_name = generate_layer_name(stack, layer_id, f'aggregation_{n_outputs}x')
     namespace = f'local/{local_layer_name}'
     pname = f"ratios"
-
-    max_agg_size = 0
-
-    if stack is not None:
-        for node in stack.get_all_nodes():
-            cnode = node.get_compute_node()
-            if cnode.type == 'aggregation':
-                max_agg_size = max(max_agg_size, len(cnode.output_to))
-
-    if max_agg_size < n_outputs:
-        raise ValueError(f'Aggregation expects at most {max_agg_size} outputs, got {n_outputs}')
 
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey, **_):
         ratios = []
         for i, node in enumerate(nodelist):
-            extra = node.get_compute_node().extra
+            extra = node.get_compute_node('extra')
             if 'ratios' in extra:
                 assert len(extra['ratios']) == n_outputs
                 ratio_v = jnp.array(extra['ratios'], dtype=jnp.float32)
             else:
                 ratio_v = jax.random.uniform(key, (n_outputs,))
             # pad to max_outputs if necessary
-            ratio_v = jnp.pad(ratio_v, (0, max_agg_size - n_outputs), constant_values=0.0)
             ratios.append(ratio_v)
 
         ratios = jnp.stack(ratios)
-        assert ratios.shape == (len(nodelist), max_agg_size)
+        assert ratios.shape == (len(nodelist), n_outputs), f'Invalid ratio shape {ratios.shape}'
         params[f'{namespace}/{pname}'] = ratios
 
     def apply(
@@ -279,8 +266,6 @@ def aggregation(
     ) -> ArrayLike:
         assert input.shape == input_shapes[0], f'Invalid input shape {input.shape}'
         ratios = params[f'{namespace}/{pname}'][node_id][:n_outputs]
-        if normalize:
-            ratios = ratios / jnp.maximum(jnp.sum(ratios), 1e-12)
         return jnp.array(ratios) * input
 
     output_shape = input_shapes * n_outputs
@@ -293,7 +278,6 @@ def inv_aggregation(
     n_outputs: int,
     stack: ComputeStack,
     layer_id: int,
-    normalize=False,
     **_,
 ) -> LayerInstance:
 
@@ -303,31 +287,36 @@ def inv_aggregation(
 
     EPSILON = 1e-12
 
-    local_layer_name = generate_layer_name(stack, layer_id, 'inverse_aggregation')
+    local_layer_name = generate_layer_name(stack, layer_id, f'inverse_aggregation')
     namespace = f'local/{local_layer_name}'
 
 
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
 
-        original_slots = []
-
-        for node in nodelist:
-            cnode = node.get_compute_node()
-            extra = cnode.extra
-            assert 'original_output_len' in extra
-            assert 'original_output_slot' in extra
-            assert extra['original_output_len'] > 0
-            assert extra['original_output_slot'] < extra['original_output_len']
-            original_slots.append(np.asarray(extra['original_output_slot']))
-        params.at(f'{namespace}/original_output_slot', np.stack(original_slots), tags=['non_grad'])
+        # original_slots = []
+        # for node in nodelist:
+            # extra = node.get_compute_node('extra')
+            # assert 'original_output_len' in extra
+            # assert 'original_output_slot' in extra
+            # assert extra['original_output_len'] > 0
+            # assert extra['original_output_slot'] < extra['original_output_len']
+            # original_slots.append(np.asarray(extra['original_output_slot']))
+        # params.at(f'{namespace}/original_output_slot', np.stack(original_slots), tags=['non_grad'])
 
         if stack is not None:
             ref = ArrayRef(params.data)
             for node in nodelist:
-                inv_node = node.get_inverse_node(stack)
-                inv_layer, inv_loc = inv_node.get_layer_and_local_id(stack)
-                fwd_namespace = f'local/{generate_layer_name(stack, inv_layer, "aggregation")}'
-                ref.push_back(f'{fwd_namespace}/ratios', inv_loc)
+
+                extra = node.get_compute_node('extra')
+                assert extra['original_output_slot'] < extra['original_output_len']
+                original_slot = extra['original_output_slot']
+
+                fwd_node = node.get_inverse_node(stack)
+                fwd_layer, fwd_loc = fwd_node.get_layer_and_local_id(stack)
+                fwd_n_output = stack.layers[fwd_layer].get_n_outputs()
+                fwd_namespace = f'local/{generate_layer_name(stack, fwd_layer, f"aggregation_{fwd_n_output}x")}'
+                ref.push_back(f'{fwd_namespace}/ratios', (fwd_loc, original_slot))
+
             params.at(f'{namespace}/ratios', ref, overwrite=None)
 
     def apply(
@@ -338,20 +327,16 @@ def inv_aggregation(
         key,
     ) -> ArrayLike:
 
-        original_output_slot = jnp.asarray(
-            params[f'{namespace}/original_output_slot'][node_id], dtype=jnp.int32
-        )
+        # original_output_slot = jnp.asarray(
+            # params[f'{namespace}/original_output_slot'][node_id], dtype=jnp.int32
+        # )
 
         if stack is not None:
-            ratios = params[f'{namespace}/ratios'][node_id][:n_outputs]
+            ratio = params[f'{namespace}/ratios'][node_id]
         else:
-            ratios = jnp.ones((n_outputs,))
+            ratio = jnp.ones((1,))
 
-        if normalize:
-            ratios = ratios / jnp.maximum(jnp.sum(ratios), EPSILON)
-
-        ratio = ratios[original_output_slot]
-        return jnp.where(ratio > EPSILON, inp / ratio, 0.0)
+        return jnp.where(ratio > EPSILON, input / ratio, 0.0)
 
     output_shape = input_shapes
     return prepare, apply, output_shape
@@ -632,7 +617,7 @@ def sequestron_ERN(
         for node in nodelist:
             # we need to know which affinity value to use for this node
             assert 'seq_name' in node.get_compute_node().extra
-            seq_name = node.get_compute_node().extra['seq_name']  # ex: 'CasE5p'
+            seq_name = node.get_compute_node('extra')['seq_name']  # ex: 'CasE5p'
             if seq_name not in affinity_names:
                 raise ValueError(f'Unknown affinity name {seq_name}. Available: {affinity_names}')
             affinity_id = affinity_names.index(seq_name)
