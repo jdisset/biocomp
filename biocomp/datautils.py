@@ -225,7 +225,7 @@ def sample_batches_direct(
     selection_proba = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
     selection_proba /= np.sum(selection_proba)
     try:
-        indices = rng.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba)
+        indices = rng.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba, replace=True)
     except ValueError:
         n_nans = np.sum(np.isnan(selection_proba))
         ut.logger.warning(
@@ -233,7 +233,7 @@ def sample_batches_direct(
         )
         selection_proba[np.isnan(selection_proba)] = 0.0
         selection_proba /= np.sum(selection_proba)
-        indices = rng.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba)
+        indices = rng.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba, replace=True)
 
     Xsub = X[indices]
     Ysub = Y[indices]

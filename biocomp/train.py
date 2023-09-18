@@ -482,11 +482,11 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
 ### {{{                  --     training program helper     --
 
 DEFAULT_TRAINING_CONFIG = {
+
     # -------- training config --------
     "rng_key": 42,
     "negative_grad_penalty": 0.1,
     "huber_quantile_loss_delta": 0.1,
-    "static_params": [ut.STATIC_PATH, ut.NODE_PATH],
     "cache_dir": "./.training_cache",
     'optimizer': 'adam',
     'epochs': 150,
@@ -518,6 +518,7 @@ DEFAULT_TRAINING_CONFIG = {
     "data_sampling_max_density_samples": 4000,
     "data_sampling_density_quantile_threshold": 0.025,  # threshold = min of both
     "data_sampling_coords_for_density_threshold": 0.15,  # threshold = min of both
+
 }
 
 import argparse

@@ -198,7 +198,12 @@ def inv_source(*args, **kwargs):
 
 
 def numeric(
-    input_shapes: Sequence[Tuple[int]], n_outputs: int, layer_id: int, stack, shape: Tuple[int] = (1,),**_
+    input_shapes: Sequence[Tuple[int]],
+    n_outputs: int,
+    layer_id: int,
+    stack,
+    shape: Tuple[int] = (1,),
+    **_,
 ) -> LayerInstance:
 
     assert n_outputs == 1, f'Numeric node should have 1 output, got {n_outputs}'
@@ -290,18 +295,7 @@ def inv_aggregation(
     local_layer_name = generate_layer_name(stack, layer_id, f'inverse_aggregation')
     namespace = f'local/{local_layer_name}'
 
-
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
-
-        # original_slots = []
-        # for node in nodelist:
-            # extra = node.get_compute_node('extra')
-            # assert 'original_output_len' in extra
-            # assert 'original_output_slot' in extra
-            # assert extra['original_output_len'] > 0
-            # assert extra['original_output_slot'] < extra['original_output_len']
-            # original_slots.append(np.asarray(extra['original_output_slot']))
-        # params.at(f'{namespace}/original_output_slot', np.stack(original_slots), tags=['non_grad'])
 
         if stack is not None:
             ref = ArrayRef(params.data)
@@ -314,7 +308,9 @@ def inv_aggregation(
                 fwd_node = node.get_inverse_node(stack)
                 fwd_layer, fwd_loc = fwd_node.get_layer_and_local_id(stack)
                 fwd_n_output = stack.layers[fwd_layer].get_n_outputs()
-                fwd_namespace = f'local/{generate_layer_name(stack, fwd_layer, f"aggregation_{fwd_n_output}x")}'
+                fwd_namespace = (
+                    f'local/{generate_layer_name(stack, fwd_layer, f"aggregation_{fwd_n_output}x")}'
+                )
                 ref.push_back(f'{fwd_namespace}/ratios', (fwd_loc, original_slot))
 
             params.at(f'{namespace}/ratios', ref, overwrite=None)
@@ -326,10 +322,6 @@ def inv_aggregation(
         node_id: ArrayLike,
         key,
     ) -> ArrayLike:
-
-        # original_output_slot = jnp.asarray(
-            # params[f'{namespace}/original_output_slot'][node_id], dtype=jnp.int32
-        # )
 
         if stack is not None:
             ratio = params[f'{namespace}/ratios'][node_id]
@@ -378,7 +370,7 @@ def transform_nn(
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
 
     def make_layer_name(l_id, is_inv):
-        return  generate_layer_name(stack, l_id, f"{'inverse_' if is_inv else ''}{transform_name}")
+        return generate_layer_name(stack, l_id, f"{'inverse_' if is_inv else ''}{transform_name}")
 
     rate_shape = (len(input_shapes), rate_dim)
     rate_name = f'{transform_name}_rate'  # _x{len(input_shapes)}'
@@ -389,6 +381,38 @@ def transform_nn(
     quantization_names_path = f'shared/quantization/{rate_name}_names'  # for sanity check
     mask_name = f'{rate_name}_quantization_mask'
     quantization_mask_path = f'local/{layer_name}/{mask_name}'
+
+    def inner(params, value: ArrayLike, quantile, rate_embedding: ArrayLike, key: PRNGKey):
+        """For a single source, computes a latent output from the concatenation of
+        the rate embedding and the source value.
+        All of these outputs will then be summed up and passed through a final layer.
+        """
+        if value.ndim == 0:
+            value = value.reshape((1,))
+        if rate_embedding.ndim == 0:
+            rate_embedding = rate_embedding.reshape((1,))
+
+        assert value.ndim == 1, f'In {transform_name}: {value.ndim} != 1: {value}'
+        assert rate_embedding.ndim == 1
+
+        inputs = ut.flat_concat(value, rate_embedding, quantile)
+
+        out = inner_activation(
+            dense_multilevel(
+                inputs,
+                inner_wsize,
+                inner_outsize,
+                depth=inner_depth,
+                activation=inner_activation,
+                key=key,
+                param_f=partial(init_if_needed, params, base_path='shared'),
+                name=f'NN/{shared_layer_name}/inner',
+            )
+        )
+
+        assert out.shape == (inner_outsize,)
+
+        return out
 
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey):
 
@@ -403,15 +427,15 @@ def transform_nn(
         except KeyError:
             qvalues = jax.random.uniform(key0, (len(quantization_names), rate_dim))
             params[quantization_values_path] = qvalues
-            params[quantization_names_path] = tuple(quantization_names)
-            params.tag(quantization_names_path, ['non_jit', 'non_grad'])
+            # params[quantization_names_path] = tuple(quantization_names)
+            # params.tag(quantization_names_path, ['non_jit', 'non_grad'])
 
-        assert qvalues.shape == (len(quantization_names), rate_dim)
-        if params[quantization_names_path] != tuple(quantization_names):
-            raise ValueError(
-                f"""Quantization names for {rate_name} do not match:
-                {params[quantization_names_path]} != {tuple(quantization_names)}"""
-            )
+        # assert qvalues.shape == (len(quantization_names), rate_dim)
+        # if params[quantization_names_path] != tuple(quantization_names):
+            # raise ValueError(
+                # f"""Quantization names for {rate_name} do not match:
+                # {params[quantization_names_path]} != {tuple(quantization_names)}"""
+            # )
 
         if not is_inverse:  # forward node
             # We initialize quantization masks for these nodes.
@@ -425,7 +449,9 @@ def transform_nn(
             params.at(f'{quantization_mask_path}', np.array(qmasks), tags=['non_grad'])
 
             # And we also initialize the quantized rates
-            params[f'local/{layer_name}/{rate_name}'] = jax.random.uniform(key1, (n_nodes, *rate_shape))
+            params[f'local/{layer_name}/{rate_name}'] = jax.random.uniform(
+                key1, (n_nodes, *rate_shape)
+            )
 
         else:
             # For inverse nodes, we will use a view (a subtree of ArrayRef that mirrors the original subtree)
@@ -441,7 +467,9 @@ def transform_nn(
 
             # make view will create 2 subtrees of ArrayRef, one for the rates and one for the masks
             # that point to the same underlying data as the forward nodes
-            make_view(params, f'local/{layer_name}', fwd_paths, fwd_loc, leaves=[rate_name, mask_name])
+            make_view(
+                params, f'local/{layer_name}', fwd_paths, fwd_loc, leaves=[rate_name, mask_name]
+            )
 
         # --------- quantile var
         quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
@@ -455,7 +483,22 @@ def transform_nn(
         fake_vals = [np.zeros(s) for s in input_shapes]
         maxq = np.max(quantile_var_ids)
 
-        apply(*fake_vals, quantiles=np.zeros(maxq+1), params=params, node_id=0, key=key1)
+        apply(*fake_vals, quantiles=np.zeros(maxq + 1), params=params, node_id=0, key=key1)
+
+    def outer(inner_out: ArrayLike, params, key: PRNGKey):
+
+        return outer_activation(
+            dense_multilevel(
+                inner_out,
+                outer_wsize,
+                1,
+                depth=outer_depth,
+                param_f=partial(init_if_needed, params, base_path='shared'),
+                key=key,
+                name=f'NN/{shared_layer_name}/outer',
+                activation=inner_activation,
+            )
+        )
 
     def apply(
         *values: ArrayLike,
@@ -478,58 +521,18 @@ def transform_nn(
             rates, params, quantization_values_path, quantization_mask_path, node_id
         )
 
-        def inner(value: ArrayLike, rate_embeding: ArrayLike, key: PRNGKey):
-            """For a single source, computes a latent output from the concatenation of
-            the rate embedding and the source value.
-            All of these outputs will then be summed up and passed through a final layer.
-            """
-            if value.ndim == 0:
-                value = value.reshape((1,))
-            if rate_embeding.ndim == 0:
-                rate_embeding = rate_embeding.reshape((1,))
-
-            assert value.ndim == 1, f'In {transform_name}: {value.ndim} != 1: {value}'
-            assert rate_embeding.ndim == 1
-
-            inputs = ut.flat_concat(value, rate_embeding, quantile)
-
-            out = inner_activation(
-                dense_multilevel(
-                    inputs,
-                    inner_wsize,
-                    inner_outsize,
-                    depth=inner_depth,
-                    activation=inner_activation,
-                    key=key,
-                    param_f=partial(init_if_needed, params, base_path='shared'),
-                    name=f'NN/{shared_layer_name}/inner',
-                )
-            )
-
-            assert out.shape == (inner_outsize,)
-
-            return out
-
         # first we apply the inner stack to all inputs and sum them:
         inner_keys = jax.random.split(k1, val.shape[0])
-        inner_out = sum(inner(v, r, k) for v, r, k in zip(val, qrates, inner_keys))
+        inner_out = sum(
+            inner(params, value=v, quantile=quantile, rate_embedding=r, key=k)
+            for v, r, k in zip(val, qrates, inner_keys)
+        )
         inner_out = ut.flat_concat(inner_out, quantile)
 
         assert inner_out.shape == (inner_outsize + 1,)
 
         # then we apply a final outer layer to the summed output:
-        return outer_activation(
-            dense_multilevel(
-                inner_out,
-                outer_wsize,
-                1,
-                depth=outer_depth,
-                param_f=partial(init_if_needed, params, base_path='shared'),
-                key=k2,
-                name=f'NN/{shared_layer_name}/outer',
-                activation=inner_activation,
-            )
-        )
+        return outer(inner_out, params, k2)
 
     output_shape = [(1,)]
 
@@ -603,20 +606,19 @@ def sequestron_ERN(
             init_f=ut.continuous_initializer(key, (len(affinity_names), affinity_dim)),
         )
 
-        existing_names = params.at(
-            f'shared/{shared_layer_name}/affinities_names',
-            tuple(affinity_names),
-            tags=['non_jit', 'non_grad'],
-            overwrite=False,
-        )
-        assert existing_names == tuple(
-            affinity_names
-        ), f'Affinity names mismatch: {existing_names} != {affinity_names}'
+        # existing_names = params.at(
+            # f'shared/{shared_layer_name}/affinities_names',
+            # tuple(affinity_names),
+            # tags=['non_jit', 'non_grad'],
+            # overwrite=False,
+        # )
+        # assert existing_names == tuple(
+            # affinity_names
+        # ), f'Affinity names mismatch: {existing_names} != {affinity_names}'
 
         ref = ArrayRef(params.data)
         for node in nodelist:
             # we need to know which affinity value to use for this node
-            assert 'seq_name' in node.get_compute_node().extra
             seq_name = node.get_compute_node('extra')['seq_name']  # ex: 'CasE5p'
             if seq_name not in affinity_names:
                 raise ValueError(f'Unknown affinity name {seq_name}. Available: {affinity_names}')

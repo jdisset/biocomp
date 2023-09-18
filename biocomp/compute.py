@@ -314,13 +314,11 @@ class ComputeStack:
         """
         with ut.timer('Building compute stack'):
             self.config = config
-            with ut.timer('assembling stack'):
-                self._assemble_stack(**kwargs)
+            self._assemble_stack(**kwargs)
             self._refresh()
-            with ut.timer('building layers'):
-                for layer in self.layers:
-                    layer.setup(config, stack=self)
-                    self._refresh()
+            for layer in self.layers:
+                layer.setup(config, stack=self)
+                self._refresh()
             self._generate_apply_method()
             self.check()
             self.is_built = True
@@ -338,7 +336,7 @@ class ComputeStack:
             assert layer.is_built, 'Layer not built'
             assert l_id == layer.layer_id, 'Layer id mismatch'
             rng_key, _ = jax.random.split(rng_key)
-            ut.logger.info(
+            ut.logger.debug(
                 f'Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}'
             )
             if layer.f_prepare is not None:
@@ -371,7 +369,8 @@ class ComputeStack:
         which we define as the position of the output in the array of all outputs of all networks.
         """
         assert network_id < len(self.networks)
-        return sum(n.get_nb_outputs() for n in self.networks[:network_id]) + output_id
+        return np.sum(n.get_nb_outputs() for n in self.networks[:network_id]) + output_id
+
 
     def get_node_from_net_and_compute_id(
         self, network_id: int, compute_node_id: int
@@ -821,11 +820,10 @@ class ComputeStack:
         type_dict = {}
         for n in n_list:
             type_dict.setdefault(n.type_signature, []).append(n)
-        with ut.timer('make_smallest_stack'):
-            minstack = ComputeStack.make_smallest_stack_dfs(
-                ComputeStack(self.networks, []), type_dict, **kwargs
-            )
-            ut.logger.info(f'Final stack size: {len(minstack.layers)}')
+        minstack = ComputeStack.make_smallest_stack_dfs(
+            ComputeStack(self.networks, []), type_dict, **kwargs
+        )
+        ut.logger.debug(f'Final stack size: {len(minstack.layers)}')
         self.layers = minstack.layers
 
     def _make_layer_input_getters(self, layer_id: int):

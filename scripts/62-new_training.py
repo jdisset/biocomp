@@ -1,14 +1,30 @@
 from biocomp import utils as ut
 import numpy as np
 import scriptutils as su
+import optax
+import time
+from copy import deepcopy
 import biocomp.datautils as du
 import biocomp.train as train
 import biocomp.parameters as pm
 import biocomp.nodes as nd
 import biocomp.compute as cmp
+import biocomp
 import jax
+from jax import jit, grad, vmap, random, value_and_grad
+from jax import numpy as jnp
 import jax.tree_util as jtu
 import cProfile
+
+class profiler:
+    def __init__(self, filename):
+        self.filename = filename
+    def __enter__(self):
+        self.profiler = cProfile.Profile()
+        self.profiler.enable()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.profiler.disable()
+        self.profiler.dump_stats(self.filename)
 
 prog = train.TrainingProgram()
 prog.parse_args()
@@ -29,9 +45,9 @@ xpnames = XP.keys()
 
 with ut.timer(f'Loading data and building networks for {xpnames}'):
     # 7.6s
+
     # profiler = cProfile.Profile()
     # profiler.enable()
-
     lib = su.load_lib()
     loadedxp = {
         xpname: su.load_xp(XP[xpname], lib, data_path='./data/calibrated_data_v2')
@@ -42,9 +58,9 @@ with ut.timer(f'Loading data and building networks for {xpnames}'):
     # profiler.disable()
     # profiler.dump_stats("/tmp/dmanbuild.prof")
 
-# all_networks = dman_full.get_networks()
-# net_xp = [n.metadata['from_xp'] for n in all_networks]
-# net_name = [n.name for n in all_networks]
+all_networks = dman_full.get_networks()
+net_xp = [n.metadata['from_xp'] for n in all_networks]
+net_name = [n.name for n in all_networks]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -89,124 +105,244 @@ with ut.timer('Stack building'):
 
 ##
 
-# profiler = cProfile.Profile()
-# profiler.enable()
-with ut.timer('Stack initialization'):
-    # 1.4s
-    params = stack.init(key)
-    # params = stack.init(key)
-    # params = stack.init(key)
-# profiler.disable()
-# profiler.dump_stats("/tmp/stackinit3.prof")
+with profiler("/tmp/stackinit7.prof"):
+    with ut.timer('Stack initialization'):
+        # 1.4s
+        params = stack.init(key)
 
-# params
 ##
 
-from copy import deepcopy
-paramsold = deepcopy(params)
-params == paramsold
-params
 
-l, s = jtu.tree_flatten(params)
+with profiler("/tmp/batches3.prof"):
+    xbatches, ybatches = training.get_batches(key)
 
+
+##
+
+compute_config = cmp.DEFAULT_COMPUTE_CONFIG
+key = jax.random.PRNGKey(0)
+seed = 42
+training_config = deepcopy(biocomp.train.DEFAULT_TRAINING_CONFIG)
+dman = training
+
+ut.logger.debug(f"About to start training")
+ut.logger.debug(f"Training config: {training_config}")
+ut.logger.debug(f"Compute config: {compute_config.config}")
+
+if seed is not None:
+    training_config['rng_key'] = seed
+
+ut.logger.info(f"Going to train with random seed {training_config['rng_key']}")
+key = jax.random.PRNGKey(training_config['rng_key'])
+
+def init_stack(dman, key):
+    stack = dman.build_compute_stack(compute_config)
+    with ut.timer('Stack initialization'):
+        params = stack.init(key)
+    return stack, params
+
+def generate_batches(dman, key):
+    with ut.timer('Generating batches'):
+        xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
+    return xbatches, ybatches
+
+stack, params = init_stack(dman, key)
+xbatches, ybatches = generate_batches(dman, key)
+
+ut.logger.info(f"Generated {xbatches.shape[0]} batches")
+optimizer = biocomp.train.get_optimizer(training_config)
+
+
+params.tag('local','local')
+static, dynamic = params.filter_by_tag(['non_grad', 'local'])
+
+merged = pm.ParameterTree.merge(static, dynamic)
+merged
+
+
+ut.logger.info(f"Split params between dynamic and static. Now intializing optimizer.")
+opt_state = optimizer.init(dynamic)
+total_batches = training_config['n_batches']
+assert total_batches == xbatches.shape[0] == ybatches.shape[0]
+steps_per_epoch = max(1, int(training_config['steps_per_epoch']))
+ut.logger.info(f"Done initializing optimizer, total batches: {total_batches}, steps per epoch: {steps_per_epoch}")
+
+# --- loss & update functions
+
+##
+vmapped_compute = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+
+@jit
+def loss_func(dynamic, static, X, Y, Z, key):
+    nb_inputs = sum([n.get_nb_inputs() for n in stack.networks])
+    nb_outputs = sum([n.get_nb_outputs() for n in stack.networks])
+    assert X.ndim == Y.ndim == Z.ndim == 2, "X, Y, and Z must have 2 dimensions"
+    assert (
+        X.shape[0] == Y.shape[0] == Z.shape[0]
+    ), "X, Y, and Z must have the same number of rows"
+    assert (
+        X.shape[1] == nb_inputs
+    ), "X must have as many columns as the total number of inputs in the stack"
+    assert (
+        Y.shape[1] == Z.shape[1] == nb_outputs
+    ), "Y and Z must have as many columns as the total number of outputs in the stack"
+
+    # params = ut.assemble_params(dynamic, static)
+    params = pm.ParameterTree.merge(dynamic, static)
+    keys = jax.random.split(key, X.shape[0])
+
+    yhat, grads = vmapped_compute(params, X, Z, keys)
+    assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
+
+    error = yhat - Y
+    quantile_loss = jnp.mean(
+        biocomp.train.huber_quantile_loss(error, Z, delta=training_config['huber_quantile_loss_delta'])
+    )
+
+    # grads is the concatenated and flattened jacobian of
+    # translate, transcript, and output nodes wrt their inputs
+    # they should be monotonically increasing so we add a loss term
+    negative_grads = jnp.mean(jnp.where(grads < 0, -grads, 0))
+    return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
+
+
+##
+def training_step(params, opt_state, x, y, z, key):
+    static, dynamic = params.filter_by_tag(['non_grad', 'local'])
+    loss, grads = jit(value_and_grad(loss_func, has_aux=False))(dynamic, static, x, y, z, key)
+    updates, opt_state = optimizer.update(grads, opt_state, dynamic)
+    dynamic = optax.apply_updates(dynamic, updates)
+    # params = ut.assemble_params(dynamic, static)
+    params = pm.ParameterTree.merge(static, dynamic)
+    res = {
+        'params': params,
+        'loss': loss,
+        'grad': grads,
+        'opt': opt_state,
+    }
+    return res
+
+start_params = params
+start_opt_state = opt_state
+i = 0
+xb = ut.get_looped_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
+yb = ut.get_looped_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
+zb = jax.random.uniform(key, yb.shape)
+
+training_step(start_params, start_opt_state, xb[0], yb[0], zb[0], key)
+
+##
+
+p = pm.ParameterTree()
+p['a/arr'] = np.array([1,2,3], dtype=np.float32)
+ref = pm.ArrayRef(p)
+ref.push_back('a/arr', 2)
+ref.push_back('a/arr', 1)
+p['a/ref'] = ref
+p['a/ref']
+p.tag('a/ref', ['ref'])
+
+p
+
+static, dynamic = params.filter_by_tag(['non_grad'])
+dynamic['local/l19 ERN_5p (40)/affinity']
+
+m = pm.ParameterTree.merge(dynamic, static)
+m == params
+jnp.mean(m['local/l19 ERN_5p (40)/affinity'] * 2)
+
+m.tags == params.tags
+static.tags
+dynamic.tags
+
+##
+
+l, s = jtu.tree_flatten(dynamic)
 reconstructed = jtu.tree_unflatten(s, l)
 
 reconstructed
 
 ##
 
-assert(reconstructed == params)
-reconstructed.data == params.data
+def f(dyn, stat):
+    # params = pm.ParameterTree.merge(stat, dyn)
+    m = pm.ParameterTree.merge(dyn, stat)
+    return jnp.mean(m['local/l19 ERN_5p (40)/affinity'] * 2)
+    # return jnp.mean(params['affinity'] * 2)
+    # return jnp.mean(params['a/ref']*2)
 
-# p = 'local/l1 inverse_tl (101)/tl_rate'
-p = 'local/l15 ERN_5p (16)/affinity'
-base = 'local/l15 ERN_5p (16)'
-params[base]
-params.data.get_at(p, follow_ref=False)
-
-
-p in params.data
-params[base] == reconstructed[base]
-params.data[base] == reconstructed.data[base]
-params[base]
-reconstructed[base]
-pm.is_equal(params[p],reconstructed[p])
-params[p]
-reconstructed[p]
-
-np.all(params[p] == reconstructed[p])
-pm.is_equal(params[p],reconstructed[p])
-pm.is_equal(params.data[p],reconstructed.data[p])
-
-
-diff = pm.ParameterTree.datadiff(params, reconstructed)
-diff
-
-
-nj, j = params.filter_by_tag('non_jit')
-ng, g = params.filter_by_tag('non_grad')
-nj
-
-lp, sp = jtu.tree_flatten(params, is_leaf=lambda x: x is None)
-lr, sr = jtu.tree_flatten(reconstructed, is_leaf=lambda x: x is None)
-
-lp == lr
-str(sp) == str(sr)
-sp
-sr
-
-pm.flatten_PTree(params.data)
-
+# value_and_grad(f)(dynamic)
+value_and_grad(f)(dynamic, static)
+# value_and_grad(f)(p)
 
 ##
 
-# def sorted_flatten(params):
-    # keys, values  = zip(*list(params.data.iter_leaves(path_as_str=True)))
-    # order = np.argsort(keys)
-    # sorted_keys = np.array(keys)[order].tolist()
-    # sorted_values = np.array(values, dtype=object)[order].tolist()
-    # return sorted_keys, sorted_values
+keep_in_history = training_config.get('keep_in_history', ['loss'])
 
-def sorted_flatten(params):
-    # without numpy to sort:
-    keys, values  = zip(*list(params.data.iter_leaves(path_as_str=False)))
-    order = sorted(range(len(keys)), key=lambda i: keys[i])
-    sorted_keys = [keys[i] for i in order]
-    sorted_values = [values[i] for i in order]
-    return sorted_keys, sorted_values
+def scannable_step(carry, i_x_y_z_k):
+    params, opt_state = carry
+    i, x, y, z, k = i_x_y_z_k
+    updt = training_step(params, opt_state, x, y, z, k)
+    params, opt_state = updt['params'], updt['opt']
+    history = {k: updt[k] for k in keep_in_history}
+    return (params, opt_state), history
 
-# timeit:
-import timeit
-t = timeit.timeit(lambda: sorted_flatten(params), number=100)
-print(f'{t*10:.3f} ms')
+@jit
+def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
+    pscan = ut.progress_scan(steps_per_epoch, message='Training model')
+    zbatches = jax.random.uniform(epoch_key, ybs.shape)
+    batch_keys = jax.random.split(epoch_key, steps_per_epoch)
+    sstep = pscan(scannable_step)
+    (final_params, final_opt_state), epoch_history = jax.lax.scan(
+        sstep,
+        (start_params, start_opt_state),
+        (jnp.arange(steps_per_epoch), xbs, ybs, zbatches, batch_keys),
+    )
+    return final_params, final_opt_state, epoch_history
 
-t2 = timeit.timeit(lambda: jtu.tree_flatten(params), number=100)
-print(f'{t2*1000:.3f} ms')
+def epoch_step_no_scan(start_params, start_opt_state, epoch_key, xbs, ybs):
+    zbatches = jax.random.uniform(epoch_key, ybs.shape)
+    batch_keys = jax.random.split(epoch_key, steps_per_epoch)
+    all_history = []
+    tstep = training_step
+    for i, (x, y, z, k) in tqdm(
+        enumerate(zip(xbs, ybs, zbatches, batch_keys)), total=steps_per_epoch
+    ):
+        updt = tstep(start_params, start_opt_state, x, y, z, k)
+        start_params, start_opt_state = updt['params'], updt['opt']
+        history = {k: updt[k] for k in keep_in_history}
+        all_history.append(history)
+    epoch_history = {k: jnp.stack([h[k] for h in all_history]) for k in keep_in_history}
+    return start_params, start_opt_state, epoch_history
+
+epoch_step = epoch_step if not ut.enable_checks else epoch_step_no_scan
 
 ##
+# --- main training loop
 
-p = pm.PTree()
-p['a'] = np.arange(10).reshape(2,5)
-p['b'] = np.arange(12).reshape(4,3)
-p['c'] = np.arange(15).reshape(3,5)
-p
+loggers = [(1, biocomp.train.console_log)]
 
-ref1 = pm.ArrayRef(p)
-ref1.push_back('a', 0)
-ref1.push_back('c', (1,))
-ref1
+for _, l in loggers:
+    l(epoch=0, training_config=training_config)
 
-ref2 = pm.ArrayRef(p)
-ref2.push_back('a', (0,1))
-ref2.push_back('b', (1,2))
-ref2.push_back('c', (1,2))
-ref2
+ut.logger.info(f'Begin training for {training_config["epochs"]} epochs')
 
-p['ref2'] = ref2
-p
+training_config['epochs'] = 3
 
+for i, epoch_key in enumerate(jax.random.split(key, training_config['epochs']), 1):
+    t0 = time.time()
+    xb = ut.get_looped_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
+    yb = ut.get_looped_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
+    params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key, xb, yb)
+    epoch_history['epoch_time'] = time.time() - t0
+    epoch_history['latest_params'] = params
 
-
-
-
-
+    for t, l in loggers:
+        if t is not None:
+            if (t == 0 or (i % t == 0 and t > 0)) or i == training_config['epochs']:
+                l(
+                    epoch=i,
+                    training_config=training_config,
+                    epoch_history=epoch_history,
+                    nbatches=steps_per_epoch,
+                )

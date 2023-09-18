@@ -351,7 +351,11 @@ class ArrayRef:
         self.make_map()
 
     def __repr__(self):
-        return f"RefArray from {len(self.paths)} pointed arrays:\n{pretty_str(self.get())}"
+        r = f"RefArray from {len(self.paths)} pointed arrays:\n"
+        for a, p, i in self.map:
+            r += f"* {self.paths[a]}: ({len(i[0])} elmts)\n"
+        return r
+
 
     def push_back(self, array_path, id):
 
@@ -398,9 +402,8 @@ class ArrayRef:
         for a in np.unique(idx[:, 0]):
             positions = np.where(idx[:, 0] == a)[0]
             ids_in_array = idx[positions, 1:]
-            idtup = tuple(ids_in_array.T) # transpose to get a tuple of arrays of indices
+            idtup = tuple(ids_in_array.T)  # transpose to get a tuple of arrays of indices
             self.map += ((a, positions, idtup),)
-
 
     def __eq__(self, other):
         if not isinstance(other, ArrayRef):
@@ -573,6 +576,14 @@ class ParameterTree:
                 self.tag(path, tags, True)
             return self.data[path]
 
+    def get_subtree(self, path):
+        return ParameterTree(
+            data=self.data[path],
+            tags=self.tags[path],
+            tagnames=self.tagnames,
+            read_only=self.read_only,
+        )
+
     def __repr__(self):
         def with_box(title, data_splitlines, lw):
             reconstructed_lines = [
@@ -615,12 +626,12 @@ class ParameterTree:
         is_leaf = lambda x: PTree.is_leaf(x) and not isinstance(x, ParameterTree)
 
         if self.tags is None or self.tags.is_empty():
-            self.tags = jtu.tree_map(lambda _: np.array([False]), self.data, is_leaf=is_leaf)
+            for p, _ in self.data.iter_leaves():
+                self.tags[p] = np.zeros(len(self.tagnames), dtype=bool)
         else:
             insert_idx = self.__tagdict[tag]
-            self.tags = jtu.tree_map(
-                lambda t: np.insert(t, insert_idx, False), self.tags, is_leaf=is_leaf
-            )
+            for p, _ in self.data.iter_leaves():
+                self.tags[p] = np.insert(self.tags[p], insert_idx, False)
 
     def get_tag_flags(self, tags):
         if isinstance(tags, str):
@@ -635,22 +646,30 @@ class ParameterTree:
             return
         if self.read_only:
             raise RuntimeError("Cannot tag read-only ParameterTree")
-        self.create_tags_if_required(tags)
-        if not self.data.has_leaf(path):
-            raise KeyError(f"Trying to tag non-leaf node {path}")
+
+        # if not self.data.has_leaf(path):
+        # raise KeyError(f"Trying to tag non-leaf node {path}")
+
         if isinstance(tags, str):
             tags = [tags]
 
         self.create_tags_if_required(tags)
-
-        assert self.tags[path].shape == (len(self.tagnames),)
-
         tag_flags = self.get_tag_flags(tags)
 
-        if overwrite:
-            self.tags[path] = tag_flags
+        if self.data.has_leaf(path):
+            if overwrite:
+                self.tags[path] = tag_flags
+            else:
+                self.tags[path] = self.tags[path] | tag_flags
+
         else:
-            self.tags[path] = self.tags[path] | tag_flags
+            # it's a branch, tag all leaves
+            for p, _ in self.data[path].iter_leaves():
+                pp = ParamPath(path) / p
+                if overwrite:
+                    self.tags[pp] = tag_flags
+                else:
+                    self.tags[pp] = self.tags[pp] | tag_flags
 
     def get_read_only_copy(self):
         from copy import deepcopy
@@ -698,12 +717,16 @@ class ParameterTree:
     # else:
     # return cls.sparse_merge(left, right)
 
-    def filter_by_tag(self, tags):
+    def filter_by_tag(self, tags, mode='any'):
+
+        # modes: 'any', 'all', 'exact'
+
         if isinstance(tags, str):
             tags = [tags]
         for t in tags:
             if t not in self.tagnames:
                 raise KeyError(f"Tag {t} not found in ParameterTree")
+
         tag_ids = [self.__tagdict[tag] for tag in tags]
         left_param_tree = ParameterTree(
             tagnames=self.tagnames,
@@ -714,9 +737,17 @@ class ParameterTree:
             read_only=False,
         )
 
+        match_f = lambda x: np.any(x[tag_ids])
+        if mode == 'all':
+            match_f = lambda x: np.all(x[tag_ids])
+        elif mode == 'exact':
+            target_tag_flags = np.zeros(len(self.tagnames), dtype=bool)
+            target_tag_flags[tag_ids] = True
+            match_f = lambda x: np.all(x == target_tag_flags)
+
         for path, data in self.data.iter_leaves():
             tag_flags = self.tags[path]
-            if np.all(tag_flags[tag_ids]):
+            if match_f(tag_flags):
                 left_param_tree.data[path] = data
                 left_param_tree.tags[path] = tag_flags
             else:
@@ -786,14 +817,14 @@ class ParameterTree:
 
 
 def flatten_ParameterTree(ptree):
-    flat_contents = (ptree.data, ptree.tags)
-    aux_data = (ptree.read_only, ptree.tagnames)
+    flat_contents = (ptree.data,)
+    aux_data = (ptree.read_only, ptree.tagnames, ptree.tags)
     return (flat_contents, aux_data)
 
 
 def unflatten_ParameterTree(aux_data, flat_contents):
-    data, tags = flat_contents
-    read_only, tagnames = aux_data
+    data = flat_contents[0]
+    read_only, tagnames, tags = aux_data
     return ParameterTree(data=data, read_only=read_only, tags=tags, tagnames=tagnames)
 
 
