@@ -242,10 +242,16 @@ p['a/ref'] = ref
 p['a/ref']
 p.tag('a/ref', ['ref'])
 
-p
-
 static, dynamic = params.filter_by_tag(['non_grad'])
 dynamic['local/l19 ERN_5p (40)/affinity']
+
+sl, ss = jtu.tree_flatten(static)
+dl, ds = jtu.tree_flatten(dynamic)
+
+rec_static = jtu.tree_unflatten(ss, sl)
+rec_dynamic = jtu.tree_unflatten(ds, dl)
+
+rec_merged = pm.ParameterTree.merge(rec_dynamic, rec_static)
 
 m = pm.ParameterTree.merge(dynamic, static)
 m == params

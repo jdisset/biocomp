@@ -206,8 +206,8 @@ for (s, m), r in tqdm(zip(fwd_models.items(), ikeys)):
     # use a lognormal distribution
     # Xsynth[s] = jax.random.lognormal(r, (nsamples, m.n_inputs), 0, 0.1)
     # Xsynth[s] = np.random.lognormal(0, 0.5, (nsamples, m.n_inputs))
-    vmapped = jit(jax.vmap(m, in_axes=(None, 0, None)))
-    Ysynth[s] = vmapped(generator_params, Xsynth[s], r)
+    layer_apply = jit(jax.vmap(m, in_axes=(None, 0, None)))
+    Ysynth[s] = layer_apply(generator_params, Xsynth[s], r)
 
 
 ##
