@@ -647,14 +647,13 @@ def sequestron_ERN(
         assert affinity.shape == (affinity_dim,)
 
         qid = params[f'local/{local_layer_name}/quantile_variable_id'][node_id].squeeze()
-        assert len(qid) == 1
 
         return MLP(
             *values,
             affinity=affinity,
             quantile=quantiles[qid],
             param_f=partial(get_param, params, base_path='shared'),
-            rng_key=key,
+            key=key,
         )
 
     output_shape = [(1,)]
@@ -702,10 +701,6 @@ def grouped_output(
         # --------- quantile var
         quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
 
-        # assert quantile_var_ids.shape == (
-        # len(input_shapes),
-        # ), f'{quantile_var_ids.shape} != {len(input_shapes)}'
-
         params.at(
             f'local/{layer_name}/quantile_variable_id',
             quantile_var_ids,
@@ -725,11 +720,8 @@ def grouped_output(
 
         inputs = jnp.asarray(inputs)
         assert len(inputs) == len(input_shapes)
-        assert quantiles.shape == (len(inputs),)
 
         qid = params[f'local/{layer_name}/quantile_variable_id'][node_id].squeeze()
-        assert qid.shape == quantiles.shape
-        assert np.all(qid == np.arange(len(inputs)))  # I think this is always true?
 
         res = vmap(
             partial(MLP_head, rng_key=key, params=params),

@@ -97,24 +97,23 @@ training = dman_full.make_subset(training_set)
 compute_config = cmp.DEFAULT_COMPUTE_CONFIG
 key = jax.random.PRNGKey(0)
 
-with ut.timer('Stack building'):
+# with ut.timer('Stack building'):
     # 7.5s -> 5.3s
-    stack = training.build_compute_stack(compute_config)
+    # stack = training.build_compute_stack(compute_config)
 # profiler.disable()
 # profiler.dump_stats("/tmp/stackbuild2.prof")
 
 ##
 
-with profiler("/tmp/stackinit7.prof"):
-    with ut.timer('Stack initialization'):
-        # 1.4s
-        params = stack.init(key)
+# with profiler("/tmp/stackinit7.prof"):
+    # with ut.timer('Stack initialization'):
+        # # 1.4s
+        # params = stack.init(key)
 
 ##
 
 
-with profiler("/tmp/batches3.prof"):
-    xbatches, ybatches = training.get_batches(key)
+xbatches, ybatches = training.get_batches(key)
 
 
 ##
@@ -147,7 +146,7 @@ def generate_batches(dman, key):
     return xbatches, ybatches
 
 stack, params = init_stack(dman, key)
-xbatches, ybatches = generate_batches(dman, key)
+# xbatches, ybatches = generate_batches(dman, key)
 
 ut.logger.info(f"Generated {xbatches.shape[0]} batches")
 optimizer = biocomp.train.get_optimizer(training_config)
@@ -157,7 +156,6 @@ params.tag('local','local')
 static, dynamic = params.filter_by_tag(['non_grad', 'local'])
 
 merged = pm.ParameterTree.merge(static, dynamic)
-merged
 
 
 ut.logger.info(f"Split params between dynamic and static. Now intializing optimizer.")
@@ -169,10 +167,8 @@ ut.logger.info(f"Done initializing optimizer, total batches: {total_batches}, st
 
 # --- loss & update functions
 
-##
 vmapped_compute = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
-@jit
 def loss_func(dynamic, static, X, Y, Z, key):
     nb_inputs = sum([n.get_nb_inputs() for n in stack.networks])
     nb_outputs = sum([n.get_nb_outputs() for n in stack.networks])
@@ -206,13 +202,12 @@ def loss_func(dynamic, static, X, Y, Z, key):
     return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
 
 
-##
+@jit
 def training_step(params, opt_state, x, y, z, key):
     static, dynamic = params.filter_by_tag(['non_grad', 'local'])
-    loss, grads = jit(value_and_grad(loss_func, has_aux=False))(dynamic, static, x, y, z, key)
+    loss, grads = value_and_grad(loss_func, has_aux=False)(dynamic, static, x, y, z, key)
     updates, opt_state = optimizer.update(grads, opt_state, dynamic)
-    dynamic = optax.apply_updates(dynamic, updates)
-    # params = ut.assemble_params(dynamic, static)
+    # dynamic = optax.apply_updates(dynamic, updates)
     params = pm.ParameterTree.merge(static, dynamic)
     res = {
         'params': params,
@@ -222,67 +217,18 @@ def training_step(params, opt_state, x, y, z, key):
     }
     return res
 
-start_params = params
-start_opt_state = opt_state
+
+##
 i = 0
 xb = ut.get_looped_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
 yb = ut.get_looped_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
 zb = jax.random.uniform(key, yb.shape)
+r = jax.jit(training_step)(params, opt_state, xb[0], yb[0], zb[0], key)
+print(r['grad']['shared/quantization/tl_rate_values'])
 
-training_step(start_params, start_opt_state, xb[0], yb[0], zb[0], key)
-
-##
-
-p = pm.ParameterTree()
-p['a/arr'] = np.array([1,2,3], dtype=np.float32)
-ref = pm.ArrayRef(p)
-ref.push_back('a/arr', 2)
-ref.push_back('a/arr', 1)
-p['a/ref'] = ref
-p['a/ref']
-p.tag('a/ref', ['ref'])
-
-static, dynamic = params.filter_by_tag(['non_grad'])
-dynamic['local/l19 ERN_5p (40)/affinity']
-
-sl, ss = jtu.tree_flatten(static)
-dl, ds = jtu.tree_flatten(dynamic)
-
-rec_static = jtu.tree_unflatten(ss, sl)
-rec_dynamic = jtu.tree_unflatten(ds, dl)
-
-rec_merged = pm.ParameterTree.merge(rec_dynamic, rec_static)
-
-m = pm.ParameterTree.merge(dynamic, static)
-m == params
-jnp.mean(m['local/l19 ERN_5p (40)/affinity'] * 2)
-
-m.tags == params.tags
-static.tags
-dynamic.tags
+r['params'] == params
 
 ##
-
-l, s = jtu.tree_flatten(dynamic)
-reconstructed = jtu.tree_unflatten(s, l)
-
-reconstructed
-
-##
-
-def f(dyn, stat):
-    # params = pm.ParameterTree.merge(stat, dyn)
-    m = pm.ParameterTree.merge(dyn, stat)
-    return jnp.mean(m['local/l19 ERN_5p (40)/affinity'] * 2)
-    # return jnp.mean(params['affinity'] * 2)
-    # return jnp.mean(params['a/ref']*2)
-
-# value_and_grad(f)(dynamic)
-value_and_grad(f)(dynamic, static)
-# value_and_grad(f)(p)
-
-##
-
 keep_in_history = training_config.get('keep_in_history', ['loss'])
 
 def scannable_step(carry, i_x_y_z_k):
@@ -323,7 +269,7 @@ def epoch_step_no_scan(start_params, start_opt_state, epoch_key, xbs, ybs):
 
 epoch_step = epoch_step if not ut.enable_checks else epoch_step_no_scan
 
-##
+# ##
 # --- main training loop
 
 loggers = [(1, biocomp.train.console_log)]
@@ -352,3 +298,122 @@ for i, epoch_key in enumerate(jax.random.split(key, training_config['epochs']), 
                     epoch_history=epoch_history,
                     nbatches=steps_per_epoch,
                 )
+
+
+
+
+
+# ### {{{                          --     archive     --
+# ##
+
+
+
+# sl, ss = jtu.tree_flatten(static)
+# dl, ds = jtu.tree_flatten(dynamic)
+
+# rec_static = jtu.tree_unflatten(ss, sl)
+# rec_dynamic = jtu.tree_unflatten(ds, dl)
+
+# rec_merged = pm.ParameterTree.merge(rec_dynamic, rec_static)
+
+# m = pm.ParameterTree.merge(dynamic, static)
+# m == params
+
+# type(m.data.get_at('local/l19 ERN_5p (40)/affinity', get_leaf_value=True))
+
+# m.tags == params.tags
+
+# ##
+
+# static, dynamic = params.filter_by_tag(['non_grad'])
+# dynamic['local/l19 ERN_5p (40)/affinity']
+# l, s = jtu.tree_flatten(dynamic)
+# reconstructed = jtu.tree_unflatten(s, l)
+# reconstructed == dynamic
+
+
+# d = reconstructed.data.diff(dynamic.data)
+# d
+# reconstructed['local/l1 inverse_tl (623)/tl_rate_quantization_mask']
+# reconstructed.data['local/l1 inverse_tl (623)/tl_rate_quantization_mask']
+
+# dynref = dynamic.data.get_at('local/l1 inverse_tl (623)/tl_rate_quantization_mask', get_leaf_value=False).value
+# recref = reconstructed.data.get_at('local/l1 inverse_tl (623)/tl_rate_quantization_mask', get_leaf_value=False).value
+
+# id(dynamic.data)
+# id(dynref.tree)
+
+# id(recref.tree)
+
+# reconstructed['local/l1 inverse_tl (623)/tl_rate_quantization_mask']
+# dynamic['local/l1 inverse_tl (623)/tl_rate_quantization_mask']
+
+# dynamic['local/l1 inverse_tl (623)']
+# reconstructed['local/l1 inverse_tl (623)']
+# reconstructed
+
+# dynamic.data.check()
+
+# ##
+
+# def f(dyn, stat):
+    # # params = pm.ParameterTree.merge(stat, dyn)
+    # m = pm.ParameterTree.merge(dyn, stat)
+    # return jnp.mean(m['local/l19 ERN_5p (40)/affinity'] * 2)
+    # # return jnp.mean(params['affinity'] * 2)
+    # # return jnp.mean(params['a/ref']*2)
+
+# st, dy = params.filter_by_tag(['non_grad', 'local'])
+# st_l, st_s = jtu.tree_flatten(st)
+# dy_l, dy_s = jtu.tree_flatten(dy)
+# st_r = jtu.tree_unflatten(st_s, st_l)
+# dy_r = jtu.tree_unflatten(dy_s, dy_l)
+
+# st_r == st
+# st_r.data
+# st.data
+
+# params['local/l19 ERN_5p (40)/affinity'].view()
+
+# m = pm.ParameterTree.merge(dy_r, st_r)
+# m['local/l19 ERN_5p (40)/affinity']
+# m == params
+# jit(value_and_grad(f))(dy, st)
+
+
+
+# ##
+
+# st, dy = params.filter_by_tag(['non_grad', 'local'])
+# st_l, st_s = jtu.tree_flatten(st)
+# dy_l, dy_s = jtu.tree_flatten(dy)
+# st_r = jtu.tree_unflatten(st_s, st_l)
+# st_r == st
+# dy_r = jtu.tree_unflatten(dy_s, dy_l)
+# dy_r == dy
+
+# m = pm.ParameterTree.merge(dy_r, st_r)
+# m == params
+
+
+# params['local/l19 ERN_5p (40)/affinity']
+
+# params.data.get_at('local/l19 ERN_5p (40)/affinity', get_leaf_value=False)
+
+# type(m.data.get_at('local/l19 ERN_5p (40)', get_leaf_value=False).value['affinity'])
+# type(m.data.get_at('local/l19 ERN_5p (40)/affinity', get_leaf_value=True))
+# type(params.data.get_at('local/l19 ERN_5p (40)/affinity', get_leaf_value=True))
+# type(params.data.get_at('local/l19 ERN_5p (40)', get_leaf_value=False).value['affinity'])
+
+# np.all(m['local/l12 tl (366)/tl_rate'] == params['local/l12 tl (366)/tl_rate'])
+
+# type(m['local/l12 tl (366)/tl_rate'])
+# type(params['local/l12 tl (366)/tl_rate'])
+
+# m
+# params
+
+# ##
+
+
+# ##────────────────────────────────────────────────────────────────────────────}}}

@@ -13,9 +13,7 @@ from . import utils as ut
 
 import re
 
-
 ### {{{                           --     utils     --
-
 
 def is_equal(a, b):
     if not type(a) == type(b):
@@ -57,7 +55,6 @@ def pretty_str(x):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 
 ### {{{                         --     ParamPath     --
 
@@ -117,53 +114,167 @@ class ParamPath:
         return hash(str(self))
 
     def __contains__(self, key):
-        if isinstance(key, str):
-            key = ParamPath.psplit(key)
-        elif isinstance(key, ParamPath):
-            key = key.path
-        return key in self.path
+        if isinstance(key, ParamPath):
+            key = key._str
+        # check if substr
+        return key in self._str
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                        --     Ptree     --
+
+
+class PTreeBranch(dict):
+    pass
+
+
 class PTree:
+
+    # a PTree is a tree of trees.
+    # The children of a tree are stored in the self.value member variable.
+    # If the tree is a leaf, then self.value is the value of the leaf
+    # If the tree is a branch, then self.value is a PTreeBranch, which is a dict
+    # (using a different type name than dict to avoid confusion with a possible
+    # leaf value that would be a dict, which is allowed).
+    # None is a special value for self.value, which is used to represent an empty tree.
+    #
+    # The goal of PTrees is to be fully compatible with jax.tree_util functions, i.e a PTree is a pytree.
+    # During flattening/unflattening PTree are "aware" of a special leaf type: ArrayRef, which is a composite
+    # view of multiple arrays.
+
     def __init__(self, value=None, read_only=False):
         self.value = value
         self.set_read_only(read_only)
 
-    @staticmethod
-    def is_leaf(tree, count_none_as_leaf=True):
-        if not isinstance(tree, PTree):
-            return True
-        if tree.value is None:
-            return count_none_as_leaf
-        if not isinstance(tree.value, dict):
-            return True
-        if len(tree.value) == 0:
-            return True
-        return False
+    def is_empty(self):
+        return self.value is None
+
+    def is_leaf(self, count_empty_as_leaf=True):
+        if self.is_empty():
+            return count_empty_as_leaf
+        return not isinstance(self.value, PTreeBranch)
+
+    def is_leaf_at(self, path, count_empty_as_leaf=True):
+        branch = self.get_at(path, get_leaf_value=False)
+        return branch.is_leaf(count_empty_as_leaf)
+
+    def get_at(self, path, get_leaf_value=True):
+        if not isinstance(path, ParamPath):
+            path = ParamPath(path)
+        if len(path) == 0:
+            raise KeyError(f"PTree get_at called with empty path")
+        if self.is_leaf(self):
+            raise KeyError(f"PTree is a leaf, cannot get {path}")
+        assert isinstance(self.value, PTreeBranch), f"self.value is not a PTreeBranch: {self.value}"
+
+        p, rest = path[0], path[1:]
+        if p not in self.value:
+            raise KeyError(f"Path {path} not found in ParamTree")
+
+        if len(rest) == 0:
+            return self.value[p].get(get_leaf_value=get_leaf_value)
+
+        return self.value[p].get_at(rest, get_leaf_value)
+
+    def get(self, get_leaf_value=True):
+        """Return the value of the leaf, or the value of the branch if it is not a leaf.
+        If the leaf is an ArrayRef and get_leaf_value is True, return the view of the array.
+        """
+        if self.is_leaf() and get_leaf_value:
+            if isinstance(self.value, ArrayRef):
+                return self.value.view()
+            return self.value
+        return self
+
+    def set_at(self, path, value):
+        """if set_leaf_value is true, set the .value of the leaf node to value,
+        otherwise, set the branch node to value
+        """
+        if self.read_only:
+            raise RuntimeError("Cannot set value on read-only ParamTree")
+        if not isinstance(path, ParamPath):
+            path = ParamPath(path)
+        if len(path) == 0:
+            raise KeyError(f"Path is empty")
+
+        p, rest = path[0], path[1:]
+        if self.value is None:
+            self.value = PTreeBranch()
+        if p not in self.value:
+            self.value[p] = PTree(read_only=self.read_only)
+        if len(rest) == 0:
+                self.value[p].value = value
+        else:
+            if self.is_leaf_at(p, count_empty_as_leaf=False):
+                raise KeyError(
+                    f"Trying to expand leaf node into branch is not allowed, delete leaf first"
+                )
+            self.value[p].get(False).set_at(rest, value)
+
+
+    def at(self, path, value=None, overwrite=False, leaf_value=True):
+        if self.read_only or value is None:
+            return self.get_at(path, get_leaf_value=leaf_value)
+        else:
+            try:
+                self[path]
+            except KeyError:
+                overwrite = True
+            if overwrite:
+                self.set_at(path, value)
+            return self.get_at(path, get_leaf_value=leaf_value)
+
+    def __getitem__(self, path):
+        return self.get_at(path, get_leaf_value=True)
+
+    def __setitem__(self, path, value):
+        self.set_at(path, value)
+
+    def __delitem__(self, path):
+        if self.read_only:
+            raise RuntimeError("Cannot delete value on read-only ParamTree")
+        if not isinstance(path, ParamPath):
+            path = ParamPath(path)
+        if len(path) == 0:
+            raise KeyError(f"Path is empty")
+        p, rest = path[0], path[1:]
+        if self.value is None:
+            raise KeyError(f"Path {path} not found in ParamTree")
+        if p not in self.value:
+            raise KeyError(f"Path {path} not found in ParamTree")
+        if len(rest) == 0:
+            del self.value[p]
+            if len(self.value) == 0:
+                self.value = None
+        else:
+            del self.value[p][rest]
+
+    def __len__(self):
+        return len(list(self.iter_leaves()))
 
     def __contains__(self, key):
-        if PTree.is_leaf(self):
+        if self.is_leaf(count_empty_as_leaf=True):
             return False
         try:
-            self[key]
-            return True
+            self.get_at(key)
         except KeyError:
             return False
+        return True
 
     def pretty(self, levels=None, key=None):
         s = ""
         if levels == None:
+            if self.is_leaf(count_empty_as_leaf=False):
+                return f"{self.get(get_leaf_value=True)}\n"
+            if self.is_empty():
+                return " ∅\n"
             s += f"\n ▼"
             s += self.pretty([]) + "\n\n"
-            if self.value is None:
-                return " ∅\n"
         else:
             other_branches = [' │  ' if l else '    ' for l in levels]
             lineheader = f"\n{''.join(other_branches)}"
-            if PTree.is_leaf(self):
+            if self.is_leaf():
                 keylen = len(key) if key is not None else 0
                 valstr = pretty_str(self.value) if self.value is not None else "∅"
                 valstr = valstr.replace("\n", f'{lineheader}{" " * keylen}     ')
@@ -182,154 +293,91 @@ class PTree:
     def __repr__(self):
         return self.pretty()
 
-    def get(self, follow_ref=True):
-        if PTree.is_leaf(self, count_none_as_leaf=False):
-            # does this value itself have a get method? (e.g. TreeReferences do...)
-            if follow_ref and hasattr(self.value, "get"):
-                return self.value.get()  # alows to follow references
-            return self.value
-        return self
-
-    def get_at(self, path, follow_ref=True):
-        if not isinstance(path, ParamPath):
-            path = ParamPath(path)
-        if self.value is None:
-            raise KeyError(f"PTree is empty, cannot get {path}")
-        if len(path) == 0:
-            raise KeyError(f"PTree getitem called with empty path")
-        if PTree.is_leaf(self):
-            raise KeyError(f"PTree is a leaf, cannot get {path}")
-
-        p, rest = path[0], path[1:]
-        if p not in self.value:
-            raise KeyError(f"Path {path} not found in ParamTree")
-        if len(rest) == 0:
-            return self.value[p].get(follow_ref)
-
-        return self.value[p].get_at(rest, follow_ref)
-
-    def __getitem__(self, path):
-        return self.get_at(path, follow_ref=True)
-
-    def __setitem__(self, path, value):
-        if self.read_only:
-            raise RuntimeError("Cannot set value on read-only ParamTree")
-        if not isinstance(path, ParamPath):
-            path = ParamPath(path)
-        if len(path) == 0:
-            raise KeyError(f"Path is empty")
-
-        p, rest = path[0], path[1:]
-        if self.value is None:
-            self.value = {}
-        if p not in self.value:
-            self.value[p] = PTree(read_only=self.read_only)
-        if len(rest) == 0:
-            # if not PTree.is_leaf(self.value[p], count_none_as_leaf=True):
-            # raise KeyError(f"Trying to assign value on non-leaf node!")
-            self.value[p].value = value
-        else:
-            self.value[p].get()[rest] = value
-
-    def at(self, path, value=None, overwrite=False, follow_ref=True):
-        if self.read_only or value is None:
-            return self.get_at(path, follow_ref)
-        else:
-            try:
-                self[path]
-            except KeyError:
-                overwrite = True
-            if overwrite:
-                self[path] = value
-            return self.get_at(path, follow_ref)
-
-    def has_leaf(self, path):
-        return not isinstance(self[path], PTree)
-
-    def is_empty(self):
-        return self.value is None
-
     def get_read_only_copy(self):
         from copy import deepcopy
-
         cop = deepcopy(self)
-        cop.set_read_only()
+        cop.set_read_only(True)
         return cop
 
     def set_read_only(self, ro=True):
         self.read_only = ro
-        if not PTree.is_leaf(self):
+        if not self.is_leaf():
             for v in self.value.values():
                 v.set_read_only(ro)
 
     def all_leaves_are_none(self):
-        # return jtu.tree_all(jtu.tree_map(lambda x: x is None, self))
         for _, v in self.iter_leaves():
             if v is not None:
                 return False
         return True
 
-    def remove_empty_leaves(self):
-        newvals = {}
+    # def remove_empty_leaves(self):
+    # newvals = {}
+    # if PTree.is_leaf(self, count_empty_as_leaf=False):
+    # return self
+    # if self.value is not None:
+    # for k, v in self.value.items():
+    # if not v.all_leaves_are_none():
+    # newvals[k] = v.remove_empty_leaves()
+    # return PTree(value=newvals, read_only=self.read_only)
 
-        if PTree.is_leaf(self, count_none_as_leaf=False):
-            return self
-        if self.value is not None:
-            for k, v in self.value.items():
-                if not v.all_leaves_are_none():
-                    newvals[k] = v.remove_empty_leaves()
-
-        return PTree(value=newvals, read_only=self.read_only)
-
-    def iter_leaves(self, path=ParamPath(), path_as_str=False):
-        if PTree.is_leaf(self):
-            if path_as_str:
-                yield str(path), self.value
-            else:
-                yield path, self.value
+    def iter_leaves(self, path=ParamPath(), path_as_str=False, get_leaf_value=True):
+        if self.is_empty():
+            return
+        if self.is_leaf(count_empty_as_leaf=False):
+            retval = self.value if get_leaf_value else self
+            p = str(path) if path_as_str else path
+            yield p, retval
         else:
             for k, v in self.value.items():
-                yield from v.iter_leaves(path / k)
+                yield from v.iter_leaves(path / k, path_as_str, get_leaf_value)
 
     def __eq__(self, other):
         if not isinstance(other, PTree):
             return False
+        this_is_leaf, other_is_leaf = self.is_leaf(), other.is_leaf()
+        if this_is_leaf != other_is_leaf:
+            return False
+        if this_is_leaf:
+            return is_equal(self.value, other.value)
         k1, k2 = set(self.value.keys()), set(other.value.keys())
         if k1 != k2:
             return False
         for k in k1:
-            if not is_equal(self.get_at(k, follow_ref=False), other.get_at(k, follow_ref=False)):
+            if not is_equal(
+                self.get_at(k, get_leaf_value=False), other.get_at(k, get_leaf_value=False)
+            ):
                 return False
         return True
 
+    def diff(self, other):
+        diffs = set()
+        for k, v in self.iter_leaves(get_leaf_value=False):
+            assert isinstance(v, PTree), f'this branch at {k} is {type(v)}'
+            if k not in other:
+                print(f'k {k} not in other')
+                diffs.add(k)
+            else:
+                otherb = other.get_at(k, get_leaf_value=False)
+                assert isinstance(otherb, PTree), f'other branch at {k} is {type(otherb)}'
+                if not is_equal(v.value, otherb.value):
+                    print(f'k {k} not equal')
+                    diffs.add(k)
 
-##────────────────────────────────────────────────────────────────────────────}}}
+        for k, v in other.iter_leaves(get_leaf_value=False):
+            assert isinstance(v, PTree), f'other branch at {k} is {type(v)}'
+            if k not in self:
+                print(f'k {k} not in self')
+                diffs.add(k)
 
-### {{{                          --     TreeRef     --
-class TreeRef:
-    """A reference to a subtree of a ParamTree"""
+        return diffs
 
-    def __init__(self, path, tree):
-        self.path = path  # the parampath pointing to the subtree
-        self.tree = tree
+    def check(self):
+        for k, nd in self.iter_leaves(get_leaf_value=False):
+            assert isinstance(nd, PTree), f'branch at {k} is {type(nd)}'
+            if isinstance(nd.value, ArrayRef):
+                assert nd.value.tree is self, f'branch at {k} has wrong tree'
 
-    def __repr__(self):
-        return f"TreeRef* ({self.path}): {self.tree[self.path]}"
-
-    def get(self):
-        return self.tree[self.path]
-
-    def __getitem__(self, path):
-        subtree = self.tree[self.path]
-        return subtree.__getitem__(path)
-
-    def __setitem__(self, path, value):
-        self.tree[self.path / path] = value
-
-    def __eq__(self, other):
-        if not isinstance(other, TreeRef):
-            return False
-        return self.path == other.path and self.tree[self.path] == other.tree[other.path]
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -343,7 +391,8 @@ class ArrayRef:
     aka a view, but over potentially several different arrays
     """
 
-    def __init__(self, tree, paths=None, indices=None):
+    def __init__(self, tree:PTree, paths=None, indices=None):
+        assert isinstance(tree, PTree), f"tree must be a PTree, not {type(tree)}"
         self.tree = tree
         self.indices = indices or ()  # tuple of (array_num, index0, index1, ...) coordinates
         self.paths = paths or ()  # tuple of paths to the referenced arrays
@@ -355,7 +404,6 @@ class ArrayRef:
         for a, p, i in self.map:
             r += f"* {self.paths[a]}: ({len(i[0])} elmts)\n"
         return r
-
 
     def push_back(self, array_path, id):
 
@@ -369,7 +417,7 @@ class ArrayRef:
         self.indices += ((self._pathdict[array_path], *id),)
         self.make_map()
 
-    def get(self):
+    def view(self):
         N = len(self.indices)
         if N == 0:
             return jnp.array([])
@@ -382,10 +430,6 @@ class ArrayRef:
         conc = jnp.zeros((N, *shape), dtype=arrays[0].dtype)
 
         for a, p, i in self.map:
-            # print(f'a shape: {arrays[a][i].shape}')
-            # print(f'conc shape: {conc.shape}')
-            # print(f'p: {p}')
-            # print(f'i: {i}')
             # a is the array number
             # p is the position in the concatenated array
             # i are the coordinates of the value in the array)
@@ -414,15 +458,10 @@ class ArrayRef:
         return hash(self.get().tobytes())
 
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
-def isRef(x):
-    return isinstance(x, (TreeRef, ArrayRef))
-
-
 ### {{{                 --     jax [un]flattening of Ptrees     --
-
 
 @dataclass
 class RefPath:
@@ -466,7 +505,6 @@ class ArrayRefPath:
         return self.actual_path < other.actual_path
 
     def __gt__(self, other):
-        print("gt", self.actual_path, other)
         if isinstance(other, ParamPath):
             return self.actual_path > other
         return self.actual_path > other.actual_path
@@ -481,10 +519,7 @@ class ArrayRefPath:
 def flatten_PTree(ptree):
     keys, values = [], []
     for k, v in ptree.iter_leaves():
-        if isinstance(v, TreeRef):
-            values.append(None)
-            keys.append(RefPath(k, v.path))  # all the information to reconstruct the reference
-        elif isinstance(v, ArrayRef):
+        if isinstance(v, ArrayRef):
             values.append(None)
             keys.append(ArrayRefPath(k, v.paths, v.indices))
         else:
@@ -504,9 +539,7 @@ def unflatten_PTree(aux_data, content):
     read_only = aux_data[1]
     ptree = PTree(read_only=read_only)
     for k, v in zip(keys, content):
-        if isinstance(k, RefPath):
-            ptree[k.actual_path] = TreeRef(k.points_to, ptree)
-        elif isinstance(k, ArrayRefPath):
+        if isinstance(k, ArrayRefPath):
             ptree[k.actual_path] = ArrayRef(ptree, k.paths, k.indices)
         else:
             ptree[k] = v
@@ -519,7 +552,6 @@ jtu.register_pytree_node(PTree, flatten_PTree, unflatten_PTree)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                        --     ParameterTree     --
-
 
 class ParameterTree:
     """A tree of parameters, with a separate tree of tags + some convenience partitionning methods"""
@@ -539,11 +571,6 @@ class ParameterTree:
         if self.tags is not None:
             self.tags.set_read_only(read_only)
 
-    def createReference(self, path, to):
-        if self.read_only:
-            raise RuntimeError("Cannot set value on read-only ParameterTree")
-        self.data[path] = TreeRef(to, self.data)
-        self.tags[path] = TreeRef(to, self.tags)
 
     def __setitem__(self, path, value):
         if self.read_only:
@@ -564,11 +591,7 @@ class ParameterTree:
         if self.read_only or value is None:
             return self.data[path]
         else:
-            exists = True
-            try:
-                self.data[path]
-            except KeyError:
-                exists = False
+            exists = path in self.data
             if overwrite is None and exists:
                 raise KeyError(f"Path {path} already exists, cant overwrite without overwrite=True")
             if overwrite or not exists:
@@ -621,6 +644,10 @@ class ParameterTree:
                 self.add_new_tag(tag)
 
     def add_new_tag(self, tag):
+        if self.read_only:
+            raise RuntimeError("Cannot add new tag on read-only ParameterTree")
+        if tag in self.__tagdict:
+            return
         self.tagnames = sorted(self.tagnames + [tag])
         self.__tagdict = {name: i for i, name in enumerate(self.tagnames)}
         is_leaf = lambda x: PTree.is_leaf(x) and not isinstance(x, ParameterTree)
@@ -647,16 +674,13 @@ class ParameterTree:
         if self.read_only:
             raise RuntimeError("Cannot tag read-only ParameterTree")
 
-        # if not self.data.has_leaf(path):
-        # raise KeyError(f"Trying to tag non-leaf node {path}")
-
         if isinstance(tags, str):
             tags = [tags]
 
         self.create_tags_if_required(tags)
         tag_flags = self.get_tag_flags(tags)
 
-        if self.data.has_leaf(path):
+        if self.data.is_leaf_at(path):
             if overwrite:
                 self.tags[path] = tag_flags
             else:
@@ -681,41 +705,6 @@ class ParameterTree:
             read_only=True,
         )
 
-    # def filter_by_tag(self, tags):
-    # if isinstance(tags, str):
-    # tags = [tags]
-    # for t in tags:
-    # if t not in self.tagnames:
-    # raise KeyError(f"Tag {t} not found in ParameterTree")
-    # tag_ids = [self.__tagdict[tag] for tag in tags]
-    # is_valid = jtu.tree_map(lambda x: np.all(x[tag_ids]), self.tags)
-    # left_data_tree = jtu.tree_map(lambda mask, x: x if mask else None, is_valid, self.data)
-    # right_data_tree = jtu.tree_map(lambda mask, x: x if not mask else None, is_valid, self.data)
-    # left_tag_tree = jtu.tree_map(lambda mask, x: x if mask else None, is_valid, self.tags)
-    # right_tag_tree = jtu.tree_map(lambda mask, x: x if not mask else None, is_valid, self.tags)
-    # left_param_tree = ParameterTree(
-    # data=left_data_tree,
-    # tags=left_tag_tree,
-    # tagnames=self.tagnames,
-    # read_only=self.read_only,
-    # )
-    # right_param_tree = ParameterTree(
-    # data=right_data_tree,
-    # tags=right_tag_tree,
-    # tagnames=self.tagnames,
-    # read_only=self.read_only,
-    # )
-    # return left_param_tree, right_param_tree
-
-    # @classmethod
-    # def merge(cls, left, right):
-    # jax_leaf = lambda x: x is None
-    # left_struct = jtu.tree_structure(left, is_leaf=jax_leaf)
-    # right_struct = jtu.tree_structure(right, is_leaf=jax_leaf)
-    # if left_struct == right_struct:
-    # return jtu.tree_map(lambda l, r: l if r is None else r, left, right, is_leaf=jax_leaf)
-    # else:
-    # return cls.sparse_merge(left, right)
 
     def filter_by_tag(self, tags, mode='any'):
 
@@ -745,14 +734,20 @@ class ParameterTree:
             target_tag_flags[tag_ids] = True
             match_f = lambda x: np.all(x == target_tag_flags)
 
+        def setval(tree, path, value, tags):
+            if isinstance(value, ArrayRef):
+                newref = ArrayRef(tree.data, value.paths, value.indices)
+                tree.data[path] = newref
+            else:
+                tree.data[path] = value
+            tree.tags[path] = tags
+
         for path, data in self.data.iter_leaves():
             tag_flags = self.tags[path]
             if match_f(tag_flags):
-                left_param_tree.data[path] = data
-                left_param_tree.tags[path] = tag_flags
+                setval(left_param_tree, path, data, tag_flags)
             else:
-                right_param_tree.data[path] = data
-                right_param_tree.tags[path] = tag_flags
+                setval(right_param_tree, path, data, tag_flags)
 
         left_param_tree.set_read_only(self.read_only)
         right_param_tree.set_read_only(self.read_only)
@@ -773,35 +768,42 @@ class ParameterTree:
         else:
             return [self.tagnames[i] for i in np.where(self.tags[path])[0]]
 
+
     @staticmethod
-    def datadiff(left, right):
-        paths = set()
+    def merge(left:PTree, right:PTree, which=Optional[str]):
+        merged = ParameterTree()
+
+        for left_tag_name in left.tagnames:
+            merged.add_new_tag(left_tag_name)
+        for right_tag_name in right.tagnames:
+            merged.add_new_tag(right_tag_name)
+
+        def setval(path, data, tags):
+            if isinstance(data, ArrayRef):
+                newref = ArrayRef(merged.data, data.paths, data.indices)
+                merged.data[path] = newref
+            else:
+                merged.data[path] = data
+            merged.tags[path] = tags
+
         for path, left_data in left.data.iter_leaves():
-            if path not in right.data:
-                paths.add(path)
-                continue
-            right_data = right.data.get_at(path, follow_ref=False)
-            if not is_equal(left_data, right_data):
-                print('diff')
-                print(f"left: {left_data}")
-                print(f"right: {right_data}")
-                paths.add(path)
+            if path in right.data:
+                if not which:
+                    raise ValueError(f"Path {path} found in both trees, specify which arg to merge")
+                if which == 'left':
+                    setval(path, left_data, left.tags[path])
+                elif which == 'right':
+                    setval(path, right.data[path], right.tags[path])
+                else:
+                    raise ValueError(f"Unknown 'which' arg {which}. Allowed values: 'left', 'right'")
+            else:
+                setval(path, left_data, left.tags[path])
+
         for path, right_data in right.data.iter_leaves():
             if path not in left.data:
-                paths.add(path)
-                continue
-        return paths
+                setval(path, right_data, right.tags[path])
 
-    @staticmethod
-    def merge(left, right):
-        merged = deepcopy(left)
-        for right_tag_name in right.tagnames:
-            if right_tag_name not in merged.tagnames:
-                merged.add_new_tag(right_tag_name)
-
-        for k, v in right.data.iter_leaves():
-            vtags = right.get_tags(k)
-            merged.at(k, value=v, tags=vtags, overwrite=None)
+        merged.set_read_only(left.read_only and right.read_only)
 
         return merged
 
@@ -832,7 +834,6 @@ jtu.register_pytree_node(ParameterTree, flatten_ParameterTree, unflatten_Paramet
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 def init_if_needed(params, path, init_f, base_path=''):
     try:
         return params[f'{base_path}/{path}']
@@ -840,10 +841,8 @@ def init_if_needed(params, path, init_f, base_path=''):
         params[f'{base_path}/{path}'] = init_f()
         return params[f'{base_path}/{path}']
 
-
 def get_param(params, path, base_path='', **_):
     return params[f'{base_path}/{path}']
-
 
 def make_view(
     params: ParameterTree,
@@ -858,3 +857,4 @@ def make_view(
         for from_path, from_id in zip(from_paths, from_ids):
             ref.push_back(f'{from_path}/{leaf}', from_id)
         params[leafpath] = ref
+

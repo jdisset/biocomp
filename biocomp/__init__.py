@@ -20,7 +20,6 @@ from . import recipe as recipe
 from . import train as train
 from . import evo as evo
 from . import nodes as nodes
-from . import nodes_old as nodes_old
 from . import defaults as defaults
 from . import parameters as parameters
 from . import quantization as quantization

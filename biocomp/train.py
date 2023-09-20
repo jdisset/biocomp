@@ -19,7 +19,6 @@ from joblib import Parallel, delayed
 from . import datautils as du
 from . import utils as ut
 from . import nodes as nodes
-from . import nodes_old as nodes_old
 from . import compute as cmp
 from .utils import check, checkwrap
 

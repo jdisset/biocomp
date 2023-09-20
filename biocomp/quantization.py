@@ -8,14 +8,6 @@ from .parameters import ParameterTree
 
 ### {{{                       --     actual quantization functions    --
 
-def quantize(x, possible_values):
-    if len(possible_values) == 0:
-        return x
-    if len(possible_values) == 1:
-        return possible_values[0]
-    else:
-        return quantize_impl(x, possible_values)
-
 
 def quantize_masked(x, possible_values, mask):
     if len(possible_values) == 0:
@@ -26,27 +18,16 @@ def quantize_masked(x, possible_values, mask):
         return quantize_masked_impl(x, possible_values, mask)
 
 
-def quantize_impl(x, arr):
-    zero = x - jax.lax.stop_gradient(x)  # for straight-through gradient
-    return zero + jax.lax.stop_gradient(arr[jnp.argmin(jnp.abs(arr - x))])
-
-
-@jit
 def quantize_masked_impl(x, qvalues, mask):
     """Quantize x to the nearest element in qvalues, but only if the corresponding
-    element in mask is True.
+    element in mask is True. Passthrough for x gradient.
     """
     zero = x - jax.lax.stop_gradient(x)  # for straight-through gradient
     dist = jnp.where(mask, jnp.abs(qvalues - x), jnp.inf)
     amin = jnp.argmin(dist)
-    res = zero + jax.lax.stop_gradient(qvalues[amin])
+    res = zero + qvalues[amin]
     return res
 
-
-@jax.custom_jvp
-def round_to_int(x):
-    zero = x - jax.lax.stop_gradient(x)  # for straight-through gradient
-    return zero + jax.lax.stop_gradient(jnp.round(x))
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
