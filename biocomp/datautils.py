@@ -369,6 +369,7 @@ class DataManager:
         self._densities = None
         self.individual_compute_stacks = {}
         # data_checks(X, Y, models)
+        ut.logger.info(f'Initialized a DataManager with {len(self._networks)} networks')
 
     def make_subset(self, network_ids):
         sub_x = [self._raw_X[i] for i in network_ids]

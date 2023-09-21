@@ -418,7 +418,7 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         static, dynamic = params.filter_by_tag(['non_grad', 'local'])
         loss, grads = value_and_grad(loss_func, has_aux=False)(dynamic, static, x, y, z, key)
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
-        # dynamic = optax.apply_updates(dynamic, updates)
+        dynamic = optax.apply_updates(dynamic, updates)
         params = ParameterTree.merge(static, dynamic)
         res = {
             'params': params,

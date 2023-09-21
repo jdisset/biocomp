@@ -3,7 +3,6 @@ from . import utils as ut
 from .network import Network, inverted_network
 from pathlib import Path
 import numpy as np
-import jax
 import pandas as pd
 from tqdm import tqdm
 import sqlite3
