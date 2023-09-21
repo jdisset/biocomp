@@ -247,7 +247,7 @@ class GraphComputeNode:
 
 # main class: a network of interacting transcription units
 class Network:
-    def __init__(self, lib, recipe_name, recipe_db, custom_outputs=None, build=True, metadata=None):
+    def __init__(self, lib, recipe_name, custom_outputs=None, metadata=None):
         self.lib = lib
         self.name: str = recipe_name
         self.custom_outputs = custom_outputs
@@ -256,17 +256,9 @@ class Network:
         self.central_dogma_graph: Optional[pd.DataFrame] = None
         self.aggregations: Optional[pd.DataFrame] = None
         self.tu_inputs: Optional[pd.DataFrame] = None
-        self.db = recipe_db
         self.metadata = metadata
-
         self.n_inputs = None
         self.n_outputs = None
-
-        if recipe_db is not None:
-            self.db.commit()
-            self.__build_from_db()
-        if build:
-            self.build()
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                  --     public tools & utils    --
@@ -276,37 +268,31 @@ class Network:
         node_dict = self.compute_graph.groupby('type').apply(lambda x: x.index.to_list()).to_dict()
         return node_dict
 
-    # def get_compute_types_and_extra(self):
-    # gb = self.compute_graph.groupby('type')
-    # # extra is a dict, so we need to json it
-    # gb = gb['extra'].apply(lambda x: x.apply(partial(json.dumps, default=np_converter)).tolist())
-    # gb = gb.apply(lambda x: list(set(x)))
-    # # we want to build a dict of {type: {extra: [indices]}}
-    # # but we have a series of {extra: [indices]}
-    # # so we need to build a dict for each extra
-    # gb = gb.apply(lambda x: {e: i for e, i in zip(x, gb.index)})
-    # return gb.to_dict()
-
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
 
-    def __build_from_db(self):
-        assert self.db is not None
-        c = self.db.cursor()
+    ### {{{                    --     static constructors     --
+    @classmethod
+    def from_db(cls, lib, name, recipe_db, custom_outputs=None, build=True, metadata=None):
+        assert recipe_db is not None
+        recipe_db.commit()
+
+        n = cls(lib, name, custom_outputs=custom_outputs, metadata=metadata)
+        c = recipe_db.cursor()
         # first let's check that there is a recipe with this name
-        c.execute('SELECT * FROM recipes WHERE name=?', (self.name,))
+        c.execute('SELECT * FROM recipes WHERE name=?', (n.name,))
         assert (
             c.fetchone() is not None
-        ), f'No recipe named {self.name} in database {self.db}. Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
+        ), f'No recipe named {n.name} in database {recipe_db}. Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
 
         # get the transcription units
         c.execute(
             """SELECT TU, TU || '_' || aggregation as name FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
-            (self.name,),
+            (n.name,),
         )
-        self.transcription_units = {
-            tu[1]: transcription_unit_from_L1(tu[0], self.lib) for i, tu in enumerate(c.fetchall())
+        n.transcription_units = {
+            tu[1]: transcription_unit_from_L1(tu[0], n.lib) for i, tu in enumerate(c.fetchall())
         }
 
         # then get the sources
@@ -314,19 +300,19 @@ class Network:
             """SELECT tis.source || '_' || aggregation as source, TU || '_' || aggregation as TU, position
             FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
-            (self.name,),
+            (n.name,),
         )
         tu_in_sources = pd.DataFrame(
             [t for t in c.fetchall()], columns=['source', 'TU', 'position']
         )
         tu_in_sources.sort_values(by='position', inplace=True)
-        self.tu_in_sources = tu_in_sources
+        n.tu_in_sources = tu_in_sources
 
         # finally get the aggregations
         c.execute(
             """SELECT a.id, sia.source || '_' || aggregation, sia.ratio FROM aggregations a, source_in_aggregation sia
             WHERE a.id = sia.aggregation AND a.recipe = ?""",
-            (self.name,),
+            (n.name,),
         )
         # adding the aggregation nodes
         aggregations = (
@@ -334,11 +320,16 @@ class Network:
             .groupby('id')
             .agg(list)
         )
-        self.aggregations = aggregations
+        n.aggregations = aggregations
+
+        if build:
+            n.build()
+
+        return n
 
     @classmethod
     def from_dict(cls, lib, name, transcription_units, sources, aggregations, build=True):
-        n = cls(lib, name, None, build=False)
+        n = cls(lib, name)
 
         # transcription_units = {TU_name : TU}
         n.transcription_units = transcription_units
@@ -367,6 +358,8 @@ class Network:
             n.__build_central_dogma_graph()
             n.__build_compute_graph()
         return n
+
+    ##────────────────────────────────────────────────────────────────────────────}}}
 
     def build(self):
         assert len(self.transcription_units) > 0, f'No transcription units in recipe {self.name}'
@@ -1003,8 +996,7 @@ class Network:
             ), 'central dogma graph has duplicate ids'
 
     def copy(self):
-        N = Network(self.lib, self.name, None, custom_outputs=self.custom_outputs, build=False)
-        N.db = self.db
+        N = Network(self.lib, self.name, custom_outputs=self.custom_outputs)
         N.transcription_units = self.transcription_units.copy()
         N.central_dogma_graph = self.central_dogma_graph.copy()
         N.compute_graph = self.compute_graph.copy()

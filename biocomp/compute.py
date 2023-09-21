@@ -86,6 +86,9 @@ class ComputeConfigManager:
         with open(filename, 'r') as f:
             self.config = json.load(f)
 
+    def dumps(self):
+        return json.dumps(self.config, indent=4)
+
     @classmethod
     def from_file(cls, filename):
         ccm = cls()
@@ -341,6 +344,8 @@ class ComputeStack:
             )
             if layer.f_prepare is not None:
                 layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
+            params.tag('local', 'local')
+            params.tag('shared', 'shared')
         return params
 
     def get_network_output_indices(self, network_id: int):

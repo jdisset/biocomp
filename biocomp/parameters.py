@@ -11,6 +11,7 @@ from jax.tree_util import register_pytree_node_class
 from copy import deepcopy
 from . import utils as ut
 
+import base64
 import re
 
 ### {{{                           --     utils     --
@@ -54,17 +55,131 @@ def pretty_str(x):
     return msg + "\n"
 
 
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                         --     ParamPath     --
 
+### {{{                       --     serialization     --
+
+# maintain a dict of type to a serialize or deserialize functions
+
+serializers = {}
+deserializers = {}
+
+jnparr = type(jnp.array([1,2,3]))
+
+
+def register_serializer(cls, func):
+    if isinstance(cls, str):
+        serializers[cls] = func
+    else:
+        serializers[cls.__name__] = func
+
+def register_deserializer(cls, func):
+    if isinstance(cls, str):
+        deserializers[cls] = func
+    else:
+        deserializers[cls.__name__] = func
+
+def serializer(types: Union[Sequence, type]):
+    if isinstance(types, type):
+        types = (types,)
+    def decorator(function):
+        for t in types:
+            register_serializer(t, function)
+        return function
+    return decorator
+
+def deserializer(types: Union[Sequence, type]):
+    if isinstance(types, type):
+        types = (types,)
+    def decorator(function):
+        for t in types:
+            register_deserializer(t, function)
+        return function
+    return decorator
+
+def serialize(x):
+    if type(x).__name__ in serializers:
+        return serializers[type(x).__name__](x)
+    else:
+        raise ValueError(f"Cannot serialize type {type(x)}")
+
+
+
+
+# ArrayLike
+@serializer((np.ndarray, jnparr))
+def serialize_arraylike(x):
+    x = np.asarray(x)
+    b64data = base64.b64encode(x.tobytes())
+    return {
+            'type': type(x).__name__,
+            'dtype': str(x.dtype),
+            'shape': x.shape,
+            'data': b64data.decode('utf-8')
+    }
+@deserializer(np.ndarray)
+def deserialize_arraylike(x):
+    dtype = np.dtype(x['dtype'])
+    shape = tuple(x['shape'])
+    b64data = x['data'].encode('utf-8')
+    data = np.frombuffer(base64.decodebytes(b64data), dtype=dtype)
+    return data.reshape(shape)
+
+
+# ListLike
+@serializer((list, tuple))
+def serialize_listlike(x):
+    return {
+            'type': type(x).__name__,
+            'data': tuple(serialize(xi) for xi in x)
+    }
+
+@deserializer((list, tuple))
+def deserialize_listlike(x):
+    return type(x['type'])(deserialize(xi) for xi in x['data'])
+
+
+# Dict
+@serializer(dict)
+def serialize_dict(x):
+    return {
+            'type': type(x).__name__,
+            'data': {serialize(k): serialize(v) for k, v in x.items()}
+    }
+
+
+
+
+
+
+
+
+def serialize_PTree(x):
+    return jtu.tree_map(serialize, x)
+
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+### {{{                         --     ParamPath     --
 
 class ParamPath:
     @staticmethod
     def psplit(key):
+        if key is None:
+            return []
         if isinstance(key, str):
             return key.strip("/").split("/")
-        return key
+        elif isinstance(key, ParamPath):
+            return key.path
+        elif isinstance(key, (list, tuple)):
+            return key
+        else:
+            raise ValueError(f"Invalid key type: {type(key)}")
 
     @staticmethod
     def tostr(key):
@@ -101,14 +216,34 @@ class ParamPath:
     def __iter__(self):
         return iter(self.path)
 
-    def __eq__(self, other):
-        return str(self) == str(other)
-
     def __lt__(self, other):
-        return str(self) < str(other)
+        if isinstance(other, ParamPath):
+            for i in range(min(len(self), len(other))):
+                if self[i] == other[i]:
+                    continue
+                return self[i] < other[i]
+            return len(self) < len(other)
+        if isinstance(other, str):
+            return self < ParamPath(other)
+        return other > self # delegate to __gt__ of the other type
 
     def __gt__(self, other):
-        return str(self) > str(other)
+        if isinstance(other, ParamPath):
+            for i in range(min(len(self), len(other))):
+                if self[i] == other[i]:
+                    continue
+                return self[i] > other[i]
+            return len(self) > len(other)
+        if isinstance(other, str):
+            return self > ParamPath(other)
+        return other < self # delegate to __lt__ of the other type
+
+    def __eq__(self, other):
+        if isinstance(other, ParamPath):
+            return self.path == other.path
+        if isinstance(other, str):
+            return self.path == ParamPath.psplit(other)
+        return other == self # delegate to __eq__ of the other type
 
     def __hash__(self):
         return hash(str(self))
@@ -463,32 +598,13 @@ class ArrayRef:
 
 ### {{{                 --     jax [un]flattening of Ptrees     --
 
-@dataclass
-class RefPath:
-    actual_path: ParamPath
-    points_to: ParamPath
 
-    def __eq__(self, other):
-        if not isinstance(other, RefPath):
-            return False
-        return self.actual_path == other.actual_path and self.points_to == other.points_to
-
-    def __lt__(self, other):
-        if isinstance(other, ParamPath):
-            return self.actual_path < other
-        return self.actual_path < other.actual_path
-
-    def __gt__(self, other):
-        if isinstance(other, ParamPath):
-            return self.actual_path > other
-        return self.actual_path > other.actual_path
-
-
-@dataclass
+@dataclass(order=False)
 class ArrayRefPath:
     actual_path: ParamPath
     paths: List[ParamPath]
     indices: List[Tuple[int, int]]
+
 
     def __eq__(self, other):
         if not isinstance(other, ArrayRefPath):
@@ -521,14 +637,14 @@ def flatten_PTree(ptree):
     for k, v in ptree.iter_leaves():
         if isinstance(v, ArrayRef):
             values.append(None)
-            keys.append(ArrayRefPath(k, v.paths, v.indices))
+            keys.append(ArrayRefPath(ParamPath(k), v.paths, v.indices))
         else:
             values.append(v)
-            keys.append(k)
+            keys.append(ParamPath(k))
 
     order = sorted(range(len(keys)), key=lambda i: keys[i])
-    sorted_keys = [keys[i] for i in order]
-    sorted_values = [values[i] for i in order]
+    sorted_keys = tuple(keys[i] for i in order)
+    sorted_values = tuple(values[i] for i in order)
 
     aux_data = (sorted_keys, ptree.read_only)
     return (sorted_values, aux_data)

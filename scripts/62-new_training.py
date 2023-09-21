@@ -31,6 +31,7 @@ prog.parse_args()
 
 ut.set_loglevel('info')
 
+
 ### {{{                      --     loading xp     --
 
 XP = {
@@ -44,10 +45,6 @@ xpnames = XP.keys()
 
 
 with ut.timer(f'Loading data and building networks for {xpnames}'):
-    # 7.6s
-
-    # profiler = cProfile.Profile()
-    # profiler.enable()
     lib = su.load_lib()
     loadedxp = {
         xpname: su.load_xp(XP[xpname], lib, data_path='./data/calibrated_data_v2')
@@ -55,8 +52,6 @@ with ut.timer(f'Loading data and building networks for {xpnames}'):
     }
 
     dman_full = du.DataManager.from_xps(loadedxp.values(), prog.training_config, inverse='all')
-    # profiler.disable()
-    # profiler.dump_stats("/tmp/dmanbuild.prof")
 
 all_networks = dman_full.get_networks()
 net_xp = [n.metadata['from_xp'] for n in all_networks]
@@ -97,24 +92,7 @@ training = dman_full.make_subset(training_set)
 compute_config = cmp.DEFAULT_COMPUTE_CONFIG
 key = jax.random.PRNGKey(0)
 
-# with ut.timer('Stack building'):
-    # 7.5s -> 5.3s
-    # stack = training.build_compute_stack(compute_config)
-# profiler.disable()
-# profiler.dump_stats("/tmp/stackbuild2.prof")
-
-##
-
-# with profiler("/tmp/stackinit7.prof"):
-    # with ut.timer('Stack initialization'):
-        # # 1.4s
-        # params = stack.init(key)
-
-##
-
-
 xbatches, ybatches = training.get_batches(key)
-
 
 ##
 
@@ -146,19 +124,17 @@ def generate_batches(dman, key):
     return xbatches, ybatches
 
 stack, params = init_stack(dman, key)
-# xbatches, ybatches = generate_batches(dman, key)
+xbatches, ybatches = generate_batches(dman, key)
 
 ut.logger.info(f"Generated {xbatches.shape[0]} batches")
 optimizer = biocomp.train.get_optimizer(training_config)
 
 
-params.tag('local','local')
 static, dynamic = params.filter_by_tag(['non_grad', 'local'])
-
-merged = pm.ParameterTree.merge(static, dynamic)
 
 
 ut.logger.info(f"Split params between dynamic and static. Now intializing optimizer.")
+
 opt_state = optimizer.init(dynamic)
 total_batches = training_config['n_batches']
 assert total_batches == xbatches.shape[0] == ybatches.shape[0]
@@ -201,7 +177,6 @@ def loss_func(dynamic, static, X, Y, Z, key):
     negative_grads = jnp.mean(jnp.where(grads < 0, -grads, 0))
     return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
 
-
 @jit
 def training_step(params, opt_state, x, y, z, key):
     static, dynamic = params.filter_by_tag(['non_grad', 'local'])
@@ -218,15 +193,6 @@ def training_step(params, opt_state, x, y, z, key):
     return res
 
 
-##
-i = 0
-xb = ut.get_looped_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
-yb = ut.get_looped_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
-zb = jax.random.uniform(key, yb.shape)
-r = jax.jit(training_step)(params, opt_state, xb[0], yb[0], zb[0], key)
-print(r['grad']['shared/quantization/tl_rate_values'])
-
-r['params'] == params
 
 ##
 keep_in_history = training_config.get('keep_in_history', ['loss'])
@@ -239,7 +205,6 @@ def scannable_step(carry, i_x_y_z_k):
     history = {k: updt[k] for k in keep_in_history}
     return (params, opt_state), history
 
-@jit
 def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
     pscan = ut.progress_scan(steps_per_epoch, message='Training model')
     zbatches = jax.random.uniform(epoch_key, ybs.shape)
@@ -269,7 +234,23 @@ def epoch_step_no_scan(start_params, start_opt_state, epoch_key, xbs, ybs):
 
 epoch_step = epoch_step if not ut.enable_checks else epoch_step_no_scan
 
-# ##
+jax.clear_caches()
+
+print(compute_config.dumps())
+##
+
+with ut.timer('lowering the epoch_step function'):
+    xb = ut.get_looped_slice(xbatches, 0 * steps_per_epoch, steps_per_epoch)
+    yb = ut.get_looped_slice(ybatches, 0 * steps_per_epoch, steps_per_epoch)
+    lowered = jax.jit(epoch_step).lower(params, opt_state, key, xb, yb)
+
+##
+
+with ut.timer('Compiling the epoch_step function'):
+    compiled_epoch_step = lowered.compile()
+
+
+##
 # --- main training loop
 
 loggers = [(1, biocomp.train.console_log)]
@@ -279,13 +260,14 @@ for _, l in loggers:
 
 ut.logger.info(f'Begin training for {training_config["epochs"]} epochs')
 
-training_config['epochs'] = 3
+training_config['epochs'] = 1
 
 for i, epoch_key in enumerate(jax.random.split(key, training_config['epochs']), 1):
+
     t0 = time.time()
     xb = ut.get_looped_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
     yb = ut.get_looped_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
-    params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key, xb, yb)
+    params, opt_state, epoch_history = compiled_epoch_step(params, opt_state, epoch_key, xb, yb)
     epoch_history['epoch_time'] = time.time() - t0
     epoch_history['latest_params'] = params
 
@@ -300,120 +282,7 @@ for i, epoch_key in enumerate(jax.random.split(key, training_config['epochs']), 
                 )
 
 
+print('done')
 
+##
 
-
-# ### {{{                          --     archive     --
-# ##
-
-
-
-# sl, ss = jtu.tree_flatten(static)
-# dl, ds = jtu.tree_flatten(dynamic)
-
-# rec_static = jtu.tree_unflatten(ss, sl)
-# rec_dynamic = jtu.tree_unflatten(ds, dl)
-
-# rec_merged = pm.ParameterTree.merge(rec_dynamic, rec_static)
-
-# m = pm.ParameterTree.merge(dynamic, static)
-# m == params
-
-# type(m.data.get_at('local/l19 ERN_5p (40)/affinity', get_leaf_value=True))
-
-# m.tags == params.tags
-
-# ##
-
-# static, dynamic = params.filter_by_tag(['non_grad'])
-# dynamic['local/l19 ERN_5p (40)/affinity']
-# l, s = jtu.tree_flatten(dynamic)
-# reconstructed = jtu.tree_unflatten(s, l)
-# reconstructed == dynamic
-
-
-# d = reconstructed.data.diff(dynamic.data)
-# d
-# reconstructed['local/l1 inverse_tl (623)/tl_rate_quantization_mask']
-# reconstructed.data['local/l1 inverse_tl (623)/tl_rate_quantization_mask']
-
-# dynref = dynamic.data.get_at('local/l1 inverse_tl (623)/tl_rate_quantization_mask', get_leaf_value=False).value
-# recref = reconstructed.data.get_at('local/l1 inverse_tl (623)/tl_rate_quantization_mask', get_leaf_value=False).value
-
-# id(dynamic.data)
-# id(dynref.tree)
-
-# id(recref.tree)
-
-# reconstructed['local/l1 inverse_tl (623)/tl_rate_quantization_mask']
-# dynamic['local/l1 inverse_tl (623)/tl_rate_quantization_mask']
-
-# dynamic['local/l1 inverse_tl (623)']
-# reconstructed['local/l1 inverse_tl (623)']
-# reconstructed
-
-# dynamic.data.check()
-
-# ##
-
-# def f(dyn, stat):
-    # # params = pm.ParameterTree.merge(stat, dyn)
-    # m = pm.ParameterTree.merge(dyn, stat)
-    # return jnp.mean(m['local/l19 ERN_5p (40)/affinity'] * 2)
-    # # return jnp.mean(params['affinity'] * 2)
-    # # return jnp.mean(params['a/ref']*2)
-
-# st, dy = params.filter_by_tag(['non_grad', 'local'])
-# st_l, st_s = jtu.tree_flatten(st)
-# dy_l, dy_s = jtu.tree_flatten(dy)
-# st_r = jtu.tree_unflatten(st_s, st_l)
-# dy_r = jtu.tree_unflatten(dy_s, dy_l)
-
-# st_r == st
-# st_r.data
-# st.data
-
-# params['local/l19 ERN_5p (40)/affinity'].view()
-
-# m = pm.ParameterTree.merge(dy_r, st_r)
-# m['local/l19 ERN_5p (40)/affinity']
-# m == params
-# jit(value_and_grad(f))(dy, st)
-
-
-
-# ##
-
-# st, dy = params.filter_by_tag(['non_grad', 'local'])
-# st_l, st_s = jtu.tree_flatten(st)
-# dy_l, dy_s = jtu.tree_flatten(dy)
-# st_r = jtu.tree_unflatten(st_s, st_l)
-# st_r == st
-# dy_r = jtu.tree_unflatten(dy_s, dy_l)
-# dy_r == dy
-
-# m = pm.ParameterTree.merge(dy_r, st_r)
-# m == params
-
-
-# params['local/l19 ERN_5p (40)/affinity']
-
-# params.data.get_at('local/l19 ERN_5p (40)/affinity', get_leaf_value=False)
-
-# type(m.data.get_at('local/l19 ERN_5p (40)', get_leaf_value=False).value['affinity'])
-# type(m.data.get_at('local/l19 ERN_5p (40)/affinity', get_leaf_value=True))
-# type(params.data.get_at('local/l19 ERN_5p (40)/affinity', get_leaf_value=True))
-# type(params.data.get_at('local/l19 ERN_5p (40)', get_leaf_value=False).value['affinity'])
-
-# np.all(m['local/l12 tl (366)/tl_rate'] == params['local/l12 tl (366)/tl_rate'])
-
-# type(m['local/l12 tl (366)/tl_rate'])
-# type(params['local/l12 tl (366)/tl_rate'])
-
-# m
-# params
-
-# ##
-
-
-# ##────────────────────────────────────────────────────────────────────────────}}}

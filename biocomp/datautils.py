@@ -17,7 +17,8 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from jax.scipy.stats import gaussian_kde
 import itertools
-
+import hashlib
+import pickle
 from matplotlib.ticker import FixedLocator, FuncFormatter
 import matplotlib.ticker as ticker
 
@@ -155,6 +156,29 @@ class ShortScientificFormatter(string.Formatter):
 scformat = ShortScientificFormatter()
 
 
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                           --     cache     --
+def get_cache(gen_f, name, cache_location):
+    if cache_location is not None:
+        namehash = hashlib.md5(name.encode('utf-8')).hexdigest()
+        # create cache directory if it doesn't exist
+        if isinstance(cache_location, str):
+            cache_location = Path(cache_location)
+        cache_location.mkdir(parents=True, exist_ok=True)
+        cachepath = cache_location / namehash
+        print(cachepath)
+        if cachepath.exists():
+            ut.logger.debug(f'Loading {namehash} from cache.')
+            with open(cachepath, 'rb') as file:
+                data = pickle.load(file)
+        else:
+            ut.logger.debug(f'Generating {namehash} and saving to cache.')
+            data = gen_f()
+            with open(cachepath, 'wb') as file:
+                pickle.dump(data, file)
+    else:
+        data = gen_f()
+    return data
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -401,6 +425,7 @@ class DataManager:
 
     def compute_densities(self, max_chunk=50000, cache_dir=None):
         """Compute the densities at each data point in the dataset, for each sample"""
+        #TODO: switch to the more general get_cache
         import hashlib
         from pathlib import Path
         import base64
@@ -408,8 +433,8 @@ class DataManager:
         ut.logger.debug('Computing densities')
 
         if cache_dir is None:
-            if 'densities_cache_dir' in self.data_cfg:
-                self.cache_dir = self.data_cfg['densities_cache_dir']
+            if 'densities_cache_location' in self.data_cfg:
+                self.cache_dir = self.data_cfg['densities_cache_location']
             else:
                 self.cache_dir = DEFAULT_DENSITIES_CACHE_DIR
 
@@ -552,21 +577,32 @@ class DataManager:
     @classmethod
     def from_xps(cls, xplist, config=cmp.DEFAULT_COMPUTE_CONFIG, **kw):
 
+        network_cache_location = None
+        if 'network_cache_location' in config:
+            network_cache_location = Path(config['network_cache_location'])
+
         # build all networks and gat all sample names, for each xp
-        networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
+        # networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
+        net_sample_pairs = []
+        for xp in xplist:
+            net_sample_pairs.append(get_cache(lambda : xp.build_networks(**kw), f'{str(xp)}_net', network_cache_location))
+
+        networks, samples = zip(*net_sample_pairs)
 
         # get all X (independent vars) and Y (dependent vars) for each xp
-        X, Y = zip(*[xp.get_XY(n, s) for xp, n, s in zip(xplist, networks, samples)])
+        # X, Y = zip(*[xp.get_XY(n, s) for xp, n, s in zip(xplist, networks, samples)])
+        XY_pairs = []
+        for xp, n, s in zip(xplist, networks, samples):
+            XY_pairs.append(get_cache(lambda : xp.get_XY(n, s), f'{str(xp)}_XY', network_cache_location))
 
+        X, Y = zip(*XY_pairs)
         # get everything as a long concatenated list
         X, Y, networks = (
             list(itertools.chain(*X)),
             list(itertools.chain(*Y)),
             list(itertools.chain(*networks)),
         )
-
         return cls(X, Y, networks, config)
-
 
 #                                                                            }}}
 

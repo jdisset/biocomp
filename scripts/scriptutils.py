@@ -839,7 +839,7 @@ def get_xla(fun, *args, static_argnums=(), **kwargs):
 
 
 def print_xla(fun, *args, static_argnums=(), **kwargs):
-    print(get_xla(fun, *args, static_argnums=static_argnums, **kwargs))
+    print(get_xla(fun, *args, **kwargs))
 
 
 #                                                                            }}}

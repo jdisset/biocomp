@@ -7,6 +7,7 @@ import jax
 import pandas as pd
 from tqdm import tqdm
 import sqlite3
+import hashlib
 import json
 import json5
 from typing import Optional
@@ -228,7 +229,7 @@ def network_from_recipe(recipe, lib, db_path=':memory:'):
     dbconn = sqlite3.connect(db_path)
     recipes_to_sql([recipe], dbconn, lib)
     assert recipe['name'] in [r[0] for r in dbconn.execute("SELECT name FROM recipes").fetchall()]
-    n = Network(lib, recipe['name'], dbconn)
+    n = Network.from_db(lib, recipe['name'], dbconn)
     return n
 
 
@@ -325,13 +326,13 @@ class XP:
         for recipename in tqdm(unique_recipe_names, desc=f'Building networks for xp {self.name}'):
             try:
                 log.debug(f'building recipe {recipename}')
-                fwd_networks[recipename] = Network(
+                fwd_networks[recipename] = Network.from_db(
                     self.lib, recipename, self.dbconn, metadata={'from_xp': self.name}
                 )
             except Exception as e:
-                raise RuntimeError(
-                    f'Error building network for recipe {recipename} in xp {self.name}: \n{e}'
-                )
+                msg = f'Error building network for recipe {recipename} in xp {self.name}: \n{e}'
+                raise RuntimeError(msg) from e
+
 
         # now go through the samples and create the correct pairs
         networks = []
@@ -368,6 +369,8 @@ class XP:
         # add borders:
         res = '-' * 18 + f'  XP {self.name}  ' + '-' * 18 + '\n'
         for k, v in self.__dict__.items():
+            if k == 'dbconn':
+                continue
             if isinstance(v, dict):
                 res += f"* {k}:\n"
                 for kk, vv in v.items():
@@ -382,6 +385,9 @@ class XP:
 
     def __repr__(self):
         return self.__str__()
+
+    def __hash__(self):
+        return hash(self.__str__())
 
 
 #                                                                            }}}

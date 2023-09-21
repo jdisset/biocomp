@@ -21,12 +21,12 @@ from . import utils as ut
 from . import nodes as nodes
 from . import compute as cmp
 from .utils import check, checkwrap
+from .parameters import ParameterTree
 
 import wandb as wb
 import os
 import time
 from tqdm import tqdm
-
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ def get_epoch_stats(epoch_data, smooth_win=1):
     return stats
 
 
-def local_save(epoch, epoch_history=None, save_dir=None, full_save=False, **_):
+def local_save(epoch, compute_config, training_config, epoch_history=None, save_dir=None, full_save=False, **_):
     assert save_dir is not None
     if epoch_history is None:
         return
@@ -94,12 +94,24 @@ def local_save(epoch, epoch_history=None, save_dir=None, full_save=False, **_):
 
     t0 = time.time()
 
+    if not Path(save_dir).exists():
+        Path(save_dir).mkdir(parents=True)
+
+    compute_conf_path = Path(save_dir) / 'compute_config.json'
+    if not compute_conf_path.exists():
+        compute_config.export(compute_conf_path)
+
+    training_conf_path = Path(save_dir) / 'training_config.json'
+    if not training_conf_path.exists():
+        with open(training_conf_path, 'w') as f:
+            json.dump(training_config, f)
+
+
     if full_save:
         full_save_until_epoch = full_save if isinstance(full_save, int) else 2
         if epoch <= full_save_until_epoch:
             du.save(epoch_history, f'{save_dir}/epoch_{epoch}_full.pkl')
 
-    # params = ut.tree_get(epoch_history['params'], -1)
     params = epoch_history['latest_params']
     loss = np.array(epoch_history['loss'])
 
@@ -135,8 +147,11 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
         return
 
     params = epoch_history['latest_params']
+
     if base_params is not None:
-        params = stack.use_shared_params(base_params, params)
+        local, _ = base_params.filter_by_tag(['local'])
+        _, shared= params.filter_by_tag(['local'])
+        params = ParameterTree.merge(local, shared)
 
     with ut.timer('wandb_plot_pred'):
         N_SAMPLES_PER_CHUNK = 2000
@@ -237,7 +252,6 @@ def console_log(epoch, training_config, epoch_history=None, **_):
 
 ### {{{                       --     main function     --
 
-
 def get_optimizer(cfg):
 
     learning_rate = cfg['learning_rate']
@@ -324,17 +338,14 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
     ut.logger.info(f"Going to train with random seed {training_config['rng_key']}")
     key = jax.random.PRNGKey(training_config['rng_key'])
 
-    # --- cached init & batches generation
-    memory = get_memory(training_config)
+    # --- init & batches generation
 
-    @memory.cache
     def init_stack(dman, key):
         stack = dman.build_compute_stack(compute_config)
         with ut.timer('Stack initialization'):
             params = stack.init(key)
         return stack, params
 
-    @memory.cache
     def generate_batches(dman, key):
         with ut.timer('Generating batches'):
             xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
@@ -343,9 +354,11 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
     stack, params = init_stack(dman, key)
     xbatches, ybatches = generate_batches(dman, key)
     ut.logger.info(f"Generated {xbatches.shape[0]} batches")
+
     optimizer = get_optimizer(training_config)
-    dynamic, _ = ut.split_params(params, training_config['static_params'])
+    static, dynamic = params.filter_by_tag(['non_grad', 'local'])
     ut.logger.info(f"Split params between dynamic and static. Now intializing optimizer.")
+
     opt_state = optimizer.init(dynamic)
     total_batches = training_config['n_batches']
     assert total_batches == xbatches.shape[0] == ybatches.shape[0]
@@ -356,7 +369,7 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
 
     vmapped_compute = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
-    @jit
+
     def loss_func(dynamic, static, X, Y, Z, key):
         nb_inputs = sum([n.get_nb_inputs() for n in stack.networks])
         nb_outputs = sum([n.get_nb_outputs() for n in stack.networks])
@@ -371,7 +384,8 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
             Y.shape[1] == Z.shape[1] == nb_outputs
         ), "Y and Z must have as many columns as the total number of outputs in the stack"
 
-        params = ut.assemble_params(dynamic, static)
+        # params = ut.assemble_params(dynamic, static)
+        params = ParameterTree.merge(dynamic, static)
         keys = jax.random.split(key, X.shape[0])
 
         yhat, grads = vmapped_compute(params, X, Z, keys)
@@ -389,13 +403,11 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
 
     def training_step(params, opt_state, x, y, z, key):
-        dynamic, static = ut.split_params(params, training_config['static_params'])
+        static, dynamic = params.filter_by_tag(['non_grad', 'local'])
         loss, grads = value_and_grad(loss_func, has_aux=False)(dynamic, static, x, y, z, key)
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
-
-        dynamic = optax.apply_updates(dynamic, updates)
-        params = ut.assemble_params(dynamic, static)
-
+        # dynamic = optax.apply_updates(dynamic, updates)
+        params = ParameterTree.merge(static, dynamic)
         res = {
             'params': params,
             'loss': loss,
@@ -403,6 +415,7 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
             'opt': opt_state,
         }
         return res
+
 
     keep_in_history = training_config.get('keep_in_history', ['loss'])
 
@@ -414,7 +427,6 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
         history = {k: updt[k] for k in keep_in_history}
         return (params, opt_state), history
 
-    @jit
     def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
         pscan = ut.progress_scan(steps_per_epoch, message='Training model')
         zbatches = jax.random.uniform(epoch_key, ybs.shape)
@@ -444,6 +456,14 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
 
     epoch_step = epoch_step if not ut.enable_checks else epoch_step_no_scan
 
+    with ut.timer('Lowering the epoch_step function before compilation'):
+        xb = ut.get_looped_slice(xbatches, 0 * steps_per_epoch, steps_per_epoch)
+        yb = ut.get_looped_slice(ybatches, 0 * steps_per_epoch, steps_per_epoch)
+        lowered = jax.jit(epoch_step).lower(params, opt_state, key, xb, yb)
+
+    with ut.timer('Compiling the epoch_step function'):
+        compiled_epoch_step = lowered.compile()
+
     # --- main training loop
 
     if loggers is None:
@@ -455,10 +475,11 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
     ut.logger.info(f'Begin training for {training_config["epochs"]} epochs')
 
     for i, epoch_key in enumerate(jax.random.split(key, training_config['epochs']), 1):
+
         t0 = time.time()
         xb = ut.get_looped_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
         yb = ut.get_looped_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
-        params, opt_state, epoch_history = epoch_step(params, opt_state, epoch_key, xb, yb)
+        params, opt_state, epoch_history = compiled_epoch_step(params, opt_state, epoch_key, xb, yb)
         epoch_history['epoch_time'] = time.time() - t0
         epoch_history['latest_params'] = params
 
@@ -477,16 +498,15 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ### {{{                  --     training program helper     --
 
 DEFAULT_TRAINING_CONFIG = {
 
     # -------- training config --------
+    # training loop
     "rng_key": 42,
     "negative_grad_penalty": 0.1,
     "huber_quantile_loss_delta": 0.1,
-    "cache_dir": "./.training_cache",
     'optimizer': 'adam',
     'epochs': 150,
     'schedule': 'cosine',
@@ -497,6 +517,11 @@ DEFAULT_TRAINING_CONFIG = {
     'decay_epochs': 130,
     'adam_w_decay': 0.001,
     'max_gradient_norm': 1.0,
+
+    # cache
+    "network_cache_location": "../__cache/network",
+    "training_cache_location": "../__cache/training",
+    "densities_cache_location": "../__cache/densities",
 
     # -------- data config --------
 
@@ -716,3 +741,4 @@ class TrainingProgram:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
