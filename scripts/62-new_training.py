@@ -28,7 +28,6 @@ class profiler:
 
 prog = train.TrainingProgram()
 prog.parse_args()
-
 ut.set_loglevel('info')
 
 

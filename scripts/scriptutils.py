@@ -19,7 +19,17 @@ import rich
 from rich.console import Console
 from rich.progress import track
 from typing import List
+import cProfile
 
+class profiler:
+    def __init__(self, filename):
+        self.filename = filename
+    def __enter__(self):
+        self.profiler = cProfile.Profile()
+        self.profiler.enable()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.profiler.disable()
+        self.profiler.dump_stats(self.filename)
 
 class ddict(dict):
     def __getattr__(*args):

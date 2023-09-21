@@ -27,6 +27,7 @@ import wandb as wb
 import os
 import time
 from tqdm import tqdm
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -83,7 +84,9 @@ def get_epoch_stats(epoch_data, smooth_win=1):
     return stats
 
 
-def local_save(epoch, compute_config, training_config, epoch_history=None, save_dir=None, full_save=False, **_):
+def local_save(
+    epoch, compute_config, training_config, epoch_history=None, save_dir=None, full_save=False, **_
+):
     assert save_dir is not None
     if epoch_history is None:
         return
@@ -105,7 +108,6 @@ def local_save(epoch, compute_config, training_config, epoch_history=None, save_
     if not training_conf_path.exists():
         with open(training_conf_path, 'w') as f:
             json.dump(training_config, f)
-
 
     if full_save:
         full_save_until_epoch = full_save if isinstance(full_save, int) else 2
@@ -150,7 +152,7 @@ def wandb_plot_pred(dman, epoch_history=None, base_params=None, log_key=None, **
 
     if base_params is not None:
         local, _ = base_params.filter_by_tag(['local'])
-        _, shared= params.filter_by_tag(['local'])
+        _, shared = params.filter_by_tag(['local'])
         params = ParameterTree.merge(local, shared)
 
     with ut.timer('wandb_plot_pred'):
@@ -252,6 +254,7 @@ def console_log(epoch, training_config, epoch_history=None, **_):
 
 ### {{{                       --     main function     --
 
+
 def get_optimizer(cfg):
 
     learning_rate = cfg['learning_rate']
@@ -310,7 +313,15 @@ def setup_wandb_logging(
     save_dir = Path(wb.run.dir)
     loggers = [
         (1, console_log),
-        (params_save_period, partial(local_save, save_dir=save_dir)),
+        (
+            params_save_period,
+            partial(
+                local_save,
+                compute_config=compute_config,
+                training_config=training_config,
+                save_dir=save_dir,
+            ),
+        ),
         (1, wandb_log_epoch),
         (plot_period, partial(wandb_plot_pred, dman=dman)),
     ]
@@ -363,12 +374,13 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
     total_batches = training_config['n_batches']
     assert total_batches == xbatches.shape[0] == ybatches.shape[0]
     steps_per_epoch = max(1, int(training_config['steps_per_epoch']))
-    ut.logger.info(f"Done initializing optimizer, total batches: {total_batches}, steps per epoch: {steps_per_epoch}")
+    ut.logger.info(
+        f"Done initializing optimizer, total batches: {total_batches}, steps per epoch: {steps_per_epoch}"
+    )
 
     # --- loss & update functions
 
     vmapped_compute = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
-
 
     def loss_func(dynamic, static, X, Y, Z, key):
         nb_inputs = sum([n.get_nb_inputs() for n in stack.networks])
@@ -415,7 +427,6 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
             'opt': opt_state,
         }
         return res
-
 
     keep_in_history = training_config.get('keep_in_history', ['loss'])
 
@@ -501,7 +512,6 @@ def start(dman: du.DataManager, training_config, compute_config, loggers=None, s
 ### {{{                  --     training program helper     --
 
 DEFAULT_TRAINING_CONFIG = {
-
     # -------- training config --------
     # training loop
     "rng_key": 42,
@@ -517,18 +527,14 @@ DEFAULT_TRAINING_CONFIG = {
     'decay_epochs': 130,
     'adam_w_decay': 0.001,
     'max_gradient_norm': 1.0,
-
     # cache
     "network_cache_location": "../__cache/network",
     "training_cache_location": "../__cache/training",
     "densities_cache_location": "../__cache/densities",
-
     # -------- data config --------
-
     # batches
     "batch_size": 32,
     "n_batches": 2048,
-
     # log transform:
     "data_min_value": 500,
     "data_max_value": 1e8,
@@ -536,13 +542,11 @@ DEFAULT_TRAINING_CONFIG = {
     "data_log_factor": 100,
     "data_log_poly_threshold": 300,
     "data_log_poly_compression": 0.4,
-
     # resampling:
     "data_sampling_kde_bw_method": 0.02,
     "data_sampling_max_density_samples": 4000,
     "data_sampling_density_quantile_threshold": 0.025,  # threshold = min of both
     "data_sampling_coords_for_density_threshold": 0.15,  # threshold = min of both
-
 }
 
 import argparse
@@ -590,10 +594,10 @@ class TrainingProgram:
             help='enable checks (default: False)',
         )
         self.parser.add_argument(
-            '--loglevel', type=str, default='debug', help='log level (default: debug)'
+            '--loglevel', type=str, default='info', help='log level (default: debug)'
         )
         # self.parser.add_argument(
-            # '--device', type=str, default='cpu', help='jax device (default: cpu)'
+        # '--device', type=str, default='cpu', help='jax device (default: cpu)'
         # )
         self.parser.add_argument(
             '--data_path',
@@ -734,11 +738,18 @@ class TrainingProgram:
         else:
             loggers = [
                 (1, console_log),
-                (-1, partial(local_save, save_dir=self.local_save_dir)),
+                (
+                    -1,
+                    partial(
+                        local_save,
+                        compute_config=self.compute_config,
+                        trainer_config=self.training_config,
+                        save_dir=self.local_save_dir,
+                    ),
+                ),
             ]
 
         start(training, self.training_config, self.compute_config, loggers, seed=self.seed)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
