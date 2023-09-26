@@ -16,6 +16,11 @@ import re
 
 ### {{{                           --     utils     --
 
+
+def isArrayRef(x):
+    return str(type(x)) == str(ArrayRef)
+
+
 def is_equal(a, b):
     if not type(a) == type(b):
         return False
@@ -37,10 +42,10 @@ def pretty_str(x):
                 typestr = "jax" if isinstance(x, jnp.ndarray) else "numpy"
                 msg = f"{x.shape} {x.dtype} {typestr} array:\n{np.asarray(x)}"
 
-    elif isinstance(x, (list, tuple)):
+    elif isinstance(x, (list)):
         chars = '()' if isinstance(x, tuple) else '[]'
         max_lines = 5
-        max_elem_per_line = 3
+        max_elem_per_line = 5
         # xspl = x[:::max_elem_per_line]
         # make chunks of max_elem_per_line
         xspl = [x[i : i + max_elem_per_line] for i in range(0, len(x), max_elem_per_line)]
@@ -55,8 +60,6 @@ def pretty_str(x):
     return msg + "\n"
 
 
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
@@ -67,7 +70,7 @@ def pretty_str(x):
 serializers = {}
 deserializers = {}
 
-jnparr = type(jnp.array([1,2,3]))
+jnparr = type(jnp.array([1, 2, 3]))
 
 
 def register_serializer(cls, func):
@@ -76,29 +79,37 @@ def register_serializer(cls, func):
     else:
         serializers[cls.__name__] = func
 
+
 def register_deserializer(cls, func):
     if isinstance(cls, str):
         deserializers[cls] = func
     else:
         deserializers[cls.__name__] = func
 
+
 def serializer(types: Union[Sequence, type]):
     if isinstance(types, type):
         types = (types,)
+
     def decorator(function):
         for t in types:
             register_serializer(t, function)
         return function
+
     return decorator
+
 
 def deserializer(types: Union[Sequence, type]):
     if isinstance(types, type):
         types = (types,)
+
     def decorator(function):
         for t in types:
             register_deserializer(t, function)
         return function
+
     return decorator
+
 
 def serialize(x):
     if type(x).__name__ in serializers:
@@ -107,19 +118,19 @@ def serialize(x):
         raise ValueError(f"Cannot serialize type {type(x)}")
 
 
-
-
 # ArrayLike
 @serializer((np.ndarray, jnparr))
 def serialize_arraylike(x):
     x = np.asarray(x)
     b64data = base64.b64encode(x.tobytes())
     return {
-            'type': type(x).__name__,
-            'dtype': str(x.dtype),
-            'shape': x.shape,
-            'data': b64data.decode('utf-8')
+        'type': type(x).__name__,
+        'dtype': str(x.dtype),
+        'shape': x.shape,
+        'data': b64data.decode('utf-8'),
     }
+
+
 @deserializer(np.ndarray)
 def deserialize_arraylike(x):
     dtype = np.dtype(x['dtype'])
@@ -132,10 +143,8 @@ def deserialize_arraylike(x):
 # ListLike
 @serializer((list, tuple))
 def serialize_listlike(x):
-    return {
-            'type': type(x).__name__,
-            'data': tuple(serialize(xi) for xi in x)
-    }
+    return {'type': type(x).__name__, 'data': tuple(serialize(xi) for xi in x)}
+
 
 @deserializer((list, tuple))
 def deserialize_listlike(x):
@@ -145,27 +154,18 @@ def deserialize_listlike(x):
 # Dict
 @serializer(dict)
 def serialize_dict(x):
-    return {
-            'type': type(x).__name__,
-            'data': {serialize(k): serialize(v) for k, v in x.items()}
-    }
-
-
-
-
-
-
+    return {'type': type(x).__name__, 'data': {serialize(k): serialize(v) for k, v in x.items()}}
 
 
 def serialize_PTree(x):
     return jtu.tree_map(serialize, x)
 
 
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ### {{{                         --     ParamPath     --
+
 
 class ParamPath:
     @staticmethod
@@ -225,7 +225,7 @@ class ParamPath:
             return len(self) < len(other)
         if isinstance(other, str):
             return self < ParamPath(other)
-        return other > self # delegate to __gt__ of the other type
+        return other > self  # delegate to __gt__ of the other type
 
     def __gt__(self, other):
         if isinstance(other, ParamPath):
@@ -236,14 +236,14 @@ class ParamPath:
             return len(self) > len(other)
         if isinstance(other, str):
             return self > ParamPath(other)
-        return other < self # delegate to __lt__ of the other type
+        return other < self  # delegate to __lt__ of the other type
 
     def __eq__(self, other):
         if isinstance(other, ParamPath):
             return self.path == other.path
         if isinstance(other, str):
             return self.path == ParamPath.psplit(other)
-        return other == self # delegate to __eq__ of the other type
+        return other == self  # delegate to __eq__ of the other type
 
     def __hash__(self):
         return hash(str(self))
@@ -299,6 +299,8 @@ class PTree:
             path = ParamPath(path)
         if len(path) == 0:
             raise KeyError(f"PTree get_at called with empty path")
+        if self.is_empty():
+            raise KeyError(f"PTree is empty, cannot get {path}")
         if self.is_leaf(self):
             raise KeyError(f"PTree is a leaf, cannot get {path}")
         assert isinstance(self.value, PTreeBranch), f"self.value is not a PTreeBranch: {self.value}"
@@ -317,7 +319,7 @@ class PTree:
         If the leaf is an ArrayRef and get_leaf_value is True, return the view of the array.
         """
         if self.is_leaf() and get_leaf_value:
-            if isinstance(self.value, ArrayRef):
+            if isArrayRef(self.value):
                 return self.value.view()
             return self.value
         return self
@@ -339,14 +341,13 @@ class PTree:
         if p not in self.value:
             self.value[p] = PTree(read_only=self.read_only)
         if len(rest) == 0:
-                self.value[p].value = value
+            self.value[p].value = value
         else:
             if self.is_leaf_at(p, count_empty_as_leaf=False):
                 raise KeyError(
                     f"Trying to expand leaf node into branch is not allowed, delete leaf first"
                 )
             self.value[p].get(False).set_at(rest, value)
-
 
     def at(self, path, value=None, overwrite=False, leaf_value=True):
         if self.read_only or value is None:
@@ -397,7 +398,7 @@ class PTree:
             return False
         return True
 
-    def pretty(self, levels=None, key=None):
+    def getpretty(self, levels=None, key=None):
         s = ""
         if levels == None:
             if self.is_leaf(count_empty_as_leaf=False):
@@ -405,7 +406,7 @@ class PTree:
             if self.is_empty():
                 return " ∅\n"
             s += f"\n ▼"
-            s += self.pretty([]) + "\n\n"
+            s += self.getpretty([]) + "\n\n"
         else:
             other_branches = [' │  ' if l else '    ' for l in levels]
             lineheader = f"\n{''.join(other_branches)}"
@@ -419,17 +420,18 @@ class PTree:
                 for i, (k, v) in enumerate(self.value.items()):
                     this_branch_char = " └─ " if i == nitems - 1 else " ├─ "
                     s += f"{lineheader}{this_branch_char}'{k}'"
-                    s += v.pretty(levels + [i < nitems - 1], k)
+                    s += v.getpretty(levels + [i < nitems - 1], k)
         return s
 
     def __str__(self):
-        return self.pretty()
+        return self.getpretty()
 
     def __repr__(self):
-        return self.pretty()
+        return self.getpretty()
 
     def get_read_only_copy(self):
         from copy import deepcopy
+
         cop = deepcopy(self)
         cop.set_read_only(True)
         return cop
@@ -490,19 +492,16 @@ class PTree:
         for k, v in self.iter_leaves(get_leaf_value=False):
             assert isinstance(v, PTree), f'this branch at {k} is {type(v)}'
             if k not in other:
-                print(f'k {k} not in other')
                 diffs.add(k)
             else:
                 otherb = other.get_at(k, get_leaf_value=False)
                 assert isinstance(otherb, PTree), f'other branch at {k} is {type(otherb)}'
                 if not is_equal(v.value, otherb.value):
-                    print(f'k {k} not equal')
                     diffs.add(k)
 
         for k, v in other.iter_leaves(get_leaf_value=False):
             assert isinstance(v, PTree), f'other branch at {k} is {type(v)}'
             if k not in self:
-                print(f'k {k} not in self')
                 diffs.add(k)
 
         return diffs
@@ -510,9 +509,10 @@ class PTree:
     def check(self):
         for k, nd in self.iter_leaves(get_leaf_value=False):
             assert isinstance(nd, PTree), f'branch at {k} is {type(nd)}'
-            if isinstance(nd.value, ArrayRef):
-                assert nd.value.tree is self, f'branch at {k} has wrong tree'
-
+            if isArrayRef(nd.value):
+                assert (
+                    nd.value.tree is self
+                ), f'branch at {k} has wrong tree: {id(nd.value.tree)} != {id(self)}'
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -526,7 +526,7 @@ class ArrayRef:
     aka a view, but over potentially several different arrays
     """
 
-    def __init__(self, tree:PTree, paths=None, indices=None):
+    def __init__(self, tree: PTree, paths=None, indices=None):
         assert isinstance(tree, PTree), f"tree must be a PTree, not {type(tree)}"
         self.tree = tree
         self.indices = indices or ()  # tuple of (array_num, index0, index1, ...) coordinates
@@ -585,13 +585,12 @@ class ArrayRef:
             self.map += ((a, positions, idtup),)
 
     def __eq__(self, other):
-        if not isinstance(other, ArrayRef):
+        if not isArrayRef(other):
             return False
         return self.indices == other.indices and self.paths == other.paths
 
     def __hash__(self):
         return hash(self.get().tobytes())
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -604,7 +603,6 @@ class ArrayRefPath:
     actual_path: ParamPath
     paths: List[ParamPath]
     indices: List[Tuple[int, int]]
-
 
     def __eq__(self, other):
         if not isinstance(other, ArrayRefPath):
@@ -635,17 +633,15 @@ class ArrayRefPath:
 def flatten_PTree(ptree):
     keys, values = [], []
     for k, v in ptree.iter_leaves():
-        if isinstance(v, ArrayRef):
+        if isArrayRef(v):
             values.append(None)
             keys.append(ArrayRefPath(ParamPath(k), v.paths, v.indices))
         else:
             values.append(v)
             keys.append(ParamPath(k))
-
     order = sorted(range(len(keys)), key=lambda i: keys[i])
     sorted_keys = tuple(keys[i] for i in order)
     sorted_values = tuple(values[i] for i in order)
-
     aux_data = (sorted_keys, ptree.read_only)
     return (sorted_values, aux_data)
 
@@ -653,7 +649,7 @@ def flatten_PTree(ptree):
 def unflatten_PTree(aux_data, content):
     keys = aux_data[0]
     read_only = aux_data[1]
-    ptree = PTree(read_only=read_only)
+    ptree = PTree(read_only=False)
     for k, v in zip(keys, content):
         if isinstance(k, ArrayRefPath):
             ptree[k.actual_path] = ArrayRef(ptree, k.paths, k.indices)
@@ -668,6 +664,7 @@ jtu.register_pytree_node(PTree, flatten_PTree, unflatten_PTree)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                        --     ParameterTree     --
+
 
 class ParameterTree:
     """A tree of parameters, with a separate tree of tags + some convenience partitionning methods"""
@@ -686,7 +683,6 @@ class ParameterTree:
         self.data.set_read_only(read_only)
         if self.tags is not None:
             self.tags.set_read_only(read_only)
-
 
     def __setitem__(self, path, value):
         if self.read_only:
@@ -821,7 +817,6 @@ class ParameterTree:
             read_only=True,
         )
 
-
     def filter_by_tag(self, tags, mode='any'):
 
         # modes: 'any', 'all', 'exact'
@@ -851,7 +846,7 @@ class ParameterTree:
             match_f = lambda x: np.all(x == target_tag_flags)
 
         def setval(tree, path, value, tags):
-            if isinstance(value, ArrayRef):
+            if isArrayRef(value):
                 newref = ArrayRef(tree.data, value.paths, value.indices)
                 tree.data[path] = newref
             else:
@@ -884,9 +879,8 @@ class ParameterTree:
         else:
             return [self.tagnames[i] for i in np.where(self.tags[path])[0]]
 
-
     @staticmethod
-    def merge(left:PTree, right:PTree, which=Optional[str]):
+    def merge(left: PTree, right: PTree, which: str = 'left'):
         merged = ParameterTree()
 
         for left_tag_name in left.tagnames:
@@ -911,7 +905,9 @@ class ParameterTree:
                 elif which == 'right':
                     setval(path, right.data[path], right.tags[path])
                 else:
-                    raise ValueError(f"Unknown 'which' arg {which}. Allowed values: 'left', 'right'")
+                    raise ValueError(
+                        f"Unknown 'which' arg {which}. Allowed values: 'left', 'right'"
+                    )
             else:
                 setval(path, left_data, left.tags[path])
 
@@ -933,6 +929,17 @@ class ParameterTree:
                 and self.tagnames == other.tagnames
             )
 
+    def tree_set_at(self, path, set_to):
+        """return a copy of the tree, with the value at path set to set_to"""
+        # naive version:
+        tcopy = deepcopy(self)
+        tcopy.set_read_only(False)
+        tcopy[path] = set_to
+        tcopy.tags[path] = self.tags[path]
+        tcopy.set_read_only(self.read_only)
+        tcopy2 = jtu.tree_map(lambda x: x, tcopy)
+        return tcopy2
+
 
 def flatten_ParameterTree(ptree):
     flat_contents = (ptree.data,)
@@ -950,6 +957,7 @@ jtu.register_pytree_node(ParameterTree, flatten_ParameterTree, unflatten_Paramet
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 def init_if_needed(params, path, init_f, base_path=''):
     try:
         return params[f'{base_path}/{path}']
@@ -957,8 +965,10 @@ def init_if_needed(params, path, init_f, base_path=''):
         params[f'{base_path}/{path}'] = init_f()
         return params[f'{base_path}/{path}']
 
+
 def get_param(params, path, base_path='', **_):
     return params[f'{base_path}/{path}']
+
 
 def make_view(
     params: ParameterTree,
@@ -973,4 +983,3 @@ def make_view(
         for from_path, from_id in zip(from_paths, from_ids):
             ref.push_back(f'{from_path}/{leaf}', from_id)
         params[leafpath] = ref
-

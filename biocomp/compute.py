@@ -98,6 +98,13 @@ class ComputeConfigManager:
     def load(self, config):
         self.config = config
 
+    def __repr__(self):
+        return self.dumps()
+
+    def __str__(self):
+        return self.__repr__()
+
+
 
 DEFAULT_COMPUTE_CONFIG = ComputeConfigManager()
 DEFAULT_COMPUTE_CONFIG.set_impl('transcription', nodes.transcription)
@@ -107,8 +114,10 @@ DEFAULT_COMPUTE_CONFIG.set_impl('inv_translation', nodes.inv_translation)
 DEFAULT_COMPUTE_CONFIG.set_impl('sequestron_ERN', nodes.ERN5p)
 DEFAULT_COMPUTE_CONFIG.set_impl('source', nodes.source)
 DEFAULT_COMPUTE_CONFIG.set_impl('inv_source', nodes.inv_source)
-DEFAULT_COMPUTE_CONFIG.set_impl('numeric', nodes.numeric)
-DEFAULT_COMPUTE_CONFIG.set_impl('inv_numeric', nodes.inv_numeric)
+DEFAULT_COMPUTE_CONFIG.set_impl('bias', nodes.bias)
+DEFAULT_COMPUTE_CONFIG.set_impl('inv_bias', nodes.inv_bias)
+DEFAULT_COMPUTE_CONFIG.set_impl('numeric', nodes.bias)
+DEFAULT_COMPUTE_CONFIG.set_impl('inv_numeric', nodes.inv_bias)
 DEFAULT_COMPUTE_CONFIG.set_impl('aggregation', nodes.aggregation)
 DEFAULT_COMPUTE_CONFIG.set_impl('inv_aggregation', nodes.inv_aggregation)
 DEFAULT_COMPUTE_CONFIG.set_impl('output', nodes.grouped_output)
@@ -304,6 +313,8 @@ class ComputeStack:
 
     apply: Optional[Callable] = None
 
+    post_process_callbacks: Optional[List[Callable]] = None
+
     ### {{{                     --     public interface     --
 
     def build(self, config: ComputeConfigManager, **kwargs):
@@ -346,6 +357,8 @@ class ComputeStack:
                 layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
             params.tag('local', 'local')
             params.tag('shared', 'shared')
+        # pp_params = self.post_process(params)
+        # assert pp_params == params, 'Post process changed params'
         return params
 
     def get_network_output_indices(self, network_id: int):
@@ -406,53 +419,19 @@ class ComputeStack:
             for node in layer.nodes:
                 yield node
 
-    # TODO
-    # def make_subset(self, network_ids: Sequence[int], pre_init: bool = True):
-    # """Returns a new stack with only the networks with the given ids"""
-    # assert self.is_built, 'Stack not built'
-    # s = ComputeStack([self.networks[i] for i in network_ids])
-    # s.build(self.config)
-    # old_node_id = []
-    # for i, n in enumerate(s.each_node()):
-    # assert n.node_id == i
-    # old_net_id = network_ids[n.network_id]
-    # l_id, n_pos = self.node_map[(old_net_id, n.compute_node_id)]
-    # old_node_id.append(self.layers[l_id].nodes[n_pos].node_id)
-    # old_node_id = jnp.array(old_node_id)
-    # captured_static_p = {}
-    # if pre_init:
-    # # generate valid static parameters
-    # _, captured_static_p = ut.split_params(s.init(jax.random.PRNGKey(0)), [ut.STATIC_PATH])
-    # def get_param_subset(params: ParameterTree):
-    # """Helper function that returns a subset of the given full-stack parameters,
-    # corresponding to the subset of networks"""
-    # static_p = captured_static_p
-    # if not pre_init:
-    # # new init to generate valid static parameters
-    # _, static_p = ut.split_params(s.init(jax.random.PRNGKey(0)), [ut.STATIC_PATH])
-    # # grab a copy of the shared parameters
-    # copy_p = deepcopy(params)
-    # _, shared_p = ut.split_params(copy_p, [ut.SHARED_PATH])
-    # # truncated node parameters
-    # _, node_p = ut.split_params(copy_p, [ut.NODE_PATH])
-    # node_p = jax.tree_map(lambda x: jnp.array(x)[old_node_id], node_p)
-    # return ut.merge_dicts(static_p, shared_p, node_p)
-    # return s, get_param_subset
+    def register_post_process(self, callback: Callable):
+        if self.post_process_callbacks is None:
+            self.post_process_callbacks = []
+        self.post_process_callbacks.append(callback)
 
-    # TODO
-    # @staticmethod
-    # def use_shared_params(cls, params: ParameterTree, params_to_use_shared_from: ParameterTree):
-    # """Returns a copy of the params with the shared parameters
-    # replaced by the ones in params_to_use_shared_from"""
-    # # grab a copy of the shared parameters
-    # my_p = deepcopy(params)
-    # other_p = deepcopy(params_to_use_shared_from)
-    # _, shared_p = ut.split_params(other_p, [ut.SHARED_PATH])
-    # _, this_static_p = ut.split_params(my_p, [ut.STATIC_PATH])
-    # _, other_static_p = ut.split_params(other_p, [ut.STATIC_PATH])
-    # _, node_p = ut.split_params(my_p, [ut.NODE_PATH])
-    # my_p = ut.assemble_params(this_static_p, shared_p, node_p)
-    # return my_p
+    @partial(jax.jit, static_argnums=(0,))
+    def post_process(self, params: ParameterTree):
+        if self.post_process_callbacks is not None:
+            for callback in self.post_process_callbacks:
+                params = callback(params)
+        return params
+
+
 
     ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -989,7 +968,7 @@ class ComputeStack:
                 layer_inputs = [input_getters_f[lid][i](out) for i in range(n_inputs)]
 
                 assert len(layer_inputs) == n_inputs
-                assert len(layer_inputs[0]) == n_nodes
+                # assert len(layer_inputs[0]) == n_nodes
 
                 keys = jax.random.split(key, n_nodes)
 

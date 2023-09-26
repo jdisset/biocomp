@@ -365,17 +365,17 @@ class Network:
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
 
-    def set_inputs(self, input_ids):
-        assert self.is_built()
-        ut.logger.debug(f'setting inputs to {input_ids}')
-        for i, inp_id in enumerate(input_ids):
-            self.compute_graph.loc[inp_id, 'type'] = 'input'
-            self.compute_graph.loc[inp_id, 'extra'].update({'input_position': i})
+    # def set_inputs(self, input_ids):
+    # assert self.is_built()
+    # ut.logger.debug(f'setting inputs to {input_ids}')
+    # for i, inp_id in enumerate(input_ids):
+    # self.compute_graph.loc[inp_id, 'type'] = 'input'
+    # self.compute_graph.loc[inp_id, 'extra'].update({'input_position': i})
 
-    def set_numeric_as_input(self):
-        assert self.is_built()
-        numeric_nodes = list(self.compute_graph.loc[self.compute_graph['type'] == 'numeric'].index)
-        self.set_inputs(numeric_nodes)
+    # def set_numeric_as_input(self):
+    # assert self.is_built()
+    # numeric_nodes = list(self.compute_graph.loc[self.compute_graph['type'] == 'numeric'].index)
+    # self.set_inputs(numeric_nodes)
 
     def is_built(self):
         return (
@@ -383,6 +383,10 @@ class Network:
             and self.central_dogma_graph is not None
             and self.transcription_units is not None
         )
+
+    def set_input_as_bias(self, input_id):
+        assert self.is_built()
+        self.compute_graph.loc[input_id, 'extra'].update({'bias': True})
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                           --     utils     --
@@ -900,7 +904,8 @@ class Network:
         """Given an array of output values, returns the columns that are inputs of the inverted network,
         properly ordered by input number"""
         # In inverted networks, each input node has,
-        # in its extra, 'input_from_output' and 'input_position' (which get_inverted_input_positions uses)
+        # in its extra, 'input_from_output' and 'input_position' 
+        # (which get_inverted_input_positions uses)
         # We want to transform output_arr by reordering the columns accordingly
         mapping = self.get_inverted_input_positions()
         return output_arr[:, [mapping[i] for i in range(len(mapping))]]
@@ -924,6 +929,30 @@ class Network:
         assert set(mapping.keys()) == set(range(len(mapping.keys()))), f'Invalid mapping: {mapping}'
         assert len(mapping.keys()) == len(set(mapping.values())), f'Invalid mapping: {mapping}'
         return mapping
+
+    def set_input_as_bias(self, input_protein_name):
+        """Sets this input protein as a bias node (instead of an input one)"""
+        original_mapping = self.get_inverted_input_positions()
+        output_proteins = self.get_output_proteins()
+        assert (
+            input_protein_name in output_proteins
+        ), f'Invalid input protein name: {input_protein_name}'
+        output_position = output_proteins.index(input_protein_name)
+        assert output_position in original_mapping.values()
+        inputs = self.compute_graph[self.compute_graph['type'] == 'input']
+        found = False
+        for i, row in inputs.iterrows():
+            assert 'input_position' in row.extra, f'input_position not in {row.extra}'
+            assert 'input_from_output' in row.extra, f'input_from_output not in {row.extra}'
+            if row.extra['input_from_output'] == output_position:
+                self.compute_graph.at[i, 'type'] = 'bias'
+                found = True
+                break
+        assert found, f'Could not find input protein {input_protein_name} in compute graph'
+        new_mapping = self.get_inverted_input_positions()
+        assert len(new_mapping) == len(original_mapping) - 1, f'Invalid mapping: {new_mapping}'
+        assert output_position not in new_mapping.values()
+        assert len(self.get_inverted_input_proteins()) == len(new_mapping)
 
     def get_nb_inputs(self):
         if self.n_inputs is None:

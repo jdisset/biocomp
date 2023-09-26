@@ -39,8 +39,8 @@ fig, ax = du.mkfig(1, 1, (7, 5))
 with ut.timer('Loss plot'):
     du.losses_plot(losses, ax, runs=runs)
 fig.savefig('/Users/jeandisset/Desktop/bestloss_v2.pdf')
-best_run = runs[du.get_best_run_id(losses)]
-print('Best run:', best_run.name)
+run = runs[du.get_best_run_id(losses)]
+print('Best run:', run.name)
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
 
@@ -123,7 +123,7 @@ except FileNotFoundError:
         # base_params = full_stack.init(key)
 
     tmp_dir = Path(f'./{project_name}')
-    param_file = best_run.file('latest_params.pkl').download(replace=True, root=tmp_dir)
+    param_file = run.file('latest_params.pkl').download(replace=True, root=tmp_dir)
 
     with open(param_file.name, 'rb') as f:
         trained_params = pickle.load(f)

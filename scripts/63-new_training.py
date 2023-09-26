@@ -4,7 +4,11 @@ import biocomp.datautils as du
 import biocomp.train as train
 
 prog = train.TrainingProgram()
-prog.parse_args()
+prog.parse_args('--config learning_rate=3e-4'.split())
+
+prog.training_config
+
+##
 
 XP = {
     'bt': '2023-04-03_Constraints_Pgu_Bleedthrough',
@@ -27,3 +31,4 @@ validation = dman_full.make_subset(training_set[::10])
 training = dman_full.make_subset(training_set)
 
 prog.start_training(training, validation)
+

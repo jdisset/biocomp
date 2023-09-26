@@ -252,6 +252,33 @@ assert p3 == p
 p3.data.check()
 # let's use pickle for now...
 
+
+##
+
+# tree_at
+
+pt = pm.ParameterTree()
+pt.at('a', 1)
+pt.at('b/c', np.array([1,2,3], dtype=np.float32))
+
+@jax.jit
+def add1(x):
+    c = x['b/c'] + 1
+    x = x.tree_set_at('b/c', c)
+    return x
+
+@jax.jit
+def addn(x, n):
+    x = jax.lax.fori_loop(0, n, lambda i, x: add1(x), x)
+    return x
+
+
+
+pt = addn(pt, 3)
+
+assert np.all(pt['b/c'] == np.array([4,5,6]))
+
+##
 print()
 print()
 print('test_params.py: all tests passed')

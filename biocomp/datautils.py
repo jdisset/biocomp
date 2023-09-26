@@ -9,6 +9,7 @@ import pandas as pd
 import biocomp as bc
 from . import utils as ut
 from pathlib import Path
+import json
 from . import defaults as dft
 from . import nodes as nd
 from . import compute as cmp
@@ -1915,12 +1916,8 @@ def fluo_densities(
     fig.tight_layout()
 
 
-def get_best_run_id(losses, smooth_window=10, return_smooth_losses=False):
+def get_best_run_id(losses, smooth_window=20, return_smooth_losses=False):
 
-    # smoothed_losses = [
-    # np.convolve(loss, np.ones(smooth_window) / smooth_window, mode='valid') for loss in losses
-    # ]
-    # and with gaussian smoothing:
     from scipy.ndimage import gaussian_filter1d
 
     smoothed_losses = [gaussian_filter1d(loss, smooth_window) for loss in losses]
@@ -1930,22 +1927,22 @@ def get_best_run_id(losses, smooth_window=10, return_smooth_losses=False):
     return best_loss
 
 
-def losses_plot(losses, ax, smooth_window=200, runs=None):
-    best_loss, smoothed_losses = get_best_run_id(
+def losses_plot(losses, ax=None, smooth_window=200, runs=None):
+    best_loss_id, smoothed_losses = get_best_run_id(
         losses, smooth_window=smooth_window, return_smooth_losses=True
     )
+    if ax is None:
+        fig, ax = mkfig(1, 1, (7, 5))
     for index, loss in enumerate(smoothed_losses):
-        # color = '#0897BA' if index == best_loss else 'k'
-        color = '#00A1D9' if index == best_loss else 'k'
-        # color = '#E70043' if index == best_loss else 'k'
-        alpha = 1 if index == best_loss else 0.125
-        size = 1.5 if index == best_loss else 0.25
+        color = '#00A1D9' if index == best_loss_id else 'k'
+        alpha = 1 if index == best_loss_id else 0.25
+        size = 1.5 if index == best_loss_id else 0.5
         ax.plot(
             loss,
             color=color,
             alpha=alpha,
             linewidth=size,
-            label='Best run' if index == best_loss else None,
+            label='Best run' if index == best_loss_id else None,
         )
         ax.set_yscale('log')
     ax.set_xlabel('Batches seen')
@@ -1956,19 +1953,19 @@ def losses_plot(losses, ax, smooth_window=200, runs=None):
     ax.legend()
     # add name of best run (centered)
     if runs is not None:
-        best_run = runs[best_loss]
+        best_run = runs[best_loss_id]
         ax.text(
             0.5,
             0.01,
-            f'Best run: "{best_run.name}" with {smoothed_losses[best_loss][-1]:.1e}',
+            f'Best run: "{best_run.name}" with {smoothed_losses[best_loss_id][-1]:.1e}',
             transform=ax.transAxes,
             horizontalalignment='center',
             verticalalignment='bottom',
         )
-    return best_loss
+    return best_loss_id
 
 
-def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True):
+def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True, **kw):
     import wandb
     import pickle
     from concurrent.futures import ThreadPoolExecutor
@@ -1976,7 +1973,7 @@ def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True):
     wandb.login()
     api = wandb.Api()
     project_path = f"{entity}/{project_name}" if entity else project_name
-    runs = api.runs(project_path)
+    runs = api.runs(project_path, **kw)
 
     if with_losses:
 
@@ -1995,6 +1992,20 @@ def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True):
 
     return runs
 
+def get_wandb_trained_params(run, save_to=None):
+    if save_to is None:
+        save_to = Path(f'/tmp/biocomp_runs/{run.name}')
+    save_to.mkdir(parents=True, exist_ok=True)
+    param_file = run.file('latest_params.pkl').download(replace=True, root=save_to)
+    trained_params = load(param_file.name)
+    shared_trained_params, local = trained_params.filter_by_tag('shared')
+    compute_config_file = run.file('compute_config.json').download(replace=True, root=save_to)
+    training_config_file = run.file('training_config.json').download(replace=True, root=save_to)
+    compute_config = cmp.ComputeConfigManager.from_file(compute_config_file.name)
+    with open(training_config_file.name, 'r') as f:
+        training_config = json.load(f)
+    shared_trained_params.set_read_only(True)
+    return shared_trained_params, compute_config, training_config, local
 
 def model_fluo_distributions(dman, model_id, method='scatter', **kwargs):
     model = dman.get_models()[model_id]

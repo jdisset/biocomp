@@ -10,7 +10,6 @@ import jax.numpy as jnp
 import numpy as np
 from tqdm import tqdm
 import jax
-from jax import jit, vmap, value_and_grad
 import jax.numpy as jnp
 import pickle
 

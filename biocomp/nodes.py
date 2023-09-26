@@ -197,7 +197,7 @@ def inv_source(*args, **kwargs):
     return single_passthrough(*args, **kwargs)
 
 
-def numeric(
+def bias(
     input_shapes: Sequence[Tuple[int]],
     n_outputs: int,
     layer_id: int,
@@ -206,17 +206,17 @@ def numeric(
     **_,
 ) -> LayerInstance:
 
-    assert n_outputs == 1, f'Numeric node should have 1 output, got {n_outputs}'
+    assert n_outputs == 1, f'Bias node should have 1 output, got {n_outputs}'
     assert len(input_shapes) == 0
 
-    local_layer_name = generate_layer_name(stack, layer_id, 'numeric')
+    local_layer_name = generate_layer_name(stack, layer_id, 'bias')
     namespace = f'local/{local_layer_name}'
 
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key, **_):
-        params[f'{namespace}/numeric:value'] = jax.random.uniform(key, (len(nodelist), *shape))
+        params[f'{namespace}/value'] = jax.random.uniform(key, (len(nodelist), *shape))
 
-    def apply(_, __, params: ParameterTree, node_id: ArrayLike, ___) -> ArrayLike:
-        return params[f'{namespace}/numeric:value'][node_id]
+    def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> ArrayLike:
+        return params[f'{namespace}/value'][node_id]
 
     output_shapes = [shape]
 
@@ -224,7 +224,7 @@ def numeric(
 
 
 # inverse of numeric is just a pass-through
-def inv_numeric(*args, **kwargs) -> LayerInstance:
+def inv_bias(*args, **kwargs) -> LayerInstance:
     return single_passthrough(*args, **kwargs)
 
 
@@ -262,6 +262,15 @@ def aggregation(
         assert ratios.shape == (len(nodelist), n_outputs), f'Invalid ratio shape {ratios.shape}'
         params[f'{namespace}/{pname}'] = ratios
 
+        def normalize_ratios_cb(params: ParameterTree, **__):
+            current_ratios = params[f'{namespace}/{pname}']
+            assert current_ratios.shape == (len(nodelist), n_outputs)
+            max_ratios = jnp.maximum(jnp.max(current_ratios, axis=1), 1e-9)
+            normed_ratios = current_ratios / max_ratios[:, None]
+            return params.tree_set_at(f'{namespace}/{pname}', jnp.clip(normed_ratios, 0, 1))
+
+        stack.register_post_process(normalize_ratios_cb)
+
     def apply(
         input: ArrayLike,
         quantiles: ArrayLike,
@@ -271,7 +280,7 @@ def aggregation(
     ) -> ArrayLike:
         assert input.shape == input_shapes[0], f'Invalid input shape {input.shape}'
         ratios = params[f'{namespace}/{pname}'][node_id][:n_outputs]
-        return jnp.array(ratios) * input
+        return jnp.abs(jnp.array(ratios)) * input
 
     output_shape = input_shapes * n_outputs
 
@@ -290,7 +299,6 @@ def inv_aggregation(
     assert len(input_shapes) == 1, f'inverse_Aggregation expects 1 input, got {len(input_shapes)}'
     assert n_outputs == 1, f'inverse_Aggregation expects 1 output, got {n_outputs}'
 
-    EPSILON = 1e-12
 
     local_layer_name = generate_layer_name(stack, layer_id, f'inverse_aggregation')
     namespace = f'local/{local_layer_name}'
@@ -315,6 +323,8 @@ def inv_aggregation(
 
             params.at(f'{namespace}/ratios', ref, overwrite=None)
 
+
+    EPSILON = 1e-9
     def apply(
         input: ArrayLike,
         quantiles: ArrayLike,
@@ -324,11 +334,11 @@ def inv_aggregation(
     ) -> ArrayLike:
 
         if stack is not None:
-            ratio = params[f'{namespace}/ratios'][node_id]
+            ratio = jnp.abs(params[f'{namespace}/ratios'][node_id])
         else:
             ratio = jnp.ones((1,))
 
-        return jnp.where(ratio > EPSILON, input / ratio, 0.0)
+        return input / jnp.maximum(ratio, EPSILON)
 
     output_shape = input_shapes
     return prepare, apply, output_shape
@@ -432,10 +442,10 @@ def transform_nn(
 
         # assert qvalues.shape == (len(quantization_names), rate_dim)
         # if params[quantization_names_path] != tuple(quantization_names):
-            # raise ValueError(
-                # f"""Quantization names for {rate_name} do not match:
-                # {params[quantization_names_path]} != {tuple(quantization_names)}"""
-            # )
+        # raise ValueError(
+        # f"""Quantization names for {rate_name} do not match:
+        # {params[quantization_names_path]} != {tuple(quantization_names)}"""
+        # )
 
         if not is_inverse:  # forward node
             # We initialize quantization masks for these nodes.
@@ -470,6 +480,7 @@ def transform_nn(
             make_view(
                 params, f'local/{layer_name}', fwd_paths, fwd_loc, leaves=[rate_name, mask_name]
             )
+            params.tag(f'local/{layer_name}/{mask_name}', ['non_grad'])
 
         # --------- quantile var
         quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
@@ -607,13 +618,13 @@ def sequestron_ERN(
         )
 
         # existing_names = params.at(
-            # f'shared/{shared_layer_name}/affinities_names',
-            # tuple(affinity_names),
-            # tags=['non_jit', 'non_grad'],
-            # overwrite=False,
+        # f'shared/{shared_layer_name}/affinities_names',
+        # tuple(affinity_names),
+        # tags=['non_jit', 'non_grad'],
+        # overwrite=False,
         # )
         # assert existing_names == tuple(
-            # affinity_names
+        # affinity_names
         # ), f'Affinity names mismatch: {existing_names} != {affinity_names}'
 
         ref = ArrayRef(params.data)
@@ -700,6 +711,10 @@ def grouped_output(
 
         # --------- quantile var
         quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
+
+        # assert quantile_var_ids.shape == (
+        # len(input_shapes),
+        # ), f'{quantile_var_ids.shape} != {len(input_shapes)}'
 
         params.at(
             f'local/{layer_name}/quantile_variable_id',
