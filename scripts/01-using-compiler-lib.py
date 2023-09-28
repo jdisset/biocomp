@@ -109,9 +109,9 @@ if st.button('Start training'):
     losses, stacked_params = model.train(
         key, X, y_true, n_init=100, n_steps=2000, learning_rate=0.1, progress_type=StreamlitProgress
     )
-    best_run = np.argmin(losses[:, -1])
-    best_loss = losses[best_run]
-    params_history = bu.param_unstack(bu.get_pytree(stacked_params, best_run), len(best_loss) + 1)
+    run = np.argmin(losses[:, -1])
+    best_loss = losses[run]
+    params_history = bu.param_unstack(bu.get_pytree(stacked_params, run), len(best_loss) + 1)
     compg_history = [model.toDataframe(p) for p in tqdm(params_history, "Collecting params")]
 
 

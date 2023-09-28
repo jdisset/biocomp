@@ -438,9 +438,9 @@ params_hist, loss_hist = bc.train_single_model(model, x, y, cfg)
 
 from time import time
 
-best_run = np.argmin(loss_hist[-1, :])
-best_loss = loss_hist[:, best_run]
-best_params = bu.get_params(params_hist, best_run)
+run = np.argmin(loss_hist[-1, :])
+best_loss = loss_hist[:, run]
+best_params = bu.get_params(params_hist, run)
 
 
 ## plot loss

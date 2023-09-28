@@ -256,6 +256,7 @@ restored_params = jit(uncompress)(compressed_params)
 # in logspace.
 
 training_config = train.DEFAULT_TRAINING_CONFIG
+
 logtr_conf = {
     'offset': training_config['data_log_offset'],
     'maxv': training_config['data_max_value'],
@@ -263,7 +264,6 @@ logtr_conf = {
     'threshold': training_config['data_log_poly_threshold'],
     'compression': training_config['data_log_poly_compression'],
 }
-
 tr = partial(du.tr, **logtr_conf)
 inv_tr = partial(du.inv_tr, **logtr_conf)
 
@@ -413,7 +413,6 @@ def generate_fitness(
         return yhat
 
     def fitness_fn(flat_params):
-
         yhat = compute(flat_params, x, Q, k1)
         score = jnp.mean((yhat - y) ** 2)
         # anything outside of 0, 1 is penalized
@@ -423,7 +422,6 @@ def generate_fitness(
             under, MIN_PARAM - flat_params, jnp.where(over, flat_params - MAX_PARAM, 0)
         )
         outside = jnp.sum(outside) / jnp.maximum(jnp.sum(under + over), 1)
-
         return score + outside * outside_penalty
 
     return fitness_fn, flat_params_size, compute, reconstruct_params_and_biases, labels

@@ -70,28 +70,26 @@ tus_bp = {
     'B_neg_0': TU(ern[1]),
     'B_neg_1': TU(ern[1]),
     'B_neg_2': TU(ern[1]),
+    # output node
+    'C_pos_0': TU(rec[2], outcolor_part),
+    'C_pos_1': TU(rec[2], outcolor_part),
+    'C_pos_2': TU(rec[2], outcolor_part),
+    'C_neg_0': TU(ern[2]),
+    'C_neg_1': TU(ern[2]),
+    'C_neg_2': TU(ern[2]),
     # colors
     'x0color': TU(x0color_part),
     'x1color': TU(x1color_part),
     'biascolor': TU(biascolor_part),
-    # output node
-    'C_pos': TU(rec[2], outcolor_part),
-    'C_neg': TU(ern[2]),
 }
 
-# # simple:
-# aggregations_bp = [
-# ['A_pos_0', 'B_neg_0', 'x0color'],  # x0
-# ['A_neg_0', 'B_pos_0', 'x1color'],  # x1
-# ['C_pos', 'C_neg', 'A_neg_1', 'B_neg_1', 'biascolor'],  # biases
-# ]
 
 
 # everything everywhere all at once:
 aggregations_bp = [
-    ['A_pos_0', 'A_neg_0', 'B_pos_0', 'B_neg_0', 'x0color'],  # x0
-    ['A_pos_1', 'A_neg_1', 'B_pos_1', 'B_neg_1', 'x1color'],  # x1
-    ['A_pos_2', 'A_neg_2', 'B_pos_2', 'B_neg_2', 'C_pos', 'C_neg', 'biascolor'],  # biases
+    ['A_pos_0', 'A_neg_0', 'B_pos_0', 'B_neg_0', 'C_pos_0', 'C_neg_0', 'x0color'],  # x0
+    ['A_pos_1', 'A_neg_1', 'B_pos_1', 'B_neg_1', 'C_pos_1', 'C_neg_1', 'x1color'],  # x1
+    ['A_pos_2', 'A_neg_2', 'B_pos_2', 'B_neg_2', 'C_pos_2', 'C_neg_2', 'biascolor'],  # bias
 ]
 
 
@@ -140,9 +138,11 @@ vlims = np.array([logtr_conf['offset'], logtr_conf['maxv']])
 
 vlims_log = tr(vlims) * 0.90
 
+vlims_log
+
 vrange = vlims_log[1] - vlims_log[0]
-on_value = 0.4
-off_value = 0.1
+on_value = 1.0
+off_value = 0.0
 pmargin = 0.1
 
 
@@ -189,20 +189,31 @@ def gen_bandpass_xz(vlims, key, nsamples=10000):
     return x, y
 
 
-rng = jax.random.PRNGKey(1)
-NBP = 15
+rng = jax.random.PRNGKey(3)
+NBP = 25
 bandpasses = [gen_bandpass_xz(vlims_log, k, nsamples=50000) for k in jax.random.split(rng, NBP)]
 
-for x, z in bandpasses:
+for i, (x, z) in enumerate(bandpasses):
+    print(i)
     fig, ax = plt.subplots()
-    ax.scatter(x[:, 0], x[:, 1], c=z, s=2, cmap='inferno', alpha=0.75, vmin=0, vmax=0.6)
+    ax.scatter(x[:, 0], x[:, 1], c=z, s=2, cmap='YlGnBu', vmin=0, vmax=0.6)
     ax.set_xlim(vlims_log)
     ax.set_ylim(vlims_log)
+    plt.show()
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                        --     train utils     --
+
+def get_output_indices(stack, output_protein_name):
+    out_indices = []
+    for n_id, n in enumerate(stack.networks):
+        output_id = n.get_output_proteins().index(output_protein_name)
+        out_indices.append(stack.get_network_global_output_id(n_id, output_id))
+    return jnp.array(out_indices)
+
+
 
 
 def generate_batches(bandpasses, n_batches, batch_size, key):
@@ -241,35 +252,20 @@ compute_config.set_impl('bias', bc.nodes.bias)
 
 
 from jax import config
-config.update("jax_debug_nans", True)
+config.update("jax_debug_nans", False)
 
-seed = 100213
+seed = 10213
 total_batches = 2000
-batch_size = 32
+batch_size = 50
 loggers = None
-BP = bandpasses
+BP = [bandpasses[3]]*50
 bias_protein_names = ['NeonGreen']
 output_protein_name = 'iRFP720'
-
 if seed is not None:
     training_config['rng_key'] = seed
 key = jax.random.PRNGKey(training_config['rng_key'])
 training_config['steps_per_epoch'] = 100
-training_config['epochs'] = 30
-
-
-# --- init & batches generation
-
-# generate the compute stack
-stack = cmp.ComputeStack([NETWORK])
-stack.build(compute_config)
-
-def get_output_indices(stack, output_protein_name):
-    out_indices = []
-    for n_id, n in enumerate(stack.networks):
-        output_id = n.get_output_proteins().index(output_protein_name)
-        out_indices.append(stack.get_network_global_output_id(n_id, output_id))
-    return jnp.array(out_indices)
+training_config['epochs'] = 40
 
 def init_stack(rng):
     local_params, _ = stack.init(rng).filter_by_tag('local')
@@ -277,6 +273,11 @@ def init_stack(rng):
     full_params = ParameterTree.merge(local_params, shared_parameters)
     return full_params
 
+# --- init & batches generation
+
+# generate the compute stack
+stack = cmp.ComputeStack([NETWORK])
+stack.build(compute_config)
 output_indices = get_output_indices(stack, output_protein_name)
 
 
@@ -311,9 +312,16 @@ def evaluate_at(params, X, Z, key):
 
 
 def loss_func(dynamic, static, X, Y, Z, key):
-    yhat = evaluate_at(ParameterTree.merge(dynamic, static), X, Z, key)
-    assert yhat.shape == Y.shape, f"yhat shape: {yhat.shape}, Y shape: {Y.shape}"
-    return jnp.mean((yhat - Y) ** 2)
+    yhat = evaluate_at(ParameterTree.merge(dynamic, static), X, Z, key).squeeze()
+    y_on = (Y > 0.5).squeeze()
+    y_off = (Y < 0.5).squeeze()
+    n_on = jnp.sum(y_on)
+    n_off = jnp.sum(y_off)
+    yhat_on_avg = jnp.sum(jnp.where(y_on, yhat, 0)) / jnp.maximum(n_on, 1)
+    yhat_off_avg = jnp.sum(jnp.where(y_off, yhat, 0)) / jnp.maximum(n_off, 1)
+    loss = yhat_off_avg - yhat_on_avg
+    return loss
+
 
 def vgloss(dynamic, static, X, Y, Z, key):
     l, g = jax.vmap(value_and_grad(loss_func), in_axes=(-1, -1, -1, -1, -1, 0), out_axes=-1)(dynamic, static, X, Y, Z, key)
@@ -321,13 +329,13 @@ def vgloss(dynamic, static, X, Y, Z, key):
 
 def training_step(params, opt_state, x, y, key):
     static, dynamic = params.filter_by_tag(['shared', 'non_grad'], mode='any')
-    z = jax.random.uniform(epoch_key, (x.shape[0], stack.total_nb_of_outputs, x.shape[-1]))
+    z = jax.random.uniform(key, (x.shape[0], stack.total_nb_of_outputs, x.shape[-1]))
     keys = jax.random.split(key, x.shape[-1])
     losses, grads = vgloss(dynamic, static, x, y, z, keys)
     updates, opt_state = optimizer.update(grads, opt_state, dynamic)
     dynamic = optax.apply_updates(dynamic, updates)
     params = ParameterTree.merge(static, dynamic)
-    params = vmap(stack.post_process, in_axes=(-1,), out_axes=-1)(params)
+    # params = vmap(stack.post_process, in_axes=(-1,), out_axes=-1)(params)
     res = {
         'params': params,
         'losses': losses,
@@ -441,12 +449,14 @@ smoothed_losses = np.array([np.convolve(l, np.ones(smooth_window) / smooth_windo
 fig, ax = du.mkfig(1, 1, (15, 10))
 for i,l in enumerate(smoothed_losses):
     ax.plot(l, label=f'run {i}')
-ax.set_yscale('log')
+# ax.set_yscale('log')
 ax.set_xlabel('epoch')
 ax.set_ylabel('loss')
 # wirte the legend above each line
 labelLines(ax.get_lines(), zorder=2.5)
-plt.show()
+# plt.show()
+# save
+fig.savefig('losses.png', dpi=300)
 
 ##
 
@@ -471,21 +481,20 @@ def plot_eval(params, res=100, xlims=(0, 1)):
     fig.colorbar(im, cax=cax, orientation='vertical')
     ax.set_xlabel('$X_1$')
     ax.set_ylabel('$X_2$')
+    return fig, ax
 
 
 
-for i in range(len(bandpasses)):
+for i in range(len(BP)):
     p = jtu.tree_map(lambda x: x[...,i], params)
-    plot_eval(p, res, xlims)
+    f, a = plot_eval(p, res, xlims)
+    f.savefig(f'eval_{i}.png', dpi=300)
 
-##
-_, learned_dynamic = params.filter_by_tag(['shared', 'non_grad'], mode='any')
-learned_dynamic.data
-jax.flatten_util.ravel_pytree(learned_dynamic)[0]
+    # x, y = BP[i]
+    # fig, ax = plt.subplots()
+    # ax.scatter(x[:, 0], x[:, 1], c=y, s=2, cmap='inferno', alpha=0.75, vmin=0, vmax=0.6)
+    # ax.set_xlim(vlims_log)
+    # ax.set_ylim(vlims_log)
+    # plt.show()
 
-r = learned_dynamic.data['local/l5 aggregation_5x (2)/ratios']
-learned_dynamic.data
 
-##
-
-stack

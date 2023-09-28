@@ -520,7 +520,7 @@ def transform_nn(
     ):
         k1, k2 = jax.random.split(key, 2)
 
-        qid = params[f'local/{layer_name}/quantile_variable_id'][node_id].squeeze()
+        qid = jnp.squeeze(params[f'local/{layer_name}/quantile_variable_id'][node_id])
         quantile = quantiles[qid]
 
         val = jnp.array(values)
@@ -657,7 +657,7 @@ def sequestron_ERN(
         affinity = params[f'local/{local_layer_name}/affinity'][node_id]
         assert affinity.shape == (affinity_dim,)
 
-        qid = params[f'local/{local_layer_name}/quantile_variable_id'][node_id].squeeze()
+        qid = jnp.squeeze(params[f'local/{local_layer_name}/quantile_variable_id'][node_id])
 
         return MLP(
             *values,
@@ -736,7 +736,7 @@ def grouped_output(
         inputs = jnp.asarray(inputs)
         assert len(inputs) == len(input_shapes)
 
-        qid = params[f'local/{layer_name}/quantile_variable_id'][node_id].squeeze()
+        qid = jnp.squeeze(params[f'local/{layer_name}/quantile_variable_id'][node_id])
 
         res = vmap(
             partial(MLP_head, rng_key=key, params=params),
