@@ -36,6 +36,8 @@ const computeNodeTypes = {
   bias: CTENode,
   in: INNode,
   out: OUTNode,
+  input: INNode,
+  output: OUTNode,
   aggregation: AGGNode,
   source: SRCNode,
   numeric: NUMNode,
@@ -48,12 +50,18 @@ const computeNodeTypes = {
 };
 
 const typeDim = {
-  sequestron_ERN: { width: 150, height: 70 },
+  sequestron_ERN: { width: 200, height: 60 },
   sequestron_RECOMBINASE: { width: 100, height: 70 },
   translation: { width: 40, height: 80 },
   transcription: { width: 40, height: 80 },
+  inv_transcription: { width: 40, height: 5 },
+  inv_translation: { width: 40, height: 5 },
+  inv_source: { width: 40, height: 5 },
+  inv_aggregation: { width: 40, height: 5 },
+  source: { width: 30, height: 120 },
+  aggregation: { width: 150, height: 30 },
   bias: { width: 45, height: 40 },
-  output: { width: 20, height: 20 },
+  output: { width: 20, height: 50 },
 };
 
 class Util {
@@ -131,11 +139,11 @@ class Util {
     nodeWidth = 150,
     nodeHeight = 270,
     dimensionsDict = {},
-    direction = "TB"
+    direction = "TB",
   ) => {
     dagreGraph.setDefaultEdgeLabel(() => ({}));
     const isHorizontal = direction === "LR";
-    dagreGraph.setGraph({ rankdir: direction });
+    dagreGraph.setGraph({ rankdir: direction, multigraph: true, compound: true });
     nodes.forEach((node) => {
       const w = node.type in dimensionsDict ? dimensionsDict[node.type].width : nodeWidth;
       const h = node.type in dimensionsDict ? dimensionsDict[node.type].height : nodeHeight;
@@ -164,10 +172,14 @@ class Util {
         x: nodeWithPosition.x - w / 2,
         y: nodeWithPosition.y - h / 2,
       };
+
+      if (node.type == "aggregation") {
+        node.dragHandle = ".drag-handle";
+      }
+
       return node;
     });
     return { nodes, edges };
   };
-
 }
 export { Util as default, computeNodeTypes, typeDim };

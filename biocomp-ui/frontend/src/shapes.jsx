@@ -57,9 +57,9 @@ function TShape(props) {
       <path
         d="M 599.9074 -1163.6768 L 588.9074 -1173.2332 C 587.0266 -1174.8672 584.2299 -1174.8672 582.3491 -1173.2332 L 571.3491 -1163.6768 C 570.256 -1162.7272 569.62825 -1161.3503 569.62825 -1159.9023 L 569.62825 -1140.5898 C 569.62825 -1139.1418 570.256 -1137.765 571.3491 -1136.8153 L 582.3491 -1127.259 C 584.2299 -1125.625 587.0266 -1125.625 588.9074 -1127.259 L 599.9074 -1136.8153 C 601.0005 -1137.765 601.62825 -1139.1418 601.62825 -1140.5898 L 601.62825 -1159.9023 C 601.62825 -1161.3503 601.0005 -1162.7272 599.9074 -1163.6768 Z"
         stroke="black"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width=".75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth=".75"
         fill={props.topcolor}
       />
       <path
@@ -78,7 +78,7 @@ function TShape(props) {
         d="M 599.7309 -1132.767 L 588.9309 -1123.2657 C 587.0425 -1121.6043 584.214 -1121.6043 582.3256 -1123.2657 L 571.5256 -1132.767 C 570.4466 -1133.7163 569.82825 -1135.084 569.82825 -1136.521 L 569.82825 -1155.8711 C 569.82825 -1157.3082 570.4466 -1158.6759 571.5256 -1159.6251 L 582.3256 -1169.1265 C 584.214 -1170.7878 587.0425 -1170.7878 588.9309 -1169.1265 L 599.7309 -1159.6251 C 600.8099 -1158.6759 601.42825 -1157.3082 601.42825 -1155.8711 L 601.42825 -1136.521 C 601.42825 -1135.084 600.8099 -1133.7163 599.7309 -1132.767 Z"
         fill="white"
       />
-      <text transform="translate(571 -1172.032)" fill="black" text-anchor="middle">
+      <text transform="translate(571 -1172.032)" fill="black" textAnchor="middle">
         <tspan fontFamily="Roboto" fontSize="8" fontWeight="400" x="14" y="30">
           {props.txt}
         </tspan>
@@ -103,9 +103,9 @@ function ERNSeqShape(props) {
         d="M 549.42825 -1037.6328 L 679.20105 -1037.6328 C 680.8579 -1037.6328 682.20105 -1036.2896 682.20105 -1034.6328 L 682.20105 -992.7 C 682.20105 -991.0431 680.8579 -989.7 679.20105 -989.7 L 549.42825 -989.7 C 547.7714 -989.7 546.42825 -991.0431 546.42825 -992.7 L 546.42825 -1034.6328 C 546.42825 -1036.2896 547.7714 -1037.6328 549.42825 -1037.6328 Z"
         stroke="black"
         fill="white"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width=".5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth=".5"
       />
 
       <rect x="571.02825" y="-1044.7" width="83.8067" height="15.289767" fill="white" />
@@ -122,9 +122,9 @@ function ERNSeqShape(props) {
         d="M 649.9044 -1031.9997 L 649.9044 -1035.4445 L 642.2209 -1043.9 L 634.61465 -1035.4445 L 634.61465 -1031.9997 L 642.2209 -1040.4552 Z"
         stroke={props.rightcolor}
         fill={props.rightcolor}
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1"
       />
 
       <line
@@ -133,9 +133,9 @@ function ERNSeqShape(props) {
         x2="626.34815"
         y2="-1037.2718"
         stroke="black"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1"
       />
 
       <line
@@ -144,9 +144,9 @@ function ERNSeqShape(props) {
         x2="626.57995"
         y2="-1032.8465"
         stroke="black"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1"
       />
 
       <path
@@ -190,9 +190,9 @@ function RCBSeqShape(props) {
         d="M 549.42825 -1037.6328 L 679.20105 -1037.6328 C 680.8579 -1037.6328 682.20105 -1036.2896 682.20105 -1034.6328 L 682.20105 -992.7 C 682.20105 -991.0431 680.8579 -989.7 679.20105 -989.7 L 549.42825 -989.7 C 547.7714 -989.7 546.42825 -991.0431 546.42825 -992.7 L 546.42825 -1034.6328 C 546.42825 -1036.2896 547.7714 -1037.6328 549.42825 -1037.6328 Z"
         stroke="black"
         fill="white"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width=".5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth=".5"
       />
 
       <rect x="571.02825" y="-1044.7" width="83.8067" height="15.289767" fill="white" />
@@ -202,9 +202,9 @@ function RCBSeqShape(props) {
         x2="628.2302"
         y2="-1037.3718"
         stroke="black"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1"
       />
       <line
         x1="628.462"
@@ -212,9 +212,9 @@ function RCBSeqShape(props) {
         x2="628.462"
         y2="-1032.9466"
         stroke="black"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1"
       />
       <line
         x1="599.0749"
@@ -222,31 +222,31 @@ function RCBSeqShape(props) {
         x2="599.0749"
         y2="-1033.2497"
         stroke="black"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1"
       />
       <path
         d="M 592.7087 -1041.97 L 583.82826 -1037.4583 L 592.7087 -1032.9466 Z"
         stroke="black"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1"
       />
       <path
         d="M 586.1087 -1041.97 L 577.22826 -1037.4583 L 586.1087 -1032.9466 Z"
         stroke={props.leftcolor}
         fill={props.leftcolor}
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1"
       />
       <path
         d="M 634.82826 -1032.9466 L 643.7087 -1037.4583 L 634.82826 -1041.97 Z"
         stroke="black"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1"
       />
       <path
         d="M 641.42826 -1032.9466 L 650.3087 -1037.4583 L 641.42826 -1041.97 Z"
@@ -256,9 +256,9 @@ function RCBSeqShape(props) {
         d="M 641.42826 -1032.9466 L 650.3087 -1037.4583 L 641.42826 -1041.97 Z"
         stroke={props.rightcolor}
         fill={props.rightcolor}
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        stroke-width="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1"
       />
 
       <path
@@ -286,7 +286,7 @@ function RCBSeqShape(props) {
   );
 }
 
-function generateArcs(nhandles = 1, radius = 28, center=30, arc_span = 35, spacing = 10) {
+function generateArcs(keybase = '', nhandles = 1, radius = 28, center=30, arc_span = 35, spacing = 10 ) {
   let arcs = [];
   const total_span = nhandles * arc_span + (nhandles - 1) * spacing;
   const start_angle = 180 - total_span / 2;
@@ -294,6 +294,7 @@ function generateArcs(nhandles = 1, radius = 28, center=30, arc_span = 35, spaci
   for (let i = 0; i < nhandles; i++) {
     arcs.push(
       <path
+        key={keybase + i}
         d={Util.describeArc(
           center,
           center,

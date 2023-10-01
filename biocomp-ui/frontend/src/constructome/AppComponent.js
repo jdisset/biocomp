@@ -277,6 +277,7 @@ function NewAppComponent() {
   const selectXp = (name) => {
     selectItem(name, xpList, setXpList, filterRecipes);
   };
+
   const selectRecipe = (name) => {
     selectItem(name, recipeList, setRecipeList, filterXps);
     setGraph(null);

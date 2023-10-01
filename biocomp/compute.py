@@ -21,7 +21,7 @@ from . import nodes as nd
 from .network import Network
 from . import utils as ut
 from .utils import check, checkwrap
-from .parameters import ParameterTree
+from .parameters import ParameterTree, ParamPath
 from . import nodes
 
 from jax.typing import ArrayLike
@@ -105,7 +105,6 @@ class ComputeConfigManager:
         return self.__repr__()
 
 
-
 DEFAULT_COMPUTE_CONFIG = ComputeConfigManager()
 DEFAULT_COMPUTE_CONFIG.set_impl('transcription', nodes.transcription)
 DEFAULT_COMPUTE_CONFIG.set_impl('translation', nodes.translation)
@@ -115,9 +114,9 @@ DEFAULT_COMPUTE_CONFIG.set_impl('sequestron_ERN', nodes.ERN5p)
 DEFAULT_COMPUTE_CONFIG.set_impl('source', nodes.source)
 DEFAULT_COMPUTE_CONFIG.set_impl('inv_source', nodes.inv_source)
 DEFAULT_COMPUTE_CONFIG.set_impl('bias', nodes.bias)
-DEFAULT_COMPUTE_CONFIG.set_impl('inv_bias', nodes.inv_bias)
+# DEFAULT_COMPUTE_CONFIG.set_impl('inv_bias', nodes.inv_bias)compute
 DEFAULT_COMPUTE_CONFIG.set_impl('numeric', nodes.bias)
-DEFAULT_COMPUTE_CONFIG.set_impl('inv_numeric', nodes.inv_bias)
+# DEFAULT_COMPUTE_CONFIG.set_impl('inv_numeric', nodes.inv_bias)
 DEFAULT_COMPUTE_CONFIG.set_impl('aggregation', nodes.aggregation)
 DEFAULT_COMPUTE_CONFIG.set_impl('inv_aggregation', nodes.inv_aggregation)
 DEFAULT_COMPUTE_CONFIG.set_impl('output', nodes.grouped_output)
@@ -145,11 +144,10 @@ class VirtualNode:
 
     @staticmethod
     def generate_type_signature(network, compute_node_id):
-        node = network.compute_graph.loc[compute_node_id]
-        type = node['type']
-        n_inputs = len(node['input_from'])
-        n_outputs = len(node['output_to'])
-        return f'{type}_{n_inputs}_{n_outputs}'
+        ntype = network.compute_graph.at[compute_node_id, 'type']
+        n_inputs = len(network.compute_graph.at[compute_node_id, 'input_from'])
+        n_outputs = len(network.compute_graph.at[compute_node_id, 'output_to'])
+        return f'{ntype}_{n_inputs}_{n_outputs}'
 
     @classmethod
     def from_node(
@@ -163,6 +161,11 @@ class VirtualNode:
             type_signature=type_signature,
             batch_order=batch_order,
         )
+
+    def set_compute_node_column(self, col, value):
+        if self.network is None:
+            return
+        self.network.compute_graph.at[self.compute_node_id, col] = value
 
     def get_compute_node(self, col=None):
         if self.network is None:
@@ -268,7 +271,11 @@ class ComputeLayer:
             stack=stack,
             layer_id=self.layer_id,
         )
-        self.f_prepare, self.f_apply, self.f_out_shapes = impl
+
+        self.f_prepare = impl.prepare
+        self.f_apply = impl.apply
+        self.f_out_shapes = impl.output_shapes
+        self.f_commit = impl.commit
         self.is_built = True
 
     def get_n_outputs(self):
@@ -344,7 +351,7 @@ class ComputeStack:
         assert self.is_built, 'Stack not built'
         params = ParameterTree()
         # for l_id, layer in enumerate(self.layers):
-        # let's initialize the stacj it in reverse order 
+        # let's initialize the stacj it in reverse order
         # so that the inverse nodes can reference fwd ones after init
         for l_id, layer in reversed(list(enumerate(self.layers))):
             assert layer.is_built, 'Layer not built'
@@ -355,8 +362,8 @@ class ComputeStack:
             )
             if layer.f_prepare is not None:
                 layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
-            params.tag('local', 'local')
-            params.tag('shared', 'shared')
+        params.tag('local', 'local')
+        params.tag('shared', 'shared')
         # pp_params = self.post_process(params)
         # assert pp_params == params, 'Post process changed params'
         return params
@@ -388,7 +395,6 @@ class ComputeStack:
         """
         assert network_id < len(self.networks)
         return np.sum(n.get_nb_outputs() for n in self.networks[:network_id]) + output_id
-
 
     def get_node_from_net_and_compute_id(
         self, network_id: int, compute_node_id: int
@@ -430,8 +436,6 @@ class ComputeStack:
             for callback in self.post_process_callbacks:
                 params = callback(params)
         return params
-
-
 
     ##────────────────────────────────────────────────────────────────────────────}}}
 

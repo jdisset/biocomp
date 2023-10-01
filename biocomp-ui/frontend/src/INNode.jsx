@@ -9,7 +9,6 @@ function hasCopyNumber(data) {
 
 
 function INNode(props) {
-  console.log(props);
   return (
     <div className="input-node">
       <svg version="1.1" viewBox="569 -1352 33 55" width="32.5" height="53.34853">
@@ -27,11 +26,11 @@ function INNode(props) {
           d="M 569.89354 -1335.6822 L 569.89354 -1335.0644 L 569.89354 -1316.4485 C 569.89354 -1315.0064 570.5109 -1313.6351 571.58585 -1312.6893 L 582.40346 -1303.172 C 584.2531 -1301.5446 587.00344 -1301.5446 588.85305 -1303.172 L 599.67066 -1312.6893 C 600.7456 -1313.6351 601.36296 -1315.0064 601.36296 -1316.4485 L 601.36296 -1335.0644 L 601.36296 -1335.6822 L 601.36296 -1347.8122 C 601.36296 -1349.4623 600.0421 -1350.8 598.4127 -1350.8 L 572.8438 -1350.8 C 571.2144 -1350.8 569.89354 -1349.4623 569.89354 -1347.8122 Z"
           fill="white"
         />
-        <text clip-path="url(#clip_path)" transform="translate(569.89354 -1350.8)" fill="#322f30">
-          <tspan font-family="Roboto" font-size="8" font-weight="200" x="5" y="12">
+        <text clipPath="url(#clip_path)" transform="translate(569.89354 -1350.8)" fill="#322f30">
+          <tspan fontFamily="Roboto" fontSize="8" fontWeight="200" x="5" y="12">
 			  INPUT
           </tspan>
-          <tspan font-family="Roboto" font-size="15" font-weight="500" x="12" y="35">
+          <tspan fontFamily="Roboto" fontSize="15" fontWeight="500" x="12" y="35">
 			  {Util.zeroPad(props.data.extra.input_position, 1)}
           </tspan>
         </text>

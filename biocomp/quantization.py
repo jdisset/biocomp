@@ -15,7 +15,7 @@ def quantize_masked(x, possible_values, mask):
     if len(possible_values) == 1:
         return possible_values[0]
     else:
-        return quantize_masked_impl(x, possible_values, mask)
+        return quantize_masked_impl(x, possible_values, mask)[0]
 
 
 def quantize_masked_impl(x, qvalues, mask):
@@ -26,7 +26,7 @@ def quantize_masked_impl(x, qvalues, mask):
     dist = jnp.where(mask, jnp.abs(qvalues - x), jnp.inf)
     amin = jnp.argmin(dist)
     res = zero + qvalues[amin]
-    return res
+    return res, amin
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -36,7 +36,7 @@ def quantize_masked_impl(x, qvalues, mask):
 
 def get_quantized(
     values_to_quantize,
-    params:ParameterTree,
+    params: ParameterTree,
     quantization_values_path,
     quantization_mask_path,
     node_id,
@@ -62,6 +62,18 @@ def get_quantized(
         values_to_quantize, possible_values, masks
     )
 
+def get_quantized_rate_names(values_to_quantize, params, qnames, quantization_values_path, quantization_mask_path, node_id):
+    possible_values = jnp.atleast_1d(params[quantization_values_path].squeeze())
+    masks = params[quantization_mask_path][node_id]
+    assert masks.shape == (values_to_quantize.shape[0], len(possible_values))
+    names = []
+    for v, m in zip(values_to_quantize, masks):
+        _, i = quantize_masked_impl(v, possible_values, m)
+        names.append(qnames[i])
+    return names
+
+
+
 def get_all_possible_quantization_params(network) -> dict[str, list[str]]:
     # returns a dictionary of all possible parameters
     # they can be found at each row of the central_dogma_graph, in the params column
@@ -84,7 +96,7 @@ def get_available_quantizations(param_name, cdg_node_id, cdg):
               get_possible_values('translation_rate', ...) -> [None, '1xuORF', '2xuORF', ...]
     params are stored in the params column of the cdg as a dict {param_name:[possiblevaluees]}
     """
-    available_params = cdg.loc[cdg_node_id, 'params']
+    available_params = cdg.at[cdg_node_id, 'params']
     if param_name not in available_params:
         raise ValueError(
             f'Param {param_name} not available for cdg node {cdg_node_id}. Available: {available_params}'
@@ -92,9 +104,7 @@ def get_available_quantizations(param_name, cdg_node_id, cdg):
     return available_params[param_name]
 
 
-def get_quantization_mask(
-    qnames, pname, vnode, masks_per_node=1, **kwargs
-):
+def get_quantization_mask(qnames, pname, vnode, masks_per_node=1, **kwargs):
     """
     generate the quantization masks for a given vnode and parameter. One mask per input.
     - qnames: the list of quantization names for this parameter (e.g. ['hEF1a', ...])
@@ -105,7 +115,6 @@ def get_quantization_mask(
     """
     # example: generate_quantization_masks(['hEF1a', 'hEF1b', 'hEF1c'], params, 'tc_rate', vnode)
     compute_node_id = vnode.compute_node_id
-    stack_node_id = vnode.node_id
     network = vnode.network
     if network is None:
         # pure virtual node, no network, no masks!
@@ -116,7 +125,7 @@ def get_quantization_mask(
     cdf = network.compute_graph
     cdg = network.central_dogma_graph
 
-    cdg_ids = cdf.loc[compute_node_id]['cdg_input']
+    cdg_ids = cdf.at[compute_node_id, 'cdg_input']
     assert cdg_ids is not None, f'Node {compute_node_id} has no input CDG node'
     cdg_ids = [cdg_ids] if not isinstance(cdg_ids, list) else cdg_ids
 
@@ -142,6 +151,40 @@ def get_quantization_mask(
     # now we store the mask in the params dict, under the mask namespace,
     return mask
 
+
+def collapse_quantized_parameter(vnode, param_name, value):
+    """
+    collapse a quantized parameter into a single value
+    - vnode: the node we want to quantize
+    - param_name: the name of the parameter we want to quantize (e.g. 'tl_rate')
+    - value: the value of the parameter as a list of names (1 per input)
+    """
+
+    compute_node_id = vnode.compute_node_id
+    network = vnode.network
+    if network is None:
+        return
+    cdf = network.compute_graph
+    cdg = network.central_dogma_graph
+
+    cdg_ids = cdf.at[compute_node_id, 'cdg_input']
+    assert cdg_ids is not None, f'Node {compute_node_id} has no input CDG node'
+    cdg_ids = [cdg_ids] if not isinstance(cdg_ids, list) else cdg_ids
+
+    assert len(value) == len(cdg_ids), (
+        f'Node {compute_node_id} has {len(cdg_ids)} CDG inputs, '
+        f'but only {len(value)} values were provided'
+    )
+
+    for cid, val in zip(cdg_ids, value):
+        if isinstance(val, (list, tuple)):
+            assert len(val) == 1
+        else:
+            val = [val]
+        current_params = cdg.at[cid, 'params']
+        assert param_name in current_params, f'Param {param_name} not available for cdg node {cid}'
+        current_params[param_name] = val
+        cdg.at[cid, 'params'] = current_params
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

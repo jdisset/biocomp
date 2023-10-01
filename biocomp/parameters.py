@@ -249,10 +249,14 @@ class ParamPath:
         return hash(str(self))
 
     def __contains__(self, key):
-        if isinstance(key, ParamPath):
-            key = key._str
-        # check if substr
-        return key in self._str
+        if not isinstance(key, ParamPath):
+            key = ParamPath(key)
+        n = len(key)
+        for i in range(len(self.path)):
+            if self.path[i:i + n] == key.path:
+                return True
+        return False
+
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

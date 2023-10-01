@@ -84,7 +84,6 @@ tus_bp = {
 }
 
 
-
 # everything everywhere all at once:
 aggregations_bp = [
     ['A_pos_0', 'A_neg_0', 'B_pos_0', 'B_neg_0', 'C_pos_0', 'C_neg_0', 'x0color'],  # x0
@@ -136,7 +135,7 @@ inv_tr = partial(du.inv_tr, **logtr_conf)
 
 vlims = np.array([logtr_conf['offset'], logtr_conf['maxv']])
 
-vlims_log = tr(vlims) * 0.90
+vlims_log = tr(vlims) * 0.70
 
 vlims_log
 
@@ -178,6 +177,9 @@ def gen_bandpass(key):
     return points, normals
 
 
+jax.clear_caches()
+
+
 @partial(jit, static_argnums=(2,))
 def gen_bandpass_xz(vlims, key, nsamples=10000):
     k0, k1 = jax.random.split(key, 2)
@@ -189,8 +191,8 @@ def gen_bandpass_xz(vlims, key, nsamples=10000):
     return x, y
 
 
-rng = jax.random.PRNGKey(3)
-NBP = 25
+rng = jax.random.PRNGKey(4)
+NBP = 10
 bandpasses = [gen_bandpass_xz(vlims_log, k, nsamples=50000) for k in jax.random.split(rng, NBP)]
 
 for i, (x, z) in enumerate(bandpasses):
@@ -206,14 +208,13 @@ for i, (x, z) in enumerate(bandpasses):
 
 ### {{{                        --     train utils     --
 
+
 def get_output_indices(stack, output_protein_name):
     out_indices = []
     for n_id, n in enumerate(stack.networks):
         output_id = n.get_output_proteins().index(output_protein_name)
         out_indices.append(stack.get_network_global_output_id(n_id, output_id))
     return jnp.array(out_indices)
-
-
 
 
 def generate_batches(bandpasses, n_batches, batch_size, key):
@@ -252,26 +253,31 @@ compute_config.set_impl('bias', bc.nodes.bias)
 
 
 from jax import config
+
 config.update("jax_debug_nans", False)
 
-seed = 10213
+seed = 1021
 total_batches = 2000
-batch_size = 50
+batch_size = 32
 loggers = None
-BP = [bandpasses[3]]*50
+BP = [bandpasses[2]] * 20
 bias_protein_names = ['NeonGreen']
 output_protein_name = 'iRFP720'
 if seed is not None:
     training_config['rng_key'] = seed
 key = jax.random.PRNGKey(training_config['rng_key'])
 training_config['steps_per_epoch'] = 100
-training_config['epochs'] = 40
+training_config['epochs'] = 60
+training_config['warmup_epochs'] = 5
+training_config['optimizer'] = 'amsgrad'
+training_config['learning_rate'] = 2e-3
 
-def init_stack(rng):
+def init_stack(stack, rng):
     local_params, _ = stack.init(rng).filter_by_tag('local')
     local_params.data.check()
     full_params = ParameterTree.merge(local_params, shared_parameters)
     return full_params
+
 
 # --- init & batches generation
 
@@ -281,7 +287,7 @@ stack.build(compute_config)
 output_indices = get_output_indices(stack, output_protein_name)
 
 
-full_params = vmap(init_stack, out_axes=-1)(jax.random.split(key, len(BP)))
+full_params = vmap(partial(init_stack, stack), out_axes=-1)(jax.random.split(key, len(BP)))
 full_params.data.check()
 static_params, dynamic_params = full_params.filter_by_tag(['shared', 'non_grad'], mode='any')
 xbatches, ybatches = generate_batches(BP, total_batches, batch_size, key)
@@ -319,13 +325,17 @@ def loss_func(dynamic, static, X, Y, Z, key):
     n_off = jnp.sum(y_off)
     yhat_on_avg = jnp.sum(jnp.where(y_on, yhat, 0)) / jnp.maximum(n_on, 1)
     yhat_off_avg = jnp.sum(jnp.where(y_off, yhat, 0)) / jnp.maximum(n_off, 1)
-    loss = yhat_off_avg - yhat_on_avg
-    return loss
+    contrast_loss = yhat_off_avg - yhat_on_avg
+    shape_loss = jnp.mean(jnp.abs(yhat - Y * jnp.maximum(yhat_on_avg, 0.4)))
+    return shape_loss + 0.3 * contrast_loss
 
 
 def vgloss(dynamic, static, X, Y, Z, key):
-    l, g = jax.vmap(value_and_grad(loss_func), in_axes=(-1, -1, -1, -1, -1, 0), out_axes=-1)(dynamic, static, X, Y, Z, key)
+    l, g = jax.vmap(value_and_grad(loss_func), in_axes=(-1, -1, -1, -1, -1, 0), out_axes=-1)(
+        dynamic, static, X, Y, Z, key
+    )
     return l, g
+
 
 def training_step(params, opt_state, x, y, key):
     static, dynamic = params.filter_by_tag(['shared', 'non_grad'], mode='any')
@@ -346,7 +356,6 @@ def training_step(params, opt_state, x, y, key):
 
 
 keep_in_history = training_config.get('keep_in_history', ['losses'])
-
 
 
 def scannable_step(carry, i_x_y_k):
@@ -382,6 +391,7 @@ def no_scan_epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
             epoch_history.setdefault(k, []).append(v)
     return params, opt_state, epoch_history
 
+
 with ut.timer('Lowering the epoch_step function before compilation'):
     xb = ut.get_looped_slice(xbatches, 0 * steps_per_epoch, steps_per_epoch)
     yb = ut.get_looped_slice(ybatches, 0 * steps_per_epoch, steps_per_epoch)
@@ -389,10 +399,6 @@ with ut.timer('Lowering the epoch_step function before compilation'):
 with ut.timer('Compiling the epoch_step function'):
     compiled_epoch_step = lowered.compile()
 
-# compiled_epoch_step = jax.jit(epoch_step)
-# compiled_epoch_step = no_scan_epoch_step
-
-##
 
 def clog(epoch, training_config, epoch_history=None, **_):
     if epoch_history is not None and len(epoch_history['losses']) > 0:
@@ -406,6 +412,7 @@ def clog(epoch, training_config, epoch_history=None, **_):
         loss: {fmt(avg)} ± {fmt(std)} [min {fmt(lmin)}, max {fmt(lmax)}] in \
         {epoch_history["epoch_time"]:.2f}s"""
         )
+
 
 # --- main training loop
 params = deepcopy(full_params)
@@ -442,36 +449,46 @@ for i, epoch_key in enumerate(jax.random.split(key, training_config['epochs']), 
 
 ##
 from labellines import labelLine, labelLines
+
 loss = np.concatenate(all_losses)
-loss.shape # (epochs * steps_per_epoch, nruns)
+loss.shape  # (epochs * steps_per_epoch, nruns)
 smooth_window = 1000
-smoothed_losses = np.array([np.convolve(l, np.ones(smooth_window) / smooth_window, mode='valid') for l in loss.T])
+smoothed_losses = np.array(
+    [np.convolve(l, np.ones(smooth_window) / smooth_window, mode='valid') for l in loss.T]
+)
 fig, ax = du.mkfig(1, 1, (15, 10))
-for i,l in enumerate(smoothed_losses):
+for i, l in enumerate(smoothed_losses):
     ax.plot(l, label=f'run {i}')
 # ax.set_yscale('log')
 ax.set_xlabel('epoch')
 ax.set_ylabel('loss')
-# wirte the legend above each line
 labelLines(ax.get_lines(), zorder=2.5)
 # plt.show()
-# save
-fig.savefig('losses.png', dpi=300)
+# fig.savefig('losses.png', dpi=300)
 
 ##
 
-res = 100
-xlims = (0, 1)
-
-def plot_eval(params, res=100, xlims=(0, 1)):
+def plot_eval(params, res=100, xlims=(0, 0.7)):
     X = np.meshgrid(np.linspace(*xlims, res), np.linspace(*xlims, res))
     X = np.stack(X, axis=-1).reshape(-1, 2)
     Z = jnp.ones((res * res, stack.total_nb_of_outputs)) * 0.5
     Y = jax.jit(evaluate_at)(params, X, Z, key)
     fig, ax = du.mkfig(1, 1)
-    im = ax.imshow(Y.reshape(res, res), extent=[*xlims, *xlims], cmap='YlGnBu', origin='lower')
+    im = ax.imshow(
+        Y.reshape(res, res),
+        extent=[*xlims, *xlims],
+        cmap='YlGnBu',
+        origin='lower',
+        vmin=0,
+        vmax=0.6,
+    )
     ax.contour(
-        Y.reshape(res, res), 2, extent=[*xlims, *xlims], colors='k', origin='lower', alpha=0.25
+        Y.reshape(res, res),
+        [0.2, 0.4, 0.5],
+        extent=[*xlims, *xlims],
+        colors='k',
+        origin='lower',
+        alpha=0.25,
     )
     # colorbar
     from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -484,11 +501,10 @@ def plot_eval(params, res=100, xlims=(0, 1)):
     return fig, ax
 
 
-
 for i in range(len(BP)):
-    p = jtu.tree_map(lambda x: x[...,i], params)
-    f, a = plot_eval(p, res, xlims)
-    f.savefig(f'eval_{i}.png', dpi=300)
+    p = jtu.tree_map(lambda x: x[..., i], params)
+    f, a = plot_eval(p)
+    # f.savefig(f'eval_{i}.png', dpi=300)
 
     # x, y = BP[i]
     # fig, ax = plt.subplots()
@@ -496,5 +512,3 @@ for i in range(len(BP)):
     # ax.set_xlim(vlims_log)
     # ax.set_ylim(vlims_log)
     # plt.show()
-
-

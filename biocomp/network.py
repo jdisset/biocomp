@@ -910,17 +910,21 @@ class Network:
         mapping = self.get_inverted_input_positions()
         return output_arr[:, [mapping[i] for i in range(len(mapping))]]
 
-    def get_inverted_input_proteins(self):
+
+    def get_inverted_input_proteins(self, include_biases=False):
         """Returns the names of the proteins that are inputs of the inverted network, ordered"""
-        mapping = self.get_inverted_input_positions()
+        mapping = self.get_inverted_input_positions(include_biases)
         output_proteins = self.get_output_proteins()
         assert len(mapping) <= len(output_proteins)
         return [output_proteins[mapping[i]] for i in range(len(mapping))]
 
-    def get_inverted_input_positions(self):
+    def get_inverted_input_positions(self, include_biases=False):
         """Returns a mapping from input position to output position"""
         mapping = {}  # input number -> output position
-        inputs = self.compute_graph[self.compute_graph['type'] == 'input']
+        mask = self.compute_graph['type'] == 'input'
+        if include_biases:
+            mask = mask | (self.compute_graph['type'] == 'bias')
+        inputs = self.compute_graph[mask]
         for _, row in inputs.iterrows():
             assert 'input_position' in row.extra, f'input_position not in {row.extra}'
             assert 'input_from_output' in row.extra, f'input_from_output not in {row.extra}'
@@ -929,6 +933,11 @@ class Network:
         assert set(mapping.keys()) == set(range(len(mapping.keys()))), f'Invalid mapping: {mapping}'
         assert len(mapping.keys()) == len(set(mapping.values())), f'Invalid mapping: {mapping}'
         return mapping
+
+    def get_dependent_output_proteins(self):
+        all_outputs = self.get_output_proteins()
+        input_proteins = self.get_inverted_input_proteins(include_biases=True)
+        return [p for p in all_outputs if p not in input_proteins]
 
     def set_input_as_bias(self, input_protein_name):
         """Sets this input protein as a bias node (instead of an input one)"""

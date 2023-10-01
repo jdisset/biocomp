@@ -292,8 +292,8 @@ bfp_df = cal.controls[('EBFP2',)]
 yfp_df = cal.controls[('EYFP',)]
 mkate_df = cal.controls[('MKATE',)]
 all_df = cal.controls[('ALL')]
-df = all_df
-df[df['FITC']<0]
+compg = all_df
+compg[compg['FITC']<0]
 43/76
 
 # df = bfp_df
@@ -318,7 +318,7 @@ df[df['FITC']<0]
 # a,b
 # params
 
-Y = df.values
+Y = compg.values
 X = cal.apply(Y)
 
 

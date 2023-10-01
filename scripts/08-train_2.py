@@ -69,10 +69,10 @@ if log:
 else:
     bins = np.linspace(vmin, vmax, nbins)
 coords = np.array([np.digitize(data[:, i], bins[:, b]) for b, i in enumerate(bin_columns)]).T
-df = pd.DataFrame(data)
-df['coords'] = [tuple(x) for x in coords]
-df = df.groupby('coords').agg({stat_column: ['mean', 'std', 'count']})
-df.columns = ['mean', 'std', 'count']
+compg = pd.DataFrame(data)
+compg['coords'] = [tuple(x) for x in coords]
+compg = compg.groupby('coords').agg({stat_column: ['mean', 'std', 'count']})
+compg.columns = ['mean', 'std', 'count']
 bins
 
 # plot all losses. They are stored in a list where each element
@@ -457,9 +457,9 @@ plt.show()
 out_proteins = model.get_output_proteins()
 za = out_proteins.index('eYFP')
 xa, ya = out_proteins.index('eBFP'), out_proteins.index('mKate')
-df, bins = du.binstats(y, [xa, ya], za, nbins=nbins)
+compg, bins = du.binstats(y, [xa, ya], za, nbins=nbins)
 du.heatmap(
-    df,
+    compg,
     bins,
     figscale=1.0,
     axis_names=[out_proteins[xa], out_proteins[ya], out_proteins[za]],

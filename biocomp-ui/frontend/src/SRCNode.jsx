@@ -11,9 +11,8 @@ function SRCNode(props) {
   const circle_radius = 28;
   const center = circle_radius + 2;
 
-
   const nhandles = props.data.output_to.length;
-  let arcs = generateArcs(nhandles, circle_radius, center);
+  let arcs = generateArcs("src_arc_" + props.data.id, nhandles, circle_radius, center);
 
   const handle_padding = 1;
   function generateHandles(arc_span = 35, spacing = 10, radius = circle_radius) {
@@ -30,9 +29,10 @@ function SRCNode(props) {
         <Handle
           type="source"
           position={Position.Bottom}
-          id={i + 1}
+          id={i}
+          key={"src_handle_" + props.data.id + "_" + i}
           style={{ left: center + arc_center_x, bottom: center + arc_center_y }}
-        />
+        />,
       );
     }
     return handles;
@@ -41,7 +41,6 @@ function SRCNode(props) {
 
   return (
     <div className="input-node">
-
       <svg
         width={(circle_radius + 2) * 2}
         height={(circle_radius + 2) * 2}
@@ -50,11 +49,11 @@ function SRCNode(props) {
         xmlns="http://www.w3.org/2000/svg"
       >
         <circle cx={center} cy={center} r={circle_radius + 1.0} fill="white" />
-        <circle cx={center} cy={center} r={circle_radius} stroke="#EEEEEE" stroke-width="3" />
+        <circle cx={center} cy={center} r={circle_radius} stroke="#EEEEEE" strokeWidth="3" />
 
         {arcs}
 
-        <circle cx={center} cy={center} r={circle_radius + 1.5} stroke="black" stroke-width="0.5" />
+        <circle cx={center} cy={center} r={circle_radius + 1.5} stroke="black" strokeWidth="0.5" />
         <text fill="black" fontSize="8" letterSpacing="-0.05em">
           <tspan x={center} y={center + 2} textAnchor="middle">
             {props.data.source_id}
@@ -66,4 +65,5 @@ function SRCNode(props) {
     </div>
   );
 }
+
 export default SRCNode;

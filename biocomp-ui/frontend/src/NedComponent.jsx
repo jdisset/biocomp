@@ -38,3 +38,5 @@ const StaticComponent = NedComponent;
 export default StreamlitComponent;
 
 export { StaticComponent };
+
+

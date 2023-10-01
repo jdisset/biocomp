@@ -19,22 +19,29 @@ if TYPE_CHECKING:
 from jax.typing import ArrayLike
 from typing import Callable, Tuple, Sequence
 from typing import NewType
+from dataclasses import dataclass
 
-# LayerInstance = NewType("LayerInstance", Tuple[Callable, Callable, Sequence[Tuple[int]]])
-
-LayerInstance = Tuple[Callable, Callable, Sequence[Tuple[int]]]
 PRNGKey = ArrayLike
 
 
 # =========================== Utils ===========================
+### {{{                 --     misc    --
 def generate_layer_name(stack, layer_id, name):
     if stack is None:
-        return f'l{layer_id}::{name}'
+        return f'{layer_id}/{name}'
     else:
         n_nodes = len(stack.layers[layer_id].nodes)
         n_layers = len(stack.layers)
-        return f'l{layer_id} {name} ({n_nodes})'
+        return f'{layer_id}/{name} ({n_nodes})'
 
+
+@dataclass
+class LayerInstance:
+    prepare: Callable
+    apply: Callable
+    output_shapes: Sequence[Tuple[int]]
+    commit: Callable = None
+##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                 --     quantile variable helpers     --
 
@@ -174,7 +181,7 @@ def single_passthrough(input_shapes: Sequence[Tuple[int]], *_, **__) -> LayerIns
 
     output_shapes = input_shapes
 
-    return empty_prepare, apply, output_shapes
+    return LayerInstance(empty_prepare, apply, output_shapes)
 
 
 # source node is just an L2 plasmid, i.e an aggregation that has a fixed ratio of 1:1
@@ -189,7 +196,7 @@ def source(input_shapes: Sequence[Tuple[int]], n_outputs: int, **_) -> LayerInst
 
     output_shapes = input_shapes * n_outputs
 
-    return empty_prepare, apply, output_shapes
+    return LayerInstance(empty_prepare, apply, output_shapes)
 
 
 # inverse of source is just a passthrough, as it's only inverted when only one output and one input
@@ -218,14 +225,15 @@ def bias(
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> ArrayLike:
         return params[f'{namespace}/value'][node_id]
 
+    def commit(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
+        for i, n in enumerate(nodelist):
+            extra = n.get_compute_node('extra') or {}
+            extra['bias_value'] = params[f'{namespace}/value'][i]
+            n.set_compute_node_column('extra', extra)
+
     output_shapes = [shape]
 
-    return prepare, apply, output_shapes
-
-
-# inverse of numeric is just a pass-through
-def inv_bias(*args, **kwargs) -> LayerInstance:
-    return single_passthrough(*args, **kwargs)
+    return LayerInstance(prepare, apply, output_shapes, commit=commit)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -282,9 +290,15 @@ def aggregation(
         ratios = params[f'{namespace}/{pname}'][node_id][:n_outputs]
         return jnp.abs(jnp.array(ratios)) * input
 
+    def commit(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
+        for i, n in enumerate(nodelist):
+            extra = n.get_compute_node('extra') or {}
+            extra['ratios'] = params[f'{namespace}/{pname}'][i]
+            n.set_compute_node_column('extra', extra)
+
     output_shape = input_shapes * n_outputs
 
-    return prepare, apply, output_shape
+    return LayerInstance(prepare, apply, output_shape, commit)
 
 
 def inv_aggregation(
@@ -298,7 +312,6 @@ def inv_aggregation(
     # an inverse aggregation node always has 1 input and 1 output
     assert len(input_shapes) == 1, f'inverse_Aggregation expects 1 input, got {len(input_shapes)}'
     assert n_outputs == 1, f'inverse_Aggregation expects 1 output, got {n_outputs}'
-
 
     local_layer_name = generate_layer_name(stack, layer_id, f'inverse_aggregation')
     namespace = f'local/{local_layer_name}'
@@ -323,8 +336,8 @@ def inv_aggregation(
 
             params.at(f'{namespace}/ratios', ref, overwrite=None)
 
-
     EPSILON = 1e-9
+
     def apply(
         input: ArrayLike,
         quantiles: ArrayLike,
@@ -341,7 +354,7 @@ def inv_aggregation(
         return input / jnp.maximum(ratio, EPSILON)
 
     output_shape = input_shapes
-    return prepare, apply, output_shape
+    return LayerInstance(prepare, apply, output_shape)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -527,7 +540,6 @@ def transform_nn(
         rates = params[f'local/{layer_name}/{rate_name}'][node_id]
         assert val.shape == (len(input_shapes), *input_shapes[0])
         assert rates.shape == (len(input_shapes), rate_dim)
-
         qrates = qz.get_quantized(
             rates, params, quantization_values_path, quantization_mask_path, node_id
         )
@@ -545,9 +557,22 @@ def transform_nn(
         # then we apply a final outer layer to the summed output:
         return outer(inner_out, params, k2)
 
+    def commit(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
+        for node_id, node in enumerate(nodelist):
+            rates = params[f'local/{layer_name}/{rate_name}'][node_id]
+            collapsed_names = qz.get_quantized_rate_names(
+                rates,
+                params,
+                quantization_names,
+                quantization_values_path,
+                quantization_mask_path,
+                node_id,
+            )
+            qz.collapse_quantized_parameter(node, rate_name, collapsed_names)
+
     output_shape = [(1,)]
 
-    return prepare, apply, output_shape
+    return LayerInstance(prepare, apply, output_shape, commit=commit)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -669,11 +694,10 @@ def sequestron_ERN(
 
     output_shape = [(1,)]
 
-    return prepare, apply, output_shape
+    return LayerInstance(prepare, apply, output_shape)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 
 ### {{{                    --     output (fluorescence) node     --
 def grouped_output(
@@ -746,11 +770,10 @@ def grouped_output(
 
     output_shape = [(1,)] * len(input_shapes)
 
-    return prepare, apply, output_shape
+    return LayerInstance(prepare, apply, output_shape)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
-
 
 ### {{{                    --     defaults & aliases     --
 DEFAULT_AVAILABLE_TC_RATES = ['hEF1a']

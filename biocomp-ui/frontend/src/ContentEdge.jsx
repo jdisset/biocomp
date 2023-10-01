@@ -88,18 +88,18 @@ export default function CustomEdge({
   let itemsAsText = "";
   if (data.srccdg && (data.srcdata.type == "transcription" || data.srcdata.type == "translation")) {
     const content = data.srccdg.content;
-	// params is a dictionary of the parameters of the edge
-	var params = {};
-	if (data.srccdg.params) {
-		params = data.srccdg.params;
-		//if (data.srcdata.type == "transcription") {
-			//var params = data.srccdg.params["tc_rate"];
-		//} else if (data.srcdata.type == "translation") {
-			//var params = data.srccdg.params["tl_rate"];
-		//}
-	}
+    // params is a dictionary of the parameters of the edge
+    var params = {};
+    if (data.srccdg.params) {
+      params = data.srccdg.params;
+      //if (data.srcdata.type == "transcription") {
+      //var params = data.srccdg.params["tc_rate"];
+      //} else if (data.srcdata.type == "translation") {
+      //var params = data.srccdg.params["tl_rate"];
+      //}
+    }
 
-    const listItems = data.srccdg.content.map((e) => <li>{e}</li>);
+    const listItems = content.map((e, i) => <li key={i}>{e}</li>);
     const height = baseHeight * listItems.length + 10;
 
     foreignObject = (
@@ -131,7 +131,9 @@ export default function CustomEdge({
             strokeWidth="10"
             className="edgecontent-text"
           >
-			  {content.join(" + ") + "   " + (Object.keys(params).length > 0 ? JSON.stringify(params) : "")}
+            {content.join(" + ") +
+              "   " +
+              (Object.keys(params).length > 0 ? JSON.stringify(params) : "")}
           </text>
 
           <text
@@ -142,7 +144,9 @@ export default function CustomEdge({
             alignmentBaseline="central"
             className="edgecontent-text"
           >
-			  {content.join(" + ") + "   " + (Object.keys(params).length > 0 ? JSON.stringify(params) : "")}
+            {content.join(" + ") +
+              "   " +
+              (Object.keys(params).length > 0 ? JSON.stringify(params) : "")}
           </text>
         </>
       );

@@ -271,14 +271,14 @@ len(mkate_df)
 len(blank_df)
 np.median(cal.blanks.values, axis=0)
 # Pdf = cal.controls[('EYFP', 'EBFP2', 'MKATE')]
-df = all_df
+compg = all_df
 # df = bfp_df
 # df = mkate_df
 # df = yfp_df
 
-Y = df.values
+Y = compg.values
 Y = cal.to_MEF(Y)
-channels = df.columns
+channels = compg.columns
 X = cal.apply(Y)
 
 fluonames = cal._Calibration__fluo_proteins

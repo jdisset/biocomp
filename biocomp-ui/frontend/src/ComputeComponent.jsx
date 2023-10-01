@@ -18,7 +18,8 @@ import ContentEdge from "./ContentEdge.jsx";
 import dagre from "dagre";
 
 import images from "./grnsymbols/*.png";
-import React, { ReactNode, useRef } from "react";
+import React, { ReactNode, useRef, useEffect, useMemo, useCallback } from "react";
+
 import ReactFlow, {
   ReactFlowProvider,
   addEdge,
@@ -31,7 +32,6 @@ import Util from "./util.jsx";
 // from util we also want typeDim
 import { typeDim, computeNodeTypes } from "./util.jsx";
 
-
 console.log("ComputeComponent.jsx loaded");
 
 function getEdgeLabel(data) {
@@ -42,6 +42,7 @@ const computeEdgeTypes = {
   content: ContentEdge,
 };
 
+// there can be a handleNodeChange functions passed
 function ComputeComponent(props) {
   if (!props.data) {
     return null;
@@ -52,6 +53,7 @@ function ComputeComponent(props) {
     const elements = rootRef.current;
     Util.exportAsImage(elements, "test");
   };
+
   const styled_edges = props.data.edges.map((e) => ({
     style: {
       stroke: "black",
@@ -62,10 +64,60 @@ function ComputeComponent(props) {
     ...e,
   }));
 
-  const dagreGraph = new dagre.graphlib.Graph();
-  const layouted = Util.getLayoutedElements(dagreGraph, props.data.nodes, styled_edges, 60, 60, typeDim);
+  const styled_nodes = props.data.nodes.map((n) => ({
+    ...n,
+    type: n.type == "input" ? "in" : n.type == "output" ? "out" : n.type,
+  }));
+
+  const dagreGraph = new dagre.graphlib.Graph({ multigraph: true, compound: true });
+  const layouted = Util.getLayoutedElements(
+    dagreGraph,
+    styled_nodes,
+    styled_edges,
+    30,
+    80,
+    typeDim,
+  );
+
   const [nodes, setNodes, onNodesChange] = useNodesState(layouted.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(layouted.edges);
+
+
+
+
+
+  
+
+
+
+  useEffect(() => {
+    if (props.handleNodeChange) {
+      const new_nodes = props.handleNodeChange(nodes);
+      // check if their json representation is the same
+      if (new_nodes != undefined && JSON.stringify(new_nodes) != JSON.stringify(nodes)) {
+        setNodes(new_nodes);
+      }
+      console.log("nodes changed");
+    }
+  }, [nodes]);
+
+  function fillEdgesWithNodeData(edges, nodes) {
+    return edges.map((e) => {
+      const src_id = parseInt(e.data.source_node_list_id);
+      const tgt_id = parseInt(e.data.target_node_list_id);
+      const src_node = nodes[src_id];
+      const tgt_node = nodes[tgt_id];
+      return {
+        ...e,
+        data: {
+          ...e.data,
+          srcdata: src_node.data,
+          tgtdata: tgt_node.data,
+        },
+      };
+    });
+  }
+
   return (
     <div
       style={{
@@ -75,7 +127,7 @@ function ComputeComponent(props) {
     >
       <ReactFlow
         nodes={nodes}
-        edges={edges}
+        edges={fillEdgesWithNodeData(edges, nodes)}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         nodeTypes={computeNodeTypes}
