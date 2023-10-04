@@ -1,37 +1,12 @@
-import {
-  Streamlit,
-  StreamlitComponentBase,
-  withStreamlitConnection,
-} from "streamlit-component-lib";
-import SEQNode from "./SEQNode.jsx";
-import AGGNode from "./AGGNode.jsx";
-import SRCNode from "./SRCNode.jsx";
-import TLNode from "./TLNode.jsx";
-import TCNode from "./TCNode.jsx";
-import INNode from "./INNode.jsx";
-import OUTNode from "./OUTNode.jsx";
-import NUMNode from "./NUMNode.jsx";
-import CTENode from "./CTENode.jsx";
-import INVNode from "./INVNode.jsx";
-import DENDNode from "./DENDNode.jsx";
 import ContentEdge from "./ContentEdge.jsx";
 import dagre from "dagre";
-
-import images from "./grnsymbols/*.png";
 import React, { ReactNode, useRef, useEffect, useMemo, useCallback } from "react";
+import ReactFlow, { useNodesState, useEdgesState, useNodesInitialized } from "reactflow";
 
-import ReactFlow, {
-  ReactFlowProvider,
-  addEdge,
-  useNodesState,
-  useEdgesState,
-} from "react-flow-renderer";
-
-import html2canvas from "html2canvas";
 import Util from "./util.jsx";
-// from util we also want typeDim
 import { typeDim, computeNodeTypes } from "./util.jsx";
 
+import "reactflow/dist/style.css";
 console.log("ComputeComponent.jsx loaded");
 
 function getEdgeLabel(data) {
@@ -47,12 +22,6 @@ function ComputeComponent(props) {
   if (!props.data) {
     return null;
   }
-  const exportRef = React.createRef();
-  const rootRef = useRef(null);
-  const onClick = () => {
-    const elements = rootRef.current;
-    Util.exportAsImage(elements, "test");
-  };
 
   const styled_edges = props.data.edges.map((e) => ({
     style: {
@@ -82,24 +51,13 @@ function ComputeComponent(props) {
   const [nodes, setNodes, onNodesChange] = useNodesState(layouted.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(layouted.edges);
 
-
-
-
-
-  
-
-
+  const nodesInitialized = useNodesInitialized({});
 
   useEffect(() => {
-    if (props.handleNodeChange) {
-      const new_nodes = props.handleNodeChange(nodes);
-      // check if their json representation is the same
-      if (new_nodes != undefined && JSON.stringify(new_nodes) != JSON.stringify(nodes)) {
-        setNodes(new_nodes);
-      }
-      console.log("nodes changed");
+    if (props.nodeInitHook) {
+      props.nodeInitHook(nodesInitialized);
     }
-  }, [nodes]);
+  }, [nodesInitialized]);
 
   function fillEdgesWithNodeData(edges, nodes) {
     return edges.map((e) => {
@@ -119,12 +77,7 @@ function ComputeComponent(props) {
   }
 
   return (
-    <div
-      style={{
-        width: props.data.width === undefined ? "100%" : props.data.width,
-        height: props.data.height === undefined ? 1000 : props.data.height,
-      }}
-    >
+    <div id="graph" style={{ height: "100vh", width: "100vw" }}>
       <ReactFlow
         nodes={nodes}
         edges={fillEdgesWithNodeData(edges, nodes)}
@@ -132,7 +85,6 @@ function ComputeComponent(props) {
         onEdgesChange={onEdgesChange}
         nodeTypes={computeNodeTypes}
         edgeTypes={computeEdgeTypes}
-        fitView
       />
     </div>
   );

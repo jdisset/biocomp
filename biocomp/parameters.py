@@ -38,7 +38,7 @@ def pretty_str(x):
             with np.printoptions(precision=3):
                 msg = str(x)
         else:
-            with np.printoptions(precision=3, edgeitems=2, threshold=5):
+            with np.printoptions(precision=3, edgeitems=4, threshold=8):
                 typestr = "jax" if isinstance(x, jnp.ndarray) else "numpy"
                 msg = f"{x.shape} {x.dtype} {typestr} array:\n{np.asarray(x)}"
 

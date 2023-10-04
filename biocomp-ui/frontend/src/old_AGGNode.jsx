@@ -3,55 +3,50 @@ import { Handle, Position } from "reactflow";
 import { theme } from "./shapes.jsx";
 import Util from "./util.jsx";
 import ParamInput from "./ParamInput.jsx";
-import IndividualParamInput from "./IndividualParamInput.jsx";
 
 function AGGNode(props) {
   /*──────────────────────────────▼     draw functions    ▼───────────────────────────────*/
+  let nCircles = props.data.output_to.length;
+  let circleRadius = 15;
+  let circleSpacing = 8;
 
-  const nCircles = props.data.output_to.length;
-  const circleRadius = 15;
-  const circleSpacing = 8;
+  function generateCircles(ratios = null) {
+    let circles = [];
+    for (let i = 0; i < nCircles; i++) {
+      let x = circleRadius + i * (circleRadius * 2 + circleSpacing);
+      let y = circleRadius;
+      circles.push(
+        <circle
+          cx={x}
+          cy={y}
+          r={circleRadius - 0.5}
+          stroke="black"
+          strokeWidth="0.5"
+          key={"agg_circ_" + i}
+          onMouseDown={(e) => handleCircleClick(e, i, x - 1, y - 1)}
+        />,
+      );
 
-  const generateCircles = useCallback(
-    (ratios = null) => {
-      let circles = [];
-      for (let i = 0; i < nCircles; i++) {
-        const x = circleRadius + i * (circleRadius * 2 + circleSpacing);
-        const y = circleRadius;
+      if (ratios) {
+        console.assert(ratios.length == nCircles);
         circles.push(
-          <circle
-            cx={x}
-            cy={y}
-            r={circleRadius - 0.5}
-            stroke="black"
-            strokeWidth="0.5"
-            key={"agg_circ_" + i}
-            onMouseDown={(e) => setMouseDownInfo({ event: e, index: i, x: x, y: y })}
-          />,
+          <text
+            key={"agg_text_" + i}
+            x={x}
+            y={y + 3}
+            textAnchor="middle"
+            fill="black"
+            fontSize="8px"
+            letterSpacing="0"
+            onMouseDown={(e) => handleCircleClick(e, i, x - 1, y - 1)}
+          >
+            {ratios[i].toFixed(2)}
+          </text>,
         );
-
-        if (ratios) {
-          console.assert(ratios.length == nCircles);
-          circles.push(
-            <text
-              key={"agg_text_" + i}
-              x={x}
-              y={y + 3}
-              textAnchor="middle"
-              fill="black"
-              fontSize="8px"
-              letterSpacing="0"
-              onMouseDown={(e) => setMouseDownInfo({ event: e, index: i, x: x, y: y })}
-            >
-              {ratios[i].toFixed(2)}
-            </text>,
-          );
-        }
       }
-      return circles;
-    },
-    [ratios],
-  );
+    }
+    return circles;
+  }
 
   // then generate a line in between each circles:
   function generateLines() {
@@ -107,50 +102,68 @@ function AGGNode(props) {
   const [circles, setCircles] = useState(generateCircles(ratios));
 
   useEffect(() => {
-    setCircles(generateCircles(ratios));
-    console.log("agg node updated");
+    if (props.data.tunable) {
+      for (const [path, i, name, value] of props.data.tunable) {
+        if (name == "ratios") {
+          setRatios(value);
+        }
+      }
+    } else if (props.data.extra && props.data.extra.ratios) {
+      setRatios(props.data.extra.ratios);
+    }
+  }, [props.data]);
+
+  useEffect(() => {
+    if ("tunable" in props.data) {
+      const new_tunable = props.data.tunable.map(([path, i, name, value]) => {
+        return [path, i, name, name == "ratios" ? ratios : value];
+      });
+      props.data.updateMyParams(new_tunable);
+    }
   }, [ratios]);
 
-  const total_width = nCircles * (circleRadius * 2 + circleSpacing) - circleSpacing;
+  const updateRatio = useCallback(
+    (index, value) => {
+      let new_ratios = [...ratios];
+      new_ratios[index] = parseFloat(value);
+      setRatios(new_ratios);
+    },
+    [ratios],
+  );
 
-  const initialMouseDownInfo = { event: null, index: -1, x: -1, y: -1 };
-  const [mouseDownInfo, setMouseDownInfo] = useState(initialMouseDownInfo);
+  useEffect(() => {
+    setCircles(generateCircles(ratios));
+  }, [ratios]);
 
-  const generateParamInputs = useCallback(() => {
-    if ("tunable" in props.data) {
-      let ratioIsTunable = false;
-      for (const [path, i, name, value] of props.data.tunable)
-        if (name == "ratios") {
-          ratioIsTunable = true;
-          break;
-        }
+  const [paramProps, setParamProps] = useState({
+    param_position: { x: 0, y: 0 },
+    mouse_position: { x: 0, y: 0 },
+    display: false,
+    value: 0,
+    onChange: null,
+  });
 
-      if (ratioIsTunable) {
-        let inputs = [];
-        for (let i = 0; i < nCircles; i++) {
-          inputs.push(
-            <IndividualParamInput
-              key={"agg_param_input_" + i}
-              mouseDownEvent={i == mouseDownInfo.index ? mouseDownInfo.event : null}
-              objpos={{ x: mouseDownInfo.x, y: mouseDownInfo.y }}
-              clearMouseDownEvent={() => setMouseDownInfo(initialMouseDownInfo)}
-              pname="ratios"
-              subname={i}
-              tunableData={props.data.tunable}
-              updateParams={props.data.updateMyParams}
-              pvalue={ratios}
-              setPValue={setRatios}
-            />,
-          );
-        }
-        return inputs;
-      }
+  function handleCircleClick(event, index, x, y) {
+    if (ratios) {
+      let value = ratios[index];
+      const callback = (value) => {
+        updateRatio(index, value);
+      };
+      setParamProps({
+        param_position: { x: x, y: y },
+        mouse_position: { x: event.clientX, y: event.clientY },
+        display: true,
+        value: value,
+        onChange: callback,
+      });
     }
-  }, [props.data, ratios, mouseDownInfo, nCircles]);
+  }
 
+  const total_width = nCircles * (circleRadius * 2 + circleSpacing) - circleSpacing;
   return (
     <>
-      <div className="param-inputs">{generateParamInputs()}</div>
+
+
       <div className="input-node">
         <svg
           width={total_width}
@@ -179,3 +192,12 @@ function AGGNode(props) {
   );
 }
 export default AGGNode;
+
+      //<ParamInput
+        ////isDragging={paramProps.display}
+        ////startMousePosition={paramProps.mouse_position}
+        ////startValue={paramProps.value}
+        ////objPosition={paramProps.param_position}
+        ////onChange={paramProps.onChange}
+        ////onClose={() => setParamProps({ ...paramProps, display: false })}
+      ///>

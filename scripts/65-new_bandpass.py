@@ -492,7 +492,6 @@ def plot_eval(params, res=100, xlims=(0, 0.7)):
     )
     # colorbar
     from mpl_toolkits.axes_grid1 import make_axes_locatable
-
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.1)
     fig.colorbar(im, cax=cax, orientation='vertical')

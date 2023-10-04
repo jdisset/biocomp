@@ -1,5 +1,5 @@
 import React, { ReactNode, useCallback } from "react"
-import { Handle, Position } from "react-flow-renderer"
+import { Handle, Position } from "reactflow"
 
 function OUTNode(props) {
   return (

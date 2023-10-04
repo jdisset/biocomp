@@ -1,6 +1,6 @@
 import React, { ReactNode, useCallback } from "react";
 import { ERNSeqShape, RCBSeqShape, theme } from "./shapes.jsx";
-import { Handle, Position } from "react-flow-renderer";
+import { Handle, Position } from "reactflow";
 
 const zeroPad = (num, places) => String(num).padStart(places, "0");
 const getShape = (name, props) => {

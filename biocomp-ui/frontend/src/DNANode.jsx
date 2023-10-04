@@ -1,5 +1,5 @@
 import React, { ReactNode, useCallback } from "react";
-import { Handle, Position } from "react-flow-renderer";
+import { Handle, Position } from "reactflow";
 import ReactTooltip from "react-tooltip";
 import DNAContent from "./DNAContent.jsx";
 

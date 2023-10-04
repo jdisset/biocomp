@@ -6,7 +6,6 @@ import Util from "../util.jsx";
 import ComputeComponent from "../ComputeComponent.jsx";
 import "../style.css";
 import styled from "styled-components";
-
 import ReactFlow, {
   ReactFlowProvider,
   addEdge,
@@ -14,73 +13,80 @@ import ReactFlow, {
   useEdgesState,
   useReactFlow,
   useNodes,
-} from "react-flow-renderer";
+} from "reactflow";
 
 /*════════════════════════════════════════════════════════════════════════════════*/
 
-function AppComponent() {
+const NETWORK_NAME = "full_bandpass_csy4";
+
+function GraphWithResults() {
+  const reactFlowInstance = useReactFlow();
+
   const [graph, setGraph] = useState(null);
   const [params, setParams] = useState(null);
 
+  const [paramsPassedToNodes, setParamsPassedToNodes] = useState(false);
+
+
+  // PARAMETERS
   const changeNodeParams = useCallback((id, pdata) => {
-    const newParams = { id: pdata };
-    print("changeNodeParams", id, newParams);
+    const newParams = { [id]: pdata };
+    //console.log(`Received new params for node ${id}:`, newParams);
     setParams((prev) => {
       return { ...prev, ...newParams };
     });
   }, []);
 
-  const handleNodeChange = (nodes) => {
-    // for each param
-    if (params == null) {
-      return nodes;
-    }
-    console.log("handleNodeChange");
+  const [nodesInitialized, setNodesInitialized] = useState(false);
 
-    let new_params = {};
-
-    const new_nodes = nodes.map((node) => {
-      if (node.id in params) {
-        for (const [path, i, name, value] of params[node.id]) {
-          // add a params object to the node
-          if (!("tunable" in node.data)) {
-            node.data["tunable"] = [];
-            node.data["tunable"].push([path, i, name, value]);
-            node.data["updateMyParams"] = (pdata) => {
-              changeNodeParams(node.id, pdata);
-            };
-          }
-          // update the params object
-          else {
-            console.assert(node.data["tunable"].length == params[node.id].length);
-            // then we update the params object
-            new_params[node.id] = node.data["tunable"];
-          }
-        }
-      }
-      return node;
-    });
-
-    return new_nodes;
-  };
+  const afterNodeInit = useCallback((status) => {
+    setNodesInitialized(status);
+  }, []);
 
   useEffect(() => {
-    axios.get("http://localhost:4321/network").then((response) => {
+    const searchParams = new URLSearchParams(window.location.search);
+    const dataParam = searchParams.get('init_params');
+    console.log("dataParam", dataParam);
+    console.log("Fetching graph and params for network", NETWORK_NAME);
+    axios.get(`http://localhost:4321/network/${NETWORK_NAME}`, { params: { init_params: dataParam} }).then((response) => {
       setGraph(response.data);
     });
-    axios.get("http://localhost:4321/params").then((response) => {
+    axios.get(`http://localhost:4321/params/${NETWORK_NAME}`).then((response) => {
       setParams(response.data);
     });
   }, []);
 
-  const [simdata, setSimdata] = useState('');
-
   useEffect(() => {
-    const args = { params: params };
-    console.log("sending", args);
+    if (params != null && !paramsPassedToNodes) {
+      const nodes = reactFlowInstance.getNodes();
+      const new_nodes = nodes.map((node) => {
+        if (node.id in params) {
+          node.data = {
+            ...node.data,
+            tunable: params[node.id],
+            updateMyParams: (pdata) => {
+                changeNodeParams(node.id, pdata);
+            },
+          };
+        }
+        return node;
+      });
+      reactFlowInstance.setNodes(new_nodes);
+      setParamsPassedToNodes(true);
+    }
+  }, [paramsPassedToNodes, params, nodesInitialized]);
+
+  // SIMULATION
+
+  const [simdata, setSimdata] = useState("");
+  useEffect(() => {
+    const args = { params: params, network_name: NETWORK_NAME };
+    //console.log(`Simulation params:`, encodeURIComponent(JSON.stringify(params)));
+    //as base64:
+    console.log(`Simulation params:`, btoa(JSON.stringify(params)));
     axios.post("http://localhost:4321/simulate", args).then((response) => {
-      // response contains image, a base64 encoded png
       setSimdata(response.data.image);
+      console.log("Received simulation results");
     });
   }, [params]);
 
@@ -94,14 +100,9 @@ function AppComponent() {
   }, [simdata]);
 
 
-
   return (
     <>
-      <div id="graph" className="graph">
-        <ReactFlowProvider>
-          <ComputeComponent data={graph} handleNodeChange={handleNodeChange} />
-        </ReactFlowProvider>
-      </div>
+      <ComputeComponent data={graph} nodeInitHook={afterNodeInit} />
       <div id="results">
         <img
           src={simdata}
@@ -111,6 +112,14 @@ function AppComponent() {
         />
       </div>
     </>
+  );
+}
+
+function AppComponent() {
+  return (
+    <ReactFlowProvider>
+      <GraphWithResults />
+    </ReactFlowProvider>
   );
 }
 

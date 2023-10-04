@@ -7,6 +7,12 @@ const ParamInput = ({
   objPosition,
   onChange,
   onClose,
+
+  pname,
+  tunableData,
+  setPValue,
+  pvalue,
+
   vmin = 0,
   vmax = 1,
 }) => {
@@ -50,6 +56,24 @@ const ParamInput = ({
 
   const W = 120;
 
+  useEffect(() => {
+    if (tunableData) {
+      for (const [path, i, name, value] of tunableData) {
+        if (name == pname) setPValue(value);
+      }
+    }
+  }, [tunableData]);
+
+  useEffect(() => {
+    if (tunableData) {
+      const new_tunable = tunableData.map(([path, i, name, value]) => {
+        return [path, i, name, name == pname ? pvalue : value];
+      });
+      tunableData.updateMyParams(new_tunable);
+    }
+  }, [pvalue]);
+
+
   const incrementRegions = slideIncrements.map((inc, i) => {
     return (
       <div
@@ -89,8 +113,8 @@ const ParamInput = ({
         width: 5,
         height: 5,
         borderRadius: 15,
-        left: objPosition.x-9,
-        top: objPosition.y-9,
+        left: objPosition.x - 9,
+        top: objPosition.y - 9,
         padding: 0,
         margin: 0,
         verticalAlign: "middle",

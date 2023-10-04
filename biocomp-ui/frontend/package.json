@@ -16,14 +16,15 @@
     "parcel-bundler": "latest",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-flow-renderer": "latest",
     "react-json-tree": "^0.17.0",
+    "react-router-dom": "^6.16.0",
     "react-tooltip": "latest",
     "reactflow": "latest",
     "regenerator-runtime": "latest",
     "shapes": "latest",
     "streamlit-component-lib": "latest",
-    "styled-components": "^5.3.6"
+    "styled-components": "^5.3.6",
+    "zustand": "^4.4.1"
   },
   "devDependencies": {
     "typescript": "latest"

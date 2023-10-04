@@ -1,5 +1,5 @@
 import React, { ReactNode, useCallback } from "react";
-import { Handle, Position } from "react-flow-renderer";
+import { Handle, Position } from "reactflow";
 
 const zeroPad = (num, places) => String(num).padStart(places, "0");
 function TLNode(props) {

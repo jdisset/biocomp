@@ -1,5 +1,5 @@
 import React, { ReactNode, useCallback } from "react";
-import { Handle, Position } from "react-flow-renderer";
+import { Handle, Position } from "reactflow";
 import { TShape, theme } from "./shapes.jsx";
 import Util from "./util.jsx";
 

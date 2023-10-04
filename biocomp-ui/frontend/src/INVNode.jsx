@@ -1,5 +1,5 @@
 import React, { ReactNode, useCallback } from "react";
-import { Handle, Position } from "react-flow-renderer";
+import { Handle, Position } from "reactflow";
 import Util from "./util.jsx";
 
 function TLNode(props) {

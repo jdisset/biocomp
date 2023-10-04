@@ -81,21 +81,23 @@ class Util {
     return ["M", ...cXY(x, y, eAng), "A", r, r, 0, f, 0, ...cXY(x, y, sAng)].join(" ");
   };
 
-  static hasCopyNumber = (data) => {
-    return data.parameters && data.parameters.copy_number >= 0;
-  };
-
-  static displayCopyNumber = (data, color = "black") => {
-    const MAX_COPY_N = 100.0;
-    if (this.hasCopyNumber(data)) {
-      let cn = data.parameters.copy_number;
+  static displayCopyNumber = (data, color = "black", onMouseDown = null) => {
+    const MAX_COPY_N = 1.0;
+    if (data !== undefined && data !== null) {
+      let cn = data;
       let v = Math.min(1.0, Math.max(0.0, cn / MAX_COPY_N));
       let col = this.cmap(cn);
       let radius = 15;
       let innerRadius = 14;
       return (
-        <div class="copy_number">
-          <svg version="1.1" viewBox="-20 -20 40 40" width="40" height="40">
+        <div className="copy_number">
+          <svg
+            version="1.1"
+            viewBox="-20 -20 40 40"
+            width="40"
+            height="40"
+            onMouseDown={onMouseDown}
+          >
             <circle cx="0" cy="0" r={radius} fill="white" strokeWidth="0.25" stroke="black" />
             <circle
               cx="0"
@@ -173,7 +175,7 @@ class Util {
         y: nodeWithPosition.y - h / 2,
       };
 
-      if (node.type == "aggregation") {
+      if (node.type == "aggregation" || node.type == "bias") {
         node.dragHandle = ".drag-handle";
       }
 
@@ -181,5 +183,22 @@ class Util {
     });
     return { nodes, edges };
   };
+
+  static fillEdgesWithNodeData = (edges, nodes) =>
+    edges.map((e) => {
+      const src_id = parseInt(e.data.source_node_list_id);
+      const tgt_id = parseInt(e.data.target_node_list_id);
+      const src_node = nodes[src_id];
+      const tgt_node = nodes[tgt_id];
+      return {
+        ...e,
+        data: {
+          ...e.data,
+          srcdata: src_node.data,
+          tgtdata: tgt_node.data,
+        },
+      };
+    });
 }
+
 export { Util as default, computeNodeTypes, typeDim };

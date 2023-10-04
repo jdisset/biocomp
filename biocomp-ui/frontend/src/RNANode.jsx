@@ -1,5 +1,5 @@
 import React, { ReactNode, useCallback } from "react";
-import { Handle, Position } from "react-flow-renderer";
+import { Handle, Position } from "reactflow";
 
 function RNANode(props) {
   const content = props.data.content.map((c, i) => <li key={i}> {c} </li>);

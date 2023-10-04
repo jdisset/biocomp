@@ -283,6 +283,16 @@ class XP:
             except Exception as e:
                 raise RuntimeError(f'Error loading xp file {self.xpfile}: \n{e}')
 
+        # load all the recipes inside
+        self.recipe_names = [s['recipe'] for s in self.samples]
+        unique_recipe_names = list(set(self.recipe_names))
+        log.debug(f'Found {len(unique_recipe_names)} unique recipes')
+        import_recipes_to_sql(
+            [recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], self.dbconn, lib
+        )
+
+        if data_path is None:
+            return
         if not Path(data_path).is_absolute():
             self.datapath = self.xp_path / self.name / data_path
         else:
@@ -291,13 +301,7 @@ class XP:
         if not self.datapath.exists():
             raise RuntimeError(f'Data path {self.datapath} does not exist')
 
-        # load all the recipes inside
-        self.recipe_names = [s['recipe'] for s in self.samples]
-        unique_recipe_names = list(set(self.recipe_names))
-        log.debug(f'Found {len(unique_recipe_names)} unique recipes')
-        import_recipes_to_sql(
-            [recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], self.dbconn, lib
-        )
+
         self.load_raw_data() # will populate the self.raw_data dict
 
     def load_raw_data(self):
@@ -318,7 +322,6 @@ class XP:
         although several networks could in theory share the same sample name
         here we return a list of pairs (network, sample name) to avoid confusion
         """
-
         # first build each network for each recipe
         unique_recipe_names = list(set(self.recipe_names))
         fwd_networks = {}
@@ -331,8 +334,6 @@ class XP:
             except Exception as e:
                 msg = f'Error building network for recipe {recipename} in xp {self.name}: \n{e}'
                 raise RuntimeError(msg) from e
-
-
         # now go through the samples and create the correct pairs
         networks = []
         for s in self.samples:
@@ -342,7 +343,6 @@ class XP:
                 inv_nets = inverted_network(fwd_networks[s['recipe']], mode=inverse)
                 for n in inv_nets:
                     networks.append((n, s['name']))
-
         return tuple(zip(*networks))
 
     def get_Y(self, networks, sample_names):

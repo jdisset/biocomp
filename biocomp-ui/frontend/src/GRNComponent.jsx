@@ -13,7 +13,7 @@ import ReactFlow, {
   addEdge,
   useNodesState,
   useEdgesState,
-} from "react-flow-renderer";
+} from "reactflow";
 
 const nodeTypes = { DNA: DNANode, RNA: RNANode, PRT: PRTNode };
 

@@ -51,7 +51,7 @@ def TU(*parts):
 uorfs = P(any_uorf(lib)[0][:8])
 # 'Csy4+uOrfs': bc.TranscriptionUnit([promoter, P('Csy4'), P(any_uorf(lib)[0])]),
 
-ERNs = ['CasE', 'Csy4', 'PgU']
+ERNs = ['CasE', 'PgU', 'Csy4']
 ern = [P(ern) for ern in ERNs]
 rec = [P(ern + '_rec') for ern in ERNs]
 biascolor = 'NeonGreen'
@@ -117,9 +117,16 @@ NETWORK = networks[0]
 # save stack pickle in ../__cache/
 cachedir = Path('~/.biocompiler/cache/networks/').expanduser()
 cachedir.mkdir(exist_ok=True, parents=True)
-du.save(NETWORK, cachedir / 'full_bandpass.pkl')
+du.save(NETWORK, cachedir / 'full_bandpass_csy4.pkl')
 # reload
-NETWORK = du.load(cachedir / 'full_bandpass.pkl')
+NETWORK = du.load(cachedir / 'full_bandpass_csy4.pkl')
+
+
+def save_net(net, name):
+    cachedir = Path('~/.biocompiler/cache/networks/').expanduser()
+    cachedir.mkdir(exist_ok=True, parents=True)
+    du.save(net, cachedir / f'{name}.pkl')
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -175,8 +182,132 @@ full_params.filter_by_tag('local')[0].data
 
 stack.layers[0].nodes
 
+##
+
+xppath = '2023-10-03_BPv2_C31BP'
+x = su.load_xp(
+    xppath, su.load_lib(), data_path=None, recipe_path=su.DEFAULT_XP_PATH / xppath / 'recipes'
+)
+nets, netnames = x.build_networks()
+netnames
 
 ##
+nets[0].get_dependent_output_proteins()
+nets[0].get_inverted_input_proteins()
+
+for i, network in enumerate(nets[2:3]):
+    print(f'net {i}: {netnames[i]}')
+
+    stack = cmp.ComputeStack([network])
+    stack.build(compute_config)
+    output_indices = get_output_indices(stack)
+    full_params = init_stack(stack, rng)
+
+    key = jax.random.PRNGKey(0)
+
+    vmapped_compute = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+
+    def evaluate_at(params, X, Z, key):
+        keys = jax.random.split(key, X.shape[0])
+        print(f'X.shape: {X.shape}')
+        full_yhat, _ = vmapped_compute(params, X, Z, keys)
+        print(f'full_yhat: {full_yhat}')
+        yhat = full_yhat[:, output_indices]
+        if yhat.ndim == 1:
+            yhat = yhat.reshape(-1, 1)
+        return yhat
+
+    def plot_eval(params, res=100, xlims=(0, 0.7)):
+        X = np.meshgrid(np.linspace(*xlims, res), np.linspace(*xlims, res))
+        X = np.stack(X, axis=-1).reshape(-1, 2)
+        Z = jnp.ones((res * res, stack.total_nb_of_outputs)) * 0.5
+        Y = jax.jit(evaluate_at)(params, X, Z, key)
+        fig, ax = du.mkfig(1, 1)
+        im = ax.imshow(
+            Y.reshape(res, res),
+            extent=[*xlims, *xlims],
+            cmap='YlGnBu',
+            origin='lower',
+            vmin=0,
+            vmax=0.6,
+        )
+        ax.contour(
+            Y.reshape(res, res),
+            [0.2, 0.4, 0.5],
+            extent=[*xlims, *xlims],
+            colors='k',
+            origin='lower',
+            alpha=0.25,
+        )
+
+        # colorbar
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.1)
+        fig.colorbar(im, cax=cax, orientation='vertical')
+        ax.set_xlabel('$X_1$')
+        ax.set_ylabel('$X_2$')
+        return fig, ax
+
+    plot_eval(full_params, res=100, xlims=(0, 0.7))
+
+##
+
+xppath = 'fake_tests'
+x = su.load_xp(
+    xppath, su.load_lib(), data_path=None, recipe_path=su.DEFAULT_XP_PATH / xppath / 'recipes'
+)
+nets, netnames = x.build_networks()
+
+stacks = [cmp.ComputeStack([net]) for net in nets]
+for stack in stacks:
+    stack.build(compute_config)
+
+# su.plot_networks([nets[11]])
+jax.clear_caches()
+
+
+for netname, network, stack in list(zip(netnames, nets, stacks))[1:2]:
+    output_indices = get_output_indices(stack)
+    params = init_stack(stack, rng)
+    xlims = (0, 0.8)
+
+    n_points = 20000
+    n_inputs = stack.total_nb_of_inputs
+
+    network.get_inverted_input_proteins()
+    apply = jax.jit(jax.vmap(stack.apply, in_axes=(None, 0, 0, 0)))
+    X = jax.random.uniform(rng, (n_points, n_inputs), minval=xlims[0], maxval=xlims[1])
+    Z = jax.random.uniform(rng, (X.shape[0], stack.total_nb_of_outputs), minval=0.25, maxval=0.75)
+    keys = jax.random.split(key, X.shape[0])
+    Y, _ = apply(params, X, Z, keys)
+
+    fig, ax = du.mkfig(1, 1, (15, 15))
+    # du.smooth(X, Y, network, rescale=du.tr, ax=ax, res=200, input_order=[0,1,2], slices=[0.2, 0.4, 0.65], vmin=0.2, vmax=0.6)
+    du.smooth(X, Y, network, rescale=du.tr, ax=ax, res=200, input_order=[0,1,2], slices=[0.2, 0.4, 0.65], vmin=None, vmax=None)
+    # du smooth creates 2 more axes
+    ax1 = fig.axes[1]
+    ax1.set_title(f'Predictions for xp {netname}', y=1.05)
+
+    plt.show()
+    savedir = Path('~/Desktop/bppredictions/10_03/relative_scale').expanduser()
+    # savedir.mkdir(exist_ok=True, parents=True)
+    # fig.savefig(savedir / f'{netname}.pdf', dpi=300, bbox_inches='tight')
+
+
+
+# su.plot_networks([network])
+
+##
+def save_net(net, name):
+    cachedir = Path('~/.biocompiler/cache/networks/').expanduser()
+    cachedir.mkdir(exist_ok=True, parents=True)
+    du.save(net, cachedir / f'{name}.pkl')
+
+
+##
+
 
 def tag_tunable_params(stack, params):
     local_params, _ = params.filter_by_tag('local')
@@ -199,26 +330,31 @@ def tag_tunable_params(stack, params):
 tag_tunable_params(stack, full_params)
 tunable_params, non_tunable = full_params.filter_by_tag('tunable')
 
+
 def make_param_map(stack, tunable_params):
     from collections import defaultdict
+
     param_map = defaultdict(list)
     assert len(stack.networks) == 1
     for l, v in tunable_params.data.iter_leaves():
         layer_id = int(l.path[1])
         layer = stack.layers[layer_id]
         pname = l.path[-1]
-        for i,n in enumerate(layer.nodes):
+        for i, n in enumerate(layer.nodes):
             cid = n.compute_node_id
             param_map[cid].append((str(l), i, pname, v[i].tolist()))
     return dict(param_map)
+
 
 param_map = make_param_map(stack, tunable_params)
 
 param_map
 
 import json
+
 strmap = json.dumps(param_map)
 param_map = json.loads(strmap)
+
 
 def apply_param_map(param_map, params):
     new_params = deepcopy(tunable_params)
@@ -230,7 +366,23 @@ def apply_param_map(param_map, params):
             new_params.tags[path] = params.tags[path]
     return new_params
 
+
 new_params = apply_param_map(param_map, tunable_params)
+##
+
+
+
+x = np.linspace(0, 1, 100)
+
+fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+ax.plot(x, x, label='x')
+ax.plot(x, 2*x, label='x')
+ax.plot(x, 3*x, label='x')
+ax.plot(x, 4*x, label='x')
+
+# log scale
+ax.set_yscale('log')
+ax.set_xscale('log')
 
 
 

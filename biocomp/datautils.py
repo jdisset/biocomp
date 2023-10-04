@@ -180,6 +180,8 @@ def get_cache(gen_f, name, cache_location):
     else:
         data = gen_f()
     return data
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,7 +252,9 @@ def sample_batches_direct(
     selection_proba = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
     selection_proba /= np.sum(selection_proba)
     try:
-        indices = rng.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba, replace=True)
+        indices = rng.choice(
+            X.shape[0], size=(batch_size * n_batches,), p=selection_proba, replace=True
+        )
     except ValueError:
         n_nans = np.sum(np.isnan(selection_proba))
         ut.logger.warning(
@@ -258,7 +262,9 @@ def sample_batches_direct(
         )
         selection_proba[np.isnan(selection_proba)] = 0.0
         selection_proba /= np.sum(selection_proba)
-        indices = rng.choice(X.shape[0], size=(batch_size * n_batches,), p=selection_proba, replace=True)
+        indices = rng.choice(
+            X.shape[0], size=(batch_size * n_batches,), p=selection_proba, replace=True
+        )
 
     Xsub = X[indices]
     Ysub = Y[indices]
@@ -427,7 +433,7 @@ class DataManager:
 
     def compute_densities(self, max_chunk=50000, cache_dir=None):
         """Compute the densities at each data point in the dataset, for each sample"""
-        #TODO: switch to the more general get_cache
+        # TODO: switch to the more general get_cache
         import hashlib
         from pathlib import Path
         import base64
@@ -587,7 +593,9 @@ class DataManager:
         # networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
         net_sample_pairs = []
         for xp in xplist:
-            net_sample_pairs.append(get_cache(lambda : xp.build_networks(**kw), f'{str(xp)}_net', network_cache_location))
+            net_sample_pairs.append(
+                get_cache(lambda: xp.build_networks(**kw), f'{str(xp)}_net', network_cache_location)
+            )
 
         networks, samples = zip(*net_sample_pairs)
 
@@ -595,7 +603,9 @@ class DataManager:
         # X, Y = zip(*[xp.get_XY(n, s) for xp, n, s in zip(xplist, networks, samples)])
         XY_pairs = []
         for xp, n, s in zip(xplist, networks, samples):
-            XY_pairs.append(get_cache(lambda : xp.get_XY(n, s), f'{str(xp)}_XY', network_cache_location))
+            XY_pairs.append(
+                get_cache(lambda: xp.get_XY(n, s), f'{str(xp)}_XY', network_cache_location)
+            )
 
         X, Y = zip(*XY_pairs)
         # get everything as a long concatenated list
@@ -605,6 +615,7 @@ class DataManager:
             list(itertools.chain(*networks)),
         )
         return cls(X, Y, networks, config)
+
 
 #                                                                            }}}
 
@@ -685,6 +696,7 @@ def heatmap(
     contours=3,
     colorbar=True,
     opacities=None,
+    get_cbar_ticks=None,
     **_,
 ):
     cmap = plt.get_cmap('YlGnBu')
@@ -694,6 +706,13 @@ def heatmap(
         trans_data = trans_data + transform
     if opacities is None:
         opacities = np.ones_like(Z)
+
+
+    if vmin is None:
+        vmin = np.nanmin(Z)
+    if vmax is None:
+        vmax = np.nanmax(Z)
+
     im = ax.imshow(
         Z.T,
         origin='lower',
@@ -746,14 +765,27 @@ def heatmap(
         for spine in cbar.ax.spines.values():
             spine.set_visible(False)
 
-        # use same ticks if present
-        if len(ticks) > 0:
-            valid = ticks >= vmin
-            diff = len(ticks)
-            ticks = ticks[valid]
-            diff -= len(ticks)
+
+        if get_cbar_ticks is not None:
+            # get ticks every 0.1 decade
+            unscaled_ticks = np.geomspace(inv_tr(vmin), inv_tr(vmax), 5, endpoint=True)
+            ticks = np.array(tr(unscaled_ticks))
+            print(f'unscaled_ticks : {unscaled_ticks}')
+            print(f'vmin = {vmin}, vmax = {vmax}, ticks = {ticks}')
+            ticks = ticks[ticks < vmax]
+            ticks = ticks[ticks > vmin]
+            ticklabels = [ scformat.format("{:m}", inv_tr(x)) for x in ticks ]
             cbar.set_ticks(ticks)
-            cbar.set_ticklabels(ticklabels[diff:])
+            cbar.set_ticklabels(ticklabels)
+
+        # # use same ticks if present
+        # if len(ticks) > 0:
+            # valid = ticks >= vmin
+            # diff = len(ticks)
+            # ticks = ticks[valid]
+            # diff -= len(ticks)
+            # cbar.set_ticks(ticks)
+            # cbar.set_ticklabels(ticklabels[diff:])
 
     if connector:
         if connector_orientation == 'bottom':
@@ -871,6 +903,7 @@ def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1, input_order=
     except ValueError as e:
         ut.logger.warning(f'Could not fill between: {e}.\nzq1: {zq1}\nzq9: {zq9}')
         pass
+
     ax.set_title(f'{network.name}\nSmoothed mean and [0.1 - 0.9] quantile')
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(output_name)
@@ -882,7 +915,7 @@ def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1, input_order=
     ax.set_yticklabels(tlabels)
 
 
-def network_ticks_and_labels(network, rescaler, xmax=1, desired_order=None):
+def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, desired_order=None):
     input_names = network.get_inverted_input_proteins()
     output_names = network.get_output_proteins()
 
@@ -897,13 +930,16 @@ def network_ticks_and_labels(network, rescaler, xmax=1, desired_order=None):
     assert len(output_names) == (len(input_names) + 1)
     output_name = list(set(output_names) - set(input_names))[0]
     output_pos = output_names.index(output_name)
+
     unscaled_ticks = np.logspace(0, 12, 13)
     ticks = np.array(rescaler(unscaled_ticks))
     ticks = ticks[ticks < xmax]
+    ticks = ticks[ticks > xmin]
     tlabels = [
         scformat.format("{:m}", x) if i > 1 else ''
         for i, x in enumerate(unscaled_ticks[: len(ticks)])
     ]
+
     return input_order, reordered_input_names, output_pos, output_name, ticks, tlabels
 
 
@@ -1229,6 +1265,7 @@ def smooth_2d(
     use_y_as_x=False,
     **kw,
 ):
+
     input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
@@ -1294,16 +1331,33 @@ def smooth_3d(x, y, network, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), 
         for i, a in enumerate(axes):
             a.set_position([pos.x0 + i * each_w + i * 0.05, pos.y0, each_w, each_h])
             # plot each slice
+
     for i, s in enumerate(slices):
-        smooth_2d(x, y, network, rescaler, axes[i], xslice=np.array([slices[i]]), **kw)
+
+        def get_cbar_ticks(vmin, vmax):
+            in_order, in_names, out_pos, out_name, vticks, vtlabels = network_ticks_and_labels(
+                network, rescaler, xmin=vmin, xmax=vmax
+            )
+            return vticks, vtlabels
+
+        smooth_2d(
+            x,
+            y,
+            network,
+            rescaler,
+            axes[i],
+            xslice=np.array([slices[i]]),
+            get_cbar_ticks=get_cbar_ticks,
+            **kw,
+        )
 
     # resize all axes  so that they are square and fit in the original ax
     for i, a in enumerate(axes):
         if i > 0:
             a.set_yticks([])
             a.set_ylabel('')
-        if i < len(axes) - 1:
-            a.get_images()[0].colorbar.remove()
+        # if i < len(axes) - 1:
+        # a.get_images()[0].colorbar.remove()
         a.set_xticks([])
         remove_spines(a)
         a.set_title('')
@@ -1498,11 +1552,12 @@ def get_stack(dman, net_id, params):
     return stack, p
 
 
-def eval_model_grid(
+def eval_network_on_grid(
     params,
-    dman,
-    id,
+    network,
+    stack,
     ax,
+    rescale=tr,
     key=jax.random.PRNGKey(0),
     xrange_eval=(0, 1),
     n_repeats=10,
@@ -1512,12 +1567,10 @@ def eval_model_grid(
     **kw,
 ):
 
-    network = dman.get_networks()[id]
-    stack, p = get_stack(dman, id, params)
     jm = jit(stack.apply)
 
     input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
-        network, dman.rescale, xmax=xrange_eval[1], desired_order=input_order
+        network, rescale, xmax=xrange_eval[1], desired_order=input_order
     )
 
     k_i, k_q = jax.random.split(key)
@@ -1525,7 +1578,6 @@ def eval_model_grid(
         xrange_eval = jnp.array([0, 1])
 
     xx = jnp.linspace(xrange_eval[0], xrange_eval[1], res)
-
     x = jnp.array(np.meshgrid(xx, xx)).T.reshape(-1, 2)
 
     def compute(k):
@@ -1536,7 +1588,7 @@ def eval_model_grid(
             maxval=quantile_range[1],
         )
         keys = jax.random.split(k, len(x))
-        y, _ = vmap(jm, in_axes=(None, 0, 0, 0))(p, x, quantiles, keys)
+        y, _ = vmap(jm, in_axes=(None, 0, 0, 0))(params, x, quantiles, keys)
         return y
 
     keys = jax.random.split(key, n_repeats)
@@ -1550,6 +1602,18 @@ def eval_model_grid(
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(input_names[1])
     remove_spines(ax)
+
+
+def eval_model_grid(
+    params,
+    dman,
+    id,
+    ax,
+    **kw,
+):
+    network = dman.get_networks()[id]
+    stack, p = get_stack(dman, id, params)
+    return eval_network_on_grid(params, network, stack, ax, rescale=dman.rescale, **kw)
 
 
 def model_at_x(params, dman: DataManager, id, key=jax.random.PRNGKey(0), quantile=None, **_):
@@ -1690,9 +1754,7 @@ def make_symlog_ax(
     # invtr = partial(inverse_symlog, linthresh=linthresh, linscale=linscale)
     tr = partial(ut.log_poly_log, threshold=linthresh, compression=linscale)
     invtr = partial(ut.inverse_log_poly_log, threshold=linthresh, compression=linscale)
-
     xlims_tr, ylims_tr = None, None
-
     if xlims is not None:
         xlims_tr = tr(np.asarray(xlims))
         xp10 = powers_of_ten(*xlims)
@@ -1700,7 +1762,6 @@ def make_symlog_ax(
         ax.set_xlim(xlims_margin)
         ax.set_xticks(tr(xp10))
         ax.xaxis.set_major_formatter(PowerFormatter(xp10, skip10=skip10))
-
     if ylims is not None:
         ylims_tr = tr(np.asarray(ylims))
         yp10 = powers_of_ten(*ylims)
@@ -1708,7 +1769,6 @@ def make_symlog_ax(
         ax.set_ylim(ylims_margin)
         ax.set_yticks(tr(yp10))
         ax.yaxis.set_major_formatter(PowerFormatter(yp10, skip10=skip10))
-
     return tr, invtr, xlims_tr, ylims_tr
 
 
@@ -1992,6 +2052,7 @@ def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True, **k
 
     return runs
 
+
 def get_wandb_trained_params(run, save_to=None):
     if save_to is None:
         save_to = Path(f'/tmp/biocomp_runs/{run.name}')
@@ -2006,6 +2067,7 @@ def get_wandb_trained_params(run, save_to=None):
         training_config = json.load(f)
     shared_trained_params.set_read_only(True)
     return shared_trained_params, compute_config, training_config, local
+
 
 def model_fluo_distributions(dman, model_id, method='scatter', **kwargs):
     model = dman.get_models()[model_id]
