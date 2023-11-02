@@ -188,13 +188,16 @@ def single_passthrough(input_shapes: Sequence[Tuple[int]], *_, **__) -> LayerIns
 # we make it a multi-output node so that it's compatible with the aggregation node but
 # really we're just duplicating the input so we could also just use a passthrough node
 # or skip the node altogether (for a future version with an optimizer)
+
+# For now, input_shapes will always be [(1,)]
 def source(input_shapes: Sequence[Tuple[int]], n_outputs: int, **_) -> LayerInstance:
     assert len(input_shapes) == 1, f'A source node should have 1 input, got {len(input_shapes)}'
+
 
     def apply(value: ArrayLike, *_, **__) -> ArrayLike:
         return jnp.repeat(value, n_outputs, axis=0)
 
-    output_shapes = input_shapes * n_outputs
+    output_shapes = list(input_shapes) * n_outputs
 
     return LayerInstance(empty_prepare, apply, output_shapes)
 
@@ -731,7 +734,9 @@ def grouped_output(
             activation=inner_activation,
         )
 
+
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey):
+
 
         # --------- quantile var
         quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
@@ -758,9 +763,17 @@ def grouped_output(
     ):
 
         inputs = jnp.asarray(inputs)
+
+
         assert len(inputs) == len(input_shapes)
 
         qid = jnp.squeeze(params[f'local/{layer_name}/quantile_variable_id'][node_id])
+        # make quantiles at least 1D
+        if quantiles.ndim == 0:
+            quantiles = quantiles.reshape((1,))
+        if qid.ndim == 0:
+            qid = qid.reshape((1,))
+
 
         res = vmap(
             partial(MLP_head, rng_key=key, params=params),

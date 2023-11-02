@@ -177,14 +177,14 @@ ut.plot_networks([model.network], ['/Users/jeandisset/Desktop/model_l2.pdf'])
 ### {{{            --     rescale and move to log space     --
 
 
-def rescale(X, norm_factor):
+def rescaler(X, norm_factor):
     return np.log10(1.0 + (X / norm_factor))
 
 
 cfg['norm_factor'] = 1e3
 
-X = rescale(X_r, cfg['norm_factor'])
-Y = rescale(Y_r, cfg['norm_factor'])
+X = rescaler(X_r, cfg['norm_factor'])
+Y = rescaler(Y_r, cfg['norm_factor'])
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -517,9 +517,9 @@ ax.set_yscale('log')
 # evaluate on a grid
 res = 200
 x = jnp.linspace(0, 3, res)
-xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
+xy = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
 n_z_per_x = 5
-xx = np.tile(xygrid, (n_z_per_x, 1, 1))
+xx = np.tile(xy, (n_z_per_x, 1, 1))
 z = jax.random.uniform(rng_key, shape=(xx.shape[0], xx.shape[1], zsize))
 vvern = jit(vmap(vern, in_axes=(None, 0, 0, None)))
 out = vvern(params, xx, z, rng_key)
@@ -642,11 +642,11 @@ ax.set_title(title)
 
 ##
 x = jnp.linspace(0, 3, 200)
-xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
+xy = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
 quantiles = np.linspace(0.1, 0.9, 9)
-zzz = jnp.ones((xygrid.shape[0], Y.shape[1]))
+zzz = jnp.ones((xy.shape[0], Y.shape[1]))
 yyy = [
-    vern(params, xygrid, zzz * i, rng_key)[:, output_id['eYFP']].reshape(200, 200)
+    vern(params, xy, zzz * i, rng_key)[:, output_id['eYFP']].reshape(200, 200)
     for i in tqdm(quantiles)
 ]
 ##
@@ -663,16 +663,16 @@ du.timelapse_persp(
 ##
 res = 150
 x = jnp.linspace(0, 3, res)
-xygrid = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
+xy = jnp.array(np.meshgrid(x, x)).T.reshape(-1, 2)
 vvvern = jit(vmap(vern, in_axes=(None, None, 0, None)))
-xygrid.shape
+xy.shape
 nsamples = [1, 10, 50, 100]
 yyy = [
     jnp.mean(
     vvvern(
         params,
-        xygrid,
-        jax.random.uniform(rng_key, shape=(int(i), xygrid.shape[0], Y.shape[1])),
+        xy,
+        jax.random.uniform(rng_key, shape=(int(i), xy.shape[0], Y.shape[1])),
         rng_key,
     ), axis=0)[:, output_id['eYFP']].reshape(res, res)
     for i in tqdm(nsamples)

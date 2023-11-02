@@ -33,7 +33,6 @@ def quantize_masked_impl(x, qvalues, mask):
 
 ### {{{               --     quantized parameters helpers     --
 
-
 def get_quantized(
     values_to_quantize,
     params: ParameterTree,

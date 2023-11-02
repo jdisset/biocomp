@@ -23,5 +23,6 @@ from . import nodes as nodes
 from . import defaults as defaults
 from . import parameters as parameters
 from . import quantization as quantization
+from . import plotutils as plotutils
 
 from .utils import logger as logger

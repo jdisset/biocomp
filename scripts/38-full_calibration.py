@@ -464,7 +464,7 @@ controls_values = jnp.vstack(controls_values)
 controls_masks = jnp.vstack(controls_masks)
 
 
-def transform(x, offset, scale):
+def axtransform(x, offset, scale):
     return jnp.log10(x + offset) / scale
 
 
@@ -481,11 +481,11 @@ autofluorescence = np.median(blankdf.values, axis=0)
 controls_values = controls_values - autofluorescence
 
 # TODO: try remove instead of clip for values < 1 (NOT FOR BEADS AS IT WOULD BREAK PEAK ASSIGNMENT)
-logcontrols = transform(jnp.clip(controls_values, 1), OFFSET, SCALE)
+logcontrols = axtransform(jnp.clip(controls_values, 1), OFFSET, SCALE)
 
-logbeads = transform(jnp.clip(beads.values, 1), OFFSET, SCALE)
+logbeads = axtransform(jnp.clip(beads.values, 1), OFFSET, SCALE)
 calib_values = jnp.array([beads_reference_values[channel_to_unit[c]] for c in channel_order]).T
-logcalib = transform(calib_values, OFFSET, SCALE)
+logcalib = axtransform(calib_values, OFFSET, SCALE)
 
 calib_values.max()
 

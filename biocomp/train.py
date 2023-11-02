@@ -338,7 +338,7 @@ def get_memory(config):
         return joblib.Memory(None, verbose=0)
 
 
-def start(dman: du.DataManager, training_config, compute_config, loggers=None, seed=None):
+def start(dman: du.DataManager, training_config, compute_config: cmp.ComputeConfigManager , loggers=None, seed=None):
 
     ut.logger.debug(f"About to start training")
     ut.logger.debug(f"Training config: {training_config}")

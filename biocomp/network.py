@@ -963,6 +963,32 @@ class Network:
         assert output_position not in new_mapping.values()
         assert len(self.get_inverted_input_proteins()) == len(new_mapping)
 
+
+
+
+    def compute_node_is_upstream_of(self, node_id, other_node_id):
+        """Returns True if node_id is upstream of other_node_id"""
+        if node_id == other_node_id:
+            return True
+        node = self.compute_graph.loc[node_id]
+        if node.type == 'output':
+            return False
+        for downstream_id, _ in node['output_to']:
+            if self.compute_node_is_upstream_of(downstream_id, other_node_id):
+                return True
+        return False
+
+    def sort_nodes_by_upstream(self, nodes):
+        from functools import cmp_to_key
+        def custom_cmp(a, b):
+            if self.compute_node_is_upstream_of(a, b):
+                return -1
+            elif self.compute_node_is_upstream_of(b, a):
+                return 1
+            else:
+                return 0
+        return sorted(nodes, key=cmp_to_key(custom_cmp))
+
     def get_nb_inputs(self):
         if self.n_inputs is None:
             self.n_inputs = len(self.get_inverted_input_proteins())
@@ -1162,6 +1188,7 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
     _get_invertible_paths(network, start_node_id, [], set())
 
     return paths
+
 
 
 from rich import print as rprint

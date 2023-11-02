@@ -254,12 +254,12 @@ for i, network in enumerate(nets[2:3]):
 
 ##
 
+key = jax.random.PRNGKey(0)
 xppath = 'fake_tests'
 x = su.load_xp(
     xppath, su.load_lib(), data_path=None, recipe_path=su.DEFAULT_XP_PATH / xppath / 'recipes'
 )
 nets, netnames = x.build_networks()
-
 stacks = [cmp.ComputeStack([net]) for net in nets]
 for stack in stacks:
     stack.build(compute_config)
@@ -268,7 +268,7 @@ for stack in stacks:
 jax.clear_caches()
 
 
-for netname, network, stack in list(zip(netnames, nets, stacks))[1:2]:
+for netname, network, stack in list(zip(netnames, nets, stacks))[:]:
     output_indices = get_output_indices(stack)
     params = init_stack(stack, rng)
     xlims = (0, 0.8)
@@ -291,9 +291,41 @@ for netname, network, stack in list(zip(netnames, nets, stacks))[1:2]:
     ax1.set_title(f'Predictions for xp {netname}', y=1.05)
 
     plt.show()
-    savedir = Path('~/Desktop/bppredictions/10_03/relative_scale').expanduser()
-    # savedir.mkdir(exist_ok=True, parents=True)
-    # fig.savefig(savedir / f'{netname}.pdf', dpi=300, bbox_inches='tight')
+    savedir = Path('~/Desktop/bppredictions/10_03/relative_scalev2').expanduser()
+    savedir.mkdir(exist_ok=True, parents=True)
+    fig.savefig(savedir / f'{netname}.png', dpi=300, bbox_inches='tight')
+
+
+
+
+##
+XP = {'BPattempt': '2023-10-03_BPv2_C31BP'}
+xpname = 'BPattempt'
+with ut.timer(f'Loading data and building networks for {XP[xpname]}'):
+    lib = su.load_lib()
+    bp_xp = su.load_xp(XP[xpname], lib, data_path='./data/calibrated_data_v3', recipe_path=su.DEFAULT_DATA_PATH / 'Experiments' / XP[xpname] / 'recipes')
+    dman_full = du.DataManager.from_xps([bp_xp], training_config, inverse='all')
+
+##
+
+# su.plot_networks([dman_full.get_networks()[0]], W=2000, H=4000)
+n = dman_full.get_networks()[0]
+n.get_inverted_input_proteins()
+
+
+from matplotlib import pyplot as plt
+
+savedir = Path('~/Desktop/bppredictions/10_03/relative_scalev2/realdata/').expanduser()
+savedir.mkdir(exist_ok=True, parents=True)
+for i in range(len(dman_full.get_networks()))[:]:
+    fig, ax = du.mkfig(1,1, (14,14), dpi=200)
+    du.network_plot(dman_full, i, ax=ax, input_order=[0,1,2])
+    fig.savefig(savedir / f'network_{i}.pdf')
+    plt.show()
+    plt.close(fig)
+    print(f'Saved network {i}')
+
+
 
 
 

@@ -57,6 +57,132 @@ def load(path):
 
 
 #                                                                            }}}
+### {{{                           --     cache     --
+def get_cache(gen_f, name, cache_location):
+    if cache_location is not None:
+        namehash = hashlib.md5(name.encode('utf-8')).hexdigest()
+        # create cache directory if it doesn't exist
+        if isinstance(cache_location, str):
+            cache_location = Path(cache_location)
+        cache_location.mkdir(parents=True, exist_ok=True)
+        cachepath = cache_location / namehash
+        print(cachepath)
+        if cachepath.exists():
+            ut.logger.debug(f'Loading {namehash} from cache.')
+            with open(cachepath, 'rb') as file:
+                data = pickle.load(file)
+        else:
+            ut.logger.debug(f'Generating {namehash} and saving to cache.')
+            data = gen_f()
+            with open(cachepath, 'wb') as file:
+                pickle.dump(data, file)
+    else:
+        data = gen_f()
+    return data
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{              --     model retrieval and loss plots     --
+def get_best_run_id(losses, smooth_window=20, return_smooth_losses=False):
+
+    from scipy.ndimage import gaussian_filter1d
+
+    smoothed_losses = [gaussian_filter1d(loss, smooth_window) for loss in losses]
+    best_loss = np.argmin([loss[-1] for loss in smoothed_losses])
+    if return_smooth_losses:
+        return best_loss, smoothed_losses
+    return best_loss
+
+
+def losses_plot(losses, ax=None, smooth_window=200, runs=None):
+    best_loss_id, smoothed_losses = get_best_run_id(
+        losses, smooth_window=smooth_window, return_smooth_losses=True
+    )
+    if ax is None:
+        fig, ax = mkfig(1, 1, (7, 5))
+    for index, loss in enumerate(smoothed_losses):
+        color = '#00A1D9' if index == best_loss_id else 'k'
+        alpha = 1 if index == best_loss_id else 0.25
+        size = 1.5 if index == best_loss_id else 0.5
+        ax.plot(
+            loss,
+            color=color,
+            alpha=alpha,
+            linewidth=size,
+            label='Best run' if index == best_loss_id else None,
+        )
+        ax.set_yscale('log')
+    ax.set_xlabel('Batches seen')
+    ax.set_ylabel('Loss')
+    ax.set_ylim(np.min([np.min(s) for s in smoothed_losses]) * 0.7)
+    n_losses = sum(len(l) > 1 for l in smoothed_losses)
+    ax.set_title(f'Smoothed losses for {n_losses} runs')
+    ax.legend()
+    # add name of best run (centered)
+    if runs is not None:
+        best_run = runs[best_loss_id]
+        ax.text(
+            0.5,
+            0.01,
+            f'Best run: "{best_run.name}" with {smoothed_losses[best_loss_id][-1]:.1e}',
+            transform=ax.transAxes,
+            horizontalalignment='center',
+            verticalalignment='bottom',
+        )
+    return best_loss_id
+
+
+def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True, **kw):
+    import wandb
+    import pickle
+    from concurrent.futures import ThreadPoolExecutor
+
+    wandb.login()
+    api = wandb.Api()
+    project_path = f"{entity}/{project_name}" if entity else project_name
+    runs = api.runs(project_path, **kw)
+
+    if with_losses:
+
+        def get_loss_history(run):
+            if 'loss' in run.summary and run.summary['loss'] is not None:
+                history = run.scan_history(keys=['loss'], page_size=25000)
+                losses = [row["loss"] for row in history]
+                return np.array(losses)
+            else:
+                return np.array([np.inf])
+
+        with ThreadPoolExecutor() as executor:
+            full_losses = list(tqdm(executor.map(get_loss_history, runs), total=len(runs)))
+
+        return runs, full_losses
+
+    return runs
+
+
+def get_wandb_trained_params(run, save_to=None):
+    if save_to is None:
+        save_to = Path(f'/tmp/biocomp_runs/{run.name}')
+    save_to.mkdir(parents=True, exist_ok=True)
+    param_file = run.file('latest_params.pkl').download(replace=True, root=save_to)
+    trained_params = load(param_file.name)
+    shared_trained_params, local = trained_params.filter_by_tag('shared')
+    compute_config_file = run.file('compute_config.json').download(replace=True, root=save_to)
+    training_config_file = run.file('training_config.json').download(replace=True, root=save_to)
+    compute_config = cmp.ComputeConfigManager.from_file(compute_config_file.name)
+    with open(training_config_file.name, 'r') as f:
+        training_config = json.load(f)
+    shared_trained_params.set_read_only(True)
+    return shared_trained_params, compute_config, training_config, local
+
+
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#                         DATA MANAGEMENT AND BATCHING
+# ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     batches     --
 # ···············································································
 
@@ -85,108 +211,6 @@ def batch(X, Y, batch_size, n_batches=None):
 
 
 #                                                                            }}}
-### {{{                    --     plot styling tools     --
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-
-def mkfig(rows, cols, size=(7, 7), **kw):
-    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]), **kw)
-    return fig, ax
-
-
-def remove_spines(ax):
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-
-def remove_topright_spines(ax):
-    for spine in ['top', 'right']:
-        ax.spines[spine].set_visible(False)
-
-
-def remove_axis_and_spines(ax):
-    ax.set_xticks([])
-    ax.set_yticks([])
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-
-def set_size(w, h, axes, fig):
-    """w, h: width, height in inches"""
-    l = min([ax.figure.subplotpars.left for ax in axes])
-    r = max([ax.figure.subplotpars.right for ax in axes])
-    t = max([ax.figure.subplotpars.top for ax in axes])
-    b = min([ax.figure.subplotpars.bottom for ax in axes])
-    figw = float(w) / (r - l)
-    figh = float(h) / (t - b)
-    fig.set_size_inches(figw, figh)
-
-
-def style_violin(parts):
-    for pc in parts['bodies']:
-        pc.set_facecolor('k')
-        pc.set_edgecolor('k')
-        pc.set_linewidth(1)
-    parts['cbars'].set_linewidth(0)
-    parts['cmaxes'].set_color('black')
-    parts['cmaxes'].set_linewidth(0.5)
-    parts['cmins'].set_color('black')
-    parts['cmins'].set_linewidth(0.5)
-
-
-import string
-
-
-class ShortScientificFormatter(string.Formatter):
-    def format_field(self, value, format_spec):
-        if format_spec == 'm':
-            if value < 1000:
-                if value == int(value):
-                    return super().format_field(int(value), '')
-                else:
-                    return super().format_field(value, '.1f')
-            else:
-                if value == int(value):
-                    return super().format_field(value, '.0e').replace('e+0', 'e').replace('e+', 'e')
-                else:
-                    return super().format_field(value, '.1e').replace('e+0', 'e').replace('e+', 'e')
-        else:
-            return super().format_field(value, format_spec)
-
-
-scformat = ShortScientificFormatter()
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                           --     cache     --
-def get_cache(gen_f, name, cache_location):
-    if cache_location is not None:
-        namehash = hashlib.md5(name.encode('utf-8')).hexdigest()
-        # create cache directory if it doesn't exist
-        if isinstance(cache_location, str):
-            cache_location = Path(cache_location)
-        cache_location.mkdir(parents=True, exist_ok=True)
-        cachepath = cache_location / namehash
-        print(cachepath)
-        if cachepath.exists():
-            ut.logger.debug(f'Loading {namehash} from cache.')
-            with open(cachepath, 'rb') as file:
-                data = pickle.load(file)
-        else:
-            ut.logger.debug(f'Generating {namehash} and saving to cache.')
-            data = gen_f()
-            with open(cachepath, 'wb') as file:
-                pickle.dump(data, file)
-    else:
-        data = gen_f()
-    return data
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-# ─────────────────────────────────────────────────────────────────────────────
-#                         DATA MANAGEMENT AND BATCHING
-# ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     data manager     --
 # ···············································································
 
@@ -623,6 +647,79 @@ class DataManager:
 # ─────────────────────────────────────────────────────────────────────────────
 #                            NEIGHBORHOOD BASED TOOLS
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
+### {{{                    --     plot styling tools     --
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+
+def mkfig(rows, cols, size=(7, 7), **kw):
+    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]), **kw)
+    return fig, ax
+
+
+def remove_spines(ax):
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+
+def remove_topright_spines(ax):
+    for spine in ['top', 'right']:
+        ax.spines[spine].set_visible(False)
+
+
+def remove_axis_and_spines(ax):
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+
+def set_size(w, h, axes, fig):
+    """w, h: width, height in inches"""
+    l = min([ax.figure.subplotpars.left for ax in axes])
+    r = max([ax.figure.subplotpars.right for ax in axes])
+    t = max([ax.figure.subplotpars.top for ax in axes])
+    b = min([ax.figure.subplotpars.bottom for ax in axes])
+    figw = float(w) / (r - l)
+    figh = float(h) / (t - b)
+    fig.set_size_inches(figw, figh)
+
+
+def style_violin(parts):
+    for pc in parts['bodies']:
+        pc.set_facecolor('k')
+        pc.set_edgecolor('k')
+        pc.set_linewidth(1)
+    parts['cbars'].set_linewidth(0)
+    parts['cmaxes'].set_color('black')
+    parts['cmaxes'].set_linewidth(0.5)
+    parts['cmins'].set_color('black')
+    parts['cmins'].set_linewidth(0.5)
+
+
+import string
+
+
+class ShortScientificFormatter(string.Formatter):
+    def format_field(self, value, format_spec):
+        if format_spec == 'm':
+            if value < 1000:
+                if value == int(value):
+                    return super().format_field(int(value), '')
+                else:
+                    return super().format_field(value, '.1f')
+            else:
+                if value == int(value):
+                    return super().format_field(value, '.0e').replace('e+0', 'e').replace('e+', 'e')
+                else:
+                    return super().format_field(value, '.1e').replace('e+0', 'e').replace('e+', 'e')
+        else:
+            return super().format_field(value, format_spec)
+
+
+scformat = ShortScientificFormatter()
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{              --     knn and spatial partitionning    --
 from scipy.spatial import cKDTree
 
@@ -689,6 +786,7 @@ def heatmap(
     vmax=1,
     ticks=[],
     ticklabels=[],
+    secondticks=[],
     transform=None,
     text='',
     connector=False,
@@ -706,7 +804,6 @@ def heatmap(
         trans_data = trans_data + transform
     if opacities is None:
         opacities = np.ones_like(Z)
-
 
     if vmin is None:
         vmin = np.nanmin(Z)
@@ -754,6 +851,13 @@ def heatmap(
         ax.set_xticklabels(ticklabels)
         ax.set_yticks(sc_ticks)
         ax.set_yticklabels(ticklabels)
+        # secondticks:
+        if len(secondticks) > 0:
+            print(f'secondticks = {secondticks}')
+            sc_secondticks = secondticks * Z.shape[0]
+            ax.set_xticks(sc_secondticks, minor=True)
+            ax.set_yticks(sc_secondticks, minor=True)
+
 
     # colorbar
     if colorbar:
@@ -765,8 +869,8 @@ def heatmap(
         for spine in cbar.ax.spines.values():
             spine.set_visible(False)
 
-
         if get_cbar_ticks is not None:
+
             # get ticks every 0.1 decade
             unscaled_ticks = np.geomspace(inv_tr(vmin), inv_tr(vmax), 5, endpoint=True)
             ticks = np.array(tr(unscaled_ticks))
@@ -774,18 +878,18 @@ def heatmap(
             print(f'vmin = {vmin}, vmax = {vmax}, ticks = {ticks}')
             ticks = ticks[ticks < vmax]
             ticks = ticks[ticks > vmin]
-            ticklabels = [ scformat.format("{:m}", inv_tr(x)) for x in ticks ]
+            ticklabels = [scformat.format("{:m}", inv_tr(x)) for x in ticks]
             cbar.set_ticks(ticks)
             cbar.set_ticklabels(ticklabels)
 
         # # use same ticks if present
         # if len(ticks) > 0:
-            # valid = ticks >= vmin
-            # diff = len(ticks)
-            # ticks = ticks[valid]
-            # diff -= len(ticks)
-            # cbar.set_ticks(ticks)
-            # cbar.set_ticklabels(ticklabels[diff:])
+        # valid = ticks >= vmin
+        # diff = len(ticks)
+        # ticks = ticks[valid]
+        # diff -= len(ticks)
+        # cbar.set_ticks(ticks)
+        # cbar.set_ticklabels(ticklabels[diff:])
 
     if connector:
         if connector_orientation == 'bottom':
@@ -819,40 +923,59 @@ def scatter(x, y, network, *args, **kw):
         raise NotImplementedError(f'Cannot scater plot {ninputs} inputs')
 
 
-def smooth_line_slices(x, y, network, rescale, axes, slices, input_order, xmin=0, xmax=1, **kwargs):
+from labellines import labelLine, labelLines
+
+
+def smooth_line_slices(
+    x, y, network, rescale, slices, input_order, axes=None, ax=None, xmin=0, xmax=1, **kwargs
+):
     # slices is a list of list of slice values. (max 2 dimensions)
-    assert len(slice) <= 2, 'Can only slice maximum 2 dimensions'
+    assert len(slices) <= 2, 'Can only slice maximum 2 dimensions'
     outerslices = slices[1] if len(slices) > 1 else []
     innerslices = slices[0] if len(slices) > 0 else []
 
-    input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
+    input_order, input_names, output_pos, output_name, ticks, tlabels, secondticks = network_ticks_and_labels(
         network, rescale, xmax=xmax, desired_order=input_order
     )
 
+    if axes is None:
+        assert ax is not None
+        nplots = len(outerslices)
+        axes = [ax] + [
+            ax.figure.add_subplot(nplots, 1, i+1) for i in range(nplots - 1)
+        ]
+
+
+    print(f'input names = {input_names}')
     assert len(axes) == len(outerslices), 'Number of axes must match number of outer slices'
+    print(f'len(axes) = {len(axes)}')
+    print(f'outerslices: {input_names[input_order[2]]} at {outerslices}')
+    print(f'innerslices: {input_names[input_order[1]]} at {innerslices}')
 
     for i, outsl in enumerate(outerslices):
-        ax = axes[i]
+        iax = axes[i]
         for insl in innerslices:
-            smooth_line_plots(
+            smooth_line_plot(
                 x,
                 y,
                 network,
                 rescale,
-                ax=ax,
-                slice=[insl, outsl],
+                ax=iax,
+                slice_at=[insl, outsl],
                 input_order=input_order,
-                label=f'{input_names[input_order[1]]} ≈ {int(insl*100)}%',
+                xmax=x.max(),
+                label=f'{input_names[input_order[1]]} ≈ {insl}%',
                 **kwargs,
             )
-        ax.text(
+        iax.text(
             0.5,
             0.75,
             f'{input_names[input_order[2]]}={int(outsl*100)}%',
-            transform=ax.transAxes,
+            transform=iax.transAxes,
             ha='center',
             va='center',
         )
+        # labelLines(iax.get_lines(), zorder=2.5)
 
 
 def smooth(x, y, network, rescale, ax, **kw):
@@ -870,7 +993,7 @@ def smooth(x, y, network, rescale, ax, **kw):
 def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1, input_order=None):
     tree = cKDTree(x)
 
-    input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
+    input_order, input_names, output_pos, output_name, ticks, tlabels, secondticks = network_ticks_and_labels(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
 
@@ -933,14 +1056,17 @@ def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, desired_order=No
 
     unscaled_ticks = np.logspace(0, 12, 13)
     ticks = np.array(rescaler(unscaled_ticks))
-    ticks = ticks[ticks < xmax]
-    ticks = ticks[ticks > xmin]
-    tlabels = [
-        scformat.format("{:m}", x) if i > 1 else ''
-        for i, x in enumerate(unscaled_ticks[: len(ticks)])
-    ]
+    valid_ticks = (ticks <= xmax) & (ticks >= xmin)
+    # valid_ticks = np.ones_like(ticks, dtype=bool)
+    ticks = ticks[valid_ticks]
+    tlabels = [scformat.format("{:m}", x) for x in unscaled_ticks[valid_ticks]]
+    # secondary ticks every 0.1 decade
+    unscaled_secondary_ticks = np.geomspace(inv_tr(xmin), inv_tr(xmax), 5, endpoint=True)
+    secondary_ticks = np.array(tr(unscaled_secondary_ticks))
+    secondary_valid_ticks = (secondary_ticks <= xmax) & (secondary_ticks >= xmin)
+    secondary_ticks = secondary_ticks[secondary_valid_ticks]
 
-    return input_order, reordered_input_names, output_pos, output_name, ticks, tlabels
+    return input_order, reordered_input_names, output_pos, output_name, ticks, tlabels, secondary_ticks
 
 
 import plotly.express as px
@@ -976,7 +1102,7 @@ def scatter_3d_interactive(
     filename=None,
     **kw,
 ):
-    input_order, input_names, output_pos, output_name, ticks, ticklabels = network_ticks_and_labels(
+    input_order, input_names, output_pos, output_name, ticks, ticklabels, secondticks = network_ticks_and_labels(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
 
@@ -1059,7 +1185,7 @@ def scatter_3d(
     lw=0.1,
     **kw,
 ):
-    input_order, input_names, output_pos, output_name, ticks, ticklabels = network_ticks_and_labels(
+    input_order, input_names, output_pos, output_name, ticks, ticklabels, secondticks = network_ticks_and_labels(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
 
@@ -1131,7 +1257,7 @@ def scatter_2d(
     lw=0.1,
     **kw,
 ):
-    input_order, input_names, output_pos, output_name, ticks, ticklabels = network_ticks_and_labels(
+    input_order, input_names, output_pos, output_name, ticks, ticklabels, secondticks = network_ticks_and_labels(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
 
@@ -1205,7 +1331,7 @@ def scatter_1d(
     use_y_as_x=True,
     **kw,
 ):
-    input_order, input_names, output_pos, output_name, ticks, ticklabels = network_ticks_and_labels(
+    input_order, input_names, output_pos, output_name, ticks, ticklabels, secondticks = network_ticks_and_labels(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
 
@@ -1266,7 +1392,7 @@ def smooth_2d(
     **kw,
 ):
 
-    input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
+    input_order, input_names, output_pos, output_name, ticks, tlabels, secondticks = network_ticks_and_labels(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
 
@@ -1295,7 +1421,7 @@ def smooth_2d(
     p = np.where(np.isnan(z), 1, p)
     if density_plot:
         z = p
-    heatmap(ax, z, ticks=ticks, ticklabels=tlabels, opacities=opacities, **kw)
+    heatmap(ax, z, ticks=ticks, ticklabels=tlabels, secondticks=secondticks, opacities=opacities, **kw)
     if x.shape[1] > 2:
         ax.text(
             0.35, 0.9, f'{input_names[2]} ≈ {xslice[0]:.2f}', fontsize=8, transform=ax.transAxes
@@ -1335,7 +1461,7 @@ def smooth_3d(x, y, network, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), 
     for i, s in enumerate(slices):
 
         def get_cbar_ticks(vmin, vmax):
-            in_order, in_names, out_pos, out_name, vticks, vtlabels = network_ticks_and_labels(
+            in_order, in_names, out_pos, out_name, vticks, vtlabels, secondticks = network_ticks_and_labels(
                 network, rescaler, xmin=vmin, xmax=vmax
             )
             return vticks, vtlabels
@@ -1368,7 +1494,7 @@ def smooth_3d(x, y, network, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), 
     )
 
 
-def smooth_line_plots(
+def smooth_line_plot(
     x,
     y,
     network,
@@ -1377,7 +1503,7 @@ def smooth_line_plots(
     res=200,
     xmin=0,
     xmax=1,
-    slice=None,
+    slice_at=None,
     input_order=None,
     title=True,
     label=None,
@@ -1385,41 +1511,37 @@ def smooth_line_plots(
     lw=1,
     **kw,
 ):
-    input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
+    input_order, input_names, output_pos, output_name, ticks, tlabels, secondticks = network_ticks_and_labels(
         network, rescaler, xmax=xmax, desired_order=input_order
     )
     y = y[:, output_pos]
     x = x[:, input_order]
-    # # let's use x as y minus output_pos
-    # otherind = [i for i in range(y.shape[1]) if i != output_pos]
-    # x = y[:, otherind]
     tree = cKDTree(x)
 
     xquery = np.linspace(xmin, xmax, res).reshape(-1, 1)
-    if slice is None:
-        slice = np.array([])
-    slice = np.array(slice)
+    if slice_at is None:
+        slice_at = np.array([])
+    slice_at = np.array(slice_at)
 
     if x.shape[1] > 1:
-        assert slice.shape == (x.shape[1] - 1,)
-        xquery = np.concatenate([xquery, np.tile(slice, (xquery.shape[0], 1))], axis=1)
+        assert slice_at.shape == (x.shape[1] - 1,)
+        xquery = np.concatenate([xquery, np.tile(slice_at, (xquery.shape[0], 1))], axis=1)
 
     z, _ = get_knn_smooth(xquery, y, tree=tree, **kw)
 
     if label is None:
         label = ''
-        for i, s in enumerate(slice):
+        for i, s in enumerate(slice_at):
             label += f'{input_names[i+1]} ≈ {s:.2f}\n'
 
     ax.plot(xquery[:, 0], z, label=label, color=color, lw=lw)
-
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(output_name)
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(0, 1)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.legend()
+
 
     # ticks:
     if len(ticks) > 0:
@@ -1510,7 +1632,7 @@ def network_plot(
     elif method == 'scatter':
         return scatter(x, y, network, dman.rescale, *args, **kw)
     elif method == 'smooth_lines':
-        return smooth_lines(x, y, network, dman.rescale, *args, **kw)
+        return smooth_line_slices(x, y, network, dman.rescale, *args, **kw)
 
 
 def eval_network_plot(
@@ -1569,7 +1691,7 @@ def eval_network_on_grid(
 
     jm = jit(stack.apply)
 
-    input_order, input_names, output_pos, output_name, ticks, tlabels = network_ticks_and_labels(
+    input_order, input_names, output_pos, output_name, ticks, tlabels, secondticks = network_ticks_and_labels(
         network, rescale, xmax=xrange_eval[1], desired_order=input_order
     )
 
@@ -1746,7 +1868,7 @@ class PowerFormatter(ticker.Formatter):
         return format_powers(v, None)
 
 
-def make_symlog_ax(
+def setup_symlog(
     ax, xlims=None, ylims=None, linthresh=200, linscale=0.4, skip10=True, margins=0.05
 ):
     # ticks at all powers of 10:
@@ -1774,7 +1896,6 @@ def make_symlog_ax(
 
 def get_bio_color(name, default='k'):
     import difflib
-
     colors = {'ebfp': '#529edb', 'eyfp': '#fbda73', 'mkate': '#f75a5a', 'neongreen': '#33f397'}
     colors['fitc'] = colors['neongreen']
     colors['pe_texas_red'] = colors['mkate']
@@ -1835,7 +1956,7 @@ def fluo_scatter(
         color = get_bio_color(pnames[xid])
         xcoords = np.random.normal(0, 0.1, (X.shape[0],))
         if logscale:
-            tr, itr, _, ytr = make_symlog_ax(ax, None, ylims=[xmin, xmax])
+            tr, itr, _, ytr = setup_symlog(ax, None, ylims=[xmin, xmax])
         else:
             ax.set_ylim(xmin, xmax)
         ax.scatter(xcoords, tr(X[:, xid]), color=color, alpha=alpha, s=s, zorder=10, lw=0)
@@ -2090,3 +2211,4 @@ def model_fluo_distributions(dman, model_id, method='scatter', **kwargs):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+

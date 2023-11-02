@@ -1,0 +1,665 @@
+
+ ▼
+ └─ 'local'
+     ├─ 'l1 inverse_tl (605)'
+     │   ├─ 'quantile_variable_id' ⟶ (605,) int32 jax array:
+     │   │                           [  2   3 ... 885 886]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ RefArray from 7 pointed arrays:
+     │   │              * local/l30 tl (56)/tl_rate: (48 elmts)
+     │   │              * local/l8 tl (184)/tl_rate: (154 elmts)
+     │   │              * local/l26 tl (70)/tl_rate: (26 elmts)
+     │   │              * local/l37 tl (68)/tl_rate: (30 elmts)
+     │   │              * local/l43 tl (4)/tl_rate: (3 elmts)
+     │   │              * local/l13 tl (198)/tl_rate: (180 elmts)
+     │   │              * local/l15 tl (328)/tl_rate: (164 elmts)
+     │   │              
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ RefArray from 7 pointed arrays:
+     │                                    * local/l30 tl (56)/tl_rate_quantization_mask: (48 elmts)
+     │                                    * local/l8 tl (184)/tl_rate_quantization_mask: (154 elmts)
+     │                                    * local/l26 tl (70)/tl_rate_quantization_mask: (26 elmts)
+     │                                    * local/l37 tl (68)/tl_rate_quantization_mask: (30 elmts)
+     │                                    * local/l43 tl (4)/tl_rate_quantization_mask: (3 elmts)
+     │                                    * local/l13 tl (198)/tl_rate_quantization_mask: (180 elmts)
+     │                                    * local/l15 tl (328)/tl_rate_quantization_mask: (164 elmts)
+     │                                    
+     │                                    
+     ├─ 'l10 tc (360)'
+     │   ├─ 'quantile_variable_id' ⟶ (360,) int32 jax array:
+     │   │                           [365 364 ... 887 886]
+     │   │                           
+     │   ├─ 'tc_rate' ⟶ (360, 1, 1) float32 jax array:
+     │   │              [[[0.179]]
+     │   │              
+     │   │               [[0.821]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.822]]
+     │   │              
+     │   │               [[0.352]]]
+     │   │              
+     │   └─ 'tc_rate_quantization_mask' ⟶ (360, 1, 1) bool jax array:
+     │                                    [[[ True]]
+     │                                    
+     │                                     [[ True]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True]]
+     │                                    
+     │                                     [[ True]]]
+     │                                    
+     ├─ 'l11 aggregation_2x (164)'
+     │   └─ 'ratios' ⟶ (164, 2) float32 jax array:
+     │                 [[0.5 0.5]
+     │                  [0.5 0.5]
+     │                  ...
+     │                  [0.5 0.5]
+     │                  [0.5 0.5]]
+     │                 
+     ├─ 'l13 tl (198)'
+     │   ├─ 'quantile_variable_id' ⟶ (198,) int32 jax array:
+     │   │                           [364 367 ... 886 887]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ (198, 1, 1) float32 jax array:
+     │   │              [[[0.25 ]]
+     │   │              
+     │   │               [[0.947]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.233]]
+     │   │              
+     │   │               [[0.782]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (198, 1, 13) bool jax array:
+     │                                    [[[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     [[False False ... False False]]]
+     │                                    
+     ├─ 'l14 tc (328)'
+     │   ├─ 'quantile_variable_id' ⟶ (328,) int32 jax array:
+     │   │                           [365 366 ... 854 855]
+     │   │                           
+     │   ├─ 'tc_rate' ⟶ (328, 1, 1) float32 jax array:
+     │   │              [[[0.614]]
+     │   │              
+     │   │               [[0.805]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.13 ]]
+     │   │              
+     │   │               [[0.248]]]
+     │   │              
+     │   └─ 'tc_rate_quantization_mask' ⟶ (328, 1, 1) bool jax array:
+     │                                    [[[ True]]
+     │                                    
+     │                                     [[ True]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True]]
+     │                                    
+     │                                     [[ True]]]
+     │                                    
+     ├─ 'l15 tl (328)'
+     │   ├─ 'quantile_variable_id' ⟶ (328,) int32 jax array:
+     │   │                           [365 366 ... 854 855]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ (328, 1, 1) float32 jax array:
+     │   │              [[[0.591]]
+     │   │              
+     │   │               [[0.915]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.004]]
+     │   │              
+     │   │               [[0.869]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (328, 1, 13) bool jax array:
+     │                                    [[[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[False False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]]
+     │                                    
+     ├─ 'l16 ERN_5p (192)'
+     │   ├─ 'affinity' ⟶ RefArray from 1 pointed arrays:
+     │   │               * shared/ERN_5p/affinities: (192 elmts)
+     │   │               
+     │   │               
+     │   └─ 'quantile_variable_id' ⟶ (192,) int32 jax array:
+     │                               [169 172 ... 851 854]
+     │                               
+     ├─ 'l17 tl (192)'
+     │   ├─ 'quantile_variable_id' ⟶ (192,) int32 jax array:
+     │   │                           [169 172 ... 851 854]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ (192, 1, 1) float32 jax array:
+     │   │              [[[0.987]]
+     │   │              
+     │   │               [[0.711]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.201]]
+     │   │              
+     │   │               [[0.407]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (192, 1, 13) bool jax array:
+     │                                    [[[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[False False ... False False]]
+     │                                    
+     │                                     [[False False ... False False]]]
+     │                                    
+     ├─ 'l18 grouped_output (172)'
+     │   └─ 'quantile_variable_id' ⟶ (172, 3) int32 jax array:
+     │                               [[168 169 170]
+     │                                [171 172 173]
+     │                                ...
+     │                                [850 851 852]
+     │                                [853 854 855]]
+     │                               
+     ├─ 'l19 tl (24)'
+     │   ├─ 'quantile_variable_id' ⟶ (24,) int32 jax array:
+     │   │                           [  5   9 ... 101 105]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ (24, 2, 1) float32 jax array:
+     │   │              [[[0.657]
+     │   │                [0.795]]
+     │   │              
+     │   │               [[0.539]
+     │   │                [0.141]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.198]
+     │   │                [0.533]]
+     │   │              
+     │   │               [[0.935]
+     │   │                [0.69 ]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (24, 2, 13) bool jax array:
+     │                                    [[[ True False ... False False]
+     │                                      [False  True ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]
+     │                                      [False False ... False False]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True False ... False False]
+     │                                      [False False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]
+     │                                      [False False ... False False]]]
+     │                                    
+     ├─ 'l2 inverse_tc (605)'
+     │   ├─ 'quantile_variable_id' ⟶ (605,) int32 jax array:
+     │   │                           [  2   3 ... 885 886]
+     │   │                           
+     │   ├─ 'tc_rate' ⟶ RefArray from 5 pointed arrays:
+     │   │              * local/l7 tc (375)/tc_rate: (205 elmts)
+     │   │              * local/l25 tc (74)/tc_rate: (26 elmts)
+     │   │              * local/l36 tc (80)/tc_rate: (30 elmts)
+     │   │              * local/l10 tc (360)/tc_rate: (180 elmts)
+     │   │              * local/l14 tc (328)/tc_rate: (164 elmts)
+     │   │              
+     │   │              
+     │   └─ 'tc_rate_quantization_mask' ⟶ RefArray from 5 pointed arrays:
+     │                                    * local/l7 tc (375)/tc_rate_quantization_mask: (205 elmts)
+     │                                    * local/l25 tc (74)/tc_rate_quantization_mask: (26 elmts)
+     │                                    * local/l36 tc (80)/tc_rate_quantization_mask: (30 elmts)
+     │                                    * local/l10 tc (360)/tc_rate_quantization_mask: (180 elmts)
+     │                                    * local/l14 tc (328)/tc_rate_quantization_mask: (164 elmts)
+     │                                    
+     │                                    
+     ├─ 'l20 ERN_5p (46)'
+     │   ├─ 'affinity' ⟶ RefArray from 1 pointed arrays:
+     │   │               * shared/ERN_5p/affinities: (46 elmts)
+     │   │               
+     │   │               
+     │   └─ 'quantile_variable_id' ⟶ (46,) int32 jax array:
+     │                               [  5   9 ... 357 361]
+     │                               
+     ├─ 'l21 tl (46)'
+     │   ├─ 'quantile_variable_id' ⟶ (46,) int32 jax array:
+     │   │                           [  5   9 ... 357 361]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ (46, 1, 1) float32 jax array:
+     │   │              [[[0.829]]
+     │   │              
+     │   │               [[0.738]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.497]]
+     │   │              
+     │   │               [[0.413]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (46, 1, 13) bool jax array:
+     │                                    [[[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]]
+     │                                    
+     ├─ 'l22 grouped_output (46)'
+     │   └─ 'quantile_variable_id' ⟶ (46, 4) int32 jax array:
+     │                               [[  4   5   6   7]
+     │                                [  8   9  10  11]
+     │                                ...
+     │                                [356 357 358 359]
+     │                                [360 361 362 363]]
+     │                               
+     ├─ 'l23 aggregation_3x (22)'
+     │   └─ 'ratios' ⟶ (22, 3) float32 jax array:
+     │                 [[0.333 0.333 0.333]
+     │                  [0.333 0.333 0.333]
+     │                  ...
+     │                  [0.045 0.455 0.5  ]
+     │                  [0.045 0.455 0.5  ]]
+     │                 
+     ├─ 'l25 tc (74)'
+     │   ├─ 'quantile_variable_id' ⟶ (74,) int32 jax array:
+     │   │                           [121 121 ... 283 282]
+     │   │                           
+     │   ├─ 'tc_rate' ⟶ (74, 1, 1) float32 jax array:
+     │   │              [[[0.32 ]]
+     │   │              
+     │   │               [[0.704]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.457]]
+     │   │              
+     │   │               [[0.899]]]
+     │   │              
+     │   └─ 'tc_rate_quantization_mask' ⟶ (74, 1, 1) bool jax array:
+     │                                    [[[ True]]
+     │                                    
+     │                                     [[ True]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True]]
+     │                                    
+     │                                     [[ True]]]
+     │                                    
+     ├─ 'l26 tl (70)'
+     │   ├─ 'quantile_variable_id' ⟶ (70,) int32 jax array:
+     │   │                           [121 121 ... 282 283]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ (70, 1, 1) float32 jax array:
+     │   │              [[[0.176]]
+     │   │              
+     │   │               [[0.677]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.384]]
+     │   │              
+     │   │               [[0.393]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (70, 1, 13) bool jax array:
+     │                                    [[[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]]
+     │                                    
+     ├─ 'l27 grouped_output (36)'
+     │   └─ 'quantile_variable_id' ⟶ (36, 2) int32 jax array:
+     │                               [[244 245]
+     │                                [246 247]
+     │                                ...
+     │                                [884 885]
+     │                                [886 887]]
+     │                               
+     ├─ 'l29 tc (16)'
+     │   ├─ 'quantile_variable_id' ⟶ (16,) int32 jax array:
+     │   │                           [  1  37 ... 285 289]
+     │   │                           
+     │   ├─ 'tc_rate' ⟶ (16, 2, 1) float32 jax array:
+     │   │              [[[0.878]
+     │   │                [0.811]]
+     │   │              
+     │   │               [[0.915]
+     │   │                [0.886]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.826]
+     │   │                [0.822]]
+     │   │              
+     │   │               [[0.699]
+     │   │                [0.489]]]
+     │   │              
+     │   └─ 'tc_rate_quantization_mask' ⟶ (16, 2, 1) bool jax array:
+     │                                    [[[ True]
+     │                                      [ True]]
+     │                                    
+     │                                     [[ True]
+     │                                      [ True]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True]
+     │                                      [ True]]
+     │                                    
+     │                                     [[ True]
+     │                                      [ True]]]
+     │                                    
+     ├─ 'l30 tl (56)'
+     │   ├─ 'quantile_variable_id' ⟶ (56,) int32 jax array:
+     │   │                           [  1   0 ... 290 291]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ (56, 1, 1) float32 jax array:
+     │   │              [[[0.832]]
+     │   │              
+     │   │               [[0.466]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.938]]
+     │   │              
+     │   │               [[0.87 ]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (56, 1, 13) bool jax array:
+     │                                    [[[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]]
+     │                                    
+     ├─ 'l31 ERN_5p (12)'
+     │   ├─ 'affinity' ⟶ RefArray from 1 pointed arrays:
+     │   │               * shared/ERN_5p/affinities: (12 elmts)
+     │   │               
+     │   │               
+     │   └─ 'quantile_variable_id' ⟶ [  1  37  73 109 113 117 121 121 145 145 285 289]
+     │                               
+     ├─ 'l32 tl (10)'
+     │   ├─ 'quantile_variable_id' ⟶ [121 145 213 217 221 225 229 233 237 241]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ (10, 2, 1) float32 jax array:
+     │   │              [[[0.242]
+     │   │                [0.655]]
+     │   │              
+     │   │               [[0.006]
+     │   │                [0.539]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.421]
+     │   │                [0.649]]
+     │   │              
+     │   │               [[0.927]
+     │   │                [0.329]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (10, 2, 13) bool jax array:
+     │                                    [[[ True False ... False False]
+     │                                      [ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]
+     │                                      [ True False ... False False]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True False ... False False]
+     │                                      [False False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]
+     │                                      [False False ... False False]]]
+     │                                    
+     ├─ 'l33 grouped_output (10)'
+     │   └─ 'quantile_variable_id' ⟶ (10, 4) int32 jax array:
+     │                               [[120 121 122 123]
+     │                                [144 145 146 147]
+     │                                ...
+     │                                [236 237 238 239]
+     │                                [240 241 242 243]]
+     │                               
+     ├─ 'l34 aggregation_4x (10)'
+     │   └─ 'ratios' ⟶ (10, 4) float32 jax array:
+     │                 [[0.167 0.167 0.333 0.333]
+     │                  [0.267 0.067 0.333 0.333]
+     │                  ...
+     │                  [0.327 0.007 0.333 0.333]
+     │                  [0.33  0.003 0.333 0.333]]
+     │                 
+     ├─ 'l36 tc (80)'
+     │   ├─ 'quantile_variable_id' ⟶ (80,) int32 jax array:
+     │   │                           [124 125 ... 166 164]
+     │   │                           
+     │   ├─ 'tc_rate' ⟶ (80, 1, 1) float32 jax array:
+     │   │              [[[0.646]]
+     │   │              
+     │   │               [[0.945]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.51 ]]
+     │   │              
+     │   │               [[0.77 ]]]
+     │   │              
+     │   └─ 'tc_rate_quantization_mask' ⟶ (80, 1, 1) bool jax array:
+     │                                    [[[ True]]
+     │                                    
+     │                                     [[ True]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True]]
+     │                                    
+     │                                     [[ True]]]
+     │                                    
+     ├─ 'l37 tl (68)'
+     │   ├─ 'quantile_variable_id' ⟶ (68,) int32 jax array:
+     │   │                           [  1  37 ... 285 289]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ (68, 1, 1) float32 jax array:
+     │   │              [[[0.96 ]]
+     │   │              
+     │   │               [[0.693]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.928]]
+     │   │              
+     │   │               [[0.502]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (68, 1, 13) bool jax array:
+     │                                    [[[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]]
+     │                                    
+     ├─ 'l38 ERN_5p (20)'
+     │   ├─ 'affinity' ⟶ RefArray from 1 pointed arrays:
+     │   │               * shared/ERN_5p/affinities: (20 elmts)
+     │   │               
+     │   │               
+     │   └─ 'quantile_variable_id' ⟶ (20,) int32 jax array:
+     │                               [125 125 ... 165 165]
+     │                               
+     ├─ 'l4 inverse_aggregation (425)'
+     │   └─ 'ratios' ⟶ RefArray from 4 pointed arrays:
+     │                 * local/l5 aggregation_2x (229)/ratios: (229 elmts)
+     │                 * local/l23 aggregation_3x (22)/ratios: (22 elmts)
+     │                 * local/l34 aggregation_4x (10)/ratios: (10 elmts)
+     │                 * local/l11 aggregation_2x (164)/ratios: (164 elmts)
+     │                 
+     │                 
+     ├─ 'l40 tl (10)'
+     │   ├─ 'quantile_variable_id' ⟶ [125 129 133 137 141 149 153 157 161 165]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ (10, 2, 1) float32 jax array:
+     │   │              [[[0.1  ]
+     │   │                [0.776]]
+     │   │              
+     │   │               [[0.027]
+     │   │                [0.211]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.84 ]
+     │   │                [0.916]]
+     │   │              
+     │   │               [[0.592]
+     │   │                [0.351]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (10, 2, 13) bool jax array:
+     │                                    [[[ True False ... False False]
+     │                                      [ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]
+     │                                      [ True False ... False False]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True False ... False False]
+     │                                      [ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]
+     │                                      [ True False ... False False]]]
+     │                                    
+     ├─ 'l41 grouped_output (18)'
+     │   └─ 'quantile_variable_id' ⟶ (18, 4) int32 jax array:
+     │                               [[  0   1   2   3]
+     │                                [ 36  37  38  39]
+     │                                ...
+     │                                [284 285 286 287]
+     │                                [288 289 290 291]]
+     │                               
+     ├─ 'l42 tc (1)'
+     │   ├─ 'quantile_variable_id' ⟶ [209]
+     │   │                           
+     │   ├─ 'tc_rate' ⟶ [[[0.853]
+     │   │                [0.777]
+     │   │                [0.414]]]
+     │   │              
+     │   └─ 'tc_rate_quantization_mask' ⟶ [[[ True]
+     │                                      [ True]
+     │                                      [ True]]]
+     │                                    
+     ├─ 'l43 tl (4)'
+     │   ├─ 'quantile_variable_id' ⟶ [208 209 210 211]
+     │   │                           
+     │   ├─ 'tl_rate' ⟶ [[[0.493]]
+     │   │              
+     │   │               [[0.354]]
+     │   │              
+     │   │               [[0.527]]
+     │   │              
+     │   │               [[0.881]]]
+     │   │              
+     │   └─ 'tl_rate_quantization_mask' ⟶ (4, 1, 13) bool jax array:
+     │                                    [[[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]
+     │                                    
+     │                                     [[ True False ... False False]]]
+     │                                    
+     ├─ 'l44 grouped_output (1)'
+     │   └─ 'quantile_variable_id' ⟶ [[208 209 210 211]]
+     │                               
+     ├─ 'l5 aggregation_2x (229)'
+     │   └─ 'ratios' ⟶ (229, 2) float32 jax array:
+     │                 [[0.5 0.5]
+     │                  [0.5 0.5]
+     │                  ...
+     │                  [0.5 0.5]
+     │                  [0.5 0.5]]
+     │                 
+     ├─ 'l7 tc (375)'
+     │   ├─ 'quantile_variable_id' ⟶ (375,) int32 jax array:
+     │   │                           [  1   3 ... 362 360]
+     │   │                           
+     │   ├─ 'tc_rate' ⟶ (375, 1, 1) float32 jax array:
+     │   │              [[[0.136]]
+     │   │              
+     │   │               [[0.779]]
+     │   │              
+     │   │               ...
+     │   │              
+     │   │               [[0.891]]
+     │   │              
+     │   │               [[0.576]]]
+     │   │              
+     │   └─ 'tc_rate_quantization_mask' ⟶ (375, 1, 1) bool jax array:
+     │                                    [[[ True]]
+     │                                    
+     │                                     [[ True]]
+     │                                    
+     │                                     ...
+     │                                    
+     │                                     [[ True]]
+     │                                    
+     │                                     [[ True]]]
+     │                                    
+     └─ 'l8 tl (184)'
+         ├─ 'quantile_variable_id' ⟶ (184,) int32 jax array:
+         │                           [  4   6 ... 362 363]
+         │                           
+         ├─ 'tl_rate' ⟶ (184, 1, 1) float32 jax array:
+         │              [[[0.628]]
+         │              
+         │               [[0.577]]
+         │              
+         │               ...
+         │              
+         │               [[0.676]]
+         │              
+         │               [[0.361]]]
+         │              
+         └─ 'tl_rate_quantization_mask' ⟶ (184, 1, 13) bool jax array:
+                                          [[[ True False ... False False]]
+                                          
+                                           [[ True False ... False False]]
+                                          
+                                           ...
+                                          
+                                           [[ True False ... False False]]
+                                          
+                                           [[ True False ... False False]]]
+                                          
+

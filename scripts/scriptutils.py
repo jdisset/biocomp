@@ -21,15 +21,19 @@ from rich.progress import track
 from typing import List
 import cProfile
 
+
 class profiler:
     def __init__(self, filename):
         self.filename = filename
+
     def __enter__(self):
         self.profiler = cProfile.Profile()
         self.profiler.enable()
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.profiler.disable()
         self.profiler.dump_stats(self.filename)
+
 
 class ddict(dict):
     def __getattr__(*args):
@@ -161,16 +165,6 @@ else:
     _component_func = lambda: None
 
 
-def computeGraph(nodes, edges, key=None, func=_component_func, **kwargs):
-    def filterType(n):
-        if n['type'] == 'input':
-            n['type'] = 'in'
-        if n['type'] == 'output':
-            n['type'] = 'out'
-        return n
-
-    tnodes = [filterType(n) for n in nodes]
-    return func(nodes=tnodes, edges=edges, output_type='COMPUTE', key=key, **kwargs)
 
 
 def dnaOutput(nodes, key=None, func=_component_func, **kwargs):
@@ -189,25 +183,33 @@ def drawCentralDogmaGraph(gdf, key=None, func=_component_func):
     return func(nodes=tnodes, edges=edges, output_type='GRN', key=key)  # {{{}}}
 
 
-def drawComputeGraph(df, func=None, cdg=None, **kwargs):
-    uidGen = bc.ut.uniqueIdGenerator()
+def network_to_graph(network):
+    """ Turns a network object into a fully serializable dictionary that can be
+    safely interpreted by the frontend UI """
+
+    compg = network.compute_graph
+    cdg = network.central_dogma_graph
+
     nodes = [
         {'id': str(i), 'type': n.type, 'data': bc.ut.updated_dict(n.to_dict(), {'id': i})}
-        for i, n in df.iterrows()
+        for i, n in compg.iterrows()
     ]
+
+    node_id_to_index = {int(n['id']): i for i, n in enumerate(nodes)}
+
+    uidGen = bc.ut.uniqueIdGenerator()
     edges = []
-    has_output_values = "output_values" in df.columns
-    for i, n in df.iterrows():
+    has_output_values = "output_values" in compg.columns
+    for i, n in compg.iterrows():
         if n.output_to:
             for n_out, (o, h) in enumerate(n.output_to):
-                srccdg = None
-                if cdg is not None:
-                    cdgin = df.loc[o].cdg_input
-                    if cdgin is not None and not isinstance(cdgin, str) and isinstance(cdgin, list):
-                        assert all(
-                            [isinstance(x, int) for x in cdgin]
-                        ), "cdg_input must be a list of integers"
-                        srccdg = cdg.loc[cdgin[h]].to_dict()
+                cdgin = compg.loc[o].cdg_input
+                srccdg = None # if available, we join the "central dogma" information to the edge
+                if cdgin is not None and not isinstance(cdgin, str) and isinstance(cdgin, list):
+                    assert all(
+                        [isinstance(x, int) for x in cdgin]
+                    ), "cdg_input must be a list of integers"
+                    srccdg = cdg.loc[cdgin[h]].to_dict()
                 edge = {
                     'id': f'edge_{uidGen()}',
                     'source': str(i),
@@ -215,8 +217,8 @@ def drawComputeGraph(df, func=None, cdg=None, **kwargs):
                     'target': str(o),
                     'targetHandle': str(h),
                     'data': {
-                        'srcdata': df.loc[i].to_dict(),
-                        'tgtdata': df.loc[o].to_dict(),
+                        'source_node_list_id': node_id_to_index[i],
+                        'target_node_list_id': node_id_to_index[o],
                         'srccdg': srccdg,
                         'tgthandle': str(h),
                         'outputValue': n.output_values[n_out] if has_output_values else '',
@@ -224,12 +226,12 @@ def drawComputeGraph(df, func=None, cdg=None, **kwargs):
                 }
                 edges.append(edge)
 
-    if func is None:
-        return computeGraph(make_json_compatible(nodes), make_json_compatible(edges), **kwargs)
-    else:
-        return computeGraph(
-            make_json_compatible(nodes), make_json_compatible(edges), func=func, **kwargs
-        )
+    return make_json_compatible(nodes), make_json_compatible(edges)
+
+
+def drawComputeGraph(network, func=_component_func, **kwargs):
+    nodes, edges = network_to_graph(network)
+    return func(nodes=nodes, edges=edges, output_type='COMPUTE', **kwargs)
 
 
 #                                                                            }}}
@@ -415,15 +417,9 @@ def plot_networks(
 
     nest_asyncio.apply()
 
-    def draw_network(net, *a, **kw):
-        drawComputeGraph(
-            net.compute_graph, *a, height=H, width=W, cdg=net.central_dogma_graph, **kw
-        )
-
     if filenames is None:
         show = True
         import tempfile
-
         filenames = [tempfile.mktemp(suffix='.png') for _ in nets]
 
     if outputs is not None:
@@ -437,8 +433,12 @@ def plot_networks(
                 outp = o if o.ndim > 0 else [o]
                 net.compute_graph['output_values'][node_id] = np.array(outp)
 
+    def drawComputeGraph(network, func=_component_func, **kwargs):
+        nodes, edges = network_to_graph(network)
+        return func(nodes=nodes, edges=edges, output_type='COMPUTE', height=H, width=W, **kwargs)
+
     screenCaptures(
-        draw_network,
+        drawComputeGraph,
         nets,
         filenames=filenames,
         height=H,
@@ -839,6 +839,7 @@ def print_jaxpr(fun, *args, **kwargs):
 def get_xla(fun, *args, static_argnums=(), **kwargs):
     import jax
     import jaxlib.xla_extension as xla_ext
+
     console = Console(highlighter=rich.highlighter.ReprHighlighter())
     c = jax.xla_computation(fun, static_argnums=static_argnums)(*args, **kwargs)
     backend = jax.lib.xla_bridge.get_backend()

@@ -169,13 +169,13 @@ def smooth_line_plots_slices(
     for i, ng in enumerate(ngslices):
         ax = axes[i]
         for mk in mkslices:
-            du.smooth_line_plots(
+            du.smooth_line_plot(
                 x,
                 y,
                 net,
                 rescale,
                 ax=ax,
-                slice=[mk, ng],
+                slice_at=[mk, ng],
                 input_order=input_order,
                 radius=0.3,
                 label=f'{input_names[input_order[1]]} ≈ {int(mk*100)}%',

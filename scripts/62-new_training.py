@@ -14,8 +14,8 @@ import jax
 from jax import jit, grad, vmap, random, value_and_grad
 from jax import numpy as jnp
 import jax.tree_util as jtu
-import cProfile
 
+import cProfile
 class profiler:
     def __init__(self, filename):
         self.filename = filename

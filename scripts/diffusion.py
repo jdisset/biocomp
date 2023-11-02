@@ -61,21 +61,21 @@ nsteps = int(tend / dt) + 1
 filterIntensity = 0.01
 
 
-df = pd.read_csv('../data/cell_data.csv')
+compg = pd.read_csv('../data/cell_data.csv')
 xbins = np.linspace(0, params['plate_w'], nx + 1, endpoint=True)
 ybins = np.linspace(0, params['plate_h'], ny + 1, endpoint=True)
 scaling = (
-    params['plate_w'] / np.max(df['cell_x'] + 1),
-    params['plate_h'] / np.max(df['cell_y'] + 1),
+    params['plate_w'] / np.max(compg['cell_x'] + 1),
+    params['plate_h'] / np.max(compg['cell_y'] + 1),
 )
 
 
 def getHist2d(time, well, color):
-    h = df[
-        (df['intensity'] > filterIntensity)
-        & (df['well'] == well)
-        & (df['color'] == color)
-        & (df['time'] == time)
+    h = compg[
+        (compg['intensity'] > filterIntensity)
+        & (compg['well'] == well)
+        & (compg['color'] == color)
+        & (compg['time'] == time)
     ]
     allpos = np.array([h['cell_x'] * scaling[0], h['cell_y'] * scaling[1]])
     R, _, _ = np.histogram2d(x=allpos[0, :], y=allpos[1, :], bins=(xbins, ybins))
@@ -85,7 +85,7 @@ def getHist2d(time, well, color):
 # we interpolate the position matrices over time
 
 
-MAX_TIME = max(df['time'])
+MAX_TIME = max(compg['time'])
 
 allR = np.array([getHist2d(t, well, 'Green').flatten() for t in range(8)])
 linfitR = interp1d(list(range(MAX_TIME + 1)), allR, 'cubic', axis=0)
