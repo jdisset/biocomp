@@ -1,6 +1,9 @@
 ### {{{                          --     imports     --
 import sys
 
+from dataclasses import dataclass
+from typing import List, Tuple
+
 sys.path.append('../scripts')
 from biocomp import utils as ut
 import scriptutils as su
@@ -367,7 +370,6 @@ for i, row in xpdf.iterrows():
         xpdf.loc[i, 'network_loaded'] = True
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{                      --     quantify uorfs     --
 
 
@@ -425,25 +427,33 @@ def get_all_uorf_values(network):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{        --     add architecture family and sequestron type     --
+### {{{        --     add archit ecture family and sequestron type     --
 
 from typing import List, Callable
+
 
 def get_ERN_ids(network):
     return network.compute_graph[network.compute_graph['type'] == 'sequestron_ERN'].index.values
 
+
 def get_RCB_ids(network):
-    return network.compute_graph[network.compute_graph['type'].str.startswith('sequestron_R')].index.values
+    return network.compute_graph[
+        network.compute_graph['type'].str.startswith('sequestron_R')
+    ].index.values
+
 
 def get_sequestron_ids(network):
-    return network.compute_graph[network.compute_graph['type'].str.startswith('sequestron_')].index.values
+    return network.compute_graph[
+        network.compute_graph['type'].str.startswith('sequestron_')
+    ].index.values
 
 
 def make_is_upstream(network):
     def is_upstream(i, j):
         return network.compute_node_is_upstream_of(i, j)
+
     return is_upstream
+
 
 def topological_sort(
     node_list: List[int], is_upstream: Callable[[int, int], bool]
@@ -494,8 +504,8 @@ def get_network_family(network):
         case (3, 2):
             family = 'bandpass'
 
-
     return family, seqtype
+
 
 xpdf['architecture'] = 'unknown'
 xpdf['sequestron_type'] = 'unknown'
@@ -507,7 +517,7 @@ for i, row in xpdf.iterrows():
         xpdf.loc[i, 'sequestron_type'] = seqtype
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
-
+### {{{                     --     list used colors     --
 colors = [get_colors(r) for r in xpdf['recipe']]
 
 xpdf['colors'] = colors
@@ -518,8 +528,134 @@ for i, row in xpdf.iterrows():
         prots = net.get_output_proteins()
         xpdf.at[i, 'colors'] = prots
 
-xpdf
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                       --     export to csv     --
+export_copy = xpdf.copy()
+for col in ['xpname', 'calibration', 'colors']:
+    export_copy[col] = export_copy[col].apply(lambda x: ','.join(x) if isinstance(x, list) else x)
+
+
+export_copy.to_csv('xpdf.csv', index=False)
+
+##────────────────────────────────────────────────────────────────────────────}}}##
+
+
+# gene drawing system
+
+from dataclasses import dataclass
+from typing import Any
+import matplotlib.pyplot as plt
+from matplotlib import patches
+from matplotlib.patches import Arrow, Rectangle
+import numpy as np
+from svgpath2mpl import parse_path
+import xml.etree.ElementTree as etree
+import matplotlib as mpl
+import re
+from io import StringIO
+
+# get an example network (a bandpass)
+
+bprow = xpdf[xpdf['architecture'] == 'bandpass'].iloc[5]
+bprow = xpdf[xpdf['architecture'] == 'single'].iloc[5]
+
+bpnet = networks[bprow['recipe']]
+cg = bpnet.compute_graph
+cdg = bpnet.central_dogma_graph
+
+src = cg[cg['type'] == 'source']  # source nodes can be L1 or L2
+TUs = src['cdg_output']  # a list of TUs for each source
+
+
+TU_names = []
+for i, tu in TUs.items():
+    tu_names = ['_'.join(cdg.loc[t]['tu_id'][0].split('_')[:-1]) for t in tu]
+    print(f'Source {i}: {tu}')
+    print(f'  TUs: {tu_names}')
+    TU_names.append(tu_names)
+
+# lib.L1s.loc[TU_names[0][1]]
 
 ##
-# save xpdf to csv
-xpdf.to_csv('xpdf.csv', index=False)
+
+plotter_path = Path('./jeanplotter').resolve()
+
+
+def lw_from_data_units(lw, ax):
+    length = ax.get_figure().bbox_inches.height * ax.get_position().height
+    value_range = np.diff(ax.get_ylim())
+    return lw * (length * 72 / value_range)
+
+
+class PartArtist:
+    def __init__(self, svgpath, ppi=100.0):
+        ppi = float(ppi)
+
+        svgpath = plotter_path / 'fluo_marker.svg'
+        tree = etree.parse(StringIO(open(svgpath, 'r').read()))
+        root = tree.getroot()
+
+        self.width = int(re.match(r'\d+', root.attrib['width']).group())
+        self.height = int(re.match(r'\d+', root.attrib['height']).group())
+        self.width = self.width / ppi
+        self.height = self.height / ppi
+        path_elems = root.findall('.//{http://www.w3.org/2000/svg}path')
+        self.paths, self.linewidths = [], []
+        for elem in path_elems:
+            p = parse_path(elem.attrib['d'])
+            p.vertices /= ppi
+            self.paths.append(p)
+            self.linewidths.append(elem.attrib.get('stroke_width', 1))
+
+        self.facecolors = [elem.attrib.get('fill', 'none') for elem in path_elems]
+        self.edgecolors = [elem.attrib.get('stroke', 'none') for elem in path_elems]
+        self.maincolor_ids = [i for i, c in enumerate(self.facecolors) if c == '#0000FF']
+        self.secondarycolor_ids = [i for i, c in enumerate(self.facecolors) if c == '#00FF00']
+
+    def get_collection(self, main_color='w', secondary_color='w', edgecolor=None, linewidth=None):
+
+        facecolors = [
+            main_color
+            if i in self.maincolor_ids
+            else secondary_color
+            if i in self.secondarycolor_ids
+            else c
+            for i, c in enumerate(self.facecolors)
+        ]
+        edgecolors = [edgecolor if edgecolor else c for c in self.edgecolors]
+        linewidths = [linewidth if linewidth else l for l in self.linewidths]
+
+        collection = mpl.collections.PathCollection(
+            self.paths, edgecolors=edgecolors, linewidths=linewidths, facecolors=facecolors
+        )
+
+        return collection
+
+
+@dataclass
+class PartInstance:
+    position: np.ndarray
+    width: float
+    height: float
+    props: Any = None
+
+    def draw(self, ax):
+        pass
+
+
+p = PartInstance(np.array([0, 0]), 100, 100)
+
+fluo_marker = PartArtist(plotter_path / 'fluo_marker.svg')
+fluo_artist = fluo_marker.get_collection(linewidth=None)
+
+fluo_marker.linewidths
+
+
+fig, ax = plt.subplots()
+ax.set_xlim(-1, 1)
+ax.set_ylim(-1, 1)
+
+ax.set_aspect('equal')
+ax.add_artist(fluo_artist)
+# collection.set_transform(ax.transData)
+# ax.add_artist(collection)

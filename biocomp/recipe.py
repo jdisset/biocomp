@@ -256,20 +256,24 @@ class XP:
         db_path=":memory:",
         inverse='shortest',
         data_path='./data/calibrated_data',
+        load_data=True,
     ):
         """
         Reads the xp file, and loads both the recipes (into an instance-level sqlite db)
         and the raw data (into a dict of pandas dataframes)
         """
         log.debug(f'Initializing XP {xp_name}')
-        self.xp_path, self.recipe_path = Path(xp_path), Path(recipe_path)
+        self.xp_path = Path(xp_path)
+
+
+
         self.samples: list  # [{name, recipe, notes}]
         self.name: str
         self.dbconn = sqlite3.connect(db_path)
         self.color_names: dict
         self.lib = lib
 
-        # load the xp file
+        # -- load the xp file
         self.xpfile = xp_path / xp_name / f"{xp_name}.xp.json5"
 
         with open(self.xpfile) as f:
@@ -284,31 +288,35 @@ class XP:
             except Exception as e:
                 raise RuntimeError(f'Error loading xp file {self.xpfile}: \n{e}')
 
-        # load all the recipes inside
+        # -- load the recipes
+        if recipe_path is None:
+            raise RuntimeError(f'No recipe path specified for xp {self.name}')
+        self.recipe_path = Path(recipe_path)
+        if not Path(self.recipe_path).is_absolute():
+            self.recipe_path = self.xp_path / self.name / recipe_path
+        if not self.recipe_path.exists():
+            raise RuntimeError(f'Recipe path {self.recipe_path} does not exist')
         self.recipe_names = [s['recipe'] for s in self.samples]
         unique_recipe_names = list(set(self.recipe_names))
         log.debug(f'Found {len(unique_recipe_names)} unique recipes')
         import_recipes_to_sql(
-            [recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], self.dbconn, lib
+            [self.recipe_path / f"{r}.recipe.json5" for r in unique_recipe_names], self.dbconn, lib
         )
 
-        if data_path is None:
-            self.datapath = None
-            return
+        # -- load the data
+        self.data_path = Path(data_path) if data_path is not None else None
         if not Path(data_path).is_absolute():
-            self.datapath = self.xp_path / self.name / data_path
-        else:
-            self.datapath = Path(data_path)
-
-        if not self.datapath.exists():
-            raise RuntimeError(f'Data path {self.datapath} does not exist')
-
-
-        self.load_raw_data() # will populate the self.raw_data dict
+            self.data_path = self.xp_path / self.name / data_path
+        if not self.data_path.exists():
+            raise RuntimeError(f'Data path {self.data_path} does not exist')
+        if load_data:
+            if self.data_path is None or not self.data_path.exists():
+                raise RuntimeError(f'Data path {self.data_path} does not exist')
+            self.load_raw_data() # will populate the self.raw_data dict
 
     def load_raw_data(self):
         """Load the raw data for each sample in the xp, and store it in a dict [sample name] -> pandas dataframe"""
-        datafiles = [self.datapath / f"{s['name']}.{self.name}.csv" for s in self.samples]
+        datafiles = [self.data_path / f"{s['name']}.{self.name}.csv" for s in self.samples]
         df_data: dict[str, pd.DataFrame] = {}
         for s, f in tqdm(
             list(zip(self.samples, datafiles)), desc=f"loading data files for {self.name}"
