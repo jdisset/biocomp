@@ -989,6 +989,28 @@ class Network:
                 return 0
         return sorted(nodes, key=cmp_to_key(custom_cmp))
 
+
+    def topological_order(self, nodes=None):
+        """Returns a list of lists of compute nodes from the network,
+        where each node of a sublist can be computed independently of the others,
+        but each sublist must be computed in order."""
+        visited = set()
+        batches = []
+        nodes = set(nodes) if nodes is not None else set(self.compute_graph.index)
+        while len(visited) < len(self.compute_graph):
+            independent = [
+                i
+                for i, row in self.compute_graph.iterrows()
+                if (not row['input_from'] or all([x[0] in visited for x in row['input_from']]))
+                and i not in visited
+            ]
+            if not independent:
+                msg = f'No independent node. Remaining:{set(self.compute_graph.index) - visited}. Visited:{visited}'
+                raise ValueError(msg)
+            visited.update(independent)
+            batches.append([i for i in independent if i in nodes])
+        return [b for b in batches if len(b) > 0]
+
     def get_nb_inputs(self):
         if self.n_inputs is None:
             self.n_inputs = len(self.get_inverted_input_proteins())

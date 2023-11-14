@@ -1824,7 +1824,7 @@ def fluo_scatter(
         color = get_bio_color(pnames[xid])
         xcoords = np.random.normal(0, 0.1, (X.shape[0],))
         if logscale:
-            tr, itr, _, ytr = setup_symlog(ax, None, ylims=[xmin, xmax])
+            tr, itr, _, ytr = setup_symlog_axis(ax, None, ylims=[xmin, xmax])
         else:
             ax.set_ylim(xmin, xmax)
         ax.scatter(xcoords, tr(X[:, xid]), color=color, alpha=alpha, s=s, zorder=10, lw=0)
@@ -1839,6 +1839,8 @@ def fluo_scatter(
     fig.tight_layout()
     if fname is not None:
         fig.savefig(fname)
+
+    return fig, axes
 
 
 def fluo_densities(
@@ -1885,6 +1887,7 @@ def fluo_densities(
             x=0.45,
         )
     fig.tight_layout()
+    return fig, axes
 
 
 def model_fluo_distributions(dman, model_id, method='scatter', **kwargs):
