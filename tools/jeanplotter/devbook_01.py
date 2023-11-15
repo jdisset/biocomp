@@ -167,12 +167,12 @@ lib.parts[lib.parts['category'] == 'fluo_marker'].index.tolist()
 
 
 BASE_FLUO_COLORS = {
-    'red': '#ffe5de',
-    'green': '#efffdd',
-    'blue': '#ddf5ff',
-    'yellow': '#fffcdc',
-    'ir': '#ffe7f4',
-    'marroon': '#E4CAB7',
+    'red': {'base': '#ef957d', 'light': '#ffe5de', 'dark': '#840137'},
+    'green': {'base': '#42bb97', 'light': '#efffdd', 'dark': '#0b504c'},
+    'blue': {'base': '#6cafc3', 'light': '#F3FAFD', 'dark': '#006394'},
+    'yellow': {'base': '#faee94', 'light': '#fffce1', 'dark': '#cc9a00'},
+    'ir': {'base': '#df9ae4', 'light': '#ffe7f4', 'dark': '#6c1772'},
+    'maroon': {'base': '#d3a888', 'light': '#ebd4c4', 'dark': '#734727'},
 }
 
 
@@ -189,7 +189,14 @@ MARKER_COLORS = {
     'tagBFP': BASE_FLUO_COLORS['blue'],
     'tdTomato': BASE_FLUO_COLORS['red'],
     'mKO2': BASE_FLUO_COLORS['red'],
-    'mMaroon1': BASE_FLUO_COLORS['marroon'],
+    'mMaroon1': BASE_FLUO_COLORS['maroon'],
+}
+
+THEME = {
+    'colors': {
+        'markers': MARKER_COLORS,
+    },
+    'fontname': 'Roboto',
 }
 
 
@@ -206,7 +213,10 @@ MARKER_ALIAS = {
 
 FLUO_PART_PARAMS = {}
 for m, c in MARKER_COLORS.items():
-    FLUO_PART_PARAMS[f'fluo_marker.{m}'] = {'main_color': c, 'label_text': MARKER_ALIAS.get(m, m)}
+    FLUO_PART_PARAMS[f'fluo_marker.{m}'] = {
+        'main_color': c['light'],
+        'label_text': MARKER_ALIAS.get(m, m),
+    }
 DEFAULT_PART_PARAMS = ut.updated_dict(DEFAULT_PART_PARAMS, FLUO_PART_PARAMS)
 
 
@@ -232,37 +242,74 @@ DEFAULT_TU_PARAMS = {
     },
 }
 
-DEFAULT_WRAPPER_BORDER_PARAMS = {
-    'ec': 'k',
-    'boxstyle': 'round,pad=0.0,rounding_size=5',
-    'fc': 'none',
-    'lw': 0.5,
-    'zorder': 1,
-    'linestyle': (0, (5, 5)),
-    'alpha': 1,
-}
 
-DEFAULT_NETWORK_SCENE_PARAMS = {
+DEFAULT_CONFIG = {
+    'Theme': THEME,
     'Part': DEFAULT_PART_PARAMS,
     'TU': DEFAULT_TU_PARAMS,
     'Wrapper': {
-        'default': {'border': True, 'border_params': DEFAULT_WRAPPER_BORDER_PARAMS},
-    },
-    'Label_Aggregation': {
         'default': {
-            'shape_params': {
-                'ec': 'k',
-                'fc': 'k',
-                'lw': 0.5,
-                'zorder': 1,
+            'display_border': True,
+            'border_properties': {
+                'ec': '$$Theme/colors/markers/%%marker_color%%/base$$',
                 'boxstyle': 'round,pad=0.0,rounding_size=5',
-                'alpha': 0.1,
+                'fc': 'none',
+                'linewidth': 0.25,
+                'zorder': 1,
+                'alpha': 1,
+                'linestyle': (0, (3, 3)),
             },
         },
     },
+    'Label': {
+        'default': {
+            'origin': (1.0, 0.5),
+            'size': (70, 12),
+            'relative_position': (0.9, 0.0),
+            'logo_offset': (-57, 0.5),
+            'logo_max_size': (10, 10),
+            'text_offset': (-52, 0),
+            'text_properties': {
+                'ha': 'left',
+                'va': 'center',
+                'color': '#555',
+                'fontsize': BASE_FONT_SIZE,
+            },
+            'shape_properties': {
+                'ec': '#BBB',
+                'fc': '#EEE',
+                'linewidth': 0.25,
+                'zorder': 1,
+                'boxstyle': 'round,pad=0.0,rounding_size=6.5',
+                'alpha': 1,
+            },
+        },
+        'aggregation': {
+            'logo_svg': 'symbols/aggregation.svg',
+            'logo_main_color': '$$Theme/colors/markers/%%marker_color%%/dark$$',
+            'text_properties': {
+                'color': '$$Theme/colors/markers/%%marker_color%%/dark$$',
+            },
+            'shape_properties': {
+                'ec': '$$Theme/colors/markers/%%marker_color%%/base$$',
+                'fc': '$$Theme/colors/markers/%%marker_color%%/light$$',
+            },
+        },
+    },
+    'NetworkScene': {
+        'row_spacing': 20,
+        'col_spacing': 20,
+        'show_cotx_tu': False,
+        'cell_size': (210, 80),
+    },
 }
 
+DEFAULT_CONFIG
+
+# resolve_references(DEFAULT_CONFIG, context={'marker_color': 'mKO2'})
+
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 
 ### {{{           --     network topology and content helpers     --
 def get_tu_grid_layout(network, node_type='translation'):
@@ -302,6 +349,7 @@ def get_tu_grid_layout(network, node_type='translation'):
 
 import pandas as pd
 
+[e['ratios'] for e in aggregations['extra']]
 
 def get_tu_informations(network):
     aggs = []
@@ -310,9 +358,11 @@ def get_tu_informations(network):
     agg_to_cotx = {}
     for a, agg in aggregations.iterrows():
         sources_id = [n for n, _ in agg['output_to']]
+        ratios = agg['extra']['ratios']
         sources = network.compute_graph.loc[sources_id]
-        for s, src in sources.iterrows():
+        for i, (s, src) in enumerate(sources.iterrows()):
             plasmid_name = '_'.join(src['source_id'].split('_')[:-1])
+            plamid_ratio = ratios[i]
             tu_cdgs = network.central_dogma_graph.loc[src['cdg_output']]
             for _, tu_row in tu_cdgs.iterrows():
                 assert len(tu_row['tu_id']) == 1
@@ -332,17 +382,37 @@ def get_tu_informations(network):
                         'cotx_marker': None,
                         'is_marker': ismarker,
                         'plasmid_name': plasmid_name,
+                        'plasmid_ratio': plamid_ratio,
                         'source_node_id': s,
-                        'aggrefation_node_id': a,
+                        'aggregation_node_id': a,
                     }
                 )
     aggdf = pd.DataFrame(aggs)
-    aggdf['cotx_marker'] = aggdf['aggrefation_node_id'].apply(lambda a: agg_to_cotx.get(a, None))
+    aggdf['cotx_marker'] = aggdf['aggregation_node_id'].apply(lambda a: agg_to_cotx.get(a, None))
+    # ratios are in fraction, but we want them normalized to lowest value (per aggregation)
+    aggdf['plasmid_ratio_norm'] = aggdf.groupby('aggregation_node_id')['plasmid_ratio'].transform(
+        lambda x: x / x.min()
+    )
+    marker_rows = aggdf[aggdf['is_marker']]
+    aggdf.loc[marker_rows.index, 'marker_ratio'] = marker_rows['plasmid_ratio_norm'].values
+    aggdf['marker_ratio'] = aggdf.groupby('aggregation_node_id')['marker_ratio'].transform('max')
+
+    aggdf['plasmid_ratio_label'] = aggdf.apply(
+        lambda r: f'{r.plasmid_ratio_norm:.0f}:{r.marker_ratio:.0f}',
+        axis=1,
+    )
     return aggdf
 
 
 aggdf = get_tu_informations(net)
 layout = get_tu_grid_layout(net)
+
+# add a cotx_id column to aggdf
+# we need to find the one row for each aggregation that has is_marker to true
+#: it's the row we will use to populate the cotx_id column (with its tu_id)
+
+# add a plasmid_ratio_label that writes ratio_norm : {ratio_norm of the plasmid of this aggregation that is_marker)
+
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -416,8 +486,23 @@ class TextDataUnits(Text):
         super().draw(renderer)
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
+class FancyBboxPatchDataUnits(patches.FancyBboxPatch):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
+    # def set_linewidth(self, w):
+    # super().set_linewidth(w)
+    # self._linewidth_data = w
+    # if self.axes is not None:
+    # self._linewidth = to_display_units(self._linewidth_data, self.axes)
+
+    # def get_linewidth(self):
+    # if self.axes is not None:
+    # return to_display_units(self._linewidth, self.axes)
+    # return self._linewidth
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                  --     Config Reference system     --
 
 # reference system in the config:
@@ -432,41 +517,14 @@ class TextDataUnits(Text):
 # $$path/to/var$$ (global ref)
 # %%local_var_name%% (local ref, has priority over global ones by default)
 DEFAULT_MARKERS = {
-    'local': '%%',
-    'global': '$$',
+    'local': ('%%', '%%'),
+    'global': ('$$', '$$'),
 }
 DEFAULT_FILTER_RULES = {
     'local': r'(%%[^\%]+%%)',
     'global': r'(\$\$[^\$]+\$\$)',
-    'any': r'(%%[^\%]+%%|\$\$[^\$]+\$\$)',
 }
 DEFAULT_REFERENCE_RESOLVE_SEQUENCE = ('local', 'global')
-
-def get_dict_at(path, d):
-    pathsequence = filter(None, path.strip('/').split('/'))
-    for p in pathsequence:
-        d = d.get(p, None)
-        if d is None:
-            return None
-    return d
-
-def replace_by_ref(refstr, path, global_params, ref_type=None):
-    if ref_type == 'global':
-        return get_dict_at(refstr, global_params)
-    elif ref_type == 'local':
-        subpaths = path.strip('/').split('/')
-        print(f'        Trying to resolve local reference {refstr} at {path}')
-        for i in range(len(subpaths), -1, -1):
-            testpath = '/'.join(subpaths[:i])
-            d = get_dict_at(testpath, global_params)
-            if d is not None:
-                if refstr in d:
-                    # print(f'found {refstr} in {d}: {d[refstr]}')
-                    return d[refstr]
-            else:
-                raise ValueError(f'Could not find {testpath} in {global_params}')
-    else:
-        return refstr
 
 
 def get_ref_type(string, detect_types, markers=DEFAULT_MARKERS):
@@ -478,6 +536,36 @@ def get_ref_type(string, detect_types, markers=DEFAULT_MARKERS):
         return None, string
 
 
+def get_dict_at(path, d):
+    pathsequence = filter(None, path.strip('/').split('/'))
+    for p in pathsequence:
+        d = d.get(p, None)
+        if d is None:
+            return None
+    return d
+
+
+def replace_by_ref(refstr, path, global_params, ref_type=None, context=None):
+    if context is None:
+        context = {}
+    if ref_type == 'global':
+        return get_dict_at(refstr, global_params)
+    elif ref_type == 'local':
+        subpaths = path.strip('/').split('/')
+        if refstr in context:
+            return context[refstr]
+        for i in range(len(subpaths), -1, -1):
+            testpath = '/'.join(subpaths[:i])
+            d = get_dict_at(testpath, global_params)
+            if d is not None:
+                if refstr in d:
+                    return d[refstr]
+            else:
+                raise ValueError(f'Could not find {testpath} in {global_params}')
+    else:
+        return refstr
+
+
 def resolve_reference(
     string,
     path,
@@ -485,25 +573,26 @@ def resolve_reference(
     ref_type=None,
     resolve_type='local',
     filter_rules=DEFAULT_FILTER_RULES,
+    context=None,
 ):
+    if context is None:
+        context = {}
     chunks = filter(None, re.split(filter_rules[resolve_type], string))
     type_innerchunk_pairs = [get_ref_type(c, detect_types=(resolve_type,)) for c in chunks]
     nrefs = sum([1 for c in type_innerchunk_pairs if c[0] == resolve_type])
-    if nrefs > 0 or ref_type is not None:
-        print(f'found {nrefs} subrefs in ({ref_type}, "{string}")')
-        print(f'    subrefs are: {list(type_innerchunk_pairs)}')
     if nrefs == 0:
         if ref_type is None or resolve_type != ref_type:
             return string, False
-        print(f'    no refs found in {string}, resolve as {ref_type}')
-        resolved = replace_by_ref(string, path, global_params, ref_type=ref_type)
+        resolved = replace_by_ref(string, path, global_params, ref_type=ref_type, context=context)
         if resolved is None:
-            raise ValueError(f'Could not resolve {string} at {path}, as a {ref_type} reference')
-        print(f'    resolved {ref_type} reference "{string}" to {resolved}')
+            # raise ValueError(f'Could not resolve {string} at {path}, as a {ref_type} reference')
+            return string, False
         return resolved, True
     else:
         resolved_chunks = [
-            resolve_reference(c, path, global_params, ref_type=t, resolve_type=resolve_type)
+            resolve_reference(
+                c, path, global_params, ref_type=t, resolve_type=resolve_type, context=context
+            )
             for t, c in type_innerchunk_pairs
         ]
         newstr = ''.join([c[0] for c in resolved_chunks])
@@ -515,30 +604,30 @@ def resolve_references(
     current_params,
     path='',
     global_params=None,
+    context=None,
     max_recursion_depth=5,
     resolve_type_sequence=DEFAULT_REFERENCE_RESOLVE_SEQUENCE,
 ):
+    if global_params is None:
+        global_params = current_params
+    if context is None:
+        context = {}
+
     def _impl(
-        current_params, path='', global_params=None, max_recursion_depth=5, resolve_type=None
+        current_params, path=path, resolve_type=None, max_recursion_depth=max_recursion_depth
     ):
-
-
-        if global_params is None:
-            global_params = current_params
         resolved_params = {}
         had_ref = False
         for key, value in current_params.items():
             if isinstance(value, str):
                 result, had_ref = resolve_reference(
-                    value, path, global_params, resolve_type=resolve_type
+                    value, path, global_params, resolve_type=resolve_type, context=context
                 )
                 resolved_params[key] = result
-                print()
             elif isinstance(value, dict):
                 resolved_params[key] = _impl(
                     value,
                     path=f'{path}/{key}',
-                    global_params=global_params,
                     resolve_type=resolve_type,
                 )
             else:
@@ -550,7 +639,6 @@ def resolve_references(
             return _impl(
                 resolved_params,
                 path=path,
-                global_params=global_params,
                 max_recursion_depth=max_recursion_depth - 1,
                 resolve_type=resolve_type,
             )
@@ -559,12 +647,10 @@ def resolve_references(
     for resolve_type in resolve_type_sequence:
         resolved_params = _impl(
             resolved_params,
-            path=path,
-            global_params=global_params,
-            max_recursion_depth=max_recursion_depth,
             resolve_type=resolve_type,
         )
     return resolved_params
+
 
 SimpleExampleConf = {
     'theme': {
@@ -581,7 +667,7 @@ SimpleExampleConf = {
     'default': {
         'base_color': 'neutral_grey',
         'facecolor': 'a_$$theme/colors/%%base_color%%$$',
-        'edgecolor': '%%facecolor%%_%%random_param%%',
+        'edgecolor': '%%facecolor%%+++%%random_param%%!!!!',
         'linewidth': 0.5,
     },
     'red': {
@@ -593,19 +679,18 @@ resolved_config = resolve_references(SimpleExampleConf)
 resolved_config
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{                       --     Configurable     --
-##
 
 
 class Configurable:
-    def __init__(self, section_name, params=None, priorities=None, **_):
+    def __init__(self, section_name, params=None, priorities=None, params_context=None, **_):
         self.priorities = priorities
         self.section_name = section_name
-        self.update_params(params)
+        self.update_params(params, params_context=params_context, **_)
 
-    def update_params(self, params, **kwargs):
+    def update_params(self, params, params_context=None, **kwargs):
         self.all_params = params or {}
+        params = resolve_references(params, context=params_context)
         section_params = params.get(self.section_name, {})
         if self.priorities is None:
             self.local_params = section_params.copy()
@@ -615,14 +700,13 @@ class Configurable:
                 self.local_params = ut.updated_dict(
                     self.local_params, section_params.get(pname, {})
                 )
-
         self.local_params = ut.updated_dict(self.local_params, kwargs)
-        self.local_params = self.resolve_references(self.local_params)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{                       --     Positionable     --
+
+
 class Positionable:
     def __init__(
         self,
@@ -657,6 +741,9 @@ class Positionable:
     def get_bottom_left_position(self):
         return self.position - self.size * self.scale * self.origin
 
+    def get_pos_with_offset(self, offset):
+        return self.position + np.asarray(offset) * self.scale
+
     def on_transform_update(self):
         raise NotImplementedError
 
@@ -670,6 +757,8 @@ class Padded:
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                        --     GraphicsResource    --
+
+
 class GraphicsResource:
     """
     A class that loads an img (currently only from an svg file) and can
@@ -726,8 +815,9 @@ class GraphicsResource:
         self.edgecolors = [elem.attrib.get('stroke', 'none') for elem in path_elems]
         self.maincolor_ids = [i for i, c in enumerate(self.facecolors) if c == '#0000FF']
         self.secondarycolor_ids = [i for i, c in enumerate(self.facecolors) if c == '#00FF00']
+        self.size = np.asarray((self.width, self.height))
 
-    def get_collection(self, main_color='w', secondary_color='w', edgecolor=None, linewidth=None):
+    def get_collection(self, main_color='k', secondary_color='k', edgecolor=None, linewidth=None):
         facecolors = [
             main_color
             if i in self.maincolor_ids
@@ -749,9 +839,12 @@ class GraphicsResource:
 
         return collection
 
+    def __repr__(self):
+        return f'GraphicsResource({self.width}, {self.height})'
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                            --     SVGArtist     --
+
 class SVGArtist(Positionable):
     def __init__(self, svgpath, ppi=1.0, **kwargs):
         Positionable.__init__(self, **kwargs)
@@ -763,13 +856,13 @@ class SVGArtist(Positionable):
     def draw(
         self,
         ax,
-        main_color='w',
-        secondary_color='w',
+        main_color='k',
+        secondary_color='k',
         edgecolor=None,
         linewidth=None,
         rotation=0,
         origin=(0, 0),
-        zorder=0,
+        zorder=2,
         **_,
     ):
         collection = self.resource.get_collection(main_color, secondary_color, edgecolor, linewidth)
@@ -784,6 +877,8 @@ class SVGArtist(Positionable):
         collection.set_zorder(zorder)
         ax.add_artist(collection)
 
+    def __repr__(self):
+        return f'SVGArtist({self.resource})'
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                           --     Part    --
@@ -822,38 +917,6 @@ class Part(SVGArtist, Configurable):
 
     def __repr__(self):
         return f'Part({self.part_name}, {self.svgpath})'
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{                           --     Label     --
-class Label(Positionable, Configurable, Padded):
-    def __init__(self, label_type, text, **kwargs):
-        Configurable.__init__(self, label_type, **kwargs)
-        Padded.__init__(self, **ut.updated_dict(kwargs, self.local_params))
-        Positionable.__init__(self, **ut.updated_dict(kwargs, self.local_params))
-        self.text = text
-
-    def on_transform_update(self):
-        pass
-
-    def draw(self, ax):
-        self._draw_impl(ax, **self.local_params)
-
-    def _draw_impl(self, ax, shape_params=None, **_):
-        # add a (fancy) rectangle
-        if shape_params is not None:
-            shape_params = ut.updated_dict(shape_params, self.local_params)
-            r = patches.FancyBboxPatch(
-                self.position,
-                self.size[0],
-                self.size[1],
-                **shape_params,
-            )
-            ax.add_patch(r)
-
-        text = TextDataUnits(*self.position, self.text, **self.local_params)
-        ax.add_artist(text)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -950,6 +1013,156 @@ class TU(Positionable, Configurable):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                          --     Wrapper     --
+class Wrapper(Positionable, Padded, Configurable):
+    def __init__(
+        self,
+        elements=None,
+        **kwargs,
+    ):
+        Configurable.__init__(self, 'Wrapper', priorities=['default'], **kwargs)
+        Positionable.__init__(self, **ut.updated_dict(kwargs, self.local_params))
+        Padded.__init__(self, **ut.updated_dict(kwargs, self.local_params))
+        self.elements = elements or []
+        if not isinstance(self.elements, list):
+            self.elements = [self.elements]
+        self.prepare(**self.local_params)
+
+    def on_transform_update(self):
+        self.prepare(**self.local_params)
+
+    def prepare(self, content_align=('center', 'center'), **_):
+        self.inner_position = np.asarray(self.position) + np.asarray(self.padding)
+        self.inner_size = np.asarray(self.size) - 2 * np.asarray(self.padding)
+        self.content_align = content_align
+
+        for elt in self.elements:
+            # assumes elt origin is left center (true for TUs)
+            elt_width, elt_height = elt.size
+
+            # check if elt has a relative_position property
+            if hasattr(elt, 'relative_position') and elt.relative_position is not None:
+                xelt, yelt = elt.relative_position
+                xelt = self.inner_position[0] + self.inner_size[0] * xelt
+                yelt = self.inner_position[1] + self.inner_size[1] * yelt
+                elt.set_transform((xelt, yelt), scale=1.0)
+                continue
+
+            if self.content_align[1] == 'center':
+                yelt = self.inner_position[1] + self.inner_size[1] / 2
+            else:
+                raise ValueError(f'Unknown vertical alignment {self.content_align[1]}')
+
+            if self.content_align[0] == 'left':
+                xelt = self.inner_position[0]
+            elif self.content_align[0] == 'right':
+                xelt = self.inner_position[0] + self.inner_size[0] - elt_width
+            elif self.content_align[0] == 'center':
+                xelt = self.inner_position[0] + self.inner_size[0] / 2 - elt_width / 2
+            else:
+                raise ValueError(f'Unknown horizontal alignment {self.content_align[0]}')
+            elt.set_transform((xelt, yelt), scale=1.0)
+
+    def add_elements(self, elements):
+        if not isinstance(elements, list):
+            elements = [elements]
+        self.elements.extend(elements)
+        self.prepare(**self.local_params)
+
+    def draw(self, ax):
+        self._draw_impl(ax, **self.local_params)
+
+    def _draw_impl(
+        self,
+        ax,
+        display_border=True,
+        border_properties=None,
+        **_,
+    ):
+        if self.position is None or self.size is None:
+            raise ValueError('Wrapper position and size must be defined to draw it')
+
+        if display_border:
+            border_properties = border_properties or {}
+            lw = border_properties.pop('lw', 0.5)
+            lw = to_display_units(border_properties.pop('linewidth', lw), ax)
+            linestyle = border_properties.pop('linestyle', '-')
+            if isinstance(linestyle, tuple):
+                spacing, (on, off) = linestyle
+                linestyle = (
+                    to_display_units(spacing, ax),
+                    (to_display_units(on, ax), to_display_units(off, ax)),
+                )
+
+            b = FancyBboxPatchDataUnits(
+                self.get_bottom_left_position(),
+                self.size[0],
+                self.size[1],
+                linewidth=lw,
+                linestyle=linestyle,
+                **border_properties,
+            )
+            ax.add_patch(b)
+
+        for elt in self.elements:
+            elt.draw(ax)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                           --     Label     --
+class Label(Positionable, Configurable, Padded):
+    def __init__(self, label_type, text, **kwargs):
+        if isinstance(label_type, str):
+            label_type = [label_type]
+        priorities = ['default'] + label_type
+        Configurable.__init__(self, 'Label', priorities=priorities, **kwargs)
+        Padded.__init__(self, **ut.updated_dict(kwargs, self.local_params))
+        Positionable.__init__(self, **ut.updated_dict(kwargs, self.local_params))
+        self.text = text
+
+    def on_transform_update(self):
+        pass
+
+    def draw(self, ax):
+        self._draw_impl(ax, **self.local_params)
+
+    def _draw_impl(
+        self,
+        ax,
+        logo_max_size=(10, 10),
+        logo_svg=None,
+        logo_offset=(0, 0),
+        logo_main_color='k',
+        text_offset=(0, 0),
+        text_properties=None,
+        shape_properties=None,
+        **_,
+    ):
+        if shape_properties is not None:
+            linewidth = to_display_units(shape_properties.pop('linewidth', 0.25), ax)
+            self.bbox = FancyBboxPatchDataUnits(
+                self.get_bottom_left_position(),
+                width=self.size[0],
+                height=self.size[1],
+                linewidth=linewidth,
+                **shape_properties,
+            )
+            ax.add_patch(self.bbox)
+        tpos = self.get_pos_with_offset(text_offset)
+        self.textartist = TextDataUnits(*tpos, self.text, **text_properties)
+        ax.add_artist(self.textartist)
+
+        if logo_svg is not None:
+            svgpath = RESOURCES_PATH / logo_svg
+            self.logo = SVGArtist(svgpath, **self.local_params)
+            logo_size = self.logo.resource.size
+            logo_scale = min(logo_max_size[0] / logo_size[0], logo_max_size[1] / logo_size[1])
+            print(logo_scale)
+            self.logo.set_transform(self.get_pos_with_offset(logo_offset), scale=logo_scale)
+            self.logo.draw(ax, zorder=3, main_color=logo_main_color)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                        --     GridLayout     --
 class GridSpecItem:
     def __init__(self, grid_spec, row_slice, col_slice):
@@ -1040,84 +1253,8 @@ class GridSpec(Positionable):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                          --     Wrapper     --
-class Wrapper(Positionable, Padded, Configurable):
-    def __init__(
-        self,
-        elements=None,
-        **kwargs,
-    ):
-        Configurable.__init__(self, 'Wrapper', prioriries=['default'], **kwargs)
-        Positionable.__init__(self, **ut.updated_dict(kwargs, self.local_params))
-        Padded.__init__(self, **ut.updated_dict(kwargs, self.local_params))
-        self.elements = elements or []
-        if not isinstance(self.elements, list):
-            self.elements = [self.elements]
-        self.prepare(**self.local_params)
-
-    def on_transform_update(self):
-        self.prepare(**self.local_params)
-
-    def prepare(self, content_align=('center', 'center'), **_):
-        self.inner_position = np.asarray(self.position) + np.asarray(self.padding)
-        self.inner_size = np.asarray(self.size) - 2 * np.asarray(self.padding)
-        self.content_align = content_align
-
-        for elt in self.elements:
-            # assumes elt origin is left center (true for TUs)
-            elt_width, elt_height = elt.size
-
-            # check if elt has a relative_position property
-            if hasattr(elt, 'relative_position') and elt.relative_position is not None:
-                xelt, yelt = elt.relative_position
-                xelt = self.inner_position[0] + self.inner_size[0] * xelt
-                yelt = self.inner_position[1] + self.inner_size[1] * yelt
-                elt.set_transform((xelt, yelt), scale=1.0)
-                continue
-
-            if self.content_align[1] == 'center':
-                yelt = self.inner_position[1] + self.inner_size[1] / 2
-            else:
-                raise ValueError(f'Unknown vertical alignment {self.content_align[1]}')
-
-            if self.content_align[0] == 'left':
-                xelt = self.inner_position[0]
-            elif self.content_align[0] == 'right':
-                xelt = self.inner_position[0] + self.inner_size[0] - elt_width
-            elif self.content_align[0] == 'center':
-                xelt = self.inner_position[0] + self.inner_size[0] / 2 - elt_width / 2
-            else:
-                raise ValueError(f'Unknown horizontal alignment {self.content_align[0]}')
-            elt.set_transform((xelt, yelt), scale=1.0)
-
-    def add_elements(self, elements):
-        if not isinstance(elements, list):
-            elements = [elements]
-        self.elements.extend(elements)
-        self.prepare(**self.local_params)
-
-    def draw(self, ax):
-        self._draw_impl(ax, **self.local_params)
-
-    def _draw_impl(
-        self,
-        border=True,
-        border_params=DEFAULT_WRAPPER_BORDER_PARAMS,
-        **_,
-    ):
-        if self.position is None or self.size is None:
-            raise ValueError('Wrapper position and size must be defined to draw it')
-
-        if border:
-            b = patches.FancyBboxPatch(self.position, self.size[0], self.size[1], **border_params)
-            ax.add_patch(b)
-
-        for elt in self.elements:
-            elt.draw(ax)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                     --     Network Gene Plot     --
+
 class NetworkScene(Positionable, Configurable):
     def __init__(self, network: bc.Network, params: dict, **kwargs):
         self.network = network
@@ -1153,16 +1290,23 @@ class NetworkScene(Positionable, Configurable):
         for i, col in enumerate(layout):
             for j, tu_id in enumerate(col):
                 tu_name = aggdf[aggdf['tu_id'] == tu_id]['tu_name'].tolist()[0]
-                tu = TU(self.network.lib, tu_name, params=self.all_params)
                 lbl_text = aggdf[aggdf['tu_id'] == tu_id]['cotx_marker'].tolist()[0]
-                main_color = get_color_family(lbl_text)
+                ratio_text = aggdf[aggdf['tu_id'] == tu_id]['plasmid_ratio_label'].tolist()[0]
+                context = {'marker_color': lbl_text}
+                lbl_text = f'{ratio_text}   {lbl_text}'
+                tu = TU(self.network.lib, tu_name, params=self.all_params, params_context=context)
                 lbl = Label(
-                    ['aggregation', main_color],
+                    ['aggregation'],
                     lbl_text,
                     position=(0.5, -0.2),
                     params=self.all_params,
+                    params_context=context,
                 )
-                self.grid[j, i] = Wrapper(elements=[tu, lbl], params=self.all_params)
+                r, c = self.grid.nrows - j - 1, i
+                self.grid[r, c] = Wrapper(
+                    elements=[tu, lbl], params=self.all_params, params_context=context
+                )
+
 
     def one_row_per_plasmid(self, row_spacing=10, col_spacing=10, **_):
         self.tu_names = []
@@ -1215,8 +1359,11 @@ class NetworkScene(Positionable, Configurable):
 
 
 fig, ax = plt.subplots(dpi=300, figsize=(10, 10))
-netscene = NetworkScene(net, position=(0, 0), params=DEFAULT_NETWORK_SCENE_PARAMS)
+netscene = NetworkScene(net, position=(0, 0), params=DEFAULT_CONFIG)
 netscene.draw(ax)
+# ax.set_ylim(-100, 2000)
+# ax.set_xlim(-10, 200)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
