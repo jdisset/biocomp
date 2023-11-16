@@ -102,6 +102,7 @@ DEFAULT_PART_PARAMS = {
     'default': {
         'main_color': '#EEEEEE',
         'secondary_color': '#EEEEEE',
+        'anchor_points': [(0.5, 1), (0.5, -1.5)],
         'edgecolor': 'k',
         'linewidth': 0,
         'origin': (0, 0.5),  # center left
@@ -122,6 +123,7 @@ DEFAULT_PART_PARAMS = {
         'label_text': 'ERN',
         'label_position': (0.2, 0.0),
         'label_properties': {'ha': 'left', 'va': 'center'},
+        'anchor_points': [(0.78, 0.7), (0.78, -0.8)],
     },
     'ERN_recog_site_5p': {
         'origin': (0, 0.1),
@@ -134,7 +136,7 @@ DEFAULT_PART_PARAMS = {
         },
     },
     'uORF_group': {
-        'label_position': (0.5, -0.2),
+        'label_position': (0.5, -0.5),
         'label_properties': {
             'fontsize': SMALL_FONT_SIZE,
             'ha': 'center',
@@ -226,15 +228,15 @@ DEFAULT_TU_PARAMS = {
     'default': {
         'enabled_slots': DEFAULT_ENABLED_TU_SLOTS,
         'slot_widths': {
-            'promoter': 25,
-            '5\'UTR': 30,
+            'promoter': 22,
+            '5\'UTR': 40,
             'gene': 60,
             '3\'UTR': 1,
             'terminator': 15,
         },
         'display_empty_slots': True,
         'rescale_parts': 'never',  # 'never', 'always', 'if_too_big'
-        'parts_spacing': 0.1,
+        'parts_spacing': 12,
         'default_part_width': 3,
         'tu_linewidth': 1.2,
         'padding': (0.1, 0.1),
@@ -257,7 +259,8 @@ DEFAULT_CONFIG = {
                 'linewidth': 0.25,
                 'zorder': 1,
                 'alpha': 1,
-                'linestyle': (0, (3, 3)),
+                'linewidth': 0.1,
+                # 'linestyle': (0, (3, 3)),
             },
         },
     },
@@ -310,7 +313,88 @@ DEFAULT_CONFIG
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+### {{{                       --     Configurable     --
+class Configurable:
+    def __init__(self, section_name, params=None, priorities=None, params_context=None, **_):
+        self.priorities = priorities
+        self.section_name = section_name
+        self.update_params(params, params_context=params_context, **_)
 
+    def update_params(self, params, params_context=None, **kwargs):
+        self.all_params = params or {}
+        params = resolve_references(params, context=params_context)
+        section_params = params.get(self.section_name, {})
+        if self.priorities is None:
+            self.local_params = section_params.copy()
+        else:
+            self.local_params = section_params.get(self.priorities[0], {}).copy()
+            for pname in self.priorities[1:]:
+                self.local_params = ut.updated_dict(
+                    self.local_params, section_params.get(pname, {})
+                )
+        self.local_params = ut.updated_dict(self.local_params, kwargs)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                       --     Positionable     --
+
+
+class Positionable:
+    def __init__(
+        self,
+        position=(0, 0),
+        origin=(0, 0),
+        size=(1, 1),
+        scale=1.0,
+        relative_position=None,
+        margin=0,
+        **_,
+    ):
+        self.position = np.asarray(position)
+        self.size = np.asarray(size)
+        self.width = size[0]
+        self.height = size[1]
+        self.scale = scale
+        self.origin = origin
+        self.relative_position = relative_position
+        self.margin = margin
+        if isinstance(margin, (int, float)):
+            self.padding = (margin, margin)
+
+    def set_transform(self, position, scale=1.0, size=None):
+        self.position = np.asarray(position)
+        self.scale = scale
+        if size is not None:
+            self.size = np.asarray(size)
+            self.width = size[0]
+            self.height = size[1]
+        self.on_transform_update()
+
+    def get_bottom_left_position(self):
+        return self.position - self.size * self.scale * self.origin
+
+    def get_center_position(self):
+        return self.position - self.size * self.scale * self.origin + self.size * self.scale / 2
+
+    def get_relative_position(self, position):
+        # return self.get_bottom_left_position() + np.asarray(position) * self.size * self.scale
+        return self.origin + np.asarray(position) * self.size * self.scale
+
+    def get_pos_with_offset(self, offset):
+        return self.position + np.asarray(offset) * self.scale
+
+    def on_transform_update(self):
+        raise NotImplementedError
+
+
+class Padded:
+    def __init__(self, padding=(0, 0), **_):
+        self.padding = padding
+        if isinstance(padding, (int, float)):
+            self.padding = (padding, padding)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{           --     network topology and content helpers     --
 def get_tu_grid_layout(network, node_type='translation'):
     """return a list of lists of TUs, ordered by topological order of the nodes
@@ -349,7 +433,6 @@ def get_tu_grid_layout(network, node_type='translation'):
 
 import pandas as pd
 
-[e['ratios'] for e in aggregations['extra']]
 
 def get_tu_informations(network):
     aggs = []
@@ -404,6 +487,38 @@ def get_tu_informations(network):
     return aggdf
 
 
+def get_ERN_interactions(net):
+    ERNs = net.compute_graph[net.compute_graph['type'] == 'sequestron_ERN']
+
+    ERN_interactions = []
+    for i, e in ERNs.iterrows():
+        inputs = net.central_dogma_graph.loc[e['cdg_input']]
+        assert len(inputs) == 2
+        src_tu_id = inputs.iloc[0]['tu_id'][0]
+        src_part_name = inputs.iloc[0]['content'][0]
+        tgt_tu_id = inputs.iloc[1]['tu_id'][0]
+        tgt_parts = inputs.iloc[1]['content']
+        # the tgt part name should contain the src part name
+        tgt_part_name = [p for p in tgt_parts if src_part_name in p][0]
+        ERN_interactions.append(
+            {
+                'src_tu_id': src_tu_id,
+                'src_part_name': src_part_name,
+                'tgt_tu_id': tgt_tu_id,
+                'tgt_part_name': tgt_part_name,
+            }
+        )
+
+    ERN_interactions = pd.DataFrame(ERN_interactions)
+    return ERN_interactions
+
+
+def get_interactions(net):
+    erns = get_ERN_interactions(net)
+    erns['type'] = 'ERN'
+    return erns
+
+
 aggdf = get_tu_informations(net)
 layout = get_tu_grid_layout(net)
 
@@ -412,7 +527,6 @@ layout = get_tu_grid_layout(net)
 #: it's the row we will use to populate the cotx_id column (with its tu_id)
 
 # add a plasmid_ratio_label that writes ratio_norm : {ratio_norm of the plasmid of this aggregation that is_marker)
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -679,83 +793,6 @@ resolved_config = resolve_references(SimpleExampleConf)
 resolved_config
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                       --     Configurable     --
-
-
-class Configurable:
-    def __init__(self, section_name, params=None, priorities=None, params_context=None, **_):
-        self.priorities = priorities
-        self.section_name = section_name
-        self.update_params(params, params_context=params_context, **_)
-
-    def update_params(self, params, params_context=None, **kwargs):
-        self.all_params = params or {}
-        params = resolve_references(params, context=params_context)
-        section_params = params.get(self.section_name, {})
-        if self.priorities is None:
-            self.local_params = section_params.copy()
-        else:
-            self.local_params = section_params.get(self.priorities[0], {}).copy()
-            for pname in self.priorities[1:]:
-                self.local_params = ut.updated_dict(
-                    self.local_params, section_params.get(pname, {})
-                )
-        self.local_params = ut.updated_dict(self.local_params, kwargs)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                       --     Positionable     --
-
-
-class Positionable:
-    def __init__(
-        self,
-        position=(0, 0),
-        origin=(0, 0),
-        size=(1, 1),
-        scale=1.0,
-        relative_position=None,
-        margin=0,
-        **_,
-    ):
-        self.position = np.asarray(position)
-        self.size = np.asarray(size)
-        self.width = size[0]
-        self.height = size[1]
-        self.scale = scale
-        self.origin = origin
-        self.relative_position = relative_position
-        self.margin = margin
-        if isinstance(margin, (int, float)):
-            self.padding = (margin, margin)
-
-    def set_transform(self, position, scale=1.0, size=None):
-        self.position = np.asarray(position)
-        self.scale = scale
-        if size is not None:
-            self.size = np.asarray(size)
-            self.width = size[0]
-            self.height = size[1]
-        self.on_transform_update()
-
-    def get_bottom_left_position(self):
-        return self.position - self.size * self.scale * self.origin
-
-    def get_pos_with_offset(self, offset):
-        return self.position + np.asarray(offset) * self.scale
-
-    def on_transform_update(self):
-        raise NotImplementedError
-
-
-class Padded:
-    def __init__(self, padding=(0, 0), **_):
-        self.padding = padding
-        if isinstance(padding, (int, float)):
-            self.padding = (padding, padding)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                        --     GraphicsResource    --
 
 
@@ -842,8 +879,10 @@ class GraphicsResource:
     def __repr__(self):
         return f'GraphicsResource({self.width}, {self.height})'
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                            --     SVGArtist     --
+
 
 class SVGArtist(Positionable):
     def __init__(self, svgpath, ppi=1.0, **kwargs):
@@ -880,6 +919,7 @@ class SVGArtist(Positionable):
     def __repr__(self):
         return f'SVGArtist({self.resource})'
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                           --     Part    --
 class Part(SVGArtist, Configurable):
@@ -899,6 +939,20 @@ class Part(SVGArtist, Configurable):
         SVGArtist.__init__(self, self.svgpath, **kwargs)
         priorities = ['default', self.part_category, f'{self.part_category}.{self.part_name}']
         Configurable.__init__(self, 'Part', priorities=priorities, **kwargs)
+        self.prepare(**self.local_params)
+
+    def prepare(self, anchor_points=None, **_):
+        anchor_points = anchor_points or [(0.5, 0.5)]
+        relative_anchor_points = [np.asarray(p) for p in anchor_points]
+        self.anchor_points = [self.get_relative_position(p) for p in relative_anchor_points]
+        print(f'Part {self.part_name} has anchor points {self.anchor_points}')
+
+    def on_transform_update(self):
+        SVGArtist.on_transform_update(self)
+        self.prepare(**self.local_params)
+
+    def get_anchor_positions(self):
+        return self.anchor_points
 
     def draw(self, ax):
         SVGArtist.draw(self, ax, **self.local_params)
@@ -937,6 +991,7 @@ class TU(Positionable, Configurable):
         self.enabled_tu_slots = self.local_params.get('enabled_slots', DEFAULT_ENABLED_TU_SLOTS)
         self.part_names = get_parts_from_tu(lib, tu_name, enabled_tu_slots=self.enabled_tu_slots)
         self.parts = [[Part(lib, p, params=self.all_params) for p in ps] for ps in self.part_names]
+        self.parts_dict = {p.part_name: p for ps in self.parts for p in ps}
 
         self.prepare(**self.local_params)
 
@@ -1087,12 +1142,14 @@ class Wrapper(Positionable, Padded, Configurable):
             lw = border_properties.pop('lw', 0.5)
             lw = to_display_units(border_properties.pop('linewidth', lw), ax)
             linestyle = border_properties.pop('linestyle', '-')
+
             if isinstance(linestyle, tuple):
                 spacing, (on, off) = linestyle
-                linestyle = (
-                    to_display_units(spacing, ax),
-                    (to_display_units(on, ax), to_display_units(off, ax)),
-                )
+
+                # linestyle = (
+                    # to_display_units(spacing, ax),
+                    # (to_display_units(on, ax), to_display_units(off, ax)),
+                # )
 
             b = FancyBboxPatchDataUnits(
                 self.get_bottom_left_position(),
@@ -1100,6 +1157,7 @@ class Wrapper(Positionable, Padded, Configurable):
                 self.size[1],
                 linewidth=lw,
                 linestyle=linestyle,
+                transform=ax.transData,
                 **border_properties,
             )
             ax.add_patch(b)
@@ -1229,6 +1287,11 @@ class GridSpec(Positionable):
         position, size = gspecitem.get_position_and_size()
         value.set_transform(position=position, size=size)
 
+    def get_cell_at(self, position):
+        row = int(position[1] // (self.cell_size[1] + self.hspace))
+        col = int(position[0] // (self.cell_size[0] + self.wspace))
+        return self[row, col]
+
     def get_cell_corner_positions(self, row, col):
         bottom_left = self.position + np.asarray((col, row)) * (
             self.cell_size + np.asarray((self.wspace, self.hspace))
@@ -1253,16 +1316,182 @@ class GridSpec(Positionable):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                     --     Network Gene Plot     --
+### {{{                     --     InteractionLine     --
 
+
+def quantize_angle(v, possible_angles, round_to=3):
+    possible_vectors = np.asarray([np.cos(possible_angles), np.sin(possible_angles)]).T
+    distances = np.dot(possible_vectors, v)
+    best = possible_vectors[np.argmax(distances)]
+    return np.round(best, round_to)
+
+
+def get_intersection(origin, direction, AB):
+    # origin is a 2d vector
+    # direction is a 2d vector
+    # AB is a 2x2 matrix with the coordinates of the two points defining the line
+    # returns the intersection point between the line and the ray, or None if no intersection
+
+    dirnorm = np.linalg.norm(direction)
+    if dirnorm == 0:
+        return None
+    direction = direction / dirnorm
+    point1 = AB[0]
+    point2 = AB[1]
+
+    v1 = origin - point1
+    v2 = point2 - point1
+    v3 = np.array([-direction[1], direction[0]])
+    t1 = np.cross(v2, v1) / np.dot(v2, v3)
+    t2 = np.dot(v1, v3) / np.dot(v2, v3)
+    if t1 >= 0.0 and t2 >= 0.0 and t2 <= 1.0:
+        return origin + t1 * direction
+    else:
+        return None
+
+
+def get_cell_corners(bottom_left, cell_size, wspacing, hspacing):
+    return np.asarray(
+        [
+            bottom_left - np.asarray((wspacing / 2, hspacing / 2)),  # BL
+            bottom_left + np.array([-wspacing / 2, cell_size[1] + hspacing / 2]),  # TL
+            bottom_left
+            + np.array([cell_size[0] + wspacing / 2, cell_size[1] + hspacing / 2]),  # TR
+            bottom_left + np.array([cell_size[0] + wspacing / 2, -hspacing / 2]),  # BR
+        ]
+    )
+
+
+class InteractionLine(Configurable):
+    def __init__(self, interaction_type, source, target, grid_spec=None, **kwargs):
+        Configurable.__init__(
+            self, 'InteractionLine', priorities=['default', interaction_type], **kwargs
+        )
+        self.src = source
+        self.tgt = target
+        self.grid_spec = grid_spec
+
+    def prepare(self, quantize_angles_to=None, **_):
+        if quantize_angles_to is None:
+            # only up and down by default
+            quantize_angles_to = [np.pi / 2, -np.pi / 2]
+
+        src_anchors = np.atleast_2d(np.asarray(self.src.get_anchor_positions()))
+        tgt_anchors = np.atleast_2d(np.asarray(self.tgt.get_anchor_positions()))
+        # find the pair that minimizes the distance between the two anchors
+        distances = np.sqrt((src_anchors[:, :, None] - tgt_anchors[:, :, None].T) ** 2).sum(1).T
+        src_anchor_id, tgt_anchor_id = np.unravel_index(np.argmax(distances), distances.shape)
+        self.src_anchor = src_anchors[src_anchor_id]
+        self.tgt_anchor = tgt_anchors[tgt_anchor_id]
+
+        # find orientation of the line (to the center of the object
+        self.src_orientation = self.src_anchor - self.src.get_center_position()
+        self.tgt_orientation = self.tgt_anchor - self.tgt.get_center_position()
+
+        # quantize to the given angles
+        self.src_orientation = quantize_angle(self.src_orientation, quantize_angles_to)
+        self.tgt_orientation = quantize_angle(self.tgt_orientation, quantize_angles_to)
+
+        if self.grid_spec is not None:
+            src_cell_pos, src_cell_size = self.grid_spec.get_cell_at(
+                self.src.position
+            ).get_position_and_size()
+            tgt_cell_pos, tgt_cell_size = self.grid_spec.get_cell_at(
+                self.tgt.position
+            ).get_position_and_size()
+            # now we need to find the point of intersection between src_orientation
+            # and any of the 4 sides of the cell (+ 0.5hspace and + 0.5wspace)
+            src_corners = get_cell_corners(
+                src_cell_pos, src_cell_size, self.grid_spec.wspace, self.grid_spec.hspace
+            )
+            tgt_corners = get_cell_corners(
+                tgt_cell_pos, tgt_cell_size, self.grid_spec.wspace, self.grid_spec.hspace
+            )
+            src_intersections = [
+                get_intersection(self.src_anchor, self.src_orientation, np.asarray([c1, c2]))
+                for c1, c2 in zip(src_corners, src_corners[1:] + [src_corners[0]])
+            ]
+            tgt_intersections = [
+                get_intersection(self.tgt_anchor, self.tgt_orientation, np.asarray([c1, c2]))
+                for c1, c2 in zip(tgt_corners, tgt_corners[1:] + [tgt_corners[0]])
+            ]
+
+            print(f'src_intersections: {src_intersections}')
+            print(f'tgt_intersections: {tgt_intersections}')
+            # pick the first intersection found
+            src_intersection = next(filter(None, src_intersections), None)
+            tgt_intersection = next(filter(None, tgt_intersections), None)
+
+            assert src_intersection is not None, f'No intersection found for {self.src}'
+            assert tgt_intersection is not None, f'No intersection found for {self.tgt}'
+
+            # for now we'll simply create a path that goes:
+            # src_anchor -> src_intersection -> tgt_intersection -> tgt_anchor
+
+            self.path = mpl.path.Path(
+                [
+                    self.src_anchor,
+                    src_intersection,
+                    tgt_intersection,
+                    self.tgt_anchor,
+                ],
+                codes=[1, 2, 2, 2],
+            )
+        else:
+            print('no grid spec')
+            print(f'src_anchor: {self.src_anchor}')
+            print(f'src_orientation: {self.src_orientation}')
+            print(f'tgt_anchor: {self.tgt_anchor}')
+            print(f'tgt_orientation: {self.tgt_orientation}')
+
+            self.path = mpl.path.Path(
+                [
+                    self.src_anchor,
+                    self.src_anchor + self.src_orientation*10,
+                    self.tgt_anchor + self.tgt_orientation*10,
+                    self.tgt_anchor,
+                ],
+                codes=[1, 2, 2, 2],
+            )
+
+
+    def draw(self, ax):
+        self._draw_impl(ax, **self.local_params)
+
+    def _draw_impl(
+        self,
+        ax,
+        color='#777',
+        linewidth=0.5,
+        zorder=0,
+        **_,
+    ):
+        self.prepare(**self.local_params)
+
+        line = mpl.patches.FancyArrowPatch(
+            path=self.path,
+            arrowstyle=mpl.patches.ArrowStyle(
+                '|-|', widthA=0.0, angleA=None, widthB=3, angleB=None
+            ),
+            linewidth=linewidth,
+            color=color,
+            zorder=zorder,
+        )
+
+        ax.add_patch(line)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                     --     Network Gene Plot     --
 class NetworkScene(Positionable, Configurable):
     def __init__(self, network: bc.Network, params: dict, **kwargs):
-        self.network = network
-        self.sources = network.compute_graph[network.compute_graph['type'] == 'source']
-        self.tus = network.compute_graph[network.compute_graph['type'] == 'tu']
-
         Configurable.__init__(self, 'NetworkScene', params=params, **kwargs)
         Positionable.__init__(self, **ut.updated_dict(kwargs, self.local_params))
+        self.network = network
+        self.tus = {}
+        self.parts = {}
+
+        self.interactions = []
 
         self.smart_grid(**self.local_params)
         self.size = (self.grid.width, self.grid.height)
@@ -1272,6 +1501,7 @@ class NetworkScene(Positionable, Configurable):
     ):
         layout = get_tu_grid_layout(self.network)
         aggdf = get_tu_informations(self.network)
+        interactions = get_interactions(self.network)
         if not show_cotx_tu:
             markers_id = aggdf[aggdf['is_marker'] == True]['tu_id'].tolist()
             aggdf = aggdf[aggdf['is_marker'] == False]
@@ -1295,6 +1525,8 @@ class NetworkScene(Positionable, Configurable):
                 context = {'marker_color': lbl_text}
                 lbl_text = f'{ratio_text}   {lbl_text}'
                 tu = TU(self.network.lib, tu_name, params=self.all_params, params_context=context)
+                self.tus[tu_id] = tu
+                self.parts[tu_id] = tu.parts_dict
                 lbl = Label(
                     ['aggregation'],
                     lbl_text,
@@ -1307,11 +1539,28 @@ class NetworkScene(Positionable, Configurable):
                     elements=[tu, lbl], params=self.all_params, params_context=context
                 )
 
+        for _, row in interactions.iterrows():
+            # interactions contain src_tu_id, src_part_name, tgt_tu_id, tgt_part_name
+            src_part = self.parts[row['src_tu_id']][row['src_part_name']]
+            tgt_part = self.parts[row['tgt_tu_id']][row['tgt_part_name']]
+            print(src_part, tgt_part)
+
+            il = InteractionLine(
+                row['type'],
+                src_part,
+                tgt_part,
+                # grid_spec=self.grid,
+                grid_spec=None,
+                params=self.all_params,
+            )
+            self.interactions.append(il)
 
     def one_row_per_plasmid(self, row_spacing=10, col_spacing=10, **_):
+        sources = self.network.compute_graph[self.network.compute_graph['type'] == 'source']
+        tus = self.network.compute_graph[self.network.compute_graph['type'] == 'tu']
         self.tu_names = []
         self.plasmid_names = []
-        for i, src in self.sources.iterrows():
+        for i, src in sources.iterrows():
             tu_names = [
                 '_'.join(self.network.central_dogma_graph.loc[t]['tu_id'][0].split('_')[:-1])
                 for t in src['cdg_output']
@@ -1356,14 +1605,15 @@ class NetworkScene(Positionable, Configurable):
             max(current_ylim[1], self.position[1] + self.size[1] + ax_min_padding),
         )
         self.grid.draw(ax)
+        for il in self.interactions:
+            il.draw(ax)
 
 
-fig, ax = plt.subplots(dpi=300, figsize=(10, 10))
-netscene = NetworkScene(net, position=(0, 0), params=DEFAULT_CONFIG)
-netscene.draw(ax)
-# ax.set_ylim(-100, 2000)
-# ax.set_xlim(-10, 200)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+for net in networks[:]:
+    fig, ax = plt.subplots(dpi=300, figsize=(10, 10))
+    netscene = NetworkScene(net, position=(0, 0), params=DEFAULT_CONFIG)
+    netscene.draw(ax)
