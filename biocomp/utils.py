@@ -2,10 +2,10 @@ import json
 import copy
 
 import time
-from jax.experimental import host_callback
 from pathlib import Path
 from tqdm import tqdm
 import jax
+from jax.experimental import host_callback
 from jax import jit, vmap, lax
 from jax import tree_util as pytree
 import jax.numpy as jnp
@@ -17,8 +17,26 @@ from rich.logging import RichHandler
 from jax.tree_util import Partial as partial
 from contextlib import contextmanager
 from pkg_resources import get_distribution
+from .recipe import XP
 import rich
 import subprocess
+import os
+
+import cProfile
+class profiler:
+    def __init__(self, filename):
+        self.filename = filename
+        # mkdir if it doesn't exist
+        Path(filename).parent.mkdir(parents=True, exist_ok=True)
+
+    def __enter__(self):
+        self.profiler = cProfile.Profile()
+        self.profiler.enable()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.profiler.disable()
+        self.profiler.dump_stats(self.filename)
+
 
 
 def get_git_commit_hash():
@@ -27,6 +45,71 @@ def get_git_commit_hash():
 def get_biocomp_version():
     return get_distribution('biocomp').version
 
+### {{{               --     loading constants and config     --
+
+# we check if there is a file named ~/.biocomp.json
+# if so, we load it and use the paths defined there
+# otherwise, we use the default paths defined above
+GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
+if GLOBAL_CONFIG_PATH.exists():
+    with open(GLOBAL_CONFIG_PATH) as f:
+        config = json.load(f)
+        DEFAULT_XP_PATH = Path(config.get('xp_path', '')).expanduser()
+        DEFAULT_RECIPE_PATH = config.get('recipe_path', '')
+        if isinstance(DEFAULT_RECIPE_PATH, str):
+            DEFAULT_RECIPE_PATH = Path(DEFAULT_RECIPE_PATH).expanduser()
+        elif isinstance(DEFAULT_RECIPE_PATH, list):
+            DEFAULT_RECIPE_PATH = [Path(p).expanduser() for p in DEFAULT_RECIPE_PATH]
+        DEFAULT_LIB_PATH = Path(config.get('lib_path', '')).expanduser()
+
+# we also check the environment variables to see if they define the paths
+# if so, we use them in priority
+
+if 'BIOCOMP_XP_PATH' in os.environ:
+    DEFAULT_XP_PATH = Path(os.environ['BIOCOMP_XP_PATH']).expanduser()
+if 'BIOCOMP_RECIPE_PATH' in os.environ:
+    DEFAULT_RECIPE_PATH = Path(os.environ['BIOCOMP_RECIPE_PATH']).expanduser()
+if 'BIOCOMP_LIB_PATH' in os.environ:
+    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_LIB_PATH']).expanduser()
+
+##────────────────────────────────────────────────────────────────────────────}}}
+# {{{                      --     data load/save     --
+# ···············································································
+import pickle
+
+
+def save(data, path, overwrite=False, rename_if_exists=True):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if overwrite:
+            path.unlink()
+        elif rename_if_exists:
+            path = path.with_name(path.stem + '_' + path.suffix)
+        else:
+            raise RuntimeError(f'File {path} already exists.')
+    with open(path, 'wb') as file:
+        pickle.dump(data, file)
+
+
+def load(path):
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f'Not a file: {path}')
+    with open(path, 'rb') as file:
+        data = pickle.load(file)
+    return data
+
+
+#                                                                            }}}
+### {{{               --     convenience loading functions     --
+def load_lib(lib_path=DEFAULT_LIB_PATH):
+    return load(lib_path)
+# convenience loading functions with default paths
+def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH, **kwargs):
+    xp = XP(xpname, xp_path, recipe_path, lib, **kwargs)
+    return xp
+##────────────────────────────────────────────────────────────────────────────}}}
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     logging utils     --
@@ -95,9 +178,61 @@ def timer(name=None, use_logger=True):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
+### {{{                           --     cache     --
+import xxhash
+def get_cache(gen_f, signature, cache_location):
+    if cache_location is not None:
+        sighash = xxhash.xxh128(signature).hexdigest()
+        # create cache directory if it doesn't exist
+        if isinstance(cache_location, str):
+            cache_location = Path(cache_location)
+        cache_location.mkdir(parents=True, exist_ok=True)
+        cachepath = cache_location / sighash
+        if cachepath.exists():
+            logger.debug(f'Loading {sighash} from cache.')
+            with open(cachepath, 'rb') as file:
+                data = pickle.load(file)
+        else:
+            logger.info(f'No such signature in cache: {signature}')
+            logger.debug(f'Generating {sighash} and saving to cache.')
+            data = gen_f()
+            with open(cachepath, 'wb') as file:
+                pickle.dump(data, file)
+    else:
+        data = gen_f()
+    return data
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                    --     random misc stuff     --
 # ···············································································
+
+def np_converter(obj):
+    import jax.numpy as jnp
+
+    if isinstance(obj, (np.integer, jnp.integer)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, jnp.floating)):
+        return float(obj)
+    elif isinstance(obj, (np.ndarray, jnp.ndarray)):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_) or isinstance(obj, jnp.bool_):
+        return bool(obj)
+    elif np.isnan(obj) or jnp.isnan(obj):
+        return None
+
+
+# parse_float=lambda x: round(float(x), 3)
+def make_json_compatible(o, converter=np_converter, float_precision=None):
+    if float_precision is not None:
+        return json.loads(
+            json.dumps(o, default=converter), parse_float=lambda x: round(float(x), float_precision)
+        )
+    else:
+        return json.loads(json.dumps(o, default=converter))
+
 
 
 def apply_constraints(par, cons):
@@ -184,15 +319,15 @@ def set_list_item(lst, i, val):
     lst[i] = val
 
 
-def load(path, suffix='.pickle'):
-    path = Path(path)
-    if not path.is_file():
-        raise ValueError(f'Not a file: {path}')
-    if path.suffix != suffix:
-        raise ValueError(f'Not a {suffix} file: {path}')
-    with open(path, 'rb') as file:
-        data = pickle.load(file)
-    return data
+# def load(path, suffix='.pickle'):
+    # path = Path(path)
+    # if not path.is_file():
+        # raise ValueError(f'Not a file: {path}')
+    # if path.suffix != suffix:
+        # raise ValueError(f'Not a {suffix} file: {path}')
+    # with open(path, 'rb') as file:
+        # data = pickle.load(file)
+    # return data
 
 
 def load_json5(path):
@@ -230,167 +365,6 @@ def tree_to_np(params):
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                        --     JAX helpers     --
-# ···············································································
-
-
-def get_looped_slice(a, start, end):
-    """Get a slice of an array that loops around the end of the array if end > a.shape[0]"""
-    offset = start // a.shape[0]
-    start = start % a.shape[0]
-    end = end - offset * a.shape[0]
-    if end > a.shape[0]:  # loop around
-        return np.concatenate([a[start:], get_looped_slice(a, 0, end - a.shape[0])])
-    else:
-        return a[start:end]
-
-
-def value_and_jacfwd(f, x):
-    pushfwd = partial(jax.jvp, f, (x,))
-    basis = jnp.eye(x.size, dtype=x.dtype)
-    y, jac = jax.vmap(pushfwd, out_axes=(None, 1))((basis,))
-    return y, jac
-
-
-def value_and_jacrev(f, x):
-    y, pullback = jax.vjp(f, x)
-    basis = jnp.eye(y.size, dtype=y.dtype)
-    jac = jax.vmap(pullback)(basis)
-    return y, jac
-
-
-class TQDMProgress:
-    def __init__(self, num_samples, message):
-        self.bar = tqdm(range(num_samples))
-        self.bar.set_description(message, refresh=False)
-
-    def update(self, count):
-        self.bar.update(count)
-
-    def close(self):
-        self.bar.close()
-        pass
-
-
-# --- tqdm progress bar for jax scan ---
-# This code is from this blog post: https://www.jeremiecoullon.com/2021/01/29/jax_progress_bar/
-def progress_scan(num_samples, progress_type=TQDMProgress, message=None, print_rate=None):
-    "Progress bar for a JAX scan"
-    if message is None:
-        message = ""
-        # message = f"Running for {num_samples:,} iterations"
-    bars = {}
-
-    if print_rate is None:
-        print_rate = max(1, int(num_samples / 100))
-
-    remainder = num_samples % print_rate
-
-    def create(arg, transform):
-        bars[0] = progress_type(num_samples, message)
-        pass
-
-    def update(arg, transform):
-        bars[0].update(arg)
-
-    def _update_progress_bar(iter_num):
-        "Updates tqdm progress bar of a JAX scan or loop"
-        _ = lax.cond(
-            iter_num == 0,
-            lambda _: host_callback.id_tap(create, None, result=iter_num),
-            lambda _: iter_num,
-            operand=None,
-        )
-
-        _ = lax.cond(
-            # update every multiple of `print_rate` except at the end
-            (iter_num % print_rate == 0) & (iter_num != num_samples - remainder),
-            lambda _: host_callback.id_tap(update, print_rate, result=iter_num),
-            lambda _: iter_num,
-            operand=None,
-        )
-
-        _ = lax.cond(
-            # update by `remainder`
-            iter_num == num_samples - remainder,
-            lambda _: host_callback.id_tap(update, remainder, result=iter_num),
-            lambda _: iter_num,
-            operand=None,
-        )
-
-    def close(arg, transform):
-        bars[0].close()
-
-    def _close_progress_bar(result, iter_num):
-        return lax.cond(
-            iter_num == num_samples - 1,
-            lambda _: host_callback.id_tap(close, None, result=result),
-            lambda _: result,
-            operand=None,
-        )
-
-    def _progress_bar_scan(func):
-        """Decorator that adds a progress bar to `body_fun` used in `lax.scan`.
-        Note that `body_fun` must either be looping over `np.arange(num_samples)`,
-        or be looping over a tuple who's first element is `np.arange(num_samples)`
-        This means that `iter_num` is the current iteration number
-        """
-
-        @jit
-        def wrapper_progress_bar(carry, x):
-            if type(x) is tuple:
-                iter_num, *_ = x
-            else:
-                iter_num = x
-            _update_progress_bar(iter_num)
-            result = func(carry, x)
-            return _close_progress_bar(result, iter_num)
-
-        return wrapper_progress_bar
-
-    return _progress_bar_scan
-
-def freeze(struct):
-    # converts dict to frozendict, list to tuple and recursively
-    # freezes all nested dicts, lists, tuples, and sets.
-    import frozendict
-    if isinstance(struct, dict):
-        return frozendict.frozendict({k: freeze(v) for k, v in struct.items()})
-    elif isinstance(struct, list):
-        return tuple([freeze(v) for v in struct])
-    elif isinstance(struct, tuple):
-        return tuple([freeze(v) for v in struct])
-    elif isinstance(struct, set):
-        return frozenset([freeze(v) for v in struct])
-    else:
-        return struct
-
-def tree_shape(t):
-    return pytree.tree_map(lambda x: x.shape, t)
-
-
-@jit
-def tree_append(t, e):
-    fa, tt = pytree.tree_flatten(t)
-    fb, te = pytree.tree_flatten(e)
-    assert te == tt
-    return pytree.tree_unflatten(tt, [jnp.concatenate([a, jnp.array([b])]) for a, b in zip(fa, fb)])
-
-
-def tree_get(t, i):
-    return pytree.tree_map(lambda x: x[i], t)
-
-
-@jax.jit
-def tree_unstack(t):
-    """Unstack a tree of arrays into a list of trees of arrays"""
-    N = jax.tree_util.tree_leaves(t)[0].shape[0]
-    return [tree_get(t, i) for i in range(N)]
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                     --     parameters utils     --
@@ -680,7 +654,6 @@ class TimeStore:
 
 ### {{{                   --     log-poly-log transform     --
 
-
 def logb(x, base=10):
     """Compute log of x in base b."""
     return np.log(x) / np.log(base)
@@ -845,14 +818,236 @@ def jax_inverse_log_poly_log(y, threshold=100, base=10, compression=0.5):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-# at_path = at_path_flat
-# delete_path = delete_path_flat
-# split_params = split_params_flat
-# assemble_params = assemble_params_flat
-# path_contains = path_contains_flat
-
-# checks
+### {{{                         --     jaxutils     --
+from jax.experimental import host_callback
 enable_checks = False
+
+
+def grid_map(F, xrange, yrange, meshres):
+    import jax
+    XX, YY = np.meshgrid(
+        np.linspace(xrange[0], xrange[1], meshres[0]),
+        np.linspace(yrange[0], yrange[1], meshres[1]),
+        indexing='xy',
+    )
+    coords = np.column_stack((XX.ravel(), YY.ravel()))
+    ZZ = jax.vmap(F)(coords).reshape(XX.shape)
+    return XX, YY, ZZ
+
+def hooked_scan(num_samples, on_update, call_rate=1):
+    import jax
+    from jax import lax
+    from jax.experimental import host_callback
+
+    def update(args, transform):
+        result, iternum = args
+        carry, acc = result
+        on_update(acc, iternum)
+
+    def _update_(result, iter_num):
+        return lax.cond(
+            (iter_num % call_rate == 0) | (iter_num == num_samples - 1),
+            lambda _: host_callback.id_tap(update, (result, iter_num), result=result),
+            lambda _: result,
+            operand=None,
+        )
+
+    def _hooked_scan(func):
+        @jax.jit
+        def wrapper(carry, x):
+            if type(x) is tuple:
+                iter_num, *_ = x
+            else:
+                iter_num = x
+            result = func(carry, x)
+            return _update_(result, iter_num)
+
+        return wrapper
+
+    return _hooked_scan
+
+
+
+def get_jaxpr(fun, *args, **kwargs):
+    import jax
+
+    return jax.make_jaxpr(fun)(*args, **kwargs)
+
+
+def print_jaxpr(fun, *args, **kwargs):
+    get_jaxpr(fun, *args, **kwargs).pretty_print()
+
+
+def get_xla(fun, *args, static_argnums=(), **kwargs):
+    import jax
+    import jaxlib.xla_extension as xla_ext
+
+    console = Console(highlighter=rich.highlighter.ReprHighlighter())
+    c = jax.xla_computation(fun, static_argnums=static_argnums)(*args, **kwargs)
+    backend = jax.lib.xla_bridge.get_backend()
+    e = backend.compile(c)
+    option = xla_ext.HloPrintOptions.short_parsable()
+    out = e.hlo_modules()[0].to_string(option)
+    return out
+
+
+def print_xla(fun, *args, static_argnums=(), **kwargs):
+    print(get_xla(fun, *args, **kwargs))
+
+
+
+def get_looped_slice(a, start, end):
+    """Get a slice of an array that loops around the end of the array if end > a.shape[0]"""
+    offset = start // a.shape[0]
+    start = start % a.shape[0]
+    end = end - offset * a.shape[0]
+    if end > a.shape[0]:  # loop around
+        return np.concatenate([a[start:], get_looped_slice(a, 0, end - a.shape[0])])
+    else:
+        return a[start:end]
+
+
+def value_and_jacfwd(f, x):
+    pushfwd = partial(jax.jvp, f, (x,))
+    basis = jnp.eye(x.size, dtype=x.dtype)
+    y, jac = jax.vmap(pushfwd, out_axes=(None, 1))((basis,))
+    return y, jac
+
+
+def value_and_jacrev(f, x):
+    y, pullback = jax.vjp(f, x)
+    basis = jnp.eye(y.size, dtype=y.dtype)
+    jac = jax.vmap(pullback)(basis)
+    return y, jac
+
+
+class TQDMProgress:
+    def __init__(self, num_samples, message):
+        self.bar = tqdm(range(num_samples))
+        self.bar.set_description(message, refresh=False)
+
+    def update(self, count):
+        self.bar.update(count)
+
+    def close(self):
+        self.bar.close()
+        pass
+
+
+# --- tqdm progress bar for jax scan ---
+# This code is from this blog post: https://www.jeremiecoullon.com/2021/01/29/jax_progress_bar/
+def progress_scan(num_samples, progress_type=TQDMProgress, message=None, print_rate=None):
+    "Progress bar for a JAX scan"
+    if message is None:
+        message = ""
+        # message = f"Running for {num_samples:,} iterations"
+    bars = {}
+
+    if print_rate is None:
+        print_rate = max(1, int(num_samples / 100))
+
+    remainder = num_samples % print_rate
+
+    def create(arg, transform):
+        bars[0] = progress_type(num_samples, message)
+        pass
+
+    def update(arg, transform):
+        bars[0].update(arg)
+
+    def _update_progress_bar(iter_num):
+        "Updates tqdm progress bar of a JAX scan or loop"
+        _ = lax.cond(
+            iter_num == 0,
+            lambda _: host_callback.id_tap(create, None, result=iter_num),
+            lambda _: iter_num,
+            operand=None,
+        )
+
+        _ = lax.cond(
+            # update every multiple of `print_rate` except at the end
+            (iter_num % print_rate == 0) & (iter_num != num_samples - remainder),
+            lambda _: host_callback.id_tap(update, print_rate, result=iter_num),
+            lambda _: iter_num,
+            operand=None,
+        )
+
+        _ = lax.cond(
+            # update by `remainder`
+            iter_num == num_samples - remainder,
+            lambda _: host_callback.id_tap(update, remainder, result=iter_num),
+            lambda _: iter_num,
+            operand=None,
+        )
+
+    def close(arg, transform):
+        bars[0].close()
+
+    def _close_progress_bar(result, iter_num):
+        return lax.cond(
+            iter_num == num_samples - 1,
+            lambda _: host_callback.id_tap(close, None, result=result),
+            lambda _: result,
+            operand=None,
+        )
+
+    def _progress_bar_scan(func):
+        """Decorator that adds a progress bar to `body_fun` used in `lax.scan`.
+        Note that `body_fun` must either be looping over `np.arange(num_samples)`,
+        or be looping over a tuple who's first element is `np.arange(num_samples)`
+        This means that `iter_num` is the current iteration number
+        """
+
+        @jit
+        def wrapper_progress_bar(carry, x):
+            if type(x) is tuple:
+                iter_num, *_ = x
+            else:
+                iter_num = x
+            _update_progress_bar(iter_num)
+            result = func(carry, x)
+            return _close_progress_bar(result, iter_num)
+
+        return wrapper_progress_bar
+
+    return _progress_bar_scan
+
+def freeze(struct):
+    # converts dict to frozendict, list to tuple and recursively
+    # freezes all nested dicts, lists, tuples, and sets.
+    import frozendict
+    if isinstance(struct, dict):
+        return frozendict.frozendict({k: freeze(v) for k, v in struct.items()})
+    elif isinstance(struct, list):
+        return tuple([freeze(v) for v in struct])
+    elif isinstance(struct, tuple):
+        return tuple([freeze(v) for v in struct])
+    elif isinstance(struct, set):
+        return frozenset([freeze(v) for v in struct])
+    else:
+        return struct
+
+def tree_shape(t):
+    return pytree.tree_map(lambda x: x.shape, t)
+
+
+@jit
+def tree_append(t, e):
+    fa, tt = pytree.tree_flatten(t)
+    fb, te = pytree.tree_flatten(e)
+    assert te == tt
+    return pytree.tree_unflatten(tt, [jnp.concatenate([a, jnp.array([b])]) for a, b in zip(fa, fb)])
+
+
+def tree_get(t, i):
+    return pytree.tree_map(lambda x: x[i], t)
+
+
+@jax.jit
+def tree_unstack(t):
+    """Unstack a tree of arrays into a list of trees of arrays"""
+    N = jax.tree_util.tree_leaves(t)[0].shape[0]
+    return [tree_get(t, i) for i in range(N)]
 
 
 def set_enable_checks(value: bool):
@@ -887,3 +1082,12 @@ def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | check
             return Error({}, {}, {}, {}), result
 
         return wrapped_function
+##────────────────────────────────────────────────────────────────────────────}}}
+
+# at_path = at_path_flat
+# delete_path = delete_path_flat
+# split_params = split_params_flat
+# assemble_params = assemble_params_flat
+# path_contains = path_contains_flat
+
+

@@ -3,6 +3,60 @@ import scriptutils as ut
 import argparse
 import pickle
 import os
+from types import SimpleNamespace
+
+### {{{                   --     google sheet helpers     --
+import gspread
+from rich.progress import track
+import pandas as pd
+
+GOOGLE_APP_CREDENTIALS = '/Users/jeandisset/.google/biocomp/key.json'
+SHEET_KEY = '1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQAzME'
+
+# This function grabs the content of a google sheet and returns a pandas dataframe:
+def getGoogleSheet(key, sheet_name, credentials=GOOGLE_APP_CREDENTIALS):
+    gspread_client = gspread.service_account(filename=credentials)
+    workbook = gspread_client.open_by_key(key)
+    sheet = workbook.worksheet(sheet_name)
+    data = sheet.get_all_values()
+    headers = data.pop(0)
+    df = pd.DataFrame(data, columns=headers)
+    df = df.set_index(df.columns[0])
+    return df
+
+
+def getAllGoogleSheets(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
+    gspread_client = gspread.service_account(filename=credentials)
+    workbook = gspread_client.open_by_key(key)
+    sheets = workbook.worksheets()
+    sheets_dict = {}
+    for sheet in track(sheets, description='Loading library sheets'):
+        df = pd.DataFrame(sheet.get_all_records())
+        df.set_index(df.columns[0], inplace=True)
+        sheets_dict[sheet.title] = df
+    lib = SimpleNamespace(**sheets_dict)
+    return lib
+
+
+def listGoogleSpreadsheets(credentials=GOOGLE_APP_CREDENTIALS):
+    gspread_client = gspread.service_account(filename=credentials)
+    spreadsheets = gspread_client.openall()
+    if spreadsheets:
+        print("Available spreadsheet workbooks:")
+        for spreadsheet in spreadsheets:
+            print("Title:", spreadsheet.title, "URL:", spreadsheet.url)
+    else:
+        print("No spreadsheets available")
+        print("Please share the spreadsheet with Service Account email")
+
+###                                                                            }}}
+
+def getLibFromGoogleSheet(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
+    l = getAllGoogleSheets(key, credentials)
+    lib = bc.PartsLibrary(
+        l.parts, l.L0s, l.L1s, l.L2s, l.categories, l.sequestrons, l.sequestron_types
+    )
+    return lib
 
 def main(libpath):
     libpath = Path(libpath)

@@ -24,5 +24,6 @@ from . import defaults as defaults
 from . import parameters as parameters
 from . import quantization as quantization
 from . import plotutils as plotutils
+from . import jaxutils as jaxutils
 
 from .utils import logger as logger

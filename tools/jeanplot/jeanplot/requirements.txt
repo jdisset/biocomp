@@ -1,0 +1,5 @@
+biocomp
+matplotlib
+numpy
+pandas
+tqdm

@@ -28,60 +28,6 @@ import matplotlib.ticker as ticker
 # ─────────────────────────────────────────────────────────────────────────────
 #                            GENERAL PURPOSE TOOLS
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                      --     data load/save     --
-# ···············································································
-import pickle
-
-
-def save(data, path, overwrite=False, rename_if_exists=True):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if overwrite:
-            path.unlink()
-        elif rename_if_exists:
-            path = path.with_name(path.stem + '_' + path.suffix)
-        else:
-            raise RuntimeError(f'File {path} already exists.')
-    with open(path, 'wb') as file:
-        pickle.dump(data, file)
-
-
-def load(path):
-    path = Path(path)
-    if not path.is_file():
-        raise ValueError(f'Not a file: {path}')
-    with open(path, 'rb') as file:
-        data = pickle.load(file)
-    return data
-
-
-#                                                                            }}}
-### {{{                           --     cache     --
-def get_cache(gen_f, name, cache_location):
-    if cache_location is not None:
-        namehash = hashlib.md5(name.encode('utf-8')).hexdigest()
-        # create cache directory if it doesn't exist
-        if isinstance(cache_location, str):
-            cache_location = Path(cache_location)
-        cache_location.mkdir(parents=True, exist_ok=True)
-        cachepath = cache_location / namehash
-        print(cachepath)
-        if cachepath.exists():
-            ut.logger.debug(f'Loading {namehash} from cache.')
-            with open(cachepath, 'rb') as file:
-                data = pickle.load(file)
-        else:
-            ut.logger.debug(f'Generating {namehash} and saving to cache.')
-            data = gen_f()
-            with open(cachepath, 'wb') as file:
-                pickle.dump(data, file)
-    else:
-        data = gen_f()
-    return data
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{              --     model retrieval and loss plots     --
 def get_best_run_id(losses, smooth_window=20, return_smooth_losses=False):
 
@@ -165,7 +111,7 @@ def get_wandb_trained_params(run, save_to=None):
         save_to = Path(f'/tmp/biocomp_runs/{run.name}')
     save_to.mkdir(parents=True, exist_ok=True)
     param_file = run.file('latest_params.pkl').download(replace=True, root=save_to)
-    trained_params = load(param_file.name)
+    trained_params = ut.load(param_file.name)
     shared_trained_params, local = trained_params.filter_by_tag('shared')
     compute_config_file = run.file('compute_config.json').download(replace=True, root=save_to)
     training_config_file = run.file('training_config.json').download(replace=True, root=save_to)
@@ -457,7 +403,6 @@ class DataManager:
 
     def compute_densities(self, max_chunk=50000, cache_dir=None):
         """Compute the densities at each data point in the dataset, for each sample"""
-        # TODO: switch to the more general get_cache
         import hashlib
         from pathlib import Path
         import base64
@@ -472,26 +417,16 @@ class DataManager:
 
         ut.logger.debug(f'Using cache dir {self.cache_dir}')
 
-        def make_hash(x):
-            h = hashlib.md5()
-            h.update(x[:50].tobytes())
-            h.update(x[-50:].tobytes())
-            h.update(str(x.shape).encode())
-            h.update(str(self._kde_bw).encode())
-            return h.digest()
+        def get_signature(kde, x):
+            n = x.shape[0]
+            stepsize = max(n // 100, 1)
+            xsig = f'{x.shape}_{x[::stepsize]}'
+            ksig = f'{kde.factor:.20f}_{kde.n}_{kde.d}'
+            return f'{xsig}_{ksig}'
 
-        def _compute_d(kde, x):
+        def compute_d(kde, x):
             # cut in chunks to avoid memory issues
             n = x.shape[0]
-            xhash = make_hash(x)
-            if self.cache_dir is not None:
-                b64hash = base64.b64encode(xhash).decode()
-                fname = f'.densitycache_{b64hash}.npy'.replace('/', '_').replace('=', '')
-                cache_path = Path(self.cache_dir) / fname
-                if cache_path.exists():
-                    ut.logger.debug(f'Loading density cache from {cache_path}')
-                    return np.load(cache_path)
-
             allarr = []
             i = 0
             while i < n:
@@ -500,14 +435,10 @@ class DataManager:
             res = np.concatenate(allarr)
             assert res.shape == (n,)
 
-            if self.cache_dir is not None:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                np.save(cache_path, res)
-
             return res
 
         self._densities = [
-            _compute_d(kde, x)
+            ut.get_cache(lambda: compute_d(kde, x), get_signature(kde, x), self.cache_dir)
             for kde, x in tqdm(list(zip(self._kdes, self._X)), desc='computing densities')
         ]
 
@@ -613,12 +544,12 @@ class DataManager:
         if 'network_cache_location' in config:
             network_cache_location = Path(config['network_cache_location'])
 
-        # build all networks and gat all sample names, for each xp
+        # build all networks and get all sample names, for each xp
         # networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
         net_sample_pairs = []
         for xp in xplist:
             net_sample_pairs.append(
-                get_cache(lambda: xp.build_networks(**kw), f'{str(xp)}_net', network_cache_location)
+                ut.get_cache(lambda: xp.build_networks(**kw), f'{str(xp)}_net', network_cache_location)
             )
 
         networks, samples = zip(*net_sample_pairs)
@@ -628,7 +559,7 @@ class DataManager:
         XY_pairs = []
         for xp, n, s in zip(xplist, networks, samples):
             XY_pairs.append(
-                get_cache(lambda: xp.get_XY(n, s), f'{str(xp)}_XY', network_cache_location)
+                ut.get_cache(lambda: xp.get_XY(n, s), f'{str(xp)}_XY', network_cache_location)
             )
 
         X, Y = zip(*XY_pairs)
@@ -2179,7 +2110,7 @@ def get_wandb_trained_params(run, save_to=None):
         save_to = Path(f'/tmp/biocomp_runs/{run.name}')
     save_to.mkdir(parents=True, exist_ok=True)
     param_file = run.file('latest_params.pkl').download(replace=True, root=save_to)
-    trained_params = load(param_file.name)
+    trained_params = ut.load(param_file.name)
     shared_trained_params, local = trained_params.filter_by_tag('shared')
     compute_config_file = run.file('compute_config.json').download(replace=True, root=save_to)
     training_config_file = run.file('training_config.json').download(replace=True, root=save_to)

@@ -272,59 +272,65 @@ class Network:
 
     ### {{{                    --     static constructors     --
     @classmethod
-    def from_db(cls, lib, name, recipe_db, custom_outputs=None, build=True, metadata=None):
-        assert recipe_db is not None
+    def from_db(
+        cls, lib, name, recipe_db, custom_outputs=None, build=True, metadata=None, use_cache=None
+    ):
+        assert recipe_db is not None, 'recipe_db cannot be None'
         recipe_db.commit()
 
         n = cls(lib, name, custom_outputs=custom_outputs, metadata=metadata)
         c = recipe_db.cursor()
         # first let's check that there is a recipe with this name
         c.execute('SELECT * FROM recipes WHERE name=?', (n.name,))
-        assert (
-            c.fetchone() is not None
-        ), f'No recipe named {n.name} in database {recipe_db}. Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
+        assert c.fetchone() is not None, f'No recipe named {n.name} in database {recipe_db}.'
+        # Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
 
         # get the transcription units
         c.execute(
             """SELECT TU, TU || '_' || aggregation as name FROM TU_in_source tis, source_in_aggregation sia, aggregations a
-           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
+           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?
+           ORDER BY position, aggregation""",
             (n.name,),
         )
-        n.transcription_units = {
-            tu[1]: transcription_unit_from_L1(tu[0], n.lib) for i, tu in enumerate(c.fetchall())
-        }
+        n.raw_transcription_units = list(c.fetchall())
 
         # then get the sources
         c.execute(
             """SELECT tis.source || '_' || aggregation as source, TU || '_' || aggregation as TU, position
             FROM TU_in_source tis, source_in_aggregation sia, aggregations a
-           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?""",
+           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ? ORDER BY source, position""",
             (n.name,),
         )
-        tu_in_sources = pd.DataFrame(
-            [t for t in c.fetchall()], columns=['source', 'TU', 'position']
-        )
-        tu_in_sources.sort_values(by='position', inplace=True)
-        n.tu_in_sources = tu_in_sources
+        n.raw_tu_in_sources = list(c.fetchall())
 
-        # finally get the aggregations
         c.execute(
             """SELECT a.id, sia.source || '_' || aggregation, sia.ratio FROM aggregations a, source_in_aggregation sia
-            WHERE a.id = sia.aggregation AND a.recipe = ?""",
+            WHERE a.id = sia.aggregation AND a.recipe = ? ORDER BY a.id""",
             (n.name,),
         )
-        # adding the aggregation nodes
-        aggregations = (
-            pd.DataFrame([t for t in c.fetchall()], columns=['id', 'source', 'ratio'])
-            .groupby('id')
-            .agg(list)
-        )
-        n.aggregations = aggregations
+        n.raw_aggregations = list(c.fetchall())
 
-        if build:
-            n.build()
+        signature = n.get_signature()
 
-        return n
+        def actually_build():
+            n.transcription_units = {
+                tu[1]: transcription_unit_from_L1(tu[0], n.lib)
+                for i, tu in enumerate(n.raw_transcription_units)
+            }
+            n.tu_in_sources = pd.DataFrame(
+                n.raw_tu_in_sources, columns=['source', 'TU', 'position']
+            )
+            n.tu_in_sources.sort_values(by='position', inplace=True)
+            n.aggregations = (
+                pd.DataFrame(n.raw_aggregations, columns=['id', 'source', 'ratio'])
+                .groupby('id')
+                .agg(list)
+            )
+            if build:
+                n.build()
+            return n
+
+        return ut.get_cache(lambda: actually_build(), signature, use_cache)
 
     @classmethod
     def from_dict(cls, lib, name, transcription_units, sources, aggregations, build=True):
@@ -904,12 +910,13 @@ class Network:
         """Given an array of output values, returns the columns that are inputs of the inverted network,
         properly ordered by input number"""
         # In inverted networks, each input node has,
-        # in its extra, 'input_from_output' and 'input_position' 
+        # in its extra, 'input_from_output' and 'input_position'
         # (which get_inverted_input_positions uses)
         # We want to transform output_arr by reordering the columns accordingly
+        if output_arr is None:
+            return None
         mapping = self.get_inverted_input_positions()
         return output_arr[:, [mapping[i] for i in range(len(mapping))]]
-
 
     def get_inverted_input_proteins(self, include_biases=False):
         """Returns the names of the proteins that are inputs of the inverted network, ordered"""
@@ -963,9 +970,6 @@ class Network:
         assert output_position not in new_mapping.values()
         assert len(self.get_inverted_input_proteins()) == len(new_mapping)
 
-
-
-
     def compute_node_is_upstream_of(self, node_id, other_node_id):
         """Returns True if node_id is upstream of other_node_id"""
         if node_id == other_node_id:
@@ -980,6 +984,7 @@ class Network:
 
     def sort_nodes_by_upstream(self, nodes):
         from functools import cmp_to_key
+
         def custom_cmp(a, b):
             if self.compute_node_is_upstream_of(a, b):
                 return -1
@@ -987,8 +992,8 @@ class Network:
                 return 1
             else:
                 return 0
-        return sorted(nodes, key=cmp_to_key(custom_cmp))
 
+        return sorted(nodes, key=cmp_to_key(custom_cmp))
 
     def topological_order(self, nodes=None):
         """Returns a list of lists of compute nodes from the network,
@@ -1089,6 +1094,16 @@ class Network:
         N.aggregations = self.aggregations.copy()
         N.metadata = self.metadata.copy() if self.metadata is not None else None
         return N
+
+    def __repr__(self):
+        return f'Network(name={self.name}, metadata={self.metadata})'
+
+    def get_signature(self):
+        signature = f'{self.name}:{self.metadata}\n'
+        signature += f'{self.raw_transcription_units}\n'
+        signature += f'{self.raw_tu_in_sources}\n'
+        signature += f'{self.raw_aggregations}'
+        return signature
 
     def _assign_quantile_variable(self):
         """
@@ -1212,12 +1227,15 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
     return paths
 
 
-
 from rich import print as rprint
 
 
 def inverted_network(
-    network: Network, nodes: str = 'auto', inverse_dict=DEFAULT_INVERSE_DICT, mode='shortest'
+    network: Network,
+    nodes: str = 'auto',
+    inverse_dict=DEFAULT_INVERSE_DICT,
+    mode='shortest',
+    use_cache=None,
 ):
     ut.logger.debug(f'Inverting network {network.name}')
 
@@ -1237,97 +1255,105 @@ def inverted_network(
     else:  # list of nodes
         start_nodes = nodes
 
-    # we compute a list of invertible paths that link each start nodes to the output
-    inv_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
+    def _inverted_network():
+        # we compute a list of invertible paths that link each start nodes to the output
+        inv_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
 
-    # rprint(f'For net {network.name}, found {len(inv_paths)} invertible paths:')
-    # rprint(inv_paths)
+        # For each start_node, we might have more than one path.
+        # In 'shortest' mode, we just pick the shortest one.
+        # In the 'all' mode, we want to return every possible combination of paths per start node
+        # e.g. if we have 2 start nodes, and 2 paths for each, we want to return 4 paths
+        # (the cartesian product of the paths)
+        if mode == 'shortest':
+            inversions = [{n: min(p, key=len) for n, p in inv_paths.items() if p}]
+        elif mode == 'all':
+            inversions = [dict(zip(inv_paths.keys(), p)) for p in product(*inv_paths.values())]
+        else:
+            raise ValueError(f"Unrecognized mode: {mode}. Use 'shortest' or 'all'.")
 
-    # For each start_node, we might have more than one path.
-    # In 'shortest' mode, we just pick the shortest one.
-    # In the 'all' mode, we want to return every possible combination of paths per start node
-    # e.g. if we have 2 start nodes, and 2 paths for each, we want to return 4 paths
-    # (the cartesian product of the paths)
-    if mode == 'shortest':
-        inversions = [{n: min(p, key=len) for n, p in inv_paths.items() if p}]
-    elif mode == 'all':
-        inversions = [dict(zip(inv_paths.keys(), p)) for p in product(*inv_paths.values())]
-    else:
-        raise ValueError(f"Unrecognized mode: {mode}. Use 'shortest' or 'all'.")
+        new_networks = []
+        for paths in inversions:
 
-    new_networks = []
-    for paths in inversions:
-        inputpos = 0
-        new_network = network.copy()
-        uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
-        for start_n, path in paths.items():
-            assert len(path) > 1, 'path should not be empty'
-            assert start_n == path[0][0], 'first node of path should be the start node'
+            inputpos = 0
+            new_network = network.copy()
+            uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
+            for start_n, path in paths.items():
+                assert len(path) > 1, 'path should not be empty'
+                assert start_n == path[0][0], 'first node of path should be the start node'
 
-            # first we remove the start node
-            original_node = new_network.compute_graph.loc[start_n]  # the non inverted start node
-            assert path[0][1] == 0, 'first node of path should have output slot 0'
-            # the output_to column is a list of tuples (node_id, slot_id). We just need the node_id
-            connected_node_id = original_node['output_to'][0][0]
-            new_network.compute_graph.drop(start_n, inplace=True)
+                # first we remove the start node
+                original_node = new_network.compute_graph.loc[
+                    start_n
+                ]  # the non inverted start node
+                assert path[0][1] == 0, 'first node of path should have output slot 0'
+                # the output_to column is a list of tuples (node_id, slot_id). We just need the node_id
+                connected_node_id = original_node['output_to'][0][0]
+                new_network.compute_graph.drop(start_n, inplace=True)
 
-            prev = connected_node_id
+                prev = connected_node_id
 
-            for i, (node_id, output_slot) in enumerate(path[1:], 1):
+                for i, (node_id, output_slot) in enumerate(path[1:], 1):
 
-                # slot is output_id for nodes, input_id for output
-                original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
-                n_type = original_node['type']  # its type
-                nid = uidGen()  # the new node id
+                    # slot is output_id for nodes, input_id for output
+                    original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
+                    n_type = original_node['type']  # its type
+                    nid = uidGen()  # the new node id
 
-                # rprint(f'Inverting node {node_id} ({n_type}) to {nid}')
+                    # rprint(f'Inverting node {node_id} ({n_type}) to {nid}')
 
-                if n_type == 'output':  # special case when we reach the output
-                    assert i == len(path) - 1, 'output node should be the last node in the path'
-                    # we add an input node
-                    in_n = GraphComputeNode(nid, 'input', None, None)
-                    in_n.output_to = [
-                        (prev, 0)
-                    ]  # the input node is connected to the last inverted node
-                    in_n.input_from = []  # the input node has no input
-                    in_n.extra = {'input_from_output': output_slot, 'input_position': inputpos}
-                    inputpos += 1
-                    new_network.compute_graph = pd.concat(
-                        [new_network.compute_graph, pd.DataFrame([in_n.toDict()]).set_index('id')]
+                    if n_type == 'output':  # special case when we reach the output
+                        assert i == len(path) - 1, 'output node should be the last node in the path'
+                        # we add an input node
+                        in_n = GraphComputeNode(nid, 'input', None, None)
+                        in_n.output_to = [
+                            (prev, 0)
+                        ]  # the input node is connected to the last inverted node
+                        in_n.input_from = []  # the input node has no input
+                        in_n.extra = {'input_from_output': output_slot, 'input_position': inputpos}
+                        inputpos += 1
+                        new_network.compute_graph = pd.concat(
+                            [
+                                new_network.compute_graph,
+                                pd.DataFrame([in_n.toDict()]).set_index('id'),
+                            ]
+                        )
+                        break
+
+                    # General case, create a new node and prepend to prev
+                    cdg_in = new_network.compute_graph.loc[prev, 'cdg_output']
+                    if isinstance(cdg_in, list):
+                        cdg_in = cdg_in[output_slot]
+                    new_n = GraphComputeNode(
+                        nid, inverse_dict[n_type], cdg_in, original_node.cdg_output
                     )
-                    break
+                    new_n.output_to = [(prev, 0)]
 
-                # General case, create a new node and prepend to prev
-                cdg_in = new_network.compute_graph.loc[prev, 'cdg_output']
-                if isinstance(cdg_in, list):
-                    cdg_in = cdg_in[output_slot]
-                new_n = GraphComputeNode(
-                    nid, inverse_dict[n_type], cdg_in, original_node.cdg_output
-                )
-                new_n.output_to = [(prev, 0)]
+                    # inverse nodes always have only one input and one output
+                    # but we need to store the original output slot id in the extra field
+                    # so that we can use it when converting aggregation nodes for example
+                    # (where we convert a single input / multi output node to a single input / single output node
+                    # but we need to know which path, i.e slot, to use)
+                    new_n.is_inverse_of = node_id
+                    new_n.extra = {
+                        'original_output_slot': output_slot,
+                        'original_output_len': len(original_node['output_to']),
+                    }
 
-                # inverse nodes always have only one input and one output
-                # but we need to store the original output slot id in the extra field
-                # so that we can use it when converting aggregation nodes for example
-                # (where we convert a single input / multi output node to a single input / single output node
-                # but we need to know which path, i.e slot, to use)
-                new_n.is_inverse_of = node_id
-                new_n.extra = {
-                    'original_output_slot': output_slot,
-                    'original_output_len': len(original_node['output_to']),
-                }
+                    # set prev input_from to new nodes
+                    new_network.compute_graph.loc[prev, 'input_from'] = [(nid, 0)]
+                    new_network.compute_graph = pd.concat(
+                        [new_network.compute_graph, pd.DataFrame([new_n.toDict()]).set_index('id')]
+                    )
 
-                # set prev input_from to new nodes
-                new_network.compute_graph.loc[prev, 'input_from'] = [(nid, 0)]
-                new_network.compute_graph = pd.concat(
-                    [new_network.compute_graph, pd.DataFrame([new_n.toDict()]).set_index('id')]
-                )
+                    prev = nid
 
-                prev = nid
+            new_network.cleanup()
+            new_networks.append(new_network)
+        return new_networks
 
-        new_network.cleanup()
-        new_networks.append(new_network)
-    return new_networks
+    signature = f'{nodes}::{mode}::{inverse_dict}::{network.get_signature()}'
+
+    return ut.get_cache(lambda: _inverted_network(), signature, cache_location=use_cache)
 
 
 #                                                                            }}}

@@ -157,7 +157,6 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
     output_pos = output_names.index(output_name)
 
     if protein_aliases is not None:
-        print(f'protein_aliases = {protein_aliases}')
         reordered_input_names = [protein_aliases.get(n, n) for n in reordered_input_names]
         output_name = protein_aliases.get(output_name, output_name)
 
@@ -198,10 +197,6 @@ def setup_transformed_yaxis(ax, ylims, rescaler, skip10=True, margins=0.05):
     ylims_inv = rescaler.inv(np.asarray(ylims_tr))
     p10 = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1])
     ylims_margin = ylims_tr + np.array([-1, 1]) * margins * np.diff(ylims_tr)
-    print(f'ylims_tr = {ylims_tr}')
-    print(f'ylims_inv = {ylims_inv}')
-    print(f'ylims_margin = {ylims_margin}')
-    print(f'p10 = {p10}')
     ax.set_ylim(ylims_margin)
     ax.set_yticks(rescaler(p10))
     ax.yaxis.set_major_formatter(PowerFormatter(p10, skip10=skip10))
@@ -367,6 +362,50 @@ def get_knn_smooth(xquery, logY, tree, knn=500, min_points=20, knn_method='mean'
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                    --     misc plot styling tools     --
+from matplotlib import colors as mcolors
+
+blues = [
+    '#F9F7F5',
+    '#EEECEA',
+    '#B0CCD6',
+    '#6CAFC3',
+    '#2974A4',
+    '#3B4B90',
+    '#3D1277',
+    '#22044B',
+]
+
+greens = [
+    '#F9F7F5',
+    '#E2EADA',
+    '#CBE4BB',
+    '#9DDDAA',
+    '#4CCDAB',
+    '#30A78F',
+    '#1F7D73',
+    '#0C5558',
+]
+
+reds = [
+    '#F5F5F5',
+    '#F1E6E5',
+    '#F3CFBC',
+    '#EF957D',
+    '#D3494B',
+    '#B00031',
+    '#840137',
+    '#560140',
+]
+
+
+DEFAULT_CMAPS = {
+    'blues': mcolors.LinearSegmentedColormap.from_list('cm', blues, N=256),
+    'greens': mcolors.LinearSegmentedColormap.from_list('cm', greens, N=256),
+    'reds': mcolors.LinearSegmentedColormap.from_list('cm', reds, N=256),
+}
+
+DEFAULT_CMAP = DEFAULT_CMAPS['blues']
+
 
 
 def setup_clean_fig(title):
@@ -519,9 +558,9 @@ def heatmap(
     colorbar=True,
     opacities=None,
     get_cbar_ticks=None,
+    cmap=DEFAULT_CMAP,
     **_,
 ):
-    cmap = plt.get_cmap('YlGnBu')
     cmap.set_bad(color='#EEEEEE')
     trans_data = ax.transData
     if transform is not None:
@@ -577,7 +616,6 @@ def heatmap(
         ax.set_yticklabels(ticklabels)
         # secondticks:
         if len(secondticks) > 0:
-            print(f'secondticks = {secondticks}')
             sc_secondticks = secondticks * Z.shape[0]
             ax.set_xticks(sc_secondticks, minor=True)
             ax.set_yticks(sc_secondticks, minor=True)
@@ -596,8 +634,6 @@ def heatmap(
             # get ticks every 0.1 decade
             unscaled_ticks = np.geomspace(du.inv_tr(vmin), du.inv_tr(vmax), 5, endpoint=True)
             ticks = np.array(du.tr(unscaled_ticks))
-            print(f'unscaled_ticks : {unscaled_ticks}')
-            print(f'vmin = {vmin}, vmax = {vmax}, ticks = {ticks}')
             ticks = ticks[ticks < vmax]
             ticks = ticks[ticks > vmin]
             ticklabels = [scformat.format("{:m}", du.inv_tr(x)) for x in ticks]
@@ -620,7 +656,7 @@ def heatmap_new(
     colorbar=True,
     opacities=None,
     axtransform=None,
-    cmap='YlGnBu',
+    cmap=DEFAULT_CMAP,
     bad_color='#EEEEEE00',
     **_,
 ):
@@ -633,20 +669,15 @@ def heatmap_new(
 
     xres = len(np.unique(xy_grid[:, 0]))
     yres = len(np.unique(xy_grid[:, 1]))
-    print(f'xres = {xres}, yres = {yres}')
 
     xlims = np.array([xy_grid[:, 0].min(), xy_grid[:, 0].max()])
     ylims = np.array([xy_grid[:, 1].min(), xy_grid[:, 1].max()])
-    print(f'xlims = {xlims}, ylims = {ylims}')
     vmin = vmin if vmin is not None else np.nanmin(output_values)
     vmax = vmax if vmax is not None else np.nanmax(output_values)
-    print(f'vmin = {vmin}, vmax = {vmax}')
 
     Z = output_values.reshape((xres, yres)).T
-    print(f'Z.shape = {Z.shape}')
 
     opacities = np.ones_like(Z) if opacities is None else opacities.reshape((xres, yres)).T
-    print(np.nanmean(opacities))
 
     im = ax.imshow(
         Z.T,
@@ -664,7 +695,6 @@ def heatmap_new(
     # no borders
 
     if not np.isnan(Z).all():
-        print('plotting')
         if contours is not None:
             ax.contour(
                 Z.T,
@@ -872,11 +902,13 @@ def smooth_2d(
     xmin=0,
     xmax=1,
     xslice=None,
-    title=True,
+    title=None,
     density_plot=False,
     density_as_alpha=False,
     density_threshold=10,
     use_y_as_x=False,  # if True, use the output of the independent variables as coordinates
+    text_x=0.5,
+    text_y=0.9,
     **kw,
 ):
 
@@ -919,8 +951,8 @@ def smooth_2d(
 
     if x.shape[1] > 2:
         ax.text(
-            0.5,
-            1.1,
+            text_x,
+            text_y,
             f'{input_names[2]} $ \\approx $ {format_powers(rescaler.inv(xslice[0]), n_decimals=0)}',
             fontsize=5,
             transform=ax.transAxes,
@@ -995,7 +1027,6 @@ def smooth_3d(
             **kw,
         )
 
-    print(pnames)
     if top_ax is not None:
         top_ax.set_xlabel(pnames[-2])
         default_style(top_ax)
@@ -1022,10 +1053,10 @@ def smooth_3d(
 
         a.set_title('')
 
-    # write title on top
-    axes[0].set_title(
-        f'{network.name}\n{network.get_output_proteins()[0]} smoothed mean', fontsize=8
-    )
+    # # write title on top
+    # axes[0].set_title(
+        # f'{network.name}\n{network.get_output_proteins()[0]} smoothed mean', fontsize=8
+    # )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -1224,7 +1255,7 @@ def smooth_line_slices(
 ### {{{         --     main scatter method (route to 1D, 2D, 3D)     --
 def scatter(x, y, network, *args, **kw):
     ninputs = network.get_nb_inputs()
-    if ninputs == 2:
+    if ninputs == 1:
         return scatter_1d(x, y, network, *args, **kw)
     if ninputs == 2:
         return scatter_2d(x, y, network, *args, **kw)
@@ -1316,22 +1347,40 @@ def scatter_2d(
     size=10,
     colorbar=True,
     lw=0.1,
+    cmap=DEFAULT_CMAP,
+    xlims=None,
+    ylims=None,
     **kw,
 ):
-    (
-        input_order,
-        input_names,
-        output_pos,
-        output_name,
-        ticks,
-        ticklabels,
-        secondticks,
-    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, **kw)
 
-    cmap = plt.get_cmap('YlGnBu')
+    protein_order, protein_names = get_reordered_protein_names(network, **kw)
+    input_order, output_pos = protein_order[:-1], protein_order[-1]
+    input_names, output_name = protein_names[:-1], protein_names[-1]
+
+    # (
+        # input_order,
+        # input_names,
+        # output_pos,
+        # output_name,
+        # ticks,
+        # ticklabels,
+        # secondticks,
+    # ) = network_ticks_and_labels(network, rescaler, xmax=xmax, **kw)
+
+    print(f'Scatter 2D: {input_names}')
+
     random_order = jax.random.permutation(key, len(x))
     y = y[random_order, output_pos]
     x = x[random_order][:, input_order]
+
+    setup_transformed_axis(
+        ax,
+        xlims=xlims,
+        ylims=xlims,
+        rescaler=rescaler,
+        skip10=True,
+        margins=0.0,
+    )
 
     sc = ax.scatter(x[:, 0], x[:, 1], c=y, cmap=cmap, s=size, lw=lw, edgecolor='k')
 
@@ -1339,36 +1388,35 @@ def scatter_2d(
     ax.set_ylabel(input_names[1])
 
     # remove right and top spine
-    ax.spines['right'].set_visible(False)
-    ax.spines['top'].set_visible(False)
+    # ax.spines['right'].set_visible(False)
+    # ax.spines['top'].set_visible(False)
 
-    # ticks:
-    if len(ticks) > 0:
-        # rescale ticks to image coordinates (they are btwn 0 and 1 to start)
-        sc_ticks = ticks
-        ax.set_xticks(sc_ticks)
-        ax.set_xticklabels(ticklabels)
-        ax.set_yticks(sc_ticks)
-        ax.set_yticklabels(ticklabels)
+    # # ticks:
+    # if len(ticks) > 0:
+        # # rescale ticks to image coordinates (they are btwn 0 and 1 to start)
+        # sc_ticks = ticks
+        # ax.set_xticks(sc_ticks)
+        # ax.set_xticklabels(ticklabels)
+        # ax.set_yticks(sc_ticks)
+        # ax.set_yticklabels(ticklabels)
 
-    # colorbar
-    if colorbar:
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="4%", pad=0.05)
-        cbar = plt.colorbar(sc, cax=cax)
-        cbar.ax.tick_params(labelsize=6)
-        # no cbar spines
-        for spine in cbar.ax.spines.values():
-            spine.set_visible(False)
-
-        # use same ticks if present
-        if len(ticks) > 0:
-            valid = ticks >= xmin
-            diff = len(ticks)
-            ticks = ticks[valid]
-            diff -= len(ticks)
-            cbar.set_ticks(ticks)
-            cbar.set_ticklabels(ticklabels[diff:])
+    # # colorbar
+    # if colorbar:
+        # divider = make_axes_locatable(ax)
+        # cax = divider.append_axes("right", size="4%", pad=0.05)
+        # cbar = plt.colorbar(sc, cax=cax)
+        # cbar.ax.tick_params(labelsize=6)
+        # # no cbar spines
+        # for spine in cbar.ax.spines.values():
+            # spine.set_visible(False)
+        # # use same ticks if present
+        # if len(ticks) > 0:
+            # valid = ticks >= xmin
+            # diff = len(ticks)
+            # ticks = ticks[valid]
+            # diff -= len(ticks)
+            # cbar.set_ticks(ticks)
+            # cbar.set_ticklabels(ticklabels[diff:])
 
     ttle = None
 
@@ -1418,7 +1466,7 @@ def scatter_3d_interactive(
         y=x[:, 1],
         z=x[:, 2],
         mode='markers',
-        marker=dict(size=size, color=y, colorscale='YlGnBu', line=dict(color='black', width=lw)),
+        marker=dict(size=size, color=y, colorscale=DEFAULT_CMAP, line=dict(color='black', width=lw)),
     )
 
     fig.add_trace(scatter)
@@ -1551,6 +1599,7 @@ def scatter_3d(
 
 # ---- specialized plots
 ### {{{                --     summary model plot functions     --
+
 def network_plot(
     dman: DataManager,
     network_id: int,
