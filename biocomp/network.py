@@ -371,18 +371,6 @@ class Network:
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
 
-    # def set_inputs(self, input_ids):
-    # assert self.is_built()
-    # ut.logger.debug(f'setting inputs to {input_ids}')
-    # for i, inp_id in enumerate(input_ids):
-    # self.compute_graph.loc[inp_id, 'type'] = 'input'
-    # self.compute_graph.loc[inp_id, 'extra'].update({'input_position': i})
-
-    # def set_numeric_as_input(self):
-    # assert self.is_built()
-    # numeric_nodes = list(self.compute_graph.loc[self.compute_graph['type'] == 'numeric'].index)
-    # self.set_inputs(numeric_nodes)
-
     def is_built(self):
         return (
             self.compute_graph is not None
@@ -428,22 +416,49 @@ class Network:
         """returns a list of all the compute nodes that have cdg_input_node as output"""
         return [n for n in compute_nodes if cdg_input_node == n.cdg_output]
 
-    def __getNode(self, nodes, id):
-        for node in nodes:
-            if node.id == id:
-                return node
-        raise NetworkConstructionError(f'Node {id} not found')
+    def __checkForCycles(node_map):
+
+        def dfs(node_id, visited, rec_stack):
+            visited.add(node_id)
+            rec_stack.add(node_id)
+            for neighbor_id in node_map[node_id].input_from:
+                if neighbor_id not in visited:
+                    if dfs(neighbor_id, visited, rec_stack):
+                        return True
+                elif neighbor_id in rec_stack:
+                    return True
+            rec_stack.remove(node_id)
+            return False
+
+        visited = set()
+        rec_stack = set()
+
+        for node_id in node_map.keys():
+            if node_id not in visited:
+                if dfs(node_id, visited, rec_stack):
+                    raise NetworkConstructionError('Cycle detected in compute graph')
+
+    def __checkUniqueNodeIDs(self, nodes):
+        node_ids = {node.id for node in nodes}
+        if len(node_ids) != len(nodes):
+            raise ValueError("Node IDs are not unique")
 
     def __removeShortcuts(self, nodes, root_id):
         # removeShortcuts removes indirect links in the Compute graph,
         # turning it from a directed acyclic graph to a tree.
+        node_map = {node.id: node for node in nodes}
+        if root_id not in node_map:
+            raise ValueError(f"Root node ID {root_id} not found")
+
+        self.__checkUniqueNodeIDs(nodes)
+        Network.__checkForCycles(node_map)
         labels = {}
         for node in nodes:
             labels[node.id] = 1
         S = set()
         S.add(root_id)
         while len(S) > 0:
-            N = self.__getNode(nodes, S.pop())
+            N = node_map[S.pop()]
             w = labels[N.id] + 1
             for d in N.input_from:
                 if labels[d] < w:
@@ -453,7 +468,7 @@ class Network:
         for node in nodes:
             for d in node.input_from:
                 if labels[node.id] + 1 < labels[d]:
-                    self.__getNode(nodes, d).removeOutput(node)
+                    node_map[d].removeOutput(node)
 
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
@@ -1298,8 +1313,6 @@ def inverted_network(
                     original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
                     n_type = original_node['type']  # its type
                     nid = uidGen()  # the new node id
-
-                    # rprint(f'Inverting node {node_id} ({n_type}) to {nid}')
 
                     if n_type == 'output':  # special case when we reach the output
                         assert i == len(path) - 1, 'output node should be the last node in the path'

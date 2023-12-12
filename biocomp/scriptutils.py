@@ -18,8 +18,8 @@ import biocomp.utils as ut
 import rich
 from rich.console import Console
 from typing import List
-import cProfile
 
+import cProfile
 class profiler:
     def __init__(self, filename):
         self.filename = filename

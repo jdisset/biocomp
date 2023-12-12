@@ -1,6 +1,6 @@
 import json
 import copy
-import xxhash
+
 import time
 from pathlib import Path
 from tqdm import tqdm
@@ -179,33 +179,25 @@ def timer(name=None, use_logger=True):
 ## ─────────────────────────────────────────────────────────────────────────────
 
 ### {{{                           --     cache     --
+import xxhash
 def get_cache(gen_f, signature, cache_location):
     if cache_location is not None:
         sighash = xxhash.xxh128(signature).hexdigest()
         # create cache directory if it doesn't exist
         if isinstance(cache_location, str):
             cache_location = Path(cache_location)
-        try:
-            cache_location.mkdir(parents=True, exist_ok=True)
-            cachepath = cache_location / sighash
-            cachepath = cachepath.resolve()
-        except Exception as e:
-            logger.error(f'Error creating cache directory: {e}')
-            logger.error(f'Not using cache.')
-            return gen_f()
+        cache_location.mkdir(parents=True, exist_ok=True)
+        cachepath = cache_location / sighash
         if cachepath.exists():
             logger.debug(f'Loading {sighash} from cache.')
             with open(cachepath, 'rb') as file:
                 data = pickle.load(file)
         else:
-            logger.debug(f'No such signature in cache: {signature}')
+            logger.info(f'No such signature in cache: {signature}')
             logger.debug(f'Generating {sighash} and saving to cache.')
             data = gen_f()
-            try:
-                with open(cachepath, 'wb') as file:
-                    pickle.dump(data, file)
-            except Exception as e:
-                logger.error(f'Error generating {sighash}: {e}')
+            with open(cachepath, 'wb') as file:
+                pickle.dump(data, file)
     else:
         data = gen_f()
     return data
@@ -1098,6 +1090,7 @@ def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | check
 # assemble_params = assemble_params_flat
 # path_contains = path_contains_flat
 
+
 ### {{{                      --     topology analysis helpers     --
 
 def get_uorf_value(param):
@@ -1165,84 +1158,5 @@ def get_all_uorf_values(network):
     names = get_uorf_names(values, ERN_names)
     return tuple(values), tuple(names)
 
-from typing import List, Callable
-
-
-def get_ERN_ids(network):
-    return network.compute_graph[network.compute_graph['type'] == 'sequestron_ERN'].index.values
-
-
-def get_RCB_ids(network):
-    return network.compute_graph[
-        network.compute_graph['type'].str.startswith('sequestron_R')
-    ].index.values
-
-
-def get_sequestron_ids(network):
-    return network.compute_graph[
-        network.compute_graph['type'].str.startswith('sequestron_')
-    ].index.values
-
-
-def make_is_upstream(network):
-    def is_upstream(i, j):
-        return network.compute_node_is_upstream_of(i, j)
-
-    return is_upstream
-
-
-def topological_sort(
-    node_list: List[int], is_upstream: Callable[[int, int], bool]
-) -> List[List[int]]:
-
-    visited = set()
-    batches = []
-    while len(visited) < len(node_list):
-        independent = [
-            i
-            for i in node_list
-            if i not in visited
-            and all([j in visited for j in node_list if j != i and is_upstream(j, i)])
-        ]
-
-        if not independent:
-            raise ValueError('Cycle detected in graph')
-        visited.update(independent)
-        batches.append(independent)
-    return batches
-
-
-def get_network_family(network):
-    erns = get_ERN_ids(network)
-    rcbs = get_RCB_ids(network)
-    seqs = get_sequestron_ids(network)
-    ts = topological_sort(seqs, make_is_upstream(network))
-
-    seqtype = 'none'
-    family = 'unknown'
-    match (len(erns) > 0, len(rcbs) > 0):
-        case (True, True):
-            seqtype = 'hybrid'
-        case (True, False):
-            seqtype = 'ERN'
-        case (False, True):
-            seqtype = 'RCB'
-
-    match (len(seqs), len(ts)):
-        case (0, 0):
-            family = 'no device'
-        case (1, 1):
-            family = 'single'
-        case (2, 2):
-            family = 'cascade'
-        case (2, 1):
-            family = 'dual region'
-        case (3, 2):
-            family = 'bandpass'
-
-    return family, seqtype
-
-
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-

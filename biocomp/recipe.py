@@ -208,14 +208,13 @@ def xp_to_sql(xps: list, conn):
     conn.commit()
 
 
-def import_recipes_to_sql(recipe_files: list, conn, lib, ignore_errors=False):
+def import_recipes_to_sql(recipe_files: list, conn, lib, ignore_errors=False, show_progress=True):
     # recipe files are json5 files
     recipes = []
 
     error_log = ''
-    from tqdm import tqdm
 
-    for f in tqdm(recipe_files, desc='Importing recipes'):
+    for f in tqdm(recipe_files, desc='Importing recipes', disable=not show_progress):
         recipe = ut.load_json5(f)
         ut.logger.debug(f'Importing recipe {recipe["name"]}')
         if not Path(f).name == f'{recipe["name"]}.recipe.json5':
@@ -228,7 +227,6 @@ def import_recipes_to_sql(recipe_files: list, conn, lib, ignore_errors=False):
         recipes.append(recipe)
     error_log += recipes_to_sql(recipes, conn, lib)
     return error_log
-
 
 def network_from_recipe(recipe, lib, db_path=':memory:'):
     dbconn = sqlite3.connect(db_path)
@@ -296,112 +294,188 @@ class XP:
         data_path='./data/calibrated_data',
         load_data=True,
         ignore_errors=False,
+        show_progress=True,
     ):
 
         """
         Reads the xp file, and loads both the recipes (into an instance-level sqlite db)
         and the raw data (into a dict of pandas dataframes)
+        Important notions:
+        - A recipe is the description of a given transfection, and is implemented by a network
+        - A sample is the data resulting from a given recipe
+        - The XP stores the content of recipes in a sqlite db
+        - The XP doesn't store the networks, but provides functions to build them given a recipe_name
+        - The XP stores the raw data in a dict of pandas dataframes, indexed by sample name
         """
+        log.debug(f'Initializing XP {xp_name}')
+
+        self.lib = lib
         self.recipe_loading_errors = ''
         self.data_loading_errors = ''
         self.network_building_errors = ''
-        log.debug(f'Initializing XP {xp_name}')
         self.xp_path = Path(xp_path)
-
-        self.samples: list  # [{name, recipe, notes}]
-        self.name: str
+        self.show_progress = show_progress
 
         self.db_uri = False
         if db_path is None:
             db_path = f'file:{xp_name}.db?mode=memory'
             self.db_uri = True
-            print(f'Using db {db_path}')
-
         self.db_path = db_path
         self.dbconn = sqlite3.connect(self.db_path, uri=self.db_uri)
-        self.color_names: dict
-        self.lib = lib
 
-        # -- load the xp file
         self.xpfile = xp_path / xp_name / f"{xp_name}.xp.json5"
+        try:
+            self.load_xp_file()
+        except Exception as e:
+            msg = f'Error loading xp file {self.xpfile}: \n{e}'
+            raise RuntimeError(msg) from e
 
+        self.load_recipes(recipe_path, ignore_errors=ignore_errors)
+        self.load_samples(data_path, load_data=load_data)
+
+        if self.recipe_loading_errors != '' and not ignore_errors:
+            raise RuntimeError(self.recipe_loading_errors)
+        if self.data_loading_errors != '' and not ignore_errors:
+            raise RuntimeError(self.data_loading_errors)
+
+    def load_xp_file(self):
+        required_keys = ['name', 'flow_date', 'transfection_date', 'samples']
         with open(self.xpfile) as f:
-            try:
-                xpobj = json5.load(f)
-                xp_to_sql([xpobj], self.dbconn)
-                for k, v in xpobj.items():
-                    if k == 'color_names':
-                        self.color_names = {kk: escape(vv) for kk, vv in v.items()}
-                    else:
-                        setattr(self, k, v)
-            except Exception as e:
-                raise RuntimeError(f'Error loading xp file {self.xpfile}: \n{e}')
+            xpobj = json5.load(f)
+            xp_to_sql([xpobj], self.dbconn)
 
-        # using the function instead
-        self.recipe_names = [s['recipe'] for s in self.samples]
-        unique_recipe_names = list(set(self.recipe_names))
+            for k in required_keys:
+                if k not in xpobj:
+                    raise RuntimeError(f'Key {k} not found in xp file {self.xpfile}')
+
+            self.name = xpobj['name']
+            self.flow_date = xpobj['flow_date']
+            self.transfection_date = xpobj['transfection_date']
+            self.samples = {
+                s['name']: {k: v for k, v in s.items() if k != 'name'} for s in xpobj['samples']
+            }
+
+            # TODO: remove this old stupid color_names thing
+            self.color_names = {}
+            if 'color_names' in xpobj:
+                self.color_names = {kk: escape(vv) for kk, vv in xpobj['color_names'].items()}
+
+            self.extra = {}
+            for k, v in xpobj.items():
+                if k not in required_keys:
+                    self.extra[k] = v
+
+    def load_recipes(self, recipe_path, ignore_errors):
+        unique_recipe_names = list(set([s['recipe'] for s in self.samples.values()]))
         log.debug(f'Found {len(unique_recipe_names)} unique recipes')
-        self.recipe_files = XP.resolve_paths_with_priorities(
+        recipe_files = XP.resolve_paths_with_priorities(
             recipe_path,
             unique_recipe_names,
             extension='.recipe.json5',
             base_path=self.xp_path / self.name,
             throw_error=False,
         )
-
-        # log the recipes that were not found
-        for r, f in zip(unique_recipe_names, self.recipe_files):
+        for r, f in zip(unique_recipe_names, recipe_files):
             if f is None:
                 self.recipe_loading_errors += f'Could not find recipe file for recipe {r}\n'
         # filter out the recipes that were not found
-        self.recipe_names = [
-            r for r, f in zip(unique_recipe_names, self.recipe_files) if f is not None
+        recipe_files = [f for f in recipe_files if f is not None]
+        unique_recipe_names = [
+            n for n, f in zip(unique_recipe_names, recipe_files) if f is not None
         ]
-        self.recipe_files = [f for f in self.recipe_files if f is not None]
-
+        self.recipes = {n: f for n, f in zip(unique_recipe_names, recipe_files)}
         self.recipe_loading_errors += import_recipes_to_sql(
-            self.recipe_files, self.dbconn, lib, ignore_errors=ignore_errors
+            recipe_files,
+            self.dbconn,
+            self.lib,
+            ignore_errors=ignore_errors,
+            show_progress=self.show_progress,
         )
 
-        self.sample_names = [s['name'] for s in self.samples]
-        self.data_files = XP.resolve_paths_with_priorities(
+    def load_samples(self, data_path, load_data=True):
+        sample_names = list(self.samples.keys())
+        data_files = XP.resolve_paths_with_priorities(
             data_path,
-            self.sample_names,
+            sample_names,
             extension=f'.{self.name}.csv',
             base_path=self.xp_path / self.name,
             throw_error=False,
         )
 
+        name_to_file = {n: f for n, f in zip(sample_names, data_files) if f is not None}
+        for n, s in self.samples.items():
+            if name_to_file.get(n, None) is None:
+                self.data_loading_errors += f'Could not find data file for sample {n}\n'
+            s['data_file'] = name_to_file.get(n, None)
 
-        # filter out the data files that were not found
-        self.sample_names = [s for s, f in zip(self.sample_names, self.data_files) if f is not None]
-        self.data_files = [f for f in self.data_files if f is not None]
-
-        if self.recipe_loading_errors != '' and not ignore_errors:
-            raise RuntimeError(self.recipe_loading_errors)
+        # clean up the samples dict by removing the samples that don't have a data file or a recipe
+        # self.samples = {
+            # n: s
+            # for n, s in self.samples.items()
+            # if s['data_file'] is not None and s['recipe'] in self.recipes
+        # }
 
         if load_data:
             self.load_raw_data()
 
-
     def load_raw_data(self):
         """Load the raw data for each sample in the xp, and store it in a dict [sample name] -> pandas dataframe"""
-
-        # log the data files that were not found
-        for s, f in zip(self.sample_names, self.data_files):
-            if f is None:
-                self.data_loading_errors += f'Could not find data file for sample {s}\n'
-
-        df_data: dict[str, pd.DataFrame] = {}
-        for s, f in tqdm(
-            list(zip(self.samples, self.data_files)), desc=f"loading data files for {self.name}"
+        self.raw_data: dict[str, pd.DataFrame] = {}
+        for s_name, s in tqdm(
+            list(self.samples.items()),
+            desc=f"loading data files for {self.name}",
+            disable=not self.show_progress,
         ):
-            content = pd.read_csv(f, engine="pyarrow")
-            assert isinstance(content, pd.DataFrame)  # otherwise type hints won't match
-            df_data[s['name']] = content
-        self.raw_data = df_data
+            if s['data_file'] is None:
+                continue
+            content = pd.read_csv(s['data_file'], engine="pyarrow")
+            assert isinstance(content, pd.DataFrame)
+            self.raw_data[s_name] = content
 
-    def build_networks(self, inverse='shortest', use_db=None, ignore_errors=False, use_cache=None):
+    def build_network(
+        self, recipe_name, inverse='shortest', use_db=None, ignore_errors=False, use_cache=None
+    ):
+
+        if str(recipe_name) not in self.recipes:
+            raise RuntimeError(f'Recipe {recipe_name} not found in xp {self.name}. Cannot build network.')
+
+        dbconn = use_db or self.dbconn
+
+        try:
+            ut.logger.debug(f'building network for recipe {recipe_name}')
+            fwd_network = Network.from_db(
+                self.lib,
+                recipe_name,
+                dbconn,
+                metadata={
+                    'from_xp': self.name,
+                    'recipe_name': recipe_name,
+                    'recipe_file': self.recipes[recipe_name],
+                },
+                use_cache=use_cache,
+            )
+        except Exception as e:
+            msg = f'Error building network for recipe {recipe_name} in xp {self.name}: \n{e}'
+            if ignore_errors:
+                ut.logger.warning(msg)
+                self.network_building_errors += msg + '\n\n'
+                return None
+            else:
+                raise RuntimeError(msg) from e
+
+        if not inverse:
+            return fwd_network
+        else:
+            return [n for n in inverted_network(fwd_network, mode=inverse, use_cache=use_cache)]
+
+    def build_networks(
+        self,
+        inverse='shortest',
+        use_db=None,
+        ignore_errors=False,
+        use_cache=None,
+        progress_callback=None,
+    ):
         """Build the networks for each sample in the xp,
         returns two lists: (networks, sample names)
         although several networks could in theory share the same sample name
@@ -409,67 +483,51 @@ class XP:
         """
         self.network_building_errors = ''
 
-        # first build each network for each recipe
-        fwd_networks = {}
-        built_recipes = set()
-        dbconn = use_db or self.dbconn
-
-        for recipename, recipefile in tqdm(
-            zip(self.recipe_names, self.recipe_files), desc=f'Building networks for xp {self.name}'
+        built_networks = {}
+        networks = []
+        sample_names = []
+        for s_name, s in tqdm(
+            list(self.samples.items()),
+            desc=f"building networks for {self.name}",
+            disable=not self.show_progress,
         ):
-            if str(recipefile) in built_recipes:
+            recipe_name = s['recipe']
+            if recipe_name not in self.recipes:
+                if progress_callback is not None:
+                    progress_callback(1)
                 continue
-            try:
-                log.debug(f'building recipe {recipename}')
-                fwd_networks[recipename] = Network.from_db(
-                    self.lib,
-                    recipename,
-                    dbconn,
-                    metadata={
-                        'from_xp': self.name,
-                        'recipe_file': recipefile,
-                        'recipe_name': recipename,
-                    },
+            if recipe_name not in built_networks:
+                built_networks[recipe_name] = self.build_network(
+                    recipe_name,
+                    inverse=inverse,
+                    use_db=use_db,
+                    ignore_errors=ignore_errors,
                     use_cache=use_cache,
                 )
-            except Exception as e:
-                msg = f'Error building network for recipe {recipename} in xp {self.name}: \n{e}'
-                if ignore_errors:
-                    self.network_building_errors += msg + '\n\n'
-                else:
-                    raise RuntimeError(msg) from e
-            built_recipes.add(str(recipefile))
 
-        # now go through the samples and create the correct pairs
-        networks = []
-        for s in self.samples: # a sample is a dict with keys name, recipe, notes
-            if s['recipe'] not in fwd_networks:
-                msg = f'Forward recipe {s["recipe"]} not built for xp {self.name}'
-                if ignore_errors:
-                    continue
-                else:
-                    raise RuntimeError(f'Recipe {s["recipe"]} not built for xp {self.name}')
-            if not inverse:
-                networks.append((fwd_networks[s['recipe']], s['name']))
-            else:
-                inv_nets = inverted_network(fwd_networks[s['recipe']], mode=inverse, use_cache=use_cache)
-                for n in inv_nets:
-                    networks.append((n, s['name']))
-        if len(networks) == 0:
-            return [], []
-        return tuple(zip(*networks))
+            nets = built_networks[recipe_name]
+            if progress_callback is not None:
+                progress_callback(1)
+            if nets is None:
+                continue
+            if isinstance(nets, Network):
+                nets = [nets]
+            networks += nets
+            sample_names += [s_name] * len(nets)
 
-    def get_Y(self, networks, sample_names, ignore_errors=False):
+
+        return networks, sample_names
+
+
+    def get_Y(self, networks:list[Network], sample_names:list[str], ignore_errors=False):
         """Returns the Y data (the dependent variables) for each network and sample"""
         assert self.raw_data is not None
         assert len(networks) == len(sample_names)
-
         # we want to reorder data columns to match the network's output
-        out_prots = [net.get_output_proteins() for net in networks]
+        out_prots = [net.get_output_proteins() if net is not None else None for net in networks]
         # if we ave a color_names attribute, we use it to alias the protein names
         if hasattr(self, 'color_names'):
             out_prots = [[self.color_names.get(p, p) for p in prots] for prots in out_prots]
-
         Y = []
         for sample, prots in zip(sample_names, out_prots):
             has_error = False
@@ -483,7 +541,9 @@ class XP:
                 else:
                     cols = self.raw_data[sample].columns
                     if p not in cols:
-                        msg = f'Protein {p} not found in data for sample {sample}. Available: {cols}'
+                        msg = (
+                            f'Protein {p} not found in data for sample {sample}. Available: {cols}'
+                        )
                         self.data_loading_errors += msg + '\n\n'
                         has_error = True
                         if not ignore_errors:
@@ -494,7 +554,7 @@ class XP:
                 Y.append(np.array(self.raw_data[sample][prots]))
         return Y
 
-    def get_XY(self, networks, sample_names, ignore_errors=False):
+    def get_XY(self, networks:list[Network], sample_names:list[str], ignore_errors=False):
         """Returns the X and Y data (the independent and dependent variables) for each network and sample"""
         Y = self.get_Y(networks, sample_names, ignore_errors=ignore_errors)
         X = [net.get_input_from_output(y) for net, y in zip(networks, Y)]
