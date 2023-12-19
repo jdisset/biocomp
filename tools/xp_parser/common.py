@@ -8,8 +8,37 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import PatternFill, Font
 ##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                        --     CLIProgram     --
 
+### {{{                         --     defaults     --
+
+DEFAULT_CALIB_PATHS = [
+    './data/calibrated_data_v3',
+    './data/calibrated_data_v2',
+    './data/calibrated_data',
+]
+DEFAULT_CALIB_NAMES = ['v3', 'v2', 'old']
+DEFAULT_XP_PATH = ut.DEFAULT_XP_PATH
+DEFAULT_RECIPE_PATH = ut.DEFAULT_RECIPE_PATH
+DEFAULT_XP_CACHE_DIR = './devtmp/cache/xp_objs'
+DEFAULT_DATA_CONFIG = {
+    'network_cache_location': './__cache/network',
+    'training_cache_location': './__cache/training',
+    'densities_cache_location': './__cache/densities',
+    'data_min_value': 500,
+    'data_max_value': 100000000.0,
+    'data_log_offset': 3000.0,
+    'data_log_factor': 100,
+    'data_log_poly_threshold': 300,
+    'data_log_poly_compression': 0.4,
+    'data_sampling_kde_bw_method': 0.02,
+    'data_sampling_max_density_samples': 4000,
+    'data_sampling_density_quantile_threshold': 0.025,
+    'data_sampling_coords_for_density_threshold': 0.15,
+}
+DEFAULT_DATA_CONFIG_PATH = None
+
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                        --     CLIProgram     --
 class CLIProgram:
     def __init__(self):
         self.is_notebook = 'ipykernel' in sys.modules
@@ -101,62 +130,6 @@ def reorder_columns_back(df, columns):
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                 --     xls manipulation     --
 
-# def create_database_file(database_path, sheet_names):
-    # print(f'creating database file {database_path}')
-    # # create path if it doesn't exist
-    # database_path = Path(database_path)
-    # database_path.parent.mkdir(parents=True, exist_ok=True)
-    # # create the database file
-    # import pandas as pd
-    # writer = pd.ExcelWriter(database_path, engine='openpyxl')
-    # for sheet_name in sheet_names:
-        # pd.DataFrame().to_excel(writer, sheet_name=sheet_name)
-    # writer.close()
-
-# def get_writer(database_path, create_if_not_exists=True):
-    # database_path = Path(database_path)
-    # if not database_path.exists():
-        # if create_if_not_exists:
-            # create_database_file(database_path, [])
-        # else:
-            # raise ValueError(f'database file {database_path} does not exist')
-    # if database_path.suffix != '.xlsx':
-        # raise ValueError(f'database file {database_path} must be an excel file')
-    # return pd.ExcelWriter(database_path, engine='openpyxl')
-
-# from openpyxl import load_workbook
-
-# def create_sheet_if_not_exists(database_path, sheet_name):
-    # database_path = Path(database_path)
-    # if not database_path.exists():
-        # raise ValueError(f'Database file {database_path} does not exist')
-    # # Load the existing workbook
-
-    # with open(database_path, 'rb') as f:
-        # book = load_workbook(f)
-        # # Check if the sheet exists
-        # if sheet_name in book.sheetnames:
-            # return
-        # # Add new sheet
-        # book.create_sheet(sheet_name)
-        # # Save the workbook
-        # book.save(database_path)
-
-
-# def load_database_table(database_path, sheet_name, create_if_not_exists=False):
-    # get_writer(database_path)
-    # if create_if_not_exists:
-        # create_sheet_if_not_exists(database_path, sheet_name)
-    # return pd.read_excel(database_path, sheet_name=sheet_name, engine='openpyxl')
-
-# def save_database_table(df, database_path, sheet_name):
-    # # save the dataframe to the database at the specified sheet
-    # # DO NOT overwrite the entire database file, just the specified sheet
-    # writer = get_writer(database_path)
-    # df.to_excel(writer, sheet_name=sheet_name, index=False)
-    # writer.close()
-
-
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
@@ -217,7 +190,9 @@ def create_sheet_if_not_exists(database_path, sheet_name):
 
 def load_database_table(database_path, sheet_name, create_if_not_exists=False):
     database_path = Path(database_path)
-    if not database_path.exists() or sheet_name not in load_workbook(filename=database_path).sheetnames:
+    if not database_path.exists():
+        raise ValueError(f'Database file {database_path} not found')
+    if sheet_name not in load_workbook(filename=database_path).sheetnames:
         if create_if_not_exists:
             create_sheet_if_not_exists(database_path, sheet_name)
         else:
@@ -230,8 +205,7 @@ def save_database_table(df, database_path, sheet_name):
         raise ValueError(f'Database file {database_path} does not exist')
 
     book = load_workbook(database_path)
-    writer = pd.ExcelWriter(database_path, engine='openpyxl')
-    writer.book = book
+    writer = pd.ExcelWriter(database_path, engine='openpyxl', mode='a', if_sheet_exists='replace')
     writer.sheets.update({ws.title: ws for ws in book.worksheets})
 
     df.to_excel(writer, sheet_name=sheet_name, index=False)

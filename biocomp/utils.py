@@ -23,6 +23,8 @@ import subprocess
 import os
 
 import cProfile
+
+
 class profiler:
     def __init__(self, filename):
         self.filename = filename
@@ -38,12 +40,15 @@ class profiler:
         self.profiler.dump_stats(self.filename)
 
 
-
 def get_git_commit_hash():
-    return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+    bcpath = Path(__file__).parent
+    bcpath = bcpath.resolve()
+    return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=bcpath).decode('ascii').strip()
+
 
 def get_biocomp_version():
     return get_distribution('biocomp').version
+
 
 ### {{{               --     loading constants and config     --
 
@@ -105,10 +110,14 @@ def load(path):
 ### {{{               --     convenience loading functions     --
 def load_lib(lib_path=DEFAULT_LIB_PATH):
     return load(lib_path)
+
+
 # convenience loading functions with default paths
 def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH, **kwargs):
     xp = XP(xpname, xp_path, recipe_path, lib, **kwargs)
     return xp
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -120,14 +129,15 @@ from rich.logging import RichHandler
 
 
 # def setup_logger(lname=None, level=logging.INFO):
-    # root_logger = logging.getLogger(lname)
-    # root_logger.setLevel(level)
-    # ch = RichHandler(rich_tracebacks=True)
-    # ch.setFormatter(logging.Formatter("%(message)s"))
-    # ch.setLevel(level)
-    # root_logger.handlers = [ch]
-    # root_logger.propagate = False
-    # return root_logger
+# root_logger = logging.getLogger(lname)
+# root_logger.setLevel(level)
+# ch = RichHandler(rich_tracebacks=True)
+# ch.setFormatter(logging.Formatter("%(message)s"))
+# ch.setLevel(level)
+# root_logger.handlers = [ch]
+# root_logger.propagate = False
+# return root_logger
+
 
 def setup_logger(lname=None, level=logging.INFO):
     log = logging.getLogger(lname)
@@ -140,11 +150,11 @@ def setup_logger(lname=None, level=logging.INFO):
     log.setLevel(level)
     return log
 
+
 setup_logger()
 setup_logger('jax')
 logger = setup_logger('biocomp')
 logger.propagate = False
-
 
 
 def set_loglevel(level: str):
@@ -177,6 +187,7 @@ def timer(name=None, use_logger=True):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
 
 ### {{{                           --     cache     --
 def get_cache(gen_f, signature, cache_location):
@@ -217,6 +228,7 @@ def get_cache(gen_f, signature, cache_location):
 # {{{                    --     random misc stuff     --
 # ···············································································
 
+
 def np_converter(obj):
     import jax.numpy as jnp
 
@@ -240,7 +252,6 @@ def make_json_compatible(o, converter=np_converter, float_precision=None):
         )
     else:
         return json.loads(json.dumps(o, default=converter))
-
 
 
 def apply_constraints(par, cons):
@@ -328,14 +339,14 @@ def set_list_item(lst, i, val):
 
 
 # def load(path, suffix='.pickle'):
-    # path = Path(path)
-    # if not path.is_file():
-        # raise ValueError(f'Not a file: {path}')
-    # if path.suffix != suffix:
-        # raise ValueError(f'Not a {suffix} file: {path}')
-    # with open(path, 'rb') as file:
-        # data = pickle.load(file)
-    # return data
+# path = Path(path)
+# if not path.is_file():
+# raise ValueError(f'Not a file: {path}')
+# if path.suffix != suffix:
+# raise ValueError(f'Not a {suffix} file: {path}')
+# with open(path, 'rb') as file:
+# data = pickle.load(file)
+# return data
 
 
 def load_json5(path):
@@ -362,12 +373,13 @@ def str_to_int_array(s):
 def int_array_to_str(a):
     return ''.join([chr(int(c)) for c in a])
 
+
 def tree_to_jax(params):
     return jax.tree_map(lambda x: jnp.asarray(x), params)
 
+
 def tree_to_np(params):
     return jax.tree_map(lambda x: np.asarray(x), params)
-
 
 
 #                                                                            }}}
@@ -662,6 +674,7 @@ class TimeStore:
 
 ### {{{                   --     log-poly-log transform     --
 
+
 def logb(x, base=10):
     """Compute log of x in base b."""
     return np.log(x) / np.log(base)
@@ -676,7 +689,7 @@ def cubic_exp_fwd(x, threshold, base, scale=1):
     """
     # assert base > 1 and scale > 0, 'Base must be > 1 and scale > 0'
     # assert (
-        # 6 * logb(threshold, base) * scale > 5
+    # 6 * logb(threshold, base) * scale > 5
     # ), 'Threshold too small for given scale (or vice versa)'
 
     logthresh = np.log(threshold)
@@ -739,8 +752,8 @@ def inverse_log_poly_log(y, threshold=100, base=10, compression=0.5):
     return y * sign
 
 
-
 ### {{{                        --     jax version     --
+
 
 def jlogb(x, base=10):
     """Compute log of x in base b."""
@@ -756,7 +769,7 @@ def jcubic_exp_fwd(x, threshold, base, scale=1):
     """
     # assert base > 1 and scale > 0, 'Base must be > 1 and scale > 0'
     # assert (
-        # 6 * logb(threshold, base) * scale > 5
+    # 6 * logb(threshold, base) * scale > 5
     # ), 'Threshold too small for given scale (or vice versa)'
 
     logthresh = jnp.log(threshold)
@@ -828,11 +841,13 @@ def jax_inverse_log_poly_log(y, threshold=100, base=10, compression=0.5):
 
 ### {{{                         --     jaxutils     --
 from jax.experimental import host_callback
+
 enable_checks = False
 
 
 def grid_map(F, xrange, yrange, meshres):
     import jax
+
     XX, YY = np.meshgrid(
         np.linspace(xrange[0], xrange[1], meshres[0]),
         np.linspace(yrange[0], yrange[1], meshres[1]),
@@ -841,6 +856,7 @@ def grid_map(F, xrange, yrange, meshres):
     coords = np.column_stack((XX.ravel(), YY.ravel()))
     ZZ = jax.vmap(F)(coords).reshape(XX.shape)
     return XX, YY, ZZ
+
 
 def hooked_scan(num_samples, on_update, call_rate=1):
     import jax
@@ -875,7 +891,6 @@ def hooked_scan(num_samples, on_update, call_rate=1):
     return _hooked_scan
 
 
-
 def get_jaxpr(fun, *args, **kwargs):
     import jax
 
@@ -901,7 +916,6 @@ def get_xla(fun, *args, static_argnums=(), **kwargs):
 
 def print_xla(fun, *args, static_argnums=(), **kwargs):
     print(get_xla(fun, *args, **kwargs))
-
 
 
 def get_looped_slice(a, start, end):
@@ -1020,10 +1034,12 @@ def progress_scan(num_samples, progress_type=TQDMProgress, message=None, print_r
 
     return _progress_bar_scan
 
+
 def freeze(struct):
     # converts dict to frozendict, list to tuple and recursively
     # freezes all nested dicts, lists, tuples, and sets.
     import frozendict
+
     if isinstance(struct, dict):
         return frozendict.frozendict({k: freeze(v) for k, v in struct.items()})
     elif isinstance(struct, list):
@@ -1034,6 +1050,7 @@ def freeze(struct):
         return frozenset([freeze(v) for v in struct])
     else:
         return struct
+
 
 def tree_shape(t):
     return pytree.tree_map(lambda x: x.shape, t)
@@ -1090,6 +1107,8 @@ def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | check
             return Error({}, {}, {}, {}), result
 
         return wrapped_function
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 # at_path = at_path_flat
@@ -1099,6 +1118,7 @@ def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | check
 # path_contains = path_contains_flat
 
 ### {{{                      --     topology analysis helpers     --
+
 
 def get_uorf_value(param):
     if 'tl_rate' in param:
@@ -1165,6 +1185,7 @@ def get_all_uorf_values(network):
     names = get_uorf_names(values, ERN_names)
     return tuple(values), tuple(names)
 
+
 from typing import List, Callable
 
 
@@ -1194,7 +1215,6 @@ def make_is_upstream(network):
 def topological_sort(
     node_list: List[int], is_upstream: Callable[[int, int], bool]
 ) -> List[List[int]]:
-
     visited = set()
     batches = []
     while len(visited) < len(node_list):
@@ -1243,6 +1263,4 @@ def get_network_family(network):
     return family, seqtype
 
 
-
 ##────────────────────────────────────────────────────────────────────────────}}}
-

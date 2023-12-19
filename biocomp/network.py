@@ -417,7 +417,6 @@ class Network:
         return [n for n in compute_nodes if cdg_input_node == n.cdg_output]
 
     def __checkForCycles(node_map):
-
         def dfs(node_id, visited, rec_stack):
             visited.add(node_id)
             rec_stack.add(node_id)
@@ -562,37 +561,46 @@ class Network:
         cdg['successor'] = None
 
         # connect DNA to RNA through successor list
-        for i, r in cdg[cdg.type == 'DNA'].iterrows():
-            cdg.loc[i, 'successor'] = []
-            for ii, rr in cdg[cdg.type == 'RNA'].iterrows():
+        dna_nodes = cdg[cdg.type == 'DNA']
+        rna_nodes = cdg[cdg.type == 'RNA']
+        if len(rna_nodes) == 0:
+            raise NetworkConstructionError('No RNA nodes in central dogma graph')
+        for i, r in dna_nodes.iterrows():
+            successors = []
+            for ii, rr in rna_nodes.iterrows():
                 assert (
                     len(r.tu_id) == 1
                 ), "a DNA node should have only one value in its tu_id list (1 DNA node per Transcription Unit)"
 
                 if r.tu_id[0] in rr.tu_id:  # if we have an RNA that has the same TU as the DNA
-                    cdg.loc[i, 'successor'].append(ii)  # add the RNA to the DNA's successor
+                    successors.append(ii)
+            cdg.loc[i, 'successor'] = successors
 
         # connect RNA to PRT through successor list
-        for i_r, rna in cdg[cdg.type == 'RNA'].iterrows():  # for each RNA
-            cdg.loc[i_r, 'successor'] = []
+        for i_r, rna in rna_nodes.iterrows():  # for each RNA
+            successors = []
             for i_p, prt in cdg[cdg.type == 'PRT'].iterrows():  # for each PRT
                 if set(rna.tu_id).issubset(set(prt.tu_id)):
-                    cdg.loc[i_r, 'successor'].append(i_p)  # add the PRT to the RNA's successor
+                    successors.append(i_p)
+            cdg.loc[i_r, 'successor'] = successors
 
         # now deduce the predecessor lists
         cdg['predecessor'] = [list() for _ in range(len(cdg))]
         for i, r in cdg.iterrows():
             if r.successor is not None:
                 for s in r.successor:
-                    cdg.loc[s]['predecessor'] += [i]
+                    cdg.loc[s, 'predecessor'].append(i)
         cdg.loc[~cdg.predecessor.astype(bool), 'predecessor'] = None
+        ut.logger.debug(f'cdg: \n{cdg}\n')
 
         # We explicitly describe the part content of each node:
         try:
             cdg['content'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type], axis=1)
+
             cdg['content_type'] = cdg.apply(
-                lambda x: tuple([self.lib.parts.loc[p][0] for p in x.content]), axis=1
+                lambda x: tuple([self.lib.parts.loc[p].iloc[0] for p in x.content]), axis=1
             )
+
         except Exception as e:
             msg = f'Error while building central dogma graph. Error: {e}'
             msg += f'\ntudf: \n{tudf}'
@@ -702,7 +710,9 @@ class Network:
 
                 # add the input_from to the cooresponding sources
                 for s in r.source:
-                    cdf.loc[cdf.source_id == s, 'input_from'] = [[nid]]
+                    for source in cdf[cdf.source_id == s].index:
+                        cdf.at[source, 'input_from'] = [nid]
+
                 # For aggregations, we will store a dictionnary with the name of the aggregation and the ratio of each source
                 tmp = pd.DataFrame([newaggregation.toDict()]).set_index('id')
                 tmp['extra'] = [{'id': i, 'qtty': np.sum(r.ratio), 'ratios': r.ratio}]
@@ -716,6 +726,8 @@ class Network:
 
     def __buildRawGraph(self, uidGen: Callable[[], int]) -> List[GraphComputeNode]:
         cdg = self.central_dogma_graph
+        ut.logger.debug(f'Building compute graph for recipe {self.name}')
+        ut.logger.debug(f'cdg: \n{cdg}\n')
         assert cdg is not None, 'central dogma graph not built'
         assert isinstance(cdg, pd.DataFrame)
         newnodes = []
@@ -772,6 +784,12 @@ class Network:
                     raise NetworkConstructionError(msg)
 
         cg = []
+        # pretty format of newnodes
+        from pprint import pformat
+        newnodes_str = pformat([n.toDict() for n in newnodes])
+
+        ut.logger.debug(f'tu_in_sequestron: {tu_in_sequestron}')
+        ut.logger.debug(f'newnodes: {newnodes_str}')
 
         # right now newnodes contains only the output node and the sequestron nodes
         # we're now going to go upstream from these nodes, adding the relevant translation/transcription
@@ -798,6 +816,7 @@ class Network:
         # We will merge sources later (for TUs that are on a same plasmid)
         while newnodes:
             n: GraphComputeNode = newnodes.pop()
+            ut.logger.debug(f'Processing node {n.id} of type {n.type}')
             if n.type != 'source':
                 # for every cdg node that is an input of n
                 if n.cdg_input is None:
@@ -807,36 +826,36 @@ class Network:
                     msg += f'CDG:\n{cdg}'
                     raise NetworkConstructionError(msg)
                 for i, n_inp in enumerate(n.cdg_input):
-                    others = self.__isOutputedBy(
-                        n_inp, cg + newnodes
-                    )  # list of all other nodes that also output n_inp
+                    # list all other nodes that also output n_inp
+                    others = self.__isOutputedBy(n_inp, cg + newnodes)
                     for other in others:
                         # establish the connection between n and its parents
                         n.input_from += [other.id]
                         other.output_to += [(n.id, i)]
                     if not others:  # if n_inp is not outputed by any node we have already created
                         # then we go up the central dogma and create the matching upstream node
-                        gn = cdg.loc[
-                            n_inp
-                        ]  # the central dogma graph node that is being transformed by this compute node
+                        # gn is the central dogma graph node that is being transformed by this compute node
+                        upstream_cdg_node = cdg.loc[n_inp]
                         nid = uidGen()
                         # we just need to know what type of transform we have.
                         # for example, if the input cdg node that our compute node expects is a protein,
                         # that means that we need to add a translation node, etc...
                         ntype = {'PRT': 'translation', 'RNA': 'transcription', 'DNA': 'source'}[
-                            gn.type
+                            upstream_cdg_node.type
                         ]
-                        newn = GraphComputeNode(nid, ntype, gn.predecessor, int(n_inp))
+                        newn = GraphComputeNode(nid, ntype, upstream_cdg_node.predecessor, int(n_inp))
                         newn.input_from = []
                         newn.output_to = [(n.id, i)]
                         newnodes.append(newn)
                         n.input_from += [int(nid)]
+                        ut.logger.debug(f'Added node {newn.id} of type {newn.type}: {pformat(newn.toDict())}')
             cg += [n]
         return cg
 
     def __addNumericNodes(self, cdf, uidGen):
         # we add 1 numeric node per source or aggregation that's "at the top",
         # i.e its input_from is empty.
+        ut.logger.debug(f'comp graph before adding numeric nodes: \n{cdf}')
         topnodes = cdf[cdf.input_from.apply(len) == 0]
         ut.logger.debug(f'Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}')
         for i, r in topnodes.iterrows():
@@ -1212,6 +1231,7 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
         return invertible
 
     paths = []
+
     # we want ALL paths from start_node_id to output nodes that consist of invertible nodes
     # we store the path as a list of (this_node_id, this_output_id) tuples except for the last node
     # (the output node), where we store (output_node_id, input_id) instead
@@ -1288,7 +1308,6 @@ def inverted_network(
 
         new_networks = []
         for paths in inversions:
-
             inputpos = 0
             new_network = network.copy()
             uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
@@ -1308,7 +1327,6 @@ def inverted_network(
                 prev = connected_node_id
 
                 for i, (node_id, output_slot) in enumerate(path[1:], 1):
-
                     # slot is output_id for nodes, input_id for output
                     original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
                     n_type = original_node['type']  # its type
@@ -1353,7 +1371,7 @@ def inverted_network(
                     }
 
                     # set prev input_from to new nodes
-                    new_network.compute_graph.loc[prev, 'input_from'] = [(nid, 0)]
+                    new_network.compute_graph.at[prev, 'input_from'] = [(nid, 0)]
                     new_network.compute_graph = pd.concat(
                         [new_network.compute_graph, pd.DataFrame([new_n.toDict()]).set_index('id')]
                     )

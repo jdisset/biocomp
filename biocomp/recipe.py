@@ -11,6 +11,7 @@ import json
 import json5
 from typing import Optional
 import logging as log
+import traceback
 
 
 def escape_name(name):
@@ -130,7 +131,7 @@ def recipes_to_sql(recipes: list, conn, lib):
             )
             aggregation_id = c.lastrowid
             ratios = ratios / qtty
-            for (r, s) in zip(ratios, agg['sources']):
+            for r, s in zip(ratios, agg['sources']):
                 type = None
                 l1ids = []
                 if s['plasmid'] in lib.L1s.index:
@@ -228,6 +229,7 @@ def import_recipes_to_sql(recipe_files: list, conn, lib, ignore_errors=False, sh
     error_log += recipes_to_sql(recipes, conn, lib)
     return error_log
 
+
 def network_from_recipe(recipe, lib, db_path=':memory:'):
     dbconn = sqlite3.connect(db_path)
     recipes_to_sql([recipe], dbconn, lib)
@@ -296,7 +298,6 @@ class XP:
         ignore_errors=False,
         show_progress=True,
     ):
-
         """
         Reads the xp file, and loads both the recipes (into an instance-level sqlite db)
         and the raw data (into a dict of pandas dataframes)
@@ -315,6 +316,7 @@ class XP:
         self.network_building_errors = ''
         self.xp_path = Path(xp_path)
         self.show_progress = show_progress
+        self.raw_data: dict[str, pd.DataFrame] = {}
 
         self.db_uri = False
         if db_path is None:
@@ -392,7 +394,7 @@ class XP:
             show_progress=self.show_progress,
         )
 
-    def load_samples(self, data_path, load_data=True):
+    def load_samples(self, data_path, load_data=True, ignore_errors=False):
         sample_names = list(self.samples.keys())
         data_files = XP.resolve_paths_with_priorities(
             data_path,
@@ -408,17 +410,58 @@ class XP:
                 self.data_loading_errors += f'Could not find data file for sample {n}\n'
             s['data_file'] = name_to_file.get(n, None)
 
-        # clean up the samples dict by removing the samples that don't have a data file or a recipe
-        # self.samples = {
-            # n: s
-            # for n, s in self.samples.items()
-            # if s['data_file'] is not None and s['recipe'] in self.recipes
-        # }
-
         if load_data:
-            self.load_raw_data()
+            self.load_all_raw_data(ignore_errors=ignore_errors)
 
-    def load_raw_data(self):
+    def load_raw_data(self, sample_name, proteins=None, ignore_errors=False, force_reload=False):
+        """Load the raw data for a given sample in the xp, and store it in a pandas dataframe"""
+
+        # when ignore_errors is true, we return None when there's an error and append the error message to self.data_loading_errors
+        def error_handler(msg):
+            if ignore_errors:
+                self.data_loading_errors += msg + '\n\n'
+                ut.logger.warning(msg)
+                return None
+            else:
+                raise RuntimeError(msg)
+
+        if sample_name not in self.samples:
+            return error_handler(
+                f'Sample {sample_name} not found in xp {self.name}. Available: {self.samples.keys()}'
+            )
+
+        s = self.samples[sample_name]
+        if 'data_file' not in s:
+            return error_handler(f'No data file listed for sample {sample_name} in xp {self.name}')
+
+        if s['data_file'] is None:
+            return error_handler(f'No data file listed for sample {sample_name} in xp {self.name}')
+
+        assert s['data_file'] is not None
+
+        f = Path(s['data_file'])
+        if not f.exists():
+            return error_handler(f'Data file {f} not found for sample {sample_name} in xp {self.name}')
+
+        if sample_name not in self.raw_data or force_reload:
+            content = pd.read_csv(f, engine="pyarrow")
+            assert isinstance(content, pd.DataFrame)
+            self.raw_data[sample_name] = content
+
+        data = self.raw_data[sample_name]
+
+        available_columns = set(data.columns)
+        if proteins is None:
+            return data
+        else:
+            remainder = set(proteins) - available_columns
+            if len(remainder) > 0:
+                return error_handler(
+                    f'Proteins {remainder} not found in data for sample {sample_name}. Available: {available_columns}'
+                )
+            return np.asarray(data[proteins])
+
+    def load_all_raw_data(self, ignore_errors=False, force_reload=True):
         """Load the raw data for each sample in the xp, and store it in a dict [sample name] -> pandas dataframe"""
         self.raw_data: dict[str, pd.DataFrame] = {}
         for s_name, s in tqdm(
@@ -426,18 +469,15 @@ class XP:
             desc=f"loading data files for {self.name}",
             disable=not self.show_progress,
         ):
-            if s['data_file'] is None:
-                continue
-            content = pd.read_csv(s['data_file'], engine="pyarrow")
-            assert isinstance(content, pd.DataFrame)
-            self.raw_data[s_name] = content
+            self.load_raw_data(s_name, ignore_errors=ignore_errors, force_reload=force_reload)
 
     def build_network(
         self, recipe_name, inverse='shortest', use_db=None, ignore_errors=False, use_cache=None
     ):
-
         if str(recipe_name) not in self.recipes:
-            raise RuntimeError(f'Recipe {recipe_name} not found in xp {self.name}. Cannot build network.')
+            raise RuntimeError(
+                f'Recipe {recipe_name} not found in xp {self.name}. Cannot build network.'
+            )
 
         dbconn = use_db or self.dbconn
 
@@ -457,6 +497,8 @@ class XP:
         except Exception as e:
             msg = f'Error building network for recipe {recipe_name} in xp {self.name}: \n{e}'
             if ignore_errors:
+                # trace = traceback.format_exc()
+                # msg += f'\n\n{trace}\n'
                 ut.logger.warning(msg)
                 self.network_building_errors += msg + '\n\n'
                 return None
@@ -514,47 +556,22 @@ class XP:
                 nets = [nets]
             networks += nets
             sample_names += [s_name] * len(nets)
-
-
         return networks, sample_names
 
-
-    def get_Y(self, networks:list[Network], sample_names:list[str], ignore_errors=False):
-        """Returns the Y data (the dependent variables) for each network and sample"""
-        assert self.raw_data is not None
+    def get_Y(self, networks: list[Network], sample_names: list[str], ignore_errors=False):
+        """Returns the output data (including cotx markers) for each network and sample"""
         assert len(networks) == len(sample_names)
         # we want to reorder data columns to match the network's output
-        out_prots = [net.get_output_proteins() if net is not None else None for net in networks]
-        # if we ave a color_names attribute, we use it to alias the protein names
+        output_proteins = [net.get_output_proteins() if net is not None else None for net in networks]
+        # if we have a color_names attribute, we use it to alias the protein names
         if hasattr(self, 'color_names'):
-            out_prots = [[self.color_names.get(p, p) for p in prots] for prots in out_prots]
-        Y = []
-        for sample, prots in zip(sample_names, out_prots):
-            has_error = False
-            for p in prots:
-                if sample not in self.raw_data:
-                    msg = f'Sample {sample} not found in xp {self.name}. Available: {self.raw_data.keys()}'
-                    self.data_loading_errors += msg + '\n\n'
-                    has_error = True
-                    if not ignore_errors:
-                        raise RuntimeError(msg)
-                else:
-                    cols = self.raw_data[sample].columns
-                    if p not in cols:
-                        msg = (
-                            f'Protein {p} not found in data for sample {sample}. Available: {cols}'
-                        )
-                        self.data_loading_errors += msg + '\n\n'
-                        has_error = True
-                        if not ignore_errors:
-                            raise RuntimeError(msg)
-            if has_error:
-                Y.append(None)
-            else:
-                Y.append(np.array(self.raw_data[sample][prots]))
-        return Y
+            output_proteins = [[self.color_names.get(p, p) for p in prots] for prots in output_proteins]
+        return [
+            self.load_raw_data(s_name, proteins=p_names, ignore_errors=ignore_errors)
+            for s_name, p_names in zip(sample_names, output_proteins)
+        ]
 
-    def get_XY(self, networks:list[Network], sample_names:list[str], ignore_errors=False):
+    def get_XY(self, networks: list[Network], sample_names: list[str], ignore_errors=False):
         """Returns the X and Y data (the independent and dependent variables) for each network and sample"""
         Y = self.get_Y(networks, sample_names, ignore_errors=ignore_errors)
         X = [net.get_input_from_output(y) for net, y in zip(networks, Y)]
@@ -587,6 +604,7 @@ class XP:
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                           --     tests     --

@@ -1,5 +1,18 @@
 import pandas as pd
 from . import utils as ut
+import json5
+
+def j5loads(x):
+    try:
+        return json5.loads(x)
+    except Exception as e:
+        print(f"Error loading {x}: {e}")
+        return x
+
+def decode_json(df, cols):
+    for col in cols:
+        df[col] = df[col].apply(lambda x: j5loads(str(x)))
+    return df
 
 
 class PartsLibrary:
@@ -20,7 +33,7 @@ class PartsLibrary:
 
         self.pc = pd.merge(parts, categories, left_on='category', right_index=True, how='left')
         self.seqs = self.sequestrons.merge(self.sequestron_types, left_on='type', right_index=True)
-        self.seqs = ut.decode_json(self.seqs, ['output_part', 'output_category'])
+        self.seqs = decode_json(self.seqs, ['output_part', 'output_category'])
         self.seqs['enabled'] = True
 
 

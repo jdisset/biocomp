@@ -1,9 +1,11 @@
 evosax
-jax
+jax-metal
+#jax==0.4.11
+#jaxlib==0.4.11
+optax==0.1.5
 json5
 matplotlib
 numpy
-optax
 pandas
 rich
 scipy
@@ -13,3 +15,5 @@ pyppeteer
 gspread
 streamlit
 streamlit-aggrid
+openpyxl
+xxhash

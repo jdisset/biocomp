@@ -30,7 +30,15 @@ from pathlib import Path
 from rich import print as rprint
 
 import common as cm
-
+from common import (
+    DEFAULT_CALIB_PATHS,
+    DEFAULT_CALIB_NAMES,
+    DEFAULT_XP_PATH,
+    DEFAULT_RECIPE_PATH,
+    DEFAULT_XP_CACHE_DIR,
+    DEFAULT_DATA_CONFIG,
+    DEFAULT_DATA_CONFIG_PATH,
+)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 prog = cm.CLIProgram()
@@ -49,42 +57,11 @@ prog.add_argument('--database', type=str, required=True)
 prog.add_argument('--mode', type=str, default='update_from_filesystem')
 prog.add_argument('--create', action='store_true', default=False)
 
-DEFAULT_CALIB_PATHS = [
-    './data/calibrated_data_v3',
-    './data/calibrated_data_v2',
-    './data/calibrated_data',
-]
 prog.add_argument('--calib_paths', type=str, nargs='+', default=DEFAULT_CALIB_PATHS)
-
-DEFAULT_CALIB_NAMES = ['v3', 'v2', 'old']
 prog.add_argument('--calib_names', type=str, nargs='+', default=DEFAULT_CALIB_NAMES)
-
-DEFAULT_XP_PATH = ut.DEFAULT_XP_PATH
 prog.add_argument('--xp_path', type=str, default=DEFAULT_XP_PATH)
-
-DEFAULT_RECIPE_PATH = ut.DEFAULT_RECIPE_PATH
 prog.add_argument('--recipe_paths', type=str, nargs='+', default=DEFAULT_RECIPE_PATH)
-
-DEFAULT_XP_CACHE_DIR = './devtmp/cache/xp_objs'
 prog.add_argument('--xp_cache_dir', type=str, default=DEFAULT_XP_CACHE_DIR)
-
-
-DEFAULT_DATA_CONFIG = {
-    'network_cache_location': './__cache/network',
-    'training_cache_location': './__cache/training',
-    'densities_cache_location': './__cache/densities',
-    'data_min_value': 500,
-    'data_max_value': 100000000.0,
-    'data_log_offset': 3000.0,
-    'data_log_factor': 100,
-    'data_log_poly_threshold': 300,
-    'data_log_poly_compression': 0.4,
-    'data_sampling_kde_bw_method': 0.02,
-    'data_sampling_max_density_samples': 4000,
-    'data_sampling_density_quantile_threshold': 0.025,
-    'data_sampling_coords_for_density_threshold': 0.15,
-}
-DEFAULT_DATA_CONFIG_PATH = None
 prog.add_argument('--data_config', type=str, default=DEFAULT_DATA_CONFIG_PATH)
 
 # verbosity level
@@ -101,6 +78,7 @@ if not database_path.exists():
         raise ValueError(f'database file {database_path} does not exist')
     else:
         wb = cm.create_database_file(database_path, ['experiment', 'network'])
+
 # check extensiion (it should be an excel file)
 if database_path.suffix != '.xlsx':
     raise ValueError(f'database file {database_path} must be an excel file')
@@ -132,7 +110,6 @@ prog.console = Console()
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 logger = logging.getLogger('build_xp_table')
 
 xp_entries = {}
@@ -140,7 +117,9 @@ xp_objs = {}
 all_networks = []
 
 ### {{{                  --     list all xps in experiment folder    --
+
 import time
+
 xp_folders = sorted([f for f in prog.xp_path.iterdir() if f.is_dir()])
 for xp_dir in tqdm(xp_folders, desc='loading experiments'):
     warning_msg = ''
@@ -176,26 +155,26 @@ for xp_dir in tqdm(xp_folders, desc='loading experiments'):
 
 logger.info(f'found {len(xp_entries)} experiments')
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{            --     initial xpdf with calibration info     --
+
 def calibration_info(xppath, calib_paths=prog.calib_paths, calib_names=prog.calib_names):
     # calib_folders = list(xppath.glob('data/calibrated_data*'))
     calib_folders = [xppath / p for p in calib_paths]
     calib_type = 'no'
     calib_plot = False
     calib_path = None
-
     for calib_folder, calib_name in zip(calib_folders, calib_names):
         if calib_folder.exists():
             calib_type = calib_name
             calib_path = calib_folder
             break
-
     # check if there is a calibration plot
     calib_diag_path = xppath / 'data' / 'unmixing_diagnostics'
     if calib_diag_path.exists():
         calib_plot = True
-
     return calib_type, calib_plot, calib_path
 
 
@@ -203,14 +182,20 @@ for xp in xp_entries.values():
     calib_type, calib_plot, _ = calibration_info(xp['path'])
     xp['calibration_version'] = calib_type
     xp['calibration_diagnostics'] = calib_plot
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{  --     build networks    --
+# enable debug logging for biocomp
+logging.getLogger('biocomp').setLevel(logging.ERROR)
+
 total_samples = sum([len(x.samples) for x in xp_objs.values()])
 logger.info(f'Building networks for {total_samples} samples')
 progress = tqdm(total=total_samples, desc='Building networks')
+
 for xpname, xp in list(xp_objs.items())[:]:
     is_ok = True
-    xp.load_raw_data()
     progress.set_description(f'Building networks for {xpname}')
     networks, sample_names = xp.build_networks(
         ignore_errors=True,
@@ -245,9 +230,7 @@ for xpname, xp in list(xp_objs.items())[:]:
                     'data_loadng_errors'
                 ] += f'empty data for network {net_entry.name}\n\n'
 
-    
-logger.info(f'Done building networks')
-
+all_networks
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
 ### {{{        --     add architecture family, sequestron type, ...     --
@@ -284,6 +267,7 @@ for net_entry in tqdm(all_networks, desc='Adding network metadata'):
 ##────────────────────────────────────────────────────────────────────────────}}}##
 ### {{{                  --     create and update xpdf     --
 
+
 def merge_update(df, table_name, prog):
     dbdf = cm.load_database_table(prog.database, table_name, create_if_not_exists=True)
     # try to merge the two tables using the name as key, keeping any extra columns
@@ -309,6 +293,7 @@ def ensure_unique_id(df):
     df.set_index('id', inplace=True, drop=False)
     return df
 
+
 # minimal styling
 def table_style(table_name, prog):
     workbook = openpyxl.load_workbook(prog.database)
@@ -331,11 +316,13 @@ xpdf = cm.reorder_columns_back(xpdf, error_cols)
 merged_xpdf = merge_update(xpdf, 'experiment', prog)
 merged_xpdf = ensure_unique_id(merged_xpdf)
 
+logger.debug(f'Saving experiment table to {prog.database}')
+logger.debug(f'Experiment table:\n{merged_xpdf}')
+
 cm.save_database_table(merged_xpdf, prog.database, 'experiment')
 table_style('experiment', prog)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 
 ### {{{                  --     create and update netdf     --
 
@@ -350,6 +337,6 @@ merged_netdf = ensure_unique_id(merged_netdf)
 cm.save_database_table(merged_netdf, prog.database, 'network')
 table_style('network', prog)
 
-
 print('done')
+
 ##────────────────────────────────────────────────────────────────────────────}}}

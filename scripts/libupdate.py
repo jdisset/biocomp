@@ -1,9 +1,9 @@
 from pathlib import Path
-import scriptutils as ut
 import argparse
 import pickle
 import os
 from types import SimpleNamespace
+import biocomp as bc
 
 ### {{{                   --     google sheet helpers     --
 import gspread
@@ -13,17 +13,6 @@ import pandas as pd
 GOOGLE_APP_CREDENTIALS = '/Users/jeandisset/.google/biocomp/key.json'
 SHEET_KEY = '1K_2bt90E-Wk-A9PYGXGbKDJy-olojKtksy1jxCQAzME'
 
-# This function grabs the content of a google sheet and returns a pandas dataframe:
-def getGoogleSheet(key, sheet_name, credentials=GOOGLE_APP_CREDENTIALS):
-    gspread_client = gspread.service_account(filename=credentials)
-    workbook = gspread_client.open_by_key(key)
-    sheet = workbook.worksheet(sheet_name)
-    data = sheet.get_all_values()
-    headers = data.pop(0)
-    df = pd.DataFrame(data, columns=headers)
-    df = df.set_index(df.columns[0])
-    return df
-
 
 def getAllGoogleSheets(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
     gspread_client = gspread.service_account(filename=credentials)
@@ -32,7 +21,11 @@ def getAllGoogleSheets(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
     sheets_dict = {}
     for sheet in track(sheets, description='Loading library sheets'):
         df = pd.DataFrame(sheet.get_all_records())
-        df.set_index(df.columns[0], inplace=True)
+        col0 = df.columns[0]
+        previous_len = len(df)
+        df = df[df[col0] != ""] # remove empty rows
+        print(f"Ignoring {previous_len - len(df)} empty rows from {sheet.title}")
+        df.set_index(col0, inplace=True)
         sheets_dict[sheet.title] = df
     lib = SimpleNamespace(**sheets_dict)
     return lib
@@ -49,7 +42,6 @@ def listGoogleSpreadsheets(credentials=GOOGLE_APP_CREDENTIALS):
         print("No spreadsheets available")
         print("Please share the spreadsheet with Service Account email")
 
-###                                                                            }}}
 
 def getLibFromGoogleSheet(key=SHEET_KEY, credentials=GOOGLE_APP_CREDENTIALS):
     l = getAllGoogleSheets(key, credentials)
@@ -62,11 +54,12 @@ def main(libpath):
     libpath = Path(libpath)
     libpath.parent.mkdir(parents=True, exist_ok=True)
     print("Updating biocomp lib from google sheets...")
-    lib = ut.getLibFromGoogleSheet()
+    lib = getLibFromGoogleSheet()
     with open(libpath, "wb") as f:
         pickle.dump(lib, f)
     print("Done.")
 
+###                                                                            }}}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -76,3 +69,4 @@ if __name__ == "__main__":
     if args.path is None:
         args.path = os.getenv("BIOCOMP_LIB_PATH")
     main(args.path)
+

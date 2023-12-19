@@ -49,6 +49,11 @@ def is_interactive():
 
     return mpl.is_interactive()
 
+def as_list(x):
+    if isinstance(x, list):
+        return x
+    else:
+        return [x]
 
 DEFAULT_DATA_PATH = Path("~/Dropbox (MIT)/Biocomp/").expanduser()
 DEFAULT_XP_PATH = DEFAULT_DATA_PATH / "Experiments"
@@ -62,9 +67,13 @@ GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
 if GLOBAL_CONFIG_PATH.exists():
     with open(GLOBAL_CONFIG_PATH) as f:
         config = json.load(f)
-        DEFAULT_XP_PATH = Path(config.get('xp_path', DEFAULT_XP_PATH))
-        DEFAULT_RECIPE_PATH = Path(config.get('recipe_path', DEFAULT_RECIPE_PATH))
         DEFAULT_LIB_PATH = Path(config.get('lib_path', DEFAULT_LIB_PATH))
+        # actually they all can be lists of paths:
+        if 'xp_path' in config:
+            DEFAULT_XP_PATH = [Path(p) for p in as_list(config['xp_path'])]
+        if 'recipe_path' in config:
+            DEFAULT_RECIPE_PATH = [Path(p) for p in as_list(config['recipe_path'])]
+
 
 # we also check the environment variables to see if they define the paths
 # if so, we use them in priority
