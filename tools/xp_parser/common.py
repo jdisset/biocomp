@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import openpyxl
 from openpyxl.styles import PatternFill, Font
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                         --     defaults     --
@@ -38,6 +39,12 @@ DEFAULT_DATA_CONFIG = {
 DEFAULT_DATA_CONFIG_PATH = None
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+import logging
+tlog = logging.getLogger('biocomp_tools_common')
+tlog.setLevel(logging.DEBUG)
+
+
 ### {{{                        --     CLIProgram     --
 class CLIProgram:
     def __init__(self):
@@ -71,9 +78,14 @@ class CLIProgram:
         else:
             raise AttributeError(f"{self.__class__.__name__} object has no attribute '{attr}'")
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                         --     df tools     --
-def merge_update(left_df, right_df, key_column, priority, use_left=None, use_right=None, how='outer'):
+
+
+def merge_update(
+    left_df, right_df, key_column, priority, use_left=None, use_right=None, how='outer'
+):
     """
     Merge two pandas dataframes with priority-based column selection.
 
@@ -86,19 +98,28 @@ def merge_update(left_df, right_df, key_column, priority, use_left=None, use_rig
     pd.DataFrame: Merged dataframe based on the specified rules.
     """
 
+    tlog.debug(
+        f"""Merging dataframes with priority {priority}.
+    Left columns: {left_df.columns} with shape {left_df.shape}.
+    Right columns: {right_df.columns} with shape {right_df.shape}."""
+    )
+
     use_right = use_right or []
     use_left = use_left or []
 
     if not set(use_left).isdisjoint(use_right):
         raise ValueError("Columns in use_left and use_right must be disjoint")
 
-    common_columns = set(left_df.columns).intersection(set(right_df.columns)).difference([key_column])
+    common_columns = (
+        set(left_df.columns).intersection(set(right_df.columns)).difference([key_column])
+    )
 
     # Rename common columns in right_df to avoid suffixes in the merged dataframe
     rename_columns = {col: col + '_right' for col in common_columns if col not in use_left}
     right_df_renamed = right_df.rename(columns=rename_columns)
-
     merged_df = pd.merge(left_df, right_df_renamed, on=key_column, how=how)
+
+    tlog.debug(f'Common columns: {common_columns}, renamed to {rename_columns}')
 
     # Apply use_left, use_right, and priority rules
     for col in common_columns:
@@ -108,7 +129,6 @@ def merge_update(left_df, right_df, key_column, priority, use_left=None, use_rig
         merged_df.drop(columns=[col + '_right'], inplace=True, errors='ignore')
 
     return merged_df
-
 
 
 def reorder_columns_front(df, columns):
@@ -133,6 +153,7 @@ def reorder_columns_back(df, columns):
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
+
 
 def style_header_row(sheet, fg_color, bg_color, min_width=5, max_width=100):
     # Load the workbook and select the sheet
@@ -163,20 +184,21 @@ def wrap_text_all_cells(sheet):
             cell.alignment = Alignment(wrapText=True)
 
 
-
 from openpyxl import Workbook, load_workbook
+
 
 def create_database_file(database_path, sheet_names):
     print(f'Creating database file {database_path}')
     database_path = Path(database_path)
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     workbook = Workbook()
     for sheet_name in sheet_names:
         workbook.create_sheet(title=sheet_name)
     # Remove default sheet
     del workbook['Sheet']
     workbook.save(filename=database_path)
+
 
 def create_sheet_if_not_exists(database_path, sheet_name):
     database_path = Path(database_path)
@@ -188,6 +210,7 @@ def create_sheet_if_not_exists(database_path, sheet_name):
         workbook.create_sheet(title=sheet_name)
         workbook.save(filename=database_path)
 
+
 def load_database_table(database_path, sheet_name, create_if_not_exists=False):
     database_path = Path(database_path)
     if not database_path.exists():
@@ -198,6 +221,7 @@ def load_database_table(database_path, sheet_name, create_if_not_exists=False):
         else:
             raise ValueError(f'Sheet {sheet_name} does not exist in {database_path}')
     return pd.read_excel(database_path, sheet_name=sheet_name, engine='openpyxl')
+
 
 def save_database_table(df, database_path, sheet_name):
     database_path = Path(database_path)
@@ -214,4 +238,3 @@ def save_database_table(df, database_path, sheet_name):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-

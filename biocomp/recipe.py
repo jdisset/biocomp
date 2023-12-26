@@ -238,6 +238,60 @@ def network_from_recipe(recipe, lib, db_path=':memory:'):
     return n
 
 
+def load_data_file(
+    data_file, proteins=None, error_handler=None, use_store=None, force_reload=False
+):
+    data_file = 2
+    if error_handler is None:
+
+        def _handler(msg):
+            raise RuntimeError(msg)
+
+        error_handler = _handler
+    if use_store is None:
+        use_store = {}
+
+    if data_file is None:
+        return error_handler(f'Data file is null.')
+
+    f = Path(data_file)
+    if not f.exists():
+        return error_handler(f'Data file {f} not found')
+
+    if data_file not in use_store or force_reload:
+        content = pd.read_csv(f, engine="pyarrow")
+        assert isinstance(content, pd.DataFrame)
+        use_store[data_file] = content
+
+    data = use_store[data_file]
+
+    available_columns = set(data.columns)
+    if proteins is None:
+        return data
+    else:
+        remainder = set(proteins) - available_columns
+        if len(remainder) > 0:
+            return error_handler(
+                f'Proteins {remainder} not found in data. Available: {available_columns}'
+            )
+
+        return np.asarray(data[proteins])
+
+
+def get_network_data(network, data_file, color_aliases=None, **kwargs):
+    # we want to reorder data columns to match the network's output
+    out_proteins = network.get_output_proteins()
+    if color_aliases is not None:
+        out_proteins = [color_aliases.get(p, p) for p in out_proteins]
+    return load_data_file(data_file, proteins=out_proteins, **kwargs)
+
+
+def get_network_XY(network, data_file, color_aliases=None, **kwargs):
+    Y = get_network_data(network, data_file, color_aliases, **kwargs)
+    X = network.get_input_from_output(Y)
+    return X, Y
+
+
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -413,63 +467,51 @@ class XP:
         if load_data:
             self.load_all_raw_data(ignore_errors=ignore_errors)
 
-    def load_raw_data(self, sample_name, proteins=None, ignore_errors=False, force_reload=False):
-        """Load the raw data for a given sample in the xp, and store it in a pandas dataframe"""
+    # when ignore_errors is true, we return None when there's an error and append the error message to self.data_loading_errors
+    def data_error_handler(self, msg, ignore_errors=False):
+        if ignore_errors:
+            self.data_loading_errors += msg + '\n\n'
+            ut.logger.warning(msg)
+            return None
+        else:
+            raise RuntimeError(msg)
 
-        # when ignore_errors is true, we return None when there's an error and append the error message to self.data_loading_errors
-        def error_handler(msg):
-            if ignore_errors:
-                self.data_loading_errors += msg + '\n\n'
-                ut.logger.warning(msg)
-                return None
-            else:
-                raise RuntimeError(msg)
-
+    def get_sample_data_file(self, sample_name, ignore_errors=False):
         if sample_name not in self.samples:
-            return error_handler(
-                f'Sample {sample_name} not found in xp {self.name}. Available: {self.samples.keys()}'
+            return self.data_error_handler(
+                f'Sample {sample_name} not found in xp {self.name}. Available: {self.samples.keys()}',
+                ignore_errors=ignore_errors,
             )
 
         s = self.samples[sample_name]
         if 'data_file' not in s:
-            return error_handler(f'No data file listed for sample {sample_name} in xp {self.name}')
-
-        if s['data_file'] is None:
-            return error_handler(f'No data file listed for sample {sample_name} in xp {self.name}')
-
-        assert s['data_file'] is not None
-
-        f = Path(s['data_file'])
-        if not f.exists():
-            return error_handler(f'Data file {f} not found for sample {sample_name} in xp {self.name}')
-
-        if sample_name not in self.raw_data or force_reload:
-            content = pd.read_csv(f, engine="pyarrow")
-            assert isinstance(content, pd.DataFrame)
-            self.raw_data[sample_name] = content
-
-        data = self.raw_data[sample_name]
-
-        available_columns = set(data.columns)
-        if proteins is None:
-            return data
-        else:
-            remainder = set(proteins) - available_columns
-            if len(remainder) > 0:
-                return error_handler(
-                    f'Proteins {remainder} not found in data for sample {sample_name}. Available: {available_columns}'
-                )
-            return np.asarray(data[proteins])
+            return self.data_error_handler(
+                f'No data file listed for sample {sample_name} in xp {self.name}',
+                ignore_errors=ignore_errors,
+            )
+        return s['data_file']
 
     def load_all_raw_data(self, ignore_errors=False, force_reload=True):
         """Load the raw data for each sample in the xp, and store it in a dict [sample name] -> pandas dataframe"""
         self.raw_data: dict[str, pd.DataFrame] = {}
-        for s_name, s in tqdm(
+        for sample_name, s in tqdm(
             list(self.samples.items()),
             desc=f"loading data files for {self.name}",
             disable=not self.show_progress,
         ):
-            self.load_raw_data(s_name, ignore_errors=ignore_errors, force_reload=force_reload)
+            data_file = self.get_sample_data_file(sample_name, ignore_errors)
+
+            def err_handler(msg):
+                msg = f'Error for sample {sample_name} in xp {self.name}:' + msg
+                return self.data_error_handler(msg, ignore_errors=ignore_errors)
+
+            load_data_file(
+                data_file,
+                sample_name,
+                error_handler=err_handler,
+                use_store=self.raw_data,
+                force_reload=force_reload,
+            )
 
     def build_network(
         self, recipe_name, inverse='shortest', use_db=None, ignore_errors=False, use_cache=None
@@ -558,22 +600,68 @@ class XP:
             sample_names += [s_name] * len(nets)
         return networks, sample_names
 
-    def get_Y(self, networks: list[Network], sample_names: list[str], ignore_errors=False):
+    def load_raw_data(self, sample_name, proteins=None, ignore_errors=False, force_reload=False):
+        """Load the raw data for a given sample in the xp, and store it in a pandas dataframe"""
+        data_file = self.get_sample_data_file(sample_name, ignore_errors)
+
+        def err_handler(msg):
+            msg = f'Error for sample {data_file} in xp {self.name}:' + msg
+            return self.data_error_handler(msg, ignore_errors=ignore_errors)
+
+        return load_data_file(
+            data_file,
+            sample_name,
+            proteins,
+            error_handler=err_handler,
+            use_store=self.raw_data,
+            force_reload=force_reload,
+        )
+
+    def get_Y(
+        self,
+        networks: list[Network],
+        sample_names: list[str],
+        ignore_errors=False,
+        force_reload=False,
+    ):
         """Returns the output data (including cotx markers) for each network and sample"""
         assert len(networks) == len(sample_names)
-        # we want to reorder data columns to match the network's output
-        output_proteins = [net.get_output_proteins() if net is not None else None for net in networks]
         # if we have a color_names attribute, we use it to alias the protein names
-        if hasattr(self, 'color_names'):
-            output_proteins = [[self.color_names.get(p, p) for p in prots] for prots in output_proteins]
-        return [
-            self.load_raw_data(s_name, proteins=p_names, ignore_errors=ignore_errors)
-            for s_name, p_names in zip(sample_names, output_proteins)
-        ]
+        color_aliases = getattr(self, 'color_names', None)
+        Y = []
+        for net, sample_name in zip(networks, sample_names):
+            if 'recipe_name' in net.metadata:
+                assert net.metadata['recipe_name'] == self.samples[s_name]['recipe']
+            data_file = self.get_sample_data_file(sample_name, ignore_errors)
 
-    def get_XY(self, networks: list[Network], sample_names: list[str], ignore_errors=False):
+            def err_handler(msg):
+                msg = f'Error for sample {sample_name} in xp {self.name}:' + msg
+                return self.data_error_handler(msg, ignore_errors=ignore_errors)
+
+            Y.append(
+                get_network_data(
+                    net,
+                    data_file,
+                    color_aliases=color_aliases,
+                    error_handler=err_handler,
+                    use_store=self.raw_data,
+                    force_reload=force_reload,
+                )
+            )
+
+        return Y
+
+    def get_XY(
+        self,
+        networks: list[Network],
+        sample_names: list[str],
+        ignore_errors=False,
+        force_reload=False,
+    ):
         """Returns the X and Y data (the independent and dependent variables) for each network and sample"""
-        Y = self.get_Y(networks, sample_names, ignore_errors=ignore_errors)
+        Y = self.get_Y(
+            networks, sample_names, ignore_errors=ignore_errors, force_reload=force_reload
+        )
         X = [net.get_input_from_output(y) for net, y in zip(networks, Y)]
         return X, Y
 

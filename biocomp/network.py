@@ -289,10 +289,10 @@ class Network:
         c.execute(
             """SELECT TU, TU || '_' || aggregation as name FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?
-           ORDER BY position, aggregation""",
+           ORDER BY name""",
             (n.name,),
         )
-        n.raw_transcription_units = list(c.fetchall())
+        raw_transcription_units = list(c.fetchall())  # columns: TU, name
 
         # then get the sources
         c.execute(
@@ -301,21 +301,44 @@ class Network:
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ? ORDER BY source, position""",
             (n.name,),
         )
-        n.raw_tu_in_sources = list(c.fetchall())
+        raw_tu_in_sources = list(c.fetchall())  # columns: source, TU, position
 
         c.execute(
             """SELECT a.id, sia.source || '_' || aggregation, sia.ratio FROM aggregations a, source_in_aggregation sia
             WHERE a.id = sia.aggregation AND a.recipe = ? ORDER BY a.id""",
             (n.name,),
         )
-        n.raw_aggregations = list(c.fetchall())
+        raw_aggregations = list(c.fetchall())  # columns: id, source, ratio
 
-        signature = n.get_signature()
+        return cls.from_raw(
+            lib,
+            name,
+            raw_transcription_units,
+            raw_tu_in_sources,
+            raw_aggregations,
+            build=build,
+            use_cache=use_cache,
+        )
+
+    @classmethod
+    def from_raw(
+        cls,
+        lib,
+        name,
+        raw_transcription_units,
+        raw_tu_in_sources,
+        raw_aggregations,
+        build=True,
+        use_cache=None,
+    ):
+        n = cls(lib, name)
+        n.raw_transcription_units = raw_transcription_units
+        n.raw_tu_in_sources = raw_tu_in_sources
+        n.raw_aggregations = raw_aggregations
 
         def actually_build():
             n.transcription_units = {
-                tu[1]: transcription_unit_from_L1(tu[0], n.lib)
-                for i, tu in enumerate(n.raw_transcription_units)
+                tu[1]: transcription_unit_from_L1(tu[0], n.lib) for tu in n.raw_transcription_units
             }
             n.tu_in_sources = pd.DataFrame(
                 n.raw_tu_in_sources, columns=['source', 'TU', 'position']
@@ -330,10 +353,40 @@ class Network:
                 n.build()
             return n
 
-        return ut.get_cache(lambda: actually_build(), signature, use_cache)
+        return ut.get_cache(lambda: actually_build(), n.get_signature(), use_cache)
 
     @classmethod
-    def from_dict(cls, lib, name, transcription_units, sources, aggregations, build=True):
+    def from_dict_new(cls, lib, name, transcription_units, sources, aggregations, build=True, use_cache=None):
+        # not implemented yet
+        raise NotImplementedError()
+        #TODO:
+        # we need to get the raw_transcription_units 
+        n = cls(lib, name)
+        n.raw_transcription_units = [
+            (tuid, tu.name) for tuid, tu in transcription_units.items()
+        ]
+        # reorder by name:
+        n.raw_transcription_units.sort(key=lambda x: x[1])
+
+        n.raw_tu_in_sources = [
+            (s, t, i)
+            for s, tuids in sources.items()
+            for i, t in enumerate(tuids)
+        ]
+        # reorder by source, position:
+        n.raw_tu_in_sources.sort(key=lambda x: (x[0], x[2]))
+
+        n.raw_aggregations = [
+            (i, s, r)
+            for i, a in aggregations.items()
+            for s, r in a.items()
+        ]
+        # reorder by id:
+        n.raw_aggregations.sort(key=lambda x: x[0])
+
+
+    @classmethod
+    def __obsolete__from_dict(cls, lib, name, transcription_units, sources, aggregations, build=True):
         n = cls(lib, name)
 
         # transcription_units = {TU_name : TU}
@@ -363,6 +416,8 @@ class Network:
             n.__build_central_dogma_graph()
             n.__build_compute_graph()
         return n
+
+
 
     ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -786,6 +841,7 @@ class Network:
         cg = []
         # pretty format of newnodes
         from pprint import pformat
+
         newnodes_str = pformat([n.toDict() for n in newnodes])
 
         ut.logger.debug(f'tu_in_sequestron: {tu_in_sequestron}')
@@ -843,12 +899,16 @@ class Network:
                         ntype = {'PRT': 'translation', 'RNA': 'transcription', 'DNA': 'source'}[
                             upstream_cdg_node.type
                         ]
-                        newn = GraphComputeNode(nid, ntype, upstream_cdg_node.predecessor, int(n_inp))
+                        newn = GraphComputeNode(
+                            nid, ntype, upstream_cdg_node.predecessor, int(n_inp)
+                        )
                         newn.input_from = []
                         newn.output_to = [(n.id, i)]
                         newnodes.append(newn)
                         n.input_from += [int(nid)]
-                        ut.logger.debug(f'Added node {newn.id} of type {newn.type}: {pformat(newn.toDict())}')
+                        ut.logger.debug(
+                            f'Added node {newn.id} of type {newn.type}: {pformat(newn.toDict())}'
+                        )
             cg += [n]
         return cg
 

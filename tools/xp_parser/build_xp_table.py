@@ -40,8 +40,13 @@ from common import (
     DEFAULT_DATA_CONFIG_PATH,
 )
 
+import logging
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 prog = cm.CLIProgram()
+logger = logging.getLogger('build_xp_table')
+logger.setLevel(logging.DEBUG)
+logging.getLogger('biocomp').setLevel(logging.ERROR)
 ### {{{                --     arg declaration and parsing     --
 
 # arguments:
@@ -62,6 +67,7 @@ prog.add_argument('--calib_names', type=str, nargs='+', default=DEFAULT_CALIB_NA
 prog.add_argument('--xp_path', type=str, default=DEFAULT_XP_PATH)
 prog.add_argument('--recipe_paths', type=str, nargs='+', default=DEFAULT_RECIPE_PATH)
 prog.add_argument('--xp_cache_dir', type=str, default=DEFAULT_XP_CACHE_DIR)
+prog.add_argument('--base_dir', type=str, default=Path(DEFAULT_XP_PATH).parent)
 prog.add_argument('--data_config', type=str, default=DEFAULT_DATA_CONFIG_PATH)
 
 # verbosity level
@@ -84,6 +90,7 @@ if database_path.suffix != '.xlsx':
     raise ValueError(f'database file {database_path} must be an excel file')
 
 prog.xp_path = Path(prog.xp_path)
+prog.base_dir = Path(prog.base_dir)
 prog.recipe_paths = [Path(p) for p in prog.recipe_paths]
 prog.lib = ut.load_lib()
 if prog.data_config is None:
@@ -94,8 +101,6 @@ else:
     prog.data_config = json5.load(open(prog.data_config, 'r'))
 
 assert len(prog.calib_paths) == len(prog.calib_names)
-
-import logging
 
 # loggers = [logging.getLogger(name) for name in sorted(logging.root.manager.loggerDict)]
 logging.getLogger('jax').setLevel(logging.WARNING)
@@ -110,13 +115,9 @@ prog.console = Console()
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-logger = logging.getLogger('build_xp_table')
-
+### {{{                  --     list all xps in experiment folder    --
 xp_entries = {}
 xp_objs = {}
-all_networks = []
-
-### {{{                  --     list all xps in experiment folder    --
 
 import time
 
@@ -147,7 +148,7 @@ for xp_dir in tqdm(xp_folders, desc='loading experiments'):
     xp_entries[xp.name] = {
         'name': xp.name,
         'transfection_date': xp.transfection_date,
-        'path': xp_dir,
+        'path': Path(xp_dir).relative_to(prog.base_dir),
         'recipe_errors': xp.recipe_loading_errors,
     }
     xp_objs[xp.name] = xp
@@ -157,8 +158,8 @@ logger.info(f'found {len(xp_entries)} experiments')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{            --     initial xpdf with calibration info     --
+
 
 def calibration_info(xppath, calib_paths=prog.calib_paths, calib_names=prog.calib_names):
     # calib_folders = list(xppath.glob('data/calibrated_data*'))
@@ -185,10 +186,8 @@ for xp in xp_entries.values():
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{  --     build networks    --
-# enable debug logging for biocomp
-logging.getLogger('biocomp').setLevel(logging.ERROR)
+all_networks = []
 
 total_samples = sum([len(x.samples) for x in xp_objs.values()])
 logger.info(f'Building networks for {total_samples} samples')
@@ -213,11 +212,23 @@ for xpname, xp in list(xp_objs.items())[:]:
     assert len(networks) == len(X) == len(Y)
     for i, net_entry in enumerate(networks):
         if net_entry:
+            sname = sample_names[i]
+            data_file = xp.get_sample_data_file(sname, ignore_errors=True)
+            # subtract prog.xp_path from data_file to get the relative path:
+            if data_file is not None:
+                data_file = Path(data_file).relative_to(prog.base_dir)
+
+            recipe_file = net_entry.metadata['recipe_file']
+            if recipe_file is not None:
+                recipe_file = Path(recipe_file).relative_to(prog.base_dir)
+
             net_entry = {
                 'xp': xpname,
                 'network': net_entry,
-                'sample_name': sample_names[i],
+                'sample_name': sname,
                 'recipe_name': net_entry.metadata['recipe_name'],
+                'recipe_file': recipe_file,
+                'data_file': data_file,
             }
             all_networks.append(net_entry)
 
@@ -230,10 +241,11 @@ for xpname, xp in list(xp_objs.items())[:]:
                     'data_loadng_errors'
                 ] += f'empty data for network {net_entry.name}\n\n'
 
-all_networks
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
 ### {{{        --     add architecture family, sequestron type, ...     --
+
+
 def flatten(l):
     return [item for sublist in l for item in sublist]
 
@@ -266,8 +278,6 @@ for net_entry in tqdm(all_networks, desc='Adding network metadata'):
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
 ### {{{                  --     create and update xpdf     --
-
-
 def merge_update(df, table_name, prog):
     dbdf = cm.load_database_table(prog.database, table_name, create_if_not_exists=True)
     # try to merge the two tables using the name as key, keeping any extra columns
@@ -312,7 +322,6 @@ for col in error_cols:
 
 xpdf = cm.reorder_columns_back(xpdf, error_cols)
 
-
 merged_xpdf = merge_update(xpdf, 'experiment', prog)
 merged_xpdf = ensure_unique_id(merged_xpdf)
 
@@ -322,21 +331,32 @@ logger.debug(f'Experiment table:\n{merged_xpdf}')
 cm.save_database_table(merged_xpdf, prog.database, 'experiment')
 table_style('experiment', prog)
 
+logger.info(f'Experiment table saved to {prog.database}')
+
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{                  --     create and update netdf     --
-
 netdf = pd.DataFrame(all_networks)
 netdf = netdf.drop(columns=['network'])
 netdf = cm.reorder_columns_front(netdf, ['name', 'xp', 'architecture'])
 xp_id = merged_xpdf[['id', 'name']].set_index('name')
 netdf['xp_id'] = netdf['xp'].apply(lambda x: xp_id.loc[x, 'id'])
+
+# compute unique names
+unique_names = []
+for i, row in netdf.iterrows():
+    n = f'{row["recipe_name"]}_{row["xp_id"]}_{"-".join(row["markers"].split(", "))}'
+    unique_names.append(n)
+netdf['name'] = unique_names
+n_names = len(netdf['name'].unique())
+if n_names != len(netdf):
+    raise ValueError(f'found {len(netdf)} networks, but {n_names} unique names')
+
 merged_netdf = merge_update(netdf, 'network', prog)
 merged_netdf = ensure_unique_id(merged_netdf)
+logger.debug(f'Saving network table to {prog.database}')
 
 cm.save_database_table(merged_netdf, prog.database, 'network')
 table_style('network', prog)
 
-print('done')
-
+logger.info(f'Network table saved to {prog.database}')
 ##────────────────────────────────────────────────────────────────────────────}}}
