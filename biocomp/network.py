@@ -128,23 +128,6 @@ class TranscriptionUnit:
         return f'L1({self.slots})'
 
 
-# def resolve(self, lib, *args, **kwargs):
-# if not self.is_resolved:
-# self.part = self.resolve_function(lib, *args, **kwargs)
-# if self.part == [] or self.part == [None]:
-# self.part = None
-# if isinstance(self.part, list):
-# mapped = list(set([self.__mapped_parameter(lib, p) for p in self.part if p is not None]))
-# if len(mapped) != 1:
-# raise ValueError(f'{self.part} maps to {len(mapped)} parameters ({mapped})')
-# self.maps_to_parameter = mapped[0]
-# else:
-# self.maps_to_parameter = self.__mapped_parameter(lib, self.part)
-# if self.maps_to_parameter is not None and not isinstance(self.part, list):
-# self.part = [self.part]
-# self.is_resolved = True
-
-
 class TranscriptionUnitGenerator:
     def __init__(self, part_generators):
         self.name = ''
@@ -170,17 +153,6 @@ class TranscriptionUnitGenerator:
                     yield from _next(slots + [Slot(lib, p)], i + 1)
 
         return _next([], 0)
-
-    # def generate_random(self, lib, random_seed=1, random_order=True):
-    # rdm = jax.random.PRNGKey(random_seed)
-    # allrdm = jax.random.split(rdm, len(self.slots))
-    # order = list(range(len(self.slots)))
-    # if random_order:
-    # order = jax.random.permutation(rdm, len(self.slots))
-    # for i, r in zip(order, allrdm):
-    # if not self.slots[i].is_resolved:
-    # self.slots[i].resolve(lib, l1=self, rdm_key=r)
-    # assert all(s.is_resolved for s in self.slots)
 
 
 #                                                                            }}}
@@ -278,11 +250,10 @@ class Network:
         assert recipe_db is not None, 'recipe_db cannot be None'
         recipe_db.commit()
 
-        n = cls(lib, name, custom_outputs=custom_outputs, metadata=metadata)
         c = recipe_db.cursor()
         # first let's check that there is a recipe with this name
-        c.execute('SELECT * FROM recipes WHERE name=?', (n.name,))
-        assert c.fetchone() is not None, f'No recipe named {n.name} in database {recipe_db}.'
+        c.execute('SELECT * FROM recipes WHERE name=?', (name,))
+        assert c.fetchone() is not None, f'No recipe named {name} in database {recipe_db}.'
         # Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
 
         # get the transcription units
@@ -290,7 +261,7 @@ class Network:
             """SELECT TU, TU || '_' || aggregation as name FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?
            ORDER BY name""",
-            (n.name,),
+            (name,),
         )
         raw_transcription_units = list(c.fetchall())  # columns: TU, name
 
@@ -299,14 +270,14 @@ class Network:
             """SELECT tis.source || '_' || aggregation as source, TU || '_' || aggregation as TU, position
             FROM TU_in_source tis, source_in_aggregation sia, aggregations a
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ? ORDER BY source, position""",
-            (n.name,),
+            (name,),
         )
         raw_tu_in_sources = list(c.fetchall())  # columns: source, TU, position
 
         c.execute(
             """SELECT a.id, sia.source || '_' || aggregation, sia.ratio FROM aggregations a, source_in_aggregation sia
             WHERE a.id = sia.aggregation AND a.recipe = ? ORDER BY a.id""",
-            (n.name,),
+            (name,),
         )
         raw_aggregations = list(c.fetchall())  # columns: id, source, ratio
 
@@ -318,6 +289,8 @@ class Network:
             raw_aggregations,
             build=build,
             use_cache=use_cache,
+            custom_outputs=custom_outputs,
+            metadata=metadata,
         )
 
     @classmethod
@@ -330,8 +303,9 @@ class Network:
         raw_aggregations,
         build=True,
         use_cache=None,
+        **kwargs,
     ):
-        n = cls(lib, name)
+        n = cls(lib, name, **kwargs)
         n.raw_transcription_units = raw_transcription_units
         n.raw_tu_in_sources = raw_tu_in_sources
         n.raw_aggregations = raw_aggregations
@@ -356,37 +330,32 @@ class Network:
         return ut.get_cache(lambda: actually_build(), n.get_signature(), use_cache)
 
     @classmethod
-    def from_dict_new(cls, lib, name, transcription_units, sources, aggregations, build=True, use_cache=None):
+    def from_dict_new(
+        cls, lib, name, transcription_units, sources, aggregations, build=True, use_cache=None
+    ):
         # not implemented yet
         raise NotImplementedError()
-        #TODO:
-        # we need to get the raw_transcription_units 
+        # TODO:
+        # we need to get the raw_transcription_units
         n = cls(lib, name)
-        n.raw_transcription_units = [
-            (tuid, tu.name) for tuid, tu in transcription_units.items()
-        ]
+        n.raw_transcription_units = [(tuid, tu.name) for tuid, tu in transcription_units.items()]
         # reorder by name:
         n.raw_transcription_units.sort(key=lambda x: x[1])
 
         n.raw_tu_in_sources = [
-            (s, t, i)
-            for s, tuids in sources.items()
-            for i, t in enumerate(tuids)
+            (s, t, i) for s, tuids in sources.items() for i, t in enumerate(tuids)
         ]
         # reorder by source, position:
         n.raw_tu_in_sources.sort(key=lambda x: (x[0], x[2]))
 
-        n.raw_aggregations = [
-            (i, s, r)
-            for i, a in aggregations.items()
-            for s, r in a.items()
-        ]
+        n.raw_aggregations = [(i, s, r) for i, a in aggregations.items() for s, r in a.items()]
         # reorder by id:
         n.raw_aggregations.sort(key=lambda x: x[0])
 
-
     @classmethod
-    def __obsolete__from_dict(cls, lib, name, transcription_units, sources, aggregations, build=True):
+    def __obsolete__from_dict(
+        cls, lib, name, transcription_units, sources, aggregations, build=True
+    ):
         n = cls(lib, name)
 
         # transcription_units = {TU_name : TU}
@@ -416,8 +385,6 @@ class Network:
             n.__build_central_dogma_graph()
             n.__build_compute_graph()
         return n
-
-
 
     ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -1000,7 +967,7 @@ class Network:
             self.n_outputs = len(self.get_output_proteins())
         return self.n_outputs
 
-    def get_input_from_output(self, output_arr):
+    def get_input_from_output(self, output_arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
         """Given an array of output values, returns the columns that are inputs of the inverted network,
         properly ordered by input number"""
         # In inverted networks, each input node has,

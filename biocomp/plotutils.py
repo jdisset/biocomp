@@ -66,7 +66,7 @@ IDENTITY_RESCALER = DataRescaler(lambda x: x, lambda x: x)
 ### {{{                   --     log_spline_log scale     --
 
 
-def powers_of_ten(xmin, xmax, skip_10=False, resolution=1):
+def powers_of_ten(xmin, xmax, skip_ticklabel_range=None, resolution=1, **_):
     bounds = np.array([xmin, xmax])
     logbounds = np.sign(bounds) * np.floor(
         np.maximum(np.log10(np.maximum(np.abs(bounds), 0.1)), 0)
@@ -76,8 +76,13 @@ def powers_of_ten(xmin, xmax, skip_10=False, resolution=1):
 
     powers = np.arange(logbounds[0], logbounds[1] + 1)
 
-    if skip_10:
-        powers = np.delete(powers, np.where(np.abs(powers) == 1))
+    if skip_ticklabel_range is not None:
+        skip_power_low = np.floor(np.log10(max(skip_ticklabel_range[0], 0.1))).astype(int)
+        skip_power_high = np.ceil(np.log10(skip_ticklabel_range[1])).astype(int)
+        powers = np.delete(
+            powers,
+            np.where((np.abs(powers) >= skip_power_low) & (np.abs(powers) <= skip_power_high)),
+        )
 
     base_powers = np.power(10, powers)
 
@@ -92,8 +97,8 @@ def powers_of_ten(xmin, xmax, skip_10=False, resolution=1):
 def format_powers(x, *_, n_decimals=1):
     abs_x = abs(x)
     if abs_x < 1000:
-        if x == int(x):
-            return f'{x:.0f}'  # No decimal point
+        if np.abs(x - int(x)) < 1e-3:
+            return f'{int(x)}'  # No decimal point
         else:
             return f'{x:.1f}'  # Up to 1 decimal point
     else:
@@ -105,13 +110,17 @@ def format_powers(x, *_, n_decimals=1):
 
 
 class PowerFormatter(ticker.Formatter):
-    def __init__(self, values, skip10=False):
+    def __init__(self, values, skip_ticklabel_range=None, **_):
         self.values = values
-        self.skip10 = skip10
+        self.skip_ticklabel_range = skip_ticklabel_range
 
     def __call__(self, x, pos):
         v = self.values[pos]
-        if self.skip10 and abs(v) == 10:
+        if (
+            self.skip_ticklabel_range is not None
+            and np.abs(v) < self.skip_ticklabel_range[1]
+            and np.abs(v) > self.skip_ticklabel_range[0]
+        ):
             return ''
         return format_powers(v, None)
 
@@ -164,7 +173,6 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
 
 
 def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):
-
     unscaled_ticks = np.logspace(0, 12, 13)
     ticks = np.array(rescaler(unscaled_ticks))
     valid_ticks = (ticks <= xmax) & (ticks >= xmin)
@@ -179,69 +187,72 @@ def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):
     return *rpnames, ticks, tlabels, secondary_ticks
 
 
-def setup_transformed_xaxis(ax, xlims, rescaler, skip10=True, margins=0.05):
-    xlims_tr = np.asarray(xlims)
+def setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=0.05, **kw):
+    xlims_tr = np.asarray(xaxis_lims)
     xlims_inv = rescaler.inv(np.asarray(xlims_tr))
     p10 = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1])
     xlims_margin = xlims_tr + np.array([-1, 1]) * margins * np.diff(xlims_tr)
     ax.set_xlim(xlims_margin)
     ax.set_xticks(rescaler(p10))  # major ticks
-    ax.xaxis.set_major_formatter(PowerFormatter(p10, skip10=skip10))
-
+    ax.xaxis.set_major_formatter(PowerFormatter(p10, **kw))
     p10_minor = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1], resolution=10)
     ax.set_xticks(rescaler(p10_minor), minor=True)
+    return xlims_inv
 
 
-def setup_transformed_yaxis(ax, ylims, rescaler, skip10=True, margins=0.05):
-    ylims_tr = np.asarray(ylims)
+def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, **kw):
+    ylims_tr = np.asarray(yaxis_lims)
     ylims_inv = rescaler.inv(np.asarray(ylims_tr))
     p10 = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1])
     ylims_margin = ylims_tr + np.array([-1, 1]) * margins * np.diff(ylims_tr)
     ax.set_ylim(ylims_margin)
     ax.set_yticks(rescaler(p10))
-    ax.yaxis.set_major_formatter(PowerFormatter(p10, skip10=skip10))
-
+    ax.yaxis.set_major_formatter(PowerFormatter(p10, **kw))
     p10_minor = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1], resolution=10)
     ax.set_yticks(rescaler(p10_minor), minor=True)
+    return ylims_inv
 
 
-def setup_transformed_axis(ax, xlims=None, ylims=None, rescaler=None, skip10=True, margins=0.05):
-    if xlims is not None:
-        setup_transformed_xaxis(ax, xlims, rescaler, skip10=skip10, margins=margins)
-    if ylims is not None:
-        setup_transformed_yaxis(ax, ylims, rescaler, skip10=skip10, margins=margins)
+def setup_transformed_axis(
+    ax, xaxis_lims=None, yaxis_lims=None, rescaler=None, margins=0.05, transform=None, **kw
+):
+    if xaxis_lims is not None:
+        xaxis_lims = setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=margins, **kw)
+    if yaxis_lims is not None:
+        yaxis_lims = setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=margins, **kw)
+    return xaxis_lims, yaxis_lims
 
 
-def setup_symlog_xaxis(ax, xlims, transform, skip10=True, margins=0.05):
-    xlims_tr = transform(np.asarray(xlims))
-    xp10 = powers_of_ten(*xlims)
+def setup_symlog_xaxis(ax, xaxis_lims, transform, margins=0.05, **kw):
+    xlims_tr = transform(np.asarray(xaxis_lims))
+    xp10 = powers_of_ten(*xaxis_lims)
     xlims_margin = xlims_tr + np.array([-1, 1]) * margins * np.diff(xlims_tr)
     ax.set_xlim(xlims_margin)
     ax.set_xticks(transform(xp10))
-    ax.xaxis.set_major_formatter(PowerFormatter(xp10, skip10=skip10))
+    ax.xaxis.set_major_formatter(PowerFormatter(xp10, **kw))
 
 
-def setup_symlog_yaxis(ax, ylims, transform, skip10=True, margins=0.05):
-    ylims_tr = transform(np.asarray(ylims))
-    yp10 = powers_of_ten(*ylims)
+def setup_symlog_yaxis(ax, yaxis_lims, transform, margins=0.05, **kw):
+    ylims_tr = transform(np.asarray(yaxis_lims))
+    yp10 = powers_of_ten(*yaxis_lims)
     ylims_margin = ylims_tr + np.array([-1, 1]) * margins * np.diff(ylims_tr)
     ax.set_ylim(ylims_margin)
     ax.set_yticks(transform(yp10))
-    ax.yaxis.set_major_formatter(PowerFormatter(yp10, skip10=skip10))
+    ax.yaxis.set_major_formatter(PowerFormatter(yp10, **kw))
 
 
 def setup_symlog_axis(
-    ax, xlims=None, ylims=None, linthresh=200, linscale=0.4, skip10=True, margins=0.05
+    ax, xaxis_lims=None, yaxis_lims=None, linthresh=200, linscale=0.4, margins=0.05, **kw
 ):
     tr = partial(ut.log_poly_log, threshold=linthresh, compression=linscale)
     invtr = partial(ut.inverse_log_poly_log, threshold=linthresh, compression=linscale)
     xlims_tr, ylims_tr = None, None
 
-    if xlims is not None:
-        setup_symlog_xaxis(ax, xlims, tr, skip10=skip10, margins=margins)
+    if xaxis_lims is not None:
+        setup_symlog_xaxis(ax, xaxis_lims, tr, margins=margins, **kw)
 
-    if ylims is not None:
-        setup_symlog_yaxis(ax, ylims, tr, skip10=skip10, margins=margins)
+    if yaxis_lims is not None:
+        setup_symlog_yaxis(ax, yaxis_lims, tr, margins=margins, **kw)
 
     return tr, invtr, xlims_tr, ylims_tr
 
@@ -364,7 +375,7 @@ def get_knn_smooth(xquery, logY, tree, knn=500, min_points=20, knn_method='mean'
 ### {{{                    --     misc plot styling tools     --
 from matplotlib import colors as mcolors
 
-blues = [
+BIOCOMP_BLUES = [
     '#F9F7F5',
     '#EEECEA',
     '#B0CCD6',
@@ -375,7 +386,7 @@ blues = [
     '#22044B',
 ]
 
-greens = [
+BIOCOMP_GREENS = [
     '#F9F7F5',
     '#E2EADA',
     '#CBE4BB',
@@ -386,7 +397,7 @@ greens = [
     '#0C5558',
 ]
 
-reds = [
+BIOCOMP_REDS = [
     '#F5F5F5',
     '#F1E6E5',
     '#F3CFBC',
@@ -399,13 +410,12 @@ reds = [
 
 
 DEFAULT_CMAPS = {
-    'blues': mcolors.LinearSegmentedColormap.from_list('cm', blues, N=256),
-    'greens': mcolors.LinearSegmentedColormap.from_list('cm', greens, N=256),
-    'reds': mcolors.LinearSegmentedColormap.from_list('cm', reds, N=256),
+    'blues': mcolors.LinearSegmentedColormap.from_list('cm', BIOCOMP_BLUES, N=256),
+    'greens': mcolors.LinearSegmentedColormap.from_list('cm', BIOCOMP_GREENS, N=256),
+    'reds': mcolors.LinearSegmentedColormap.from_list('cm', BIOCOMP_REDS, N=256),
 }
 
 DEFAULT_CMAP = DEFAULT_CMAPS['blues']
-
 
 
 def setup_clean_fig(title):
@@ -437,8 +447,8 @@ def default_style(ax):
     ax.tick_params(axis='both', which='both', labelsize=8)
     ax.tick_params(axis='both', which='major', length=5, width=0.4)
     ax.tick_params(axis='both', which='minor', length=2, width=0.2)
-    ax.xaxis.label.set_size(8)
-    ax.yaxis.label.set_size(8)
+    ax.xaxis.label.set_size(10)
+    ax.yaxis.label.set_size(10)
     # tick outside
     ax.tick_params(axis='both', which='both', direction='out')
 
@@ -447,8 +457,8 @@ def default_style(ax):
     ax.spines['left'].set_color('#777777')
 
 
-def mkfig(rows, cols, size=(7, 7), **kw):
-    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]), **kw)
+def mkfig(rows=1, cols=1, size=(4, 4), dpi=300, **kw):
+    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]), dpi=dpi, **kw)
     if rows == 1 and cols == 1:
         default_style(ax)
     else:
@@ -502,7 +512,6 @@ def make_xy_grid(xmin, xmax, ymin=None, ymax=None, xres=100, yres=None):
 
 
 def get_web_font(url, font_name):
-
     import tempfile
     from pathlib import Path
     import urllib
@@ -535,10 +544,10 @@ def get_web_font(url, font_name):
 # -- -- -- smooth_2d:
 # -- -- -- -- get labels and ticks
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 #                            PLOTTING FUNCTIONS
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
+
 
 # ---- base functions
 ### {{{                          --     heatmap     --
@@ -650,28 +659,27 @@ def heatmap_new(
     xy_grid,
     output_values,
     rescaler=IDENTITY_RESCALER,
-    vmin=None,
-    vmax=None,
+    vlims=(None, None),
     contours=3,
     colorbar=True,
     opacities=None,
     axtransform=None,
     cmap=DEFAULT_CMAP,
     bad_color='#EEEEEE00',
-    **_,
+    **kw,
 ):
-
     cmap = plt.get_cmap(cmap)
     cmap.set_bad(color=bad_color)
-    trans_data = ax.transData
+    full_transform = ax.transData
     if axtransform is not None:
-        trans_data = trans_data + axtransform
+        full_transform = full_transform + axtransform
 
     xres = len(np.unique(xy_grid[:, 0]))
     yres = len(np.unique(xy_grid[:, 1]))
 
     xlims = np.array([xy_grid[:, 0].min(), xy_grid[:, 0].max()])
     ylims = np.array([xy_grid[:, 1].min(), xy_grid[:, 1].max()])
+    vmin, vmax = vlims
     vmin = vmin if vmin is not None else np.nanmin(output_values)
     vmax = vmax if vmax is not None else np.nanmax(output_values)
 
@@ -686,7 +694,7 @@ def heatmap_new(
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
-        transform=trans_data,
+        transform=full_transform,
         interpolation='none',
         # alpha=opacities.T,
         extent=[*xlims, *ylims],
@@ -702,16 +710,17 @@ def heatmap_new(
                 linewidths=0.3,
                 linestyles='solid',
                 extent=[*xlims, *ylims],
+                transform=full_transform,
                 alpha=0.5,
             )
 
         setup_transformed_axis(
             ax,
-            xlims=xlims,
-            ylims=xlims,
+            xaxis_lims=xlims,
+            yaxis_lims=xlims,
             rescaler=rescaler,
-            skip10=True,
             margins=0.0,
+            **kw,
         )
 
         if colorbar:
@@ -729,10 +738,10 @@ def heatmap_new(
                 spine.set_linewidth(0.2)
             setup_transformed_axis(
                 cbar.ax,
-                ylims=[vmin, vmax],
+                yaxis_lims=[vmin, vmax],
                 rescaler=rescaler,
-                skip10=True,
                 margins=0.0,
+                **kw,
             )
 
     return im
@@ -820,34 +829,50 @@ def density_plot_1d(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 # ---- smooth plots (gaussian neighborhood based)
 ### {{{                          --     main smooth method (route to 1D, 2D, 3D)    --
-def smooth(x, y, network, rescaler, ax, **kw):
+
+
+def smooth(x, y, network, rescaler, **kw):
     ninputs = network.get_nb_inputs()
     if ninputs == 1:
-        scatter_1d(x, y, network, rescaler, ax, **kw)
+        smooth_1d(x, y, network, rescaler, **kw)
     elif ninputs == 2:
-        smooth_2d(x, y, network, rescaler, ax, **kw)
+        smooth_2d(x, y, network, rescaler, **kw)
     elif ninputs == 3:
-        smooth_3d(x, y, network, rescaler, ax, **kw)
+        smooth_3d(x, y, network, rescaler, **kw)
     else:
         raise NotImplementedError(f'Cannot plot {ninputs} inputs')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                            --     1D     --
-def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1, **kw):
+def smooth_1d(
+    x,
+    y,
+    network,
+    rescaler,
+    ax,
+    res=500,
+    xmin=0,
+    xmax=None,
+    quantiles=None,
+    quantiles_alpha=0.2,
+    color=BIOCOMP_BLUES[4],
+    radius=0.075,
+    knn=2000,
+    min_points=500,
+    **kw,
+):
+    if xmax is None:
+        xmax = x.max()
+
     tree = cKDTree(x)
 
-    (
-        input_order,
-        input_names,
-        output_pos,
-        output_name,
-        ticks,
-        tlabels,
-        secondticks,
-    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, **kw)
+    protein_order, protein_names = get_reordered_protein_names(network, **kw)
+    input_order, output_pos = protein_order[:-1], protein_order[-1]
+    input_names, output_name = protein_names[:-1], protein_names[-1]
 
     assert len(input_names) == 1
 
@@ -862,59 +887,86 @@ def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1, **kw):
         for i, x in enumerate(unscaled_ticks[: len(ticks)])
     ]
 
-    xx = np.linspace(xmin, xmax, res).reshape(-1, 1)
-    z = get_knn_mean(xx, y, tree)
+    xquery_max = min(xmax, x.max() - radius)
+
+    xquery = np.linspace(xmin, xquery_max, res).reshape(-1, 1)
+    z, _ = get_knn_smooth(
+        xquery, y, tree, knn_method='mean', radius=radius, knn=knn, min_points=min_points, **kw
+    )
     if len(z) == 0:
         return
     try:
-        ax.plot(xx, z, color='k')
+        ax.plot(xquery, z, color=color)
     except ValueError as e:
-        ut.logger.warning(f'Could not plot: {e}.\nxx: {xx}\nz: {z}')
+        ut.logger.warning(f'Could not plot: {e}.\nxx: {xquery}\nz: {z}')
         pass
     try:
-        zq1 = get_knn_quantile(xx, y, qu=0.1, tree=tree)
-        zq9 = get_knn_quantile(xx, y, qu=0.9, tree=tree)
-        ax.fill_between(xx[:, 0], zq1, zq9, alpha=0.25, color='k')
+        if quantiles is None:
+            quantiles = [0.1, 0.9]
+        if quantiles != False:
+            assert len(quantiles) == 2
+            zq1, _ = get_knn_smooth(
+                xquery,
+                y,
+                tree,
+                knn_method='quantile',
+                qu=quantiles[0],
+                radius=radius,
+                knn=knn,
+                min_points=min_points,
+                **kw,
+            )
+            zq9, _ = get_knn_smooth(
+                xquery,
+                y,
+                tree,
+                knn_method='quantile',
+                qu=quantiles[1],
+                radius=radius,
+                knn=knn,
+                min_points=min_points,
+                **kw,
+            )
+            ax.fill_between(xquery[:, 0], zq1, zq9, alpha=quantiles_alpha, color=color)
     except ValueError as e:
         ut.logger.warning(f'Could not fill between: {e}.\nzq1: {zq1}\nzq9: {zq9}')
         pass
 
-    ax.set_title(f'{network.name}\nSmoothed mean and [0.1 - 0.9] quantile')
+    xlims = np.array([xmin, xmax])
+    setup_transformed_axis(
+        ax,
+        xaxis_lims=xlims,
+        yaxis_lims=xlims,
+        rescaler=rescaler,
+        margins=0.0,
+        **kw,
+    )
+
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(output_name)
-    ax.set_xlim(xmin, xmax)
-    ax.set_ylim(xmin, xmax)
-    ax.set_xticks(ticks)
-    ax.set_xticklabels(tlabels)
-    ax.set_yticks(ticks)
-    ax.set_yticklabels(tlabels)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{        --     2D     --
-def smooth_2d(
+
+
+def prepare_smooth_2d(
     x,
     y,
     network,
-    rescaler,
-    ax,
+    input_names,
+    input_order,
+    output_pos,
     res=200,
-    xmin=0,
-    xmax=1,
+    xlims=(0, 1),
     xslice=None,
-    title=None,
     density_plot=False,
     density_as_alpha=False,
     density_threshold=10,
     use_y_as_x=False,  # if True, use the output of the independent variables as coordinates
-    text_x=0.5,
-    text_y=0.9,
     **kw,
 ):
-
-    protein_order, protein_names = get_reordered_protein_names(network, **kw)
-    input_order, output_pos = protein_order[:-1], protein_order[-1]
-    input_names, output_name = protein_names[:-1], protein_names[-1]
+    xmin, xmax = xlims
 
     if use_y_as_x:
         output_names = network.get_output_proteins()
@@ -944,10 +996,37 @@ def smooth_2d(
     if density_plot:
         output_values = density
 
-    heatmap_new(ax, xy, output_values, rescaler, opacities=opacities, **kw)
+    return xy, output_values, opacities
+
+
+def smooth_2d(
+    x,
+    y,
+    network,
+    rescaler,
+    ax,
+    res=200,
+    xlims=(0, 1),
+    xslice=None,
+    title=None,
+    text_x=0.5,
+    text_y=0.9,
+    axtransform=None,
+    **kw,
+):
+    protein_order, protein_names = get_reordered_protein_names(network, **kw)
+    input_order, output_pos = protein_order[:-1], protein_order[-1]
+    input_names, output_name = protein_names[:-1], protein_names[-1]
+    xy, output_values, opacities = prepare_smooth_2d(
+        x, y, network, input_names, input_order, output_pos, res, xlims, xslice, **kw
+    )
+
+    heatmap_new(ax, xy, output_values, rescaler, opacities=opacities, axtransform=axtransform, **kw)
 
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(input_names[1])
+
+    full_transform = ax.transData if axtransform is None else ax.transData + axtransform
 
     if x.shape[1] > 2:
         ax.text(
@@ -955,7 +1034,7 @@ def smooth_2d(
             text_y,
             f'{input_names[2]} $ \\approx $ {format_powers(rescaler.inv(xslice[0]), n_decimals=0)}',
             fontsize=5,
-            transform=ax.transAxes,
+            transform=full_transform,
             ha='center',
             va='bottom',
         )
@@ -976,29 +1055,13 @@ def smooth_2d(
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                            --     3D     --
 def smooth_3d(
-    x, y, network, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), axes=None, top_ax=None, **kw
+    x, y, network, rescaler, slices=np.linspace(0, 0.65, 4), axes=None, top_ax=None, **kw
 ):
-    # we'll divide the third axis into slices
-    # divide ax using make_axes_locatable
-    if axes is None:
-        assert ax is not None
-        divider = make_axes_locatable(ax)
-        axes = [ax]
-        width = 1 / (len(slices) - 1)
-        for i in range(len(slices) - 1):
-            axes.append(divider.append_axes('top', size=width, pad=0.01))
-        each_w, each_h = axes[0].get_position().size
-        each_w /= len(slices)
-        each_h /= len(slices)
-        pos = ax.get_position()
-
-        # resize all axes  so that they are square and fit in the original ax
-        for i, a in enumerate(axes):
-            a.set_position([pos.x0 + i * each_w + i * 0.05, pos.y0, each_w, each_h])
-            # plot each slice
-    else:
-        if len(axes) != len(slices):
-            raise ValueError(f'axes and slices must have the same length')
+    assert axes is not None
+    if len(axes) != len(slices):
+        raise ValueError(
+            f'axes and slices must have the same length, got {len(axes)} and {len(slices)}'
+        )
 
     porder, pnames = get_reordered_protein_names(network, **kw)
 
@@ -1016,12 +1079,13 @@ def smooth_3d(
             ) = network_ticks_and_labels(network, rescaler, xmin=vmin, xmax=vmax, **kw)
             return vticks, vtlabels
 
+        kw.pop('ax', None)
         smooth_2d(
             x,
             y,
             network,
             rescaler,
-            axes[i],
+            ax=axes[i],
             xslice=np.array([slices[i]]),
             get_cbar_ticks=get_cbar_ticks,
             **kw,
@@ -1037,32 +1101,19 @@ def smooth_3d(
         if len(a.get_images()) > 0:
             if i > 0:
                 a.set_ylabel('')
-                # a.set_yticks([])
             if i < len(axes) - 1:
-                    a.get_images()[0].colorbar.remove()
+                a.get_images()[0].colorbar.remove()
             else:
                 # write the label on the right of the colorbar
                 cbarax = a.get_images()[0].colorbar.ax
                 cbarax.yaxis.set_label_position('right')
-                cbarax.set_ylabel(pnames[-1],fontsize=8)
-
-
-
-
-
+                cbarax.set_ylabel(pnames[-1], fontsize=8)
 
         a.set_title('')
-
-    # # write title on top
-    # axes[0].set_title(
-        # f'{network.name}\n{network.get_output_proteins()[0]} smoothed mean', fontsize=8
-    # )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                       --     smooth line plots     --
-
-
 def smooth_line_plot(
     x,
     y,
@@ -1072,8 +1123,7 @@ def smooth_line_plot(
     res=200,  # resolution of the plot (linearspace of input_order[0])
     xmin=0,
     xmax=1,
-    vmin=None,
-    vmax=None,
+    vlims=(None, None),
     slice_at=None,  # list of values to slice at (for input_order[1:])
     label=None,
     color=None,
@@ -1086,7 +1136,6 @@ def smooth_line_plot(
     sample_quantiles_at=None,
     **kw,
 ):
-
     protein_order, protein_names = get_reordered_protein_names(network, **kw)
     input_order, output_pos = protein_order[:-1], protein_order[-1]
     input_names, output_name = protein_names[:-1], protein_names[-1]
@@ -1147,6 +1196,7 @@ def smooth_line_plot(
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
+    vmin, vmax = vlims
     vmin = vmin if vmin is not None else np.nanmin(z)
     vmax = vmax if vmax is not None else np.nanmax(z)
     vlims = [vmin, vmax]
@@ -1235,23 +1285,25 @@ def smooth_line_slices(
     # # )
 
     if same_ax:
-
         # add marker legend: one marker per outer slice
         # for i, outsl in enumerate(outerslices):
 
         setup_transformed_axis(
             iax,
-            xlims=[xmin, xmax],
-            ylims=vlims,
+            xaxis_lims=[xmin, xmax],
+            yaxis_lims=vlims,
             rescaler=rescaler,
-            skip10=True,
             margins=0.05,
+            **kwargs,
         )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 # ---- scatter plots
+
+
 ### {{{         --     main scatter method (route to 1D, 2D, 3D)     --
 def scatter(x, y, network, *args, **kw):
     ninputs = network.get_nb_inputs()
@@ -1281,22 +1333,14 @@ def scatter_1d(
     alpha=0.1,
     lw=0,
     key=jax.random.PRNGKey(0),
-    use_y_as_x=True,
+    use_y_as_x=False,
     **kw,
 ):
-    (
-        input_order,
-        input_names,
-        output_pos,
-        output_name,
-        ticks,
-        ticklabels,
-        secondticks,
-    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, **kw)
+    protein_order, protein_names = get_reordered_protein_names(network, **kw)
+    input_order, output_pos = protein_order[:-1], protein_order[-1]
+    input_names, output_name = protein_names[:-1], protein_names[-1]
+    random_order = np.random.permutation(min(max_n, len(x)))
 
-    assert input_order == [0]
-
-    random_order = jax.random.permutation(key, min(max_n, len(x)))
     if use_y_as_x:
         other_pos = 1 - output_pos
         x = y[random_order, other_pos].squeeze()
@@ -1310,17 +1354,15 @@ def scatter_1d(
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(output_name)
 
-    # remove right and top spine
-    ax.spines['right'].set_visible(False)
-    ax.spines['top'].set_visible(False)
-
-    # ticks:
-    if len(ticks) > 0:
-        sc_ticks = ticks
-        ax.set_xticks(sc_ticks)
-        ax.set_xticklabels(ticklabels)
-        ax.set_yticks(sc_ticks)
-        ax.set_yticklabels(ticklabels)
+    xlims = np.array([xmin, xmax])
+    setup_transformed_axis(
+        ax,
+        xaxis_lims=xlims,
+        yaxis_lims=xlims,
+        rescaler=rescaler,
+        margins=0.0,
+        **kw,
+    )
 
     ttle = None
 
@@ -1352,22 +1394,9 @@ def scatter_2d(
     ylims=None,
     **kw,
 ):
-
     protein_order, protein_names = get_reordered_protein_names(network, **kw)
     input_order, output_pos = protein_order[:-1], protein_order[-1]
     input_names, output_name = protein_names[:-1], protein_names[-1]
-
-    # (
-        # input_order,
-        # input_names,
-        # output_pos,
-        # output_name,
-        # ticks,
-        # ticklabels,
-        # secondticks,
-    # ) = network_ticks_and_labels(network, rescaler, xmax=xmax, **kw)
-
-    print(f'Scatter 2D: {input_names}')
 
     random_order = jax.random.permutation(key, len(x))
     y = y[random_order, output_pos]
@@ -1375,11 +1404,11 @@ def scatter_2d(
 
     setup_transformed_axis(
         ax,
-        xlims=xlims,
-        ylims=xlims,
+        xaxis_lims=xlims,
+        yaxis_lims=xlims,
         rescaler=rescaler,
-        skip10=True,
         margins=0.0,
+        **kw,
     )
 
     sc = ax.scatter(x[:, 0], x[:, 1], c=y, cmap=cmap, s=size, lw=lw, edgecolor='k')
@@ -1387,36 +1416,23 @@ def scatter_2d(
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(input_names[1])
 
-    # remove right and top spine
-    # ax.spines['right'].set_visible(False)
-    # ax.spines['top'].set_visible(False)
-
-    # # ticks:
-    # if len(ticks) > 0:
-        # # rescale ticks to image coordinates (they are btwn 0 and 1 to start)
-        # sc_ticks = ticks
-        # ax.set_xticks(sc_ticks)
-        # ax.set_xticklabels(ticklabels)
-        # ax.set_yticks(sc_ticks)
-        # ax.set_yticklabels(ticklabels)
-
     # # colorbar
     # if colorbar:
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes("right", size="4%", pad=0.05)
-        # cbar = plt.colorbar(sc, cax=cax)
-        # cbar.ax.tick_params(labelsize=6)
-        # # no cbar spines
-        # for spine in cbar.ax.spines.values():
-            # spine.set_visible(False)
-        # # use same ticks if present
-        # if len(ticks) > 0:
-            # valid = ticks >= xmin
-            # diff = len(ticks)
-            # ticks = ticks[valid]
-            # diff -= len(ticks)
-            # cbar.set_ticks(ticks)
-            # cbar.set_ticklabels(ticklabels[diff:])
+    # divider = make_axes_locatable(ax)
+    # cax = divider.append_axes("right", size="4%", pad=0.05)
+    # cbar = plt.colorbar(sc, cax=cax)
+    # cbar.ax.tick_params(labelsize=6)
+    # # no cbar spines
+    # for spine in cbar.ax.spines.values():
+    # spine.set_visible(False)
+    # # use same ticks if present
+    # if len(ticks) > 0:
+    # valid = ticks >= xmin
+    # diff = len(ticks)
+    # ticks = ticks[valid]
+    # diff -= len(ticks)
+    # cbar.set_ticks(ticks)
+    # cbar.set_ticklabels(ticklabels[diff:])
 
     ttle = None
 
@@ -1435,8 +1451,7 @@ def scatter_3d_interactive(
     y,
     network,
     rescaler,
-    xmin=0,
-    xmax=1,
+    xlims=(0, 1),
     title=None,
     key=jax.random.PRNGKey(0),
     size=10,
@@ -1445,15 +1460,22 @@ def scatter_3d_interactive(
     filename=None,
     **kw,
 ):
-    (
-        input_order,
-        input_names,
-        output_pos,
-        output_name,
-        ticks,
-        ticklabels,
-        secondticks,
-    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, **kw)
+    xmin, xmax = xlims
+
+    protein_order, protein_names = get_reordered_protein_names(network, **kw)
+    input_order, output_pos = protein_order[:-1], protein_order[-1]
+    input_names, output_name = protein_names[:-1], protein_names[-1]
+
+    # xlims_tr = np.asarray(xaxis_lims)
+    # xlims_inv = rescaler.inv(np.asarray(xlims_tr))
+    # p10 = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1])
+    # xlims_margin = xlims_tr + np.array([-1, 1]) * margins * np.diff(xlims_tr)
+    # ax.set_xlim(xlims_margin)
+    # ax.set_xticks(rescaler(p10))  # major ticks
+    # ax.xaxis.set_major_formatter(PowerFormatter(p10, **kw))
+    # p10_minor = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1], resolution=10)
+    # ax.set_xticks(rescaler(p10_minor), minor=True)
+    # return xlims_inv
 
     random_order = jax.random.permutation(key, len(x))
     y = y[random_order, output_pos]
@@ -1466,7 +1488,9 @@ def scatter_3d_interactive(
         y=x[:, 1],
         z=x[:, 2],
         mode='markers',
-        marker=dict(size=size, color=y, colorscale=DEFAULT_CMAP, line=dict(color='black', width=lw)),
+        marker=dict(
+            size=size, color=y, colorscale='YlGnBu', opacity=1, line=dict(color='black', width=lw)
+        ),
     )
 
     fig.add_trace(scatter)
@@ -1476,9 +1500,15 @@ def scatter_3d_interactive(
             xaxis_title=input_names[0],
             yaxis_title=input_names[1],
             zaxis_title=input_names[2],
-            xaxis=dict(showspikes=False, showbackground=False, tickvals=ticks, ticktext=ticklabels),
-            yaxis=dict(showspikes=False, showbackground=False, tickvals=ticks, ticktext=ticklabels),
-            zaxis=dict(showspikes=False, showbackground=False, tickvals=ticks, ticktext=ticklabels),
+            xaxis=dict(
+                showspikes=False, showbackground=False
+            ),  # tickvals=ticks, ticktext=ticklabels),
+            yaxis=dict(
+                showspikes=False, showbackground=False
+            ),  # tickvals=ticks, ticktext=ticklabels),
+            zaxis=dict(
+                showspikes=False, showbackground=False
+            ),  # tickvals=ticks, ticktext=ticklabels),
         ),
         width=1000,
         height=800,
@@ -1496,7 +1526,7 @@ def scatter_3d_interactive(
                 cmax=y.max(),
                 colorscale='YlGnBu',
                 showscale=True,
-                colorbar=dict(title=output_name, tickvals=ticks, ticktext=ticklabels),
+                colorbar=dict(title=output_name), # tickvals=ticks, ticktext=ticklabels),
             ),
         )
 
@@ -1513,7 +1543,6 @@ def scatter_3d_interactive(
     if filename is None:
         return pyo.plot(fig, auto_open=True)
     else:
-
         return pyo.plot(fig, filename=filename, auto_open=False)
 
 
@@ -1597,9 +1626,95 @@ def scatter_3d(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
+### {{{                       --     density histogram     --
+
+
+def histogram(x, y, network, rescaler, ax, **kw):
+    ninputs = network.get_nb_inputs()
+    if ninputs == 1:
+        histogram_plot(x, y, network, rescaler, ax, **kw)
+    else:
+        raise NotImplementedError(f'Cannot plot {ninputs} inputs')
+
+
+def histogram_plot(
+    X,
+    Y,
+    network,
+    rescaler,
+    ax,
+    nbins=256,
+    xlims=(0, 1),
+    ylims=(0, 1),
+    vlims=(0.001, None),
+    cmap=DEFAULT_CMAPS['blues'],
+    noise_smooth=0,
+    log_density=True,
+    **kw,
+):
+    assert X.shape[1] == 1
+
+    if isinstance(nbins, int):
+        nbins = [nbins, nbins]
+
+    protein_order, protein_names = get_reordered_protein_names(network, **kw)
+    input_order, output_pos = protein_order[:-1], protein_order[-1]
+    input_names, output_name = protein_names[:-1], protein_names[-1]
+
+    Y = Y[:, output_pos]
+    X = X[:, 0]
+
+    xres = np.abs(np.subtract(*xlims)) / nbins[0]
+    yres = np.abs(np.subtract(*ylims)) / nbins[1]
+
+    X = X + np.random.normal(size=X.shape) * noise_smooth * xres
+    Y = Y + np.random.normal(size=Y.shape) * noise_smooth * yres
+
+    h, xedges, yedges = np.histogram2d(
+        X,
+        Y,
+        bins=nbins,
+        density=False,
+        range=[xlims, ylims],
+    )
+
+    if log_density:
+        h = np.log10(h + 1)
+
+    xlims_true_scale, ylims_true_scale = setup_transformed_axis(
+        ax,
+        xaxis_lims=xlims,
+        yaxis_lims=ylims,
+        rescaler=rescaler,
+        margins=0.0,
+        **kw,
+    )
+
+    h = h.T  # matplotlib wants it transposed
+    ax.imshow(
+        h,
+        extent=[*xlims, *ylims],
+        origin='lower',
+        aspect='auto',
+        cmap=cmap,
+        vmin=vlims[0],
+        vmax=vlims[1],
+    )
+
+    ax.set_xlabel(input_names[0])
+    ax.set_ylabel(output_name)
+
+    # show grid, including minor grid
+    ax.grid(color='k', alpha=0.25, linestyle='-', linewidth=0.2, which='major')
+    ax.grid(color='k', alpha=0.1, linestyle='-', linewidth=0.1, which='minor')
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
 # ---- specialized plots
 ### {{{                --     summary model plot functions     --
-
 def network_plot(
     dman: DataManager,
     network_id: int,
@@ -1631,7 +1746,9 @@ def network_plot(
         return smooth(x, y, network, rescaler, *args, **kw)
     elif method == 'scatter':
         return scatter(x, y, network, rescaler, *args, **kw)
-    elif method == 'smooth_lines':
+    elif method == 'histogram':
+        return histogram(x, y, network, rescaler, *args, **kw)
+    elif method == 'smooth_line_slices':
         return smooth_line_slices(x, y, network, rescaler, *args, **kw)
 
 
@@ -1646,7 +1763,6 @@ def eval_network_plot(
     xrange_eval=None,
     **kw,
 ):
-
     k_i, k_q = jax.random.split(key)
     if xrange_eval is None:
         xrange_eval = np.array([[0, 0], [1, 1]])
@@ -1687,7 +1803,6 @@ def eval_network_on_grid(
     res=100,
     **kw,
 ):
-
     jm = jit(stack.apply)
 
     (
@@ -1744,7 +1859,6 @@ def eval_model_grid(
 
 
 def model_at_x(params, dman: DataManager, id, key=jax.random.PRNGKey(0), quantile=None, **_):
-
     stack, p = get_stack(dman, id, params)
 
     x, y = dman.get_X()[id], dman.get_Y()[id]
@@ -1774,7 +1888,6 @@ def plot_model_diff(params, dman, id, ax, **kw):
 
 
 def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
-
     if use_x_y_yhat is not None:
         x, y, yhat = use_x_y_yhat
         assert len(x) == len(y), 'x and y must have the same length'
@@ -1849,7 +1962,6 @@ def fluo_scatter(
     s=2,
     **_,
 ):
-
     fig, axes = plt.subplots(1, len(pnames), figsize=(1.25 * len(pnames), 10), sharey=True)
 
     if len(pnames) == 1:
@@ -1873,7 +1985,7 @@ def fluo_scatter(
         color = get_bio_color(pnames[xid])
         xcoords = np.random.normal(0, 0.1, (X.shape[0],))
         if logscale:
-            tr, itr, _, ytr = setup_symlog_axis(ax, None, ylims=[xmin, xmax])
+            tr, itr, _, ytr = setup_symlog_axis(ax, None, yaxis_lims=[xmin, xmax])
         else:
             ax.set_ylim(xmin, xmax)
         ax.scatter(xcoords, tr(X[:, xid]), color=color, alpha=alpha, s=s, zorder=10, lw=0)
@@ -1961,7 +2073,17 @@ def model_fluo_distributions(dman, model_id, method='scatter', **kwargs):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                   --     node functions plots     --
-def plot_node(node_name, shared_parameters, compute_config, ax, median_evals_resolution = 200, n_random_evals = 10000, xlims=(0,1), color='k', quantized_param_id=0):
+def plot_node(
+    node_name,
+    shared_parameters,
+    compute_config,
+    ax,
+    median_evals_resolution=200,
+    n_random_evals=10000,
+    xlims=(0, 1),
+    color='k',
+    quantized_param_id=0,
+):
     tl = compute_config.get_impl(node_name)
 
     L = tl(input_shapes=[(1,)], n_outputs=1, stack=None, layer_id=0)
@@ -1975,7 +2097,6 @@ def plot_node(node_name, shared_parameters, compute_config, ax, median_evals_res
 
         def get_layer_and_local_id(self, _):
             return 0, 0
-
 
     key = jax.random.PRNGKey(0)
 

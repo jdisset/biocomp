@@ -93,11 +93,11 @@ prog.xp_path = Path(prog.xp_path)
 prog.base_dir = Path(prog.base_dir)
 prog.recipe_paths = [Path(p) for p in prog.recipe_paths]
 prog.lib = ut.load_lib()
+
 if prog.data_config is None:
     prog.data_config = DEFAULT_DATA_CONFIG
 else:
     import json5
-
     prog.data_config = json5.load(open(prog.data_config, 'r'))
 
 assert len(prog.calib_paths) == len(prog.calib_names)

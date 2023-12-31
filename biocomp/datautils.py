@@ -1506,7 +1506,6 @@ def setup_clean_fig(title):
 
 import matplotlib.transforms as mtransforms
 
-
 def timelapse_persp(Q, title, labels=None, outputfile=None, show=True, **kw):
     overlap = 0.1
     vmax = np.nanmax(Q)

@@ -24,6 +24,10 @@ import os
 
 import cProfile
 
+from typing import Union, Tuple, List, Dict, Any, Optional, Callable, Sequence, Iterable
+
+PathLike = Union[str, Path]
+
 
 class profiler:
     def __init__(self, filename):
@@ -338,18 +342,7 @@ def set_list_item(lst, i, val):
     lst[i] = val
 
 
-# def load(path, suffix='.pickle'):
-# path = Path(path)
-# if not path.is_file():
-# raise ValueError(f'Not a file: {path}')
-# if path.suffix != suffix:
-# raise ValueError(f'Not a {suffix} file: {path}')
-# with open(path, 'rb') as file:
-# data = pickle.load(file)
-# return data
-
-
-def load_json5(path):
+def load_json5(path: PathLike):
     with open(path) as f:
         return json5.load(f)
 

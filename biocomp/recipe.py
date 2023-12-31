@@ -12,10 +12,13 @@ import json5
 from typing import Optional
 import logging as log
 import traceback
+from typing import Union, Optional, Sequence, Iterable, Any, Callable, TypeVar
+
+PathLike = Union[str, Path]
 
 
 def escape_name(name):
-    return name.replace('-', '_').replace(' ', '_').upper().rstrip('_A')
+    return name.replace('-', '_').replace(' ', '_').upper()
 
 
 def escape(names):
@@ -27,6 +30,8 @@ def escape(names):
         return tuple([escape_name(name) for name in names])
     if isinstance(names, dict):
         return {escape_name(k): escape_name(v) for k, v in names.items()}
+    if isinstance(names, set):
+        return {escape_name(name) for name in names}
     else:
         return names
 
@@ -91,18 +96,23 @@ def create_db(conn):
     c.executescript(sql)
 
 
-def recipes_to_sql(recipes: list, conn, lib):
+def recipes_to_sql(recipes: list, conn, lib, error_handler=None):
+    if error_handler is None:
+
+        def _handler(msg):
+            raise RuntimeError(msg)
+
+        error_handler = _handler
+
     c = conn.cursor()
     c.execute("PRAGMA foreign_keys = ON;")
     create_db(conn)
-    error_log = ''
 
     for obj in recipes:
         c.execute("SELECT name FROM recipes WHERE name = ?", (obj['name'],))
         if c.fetchone():
             # already in db so we skip
             log.info(f'Recipe {obj["name"]} already in db, skipping')
-            return error_log
 
         extra = {k: v for k, v in obj.items() if k not in ['name', 'description', 'notes']}
         extra_json = json.dumps(extra)
@@ -145,7 +155,7 @@ def recipes_to_sql(recipes: list, conn, lib):
                     err_msg = f'In recipe {obj["name"]}: unknown plasmid {s["plasmid"]}'
                     ut.logger.error(err_msg)
                     error_in_recipe = True
-                    error_log += err_msg + '\n\n'
+                    error_handler(err_msg)
                     continue  # we still continue to get a list of all errors
                 c.execute("SELECT name FROM sources WHERE name = ?", (s['plasmid'],))
                 if not c.fetchone():
@@ -173,7 +183,6 @@ def recipes_to_sql(recipes: list, conn, lib):
             conn.commit()
 
     conn.commit()
-    return error_log
 
 
 def xp_to_sql(xps: list, conn):
@@ -209,65 +218,114 @@ def xp_to_sql(xps: list, conn):
     conn.commit()
 
 
-def import_recipes_to_sql(recipe_files: list, conn, lib, ignore_errors=False, show_progress=True):
-    # recipe files are json5 files
-    recipes = []
-
-    error_log = ''
-
-    for f in tqdm(recipe_files, desc='Importing recipes', disable=not show_progress):
-        recipe = ut.load_json5(f)
-        ut.logger.debug(f'Importing recipe {recipe["name"]}')
-        if not Path(f).name == f'{recipe["name"]}.recipe.json5':
-            msg = f'File vs recipe name mismatch (recipe: {recipe["name"]}, file: {f})'
-            if ignore_errors:
-                ut.logger.warning(msg)
-                error_log += msg + '\n\n'
-            else:
-                raise RuntimeError(msg)
-        recipes.append(recipe)
-    error_log += recipes_to_sql(recipes, conn, lib)
-    return error_log
-
-
-def network_from_recipe(recipe, lib, db_path=':memory:'):
-    dbconn = sqlite3.connect(db_path)
-    recipes_to_sql([recipe], dbconn, lib)
-    assert recipe['name'] in [r[0] for r in dbconn.execute("SELECT name FROM recipes").fetchall()]
-    n = Network.from_db(lib, recipe['name'], dbconn)
-    return n
-
-
-def load_data_file(
-    data_file, proteins=None, error_handler=None, use_store=None, force_reload=False
-):
-    data_file = 2
+def import_recipes_to_sql(
+    recipe_files: list[PathLike] | PathLike,
+    conn: sqlite3.Connection,
+    lib: PartsLibrary,
+    error_handler=None,
+    show_progress=True,
+) -> list:
     if error_handler is None:
 
         def _handler(msg):
             raise RuntimeError(msg)
 
         error_handler = _handler
+
+    # recipe files are json5 files
+    recipe_objects = []
+    for f in tqdm(recipe_files, desc='Importing recipes', disable=not show_progress):
+        recipe = ut.load_json5(f)
+        ut.logger.debug(f'Importing recipe {recipe["name"]}')
+        if not Path(f).name == f'{recipe["name"]}.recipe.json5':
+            error_handler(f'File vs recipe name mismatch (recipe: {recipe["name"]}, file: {f})')
+        recipe_objects.append(recipe)
+    recipes_to_sql(recipe_objects, conn, lib)
+    return recipe_objects
+
+
+def build_network(
+    recipe_name,
+    dbconn,
+    lib,
+    inverse='shortest',
+    metadata=None,
+    error_handler=None,
+    use_cache=None,
+):
+
+    if error_handler is None:
+        def _handler(msg):
+            raise RuntimeError(msg)
+        error_handler = _handler
+
+
+    if metadata is None:
+        metadata = {'recipe_name': recipe_name}
+
+    try:
+        ut.logger.debug(f'Building network for recipe {recipe_name}')
+        fwd_network = Network.from_db(
+            lib,
+            recipe_name,
+            dbconn,
+            metadata=metadata,
+            use_cache=use_cache,
+        )
+
+    except Exception as e:
+        error_handler(f'Can\'t build network: {e}')
+
+    if not inverse:
+        return fwd_network
+    else:
+        return [n for n in inverted_network(fwd_network, mode=inverse, use_cache=use_cache)]
+
+
+def network_from_recipe(
+    recipe_path: PathLike, lib: PartsLibrary, db_path=':memory:', metadata=None, **kwargs
+):
+    dbconn = sqlite3.connect(db_path)
+    recipe = import_recipes_to_sql([recipe_path], dbconn, lib)[0]
+    if metadata is None:
+        metadata = {'recipe_name': recipe['name'], 'recipe_file': recipe_path}
+    return build_network(recipe['name'], dbconn, lib, metadata=metadata, **kwargs)
+
+
+def load_data_file(
+    data_file_path: PathLike,
+    proteins: Optional[list[str]] = None,
+    error_handler: Optional[Callable] = None,
+    use_store=None,
+    force_reload=False,
+):
+    if error_handler is None:
+
+        def _handler(msg):
+            raise RuntimeError(msg)
+
+        error_handler = _handler
+
     if use_store is None:
         use_store = {}
 
-    if data_file is None:
+    if data_file_path is None:
         return error_handler(f'Data file is null.')
 
-    f = Path(data_file)
+    f = Path(data_file_path)
     if not f.exists():
         return error_handler(f'Data file {f} not found')
 
-    if data_file not in use_store or force_reload:
+    if data_file_path not in use_store or force_reload:
         content = pd.read_csv(f, engine="pyarrow")
         assert isinstance(content, pd.DataFrame)
-        use_store[data_file] = content
+        use_store[data_file_path] = content
 
-    data = use_store[data_file]
+    data = use_store[data_file_path]
 
     available_columns = set(data.columns)
     if proteins is None:
-        return data
+        return data.to_numpy()
     else:
         remainder = set(proteins) - available_columns
         if len(remainder) > 0:
@@ -278,16 +336,27 @@ def load_data_file(
         return np.asarray(data[proteins])
 
 
-def get_network_data(network, data_file, color_aliases=None, **kwargs):
+def get_network_data(
+    network: Network,
+    data_file_path: PathLike,
+    color_aliases: Optional[dict[str, str]] = None,
+    **kwargs,
+) -> Optional[np.ndarray]:
     # we want to reorder data columns to match the network's output
-    out_proteins = network.get_output_proteins()
+    out_proteins = escape(network.get_output_proteins())
     if color_aliases is not None:
-        out_proteins = [color_aliases.get(p, p) for p in out_proteins]
-    return load_data_file(data_file, proteins=out_proteins, **kwargs)
+        aliases = escape(color_aliases)
+        out_proteins = [aliases.get(p, p) for p in out_proteins]
+    return load_data_file(data_file_path, proteins=out_proteins, **kwargs)
 
 
-def get_network_XY(network, data_file, color_aliases=None, **kwargs):
-    Y = get_network_data(network, data_file, color_aliases, **kwargs)
+def get_network_XY(
+    network: Network,
+    data_file_path: PathLike,
+    color_aliases: Optional[dict[str, str]] = None,
+    **kwargs,
+):
+    Y = get_network_data(network, data_file_path, color_aliases, **kwargs)
     X = network.get_input_from_output(Y)
     return X, Y
 
@@ -308,8 +377,12 @@ class XP:
     # It also provides convenience functions to build the corrersponding networks.
 
     def resolve_paths_with_priorities(
-        paths, file_names, extension='.recipe.json5', throw_error=True, base_path=None
-    ):
+        paths: list[PathLike],
+        file_names: list[PathLike],
+        extension='.recipe.json5',
+        throw_error=True,
+        base_path=None,
+    ) -> list[Optional[Path]]:
         """Given a list of base paths ordered by priority, and a list of file names, returns a list of paths
         where each file name is found in the first priority path where it exists"""
         if isinstance(file_names, str):
@@ -342,10 +415,10 @@ class XP:
 
     def __init__(
         self,
-        xp_name,
-        xp_path,
-        recipe_path,
-        lib,
+        xp_name: str,
+        xp_path: PathLike,
+        recipe_path: PathLike | list[PathLike],
+        lib: PartsLibrary,
         db_path=None,
         data_path='./data/calibrated_data',
         load_data=True,
@@ -421,6 +494,23 @@ class XP:
                 if k not in required_keys:
                     self.extra[k] = v
 
+    # when ignore_errors is true, we return None when there's an error and append the error message to self.data_loading_errors
+    def data_error_handler(self, msg, ignore_errors=False):
+        if ignore_errors:
+            self.data_loading_errors += msg + '\n\n'
+            ut.logger.warning(msg)
+            return None
+        else:
+            raise RuntimeError(msg)
+
+    def recipe_error_handler(self, msg, ignore_errors=False):
+        if ignore_errors:
+            self.recipe_loading_errors += msg + '\n\n'
+            ut.logger.warning(msg)
+            return None
+        else:
+            raise RuntimeError(msg)
+
     def load_recipes(self, recipe_path, ignore_errors):
         unique_recipe_names = list(set([s['recipe'] for s in self.samples.values()]))
         log.debug(f'Found {len(unique_recipe_names)} unique recipes')
@@ -440,11 +530,16 @@ class XP:
             n for n, f in zip(unique_recipe_names, recipe_files) if f is not None
         ]
         self.recipes = {n: f for n, f in zip(unique_recipe_names, recipe_files)}
-        self.recipe_loading_errors += import_recipes_to_sql(
+
+        def error_handler(msg):
+            msg = f'Error in xp {self.name}:' + msg
+            return self.recipe_error_handler(msg, ignore_errors=ignore_errors)
+
+        import_recipes_to_sql(
             recipe_files,
             self.dbconn,
             self.lib,
-            ignore_errors=ignore_errors,
+            error_handler=error_handler,
             show_progress=self.show_progress,
         )
 
@@ -466,15 +561,6 @@ class XP:
 
         if load_data:
             self.load_all_raw_data(ignore_errors=ignore_errors)
-
-    # when ignore_errors is true, we return None when there's an error and append the error message to self.data_loading_errors
-    def data_error_handler(self, msg, ignore_errors=False):
-        if ignore_errors:
-            self.data_loading_errors += msg + '\n\n'
-            ut.logger.warning(msg)
-            return None
-        else:
-            raise RuntimeError(msg)
 
     def get_sample_data_file(self, sample_name, ignore_errors=False):
         if sample_name not in self.samples:
@@ -513,49 +599,17 @@ class XP:
                 force_reload=force_reload,
             )
 
-    def build_network(
-        self, recipe_name, inverse='shortest', use_db=None, ignore_errors=False, use_cache=None
-    ):
-        if str(recipe_name) not in self.recipes:
-            raise RuntimeError(
-                f'Recipe {recipe_name} not found in xp {self.name}. Cannot build network.'
-            )
-
-        dbconn = use_db or self.dbconn
-
-        try:
-            ut.logger.debug(f'building network for recipe {recipe_name}')
-            fwd_network = Network.from_db(
-                self.lib,
-                recipe_name,
-                dbconn,
-                metadata={
-                    'from_xp': self.name,
-                    'recipe_name': recipe_name,
-                    'recipe_file': self.recipes[recipe_name],
-                },
-                use_cache=use_cache,
-            )
-        except Exception as e:
-            msg = f'Error building network for recipe {recipe_name} in xp {self.name}: \n{e}'
-            if ignore_errors:
-                # trace = traceback.format_exc()
-                # msg += f'\n\n{trace}\n'
-                ut.logger.warning(msg)
-                self.network_building_errors += msg + '\n\n'
-                return None
-            else:
-                raise RuntimeError(msg) from e
-
-        if not inverse:
-            return fwd_network
+    def network_error_handler(self, msg, ignore_errors=False):
+        if ignore_errors:
+            self.network_building_errors += msg + '\n\n'
+            ut.logger.warning(msg)
+            return None
         else:
-            return [n for n in inverted_network(fwd_network, mode=inverse, use_cache=use_cache)]
+            raise RuntimeError(msg)
 
     def build_networks(
         self,
         inverse='shortest',
-        use_db=None,
         ignore_errors=False,
         use_cache=None,
         progress_callback=None,
@@ -580,13 +634,25 @@ class XP:
                 if progress_callback is not None:
                     progress_callback(1)
                 continue
+
+            def err_handler(msg):
+                msg = f'Error for recipe {recipe_name} in xp {self.name}:' + msg
+                return self.network_error_handler(msg, ignore_errors=ignore_errors)
+
             if recipe_name not in built_networks:
-                built_networks[recipe_name] = self.build_network(
+                metadata = {
+                    'from_xp': self.name,
+                    'recipe_name': recipe_name,
+                    'recipe_file': self.recipes[recipe_name],
+                }
+
+                built_networks[recipe_name] = build_network(
                     recipe_name,
                     inverse=inverse,
-                    use_db=use_db,
-                    ignore_errors=ignore_errors,
+                    dbconn=self.dbconn,
+                    error_handler=err_handler,
                     use_cache=use_cache,
+                    metadata=metadata,
                 )
 
             nets = built_networks[recipe_name]
@@ -693,10 +759,11 @@ class XP:
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
 
-
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                           --     tests     --
 # ···············································································
+
+
 def test_module():
     libpath = "./test_data/all_sheets.pickle"
     l = ut.load(libpath)
