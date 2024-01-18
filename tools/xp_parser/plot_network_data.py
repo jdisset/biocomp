@@ -231,8 +231,6 @@ def get_network_nb_inputs(dman, net_id, net_id_to_dman_id):
 
 n_inputs = {nid: get_network_nb_inputs(dman, nid, net_id_to_dman_id) for nid in net_ids}
 
-n_inputs
-
 def plot_network_data(dman, net_id, net_id_to_dman_id, extra_args=None):
     plot_title = make_network_title(netdf, net_id)
     assert net_id in net_id_to_dman_id
@@ -272,10 +270,8 @@ plot_network_data(
     dman,
     net_id,
     net_id_to_dman_id,
-    extra_args={'method':'scatter'},
+    extra_args={'method':'smooth'},
 )
-
-
 
 
 ### {{{                        --     cube smooth     --
@@ -308,9 +304,6 @@ vlims=(-.027, 0.85)
 contours=3
 kw={}
 
-# ax = axes[0]
-fig = plt.figure(figsize=(4, 4), dpi=300)
-ax = fig.add_subplot(111, projection='3d')
 
 def style_3d(ax):
     fig = ax.get_figure()
@@ -335,67 +328,72 @@ def style_3d(ax):
     ax.spines['bottom'].set_color('#777777')
     ax.spines['left'].set_color('#777777')
 
-style_3d(ax)
+for which_slice in range(3):
+    # ax = axes[0]
+    fig = plt.figure(figsize=(4, 4), dpi=300)
+    ax = fig.add_subplot(111, projection='3d')
+    style_3d(ax)
 
-for i, s in enumerate(slices):
-    xslice = np.asarray([s])
+    for i, s in enumerate(slices):
+        xslice = np.asarray([s])
 
-    protein_order, protein_names = pu.get_reordered_protein_names(network, **kw)
-    input_order, output_pos = protein_order[:-1], protein_order[-1]
-    input_names, output_name = protein_names[:-1], protein_names[-1]
-    xy_grid, output_values, opacities = pu.prepare_smooth_2d(
-        x, y, network, input_names, input_order, output_pos, res, xlims, xslice, **kw
-    )
+        protein_order, protein_names = pu.get_reordered_protein_names(network, **kw)
+        input_order, output_pos = protein_order[:-1], protein_order[-1]
+        input_names, output_name = protein_names[:-1], protein_names[-1]
+        xy_grid, output_values, opacities = pu.prepare_smooth_2d(
+            x, y, network, input_names, input_order, output_pos, res, xlims, xslice, **kw
+        )
 
-    cmap = plt.get_cmap(cmap)
-    cmap.set_bad(color=bad_color)
+        cmap = plt.get_cmap(cmap)
+        cmap.set_bad(color=bad_color)
 
-    xres = len(np.unique(xy_grid[:, 0]))
-    yres = len(np.unique(xy_grid[:, 1]))
+        xres = len(np.unique(xy_grid[:, 0]))
+        yres = len(np.unique(xy_grid[:, 1]))
 
-    xlims = np.array([xy_grid[:, 0].min(), xy_grid[:, 0].max()])
-    ylims = np.array([xy_grid[:, 1].min(), xy_grid[:, 1].max()])
+        xlims = np.array([xy_grid[:, 0].min(), xy_grid[:, 0].max()])
+        ylims = np.array([xy_grid[:, 1].min(), xy_grid[:, 1].max()])
 
-    vmin, vmax = vlims
-    vmin = vmin if vmin is not None else np.nanmin(output_values)
-    vmax = vmax if vmax is not None else np.nanmax(output_values)
+        vmin, vmax = vlims
+        vmin = vmin if vmin is not None else np.nanmin(output_values)
+        vmax = vmax if vmax is not None else np.nanmax(output_values)
 
-    Z = output_values.reshape((xres, yres))
-    opacities = np.ones_like(Z) if opacities is None else opacities.reshape((xres, yres))
+        Z = output_values.reshape((xres, yres))
+        opacities = np.ones_like(Z) if opacities is None else opacities.reshape((xres, yres))
 
-    X, Y = np.meshgrid(np.linspace(*xlims, num=xres), np.linspace(*ylims, num=yres))
+        X, Y = np.meshgrid(np.linspace(*xlims, num=xres), np.linspace(*ylims, num=yres))
 
-    Z_coord = np.ones_like(X) * s
+        Z_coord = np.ones_like(X) * s
 
-    # Create an RGBA color array
-    colors = cmap(Z / vmax)
-    alpha_multiplier = 1 if (i == 1) else 0.1
-    colors[..., -1] *= alpha_multiplier * opacities
+        # Create an RGBA color array
+        colors = cmap(Z / vmax)
+        alpha_multiplier = 1 if (i == which_slice) else 0.0
+        colors[..., -1] *= alpha_multiplier * opacities
 
-    # Plot the surface with the RGBA colors
-    ax.plot_surface(X, Y, Z_coord, facecolors=colors, rstride=1, cstride=1)
+        # Plot the surface with the RGBA colors
+        ax.plot_surface(X, Y, Z_coord, facecolors=colors, rstride=1, cstride=1)
 
-    # Add contour lines if needed
-    # if contours is not None:
+        # Add contour lines if needed
+        # if contours is not None:
         # ax.contour(X, Y, Z, zdir='y', offset=s, levels=contours, linestyles="solid", linewidths=0.25, alpha=alpha_multiplier*0.5)
 
 
-    ax.invert_zaxis()
-    ax.view_init(elev=20, azim=45, vertical_axis='y')
-    pu.setup_transformed_axis(ax, xlims, ylims, rescaler)
-    # no grid:
-    ax.grid(False)
+        ax.invert_zaxis()
+        ax.view_init(elev=30, azim=25, vertical_axis='y')
+        pu.setup_transformed_axis(ax, xlims, ylims, rescaler)
+        # no grid:
+        ax.grid(False)
 
 
 # def setup_transformed_axis(
-    # ax, xaxis_lims=None, yaxis_lims=None, rescaler=None, margins=0.05, transform=None, **kw
+# ax, xaxis_lims=None, yaxis_lims=None, rescaler=None, margins=0.05, transform=None, **kw
 # ):
-    # if xaxis_lims is not None:
-        # xaxis_lims = setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=margins, **kw)
-    # if yaxis_lims is not None:
-        # yaxis_lims = setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=margins, **kw)
-    # return xaxis_lims, yaxis_lims
+# if xaxis_lims is not None:
+# xaxis_lims = setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=margins, **kw)
+# if yaxis_lims is not None:
+# yaxis_lims = setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=margins, **kw)
+# return xaxis_lims, yaxis_lims
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 

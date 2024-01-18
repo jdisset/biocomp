@@ -17,7 +17,7 @@ import ReactFlow, {
 
 /*════════════════════════════════════════════════════════════════════════════════*/
 
-const NETWORK_NAME = "full_bandpass_csy4";
+const NETWORK_NAME = "bp_v1";
 
 function GraphWithResults() {
   const reactFlowInstance = useReactFlow();

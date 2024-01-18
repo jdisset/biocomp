@@ -103,13 +103,13 @@ def apply_param_map(param_map, params):
 
 biocompdir = Path('~/.biocompiler').expanduser()
 
-# parameters
-training_archive = du.load(biocompdir / 'training_archives/20230923_fulltrain_v0.pkl')
-shared_parameters = training_archive['parameters']
-compute_config = training_archive['compute_config']
-training_config = training_archive['training_config']
+archive_path = biocompdir / Path('training_archives/2023-09-21_expert-paper-5.pkl')
+archive = ut.load(archive_path)
+shared_parameters = archive['shared_parameters']
+compute_config = archive['compute_config']
+training_config = archive['training_config']
 compute_config.set_impl('bias', bc.nodes.bias)
-
+lib = ut.load_lib()
 
 def init_stack(stack, rng):
     local_params, _ = stack.init(rng).filter_by_tag('local')
@@ -299,7 +299,7 @@ def plot_eval(network_entry, params, res=100, xlims=(0, 1), vlims=(0, 1)):
 
 
 def get_network(
-    name: str, use_base_tunable=None, cachedir=biocompdir / 'cache/networks', rng=None
+    name: str, use_base_tunable=None, cachedir=biocompdir / 'networks', rng=None
 ) -> NetworkEntry:
     global network_registry
     fullpath = str(cachedir / f'{name}.pkl')
@@ -309,7 +309,7 @@ def get_network(
         if not Path(fullpath).exists():
             current_app.logger.error(f'Network {name} not found in {cachedir}')
             return None
-        network = du.load(cachedir / f'{name}.pkl')
+        network = ut.load(cachedir / f'{name}.pkl')
         network_entry = NetworkEntry(name, network, rng)
         network_registry[fullpath] = network_entry
 

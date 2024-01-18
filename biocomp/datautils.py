@@ -25,12 +25,12 @@ import matplotlib.ticker as ticker
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 #                            GENERAL PURPOSE TOOLS
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
 ### {{{              --     model retrieval and loss plots     --
 def get_best_run_id(losses, smooth_window=20, return_smooth_losses=False):
-
     from scipy.ndimage import gaussian_filter1d
 
     smoothed_losses = [gaussian_filter1d(loss, smooth_window) for loss in losses]
@@ -122,6 +122,35 @@ def get_wandb_trained_params(run, save_to=None):
     return shared_trained_params, compute_config, training_config, local
 
 
+def get_wandb_archive(run, save_path=None, filename=None):
+    (
+        shared_trained_params,
+        compute_config,
+        training_config,
+        local,
+    ) = get_wandb_trained_params(run, save_to=None)
+
+    archive = {
+        'shared_parameters': shared_trained_params,
+        'local_parameters': local,
+        'compute_config': compute_config,
+        'training_config': training_config,
+        'metadata': run.metadata,
+    }
+
+    archive_path = None
+    if save_path is not None:
+        if filename is None:
+            date_started = run.metadata['startedAt'].split('T')[0]
+            filename = f'{date_started}_{run.name}.pkl'
+        save_path = Path(save_path)
+        save_path.mkdir(parents=True, exist_ok=True)
+        archive_path = save_path / filename
+        with open(archive_path, 'wb') as f:
+            pickle.dump(archive, f)
+            ut.logger.info(f'Saved training archive to {archive_path}')
+
+    return archive, archive_path
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -256,7 +285,6 @@ def _get_batches(
     density_quantile_threshold,
     density_coords,
 ):
-
     all_batches = [
         sample_batches_direct(
             x,
@@ -539,7 +567,6 @@ class DataManager:
 
     @classmethod
     def from_xps(cls, xplist, config=cmp.DEFAULT_COMPUTE_CONFIG, **kw):
-
         network_cache_location = None
         if 'network_cache_location' in config:
             network_cache_location = Path(config['network_cache_location'])
@@ -549,7 +576,9 @@ class DataManager:
         net_sample_pairs = []
         for xp in xplist:
             net_sample_pairs.append(
-                ut.get_cache(lambda: xp.build_networks(**kw), f'{str(xp)}_net', network_cache_location)
+                ut.get_cache(
+                    lambda: xp.build_networks(**kw), f'{str(xp)}_net', network_cache_location
+                )
             )
 
         networks, samples = zip(*net_sample_pairs)
@@ -789,7 +818,6 @@ def heatmap(
             ax.set_xticks(sc_secondticks, minor=True)
             ax.set_yticks(sc_secondticks, minor=True)
 
-
     # colorbar
     if colorbar:
         divider = make_axes_locatable(ax)
@@ -801,7 +829,6 @@ def heatmap(
             spine.set_visible(False)
 
         if get_cbar_ticks is not None:
-
             # get ticks every 0.1 decade
             unscaled_ticks = np.geomspace(inv_tr(vmin), inv_tr(vmax), 5, endpoint=True)
             ticks = np.array(tr(unscaled_ticks))
@@ -865,17 +892,20 @@ def smooth_line_slices(
     outerslices = slices[1] if len(slices) > 1 else []
     innerslices = slices[0] if len(slices) > 0 else []
 
-    input_order, input_names, output_pos, output_name, ticks, tlabels, secondticks = network_ticks_and_labels(
-        network, rescale, xmax=xmax, desired_order=input_order
-    )
+    (
+        input_order,
+        input_names,
+        output_pos,
+        output_name,
+        ticks,
+        tlabels,
+        secondticks,
+    ) = network_ticks_and_labels(network, rescale, xmax=xmax, desired_order=input_order)
 
     if axes is None:
         assert ax is not None
         nplots = len(outerslices)
-        axes = [ax] + [
-            ax.figure.add_subplot(nplots, 1, i+1) for i in range(nplots - 1)
-        ]
-
+        axes = [ax] + [ax.figure.add_subplot(nplots, 1, i + 1) for i in range(nplots - 1)]
 
     print(f'input names = {input_names}')
     assert len(axes) == len(outerslices), 'Number of axes must match number of outer slices'
@@ -924,9 +954,15 @@ def smooth(x, y, network, rescale, ax, **kw):
 def smooth_1d(x, y, network, rescaler, ax, res=500, xmin=0, xmax=1, input_order=None):
     tree = cKDTree(x)
 
-    input_order, input_names, output_pos, output_name, ticks, tlabels, secondticks = network_ticks_and_labels(
-        network, rescaler, xmax=xmax, desired_order=input_order
-    )
+    (
+        input_order,
+        input_names,
+        output_pos,
+        output_name,
+        ticks,
+        tlabels,
+        secondticks,
+    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, desired_order=input_order)
 
     assert len(input_names) == 1
 
@@ -997,7 +1033,15 @@ def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, desired_order=No
     secondary_valid_ticks = (secondary_ticks <= xmax) & (secondary_ticks >= xmin)
     secondary_ticks = secondary_ticks[secondary_valid_ticks]
 
-    return input_order, reordered_input_names, output_pos, output_name, ticks, tlabels, secondary_ticks
+    return (
+        input_order,
+        reordered_input_names,
+        output_pos,
+        output_name,
+        ticks,
+        tlabels,
+        secondary_ticks,
+    )
 
 
 import plotly.express as px
@@ -1033,9 +1077,15 @@ def scatter_3d_interactive(
     filename=None,
     **kw,
 ):
-    input_order, input_names, output_pos, output_name, ticks, ticklabels, secondticks = network_ticks_and_labels(
-        network, rescaler, xmax=xmax, desired_order=input_order
-    )
+    (
+        input_order,
+        input_names,
+        output_pos,
+        output_name,
+        ticks,
+        ticklabels,
+        secondticks,
+    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, desired_order=input_order)
 
     random_order = jax.random.permutation(key, len(x))
     y = y[random_order, output_pos]
@@ -1095,7 +1145,6 @@ def scatter_3d_interactive(
     if filename is None:
         return pyo.plot(fig, auto_open=True)
     else:
-
         return pyo.plot(fig, filename=filename, auto_open=False)
 
 
@@ -1116,9 +1165,15 @@ def scatter_3d(
     lw=0.1,
     **kw,
 ):
-    input_order, input_names, output_pos, output_name, ticks, ticklabels, secondticks = network_ticks_and_labels(
-        network, rescaler, xmax=xmax, desired_order=input_order
-    )
+    (
+        input_order,
+        input_names,
+        output_pos,
+        output_name,
+        ticks,
+        ticklabels,
+        secondticks,
+    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, desired_order=input_order)
 
     cmap = plt.get_cmap('YlGnBu')
     random_order = jax.random.permutation(key, len(x))
@@ -1188,9 +1243,15 @@ def scatter_2d(
     lw=0.1,
     **kw,
 ):
-    input_order, input_names, output_pos, output_name, ticks, ticklabels, secondticks = network_ticks_and_labels(
-        network, rescaler, xmax=xmax, desired_order=input_order
-    )
+    (
+        input_order,
+        input_names,
+        output_pos,
+        output_name,
+        ticks,
+        ticklabels,
+        secondticks,
+    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, desired_order=input_order)
 
     cmap = plt.get_cmap('YlGnBu')
     random_order = jax.random.permutation(key, len(x))
@@ -1262,9 +1323,15 @@ def scatter_1d(
     use_y_as_x=True,
     **kw,
 ):
-    input_order, input_names, output_pos, output_name, ticks, ticklabels, secondticks = network_ticks_and_labels(
-        network, rescaler, xmax=xmax, desired_order=input_order
-    )
+    (
+        input_order,
+        input_names,
+        output_pos,
+        output_name,
+        ticks,
+        ticklabels,
+        secondticks,
+    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, desired_order=input_order)
 
     assert input_order == [0]
 
@@ -1322,10 +1389,15 @@ def smooth_2d(
     use_y_as_x=False,
     **kw,
 ):
-
-    input_order, input_names, output_pos, output_name, ticks, tlabels, secondticks = network_ticks_and_labels(
-        network, rescaler, xmax=xmax, desired_order=input_order
-    )
+    (
+        input_order,
+        input_names,
+        output_pos,
+        output_name,
+        ticks,
+        tlabels,
+        secondticks,
+    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, desired_order=input_order)
 
     if use_y_as_x:
         output_names = network.get_output_proteins()
@@ -1352,7 +1424,9 @@ def smooth_2d(
     p = np.where(np.isnan(z), 1, p)
     if density_plot:
         z = p
-    heatmap(ax, z, ticks=ticks, ticklabels=tlabels, secondticks=secondticks, opacities=opacities, **kw)
+    heatmap(
+        ax, z, ticks=ticks, ticklabels=tlabels, secondticks=secondticks, opacities=opacities, **kw
+    )
     if x.shape[1] > 2:
         ax.text(
             0.35, 0.9, f'{input_names[2]} ≈ {xslice[0]:.2f}', fontsize=8, transform=ax.transAxes
@@ -1392,9 +1466,15 @@ def smooth_3d(x, y, network, rescaler, ax=None, slices=np.linspace(0, 0.65, 4), 
     for i, s in enumerate(slices):
 
         def get_cbar_ticks(vmin, vmax):
-            in_order, in_names, out_pos, out_name, vticks, vtlabels, secondticks = network_ticks_and_labels(
-                network, rescaler, xmin=vmin, xmax=vmax
-            )
+            (
+                in_order,
+                in_names,
+                out_pos,
+                out_name,
+                vticks,
+                vtlabels,
+                secondticks,
+            ) = network_ticks_and_labels(network, rescaler, xmin=vmin, xmax=vmax)
             return vticks, vtlabels
 
         smooth_2d(
@@ -1442,9 +1522,15 @@ def smooth_line_plot(
     lw=1,
     **kw,
 ):
-    input_order, input_names, output_pos, output_name, ticks, tlabels, secondticks = network_ticks_and_labels(
-        network, rescaler, xmax=xmax, desired_order=input_order
-    )
+    (
+        input_order,
+        input_names,
+        output_pos,
+        output_name,
+        ticks,
+        tlabels,
+        secondticks,
+    ) = network_ticks_and_labels(network, rescaler, xmax=xmax, desired_order=input_order)
     y = y[:, output_pos]
     x = x[:, input_order]
     tree = cKDTree(x)
@@ -1472,7 +1558,6 @@ def smooth_line_plot(
     ax.set_ylim(0, 1)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-
 
     # ticks:
     if len(ticks) > 0:
@@ -1505,6 +1590,7 @@ def setup_clean_fig(title):
 
 
 import matplotlib.transforms as mtransforms
+
 
 def timelapse_persp(Q, title, labels=None, outputfile=None, show=True, **kw):
     overlap = 0.1
@@ -1576,7 +1662,6 @@ def eval_network_plot(
     xrange_eval=None,
     **kw,
 ):
-
     k_i, k_q = jax.random.split(key)
     if xrange_eval is None:
         xrange_eval = jnp.array([[0, 0], [1, 1]])
@@ -1618,12 +1703,17 @@ def eval_network_on_grid(
     input_order=None,
     **kw,
 ):
-
     jm = jit(stack.apply)
 
-    input_order, input_names, output_pos, output_name, ticks, tlabels, secondticks = network_ticks_and_labels(
-        network, rescale, xmax=xrange_eval[1], desired_order=input_order
-    )
+    (
+        input_order,
+        input_names,
+        output_pos,
+        output_name,
+        ticks,
+        tlabels,
+        secondticks,
+    ) = network_ticks_and_labels(network, rescale, xmax=xrange_eval[1], desired_order=input_order)
 
     k_i, k_q = jax.random.split(key)
     if xrange_eval is None:
@@ -1669,7 +1759,6 @@ def eval_model_grid(
 
 
 def model_at_x(params, dman: DataManager, id, key=jax.random.PRNGKey(0), quantile=None, **_):
-
     stack, p = get_stack(dman, id, params)
 
     x, y = dman.get_X()[id], dman.get_Y()[id]
@@ -1699,7 +1788,6 @@ def plot_model_diff(params, dman, id, ax, **kw):
 
 
 def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):
-
     if use_x_y_yhat is not None:
         x, y, yhat = use_x_y_yhat
         assert len(x) == len(y), 'x and y must have the same length'
@@ -1826,6 +1914,7 @@ def setup_symlog(
 
 def get_bio_color(name, default='k'):
     import difflib
+
     colors = {'ebfp': '#529edb', 'eyfp': '#fbda73', 'mkate': '#f75a5a', 'neongreen': '#33f397'}
     colors['fitc'] = colors['neongreen']
     colors['pe_texas_red'] = colors['mkate']
@@ -1862,7 +1951,6 @@ def fluo_scatter(
     s=2,
     **_,
 ):
-
     fig, axes = plt.subplots(1, len(pnames), figsize=(1.25 * len(pnames), 10), sharey=True)
 
     if len(pnames) == 1:
@@ -2028,7 +2116,6 @@ def fluo_densities(
 
 
 def get_best_run_id(losses, smooth_window=20, return_smooth_losses=False):
-
     from scipy.ndimage import gaussian_filter1d
 
     smoothed_losses = [gaussian_filter1d(loss, smooth_window) for loss in losses]
@@ -2141,4 +2228,3 @@ def model_fluo_distributions(dman, model_id, method='scatter', **kwargs):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-

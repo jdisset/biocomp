@@ -159,11 +159,14 @@ class TranscriptionUnitGenerator:
 ## ─────────────────────────────────────────────────────────────────────────────
 
 
-def transcription_unit_from_L1(l1id, lib):
+def transcription_unit_from_L1(l1id, lib) -> TranscriptionUnit:
+    """Builds a transcription unit from an L1 id and a library
+    The TU is built by concatenating all the parts from the L0s
+    that are in the L1"""
     l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
     L0s = lib.L1s.loc[l1id][l0_cols].tolist()
     part_cols = [f'part_{i}' for i in range(1, 7)]
-    parts = []
+    parts: List[str] = []
     for l in L0s:
         try:
             parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
@@ -173,8 +176,8 @@ def transcription_unit_from_L1(l1id, lib):
             msg += f'\nlib.L0s[{l}]: {lib.L0s.loc[l]}'
             msg += f'\nlib.L0s: {lib.L0s}'
             raise NetworkConstructionError(msg)
-    tu = TranscriptionUnit([Slot(lib, p) for p in parts])
-    return tu
+
+    return TranscriptionUnit([Slot(lib, p) for p in parts])
 
 
 class GraphComputeNode:
@@ -243,19 +246,18 @@ class Network:
     ## ─────────────────────────────────────────────────────────────────────────────
 
     ### {{{                    --     static constructors     --
+
     @classmethod
     def from_db(
         cls, lib, name, recipe_db, custom_outputs=None, build=True, metadata=None, use_cache=None
     ):
         assert recipe_db is not None, 'recipe_db cannot be None'
         recipe_db.commit()
-
         c = recipe_db.cursor()
         # first let's check that there is a recipe with this name
         c.execute('SELECT * FROM recipes WHERE name=?', (name,))
         assert c.fetchone() is not None, f'No recipe named {name} in database {recipe_db}.'
         # Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
-
         # get the transcription units
         c.execute(
             """SELECT TU, TU || '_' || aggregation as name FROM TU_in_source tis, source_in_aggregation sia, aggregations a
@@ -263,8 +265,7 @@ class Network:
            ORDER BY name""",
             (name,),
         )
-        raw_transcription_units = list(c.fetchall())  # columns: TU, name
-
+        raw_transcription_units = list(c.fetchall())  # columns: TU_id, TU_name ("TUid_aggid")
         # then get the sources
         c.execute(
             """SELECT tis.source || '_' || aggregation as source, TU || '_' || aggregation as TU, position
@@ -272,19 +273,20 @@ class Network:
            WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ? ORDER BY source, position""",
             (name,),
         )
-        raw_tu_in_sources = list(c.fetchall())  # columns: source, TU, position
-
+        raw_tu_in_sources = list(c.fetchall())  # columns: source_name, TU_name, position
         c.execute(
             """SELECT a.id, sia.source || '_' || aggregation, sia.ratio FROM aggregations a, source_in_aggregation sia
             WHERE a.id = sia.aggregation AND a.recipe = ? ORDER BY a.id""",
             (name,),
         )
-        raw_aggregations = list(c.fetchall())  # columns: id, source, ratio
-
+        raw_aggregations = list(c.fetchall())  # columns: agg_id, source_name, ratio
+        transcription_units = {
+            tu[1]: transcription_unit_from_L1(tu[0], lib) for tu in raw_transcription_units
+        }  # a dict of {TU_unique_name: TU}
         return cls.from_raw(
             lib,
             name,
-            raw_transcription_units,
+            transcription_units,
             raw_tu_in_sources,
             raw_aggregations,
             build=build,
@@ -296,24 +298,21 @@ class Network:
     @classmethod
     def from_raw(
         cls,
-        lib,
-        name,
-        raw_transcription_units,
-        raw_tu_in_sources,
-        raw_aggregations,
+        lib: PartsLibrary,
+        name: str,
+        transcription_units: dict[str, TranscriptionUnit], # dict of {TU_name: TU}
+        raw_tu_in_sources: List[Tuple[str, str, int]],  # list of (source_name, TU_name, position)
+        raw_aggregations: List[Tuple[int, str, float]],  # list of (agg_id, source_name, ratio)
         build=True,
         use_cache=None,
         **kwargs,
     ):
         n = cls(lib, name, **kwargs)
-        n.raw_transcription_units = raw_transcription_units
         n.raw_tu_in_sources = raw_tu_in_sources
         n.raw_aggregations = raw_aggregations
+        n.transcription_units = transcription_units
 
         def actually_build():
-            n.transcription_units = {
-                tu[1]: transcription_unit_from_L1(tu[0], n.lib) for tu in n.raw_transcription_units
-            }
             n.tu_in_sources = pd.DataFrame(
                 n.raw_tu_in_sources, columns=['source', 'TU', 'position']
             )
@@ -329,28 +328,6 @@ class Network:
 
         return ut.get_cache(lambda: actually_build(), n.get_signature(), use_cache)
 
-    @classmethod
-    def from_dict_new(
-        cls, lib, name, transcription_units, sources, aggregations, build=True, use_cache=None
-    ):
-        # not implemented yet
-        raise NotImplementedError()
-        # TODO:
-        # we need to get the raw_transcription_units
-        n = cls(lib, name)
-        n.raw_transcription_units = [(tuid, tu.name) for tuid, tu in transcription_units.items()]
-        # reorder by name:
-        n.raw_transcription_units.sort(key=lambda x: x[1])
-
-        n.raw_tu_in_sources = [
-            (s, t, i) for s, tuids in sources.items() for i, t in enumerate(tuids)
-        ]
-        # reorder by source, position:
-        n.raw_tu_in_sources.sort(key=lambda x: (x[0], x[2]))
-
-        n.raw_aggregations = [(i, s, r) for i, a in aggregations.items() for s, r in a.items()]
-        # reorder by id:
-        n.raw_aggregations.sort(key=lambda x: x[0])
 
     @classmethod
     def __obsolete__from_dict(
@@ -1161,7 +1138,8 @@ class Network:
 
     def get_signature(self):
         signature = f'{self.name}:{self.metadata}\n'
-        signature += f'{self.raw_transcription_units}\n'
+        for k in sorted(self.transcription_units.keys()):
+            signature += f'{k}: {self.transcription_units[k]}\n'
         signature += f'{self.raw_tu_in_sources}\n'
         signature += f'{self.raw_aggregations}'
         return signature
