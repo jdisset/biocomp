@@ -253,12 +253,12 @@ def build_network(
     error_handler=None,
     use_cache=None,
 ):
-
     if error_handler is None:
+
         def _handler(msg):
             raise RuntimeError(msg)
-        error_handler = _handler
 
+        error_handler = _handler
 
     if metadata is None:
         metadata = {'recipe_name': recipe_name}
@@ -424,6 +424,7 @@ class XP:
         load_data=True,
         ignore_errors=False,
         show_progress=True,
+        color_aliases=None,
     ):
         """
         Reads the xp file, and loads both the recipes (into an instance-level sqlite db)
@@ -454,7 +455,7 @@ class XP:
 
         self.xpfile = xp_path / xp_name / f"{xp_name}.xp.json5"
         try:
-            self.load_xp_file()
+            self.load_xp_file(color_aliases)
         except Exception as e:
             msg = f'Error loading xp file {self.xpfile}: \n{e}'
             raise RuntimeError(msg) from e
@@ -467,7 +468,7 @@ class XP:
         if self.data_loading_errors != '' and not ignore_errors:
             raise RuntimeError(self.data_loading_errors)
 
-    def load_xp_file(self):
+    def load_xp_file(self, color_aliases=None):
         required_keys = ['name', 'flow_date', 'transfection_date', 'samples']
         with open(self.xpfile) as f:
             xpobj = json5.load(f)
@@ -485,9 +486,12 @@ class XP:
             }
 
             # TODO: remove this old stupid color_names thing
-            self.color_names = {}
+            color_names = {}
             if 'color_names' in xpobj:
-                self.color_names = {kk: escape(vv) for kk, vv in xpobj['color_names'].items()}
+                color_names = {kk: escape(vv) for kk, vv in xpobj['color_names'].items()}
+
+            color_aliases = color_aliases or {}
+            self.color_aliases = {**color_aliases, **(color_names or {})}
 
             self.extra = {}
             for k, v in xpobj.items():
@@ -689,17 +693,13 @@ class XP:
         sample_names: list[str],
         ignore_errors=False,
         force_reload=False,
-        color_aliases=None,
     ):
         """Returns the output data (including cotx markers) for each network and sample"""
         assert len(networks) == len(sample_names)
-        # if we have a color_names attribute, we use it to alias the protein names
-        original_color_aliases = getattr(self, 'color_names', None)
-        color_aliases = {**original_color_aliases, **(color_aliases or {})}
         Y = []
         for net, sample_name in zip(networks, sample_names):
             if 'recipe_name' in net.metadata:
-                assert net.metadata['recipe_name'] == self.samples[s_name]['recipe']
+                assert net.metadata['recipe_name'] == self.samples[sample_name]['recipe']
             data_file = self.get_sample_data_file(sample_name, ignore_errors)
 
             def err_handler(msg):
@@ -710,7 +710,7 @@ class XP:
                 get_network_data(
                     net,
                     data_file,
-                    color_aliases=color_aliases,
+                    color_aliases=self.color_aliases,
                     error_handler=err_handler,
                     use_store=self.raw_data,
                     force_reload=force_reload,
@@ -725,12 +725,11 @@ class XP:
         sample_names: list[str],
         ignore_errors=False,
         force_reload=False,
-        color_aliases=None,
         **_,
     ):
         """Returns the X and Y data (the independent and dependent variables) for each network and sample"""
         Y = self.get_Y(
-            networks, sample_names, ignore_errors=ignore_errors, force_reload=force_reload, color_aliases=color_aliases
+            networks, sample_names, ignore_errors=ignore_errors, force_reload=force_reload
         )
         X = [net.get_input_from_output(y) for net, y in zip(networks, Y)]
         return X, Y
