@@ -189,7 +189,6 @@ def batch(X, Y, batch_size, n_batches=None):
 # {{{                       --     data manager     --
 # ···············································································
 
-
 def data_checks(X, Y, models):
     assert len(X) == len(Y)
     assert len(models) == len(X)
@@ -588,7 +587,7 @@ class DataManager:
         XY_pairs = []
         for xp, n, s in zip(xplist, networks, samples):
             XY_pairs.append(
-                ut.get_cache(lambda: xp.get_XY(n, s), f'{str(xp)}_XY', network_cache_location)
+                ut.get_cache(lambda: xp.get_XY(n, s, **kw), f'{str(xp)}_XY', network_cache_location)
             )
 
         X, Y = zip(*XY_pairs)

@@ -127,7 +127,6 @@ prog.console = Console()
 ##────────────────────────────────────────────────────────────────────────────}}}
 logger = logging.getLogger('build_xp_table')
 
-
 ### {{{                         --     plot data     --
 
 dataplot_savedir = Path('~/ResearchMisc/biocomp/dataplots').expanduser()
@@ -191,3 +190,4 @@ for xp_name, dman in list(xp_dmans.items())[:]:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+

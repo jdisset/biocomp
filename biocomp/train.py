@@ -506,7 +506,6 @@ def start(dman: du.DataManager, training_config, compute_config: cmp.ComputeConf
 
     return params, epoch_history
 
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                  --     training program helper     --

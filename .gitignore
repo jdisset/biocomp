@@ -8,6 +8,7 @@ logs/
 .parcel-cache/
 *.pkl
 pyrightconfig.json
+data_plots/
 
 *.py[cod]
 *$py.class

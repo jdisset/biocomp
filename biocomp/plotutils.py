@@ -161,7 +161,9 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
         reordered_input_names = sorted(input_names)
         in_order = [input_names.index(i) for i in reordered_input_names]
 
-    assert len(output_names) == (len(input_names) + 1)
+    if len(output_names) != (len(input_names) + 1):
+        raise ValueError(f'Wrong number of outputs. Outputs: {output_names}, inputs: {input_names}')
+
     output_name = list(set(output_names) - set(input_names))[0]
     output_pos = output_names.index(output_name)
 
@@ -1017,6 +1019,8 @@ def smooth_2d(
     protein_order, protein_names = get_reordered_protein_names(network, **kw)
     input_order, output_pos = protein_order[:-1], protein_order[-1]
     input_names, output_name = protein_names[:-1], protein_names[-1]
+    # remove input_order from kw
+    kw.pop('input_order', None)
     xy, output_values, opacities = prepare_smooth_2d(
         x, y, network, input_names, input_order, output_pos, res, xlims, xslice, **kw
     )
@@ -1526,7 +1530,7 @@ def scatter_3d_interactive(
                 cmax=y.max(),
                 colorscale='YlGnBu',
                 showscale=True,
-                colorbar=dict(title=output_name), # tickvals=ticks, ticktext=ticklabels),
+                colorbar=dict(title=output_name),  # tickvals=ticks, ticktext=ticklabels),
             ),
         )
 

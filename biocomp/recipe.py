@@ -689,11 +689,13 @@ class XP:
         sample_names: list[str],
         ignore_errors=False,
         force_reload=False,
+        color_aliases=None,
     ):
         """Returns the output data (including cotx markers) for each network and sample"""
         assert len(networks) == len(sample_names)
         # if we have a color_names attribute, we use it to alias the protein names
-        color_aliases = getattr(self, 'color_names', None)
+        original_color_aliases = getattr(self, 'color_names', None)
+        color_aliases = {**original_color_aliases, **(color_aliases or {})}
         Y = []
         for net, sample_name in zip(networks, sample_names):
             if 'recipe_name' in net.metadata:
@@ -723,10 +725,12 @@ class XP:
         sample_names: list[str],
         ignore_errors=False,
         force_reload=False,
+        color_aliases=None,
+        **_,
     ):
         """Returns the X and Y data (the independent and dependent variables) for each network and sample"""
         Y = self.get_Y(
-            networks, sample_names, ignore_errors=ignore_errors, force_reload=force_reload
+            networks, sample_names, ignore_errors=ignore_errors, force_reload=force_reload, color_aliases=color_aliases
         )
         X = [net.get_input_from_output(y) for net, y in zip(networks, Y)]
         return X, Y
