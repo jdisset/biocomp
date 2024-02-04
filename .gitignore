@@ -9,6 +9,9 @@ logs/
 *.pkl
 pyrightconfig.json
 data_plots/
+local_vars.py
+devtmp
+biocomp-static
 
 *.py[cod]
 *$py.class
