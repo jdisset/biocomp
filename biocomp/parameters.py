@@ -270,7 +270,7 @@ class PTreeBranch(dict):
 
 class PTree:
 
-    # a PTree is a tree of trees.
+    # a PTree is a tree of trees, aka, a tree.
     # The children of a tree are stored in the self.value member variable.
     # If the tree is a leaf, then self.value is the value of the leaf
     # If the tree is a branch, then self.value is a PTreeBranch, which is a dict
@@ -987,3 +987,4 @@ def make_view(
         for from_path, from_id in zip(from_paths, from_ids):
             ref.push_back(f'{from_path}/{leaf}', from_id)
         params[leafpath] = ref
+

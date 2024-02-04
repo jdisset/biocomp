@@ -736,8 +736,6 @@ def get_knn_smooth(xquery, logY, tree, knn=500, min_points=20, method='mean', **
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                      --     heatmap methods     --
-
-
 def heatmap(
     ax,
     Z,
@@ -2227,3 +2225,4 @@ def model_fluo_distributions(dman, model_id, method='scatter', **kwargs):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+

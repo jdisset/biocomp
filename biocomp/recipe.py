@@ -40,7 +40,6 @@ def escape(names):
 # {{{                            --     sql     --
 # ···············································································
 
-
 def create_db(conn):
     sql = """
     CREATE TABLE IF NOT EXISTS `recipes` (
@@ -240,7 +239,7 @@ def import_recipes_to_sql(
         if not Path(f).name == f'{recipe["name"]}.recipe.json5':
             error_handler(f'File vs recipe name mismatch (recipe: {recipe["name"]}, file: {f})')
         recipe_objects.append(recipe)
-    recipes_to_sql(recipe_objects, conn, lib)
+    recipes_to_sql(recipe_objects, conn, lib, error_handler=error_handler)
     return recipe_objects
 
 
@@ -272,9 +271,8 @@ def build_network(
             metadata=metadata,
             use_cache=use_cache,
         )
-
     except Exception as e:
-        error_handler(f'Can\'t build network: {e}')
+        return error_handler(f'Can\'t build network: {e}')
 
     if not inverse:
         return fwd_network
@@ -652,6 +650,7 @@ class XP:
 
                 built_networks[recipe_name] = build_network(
                     recipe_name,
+                    lib=self.lib,
                     inverse=inverse,
                     dbconn=self.dbconn,
                     error_handler=err_handler,
@@ -766,7 +765,6 @@ class XP:
 # {{{                           --     tests     --
 # ···············································································
 
-
 def test_module():
     libpath = "./test_data/all_sheets.pickle"
     l = ut.load(libpath)
@@ -787,7 +785,6 @@ def test_module():
         c.execute("SELECT * FROM aggregations")
         # 2 aggregations
         assert len(c.fetchall()) == 2
-
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
