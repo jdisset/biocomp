@@ -47,24 +47,16 @@ prog = cm.CLIProgram()
 logger = logging.getLogger('build_xp_table')
 logger.setLevel(logging.DEBUG)
 logging.getLogger('biocomp').setLevel(logging.ERROR)
+import psycopg2
+DBCONN = cm.connect_to_db()
 ### {{{                --     arg declaration and parsing     --
 
 # arguments:
-# --database: path to the database file (mandatory)
-# --xp_path: path to the experiment files, or empty to use env default
-# --mode:
-#      'update_from_filesystem': (DEFAULT) update the existing database, prioritizing the filesystem
-#      'overwrite': overwrite the existing database
-#      'update_from_db': update the existing database, prioritizing the database
-# --create: create a new database if it doesn't exist (default: False)
-
-prog.add_argument('--database', type=str, required=True)
-prog.add_argument('--mode', type=str, default='update_from_filesystem')
-prog.add_argument('--create', action='store_true', default=False)
 
 prog.add_argument('--calib_paths', type=str, nargs='+', default=DEFAULT_CALIB_PATHS)
 prog.add_argument('--calib_names', type=str, nargs='+', default=DEFAULT_CALIB_NAMES)
 prog.add_argument('--xp_path', type=str, default=DEFAULT_XP_PATH)
+# --xp_path: path to the experiment files, or empty to use env default
 prog.add_argument('--recipe_paths', type=str, nargs='+', default=DEFAULT_RECIPE_PATH)
 prog.add_argument('--xp_cache_dir', type=str, default=DEFAULT_XP_CACHE_DIR)
 prog.add_argument('--base_dir', type=str, default=Path(DEFAULT_XP_PATH).parent)
@@ -72,22 +64,9 @@ prog.add_argument('--data_config', type=str, default=DEFAULT_DATA_CONFIG_PATH)
 
 # verbosity level
 prog.add_argument('--verbose', type=int, default=0)
-
-prog.parse_args(['--database', 'devtmp/database.xlsx', '--create'])
+prog.parse_args([])
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                    --     arg postprocessing     --
-
-# get the database path
-database_path = Path(prog.database)
-if not database_path.exists():
-    if not prog.create:
-        raise ValueError(f'database file {database_path} does not exist')
-    else:
-        wb = cm.create_database_file(database_path, ['experiment', 'network'])
-
-# check extensiion (it should be an excel file)
-if database_path.suffix != '.xlsx':
-    raise ValueError(f'database file {database_path} must be an excel file')
 
 prog.xp_path = Path(prog.xp_path)
 prog.base_dir = Path(prog.base_dir)
@@ -98,6 +77,7 @@ if prog.data_config is None:
     prog.data_config = DEFAULT_DATA_CONFIG
 else:
     import json5
+
     prog.data_config = json5.load(open(prog.data_config, 'r'))
 
 assert len(prog.calib_paths) == len(prog.calib_names)
@@ -116,6 +96,7 @@ prog.console = Console()
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                  --     list all xps in experiment folder    --
+
 xp_entries = {}
 xp_objs = {}
 
@@ -182,7 +163,7 @@ def calibration_info(xppath, calib_paths=prog.calib_paths, calib_names=prog.cali
 for xp in xp_entries.values():
     calib_type, calib_plot, _ = calibration_info(xp['path'])
     xp['calibration_version'] = calib_type
-    xp['calibration_diagnostics'] = calib_plot
+    xp['has_calibration_diagnostics'] = calib_plot
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -265,7 +246,7 @@ for net_entry in tqdm(all_networks, desc='Adding network metadata'):
         'name': net.name,
         'sequestron_type': seqtype,
         'architecture': arch,
-        'ERN_names': ', '.join(ut.get_all_ERNs_names(net)),
+        'ern_names': ', '.join(ut.get_all_ERNs_names(net)),
         'uorf_values': ', '.join([str(v) for v in uorf_vals]),
         'uorf_names': ', '.join(flatten(uorf_names)),
         'genes': ', '.join(genes),
@@ -278,39 +259,6 @@ for net_entry in tqdm(all_networks, desc='Adding network metadata'):
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
 ### {{{                  --     create and update xpdf     --
-def merge_update(df, table_name, prog):
-    dbdf = cm.load_database_table(prog.database, table_name, create_if_not_exists=True)
-    # try to merge the two tables using the name as key, keeping any extra columns
-    # and merging on the existing ones according to the mode
-    if not dbdf.empty:
-        priority = 'left' if prog.mode == 'update_from_filesystem' else 'right'
-        merged_df = cm.merge_update(df, dbdf, 'name', priority, how='outer', use_right=['id'])
-    else:
-        merged_df = df
-    return merged_df
-
-
-def ensure_unique_id(df):
-    if 'id' not in df.columns:
-        df['id'] = np.arange(len(df))
-    maxid = df['id'].max()
-    df['id'] = df['id'].fillna(-1).astype(int)
-    for i, row in df.iterrows():
-        if row['id'] == -1:
-            maxid += 1
-            df.loc[i, 'id'] = maxid
-    df = cm.reorder_columns_front(df, ['id'])
-    df.set_index('id', inplace=True, drop=False)
-    return df
-
-
-# minimal styling
-def table_style(table_name, prog):
-    workbook = openpyxl.load_workbook(prog.database)
-    sheet = workbook[table_name]
-    cm.style_header_row(sheet, '000000', 'EEECEA')
-    cm.wrap_text_all_cells(sheet)
-    workbook.save(prog.database)
 
 
 xpdf = pd.DataFrame(xp_entries).T
@@ -320,43 +268,143 @@ for col in error_cols:
     xpdf[col] = xpdf[col].astype(str)
     xpdf[col] = xpdf[col].apply(lambda x: x.replace('nan', ''))
 
-xpdf = cm.reorder_columns_back(xpdf, error_cols)
-
-merged_xpdf = merge_update(xpdf, 'experiment', prog)
-merged_xpdf = ensure_unique_id(merged_xpdf)
-
 logger.debug(f'Saving experiment table to {prog.database}')
-logger.debug(f'Experiment table:\n{merged_xpdf}')
 
-cm.save_database_table(merged_xpdf, prog.database, 'experiment')
-table_style('experiment', prog)
+# def commit_to_db(conn, df, table_name, primary_key):
+# c = conn.cursor()
+# c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (table_name,))
+# if not c.fetchone():
+# raise ValueError(f'{table_name} table not found in db')
+# # check if the table has the right columns
+# c.execute(f'PRAGMA table_info({table_name});')
+# columns = [col[1] for col in c.fetchall()]
+# if not all([col in columns for col in df.columns]):
+# missing_cols = [col for col in df.columns if col not in columns]
+# raise ValueError(f'{table_name} table is missing columns {missing_cols}')
+
+# # check that our df has unique names
+# if len(df[primary_key].unique()) != len(df):
+# raise ValueError(f'{table_name} table has non-unique {primary_key} values')
+
+# # insert or ignore, then update
+# strdf = df.astype(str)
+# # put the name column last
+# strdf = cm.reorder_columns_back(strdf, [primary_key])
+# colnames = strdf.columns.tolist()
+# c.executemany(
+# f'INSERT OR IGNORE INTO {table_name} ({", ".join(colnames)}) VALUES ({", ".join(["?"] * len(colnames))});',
+# strdf.values.tolist(),
+# )
+
+# conn.commit()
+# # update
+# c.executemany(
+# f'UPDATE {table_name} SET {", ".join([col + " = ?" for col in colnames[:-1]])} WHERE name = ?;',
+# strdf.values.tolist(),
+# )
+# conn.commit()
+# conn.close()
+
+
+from psycopg2 import sql
+
+
+def commit_to_db(conn, df, table_name, primary_key):
+    cursor = conn.cursor()
+    try:
+        # Check if the table has the right columns
+        cursor.execute(
+            sql.SQL("SELECT column_name FROM information_schema.columns WHERE table_name = %s;"),
+            (table_name,),
+        )
+        columns = [col[0] for col in cursor.fetchall()]
+        if not all(col in columns for col in df.columns):
+            missing_cols = [col for col in df.columns if col not in columns]
+            cursor.close()
+            raise ValueError(f'{table_name} table is missing columns {missing_cols}')
+
+        # Check that our df has unique primary key values
+        if len(df[primary_key].unique()) != len(df):
+            cursor.close()
+            raise ValueError(f'{table_name} table has non-unique {primary_key} values')
+
+        # Prepare data for insertion and update
+        strdf = df.astype(str)
+        colnames = strdf.columns.tolist()
+        records = strdf.values.tolist()
+
+        # Insert or ignore
+        insert_query = sql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING;").format(
+            sql.Identifier(table_name),
+            sql.SQL(', ').join(map(sql.Identifier, colnames)),
+            sql.SQL(', ').join(sql.Placeholder() * len(colnames)),
+        )
+        cursor.executemany(insert_query, records)
+        conn.commit()
+
+        # Update
+        update_cols = sql.SQL(', ').join(
+            [
+                sql.SQL("{} = {}").format(sql.Identifier(col), sql.Placeholder())
+                for col in colnames
+                if col != primary_key
+            ]
+        )
+        update_query = sql.SQL("UPDATE {} SET {} WHERE {} = {};").format(
+            sql.Identifier(table_name), update_cols, sql.Identifier(primary_key), sql.Placeholder()
+        )
+        cursor.executemany(update_query, records)
+        conn.commit()
+
+    except Exception as e:
+        # Rollback the transaction on error
+        conn.rollback()
+        cursor.close()
+        raise e
+
+    else:
+        # Commit the transaction if no errors
+        conn.commit()
+
+    finally:
+        # Always close the cursor
+        if cursor is not None:
+            cursor.close()
+
+    cursor.close()
+
+
+commit_to_db(DBCONN, xpdf, 'experiment', 'name')
 
 logger.info(f'Experiment table saved to {prog.database}')
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{                  --     create and update netdf     --
 netdf = pd.DataFrame(all_networks)
 netdf = netdf.drop(columns=['network'])
-netdf = cm.reorder_columns_front(netdf, ['name', 'xp', 'architecture'])
-xp_id = merged_xpdf[['id', 'name']].set_index('name')
-netdf['xp_id'] = netdf['xp'].apply(lambda x: xp_id.loc[x, 'id'])
 
 # compute unique names
 unique_names = []
 for i, row in netdf.iterrows():
-    n = f'{row["recipe_name"]}_{row["xp_id"]}_{"-".join(row["markers"].split(", "))}'
+    n = f'{row["recipe_name"]}_{row["xp"]}_{"-".join(row["markers"].split(", "))}'
     unique_names.append(n)
 netdf['name'] = unique_names
 n_names = len(netdf['name'].unique())
 if n_names != len(netdf):
     raise ValueError(f'found {len(netdf)} networks, but {n_names} unique names')
 
-merged_netdf = merge_update(netdf, 'network', prog)
-merged_netdf = ensure_unique_id(merged_netdf)
+# check that each xp exists in the experiment table
+for xp in netdf['xp'].unique():
+    if xp not in xpdf.index:
+        raise ValueError(f'xp {xp} not found in experiment table')
+
 logger.debug(f'Saving network table to {prog.database}')
 
-cm.save_database_table(merged_netdf, prog.database, 'network')
-table_style('network', prog)
+commit_to_db(DBCONN, netdf, 'network', 'name')
+DBCONN.close()
 
 logger.info(f'Network table saved to {prog.database}')
+
+DBCONN.close()
 ##────────────────────────────────────────────────────────────────────────────}}}

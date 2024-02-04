@@ -1,6 +1,7 @@
 ### {{{                          --     imports     --
 import sys
 
+import urllib.parse
 import openpyxl
 import pandas as pd
 from dataclasses import dataclass
@@ -54,7 +55,7 @@ lib = ut.load_lib()
 protein_aliases = {'EBFP': 'EBFP2', 'L0.G_MNEONGREEN': 'MNEONGREEN'}
 path_prefix = '/Users/jeandisset/Dropbox (MIT)/Biocomp'
 
-DEFAULT_OUTPUT_DIR = Path('./data_plots').resolve()
+DEFAULT_OUTPUT_DIR = Path('./biocomp-static/dataplots').resolve()
 
 BASE_DEFAULT_CONFIG = {
     'xlims': (-0.027, 0.8),
@@ -87,43 +88,29 @@ DEFAULT_3D_CONFIG = {
 ### {{{                --     arg declaration and parsing     --
 prog = cm.CLIProgram()
 
-# for database mode we need a database file
-prog.add_argument('--database', type=str, help='path to database file')
 # and a network id (or list of ids, or 'all')
 prog.add_argument(
-    '--network_id', help='network id to plot: int, list of ints, or "all"', default='all'
+    '--network_id', help='network id to plot: int, list of network ids, or "all"', default='all'
 )
-
-# for recipe mode we need a recipe file and a data file
-prog.add_argument('--recipe_file', type=str, help='path to recipe file')
-prog.add_argument('--data_file', type=str, help='path to data file')
 
 prog.add_argument('--data_config', type=str, default=DEFAULT_DATA_CONFIG_PATH)
 prog.add_argument('--output_dir', type=str, default=DEFAULT_OUTPUT_DIR)
 
-prog.parse_args(['--database', 'devtmp/database.xlsx'])
+prog.parse_args()
 
-if (
-    prog.args.database is not None
-    and (prog.args.recipe_file is not None or prog.args.data_file is not None)
-) or (prog.args.database is None and prog.args.recipe_file is None and prog.args.data_file is None):
-    raise ValueError('You must provide EITHER a database file or a recipe file and a data file')
+DBCONN = cm.connect_to_db()
 
-if prog.args.recipe_file is not None or prog.args.data_file is not None:
-    raise NotImplementedError('Direct recipe + data not implemented yet, please provide a database')
+netdf = cm.load_table_as_dataframe(DBCONN, 'network')
+xpdf = cm.load_table_as_dataframe(DBCONN, 'experiment')
 
-if prog.args.database is not None:
-    netdf = cm.load_database_table(prog.args.database, 'network')
-    xpdf = cm.load_database_table(prog.args.database, 'experiment')
-    prog.database_mode = True
+prog.database_mode = True
 
 if prog.args.network_id == 'all':
-    net_ids = netdf['id'].tolist()
+    net_names = netdf['name'].tolist()
 else:
-    net_ids = int(prog.args.network_id)
+    raise NotImplementedError('Only "all" is supported for network_id right now')
 
 prog.args.output_dir = Path(prog.args.output_dir).resolve()
-# make dir if needed:
 prog.args.output_dir.mkdir(parents=True, exist_ok=True)
 
 if prog.data_config is None:
@@ -131,70 +118,16 @@ if prog.data_config is None:
 else:
     import json5
 
+    assert Path(prog.data_config).exists()
     prog.data_config = json5.load(open(prog.data_config, 'r'))
 
 
-def get_network_row(netdf, net_id):
-    if nid not in netdf['id']:
-        raise ValueError(f'Network id {nid} not found in database')
-    net_row = netdf[netdf['id'] == net_id]
-    if len(net_row) > 1:
-        raise ValueError(f'Network id {nid} is not unique in database')
-    return net_row.iloc[0]
 
 
-def get_recipe_and_data_filepaths(data_file, recipe_file, path_prefix=''):
-    # check data file present
-    if pd.isna(data_file):
-        raise ValueError(f'Data file information for network id {nid} is missing')
-    data_file = Path(path_prefix) / data_file
-    data_file = Path(data_file).resolve()
-    if not Path(data_file).exists():
-        raise ValueError(f'Data file {data_file} not found')
-
-    # check recipe file present
-    if pd.isna(recipe_file):
-        raise ValueError(f'Recipe file information for network id {nid} is missing')
-    recipe_file = Path(path_prefix) / recipe_file
-    recipe_file = Path(recipe_file).resolve()
-    if not Path(recipe_file).exists():
-        raise ValueError(f'Recipe file {recipe_file} not found')
-
-    return recipe_file, data_file
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                           --     utils     --
-def parse_list(input_string):
-    if input_string is None:
-        return []
-    if isinstance(input_string, list):
-        return input_string
-    # Split the string by comma and then strip whitespaces from each element
-    return [element.strip() for element in input_string.split(',')]
-
-
-def load_network_from_database(
-    netdf, net_id, lib, path_prefix='/Users/jeandisset/Dropbox (MIT)/Biocomp'
-):
-    row = get_network_row(netdf, net_id)
-    rfile, dfile = get_recipe_and_data_filepaths(
-        row['data_file'], row['recipe_file'], path_prefix=path_prefix
-    )
-    networks = bc.recipe.network_from_recipe(rfile, lib, inverse='all')
-    # we potentially have several networks, one for each possible inversion
-    # we can use the markers to select the right one
-    markers = [set(bc.recipe.escape(n.get_inverted_input_proteins())) for n in networks]
-    # outputs = [set(bc.recipe.escape(networks[0].get_output_proteins())) - m for m in markers]
-
-    if prog.database_mode:
-        target_markers = set(parse_list(row['markers']))
-        escaped_target_markers = bc.recipe.escape(target_markers)
-        network = networks[markers.index(escaped_target_markers)]
-
-    X, Y = bc.recipe.get_network_XY(network, dfile, color_aliases=protein_aliases)
-    return network, X, Y
-
 
 def get_network_nb_inputs(dman, net_id, net_id_to_dman_id):
     assert net_id in net_id_to_dman_id
@@ -205,26 +138,22 @@ def get_network_nb_inputs(dman, net_id, net_id_to_dman_id):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                --     load networks and data     --
-if prog.network_id == 'all' and prog.database_mode:
-    net_with_data = netdf[netdf['data_file'].notna()]
-    net_ids = net_with_data['id'].tolist()
-else:
-    if isinstance(net_ids, int):
-        net_ids = [net_ids]
-    net_ids = [int(nid) for nid in net_ids]
 
-net_id_to_dman_id, load_errors = {}, {}
+net_with_data = netdf[netdf['data_file'].notna()]
+net_names = net_with_data['name'].tolist()
+
+net_name_to_dman_id, load_errors = {}, {}
 networks, Xs, Ys = [], [], []
 
-for nid in tqdm(list(net_ids), desc='Loading networks'):
-    net_id_to_dman_id[nid] = len(networks)
+for net_name in tqdm(list(net_names), desc='Loading networks'):
+    net_name_to_dman_id[net_name] = len(networks)
     try:
-        network, X, Y = load_network_from_database(netdf, nid, lib, path_prefix=path_prefix)
+        network, X, Y = cm.load_network_and_data(netdf, net_name, lib, path_prefix=path_prefix)
         networks.append(network)
         Xs.append(X)
         Ys.append(Y)
     except Exception as e:
-        load_errors[nid] = f'{e.__class__.__name__}: {e}'
+        load_errors[net_name] = f'{e.__class__.__name__}: {e}'
 
 dman = du.DataManager(Xs, Ys, networks, data_cfg=prog.data_config)
 
@@ -235,8 +164,8 @@ load_errors
 
 
 def make_network_title(netdf, net_id):
-    assert net_id in netdf['id']
-    net_row = netdf[netdf['id'] == net_id]
+    assert net_id in netdf['name'].values
+    net_row = netdf[netdf['name'] == net_id]
     assert len(net_row) == 1
     net_row = net_row.iloc[0]
     title = r"\fontsize{12}{12}\selectfont " + net_row['recipe_name'] + '\n'
@@ -244,13 +173,10 @@ def make_network_title(netdf, net_id):
     return title
 
 
-# n_inputs = {nid: get_network_nb_inputs(dman, nid, net_id_to_dman_id) for nid in net_ids}
-
-
-def plot_network_data(dman, net_id, net_id_to_dman_id, extra_args=None):
-    plot_title = make_network_title(netdf, net_id)
-    assert net_id in net_id_to_dman_id
-    dmanid = net_id_to_dman_id[net_id]
+def plot_network_data(dman, net_name, net_name_to_dman_id, extra_args=None):
+    plot_title = make_network_title(netdf, net_name)
+    assert net_name in net_name_to_dman_id
+    dmanid = net_name_to_dman_id[net_name]
     network = dman.get_networks()[dmanid]
     n_inputs = network.get_nb_inputs()
 
@@ -295,31 +221,32 @@ def plot_network_data(dman, net_id, net_id_to_dman_id, extra_args=None):
                     )
             else:
                 fig, axes = pu.mkfig(1, nslices, size=plot_config['size'])
-                pu.network_plot(
-                    dman, dmanid, axes=axes, input_order=input_order, **plot_config
-                )
+                pu.network_plot(dman, dmanid, axes=axes, input_order=input_order, **plot_config)
     fig.suptitle(plot_title, fontsize=12)
     return fig
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+encoded_names = {net_name: cm.get_name_hash(net_name) for net_name in net_names}
 plot_errors = {}
-def plot_and_save(net_id, **kw):
+
+
+def plot_and_save(net_name, **kw):
     global dman
     global prog
     global plot_errors
     global load_errors
-    global net_id_to_dman_id
-    if net_id not in load_errors:
+    global net_name_to_dman_id
+    if net_name not in load_errors:
         try:
-            f = plot_network_data(
-                dman,
-                net_id,
-                net_id_to_dman_id,
-                **kw
-            )
-            fpath = prog.args.output_dir / f'{net_id}.png'
+            fpath = prog.args.output_dir / f'{encoded_names[net_name]}.png'
+            # if already exists, skip
+            if fpath.exists():
+                print(f'File {fpath} already exists, skipping')
+                return
+
+            f = plot_network_data(dman, net_name, net_name_to_dman_id, **kw)
             f.savefig(
                 fpath,
                 bbox_inches='tight',
@@ -328,9 +255,58 @@ def plot_and_save(net_id, **kw):
             )
             plt.close(f)
         except Exception as e:
-            print(f'Error plotting {net_id}: {e}')
-            plot_errors[net_id] = e
+            print(f'Error plotting {net_name}: {e}')
+            plot_errors[net_name] = e
 
-for net_id in tqdm(net_ids[:]):
-    plot_and_save(net_id, extra_args={'method': 'smooth'})
 
+for net_name in tqdm(net_names[:]):
+    plot_and_save(net_name, extra_args={'method': 'smooth'})
+
+
+# add the path in the data_plot_path column of the network table, if plot_errors is empty
+
+##
+base_dir_url = 'dataplots'
+DBCONN = cm.connect_to_db()
+with DBCONN.cursor() as cursor:
+    try:
+        sql = 'UPDATE network SET data_plot = %s WHERE name = %s'
+        for net_name in net_names:
+            if net_name not in plot_errors and net_name not in load_errors:
+                fname = f'{base_dir_url}/{encoded_names[net_name]}.png'
+                print(f'Updating network {net_name} with plot path {fname}')
+                cursor.execute(sql, (fname, net_name))
+            else:
+                cursor.execute(sql, (None, net_name))
+    except Exception as e:
+        print(f'Error updating network table: {e}')
+        raise e
+    finally:
+        DBCONN.commit()
+
+DBCONN.close()
+
+
+##
+# fetch list of network data plots from db:
+DBCONN = cm.connect_to_db()
+with DBCONN.cursor() as cursor:
+    try:
+        cursor.execute('SELECT name, data_plot FROM network')
+        rows = cursor.fetchall()
+    except Exception as e:
+        print(f'Error fetching network data plots: {e}')
+        raise e
+    finally:
+        DBCONN.close()
+
+rows = [r for r in rows if r[1] is not None]
+##
+
+# check that all files exist
+for r in rows:
+    fpath = Path('biocomp-static')/r[1]
+    if not fpath.exists():
+        print(f'File {fpath} does NOT exist!!')
+    else:
+        print(f'File {fpath} DOES exists')
