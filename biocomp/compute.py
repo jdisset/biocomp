@@ -44,8 +44,8 @@ def unwrap_partial_function(implementation):
 class ComputeConfigManager:
     def __init__(self):
         self.config = {
-            'biocomp_version': ut.get_biocomp_version(),
-            'commit_hash': ut.get_git_commit_hash(),
+            # 'biocomp_version': ut.get_biocomp_version(),
+            # 'commit_hash': ut.get_git_commit_hash(),
             'functions': {},
         }
 
@@ -86,8 +86,8 @@ class ComputeConfigManager:
         with open(filename, 'r') as f:
             self.config = json.load(f)
 
-    def dumps(self):
-        return json.dumps(self.config, indent=4)
+    def dumps(self, indent=4):
+        return json.dumps(self.config, indent=indent)
 
     @classmethod
     def from_file(cls, filename):
