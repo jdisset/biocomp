@@ -194,14 +194,30 @@ def timer(name=None, use_logger=True):
 
 
 ### {{{                           --     cache     --
-def get_cache(gen_f, signature, cache_location):
+def get_cache(
+    gen_f: Callable, signature: str, cache_location: Optional[PathLike], create_dir: bool = True
+):
+    """
+    Get a cached value or generate it if it doesn't exist.
+    Args:
+    gen_f: function to generate the value
+    signature: unique signature for the value
+    cache_location: path to the cache directory
+    create_dir: whether to create the cache directory if it doesn't exist
+    Returns:
+    the cached value or the generated value
+    """
     if cache_location is not None:
         sighash = xxhash.xxh128(signature).hexdigest()
-        # create cache directory if it doesn't exist
         if isinstance(cache_location, str):
             cache_location = Path(cache_location)
         try:
-            cache_location.mkdir(parents=True, exist_ok=True)
+            if create_dir:
+                cache_location.mkdir(parents=True, exist_ok=True)
+            elif not cache_location.exists():
+                raise FileNotFoundError(
+                    f'Path {cache_location} doesn\'t exist and create_dir is False'
+                )
             cachepath = cache_location / sighash
             cachepath = cachepath.resolve()
         except Exception as e:
@@ -222,6 +238,7 @@ def get_cache(gen_f, signature, cache_location):
             except Exception as e:
                 logger.error(f'Error generating {sighash}: {e}')
     else:
+        # no cache location = caching is disabled
         data = gen_f()
     return data
 
