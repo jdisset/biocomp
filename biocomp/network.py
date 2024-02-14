@@ -2,6 +2,7 @@ from .library import PartsLibrary as PartsLibrary
 import numpy as np
 import pandas as pd
 from . import utils as ut
+import sqlite3
 from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast
 from itertools import product
 
@@ -155,30 +156,6 @@ class TranscriptionUnitGenerator:
         return _next([], 0)
 
 
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-
-def transcription_unit_from_L1(l1id, lib) -> TranscriptionUnit:
-    """Builds a transcription unit from an L1 id and a library
-    The TU is built by concatenating all the parts from the L0s
-    that are in the L1"""
-    l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
-    L0s = lib.L1s.loc[l1id][l0_cols].tolist()
-    part_cols = [f'part_{i}' for i in range(1, 7)]
-    parts: List[str] = []
-    for l in L0s:
-        try:
-            parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
-        except Exception as e:
-            msg = f'Error in L0 {l} of L1 {l1id}: {e}'
-            msg += f'\npart_cols: {part_cols}'
-            msg += f'\nlib.L0s[{l}]: {lib.L0s.loc[l]}'
-            msg += f'\nlib.L0s: {lib.L0s}'
-            raise NetworkConstructionError(msg)
-
-    return TranscriptionUnit([Slot(lib, p) for p in parts])
-
 
 class GraphComputeNode:
     # a simple convenience one-off class to store the information about a node
@@ -219,38 +196,99 @@ class GraphComputeNode:
         return str(self.toDict())
 
 
+#                                                                            }}}
+## ─────────────────────────────────────────────────────────────────────────────
+
+
+def transcription_unit_from_L1(l1id: str, lib: PartsLibrary) -> TranscriptionUnit:
+    """Builds a transcription unit from an L1 id and a library
+    The TU is built by concatenating all the parts from the L0s
+    that are in the L1"""
+    l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
+    L0s = lib.L1s.loc[l1id][l0_cols].tolist()
+    part_cols = [f'part_{i}' for i in range(1, 7)]
+    parts: List[str] = []
+    for l in L0s:
+        try:
+            parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
+        except Exception as e:
+            msg = f'Error in L0 {l} of L1 {l1id}: {e}'
+            msg += f'\npart_cols: {part_cols}'
+            msg += f'\nlib.L0s[{l}]: {lib.L0s.loc[l]}'
+            msg += f'\nlib.L0s: {lib.L0s}'
+            raise NetworkConstructionError(msg)
+
+    return TranscriptionUnit([Slot(lib, p) for p in parts])
+
 # main class: a network of interacting transcription units
 class Network:
-    def __init__(self, lib, recipe_name, custom_outputs=None, metadata=None):
+    def __init__(
+        self,
+        lib: PartsLibrary,
+        recipe_name: str,
+        custom_outputs: Optional[List] = None,
+        metadata: Optional[Dict] = None,
+    ):
+        # general network information
         self.lib = lib
         self.name: str = recipe_name
         self.custom_outputs = custom_outputs
-        self.transcription_units: Optional[Dict[str, TranscriptionUnit]] = None
-        self.compute_graph: Optional[pd.DataFrame] = None
-        self.central_dogma_graph: Optional[pd.DataFrame] = None
-        self.aggregations: Optional[pd.DataFrame] = None
+        self.metadata: Optional[Dict] = metadata
+
+        # raw recipe data, used to build the network and generate a unique signature
+        self.raw_tu_in_sources: Optional[List[Tuple[str, str, int]]] = None
+        self.raw_aggregations: Optional[List[Tuple[int, str, float]]] = None
+
+        # processed recipe data
         self.tu_inputs: Optional[pd.DataFrame] = None
-        self.metadata = metadata
-        self.n_inputs = None
-        self.n_outputs = None
+        self.tu_in_sources: Optional[pd.DataFrame] = None
+        self.aggregations: Optional[pd.DataFrame] = None
+        self.transcription_units: Optional[Dict[str, TranscriptionUnit]] = None
 
-    ## ───────────────────────────────────── ▼ ─────────────────────────────────────
-    # {{{                  --     public tools & utils    --
-    # ···············································································
+        # building the network produces these 2 graphs
+        self.central_dogma_graph: Optional[pd.DataFrame] = None
+        self.compute_graph: Optional[pd.DataFrame] = None
 
-    def get_compute_types(self):
-        node_dict = self.compute_graph.groupby('type').apply(lambda x: x.index.to_list()).to_dict()
-        return node_dict
+        # helper "private" member variables
+        self.__n_inputs = None
+        self.__n_outputs = None
 
-    #                                                                            }}}
-    ## ─────────────────────────────────────────────────────────────────────────────
+
+    def copy(self):
+        from copy import deepcopy
+        return deepcopy(self)
+
+
+    # def copy(self):
+        # from copy import deepcopy
+        # # using deepcopy because we don't want to share the same objects
+        # N = Network(self.lib, self.name, custom_outputs=self.custom_outputs)
+        # N.transcription_units = deepcopy(self.transcription_units)
+        # N.central_dogma_graph = deepcopy(self.central_dogma_graph)
+        # N.compute_graph = deepcopy(self.compute_graph)
+        # N.tu_in_sources = deepcopy(self.tu_in_sources)
+        # N.aggregations = deepcopy(self.aggregations)
+        # N.metadata = deepcopy(self.metadata) if self.metadata is not None else None
+        # N.raw_tu_in_sources = deepcopy(self.raw_tu_in_sources)
+        # N.raw_aggregations = deepcopy(self.raw_aggregations)
+        # N = deepcopy(self)
+        # return N
+
 
     ### {{{                    --     static constructors     --
 
     @classmethod
     def from_db(
-        cls, lib, name, recipe_db, custom_outputs=None, build=True, metadata=None, use_cache=None
+        cls,
+        lib: PartsLibrary,
+        name: str,
+        recipe_db: sqlite3.Connection,
+        custom_outputs: Optional[List] = None,
+        build: bool = True,
+        metadata: Optional[Dict] = None,
+        use_cache: Optional[str] = None,
     ):
+
         assert recipe_db is not None, 'recipe_db cannot be None'
         recipe_db.commit()
         c = recipe_db.cursor()
@@ -300,11 +338,11 @@ class Network:
         cls,
         lib: PartsLibrary,
         name: str,
-        transcription_units: dict[str, TranscriptionUnit], # dict of {TU_name: TU}
+        transcription_units: dict[str, TranscriptionUnit],  # dict of {TU_name: TU}
         raw_tu_in_sources: List[Tuple[str, str, int]],  # list of (source_name, TU_name, position)
         raw_aggregations: List[Tuple[int, str, float]],  # list of (agg_id, source_name, ratio)
-        build=True,
-        use_cache=None,
+        build: bool = True,  # whether to build the network after loading the raw data
+        use_cache: Optional[str] = None,  # path to cache
         **kwargs,
     ):
         n = cls(lib, name, **kwargs)
@@ -327,7 +365,6 @@ class Network:
             return n
 
         return ut.get_cache(lambda: actually_build(), n.get_signature(), use_cache)
-
 
     @classmethod
     def __obsolete__from_dict(
@@ -365,7 +402,13 @@ class Network:
 
     ##────────────────────────────────────────────────────────────────────────────}}}
 
+    def get_compute_types(self):
+        assert isinstance(self.compute_graph, pd.DataFrame)
+        node_dict = self.compute_graph.groupby('type').apply(lambda x: x.index.to_list()).to_dict()
+        return node_dict
+
     def build(self):
+        assert self.transcription_units is not None
         assert len(self.transcription_units) > 0, f'No transcription units in recipe {self.name}'
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
@@ -377,9 +420,6 @@ class Network:
             and self.transcription_units is not None
         )
 
-    def set_input_as_bias(self, input_id):
-        assert self.is_built()
-        self.compute_graph.loc[input_id, 'extra'].update({'bias': True})
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                           --     utils     --
@@ -940,9 +980,9 @@ class Network:
         return [self.central_dogma_graph.loc[cdg_id]['content'][0] for cdg_id in onode['cdg_input']]
 
     def get_nb_outputs(self):
-        if self.n_outputs is None:
-            self.n_outputs = len(self.get_output_proteins())
-        return self.n_outputs
+        if self.__n_outputs is None:
+            self.__n_outputs = len(self.get_output_proteins())
+        return self.__n_outputs
 
     def get_input_from_output(self, output_arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
         """Given an array of output values, returns the columns that are inputs of the inverted network,
@@ -965,6 +1005,7 @@ class Network:
 
     def get_inverted_input_positions(self, include_biases=False):
         """Returns a mapping from input position to output position"""
+        assert isinstance(self.compute_graph, pd.DataFrame)
         mapping = {}  # input number -> output position
         mask = self.compute_graph['type'] == 'input'
         if include_biases:
@@ -993,6 +1034,7 @@ class Network:
         ), f'Invalid input protein name: {input_protein_name}'
         output_position = output_proteins.index(input_protein_name)
         assert output_position in original_mapping.values()
+        assert isinstance(self.compute_graph, pd.DataFrame)
         inputs = self.compute_graph[self.compute_graph['type'] == 'input']
         found = False
         for i, row in inputs.iterrows():
@@ -1010,6 +1052,7 @@ class Network:
 
     def compute_node_is_upstream_of(self, node_id, other_node_id):
         """Returns True if node_id is upstream of other_node_id"""
+        assert isinstance(self.compute_graph, pd.DataFrame)
         if node_id == other_node_id:
             return True
         node = self.compute_graph.loc[node_id]
@@ -1022,7 +1065,6 @@ class Network:
 
     def sort_nodes_by_upstream(self, nodes):
         from functools import cmp_to_key
-
         def custom_cmp(a, b):
             if self.compute_node_is_upstream_of(a, b):
                 return -1
@@ -1037,6 +1079,7 @@ class Network:
         """Returns a list of lists of compute nodes from the network,
         where each node of a sublist can be computed independently of the others,
         but each sublist must be computed in order."""
+        assert isinstance(self.compute_graph, pd.DataFrame)
         visited = set()
         batches = []
         nodes = set(nodes) if nodes is not None else set(self.compute_graph.index)
@@ -1055,9 +1098,9 @@ class Network:
         return [b for b in batches if len(b) > 0]
 
     def get_nb_inputs(self):
-        if self.n_inputs is None:
-            self.n_inputs = len(self.get_inverted_input_proteins())
-        return self.n_inputs
+        if self.__n_inputs is None:
+            self.__n_inputs = len(self.get_inverted_input_proteins())
+        return self.__n_inputs
 
     def cleanup(self):
         if self.compute_graph is not None:
@@ -1123,15 +1166,10 @@ class Network:
                 set(self.central_dogma_graph.index)
             ), 'central dogma graph has duplicate ids'
 
-    def copy(self):
-        N = Network(self.lib, self.name, custom_outputs=self.custom_outputs)
-        N.transcription_units = self.transcription_units.copy()
-        N.central_dogma_graph = self.central_dogma_graph.copy()
-        N.compute_graph = self.compute_graph.copy()
-        N.tu_in_sources = self.tu_in_sources.copy()
-        N.aggregations = self.aggregations.copy()
-        N.metadata = self.metadata.copy() if self.metadata is not None else None
-        return N
+
+
+
+    
 
     def __repr__(self):
         return f'Network(name={self.name}, metadata={self.metadata})'
@@ -1190,7 +1228,7 @@ class Network:
         output_node = cg[cg.type == 'output'].iloc[0]
         # add the quantile variable to the output node
         output_node['extra']['quantile_variable_id'] = list(range(len(output_node.input_from)))
-        self.n_outputs = len(output_node.input_from)
+        self.__n_outputs = len(output_node.input_from)
         for i, (nid, oid) in enumerate(output_node.input_from):
             propagate_upstream(cg.loc[nid], i, oid)
 

@@ -55,9 +55,24 @@ class DataRescaler:
 
     @classmethod
     def from_data_manager(cls, dm):
-        fwd = lambda x: dm.rescale([x])[0]
-        inv = lambda x: dm.unscale([x])[0]
+        def fwd(x):
+            return dm.rescale([x])[0]
+        def inv(x):
+            return dm.unscale([x])[0]
         return cls(fwd, inv)
+
+class DataManagerRescaler:
+    def __init__(self, dm):
+        self.dm = dm
+
+    def fwd(self, x):
+        return self.dm.rescale([x])[0]
+
+    def inv(self, x):
+        return self.dm.unscale([x])[0]
+
+    def __call__(self, x):
+        return self.fwd(x)
 
 
 IDENTITY_RESCALER = DataRescaler(lambda x: x, lambda x: x)
@@ -153,6 +168,7 @@ def inv_loglog(x):
 def get_reordered_protein_names(network, input_order=None, protein_aliases=None, **_):
     input_names = network.get_inverted_input_proteins()
     output_names = network.get_output_proteins()
+
     if input_order is not None:
         assert len(input_order) == len(input_names), f'Wrong number of inputs: {input_order}'
         reordered_input_names = [input_names[i] for i in input_order]
@@ -162,7 +178,12 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
         in_order = [input_names.index(i) for i in reordered_input_names]
 
     if len(output_names) != (len(input_names) + 1):
-        raise ValueError(f'Wrong number of outputs. Outputs: {output_names}, inputs: {input_names}')
+        raise ValueError(
+            f"""Wrong number of inputs/outputs:
+                         {len(input_names)} inputs: {input_names},
+                         {len(output_names)} outputs: {output_names}.
+                         Expecting networks to have one more output than inputs."""
+        )
 
     output_name = list(set(output_names) - set(input_names))[0]
     output_pos = output_names.index(output_name)
@@ -261,6 +282,7 @@ def setup_symlog_axis(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{              --     knn and spatial partitionning    --
+
 @jax.jit
 def weighted_quantile(data, weights, qu):
     ix = jnp.argsort(data)
@@ -1738,13 +1760,39 @@ def network_plot(
     if kde is not False:
         if kde is None:
             kde = dman.get_kdes()[network_id]
+
+    rescaler = DataRescaler.from_data_manager(dman)
+
+    return direct_network_plot(
+        network,
+        x,
+        y,
+        rescaler,
+        *args,
+        kde=kde,
+        density_quantile_threshold=density_quantile_threshold,
+        method=method,
+        **kw,
+    )
+
+
+def direct_network_plot(
+    network,
+    x,
+    y,
+    rescaler,
+    *args,
+    kde=None,
+    density_quantile_threshold=0.05,
+    method='smooth',
+    **kw,
+):
+    if kde is not False:
         rng = jax.random.PRNGKey(0)
         subsample = du.optimal_density_subsample(
             x, kde, rng, quantile_threshold=density_quantile_threshold
         )
         x, y = x[subsample], y[subsample]
-
-    rescaler = DataRescaler.from_data_manager(dman)
 
     if method == 'smooth':
         return smooth(x, y, network, rescaler, *args, **kw)
@@ -2144,6 +2192,38 @@ def plot_node(
 
     ax.scatter(randomx, yrandom, s=2, c=color, alpha=0.05, linewidth=0)
     ax.plot(x, ymedian, label=qname if qname is not None else '', c=color, ls='--', lw=2)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+### {{{                    --     High level helpers     --
+
+BASE_DEFAULT_CONFIG = {
+    'xlims': (-0.027, 0.8),
+    'ylims': (-0.027, 0.8),
+    'log_density': True,
+    'size': (4, 4),
+    'skip_ticklabel_range': (0.0, 101),
+}
+
+DEFAULT_1D_CONFIG = {
+    'method': 'histogram',
+}
+
+DEFAULT_2D_CONFIG = {
+    'method': 'smooth',
+}
+
+DEFAULT_3D_CONFIG = {
+    'xlims': (-0.027, 0.85),
+    'ylims': (-0.027, 0.85),
+    'vlims': (-0.027, 0.85),
+    'method': 'smooth',
+    'slices': (0.1, 0.3, 0.5),
+    'radius': 0.11,
+    'knn': 500,
+    'min_points': 20,
+}
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
