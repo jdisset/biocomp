@@ -928,23 +928,22 @@ def print_xla(fun, *args, static_argnums=(), **kwargs):
     print(get_xla(fun, *args, **kwargs))
 
 
-def get_looped_slice(a, start, end):
-    """Get a slice of an array that loops around the end of the array if end > a.shape[0]"""
-    offset = start // a.shape[0]
-    start = start % a.shape[0]
-    end = end - offset * a.shape[0]
-    if end > a.shape[0]:  # loop around
-        return np.concatenate([a[start:], get_looped_slice(a, 0, end - a.shape[0])])
+def get_looped_slice(a, start, end, axis=0):
+    """Get a slice of an array that loops around the end of the array if end > a.shape[axis]"""
+    offset = start // a.shape[axis]
+    start = start % a.shape[axis]
+    end = end - offset * a.shape[axis]
+    if end > a.shape[axis]:  # loop around
+        idx = [slice(None)] * a.ndim
+        idx[axis] = slice(start, None)
+        s1 = a[tuple(idx)]
+        idx[axis] = slice(0, end - a.shape[axis])
+        s2 = get_looped_slice(a, 0, end - a.shape[axis], axis)
+        return np.concatenate([s1, s2], axis=axis)
     else:
-        return a[start:end]
-
-
-def value_and_jacfwd(f, x):
-    pushfwd = partial(jax.jvp, f, (x,))
-    basis = jnp.eye(x.size, dtype=x.dtype)
-    y, jac = jax.vmap(pushfwd, out_axes=(None, 1))((basis,))
-    return y, jac
-
+        idx = [slice(None)] * a.ndim
+        idx[axis] = slice(start, end)
+        return a[tuple(idx)]
 
 def value_and_jacrev(f, x):
     y, pullback = jax.vjp(f, x)

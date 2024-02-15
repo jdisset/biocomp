@@ -1,14 +1,16 @@
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                      --     import and init     --
 # ···············································································
-from jax.tree_util import Partial as partial
 import jax
 from typing import Tuple
 from datetime import datetime
 import jax.numpy as jnp
 from jax import jit, vmap, grad, value_and_grad
 from pathlib import Path
-from jax.tree_util import Partial as partial
+from jax.tree_util import Partial
+
+# original partial:
+from functools import partial
 import json
 import pandas as pd
 import optax
@@ -27,6 +29,8 @@ import wandb as wb
 import os
 import time
 from tqdm import tqdm
+
+from typing import List, Tuple, Dict, Any, Callable, Collection, Optional
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
@@ -57,7 +61,7 @@ def huber_quantile_loss(e, q, delta=0.1):
 # ···············································································
 
 
-@partial(jit, static_argnums=(1,))
+@Partial(jit, static_argnums=(1,))
 def compstats(v, smooth_win=1):
     medians = vmap(jnp.median)(v)
     mins = vmap(jnp.min)(v)
@@ -236,16 +240,24 @@ def wandb_log_epoch(epoch_history=None, **_):
 
 def console_log(epoch, training_config, epoch_history=None, **_):
     if epoch_history is not None and len(epoch_history['loss']) > 0:
-        loss = np.array(epoch_history['loss'])
-        avg = np.mean(loss)
-        std = np.std(loss)
-        lmin, lmax = jnp.min(loss), jnp.max(loss)
+        losses = np.array(epoch_history['loss'])
+        # make it 2d if it's 1d
+        if losses.ndim == 1:
+            losses = losses[:, None]
+
+        avg_losses = np.mean(losses, axis=1)
+        best_id = np.argmin(avg_losses)
+        best_std = np.std(losses[best_id])
+        avg_std = np.std(avg_losses)
+        avg_avg = np.mean(avg_losses)
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
         fmt = lambda x: f'{x:.1e}' if x < 1e-3 or x > 1e3 else f'{x:.3f}'
+
         ut.logger.info(
-            f"""[{epoch}/{training_config["epochs"]}] \
-        loss: {fmt(avg)} ± {fmt(std)} [min {fmt(lmin)}, max {fmt(lmax)}] in \
-        {epoch_history["epoch_time"]:.2f}s"""
+            f"""[{epoch}/{training_config["epochs"]} in {epoch_history["epoch_time"]:.2f}s]
+             best loss: {fmt(avg_losses[best_id])} ± {fmt(best_std)} (replicate n° {best_id+1}/{len(losses)})
+             replicates avg: {fmt(avg_avg)} ± {fmt(avg_std)} """
         )
 
 
@@ -300,6 +312,7 @@ def setup_wandb_logging(
     dman,
     training_config,
     compute_config,
+    data_config,
     plot_period=-1,  # only at the end
     params_save_period=-1,  # only at the end
     entity='jdisset',
@@ -307,9 +320,9 @@ def setup_wandb_logging(
 ):
     import wandb as wb
 
-    full_config = {**training_config, **compute_config.config}
-
+    full_config = {**training_config, **compute_config.config, **data_config}
     wb.init(config=full_config, project=project, entity=entity, **kw)
+
     save_dir = Path(wb.run.dir)
     loggers = [
         (1, console_log),
@@ -338,51 +351,94 @@ def get_memory(config):
         return joblib.Memory(None, verbose=0)
 
 
-def start(dman: du.DataManager, training_config, compute_config: cmp.ComputeConfigManager , loggers=None, seed=None):
+def start(
+    dman: du.DataManager,
+    training_config,
+    compute_config: cmp.ComputeConfigManager,
+    loggers=None,
+    seed=None,
+):
+    # Note on loggers:
+    # loggers is a list of tuples (period:int, logger: Callable)
+    # period is the number of epochs between two calls to the logger
+    # if period is -1 or None, the logger will be called at the end of the training
+    # if period is 0 or 1, the logger will be called at every epoch
+    # all loggers are called at the beginning of the training run
+    # with epoch=0 and epoch_history=None
 
     ut.logger.debug(f"About to start training")
     ut.logger.debug(f"Training config: {training_config}")
     ut.logger.debug(f"Compute config: {compute_config.config}")
 
-    if seed is not None:
-        training_config['rng_key'] = seed
-    ut.logger.info(f"Going to train with random seed {training_config['rng_key']}")
-    key = jax.random.PRNGKey(training_config['rng_key'])
+    # --- get constants from training config (making sure they are there)
+    NEGATIVE_GRAD_PENALTY = training_config['negative_grad_penalty']
+    N_REPLICATES = training_config.get('n_replicates', 1)
+    N_BATCHES = training_config['n_batches']
+    N_EPOCHS = training_config['epochs']
+    BATCH_SIZE = training_config['batch_size']
+    KEEP_IN_HISTORY = training_config.get('keep_in_history', ['loss'])
+    STEPS_PER_EPOCH = max(1, int(training_config['steps_per_epoch']))
+    RNG_KEY = seed or training_config['rng_key']
+    HUBER_QUANTILE_LOSS_DELTA = float(training_config['huber_quantile_loss_delta'])
 
     # --- init & batches generation
 
-    def init_stack(dman, key):
+    def init_stack(key) -> Tuple[cmp.ComputeStack, ParameterTree]:
         stack = dman.build_compute_stack(compute_config)
+        assert stack.init is not None
         with ut.timer('Stack initialization'):
-            params = stack.init(key)
+            params = vmap(stack.init)(jax.random.split(key, N_REPLICATES))
         return stack, params
 
-    def generate_batches(dman, key):
+    def generate_batches(key):
+        total_n_batches = N_BATCHES * N_REPLICATES
+
         with ut.timer('Generating batches'):
-            xbatches, ybatches = dman.get_batches(key)  # (B,M,N,F) shape
+            xbatches, ybatches = dman.get_batches(total_n_batches, BATCH_SIZE, key)
+        # current shape is (R*B,N,F), final shape should be (R,B,N,F)
+        # R: replicates, B: batches, N: data, F: features
+        xbatches = xbatches.reshape(N_REPLICATES, N_BATCHES, *xbatches.shape[1:])
+        ybatches = ybatches.reshape(N_REPLICATES, N_BATCHES, *ybatches.shape[1:])
+
+        assert xbatches.shape[:-1] == (
+            N_REPLICATES,
+            N_BATCHES,
+            BATCH_SIZE,
+        )
+        assert ybatches.shape[:-1] == (
+            N_REPLICATES,
+            N_BATCHES,
+            BATCH_SIZE,
+        )
+
         return xbatches, ybatches
 
-    stack, params = init_stack(dman, key)
-    xbatches, ybatches = generate_batches(dman, key)
-    ut.logger.info(f"Generated {xbatches.shape[0]} batches")
+    ut.logger.info(f"Using random seed {RNG_KEY}")
+    key = jax.random.PRNGKey(RNG_KEY)
+
+    stack, params = init_stack(key)
+    assert params is not None
+
+    xbatches, ybatches = generate_batches(key)
 
     optimizer = get_optimizer(training_config)
     static, dynamic = params.filter_by_tag(['non_grad', 'local'])
     ut.logger.info(f"Split params between dynamic and static. Now intializing optimizer.")
+    opt_state = vmap(optimizer.init)(dynamic)
 
-    opt_state = optimizer.init(dynamic)
-    total_batches = training_config['n_batches']
-    assert total_batches == xbatches.shape[0] == ybatches.shape[0]
-    steps_per_epoch = max(1, int(training_config['steps_per_epoch']))
     ut.logger.info(
-        f"Done initializing optimizer, total batches: {total_batches}, steps per epoch: {steps_per_epoch}"
+        f"""Done initializing optimizer,
+    n_replicates: {N_REPLICATES},
+    batches: {xbatches.shape[1]},
+    steps per epoch: {STEPS_PER_EPOCH}"""
     )
 
     # --- loss & update functions
 
-    vmapped_compute = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+    assert stack.apply is not None
+    batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
-    def loss_func(dynamic, static, X, Y, Z, key):
+    def check_XYZ(X, Y, Z, stack):
         nb_inputs = sum([n.get_nb_inputs() for n in stack.networks])
         nb_outputs = sum([n.get_nb_outputs() for n in stack.networks])
         assert X.ndim == Y.ndim == Z.ndim == 2, "X, Y, and Z must have 2 dimensions"
@@ -396,23 +452,26 @@ def start(dman: du.DataManager, training_config, compute_config: cmp.ComputeConf
             Y.shape[1] == Z.shape[1] == nb_outputs
         ), "Y and Z must have as many columns as the total number of outputs in the stack"
 
-        # params = ut.assemble_params(dynamic, static)
+    def loss_func(dynamic, static, X, Y, Z, key):
+
+        check_XYZ(X, Y, Z, stack)
+
         params = ParameterTree.merge(dynamic, static)
         keys = jax.random.split(key, X.shape[0])
 
-        yhat, grads = vmapped_compute(params, X, Z, keys)
+        yhat, grads = batch_apply(params, X, Z, keys)
         assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
 
         error = yhat - Y
-        quantile_loss = jnp.mean(
-            huber_quantile_loss(error, Z, delta=training_config['huber_quantile_loss_delta'])
-        )
+        quantile_loss = jnp.mean(huber_quantile_loss(error, Z, delta=HUBER_QUANTILE_LOSS_DELTA))
 
         # grads is the concatenated and flattened jacobian of
         # translate, transcript, and output nodes wrt their inputs
         # they should be monotonically increasing so we add a loss term
-        negative_grads = jnp.mean(jnp.where(grads < 0, -grads, 0))
-        return quantile_loss + training_config['negative_grad_penalty'] * negative_grads
+
+        negative_grads = jnp.mean(jnp.clip(-grads, 0, None))
+
+        return quantile_loss + NEGATIVE_GRAD_PENALTY * negative_grads
 
     def training_step(params, opt_state, x, y, z, key):
         static, dynamic = params.filter_by_tag(['non_grad', 'local'])
@@ -428,83 +487,93 @@ def start(dman: du.DataManager, training_config, compute_config: cmp.ComputeConf
         }
         return res
 
-    keep_in_history = training_config.get('keep_in_history', ['loss'])
-
     def scannable_step(carry, i_x_y_z_k):
         params, opt_state = carry
         i, x, y, z, k = i_x_y_z_k
         updt = training_step(params, opt_state, x, y, z, k)
         params, opt_state = updt['params'], updt['opt']
-        history = {k: updt[k] for k in keep_in_history}
+        history = {k: updt[k] for k in KEEP_IN_HISTORY}
         return (params, opt_state), history
 
-    def epoch_step(start_params, start_opt_state, epoch_key, xbs, ybs):
-        pscan = ut.progress_scan(steps_per_epoch, message='Training model')
-        zbatches = jax.random.uniform(epoch_key, ybs.shape)
-        batch_keys = jax.random.split(epoch_key, steps_per_epoch)
+    def per_replicate_epoch_step(start_params, start_opt_state, key, xbatches, ybatches):
+        assert xbatches.shape[:-1] == (STEPS_PER_EPOCH, BATCH_SIZE)
+        assert ybatches.shape[:-1] == (STEPS_PER_EPOCH, BATCH_SIZE)
+        pscan = ut.progress_scan(STEPS_PER_EPOCH, message='Training model')
+        zbatches = jax.random.uniform(key, ybatches.shape)
+        assert zbatches.shape == ybatches.shape
+        batch_keys = jax.random.split(key, STEPS_PER_EPOCH)
         sstep = pscan(scannable_step)
         (final_params, final_opt_state), epoch_history = jax.lax.scan(
             sstep,
             (start_params, start_opt_state),
-            (jnp.arange(steps_per_epoch), xbs, ybs, zbatches, batch_keys),
+            (jnp.arange(STEPS_PER_EPOCH), xbatches, ybatches, zbatches, batch_keys),
         )
         return final_params, final_opt_state, epoch_history
 
-    def epoch_step_no_scan(start_params, start_opt_state, epoch_key, xbs, ybs):
-        zbatches = jax.random.uniform(epoch_key, ybs.shape)
-        batch_keys = jax.random.split(epoch_key, steps_per_epoch)
-        all_history = []
-        tstep = training_step
-        for i, (x, y, z, k) in tqdm(
-            enumerate(zip(xbs, ybs, zbatches, batch_keys)), total=steps_per_epoch
-        ):
-            updt = tstep(start_params, start_opt_state, x, y, z, k)
-            start_params, start_opt_state = updt['params'], updt['opt']
-            history = {k: updt[k] for k in keep_in_history}
-            all_history.append(history)
-        epoch_history = {k: jnp.stack([h[k] for h in all_history]) for k in keep_in_history}
-        return start_params, start_opt_state, epoch_history
+    def epoch_step(params: ParameterTree, opt_state: optax.OptState, epoch_key, xs, ys):
+        keys = jax.random.split(epoch_key, N_REPLICATES)
+        print(keys.shape)
+        assert xs.shape[:-1] == ys.shape[:-1] == (N_REPLICATES, STEPS_PER_EPOCH, BATCH_SIZE)
+        return jax.vmap(per_replicate_epoch_step)(params, opt_state, keys, xs, ys)
 
-    epoch_step = epoch_step if not ut.enable_checks else epoch_step_no_scan
-
+    print(xbatches.shape, ybatches.shape)
     with ut.timer('Lowering the epoch_step function before compilation'):
-        xb = ut.get_looped_slice(xbatches, 0 * steps_per_epoch, steps_per_epoch)
-        yb = ut.get_looped_slice(ybatches, 0 * steps_per_epoch, steps_per_epoch)
+        xb = ut.get_looped_slice(xbatches, 0, STEPS_PER_EPOCH, axis=1)
+        yb = ut.get_looped_slice(ybatches, 0, STEPS_PER_EPOCH, axis=1)
         lowered = jax.jit(epoch_step).lower(params, opt_state, key, xb, yb)
 
     with ut.timer('Compiling the epoch_step function'):
         compiled_epoch_step = lowered.compile()
 
     # --- main training loop
+    loggers = [(1, console_log)]
 
     if loggers is None:
         loggers = [(1, console_log)]
 
+    # call all loggers at the beginning of the training
     for _, l in loggers:
         l(epoch=0, training_config=training_config)
 
-    ut.logger.info(f'Begin training for {training_config["epochs"]} epochs')
+    ut.logger.info(f'Begin training for {N_EPOCHS} epochs')
 
-    for i, epoch_key in enumerate(jax.random.split(key, training_config['epochs']), 1):
+    epoch_history = {}
+
+    loss_history = []
+
+    for i, epoch_key in enumerate(jax.random.split(key, N_EPOCHS), 1):
 
         t0 = time.time()
-        xb = ut.get_looped_slice(xbatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
-        yb = ut.get_looped_slice(ybatches, i * steps_per_epoch, (i + 1) * steps_per_epoch)
+        xb = ut.get_looped_slice(xbatches, i * STEPS_PER_EPOCH, (i + 1) * STEPS_PER_EPOCH, axis=1)
+        yb = ut.get_looped_slice(ybatches, i * STEPS_PER_EPOCH, (i + 1) * STEPS_PER_EPOCH, axis=1)
         params, opt_state, epoch_history = compiled_epoch_step(params, opt_state, epoch_key, xb, yb)
         epoch_history['epoch_time'] = time.time() - t0
         epoch_history['latest_params'] = params
+        if 'loss' in epoch_history:
+            loss_history.append(epoch_history['loss'])
 
         for t, l in loggers:
             if t is not None:
-                if (t == 0 or (i % t == 0 and t > 0)) or i == training_config['epochs']:
+                if (t == 0 or (i % t == 0 and t > 0)) or i == N_EPOCHS:
                     l(
                         epoch=i,
                         training_config=training_config,
                         epoch_history=epoch_history,
-                        nbatches=steps_per_epoch,
+                        nbatches=STEPS_PER_EPOCH,
                     )
 
-    return params, epoch_history
+    for t, l in loggers:
+        if t is None or t == -1:
+            l(
+                epoch=N_EPOCHS,
+                training_config=training_config,
+                epoch_history=epoch_history,
+            )
+
+    ut.logger.info(f'End of training for {N_EPOCHS} epochs')
+
+    return params, loss_history
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -526,26 +595,9 @@ DEFAULT_TRAINING_CONFIG = {
     'decay_epochs': 130,
     'adam_w_decay': 0.001,
     'max_gradient_norm': 1.0,
-    # cache
-    "network_cache_location": "../__cache/network",
-    "training_cache_location": "../__cache/training",
-    "densities_cache_location": "../__cache/densities",
-    # -------- data config --------
     # batches
     "batch_size": 32,
     "n_batches": 2048,
-    # log transform:
-    "data_min_value": 500,
-    "data_max_value": 1e8,
-    "data_log_offset": 3e3,
-    "data_log_factor": 100,
-    "data_log_poly_threshold": 300,
-    "data_log_poly_compression": 0.4,
-    # resampling:
-    "data_sampling_kde_bw_method": 0.02,
-    "data_sampling_max_density_samples": 4000,
-    "data_sampling_density_quantile_threshold": 0.025,  # threshold = min of both
-    "data_sampling_coords_for_density_threshold": 0.15,  # threshold = min of both
 }
 
 import argparse
@@ -582,6 +634,9 @@ class TrainingProgram:
             '--training_config_file', type=str, default=None, help='path to training config'
         )
         self.parser.add_argument(
+            '--data_config_file', type=str, default=None, help='path to data config'
+        )
+        self.parser.add_argument(
             '--local_save_dir', type=str, default='./results', help='path to save results'
         )
         self.parser.add_argument(
@@ -607,7 +662,7 @@ class TrainingProgram:
         self.parser.add_argument(
             '--wandb_plot_period',
             type=int,
-            default=-1,
+            default=-1,  # only at the end
             help='wandb plot period, None = no plots, -1 = only at the end',
         )
 
@@ -652,19 +707,24 @@ class TrainingProgram:
             self.args = self.parser.parse_args(extra_args + sys.argv[1:])
             ut.logger.info(f'args: {self.args}')
 
-        if self.args.compute_config_file is not None:
-            if not Path(self.args.compute_config_file).is_file():
-                raise ValueError(f'{self.args.compute_config_file} is not a file')
-            self.compute_config = cmp.ComputeConfigManager.from_file(self.args.compute_config_file)
-        else:
-            self.compute_config = cmp.DEFAULT_COMPUTE_CONFIG
-
+        # load the 3 config files (training, compute, data)
+        self.training_config = DEFAULT_TRAINING_CONFIG
         if self.args.training_config_file is not None:
             if not Path(self.args.training_config_file).is_file():
                 raise ValueError(f'{self.args.training_config_file} is not a file')
             self.training_config = json.load(open(self.args.training_config_file))
-        else:
-            self.training_config = DEFAULT_TRAINING_CONFIG
+
+        self.compute_config = cmp.DEFAULT_COMPUTE_CONFIG
+        if self.args.compute_config_file is not None:
+            if not Path(self.args.compute_config_file).is_file():
+                raise ValueError(f'{self.args.compute_config_file} is not a file')
+            self.compute_config = cmp.ComputeConfigManager.from_file(self.args.compute_config_file)
+
+        self.data_config = du.DEFAULT_DATA_CONFIG
+        if self.args.data_config_file is not None:
+            if not Path(self.args.data_config_file).is_file():
+                raise ValueError(f'{self.args.data_config_file} is not a file')
+            self.data_config = json.load(open(self.args.data_config_file))
 
         if self.args.enable_checks:
             ut.set_enable_checks(True)
@@ -675,14 +735,12 @@ class TrainingProgram:
         # loglevel
         ut.set_loglevel(self.args.loglevel)
 
-        # device
-        # self.device = jax.devices(self.args.device)[0]
-
         if self.args.seed is not None:
             self.seed = self.args.seed
         else:
             self.seed = np.random.randint(0, 2**32)
 
+    def update_config_from_args(self):
         # Apply updates to the training_config dict
         updates = getattr(self.args, f"config_updates", [])
         for update in updates:
@@ -702,7 +760,18 @@ class TrainingProgram:
         else:
             raise AttributeError(f"{self.__class__.__name__} object has no attribute '{attr}'")
 
-    def start_training(self, training: du.DataManager, validation: du.DataManager = None):
+    def start_training(
+        self,
+        training: du.DataManager,
+        validation: Optional[du.DataManager] = None,
+        extra_loggers: List[Tuple[int, Callable]] = [],
+    ):
+
+        # we update the training config with the command line arguments
+        # after parsing the command line arguments, because some other program
+        # might have added some arguments to the training config
+
+        self.update_config_from_args()
 
         prog_config = self.args.__dict__.copy()
 
@@ -714,6 +783,7 @@ class TrainingProgram:
                 training,
                 self.training_config,
                 self.compute_config,
+                self.data_config,
                 plot_period=self.wandb_plot_period,
                 params_save_period=self.wandb_save_period,
             )
@@ -748,8 +818,9 @@ class TrainingProgram:
                 ),
             ]
 
-        start(training, self.training_config, self.compute_config, loggers, seed=self.seed)
+        loggers += extra_loggers
+
+        return start(training, self.training_config, self.compute_config, loggers, seed=self.seed)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-

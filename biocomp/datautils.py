@@ -364,6 +364,7 @@ DEFAULT_DATA_CONFIG = {
     'data_sampling_coords_for_density_threshold': 0.15,
 }
 
+
 class DataManager:
     """The DataManager handles XP data and their matching compute stacks"""
 
@@ -418,7 +419,7 @@ class DataManager:
         sub_networks = [self._networks[i] for i in network_ids]
         return DataManager(sub_x, sub_y, sub_networks, self.data_cfg)
 
-    def build_compute_stack(self, compute_cfg, **kwargs):
+    def build_compute_stack(self, compute_cfg, **kwargs) -> ComputeStack:
         """Build/Get the composite compute stack of all networks"""
         self.compute_stack = ComputeStack(self._networks)
         self.compute_stack.build(compute_cfg, **kwargs)
@@ -524,7 +525,7 @@ class DataManager:
             for x in X
         ]
 
-    def get_batches(self, rng_key):
+    def get_batches(self, n_batches, batch_size, rng_key):
         if self._densities is None:
             self.compute_densities()
         xbatches, ybatches = _get_batches(
@@ -533,8 +534,8 @@ class DataManager:
             self.get_kdes(),
             self._densities,
             rng_key,
-            self.data_cfg['batch_size'],
-            self.data_cfg['n_batches'],
+            batch_size,
+            n_batches,
             self.data_cfg['data_sampling_density_quantile_threshold'],
             self.data_cfg['data_sampling_coords_for_density_threshold'],
         )

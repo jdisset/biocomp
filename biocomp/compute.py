@@ -95,6 +95,12 @@ class ComputeConfigManager:
         ccm.load_file(filename)
         return ccm
 
+    @classmethod
+    def from_dict(cls, d):
+        ccm = cls()
+        ccm.config = d
+        return ccm
+
     def load(self, config):
         self.config = config
 
@@ -344,7 +350,7 @@ class ComputeStack:
             self.check()
             self.is_built = True
 
-    def init(self, rng_key: PRNGKey):
+    def init(self, rng_key: PRNGKey) -> ParameterTree:
         """
         Generates a randomly initilized dictionary of parameters for the stack
         """
