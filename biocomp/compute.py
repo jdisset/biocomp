@@ -13,7 +13,6 @@ import pandas as pd
 from jax import vmap
 from jax.tree_util import Partial as partial
 import json
-import inspect
 
 from rich import print as pprint
 
@@ -26,57 +25,29 @@ from . import nodes
 
 from jax.typing import ArrayLike
 
-PRNGKey = NewType("PRNGKey", ArrayLike)
+PRNGKey = Union[jnp.ndarray, np.ndarray, int]
+ndArray = Union[jnp.ndarray, np.ndarray]
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                      --     Config manager     --
 
 
-def unwrap_partial_function(implementation):
-    if hasattr(implementation, 'func') and hasattr(implementation, 'keywords'):
-        partial_args = implementation.keywords
-        implementation = implementation.func
-    else:
-        partial_args = {}
-    return implementation, partial_args
-
-
 class ComputeConfigManager:
     def __init__(self):
         self.config = {
-            # 'biocomp_version': ut.get_biocomp_version(),
-            # 'commit_hash': ut.get_git_commit_hash(),
             'functions': {},
         }
 
-    def set_impl(self, key, implementation, **kwargs):
-        implementation, partial_args = unwrap_partial_function(implementation)
-        kwargs.update(partial_args)
+    def set_impl(self, node_name: str, implementation: Callable, **kwargs):
+        self.config['functions'][node_name] = ut.serialize_function(implementation, **kwargs)
 
-        signature = inspect.signature(implementation)
-        parameters = {}
-        for name, param in signature.parameters.items():
-            if name in kwargs:
-                parameters[name] = kwargs[name]
-            elif param.default != inspect.Parameter.empty:
-                parameters[name] = param.default
-
-        sc = parameters.pop('stack', None)
-        assert sc is None, 'stack is a reserved parameter name'
-
-        self.config['functions'][key] = {
-            'implementation': implementation.__name__,
-            'parameters': parameters,
-        }
-
-    def get_impl(self, key):
-        assert key in self.config['functions'], f'No function named {key}'
-        func_data = self.config['functions'][key]
-        # take from node module
-        node_m = nd
-        implementation = getattr(node_m, func_data['implementation'])
-        params = func_data['parameters']
-        return partial(implementation, **params)
+    def get_impl(self, node_name, module_name=nd.__name__):
+        if node_name not in self.config['functions']:
+            raise ValueError(f'No implementation for {node_name}')
+        return ut.deserialize_function(
+            self.config['functions'][node_name], module_names=[module_name]
+        )
 
     def export(self, filename):
         with open(filename, 'w') as f:
@@ -120,7 +91,7 @@ DEFAULT_COMPUTE_CONFIG.set_impl('sequestron_ERN', nodes.ERN5p)
 DEFAULT_COMPUTE_CONFIG.set_impl('source', nodes.source)
 DEFAULT_COMPUTE_CONFIG.set_impl('inv_source', nodes.inv_source)
 DEFAULT_COMPUTE_CONFIG.set_impl('bias', nodes.bias)
-# DEFAULT_COMPUTE_CONFIG.set_impl('inv_bias', nodes.inv_bias)compute
+# DEFAULT_COMPUTE_CONFIG.set_impl('inv_bias', nodes.inv_bias)
 DEFAULT_COMPUTE_CONFIG.set_impl('numeric', nodes.bias)
 # DEFAULT_COMPUTE_CONFIG.set_impl('inv_numeric', nodes.inv_bias)
 DEFAULT_COMPUTE_CONFIG.set_impl('aggregation', nodes.aggregation)
@@ -141,12 +112,12 @@ class VirtualNode:
     is used to sort the nodes in the stack, so that the nodes that need to be computed
     first are at the top of the stack."""
 
-    network: Network = None
-    network_id: int = None
-    type_signature: str = None  # type of node, and number of inputs and outputs
-    compute_node_id: int = None  # id of the compute node in the network
-    node_id: int = None  # unique id for the node in the stack
-    batch_order: int = 0  # only used for sorting and debugging
+    network: Optional[Network] = None
+    network_id: Optional[int] = None
+    type_signature: Optional[str] = None  # type of node, and number of inputs and outputs
+    compute_node_id: Optional[int] = None  # id of the compute node in the network
+    node_id: Optional[int] = None  # unique id for the node in the stack
+    batch_order: Optional[int] = 0  # only used for sorting and debugging
 
     @staticmethod
     def generate_type_signature(network, compute_node_id):
@@ -171,11 +142,15 @@ class VirtualNode:
     def set_compute_node_column(self, col, value):
         if self.network is None:
             return
+        assert self.compute_node_id is not None, 'No compute node id'
+        assert self.network.compute_graph is not None, 'No compute graph'
         self.network.compute_graph.at[self.compute_node_id, col] = value
 
     def get_compute_node(self, col=None):
         if self.network is None:
             return None
+        assert self.compute_node_id is not None, 'No compute node id'
+        assert self.network.compute_graph is not None, 'No compute graph'
         if col is None:
             return self.network.compute_graph.loc[self.compute_node_id]
         else:
@@ -304,21 +279,21 @@ class ComputeLayer:
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                       --     Compute Stack     --
+
 @dataclass
 class ComputeStack:
     networks: List[Network]
-    layers: Sequence[ComputeLayer] = None
+    layers: Optional[Sequence[ComputeLayer]] = None
 
-    layers_start_index: List[int] = None
-    output_shape: Tuple[int] = None
+    layers_start_index: Optional[List[int]] = None
+    output_shape: Optional[Tuple[int]] = None
 
     # node_map is (network_id, compute_node_id) -> (layer_id, node_loc)
-    node_map: Dict[Tuple[int, int], Tuple[int, int]] = None
+    node_map: Optional[Dict[Tuple[int, int], Tuple[int, int]]] = None
 
-    total_nb_of_outputs: int = None
-    total_nb_of_inputs: int = None
-    max_nb_of_outputs_per_network: int = None
+    total_nb_of_outputs: Optional[int] = None
+    total_nb_of_inputs: Optional[int] = None
+    max_nb_of_outputs_per_network: Optional[int] = None
 
     is_assembled: bool = False
     is_built: bool = False
@@ -339,6 +314,7 @@ class ComputeStack:
         of all nodes in each layers, as well as the correct mapping and chaining of
         their inputs and outputs.
         """
+        assert self.layers is not None, 'No layers'
         with ut.timer('Building compute stack'):
             self.config = config
             self._assemble_stack(**kwargs)
@@ -359,6 +335,8 @@ class ComputeStack:
         # for l_id, layer in enumerate(self.layers):
         # let's initialize the stacj it in reverse order
         # so that the inverse nodes can reference fwd ones after init
+        assert self.layers is not None, 'No layers'
+        assert self.layers_start_index is not None, 'No layers start index'
         for l_id, layer in reversed(list(enumerate(self.layers))):
             assert layer.is_built, 'Layer not built'
             assert l_id == layer.layer_id, 'Layer id mismatch'
@@ -378,6 +356,9 @@ class ComputeStack:
         """Returns the start index and shape of the output of the given network in
         the flattened array of all outputs of all nodes in the stack.
         """
+        assert self.node_map is not None
+        assert self.layers_start_index is not None
+        assert self.layers is not None
         output_node = self.networks[
             network_id
         ].get_output_compute_node()  # a row from the compute df
@@ -406,6 +387,12 @@ class ComputeStack:
         self, network_id: int, compute_node_id: int
     ) -> VirtualNode:
         """Returns the virtual node corresponding to the given network and compute node ids"""
+        assert self.node_map is not None
+        assert self.layers is not None, 'Stack has no layers'
+        assert (
+            network_id,
+            compute_node_id,
+        ) in self.node_map, f'Node not found: {network_id}/{compute_node_id}'
         layer_id, node_loc = self.node_map[(network_id, compute_node_id)]
         return self.layers[layer_id].nodes[node_loc]
 
@@ -415,18 +402,24 @@ class ComputeStack:
 
     def __repr__(self):
         # layers with line breaks
+        if self.layers is None:
+            return 'Empty stack'
         return '\n'.join([l.__repr__() for l in self.layers])
 
     def __hash__(self):
+        if self.layers is None:
+            return hash(tuple(self.networks))
         return hash((tuple(self.networks), tuple(self.layers)))
 
     def __call__(self, *args, **kwargs):
         if not self.is_built:
             raise ValueError('Compute stack is not built, can\'t call it')
+        assert self.apply is not None, 'No apply method'
         res, _ = self.apply(*args, **kwargs)
         return res
 
     def each_node(self):
+        assert self.layers is not None, 'Stack has no layers'
         for layer in self.layers:
             for node in layer.nodes:
                 yield node
@@ -448,11 +441,15 @@ class ComputeStack:
     ### {{{                       --    internal utils     --
 
     def add_layer(self, layer: ComputeLayer):
+        if self.layers is None:
+            self.layers = []
         self.layers.append(layer)
         return self
 
     def extend(self, substack):
         assert self.networks == substack.networks
+        if self.layers is None:
+            self.layers = []
         self.layers.extend(substack.layers)
         return self
 
@@ -473,12 +470,16 @@ class ComputeStack:
                         prev = n.batch_order
 
     def get_all_nodes(self):
+        if self.layers is None:
+            return []
         return [n for l in self.layers for n in l.nodes]
 
     def get_node_input_start_index(self, node: VirtualNode, input_slot: int) -> int:
         """Returns the start index of the input #input_slot for the given node
         in the flattened full-stack output array"""
         assert self.node_map is not None
+        if self.layers is None:
+            raise ValueError('No layers')
 
         input_compute_node_id, input_compute_node_outslot = node.get_compute_node('input_from')[
             input_slot
@@ -779,7 +780,7 @@ class ComputeStack:
                 ]
 
                 # Calculate the priority for A* search
-                cost_so_far = len(substack.layers)
+                cost_so_far = len(substack.layers) if substack.layers else 0
                 estimated_cost = ComputeStack.heuristic(new_type_dict)
                 priority = cost_so_far + estimated_cost
 
@@ -817,12 +818,14 @@ class ComputeStack:
         minstack = ComputeStack.make_smallest_stack_dfs(
             ComputeStack(self.networks, []), type_dict, **kwargs
         )
-        ut.logger.debug(f'Final stack size: {len(minstack.layers)}')
+        ut.logger.debug(f'Final stack size: {len(minstack.layers) if minstack.layers else 0}')
         self.layers = minstack.layers
 
     def _make_layer_input_getters(self, layer_id: int):
         """Returns a list of input_getter functions that return the input values for each node in the given layer
         from the flattened output array"""
+        assert self.layers is not None, 'No layers'
+        assert len(self.layers) > layer_id, 'Layer id out of range'
 
         layer = self.layers[layer_id]
         assert layer.is_built, 'Layer not built'
@@ -878,6 +881,7 @@ class ComputeStack:
 
     def _refresh(self):
         """Refreshes all the meta information, indexing and mapping of the stack"""
+        assert self.layers is not None, 'No layers'
         allbuilt = True
         self.total_nb_of_outputs = 0
         self.total_nb_of_inputs = 0
@@ -918,7 +922,7 @@ class ComputeStack:
         self.is_assembled = allbuilt
 
     def _generate_apply_method(
-        self, get_grads_for: Tuple[str] = ('translation', 'transcription', 'output')
+        self, get_grads_for: Sequence[str] = ('translation', 'transcription', 'output')
     ):
         """
         Generates the apply method, which will call the apply of all layers of the stack
@@ -941,6 +945,11 @@ class ComputeStack:
         # input_getters_f is a list of functions that return the input values for each node in a layer
         # from the array of all outputs of the stack. Of course this assumes correct ordering, i.e
         # each layer is taking inputs from a layer that has already been applied.
+
+        assert self.layers is not None, 'No layers'
+        assert self.layers_start_index is not None, 'No layers start index'
+        assert self.node_map is not None, 'No node map'
+
         input_getters_f = [self._make_layer_input_getters(l_id) for l_id in range(len(self.layers))]
 
         out_indices_and_shapes = [
@@ -956,11 +965,14 @@ class ComputeStack:
         w_grads = [l.f_type in get_grads_for for l in self.layers]
 
         def apply_impl(
-            params: ParameterTree, inputs: ArrayLike, quantiles: ArrayLike, key: PRNGKey
-        ) -> Tuple[ArrayLike, ArrayLike]:
+            params: ParameterTree, inputs: ndArray, quantiles: ndArray, key: PRNGKey
+        ) -> Tuple[ndArray, ndArray]:
             """The core of the apply method. Everything here should be jittable"""
 
             assert len(inputs) == self.total_nb_of_inputs, 'Mismatched number of inputs'
+            assert self.layers is not None, 'No layers'
+            assert self.layers_start_index is not None, 'No layers start index'
+            assert self.node_map is not None, 'No node map'
 
             out = inputs.reshape(-1)
             grads = jnp.array([])
@@ -1024,7 +1036,3 @@ class ComputeStack:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-# }}}
-##────────────────────────────────────────────────────────────────────────────}}}
-

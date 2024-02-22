@@ -1,3 +1,4 @@
+### {{{                          --     imports     --
 import json
 import copy
 import xxhash
@@ -25,6 +26,8 @@ import os
 import cProfile
 
 from typing import Union, Tuple, List, Dict, Any, Optional, Callable, Sequence, Iterable
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 PathLike = Union[str, Path]
 
@@ -945,6 +948,7 @@ def get_looped_slice(a, start, end, axis=0):
         idx[axis] = slice(start, end)
         return a[tuple(idx)]
 
+
 def value_and_jacrev(f, x):
     y, pullback = jax.vjp(f, x)
     basis = jnp.eye(y.size, dtype=y.dtype)
@@ -1270,6 +1274,67 @@ def get_network_family(network):
             family = 'bandpass'
 
     return family, seqtype
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+### {{{                  --     function serialization     --
+import inspect
+import sys
+
+
+def unwrap_partial_function(implementation):
+    if hasattr(implementation, 'func') and hasattr(implementation, 'keywords'):
+        partial_args = implementation.keywords
+        implementation = implementation.func
+    else:
+        partial_args = {}
+    return implementation, partial_args
+
+
+def serialize_function(implementation: Callable, **kwargs):
+    implementation, partial_args = unwrap_partial_function(implementation)
+    kwargs.update(partial_args)
+
+    # detect if it's in a module
+    module_name = implementation.__module__
+    if module_name == '__main__':
+        module_name = None
+
+    signature = inspect.signature(implementation)
+    parameters = {}
+    for name, param in signature.parameters.items():
+        if name in kwargs:
+            parameters[name] = kwargs[name]
+        elif param.default != inspect.Parameter.empty:
+            parameters[name] = param.default
+
+    res = {
+        'implementation': implementation.__name__,
+        'parameters': parameters,
+    }
+    if module_name is not None:
+        res['module_name'] = module_name
+    return res
+
+
+def deserialize_function(func_data: dict, module_names: Optional[list[str]] = None):
+
+    if module_names is None:
+        if 'module_name' in func_data:
+            module_names = [func_data['module_name']]
+        else: # use the global namespace
+            module_names = ['__main__']
+            print('No module name provided, using __main__')
+
+    for module_name in module_names:
+        if module_name in sys.modules:
+            module = sys.modules[module_name]
+            if hasattr(module, func_data['implementation']):
+                implementation = getattr(module, func_data['implementation'])
+                return partial(implementation, **func_data['parameters'])
+
+    raise ValueError(f'No function named {func_data["implementation"]}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

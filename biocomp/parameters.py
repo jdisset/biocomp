@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Union, Tuple, Any, Dict, List, Sequence, Iterable
+from typing import Callable, Optional, Union, Tuple, Any, Dict, List, Sequence, Iterable, Self
 
 import jax
 import jax.numpy as jnp
@@ -253,10 +253,9 @@ class ParamPath:
             key = ParamPath(key)
         n = len(key)
         for i in range(len(self.path)):
-            if self.path[i:i + n] == key.path:
+            if self.path[i : i + n] == key.path:
                 return True
         return False
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -525,7 +524,6 @@ class PTree:
 
 
 class ArrayRef:
-
     """An array of references to some other arrays values
     aka a view, but over potentially several different arrays
     """
@@ -884,7 +882,7 @@ class ParameterTree:
             return [self.tagnames[i] for i in np.where(self.tags[path])[0]]
 
     @staticmethod
-    def merge(left: PTree, right: PTree, which: str = 'left'):
+    def merge(left: Self, right: Self, which: str = 'left'):
         merged = ParameterTree()
 
         for left_tag_name in left.tagnames:
@@ -987,4 +985,3 @@ def make_view(
         for from_path, from_id in zip(from_paths, from_ids):
             ref.push_back(f'{from_path}/{leaf}', from_id)
         params[leafpath] = ref
-

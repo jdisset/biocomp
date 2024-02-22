@@ -57,9 +57,12 @@ class DataRescaler:
     def from_data_manager(cls, dm):
         def fwd(x):
             return dm.rescale([x])[0]
+
         def inv(x):
             return dm.unscale([x])[0]
+
         return cls(fwd, inv)
+
 
 class DataManagerRescaler:
     def __init__(self, dm):
@@ -192,7 +195,7 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
         reordered_input_names = [protein_aliases.get(n, n) for n in reordered_input_names]
         output_name = protein_aliases.get(output_name, output_name)
 
-    return in_order + [output_pos], reordered_input_names + [output_name]
+    return list(in_order) + [output_pos], list(reordered_input_names) + [output_name]
 
 
 def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):
@@ -234,6 +237,22 @@ def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, **kw):
     p10_minor = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1], resolution=10)
     ax.set_yticks(rescaler(p10_minor), minor=True)
     return ylims_inv
+
+
+def get_transformed_ticks_and_labels(axis_lims, rescaler, **kw):
+    # will return 2 things:
+    # - ticks: a dict with 'major' and 'minor' keys, each containing a list of ticks
+    #   ex: ticks={'major': [0, 5, 10, 15, 20], 'minor': [2.5, 7.5, 12.5, 17.5]},
+    # - labels: a list of (float, str) tuples, each containing a tick and its label
+
+    lims_tr = np.asarray(axis_lims)
+    lims_inv = rescaler.inv(np.asarray(lims_tr))
+    p10 = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1])
+    p10_minor = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1], resolution=10)
+    ticks = {'major': rescaler(p10), 'minor': rescaler(p10_minor)}
+    pf = PowerFormatter(p10, **kw)
+    labels = [(rescaler(x), pf(x, i)) for i,x in enumerate(p10)]
+    return ticks, labels
 
 
 def setup_transformed_axis(
@@ -282,6 +301,7 @@ def setup_symlog_axis(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{              --     knn and spatial partitionning    --
+
 
 @jax.jit
 def weighted_quantile(data, weights, qu):
@@ -710,6 +730,10 @@ def heatmap_new(
     Z = output_values.reshape((xres, yres)).T
 
     opacities = np.ones_like(Z) if opacities is None else opacities.reshape((xres, yres)).T
+    opacities = np.where(np.isnan(Z), 0, opacities)
+
+    if np.isnan(Z).all():
+        Z = np.zeros_like(Z)
 
     im = ax.imshow(
         Z.T,
@@ -720,22 +744,24 @@ def heatmap_new(
         vmax=vmax,
         transform=full_transform,
         interpolation='none',
-        # alpha=opacities.T,
+        alpha=opacities.T,
         extent=[*xlims, *ylims],
     )
 
     # no borders
 
+    cnt = None
     if not np.isnan(Z).all():
         if contours is not None:
-            ax.contour(
+            cnt = ax.contour(
                 Z.T,
                 levels=contours,
-                linewidths=0.3,
+                linewidths=0.25,
                 linestyles='solid',
                 extent=[*xlims, *ylims],
                 transform=full_transform,
-                alpha=0.5,
+                alpha=0.3,
+                colors='k',
             )
 
         setup_transformed_axis(
@@ -754,10 +780,6 @@ def heatmap_new(
             cbar.ax.tick_params(labelsize=6)
             default_style(cbar.ax)
             cbar.ax.tick_params(axis='both', which='both', direction='out', pad=2, labelsize=8)
-            # tcks on the right
-            # cbar.ax.yaxis.set_ticks_position('right')
-            # cbar.ax.yaxis.set_label_position('right')
-            # 0.2 spine
             for spine in cbar.ax.spines.values():
                 spine.set_linewidth(0.2)
             setup_transformed_axis(
@@ -768,7 +790,7 @@ def heatmap_new(
                 **kw,
             )
 
-    return im
+    return im, cnt, vmin, vmax
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -1031,11 +1053,12 @@ def smooth_2d(
     ax,
     res=200,
     xlims=(0, 1),
-    xslice=None,
+    xslice=None,  # should be called zslice, really...
     title=None,
     text_x=0.5,
     text_y=0.9,
     axtransform=None,
+    show_slice_title=True,
     **kw,
 ):
     protein_order, protein_names = get_reordered_protein_names(network, **kw)
@@ -1047,14 +1070,16 @@ def smooth_2d(
         x, y, network, input_names, input_order, output_pos, res, xlims, xslice, **kw
     )
 
-    heatmap_new(ax, xy, output_values, rescaler, opacities=opacities, axtransform=axtransform, **kw)
+    hm = heatmap_new(
+        ax, xy, output_values, rescaler, opacities=opacities, axtransform=axtransform, **kw
+    )
 
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(input_names[1])
 
     full_transform = ax.transData if axtransform is None else ax.transData + axtransform
 
-    if x.shape[1] > 2:
+    if x.shape[1] > 2 and show_slice_title:
         ax.text(
             text_x,
             text_y,
@@ -1076,6 +1101,8 @@ def smooth_2d(
         ttle = title
     if ttle is not None:
         ax.set_title(ttle)
+
+    return hm
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
