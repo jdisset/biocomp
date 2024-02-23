@@ -100,7 +100,7 @@ def start(
     # --- get constants from training config (making sure they are there)
     N_REPLICATES = training_config.get('n_replicates', 1)
     N_BATCHES = training_config['n_batches']
-    N_EPOCHS = training_config['epochs']
+    N_EPOCHS = training_config['n_epochs']
     BATCH_SIZE = training_config['batch_size']
     KEEP_IN_HISTORY = training_config.get('keep_in_history', ['loss'])
     STEPS_PER_EPOCH = max(1, int(training_config['steps_per_epoch']))
@@ -132,9 +132,11 @@ def start(
 
     # --- loss & update functions
 
-    loss_func = ut.deserialize_function(LOSS_FUNCTION)
+    loss_func_generator = ut.deserialize_function(LOSS_FUNCTION)
+    assert callable(loss_func_generator)
+    loss_func = loss_func_generator(stack)
     assert callable(loss_func)
-    scannable_step = tu.make_scannable_step(
+    scannable_step = tu.make_training_step(
         loss_func, optimizer, fields_to_keep_in_history=KEEP_IN_HISTORY, scannable=True
     )
 
@@ -158,7 +160,7 @@ def start(
         assert xs.shape[:-1] == ys.shape[:-1] == (N_REPLICATES, STEPS_PER_EPOCH, BATCH_SIZE)
         return jax.vmap(per_replicate_epoch_step)(params, opt_state, keys, xs, ys)
 
-    with ut.timer('Lowering and compiling the epoch_step function'):
+    with ut.timer('Compiling the epoch_step function'):
         xb = ut.get_looped_slice(xbatches, 0, STEPS_PER_EPOCH, axis=1)
         yb = ut.get_looped_slice(ybatches, 0, STEPS_PER_EPOCH, axis=1)
         lowered = jax.jit(epoch_step).lower(params, opt_state, key, xb, yb)
@@ -211,7 +213,7 @@ def start(
 
     ut.logger.info(f'End of training for {N_EPOCHS} epochs')
 
-    return params, loss_history
+    return params, loss_history, epoch_history
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -230,7 +232,7 @@ DEFAULT_TRAINING_CONFIG = {
     "negative_grad_penalty": 0.1,
     "huber_quantile_loss_delta": 0.1,
     'optimizer': 'adam',
-    'epochs': 150,
+    'n_epochs': 150,
     'schedule': 'cosine',
     'learning_rate': 1e-3,
     'end_learning_rate': 1e-5,

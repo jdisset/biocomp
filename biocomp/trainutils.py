@@ -101,7 +101,14 @@ def get_epoch_stats(epoch_data, smooth_win=1):
 
 
 def local_save(
-    epoch, compute_config, training_config, data_config, epoch_history=None, save_dir=None, full_save=False, **_
+    epoch,
+    compute_config,
+    training_config,
+    data_config,
+    epoch_history=None,
+    save_dir=None,
+    full_save=False,
+    **_,
 ):
     assert save_dir is not None
     if epoch_history is None:
@@ -116,19 +123,24 @@ def local_save(
     if not Path(save_dir).exists():
         Path(save_dir).mkdir(parents=True)
 
-    compute_conf_path = Path(save_dir) / 'compute_config.json'
-    if not compute_conf_path.exists():
-        compute_config.export(compute_conf_path)
+    if compute_config is not None:
+        compute_conf_path = Path(save_dir) / 'compute_config.json'
+        if not compute_conf_path.exists():
+            compute_config.export(compute_conf_path)
 
-    training_conf_path = Path(save_dir) / 'training_config.json'
-    if not training_conf_path.exists():
-        with open(training_conf_path, 'w') as f:
-            json.dump(training_config, f)
 
-    data_conf_path = Path(save_dir) / 'data_config.json'
-    if not data_conf_path.exists():
-        with open(data_conf_path, 'w') as f:
-            json.dump(data_config, f)
+    if training_config is not None:
+        training_conf_path = Path(save_dir) / 'training_config.json'
+        if not training_conf_path.exists():
+            with open(training_conf_path, 'w') as f:
+                json.dump(training_config, f)
+
+    if data_config is not None:
+        data_conf_path = Path(save_dir) / 'data_config.json'
+        if not data_conf_path.exists():
+            with open(data_conf_path, 'w') as f:
+                json.dump(data_config, f)
+
 
     if full_save:
         full_save_until_epoch = full_save if isinstance(full_save, int) else 2
@@ -151,20 +163,18 @@ def local_save(
     ut.logger.info(f"Saving epoch to disk took {time.time() - t0:.2f}s")
 
 
-def wandb_plot_pred(dman, params, local_params=None, log_key=None, **_):
+def wandb_plot_pred(
+    dman: du.DataManager, params: ParameterTree, local_params=None, log_key=None, **_
+):
 
     import matplotlib
 
-    matplotlib.pyplot.switch_backend('Agg')
+    # matplotlib.pyplot.switch_backend('Agg')
     import traceback
     from tqdm import tqdm
 
     networks = dman.get_networks()
     stack = dman.get_compute_stack()
-
-    if 'latest_params' not in epoch_history:
-        ut.logger.warning("No params for plotting evaluations")
-        return
 
     if local_params is not None:
         local, _ = local_params.filter_by_tag(['local'])
@@ -244,17 +254,27 @@ def wandb_plot_pred(dman, params, local_params=None, log_key=None, **_):
 def wandb_log_epoch(epoch_history=None, **_):
     if epoch_history is not None:
         losses = np.array(epoch_history['loss'])
-        # depending on the number of replicates, we might have a 1d array or a 2d array
+        # shape of losses = (n_replicates, n_batches)
         if losses.ndim == 1:
             for loss in losses:
                 wb.log({'loss': loss})
         else:
-            for loss in enumerate(losses):
-                wb.log({f'loss_mean': np.mean(loss)})
-                wb.log({f'loss_std': np.std(loss)})
-                wb.log({f'loss_min': np.min(loss)})
-                wb.log({f'loss_max': np.max(loss)})
-                wb.log({f'loss_{i}': l for i, l in enumerate(loss)})
+            epoch = epoch_history.get('epoch', 0)
+            mean_loss = np.mean(losses, axis=0)
+            std_loss = np.std(losses, axis=0)
+            min_loss = np.min(losses, axis=0)
+            max_loss = np.max(losses, axis=0)
+
+            for i in range(mean_loss.shape[0]):
+                wb.log(
+                    {
+                        'loss/avg': mean_loss[i],
+                        'loss/std': std_loss[i],
+                        'loss/min': min_loss[i],
+                        'loss/max': max_loss[i],
+                    }
+                )
+
         wb.log({'epoch_time': epoch_history['epoch_time']})
 
 
@@ -275,7 +295,7 @@ def console_log(epoch, training_config, epoch_history=None, **_):
         fmt = lambda x: f'{x:.1e}' if x < 1e-3 or x > 1e3 else f'{x:.3f}'
 
         ut.logger.info(
-            f"""[{epoch}/{training_config["epochs"]} in {epoch_history["epoch_time"]:.2f}s]
+            f"""[{epoch}/{training_config["n_epochs"]} in {epoch_history["epoch_time"]:.2f}s]
              best loss: {fmt(avg_losses[best_id])} ± {fmt(best_std)} (replicate n° {best_id+1}/{len(losses)})
              replicates avg: {fmt(avg_avg)} ± {fmt(avg_std)} """
         )
@@ -382,8 +402,8 @@ def generate_batches(
     xbatches = xbatches.reshape(n_replicates, n_batches, *xbatches.shape[1:])
     ybatches = ybatches.reshape(n_replicates, n_batches, *ybatches.shape[1:])
 
-    assert isinstance(xbatches, jnp.ndarray)
-    assert isinstance(ybatches, jnp.ndarray)
+    assert isinstance(xbatches, ndArray)
+    assert isinstance(ybatches, ndArray)
 
     assert xbatches.shape[:-1] == (
         n_replicates,

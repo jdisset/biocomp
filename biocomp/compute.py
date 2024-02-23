@@ -314,11 +314,11 @@ class ComputeStack:
         of all nodes in each layers, as well as the correct mapping and chaining of
         their inputs and outputs.
         """
-        assert self.layers is not None, 'No layers'
         with ut.timer('Building compute stack'):
             self.config = config
             self._assemble_stack(**kwargs)
             self._refresh()
+            assert self.layers is not None, 'No layers'
             for layer in self.layers:
                 layer.setup(config, stack=self)
                 self._refresh()
