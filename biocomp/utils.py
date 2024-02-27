@@ -17,7 +17,7 @@ import logging
 from rich.logging import RichHandler
 from jax.tree_util import Partial as partial
 from contextlib import contextmanager
-from pkg_resources import get_distribution
+from pkg_resources import get_distribution, resource_filename
 from .recipe import XP
 import rich
 import subprocess
@@ -56,76 +56,6 @@ def get_git_commit_hash():
 def get_biocomp_version():
     return get_distribution('biocomp').version
 
-
-### {{{               --     loading constants and config     --
-
-# we check if there is a file named ~/.biocomp.json
-# if so, we load it and use the paths defined there
-# otherwise, we use the default paths defined above
-GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
-if GLOBAL_CONFIG_PATH.exists():
-    with open(GLOBAL_CONFIG_PATH) as f:
-        config = json.load(f)
-        DEFAULT_XP_PATH = Path(config.get('xp_path', '')).expanduser()
-        DEFAULT_RECIPE_PATH = config.get('recipe_path', '')
-        if isinstance(DEFAULT_RECIPE_PATH, str):
-            DEFAULT_RECIPE_PATH = Path(DEFAULT_RECIPE_PATH).expanduser()
-        elif isinstance(DEFAULT_RECIPE_PATH, list):
-            DEFAULT_RECIPE_PATH = [Path(p).expanduser() for p in DEFAULT_RECIPE_PATH]
-        DEFAULT_LIB_PATH = Path(config.get('lib_path', '')).expanduser()
-
-# we also check the environment variables to see if they define the paths
-# if so, we use them in priority
-
-if 'BIOCOMP_XP_PATH' in os.environ:
-    DEFAULT_XP_PATH = Path(os.environ['BIOCOMP_XP_PATH']).expanduser()
-if 'BIOCOMP_RECIPE_PATH' in os.environ:
-    DEFAULT_RECIPE_PATH = Path(os.environ['BIOCOMP_RECIPE_PATH']).expanduser()
-if 'BIOCOMP_LIB_PATH' in os.environ:
-    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_LIB_PATH']).expanduser()
-
-##────────────────────────────────────────────────────────────────────────────}}}
-# {{{                      --     data load/save     --
-# ···············································································
-import pickle
-
-
-def save(data, path, overwrite=False, rename_if_exists=True):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        if overwrite:
-            path.unlink()
-        elif rename_if_exists:
-            path = path.with_name(path.stem + '_' + path.suffix)
-        else:
-            raise RuntimeError(f'File {path} already exists.')
-    with open(path, 'wb') as file:
-        pickle.dump(data, file)
-
-
-def load(path):
-    path = Path(path)
-    if not path.is_file():
-        raise ValueError(f'Not a file: {path}')
-    with open(path, 'rb') as file:
-        data = pickle.load(file)
-    return data
-
-
-#                                                                            }}}
-### {{{               --     convenience loading functions     --
-def load_lib(lib_path=DEFAULT_LIB_PATH):
-    return load(lib_path)
-
-
-# convenience loading functions with default paths
-def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH, **kwargs):
-    xp = XP(xpname, xp_path, recipe_path, lib, **kwargs)
-    return xp
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     logging utils     --
@@ -194,6 +124,94 @@ def timer(name=None, use_logger=True):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+### {{{               --     loading constants and config     --
+
+from omegaconf import OmegaConf
+from pathlib import Path
+
+
+def load_config(*config_files):  # in order of priority, the last one wins
+    config = OmegaConf.create()
+    for config_file in config_files:
+        if not Path(config_file).exists():
+            logger.warning(f'Config file {config_file} not found.')
+            continue
+        config = OmegaConf.merge(config, OmegaConf.load(config_file))
+    OmegaConf.resolve(config)
+    return config
+
+
+BIOCOMP_BASE_CONFIG = load_config(resource_filename('biocomp', 'config/base.yaml'))
+
+# TODO: switch the following to use the config file
+# we check if there is a file named ~/.biocomp.json
+# if so, we load it and use the paths defined there
+# otherwise, we use the default paths defined above
+GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
+if GLOBAL_CONFIG_PATH.exists():
+    with open(GLOBAL_CONFIG_PATH) as f:
+        config = json.load(f)
+        DEFAULT_XP_PATH = Path(config.get('xp_path', '')).expanduser()
+        DEFAULT_RECIPE_PATH = config.get('recipe_path', '')
+        if isinstance(DEFAULT_RECIPE_PATH, str):
+            DEFAULT_RECIPE_PATH = Path(DEFAULT_RECIPE_PATH).expanduser()
+        elif isinstance(DEFAULT_RECIPE_PATH, list):
+            DEFAULT_RECIPE_PATH = [Path(p).expanduser() for p in DEFAULT_RECIPE_PATH]
+        DEFAULT_LIB_PATH = Path(config.get('lib_path', '')).expanduser()
+
+# we also check the environment variables to see if they define the paths
+# if so, we use them in priority
+
+if 'BIOCOMP_XP_PATH' in os.environ:
+    DEFAULT_XP_PATH = Path(os.environ['BIOCOMP_XP_PATH']).expanduser()
+if 'BIOCOMP_RECIPE_PATH' in os.environ:
+    DEFAULT_RECIPE_PATH = Path(os.environ['BIOCOMP_RECIPE_PATH']).expanduser()
+if 'BIOCOMP_LIB_PATH' in os.environ:
+    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_LIB_PATH']).expanduser()
+
+##────────────────────────────────────────────────────────────────────────────}}}
+# {{{                      --     data load/save     --
+# ···············································································
+import pickle
+
+
+def save(data, path, overwrite=False, rename_if_exists=True):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if overwrite:
+            path.unlink()
+        elif rename_if_exists:
+            path = path.with_name(path.stem + '_' + path.suffix)
+        else:
+            raise RuntimeError(f'File {path} already exists.')
+    with open(path, 'wb') as file:
+        pickle.dump(data, file)
+
+
+def load(path):
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f'Not a file: {path}')
+    with open(path, 'rb') as file:
+        data = pickle.load(file)
+    return data
+
+
+#                                                                            }}}
+### {{{               --     convenience loading functions     --
+def load_lib(lib_path=DEFAULT_LIB_PATH):
+    return load(lib_path)
+
+
+# convenience loading functions with default paths
+def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH, **kwargs):
+    xp = XP(xpname, xp_path, recipe_path, lib, **kwargs)
+    return xp
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ### {{{                           --     cache     --
@@ -315,10 +333,18 @@ def flatten(x):
 
 
 def updated_dict(d1, d2):
+    if d1 is None:
+        return copy.deepcopy(d2)
+    if d2 is None:
+        return copy.deepcopy(d1)
+    if not isinstance(d1, dict):
+        return copy.deepcopy(d2)
+    if not isinstance(d2, dict):
+        return copy.deepcopy(d2)
     res = {}
     for key, val in d1.items():
-        if type(val) == dict:
-            if key in d2 and type(d2[key] == dict):
+        if isinstance(val, dict):
+            if key in d2 and isinstance(d2[key], dict):
                 res[key] = updated_dict(d1[key], d2[key])
             else:
                 res[key] = copy.deepcopy(d1[key])
@@ -331,6 +357,21 @@ def updated_dict(d1, d2):
         if not key in d1:
             res[key] = copy.deepcopy(val)
     return res
+
+from omegaconf import OmegaConf
+
+def nested_resolve(d, known=None, throw_if_non_dict=True):
+    known = copy.deepcopy(known) or {}
+    if not isinstance(d, dict):
+        if throw_if_non_dict:
+            raise ValueError(f'Expected a dict, got {type(d)}')
+        return d
+    for k, v in d.items():
+        if isinstance(v, dict):
+            known[k] = updated_dict(known.get(k, {}), v)
+        else:
+            known[k] = copy.deepcopy(v)
+    return {k: nested_resolve(known[k], known, False) for k in d.keys()}
 
 
 def decode_json(df, cols):
@@ -1323,7 +1364,7 @@ def deserialize_function(func_data: dict, module_names: Optional[list[str]] = No
     if module_names is None:
         if 'module_name' in func_data:
             module_names = [func_data['module_name']]
-        else: # use the global namespace
+        else:  # use the global namespace
             module_names = ['__main__']
             print('No module name provided, using __main__')
 

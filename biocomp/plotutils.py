@@ -30,8 +30,14 @@ from labellines import labelLine, labelLines
 from jax.typing import ArrayLike
 from typing import Tuple
 import os
+from typing import Union, Sequence, List, Tuple, Dict, Any, Optional
+
+ndArray = Union[np.ndarray, jnp.ndarray]
 
 os.environ["PATH"] += os.pathsep + '/Library/TeX/texbin'
+
+
+logger = ut.setup_logger('biocomp.plotutils')
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -39,6 +45,98 @@ os.environ["PATH"] += os.pathsep + '/Library/TeX/texbin'
 #                           TOOLS & UTILS
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
 
+### {{{                   --     configurable wrapper     --
+
+import inspect
+
+__CONFIGURABLE_FUNCTIONS = {}
+
+
+def configurable(func):
+    """Decorator to add a function and its arguments to the list of configurable functions."""
+    sig = inspect.signature(func)
+    fkwargs = list(sig.parameters.keys())
+    # __CONFIGURABLE_FUNCTIONS[func.__name__] = fkwargs
+    __CONFIGURABLE_FUNCTIONS[func.__name__] = {
+        k: v.default for k, v in sig.parameters.items() if v.default is not inspect.Parameter.empty
+    }
+
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def generate_base_config(
+    available_functions=__CONFIGURABLE_FUNCTIONS,
+    function_config_suffix='_params',
+    add_defaults=False,
+):
+    # essentially a template for the full config, that shows
+    # its structure (in terms of nested functions).
+    # for each available function, we can check if it needs a nested config
+    # if it does, we can generate an empty config for it
+    emptyconf = {}
+
+    def generate_empty_func_conf(func_name, func_args):
+        subconf = {}
+        for arg in func_args.keys():
+            if arg.endswith(function_config_suffix):
+                fname = arg[: -len(function_config_suffix)]
+                if fname in available_functions:
+                    subconf[arg] = generate_empty_func_conf(fname, available_functions[fname])
+                else:
+                    print(
+                        f'{func_name} has a nested config {arg} but {fname} is not a known function'
+                    )
+        return subconf
+
+    for func_name, func_args in available_functions.items():
+        argname = f'{func_name}{function_config_suffix}'
+        emptyconf[argname] = generate_empty_func_conf(func_name, func_args)
+
+    if add_defaults:
+        for func_name, func_args in available_functions.items():
+            fdict = emptyconf[func_name + function_config_suffix]
+            for arg, default_val in func_args.items():
+                if not arg.endswith(function_config_suffix):
+                    fdict[arg] = default_val
+
+    return emptyconf
+
+
+def generate_full_config(user_config, empty_config=None):
+    if empty_config is None:
+        empty_config = generate_base_config()
+    return ut.nested_resolve(ut.updated_dict(user_config, empty_config))
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                   --     default configuration     --
+from matplotlib import colors as mcolors
+from pkg_resources import resource_filename
+
+BASE_CONFIG = ut.load_config(resource_filename('biocomp', 'config/plotconf.yaml'))
+
+cmap_definitions = BASE_CONFIG.color_maps or {}
+
+CUSTOM_CMAPS = {
+    k: mcolors.LinearSegmentedColormap.from_list(k, v, N=256) for k, v in cmap_definitions.items()
+}
+# register custom colormaps
+for k, v in CUSTOM_CMAPS.items():
+    # check if it's already registered
+    if k in plt.colormaps():
+        plt.colormaps.unregister(k)
+    plt.colormaps.register(v, name=k)
+
+DEFAULT_CMAP_NAME = BASE_CONFIG.default_color_map or 'viridis'
+DEFAULT_CMAP = CUSTOM_CMAPS.get(DEFAULT_CMAP_NAME, DEFAULT_CMAP_NAME)
+DEFAULT_CMAP = (
+    DEFAULT_CMAP if isinstance(DEFAULT_CMAP, mcolors.Colormap) else plt.get_cmap(DEFAULT_CMAP)
+)
+
+##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                   --     DataRescaler wrapper     --
 
 
@@ -169,6 +267,7 @@ def inv_loglog(x):
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{               --     get rescaled network ticks and labels     --
 def get_reordered_protein_names(network, input_order=None, protein_aliases=None, **_):
+    # TODO: add support for input_order as a list of protein names
     input_names = network.get_inverted_input_proteins()
     output_names = network.get_output_proteins()
 
@@ -244,14 +343,13 @@ def get_transformed_ticks_and_labels(axis_lims, rescaler, **kw):
     # - ticks: a dict with 'major' and 'minor' keys, each containing a list of ticks
     #   ex: ticks={'major': [0, 5, 10, 15, 20], 'minor': [2.5, 7.5, 12.5, 17.5]},
     # - labels: a list of (float, str) tuples, each containing a tick and its label
-
     lims_tr = np.asarray(axis_lims)
     lims_inv = rescaler.inv(np.asarray(lims_tr))
     p10 = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1])
     p10_minor = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1], resolution=10)
     ticks = {'major': rescaler(p10), 'minor': rescaler(p10_minor)}
     pf = PowerFormatter(p10, **kw)
-    labels = [(rescaler(x), pf(x, i)) for i,x in enumerate(p10)]
+    labels = [(rescaler(x), pf(x, i)) for i, x in enumerate(p10)]
     return ticks, labels
 
 
@@ -379,20 +477,27 @@ def gausspdf(x, mu, sigma):
     return 1 / (sigma * np.sqrt(2 * np.pi)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
 
 
-def get_knn(x, tree, knn=500, min_points=20, radius=0.1, **_):
-    distances, indices = tree.query(x, k=knn, distance_upper_bound=radius)
-    mask = distances == np.inf
-    nb_points = (~mask).sum(axis=1)
-    weights = gausspdf(distances, 0, radius / 3)
-    indices[mask] = 0
-    weights[mask] = 0
+def get_knn(x: ndArray, tree: cKDTree, k: int = 500, min_points: int = 20, radius: float = 0.1):
+    """Get the k-nearest neighbors of x in the tree,
+    and return their indices together with their weights (from a gaussian kernel)."""
+    SIGMA_FROM_RADIUS = 1 / 3
+    distances, indices = tree.query(x, k=k, distance_upper_bound=radius)
+    empty_neighbor_mask = distances == np.inf
+    nb_points = (~empty_neighbor_mask).sum(axis=1)
+    weights = gausspdf(distances, 0, radius * SIGMA_FROM_RADIUS)
+    indices[empty_neighbor_mask] = 0
+    weights[empty_neighbor_mask] = 0
     weights[nb_points < min_points, :] = np.nan
     return indices, weights
 
 
 def get_knn_mean(x, y, tree, **kw):
+    """Get the k-nearest neighbors of x in the tree,
+    and return their weighted average value together with their density."""
     indices, weights = get_knn(x, tree, **kw)
-    avg = np.average(y[indices], axis=1, weights=weights)
+    assert indices.shape == weights.shape
+    normed_w = weights / weights.sum(axis=1)[:, None]
+    avg = (y[indices] * normed_w[:, :, None]).sum(axis=1)
     density = np.nansum(weights, axis=1)
     return avg, density
 
@@ -404,62 +509,20 @@ def get_knn_quantile(x, y, tree, qu, **kw):
     return q, density
 
 
-def get_knn_smooth(xquery, logY, tree, knn=500, min_points=20, knn_method='mean', **kw):
-    if knn_method == 'mean':
-        Z, p = get_knn_mean(xquery, logY, knn=knn, min_points=min_points, tree=tree, **kw)
-    elif knn_method == 'quantile':
+@configurable
+def knn_avg(xquery, logY, tree, k=500, min_points=20, avg_method='mean', **kw):
+    if avg_method == 'mean':
+        Z, p = get_knn_mean(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
+    elif avg_method == 'quantile':
         assert 'qu' in kw
-        Z, p = get_knn_quantile(xquery, logY, knn=knn, min_points=min_points, tree=tree, **kw)
+        Z, p = get_knn_quantile(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
     else:
-        raise ValueError(f'Unknown method {knn_method}')
+        raise ValueError(f'Unknown method {avg_method}')
     return Z, p
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                    --     misc plot styling tools     --
-from matplotlib import colors as mcolors
-
-BIOCOMP_BLUES = [
-    '#F9F7F5',
-    '#EEECEA',
-    '#B0CCD6',
-    '#6CAFC3',
-    '#2974A4',
-    '#3B4B90',
-    '#3D1277',
-    '#22044B',
-]
-
-BIOCOMP_GREENS = [
-    '#F9F7F5',
-    '#E2EADA',
-    '#CBE4BB',
-    '#9DDDAA',
-    '#4CCDAB',
-    '#30A78F',
-    '#1F7D73',
-    '#0C5558',
-]
-
-BIOCOMP_REDS = [
-    '#F5F5F5',
-    '#F1E6E5',
-    '#F3CFBC',
-    '#EF957D',
-    '#D3494B',
-    '#B00031',
-    '#840137',
-    '#560140',
-]
-
-
-DEFAULT_CMAPS = {
-    'blues': mcolors.LinearSegmentedColormap.from_list('cm', BIOCOMP_BLUES, N=256),
-    'greens': mcolors.LinearSegmentedColormap.from_list('cm', BIOCOMP_GREENS, N=256),
-    'reds': mcolors.LinearSegmentedColormap.from_list('cm', BIOCOMP_REDS, N=256),
-}
-
-DEFAULT_CMAP = DEFAULT_CMAPS['blues']
 
 
 def setup_clean_fig(title):
@@ -501,6 +564,7 @@ def default_style(ax):
     ax.spines['left'].set_color('#777777')
 
 
+@configurable
 def mkfig(rows=1, cols=1, size=(4, 4), dpi=300, **kw):
     fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]), dpi=dpi, **kw)
     if rows == 1 and cols == 1:
@@ -595,122 +659,17 @@ def get_web_font(url, font_name):
 
 # ---- base functions
 ### {{{                          --     heatmap     --
+@configurable
 def heatmap(
-    ax,
-    Z,
-    vmin=0,
-    vmax=1,
-    ticks=[],
-    ticklabels=[],
-    secondticks=[],
-    transform=None,
-    text='',
-    connector=False,
-    connector_orientation='bottom',
-    contours=3,
-    colorbar=True,
-    opacities=None,
-    get_cbar_ticks=None,
-    cmap=DEFAULT_CMAP,
-    **_,
-):
-    cmap.set_bad(color='#EEEEEE')
-    trans_data = ax.transData
-    if transform is not None:
-        trans_data = trans_data + transform
-    if opacities is None:
-        opacities = np.ones_like(Z)
-
-    if vmin is None:
-        vmin = np.nanmin(Z)
-    if vmax is None:
-        vmax = np.nanmax(Z)
-
-    im = ax.imshow(
-        Z.T,
-        origin='lower',
-        aspect=1,
-        cmap=cmap,
-        vmin=vmin,
-        vmax=vmax,
-        transform=trans_data,
-        interpolation='none',
-        alpha=opacities.T,
-    )
-    # add contour
-    if contours is not None:
-        ax.contour(
-            Z.T,
-            levels=contours,
-            linewidths=0.3,
-            transform=trans_data,
-        )
-
-    x1, x2, y1, y2 = im.get_extent()
-    w = x2 - x1
-    h = y1 - y2
-
-    ax.plot(
-        [x1, x2, x2, x1, x1],
-        [y1, y1, y2, y2, y1],
-        "-",
-        color='#AAAAAA',
-        transform=trans_data,
-        linewidth=0.2,
-    )
-
-    # ticks:
-    if len(ticks) > 0:
-        # rescale ticks to image coordinates (they are btwn 0 and 1 to start)
-        sc_ticks = ticks * Z.shape[0]
-        ax.set_xticks(sc_ticks)
-        ax.set_xticklabels(ticklabels)
-        ax.set_yticks(sc_ticks)
-        ax.set_yticklabels(ticklabels)
-        # secondticks:
-        if len(secondticks) > 0:
-            sc_secondticks = secondticks * Z.shape[0]
-            ax.set_xticks(sc_secondticks, minor=True)
-            ax.set_yticks(sc_secondticks, minor=True)
-
-    # colorbar
-    if colorbar:
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="4%", pad=0.05)
-        cbar = plt.colorbar(im, cax=cax)
-        cbar.ax.tick_params(labelsize=6)
-        # no cbar spines
-        for spine in cbar.ax.spines.values():
-            spine.set_visible(False)
-
-        if get_cbar_ticks is not None:
-            # get ticks every 0.1 decade
-            unscaled_ticks = np.geomspace(du.inv_tr(vmin), du.inv_tr(vmax), 5, endpoint=True)
-            ticks = np.array(du.tr(unscaled_ticks))
-            ticks = ticks[ticks < vmax]
-            ticks = ticks[ticks > vmin]
-            ticklabels = [scformat.format("{:m}", du.inv_tr(x)) for x in ticks]
-            cbar.set_ticks(ticks)
-            cbar.set_ticklabels(ticklabels)
-
-    return im
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                          --     heatmap     --
-def heatmap_new(
     ax,
     xy_grid,
     output_values,
-    rescaler=IDENTITY_RESCALER,
     vlims=(None, None),
     contours=3,
-    colorbar=True,
     opacities=None,
     axtransform=None,
-    cmap=DEFAULT_CMAP,
+    cmap=DEFAULT_CMAP_NAME,
     bad_color='#EEEEEE00',
-    **kw,
 ):
     cmap = plt.get_cmap(cmap)
     cmap.set_bad(color=bad_color)
@@ -748,49 +707,20 @@ def heatmap_new(
         extent=[*xlims, *ylims],
     )
 
-    # no borders
-
-    cnt = None
-    if not np.isnan(Z).all():
-        if contours is not None:
-            cnt = ax.contour(
-                Z.T,
-                levels=contours,
-                linewidths=0.25,
-                linestyles='solid',
-                extent=[*xlims, *ylims],
-                transform=full_transform,
-                alpha=0.3,
-                colors='k',
-            )
-
-        setup_transformed_axis(
-            ax,
-            xaxis_lims=xlims,
-            yaxis_lims=xlims,
-            rescaler=rescaler,
-            margins=0.0,
-            **kw,
+    cntrs = None
+    if contours is not None:
+        cntrs = ax.contour(
+            Z.T,
+            levels=contours,
+            linewidths=0.25,
+            linestyles='solid',
+            extent=[*xlims, *ylims],
+            transform=full_transform,
+            alpha=0.3,
+            colors='k',
         )
 
-        if colorbar:
-            divider = make_axes_locatable(ax)
-            cax = divider.append_axes("right", size="7%", pad=0.5)
-            cbar = plt.colorbar(im, cax=cax)
-            cbar.ax.tick_params(labelsize=6)
-            default_style(cbar.ax)
-            cbar.ax.tick_params(axis='both', which='both', direction='out', pad=2, labelsize=8)
-            for spine in cbar.ax.spines.values():
-                spine.set_linewidth(0.2)
-            setup_transformed_axis(
-                cbar.ax,
-                yaxis_lims=[vmin, vmax],
-                rescaler=rescaler,
-                margins=0.0,
-                **kw,
-            )
-
-    return im, cnt, vmin, vmax
+    return im, cntrs
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -875,17 +805,29 @@ def density_plot_1d(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 # ---- smooth plots (gaussian neighborhood based)
 ### {{{                          --     main smooth method (route to 1D, 2D, 3D)    --
 
 
-def smooth(x, y, network, rescaler, **kw):
+@configurable
+def smooth(X, Y, input_names, output_name, rescaler, smooth_2d_params={}, **kw):
+    ninputs = X.shape[1]
+    if ninputs == 1:
+        pass
+    elif ninputs == 2:
+        smooth_2d(X, Y, input_names, output_name, rescaler, **smooth_2d_params, **kw)
+    elif ninputs == 3:
+        pass
+    else:
+        raise NotImplementedError(f'Cannot plot {ninputs} inputs')
+
+
+def smooth_old(x, y, network, rescaler, **kw):
     ninputs = network.get_nb_inputs()
     if ninputs == 1:
         smooth_1d(x, y, network, rescaler, **kw)
     elif ninputs == 2:
-        smooth_2d(x, y, network, rescaler, **kw)
+        smooth_2d_old(x, y, network, rescaler, **kw)
     elif ninputs == 3:
         smooth_3d(x, y, network, rescaler, **kw)
     else:
@@ -905,7 +847,7 @@ def smooth_1d(
     xmax=None,
     quantiles=None,
     quantiles_alpha=0.2,
-    color=BIOCOMP_BLUES[4],
+    color=DEFAULT_CMAP(0.7),
     radius=0.075,
     knn=2000,
     min_points=500,
@@ -936,8 +878,8 @@ def smooth_1d(
     xquery_max = min(xmax, x.max() - radius)
 
     xquery = np.linspace(xmin, xquery_max, res).reshape(-1, 1)
-    z, _ = get_knn_smooth(
-        xquery, y, tree, knn_method='mean', radius=radius, knn=knn, min_points=min_points, **kw
+    z, _ = knn_avg(
+        xquery, y, tree, avg_method='mean', radius=radius, k=knn, min_points=min_points, **kw
     )
     if len(z) == 0:
         return
@@ -951,25 +893,25 @@ def smooth_1d(
             quantiles = [0.1, 0.9]
         if quantiles != False:
             assert len(quantiles) == 2
-            zq1, _ = get_knn_smooth(
+            zq1, _ = knn_avg(
                 xquery,
                 y,
                 tree,
-                knn_method='quantile',
+                avg_method='quantile',
                 qu=quantiles[0],
                 radius=radius,
-                knn=knn,
+                k=knn,
                 min_points=min_points,
                 **kw,
             )
-            zq9, _ = get_knn_smooth(
+            zq9, _ = knn_avg(
                 xquery,
                 y,
                 tree,
-                knn_method='quantile',
+                avg_method='quantile',
                 qu=quantiles[1],
                 radius=radius,
-                knn=knn,
+                k=knn,
                 min_points=min_points,
                 **kw,
             )
@@ -994,8 +936,98 @@ def smooth_1d(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{        --     2D     --
+@configurable
+def knn_grid(
+    x, y, xlims, ylims, zslice=None, is_density_plot=False, grid_resolution=200, knn_avg_params={}
+):
+
+    xmin, xmax = xlims
+    ymin, ymax = ylims or xlims
+    xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
+    if x.shape[1] > 2:
+        assert zslice is not None
+        assert zslice.shape == (x.shape[1] - 2,)
+        xquery = np.hstack([xy, [zslice] * xy.shape[0]])
+    else:
+        xquery = xy
+
+    tree = cKDTree(x)
+    output_values, density = knn_avg(xquery, y, tree=tree, **knn_avg_params)
+    assert output_values.shape == (xy.shape[0], 1)
+    assert density.shape == (xy.shape[0],)
+
+    if is_density_plot:
+        output_values = density
+
+    return xy, output_values
 
 
+@configurable
+def smooth_2d(
+    X: ndArray,
+    Y: ndArray,
+    input_names: Sequence[str],
+    output_name: str,
+    rescaler,
+    ax,
+    title: Optional[str] = None,
+    xlims=(0, 1),
+    ylims=(None, None),
+    vlims=(None, None),
+    draw_colorbar=True,
+    knn_grid_params: Dict = {},
+    heatmap_params: Dict = {},
+):
+
+    ylims = xlims if ylims == (None, None) else ylims
+
+    input_coords, output_values = knn_grid(X, Y, xlims, ylims, **knn_grid_params)
+
+    im, cntrs = heatmap(ax, input_coords, output_values, vlims=vlims, **heatmap_params)
+
+    ax.set_xlabel(input_names[0])
+    ax.set_ylabel(input_names[1])
+
+    if title is not None:
+        ax.set_title(title)
+
+    setup_transformed_axis(
+        ax,
+        xaxis_lims=xlims,
+        yaxis_lims=ylims,
+        rescaler=rescaler,
+        margins=0.0,
+    )
+
+    # spines only on bottom and left
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    if draw_colorbar:
+        imlims = im.get_clim()
+        c_vmin = imlims[0] if vlims[0] is None else vlims[0]
+        c_vmax = imlims[1] if vlims[1] is None else vlims[1]
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="7%", pad=0.5)
+        cbar = plt.colorbar(im, cax=cax)
+        cbar.ax.tick_params(labelsize=6)
+        default_style(cbar.ax)
+        cbar.ax.tick_params(axis='both', which='both', direction='out', pad=2, labelsize=8)
+        for spine in cbar.ax.spines.values():
+            spine.set_linewidth(0.2)
+        setup_transformed_axis(
+            cbar.ax,
+            yaxis_lims=[c_vmin, c_vmax],
+            rescaler=rescaler,
+            margins=0.0,
+        )
+        cbar.ax.set_ylabel(output_name, fontsize=8)
+
+    return im, cntrs
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{        --     [OLD] 2D [OLD]     --
 def prepare_smooth_2d(
     x,
     y,
@@ -1029,8 +1061,9 @@ def prepare_smooth_2d(
         xquery = np.concatenate([xy, np.tile(xslice, (xy.shape[0], 1))], axis=1)
     else:
         xquery = xy
+
     tree = cKDTree(x)
-    output_values, density = get_knn_smooth(xquery, y, tree=tree, **kw)
+    output_values, density = knn_avg(xquery, y, tree=tree, **kw)
     assert output_values.shape == (xy.shape[0],)
     assert density.shape == (xy.shape[0],)
     opacities = (
@@ -1045,7 +1078,7 @@ def prepare_smooth_2d(
     return xy, output_values, opacities
 
 
-def smooth_2d(
+def smooth_2d_old(
     x,
     y,
     network,
@@ -1061,16 +1094,18 @@ def smooth_2d(
     show_slice_title=True,
     **kw,
 ):
+
     protein_order, protein_names = get_reordered_protein_names(network, **kw)
     input_order, output_pos = protein_order[:-1], protein_order[-1]
     input_names, output_name = protein_names[:-1], protein_names[-1]
     # remove input_order from kw
     kw.pop('input_order', None)
+
     xy, output_values, opacities = prepare_smooth_2d(
         x, y, network, input_names, input_order, output_pos, res, xlims, xslice, **kw
     )
 
-    hm = heatmap_new(
+    hm = heatmap(
         ax, xy, output_values, rescaler, opacities=opacities, axtransform=axtransform, **kw
     )
 
@@ -1207,7 +1242,7 @@ def smooth_line_plot(
         assert slice_at.shape == (x.shape[1] - 1,)
         xquery = np.concatenate([xquery, np.tile(slice_at, (xquery.shape[0], 1))], axis=1)
 
-    z, _ = get_knn_smooth(xquery, y, tree=tree, **kw)
+    z, _ = knn_avg(xquery, y, tree=tree, **kw)
 
     ax.plot(xquery[:, 0], z, label=label, color=color, lw=lw, marker=marker, markevery=markevery)
     if with_quantiles is not None:
@@ -1469,24 +1504,6 @@ def scatter_2d(
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(input_names[1])
 
-    # # colorbar
-    # if colorbar:
-    # divider = make_axes_locatable(ax)
-    # cax = divider.append_axes("right", size="4%", pad=0.05)
-    # cbar = plt.colorbar(sc, cax=cax)
-    # cbar.ax.tick_params(labelsize=6)
-    # # no cbar spines
-    # for spine in cbar.ax.spines.values():
-    # spine.set_visible(False)
-    # # use same ticks if present
-    # if len(ticks) > 0:
-    # valid = ticks >= xmin
-    # diff = len(ticks)
-    # ticks = ticks[valid]
-    # diff -= len(ticks)
-    # cbar.set_ticks(ticks)
-    # cbar.set_ticklabels(ticklabels[diff:])
-
     ttle = None
 
     if title is True:
@@ -1679,7 +1696,6 @@ def scatter_3d(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ### {{{                       --     density histogram     --
 
 
@@ -1701,7 +1717,7 @@ def histogram_plot(
     xlims=(0, 1),
     ylims=(0, 1),
     vlims=(0.001, None),
-    cmap=DEFAULT_CMAPS['blues'],
+    cmap=DEFAULT_CMAP,
     noise_smooth=0,
     log_density=True,
     **kw,
@@ -1767,6 +1783,58 @@ def histogram_plot(
 
 
 # ---- specialized plots
+
+### {{{                --     new network plot functions     --
+
+
+@configurable
+def plot_network_figure_1d(network, x, y, rescaler, mkfig_params={}, **kw):
+    assert network.get_nb_inputs() == 1
+    fig, ax = mkfig(1, 1, **mkfig_params)
+    direct_network_plot(network, x, y, rescaler, ax=ax, **kw)
+    return fig
+
+
+@configurable
+def plot_network_figure_2d(network, x, y, rescaler, mkfig_params={}, direct_network_plot_params={}):
+    assert network.get_nb_inputs() == 2
+    fig, ax = mkfig(1, 1, **mkfig_params)
+    direct_network_plot(network, x, y, rescaler, ax=ax, **direct_network_plot_params)
+    return fig
+
+
+@configurable
+def plot_network_figure_3d(network, x, y, rescaler, nslices=3, mkfig_params={}, **kw):
+    assert network.get_nb_inputs() == 3
+    fig, ax = mkfig(1, nslices, **mkfig_params)
+    direct_network_plot(network, x, y, rescaler, ax=ax, **kw)
+    return fig
+
+
+@configurable
+def plot_network_figure(
+    network,
+    x,
+    y,
+    rescaler,
+    plot_network_figure_1d_params={},
+    plot_network_figure_2d_params={},
+    plot_network_figure_3d_params={},
+):
+    # creates the figure and plots the network
+    # but first dispatches by the number of inputs
+    n_inputs = network.get_nb_inputs()
+    if n_inputs == 1:
+        return plot_network_figure_1d(network, x, y, rescaler, **plot_network_figure_1d_params)
+    elif n_inputs == 2:
+        return plot_network_figure_2d(network, x, y, rescaler, **plot_network_figure_2d_params)
+    elif n_inputs == 3:
+        return plot_network_figure_3d(network, x, y, rescaler, **plot_network_figure_3d_params)
+    else:
+        raise ValueError(f'Network with {n_inputs} inputs is not supported')
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                --     summary model plot functions     --
 def network_plot(
     dman: DataManager,
@@ -1790,7 +1858,7 @@ def network_plot(
 
     rescaler = DataRescaler.from_data_manager(dman)
 
-    return direct_network_plot(
+    return direct_network_plot_old(
         network,
         x,
         y,
@@ -1803,7 +1871,7 @@ def network_plot(
     )
 
 
-def direct_network_plot(
+def direct_network_plot_old(
     network,
     x,
     y,
@@ -1814,21 +1882,82 @@ def direct_network_plot(
     method='smooth',
     **kw,
 ):
-    if kde is not False:
+    if kde is not False and kde is not None:
         rng = jax.random.PRNGKey(0)
         subsample = du.optimal_density_subsample(
             x, kde, rng, quantile_threshold=density_quantile_threshold
         )
         x, y = x[subsample], y[subsample]
-
     if method == 'smooth':
-        return smooth(x, y, network, rescaler, *args, **kw)
+        return smooth_old(x, y, network, rescaler, *args, **kw)
     elif method == 'scatter':
         return scatter(x, y, network, rescaler, *args, **kw)
     elif method == 'histogram':
         return histogram(x, y, network, rescaler, *args, **kw)
     elif method == 'smooth_line_slices':
         return smooth_line_slices(x, y, network, rescaler, *args, **kw)
+
+
+def extract_plot_data_from_network(
+    network, x, y, input_order=None, protein_aliases=None, use_y_as_x=False
+):
+    if input_order is None:
+        input_order = np.arange(network.get_nb_inputs())
+    if protein_aliases is None:
+        protein_aliases = {}
+
+    protein_order, protein_names = get_reordered_protein_names(
+        network, input_order, protein_aliases
+    )
+
+    input_order, output_pos = protein_order[:-1], protein_order[-1]
+    input_names, output_name = protein_names[:-1], protein_names[-1]
+
+    if use_y_as_x:
+        output_names = network.get_output_proteins()
+        xind = [output_names.index(i) for i in input_names]
+        x = y[:, xind]
+    else:
+        x = x[:, input_order]
+
+    y = y[:, output_pos]
+    y = y.reshape(-1, 1)
+
+    assert x.shape[1] == len(input_order)
+    assert y.shape[0] == x.shape[0]
+    return x, y, input_names, output_name
+
+
+@configurable
+def direct_network_plot(
+    network,
+    x,
+    y,
+    rescaler,
+    kde=None,
+    density_quantile_threshold=0.05,
+    method='smooth',
+    use_y_as_x=False,
+    input_order=None,
+    protein_aliases=None,
+    smooth_params={},
+    **kw,
+):
+    if kde is not False and kde is not None:
+        rng = jax.random.PRNGKey(0)
+        subsample = du.optimal_density_subsample(
+            x, kde, rng, quantile_threshold=density_quantile_threshold
+        )
+        x, y = x[subsample], y[subsample]
+
+    x, y, input_names, output_name = extract_plot_data_from_network(
+        network, x, y, input_order, protein_aliases, use_y_as_x
+    )
+
+    if method == 'smooth':
+        return smooth(x, y, input_names, output_name, rescaler, **smooth_params, **kw)
+    else:
+        raise ValueError(f'Invalid method: {method}')
 
 
 def eval_network_plot(
@@ -1860,7 +1989,7 @@ def eval_network_plot(
 
     xmin, xmax = np.min(x, axis=0)[0], np.max(x, axis=0)[0]
 
-    smooth(x, y, network, dman.rescale, ax, xmin=xmin, xmax=xmax, **kw)
+    smooth_old(x, y, network, dman.rescale, ax, xmin=xmin, xmax=xmax, **kw)
 
 
 def get_stack(dman, net_id, params):
@@ -1919,7 +2048,7 @@ def eval_network_on_grid(
     z = y_mean[:, output_pos]
     z = z.reshape(res, res)
 
-    heatmap(ax, z, ticks=ticks, ticklabels=tlabels, **kw)
+    # heatmap(ax, z, ticks=ticks, ticklabels=tlabels, **kw)
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(input_names[1])
     remove_spines(ax)
@@ -1956,14 +2085,14 @@ def model_at_x(params, dman: DataManager, id, key=jax.random.PRNGKey(0), quantil
 def plot_model_at_x(params, dman, id, ax, **kw):
     x, _, yhat = model_at_x(params, dman, id, **kw)
     net = dman.get_networks()[id]
-    smooth(x, yhat, net, dman.rescale, ax, **kw)
+    smooth_old(x, yhat, net, dman.rescale, ax, **kw)
 
 
 def plot_model_diff(params, dman, id, ax, **kw):
     x, y, yhat = model_at_x(params, dman, id, **kw)
     net = dman.get_networks()[id]
     err = np.abs(y - yhat)
-    smooth(x, err, net, dman.rescale, ax, **kw)
+    smooth_old(x, err, net, dman.rescale, ax, **kw)
 
 
 def report(params, dman, id, suptitle='', use_x_y_yhat=None, **kw):

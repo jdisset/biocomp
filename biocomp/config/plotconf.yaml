@@ -1,0 +1,30 @@
+color_maps:
+  bc_blues:
+    - "#F9F7F5"
+    - "#EEECEA"
+    - "#B0CCD6"
+    - "#6CAFC3"
+    - "#2974A4"
+    - "#3B4B90"
+    - "#3D1277"
+    - "#22044B"
+  bc_greens:
+    - "#F9F7F5"
+    - "#E2EADA"
+    - "#CBE4BB"
+    - "#9DDDAA"
+    - "#4CCDAB"
+    - "#30A78F"
+    - "#1F7D73"
+    - "#0C5558"
+  bc_reds:
+    - "#F5F5F5"
+    - "#F1E6E5"
+    - "#F3CFBC"
+    - "#EF957D"
+    - "#D3494B"
+    - "#B00031"
+    - "#840137"
+    - "#560140"
+
+default_color_map: bc_blues
