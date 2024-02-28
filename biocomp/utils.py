@@ -358,7 +358,9 @@ def updated_dict(d1, d2):
             res[key] = copy.deepcopy(val)
     return res
 
+
 from omegaconf import OmegaConf
+
 
 def nested_resolve(d, known=None, throw_if_non_dict=True):
     known = copy.deepcopy(known) or {}
@@ -737,15 +739,15 @@ def logb(x, base=10):
 def cubic_exp_fwd(x, threshold, base, scale=1):
     """
     cubic polynomial that goes through (0,0) and has same first
-    and second derivative as the log function at the threshold
-    In other works, a spline that is log-like near the threshold
-    scale is a parameter to squeeze or stretch the function
-    """
-    # assert base > 1 and scale > 0, 'Base must be > 1 and scale > 0'
-    # assert (
-    # 6 * logb(threshold, base) * scale > 5
-    # ), 'Threshold too small for given scale (or vice versa)'
+    and second derivative as the log (in given base) at the threshold.
+    In other words, a spline that is log-like near the threshold.
 
+    Args:
+    - x: input
+    - threshold: the value at which the function should be log-like
+    - base: the base of the logarithm
+    - scale: a parameter to squeeze (<1) or stretch (>1) the function
+    """
     logthresh = np.log(threshold)
     logbase = np.log(base)
     a = -0.5 * (3 - 2 * scale * logthresh) / (threshold**3 * logbase)
@@ -758,7 +760,7 @@ def cubic_exp_inv(y, threshold, base, scale):
     """
     inverse of cubic_exp_fwd (on [0,threshold])
     """
-    # used wolfram to solve the analytical inverse
+    # used wolfram to solve for the analytical inverse
     lT, lB, cb2 = np.log(threshold), np.log(base), np.cbrt(2)
     T, T2, T3 = threshold, threshold**2, threshold**3
     A = T3 * (
@@ -779,6 +781,12 @@ def cubic_exp_inv(y, threshold, base, scale):
 def log_poly_log(x, threshold=100, base=10, compression=0.5):
     """
     bi-logarithm function with smooth transition to cubic polynomial between [-threshold, threshold]
+
+    Args:
+    - x: input
+    - threshold: when the function should transition between log and spline
+    - base: the base of the logarithm
+    - compression: a parameter to squeeze (<1) or stretch (>1) the function in the spline region
     """
     x = np.asarray(x)
     sign = np.sign(x)
@@ -793,6 +801,9 @@ def log_poly_log(x, threshold=100, base=10, compression=0.5):
 
 
 def inverse_log_poly_log(y, threshold=100, base=10, compression=0.5):
+    """
+    inverse of log_poly_log
+    """
     y = np.asarray(y)
     sign = np.sign(y)
     y = np.abs(y)

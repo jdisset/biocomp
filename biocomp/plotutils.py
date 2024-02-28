@@ -30,7 +30,8 @@ from labellines import labelLine, labelLines
 from jax.typing import ArrayLike
 from typing import Tuple
 import os
-from typing import Union, Sequence, List, Tuple, Dict, Any, Optional
+from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable
+from matplotlib.ticker import ScalarFormatter, NullFormatter, MaxNLocator
 
 ndArray = Union[np.ndarray, jnp.ndarray]
 
@@ -86,7 +87,7 @@ def generate_base_config(
                 if fname in available_functions:
                     subconf[arg] = generate_empty_func_conf(fname, available_functions[fname])
                 else:
-                    print(
+                    logger.debug(
                         f'{func_name} has a nested config {arg} but {fname} is not a known function'
                     )
         return subconf
@@ -105,10 +106,50 @@ def generate_base_config(
     return emptyconf
 
 
-def generate_full_config(user_config, empty_config=None):
+def generate_full_config(user_config=None, empty_config=None, **kw):
     if empty_config is None:
-        empty_config = generate_base_config()
+        empty_config = generate_base_config(**kw)
+    if user_config is None:
+        return empty_config
     return ut.nested_resolve(ut.updated_dict(user_config, empty_config))
+
+
+import yaml
+import copy
+
+
+class BiocompYamlDumper(yaml.SafeDumper):
+
+    def increase_indent(self, flow=False, indentless=False):
+        return super(BiocompYamlDumper, self).increase_indent(flow, False)
+
+    def ignore_aliases(self, data):
+        return True
+
+    def represent_sequence(self, tag, sequence, flow_style=None):
+        return super(BiocompYamlDumper, self).represent_sequence(tag, sequence, flow_style=True)
+
+
+def delete_empty(d):
+    if isinstance(d, dict):
+        newd = {}
+        for k, v in d.items():
+            if isinstance(v, dict):
+                if len(v) > 0:
+                    newv = delete_empty(v)
+                    if len(newv) > 0:
+                        newd[k] = newv
+            else:
+                newd[k] = copy.deepcopy(v)
+    else:
+        newd = copy.deepcopy(d)
+    return newd
+
+
+def dump_default_config(**kw):
+    baseconf = generate_base_config(add_defaults=True)
+    baseconf = delete_empty(baseconf)
+    return yaml.dump(baseconf, Dumper=BiocompYamlDumper, **kw)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -131,10 +172,6 @@ for k, v in CUSTOM_CMAPS.items():
     plt.colormaps.register(v, name=k)
 
 DEFAULT_CMAP_NAME = BASE_CONFIG.default_color_map or 'viridis'
-DEFAULT_CMAP = CUSTOM_CMAPS.get(DEFAULT_CMAP_NAME, DEFAULT_CMAP_NAME)
-DEFAULT_CMAP = (
-    DEFAULT_CMAP if isinstance(DEFAULT_CMAP, mcolors.Colormap) else plt.get_cmap(DEFAULT_CMAP)
-)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                   --     DataRescaler wrapper     --
@@ -144,6 +181,12 @@ class DataRescaler:
     def __init__(self, fwd_transform, inv_transform):
         self.fwd_transform = fwd_transform
         self.inv_transform = inv_transform
+
+    def add_kwargs(self, **kw):
+        assert callable(self.fwd_transform) and callable(self.inv_transform)
+        if kw:
+            self.fwd_transform = partial(self.fwd_transform, **kw)
+            self.inv_transform = partial(self.inv_transform, **kw)
 
     def __call__(self, x):
         return self.fwd_transform(x)
@@ -162,21 +205,31 @@ class DataRescaler:
         return cls(fwd, inv)
 
 
-class DataManagerRescaler:
-    def __init__(self, dm):
-        self.dm = dm
-
-    def fwd(self, x):
-        return self.dm.rescale([x])[0]
-
-    def inv(self, x):
-        return self.dm.unscale([x])[0]
-
-    def __call__(self, x):
-        return self.fwd(x)
+BIOCOMP_DEFAULT_RESCALERS = {
+    None: DataRescaler(lambda x: x, lambda x: x),
+    'identity': DataRescaler(lambda x: x, lambda x: x),
+    'log': DataRescaler(lambda x: np.log(x), lambda x: np.exp(x)),
+    'log10': DataRescaler(lambda x: np.log10(x), lambda x: 10**x),
+}
 
 
-IDENTITY_RESCALER = DataRescaler(lambda x: x, lambda x: x)
+def get_rescaler(rescaler, **kw):
+    if isinstance(rescaler, DataRescaler):
+        return rescaler
+    if isinstance(rescaler, str):
+        if rescaler in BIOCOMP_DEFAULT_RESCALERS:
+            r = copy.deepcopy(BIOCOMP_DEFAULT_RESCALERS[rescaler])
+            r.add_kwargs(**kw)
+            return r
+        else:
+            raise ValueError(f'Unknown rescaler {rescaler}')
+    if isinstance(rescaler, (tuple, list)):
+        assert len(rescaler) == 2, 'Rescaler must be a tuple of (fwd, inv) functions'
+        assert callable(rescaler[0]) and callable(
+            rescaler[1]
+        ), 'Rescaler must be a tuple of (fwd, inv) functions'
+        return DataRescaler(partial(rescaler[0], **kw), partial(rescaler[1], **kw))
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                   --     log_spline_log scale     --
@@ -645,13 +698,6 @@ def get_web_font(url, font_name):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-# general workflow:
-
-# -- network_data_plot:
-# -- -- smooth/scatter/smooth_lines (x, y, network, DataRescaler, **kw)
-# -- -- -- smooth_2d:
-# -- -- -- -- get labels and ticks
-
 # ─────────────────────────────────────────────────────────────────────────────
 #                            PLOTTING FUNCTIONS
 # ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -847,7 +893,7 @@ def smooth_1d(
     xmax=None,
     quantiles=None,
     quantiles_alpha=0.2,
-    color=DEFAULT_CMAP(0.7),
+    color=plt.get_cmap(DEFAULT_CMAP_NAME)(0.7),
     radius=0.075,
     knn=2000,
     min_points=500,
@@ -1024,120 +1070,6 @@ def smooth_2d(
         cbar.ax.set_ylabel(output_name, fontsize=8)
 
     return im, cntrs
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-### {{{        --     [OLD] 2D [OLD]     --
-def prepare_smooth_2d(
-    x,
-    y,
-    network,
-    input_names,
-    input_order,
-    output_pos,
-    res=200,
-    xlims=(0, 1),
-    xslice=None,
-    density_plot=False,
-    density_as_alpha=False,
-    density_threshold=10,
-    use_y_as_x=False,  # if True, use the output of the independent variables as coordinates
-    **kw,
-):
-    xmin, xmax = xlims
-
-    if use_y_as_x:
-        output_names = network.get_output_proteins()
-        xind = [output_names.index(i) for i in input_names]
-        x = y[:, xind]
-    else:
-        x = x[:, input_order]
-
-    y = y[:, output_pos]
-
-    xy = make_xy_grid(xmin, xmax, xres=res)
-    if x.shape[1] > 2:
-        assert xslice.shape == (x.shape[1] - 2,)
-        xquery = np.concatenate([xy, np.tile(xslice, (xy.shape[0], 1))], axis=1)
-    else:
-        xquery = xy
-
-    tree = cKDTree(x)
-    output_values, density = knn_avg(xquery, y, tree=tree, **kw)
-    assert output_values.shape == (xy.shape[0],)
-    assert density.shape == (xy.shape[0],)
-    opacities = (
-        np.ones_like(density)
-        if not density_as_alpha
-        else np.minimum(density / density_threshold, 1.0)
-    )
-    opacities = np.where(np.isnan(output_values), 1, opacities)
-    if density_plot:
-        output_values = density
-
-    return xy, output_values, opacities
-
-
-def smooth_2d_old(
-    x,
-    y,
-    network,
-    rescaler,
-    ax,
-    res=200,
-    xlims=(0, 1),
-    xslice=None,  # should be called zslice, really...
-    title=None,
-    text_x=0.5,
-    text_y=0.9,
-    axtransform=None,
-    show_slice_title=True,
-    **kw,
-):
-
-    protein_order, protein_names = get_reordered_protein_names(network, **kw)
-    input_order, output_pos = protein_order[:-1], protein_order[-1]
-    input_names, output_name = protein_names[:-1], protein_names[-1]
-    # remove input_order from kw
-    kw.pop('input_order', None)
-
-    xy, output_values, opacities = prepare_smooth_2d(
-        x, y, network, input_names, input_order, output_pos, res, xlims, xslice, **kw
-    )
-
-    hm = heatmap(
-        ax, xy, output_values, rescaler, opacities=opacities, axtransform=axtransform, **kw
-    )
-
-    ax.set_xlabel(input_names[0])
-    ax.set_ylabel(input_names[1])
-
-    full_transform = ax.transData if axtransform is None else ax.transData + axtransform
-
-    if x.shape[1] > 2 and show_slice_title:
-        ax.text(
-            text_x,
-            text_y,
-            f'{input_names[2]} $ \\approx $ {format_powers(rescaler.inv(xslice[0]), n_decimals=0)}',
-            fontsize=5,
-            transform=full_transform,
-            ha='center',
-            va='bottom',
-        )
-
-    # spines only on bottom and left
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-
-    ttle = None
-    if title is True:
-        ttle = f'{network.name}\n{output_name} smoothed mean'
-    elif title is not None:
-        ttle = title
-    if ttle is not None:
-        ax.set_title(ttle)
-
-    return hm
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -1390,8 +1322,6 @@ def smooth_line_slices(
 
 
 # ---- scatter plots
-
-
 ### {{{         --     main scatter method (route to 1D, 2D, 3D)     --
 def scatter(x, y, network, *args, **kw):
     ninputs = network.get_nb_inputs()
@@ -1477,7 +1407,7 @@ def scatter_2d(
     size=10,
     colorbar=True,
     lw=0.1,
-    cmap=DEFAULT_CMAP,
+    cmap=DEFAULT_CMAP_NAME,
     xlims=None,
     ylims=None,
     **kw,
@@ -1535,17 +1465,6 @@ def scatter_3d_interactive(
     protein_order, protein_names = get_reordered_protein_names(network, **kw)
     input_order, output_pos = protein_order[:-1], protein_order[-1]
     input_names, output_name = protein_names[:-1], protein_names[-1]
-
-    # xlims_tr = np.asarray(xaxis_lims)
-    # xlims_inv = rescaler.inv(np.asarray(xlims_tr))
-    # p10 = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1])
-    # xlims_margin = xlims_tr + np.array([-1, 1]) * margins * np.diff(xlims_tr)
-    # ax.set_xlim(xlims_margin)
-    # ax.set_xticks(rescaler(p10))  # major ticks
-    # ax.xaxis.set_major_formatter(PowerFormatter(p10, **kw))
-    # p10_minor = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1], resolution=10)
-    # ax.set_xticks(rescaler(p10_minor), minor=True)
-    # return xlims_inv
 
     random_order = jax.random.permutation(key, len(x))
     y = y[random_order, output_pos]
@@ -1665,21 +1584,6 @@ def scatter_3d(
             ax.set_zticks(sc_ticks)
             ax.set_zticklabels(ticklabels)
 
-        # if colorbar and i == n_views - 1:  # Only show colorbar on the last plot
-        # divider = make_axes_locatable(ax)
-        # cax = divider.append_axes("top", size="4%", pad=0.05)
-        # cbar = plt.colorbar(sc, cax=cax)
-        # cbar.ax.tick_params(labelsize=6)
-        # for spine in cbar.ax.spines.values():
-        # spine.set_visible(False)
-
-        # if len(ticks) > 0:
-        # valid = ticks >= xmin
-        # diff = len(ticks)
-        # ticks = ticks[valid]
-        # diff -= len(ticks)
-        # cbar.set_ticks(ticks)
-        # cbar.set_ticklabels(ticklabels[diff:])
 
         ttle = None
 
@@ -1696,18 +1600,313 @@ def scatter_3d(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+# ---- density histograms
 ### {{{                       --     density histogram     --
 
 
-def histogram(x, y, network, rescaler, ax, **kw):
+@configurable
+def histogram(
+    X: ndArray,
+    Y: ndArray,
+    input_names: Sequence[str],
+    output_name: str,
+    rescaler: Callable,
+    ax,
+    nbins=(256, 256),
+    xlims=(0, 1),
+    ylims=(0, 1),
+    vlims=(0.001, None),
+    cmap=DEFAULT_CMAP_NAME,
+    noise_smooth=0,
+    use_log_density=True,
+    draw_colorbar=False,
+):
+    assert X.shape[1] == 1
+
+    if isinstance(nbins, int):
+        nbins = [nbins, nbins]
+
+    assert X.shape[1] == 1
+    assert Y.shape[1] == 1
+
+    xres = np.abs(np.subtract(*xlims)) / nbins[0]
+    yres = np.abs(np.subtract(*ylims)) / nbins[1]
+
+    X = X + np.random.normal(size=X.shape) * noise_smooth * xres
+    Y = Y + np.random.normal(size=Y.shape) * noise_smooth * yres
+
+    h, xedges, yedges = np.histogram2d(
+        X,
+        Y,
+        bins=nbins,
+        density=False,
+        range=[xlims, ylims],
+    )
+
+    if use_log_density:
+        h = np.log(h + 1)
+
+    setup_transformed_axis(
+        ax,
+        xaxis_lims=xlims,
+        yaxis_lims=ylims,
+        rescaler=rescaler,
+        margins=0.0,
+    )
+
+    im = ax.imshow(
+        h.T,  # matplotlib wants it transposed
+        extent=[*xlims, *ylims],
+        origin='lower',
+        aspect='auto',
+        cmap=cmap,
+        vmin=vlims[0],
+        vmax=vlims[1],
+    )
+
+    ax.set_xlabel(input_names[0])
+    ax.set_ylabel(output_name)
+
+    # show grid, including minor grid
+    ax.grid(color='k', alpha=0.25, linestyle='-', linewidth=0.2, which='major')
+    ax.grid(color='k', alpha=0.1, linestyle='-', linewidth=0.1, which='minor')
+
+    if draw_colorbar:
+        cbar = plt.colorbar(im, ax=ax)
+        default_style(cbar.ax)
+        clabel = 'log(density)' if use_log_density else 'density'
+        cbar.set_label(clabel, fontsize=8)
+        for spine in cbar.ax.spines.values():
+            spine.set_linewidth(0.2)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+# ---- network/recipe plots
+### {{{                --     new network plot functions     --
+
+
+@configurable
+def plot_network(
+    network,
+    x,
+    y,
+    rescaler,
+    ax=None,
+    kde=None,
+    density_quantile_threshold=0.05,
+    method='smooth',
+    use_y_as_x=False,
+    input_order=None,
+    protein_aliases=None,
+    smooth_params={},
+    scatter_params={},
+    histogram_params={},
+):
+    """plot a network on a given axis (or list of axes)"""
+
+    if kde is not False and kde is not None:
+        rng = jax.random.PRNGKey(0)
+        subsample = du.optimal_density_subsample(
+            x, kde, rng, quantile_threshold=density_quantile_threshold
+        )
+        x, y = x[subsample], y[subsample]
+    x, y, input_names, output_name = extract_plot_data_from_network(
+        network, x, y, input_order, protein_aliases, use_y_as_x
+    )
+
+    if method == 'smooth':
+        return smooth(x, y, input_names, output_name, rescaler, ax=ax, **smooth_params)
+    elif method == 'scatter':
+        return scatter(x, y, input_names, output_name, rescaler, ax=ax, **scatter_params)
+    elif method == 'histogram':
+        return histogram(x, y, input_names, output_name, rescaler, ax=ax, **histogram_params)
+    else:
+        raise NotImplementedError(f'Unknown plotting method {method}')
+
+
+# network_figure_*d exist to allow for a different configuration path
+# per number of dimensions (1D, 2D, 3D)
+
+
+@configurable
+def network_figure_1d(network, x, y, rescaler, mkfig_params={}, plot_network_params={}):
+    assert network.get_nb_inputs() == 1
+    fig, ax = mkfig(1, 1, **mkfig_params)
+    plot_network(network, x, y, rescaler, ax=ax, **plot_network_params)
+    return fig
+
+
+@configurable
+def network_figure_2d(network, x, y, rescaler, mkfig_params={}, plot_network_params={}):
+    assert network.get_nb_inputs() == 2
+    fig, ax = mkfig(1, 1, **mkfig_params)
+    plot_network(network, x, y, rescaler, ax=ax, **plot_network_params)
+    return fig
+
+
+@configurable
+def network_figure_3d(network, x, y, rescaler, nslices=3, mkfig_params={}, **plot_network_params):
+    assert network.get_nb_inputs() == 3
+    fig, ax = mkfig(1, nslices, **mkfig_params)
+    plot_network(network, x, y, rescaler, ax=ax, **plot_network_params)
+    return fig
+
+
+# network_figure is the main entry point for plotting networks
+
+
+@configurable
+def network_figure(
+    network,
+    x,
+    y,
+    rescaler,
+    network_figure_1d_params={},
+    network_figure_2d_params={},
+    network_figure_3d_params={},
+):
+    n_inputs = network.get_nb_inputs()
+    if n_inputs == 1:
+        return network_figure_1d(network, x, y, rescaler, **network_figure_1d_params)
+    elif n_inputs == 2:
+        return network_figure_2d(network, x, y, rescaler, **network_figure_2d_params)
+    elif n_inputs == 3:
+        return network_figure_3d(network, x, y, rescaler, **network_figure_3d_params)
+    else:
+        raise ValueError(f'Network with {n_inputs} inputs is not supported')
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+# ---- archive
+### {{{        --     [OLD] 2D    --
+def prepare_smooth_2d(
+    x,
+    y,
+    network,
+    input_names,
+    input_order,
+    output_pos,
+    res=200,
+    xlims=(0, 1),
+    xslice=None,
+    density_plot=False,
+    density_as_alpha=False,
+    density_threshold=10,
+    use_y_as_x=False,  # if True, use the output of the independent variables as coordinates
+    **kw,
+):
+    xmin, xmax = xlims
+
+    if use_y_as_x:
+        output_names = network.get_output_proteins()
+        xind = [output_names.index(i) for i in input_names]
+        x = y[:, xind]
+    else:
+        x = x[:, input_order]
+
+    y = y[:, output_pos]
+
+    xy = make_xy_grid(xmin, xmax, xres=res)
+    if x.shape[1] > 2:
+        assert xslice.shape == (x.shape[1] - 2,)
+        xquery = np.concatenate([xy, np.tile(xslice, (xy.shape[0], 1))], axis=1)
+    else:
+        xquery = xy
+
+    tree = cKDTree(x)
+    output_values, density = knn_avg(xquery, y, tree=tree, **kw)
+    assert output_values.shape == (xy.shape[0],)
+    assert density.shape == (xy.shape[0],)
+    opacities = (
+        np.ones_like(density)
+        if not density_as_alpha
+        else np.minimum(density / density_threshold, 1.0)
+    )
+    opacities = np.where(np.isnan(output_values), 1, opacities)
+    if density_plot:
+        output_values = density
+
+    return xy, output_values, opacities
+
+
+def smooth_2d_old(
+    x,
+    y,
+    network,
+    rescaler,
+    ax,
+    res=200,
+    xlims=(0, 1),
+    xslice=None,  # should be called zslice, really...
+    title=None,
+    text_x=0.5,
+    text_y=0.9,
+    axtransform=None,
+    show_slice_title=True,
+    **kw,
+):
+
+    protein_order, protein_names = get_reordered_protein_names(network, **kw)
+    input_order, output_pos = protein_order[:-1], protein_order[-1]
+    input_names, output_name = protein_names[:-1], protein_names[-1]
+    # remove input_order from kw
+    kw.pop('input_order', None)
+
+    xy, output_values, opacities = prepare_smooth_2d(
+        x, y, network, input_names, input_order, output_pos, res, xlims, xslice, **kw
+    )
+
+    hm = heatmap(
+        ax, xy, output_values, rescaler, opacities=opacities, axtransform=axtransform, **kw
+    )
+
+    ax.set_xlabel(input_names[0])
+    ax.set_ylabel(input_names[1])
+
+    full_transform = ax.transData if axtransform is None else ax.transData + axtransform
+
+    if x.shape[1] > 2 and show_slice_title:
+        ax.text(
+            text_x,
+            text_y,
+            f'{input_names[2]} $ \\approx $ {format_powers(rescaler.inv(xslice[0]), n_decimals=0)}',
+            fontsize=5,
+            transform=full_transform,
+            ha='center',
+            va='bottom',
+        )
+
+    # spines only on bottom and left
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    ttle = None
+    if title is True:
+        ttle = f'{network.name}\n{output_name} smoothed mean'
+    elif title is not None:
+        ttle = title
+    if ttle is not None:
+        ax.set_title(ttle)
+
+    return hm
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+### {{{                       --     [OLD]    density histogram     --
+
+
+def histogram_old(x, y, network, rescaler, ax, **kw):
     ninputs = network.get_nb_inputs()
     if ninputs == 1:
-        histogram_plot(x, y, network, rescaler, ax, **kw)
+        histogram_plot_old(x, y, network, rescaler, ax, **kw)
     else:
         raise NotImplementedError(f'Cannot plot {ninputs} inputs')
 
 
-def histogram_plot(
+def histogram_plot_old(
     X,
     Y,
     network,
@@ -1717,7 +1916,7 @@ def histogram_plot(
     xlims=(0, 1),
     ylims=(0, 1),
     vlims=(0.001, None),
-    cmap=DEFAULT_CMAP,
+    cmap=DEFAULT_CMAP_NAME,
     noise_smooth=0,
     log_density=True,
     **kw,
@@ -1782,59 +1981,6 @@ def histogram_plot(
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
-# ---- specialized plots
-
-### {{{                --     new network plot functions     --
-
-
-@configurable
-def plot_network_figure_1d(network, x, y, rescaler, mkfig_params={}, **kw):
-    assert network.get_nb_inputs() == 1
-    fig, ax = mkfig(1, 1, **mkfig_params)
-    direct_network_plot(network, x, y, rescaler, ax=ax, **kw)
-    return fig
-
-
-@configurable
-def plot_network_figure_2d(network, x, y, rescaler, mkfig_params={}, direct_network_plot_params={}):
-    assert network.get_nb_inputs() == 2
-    fig, ax = mkfig(1, 1, **mkfig_params)
-    direct_network_plot(network, x, y, rescaler, ax=ax, **direct_network_plot_params)
-    return fig
-
-
-@configurable
-def plot_network_figure_3d(network, x, y, rescaler, nslices=3, mkfig_params={}, **kw):
-    assert network.get_nb_inputs() == 3
-    fig, ax = mkfig(1, nslices, **mkfig_params)
-    direct_network_plot(network, x, y, rescaler, ax=ax, **kw)
-    return fig
-
-
-@configurable
-def plot_network_figure(
-    network,
-    x,
-    y,
-    rescaler,
-    plot_network_figure_1d_params={},
-    plot_network_figure_2d_params={},
-    plot_network_figure_3d_params={},
-):
-    # creates the figure and plots the network
-    # but first dispatches by the number of inputs
-    n_inputs = network.get_nb_inputs()
-    if n_inputs == 1:
-        return plot_network_figure_1d(network, x, y, rescaler, **plot_network_figure_1d_params)
-    elif n_inputs == 2:
-        return plot_network_figure_2d(network, x, y, rescaler, **plot_network_figure_2d_params)
-    elif n_inputs == 3:
-        return plot_network_figure_3d(network, x, y, rescaler, **plot_network_figure_3d_params)
-    else:
-        raise ValueError(f'Network with {n_inputs} inputs is not supported')
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                --     summary model plot functions     --
 def network_plot(
     dman: DataManager,
@@ -1926,38 +2072,6 @@ def extract_plot_data_from_network(
     assert x.shape[1] == len(input_order)
     assert y.shape[0] == x.shape[0]
     return x, y, input_names, output_name
-
-
-@configurable
-def direct_network_plot(
-    network,
-    x,
-    y,
-    rescaler,
-    kde=None,
-    density_quantile_threshold=0.05,
-    method='smooth',
-    use_y_as_x=False,
-    input_order=None,
-    protein_aliases=None,
-    smooth_params={},
-    **kw,
-):
-    if kde is not False and kde is not None:
-        rng = jax.random.PRNGKey(0)
-        subsample = du.optimal_density_subsample(
-            x, kde, rng, quantile_threshold=density_quantile_threshold
-        )
-        x, y = x[subsample], y[subsample]
-
-    x, y, input_names, output_name = extract_plot_data_from_network(
-        network, x, y, input_order, protein_aliases, use_y_as_x
-    )
-
-    if method == 'smooth':
-        return smooth(x, y, input_names, output_name, rescaler, **smooth_params, **kw)
-    else:
-        raise ValueError(f'Invalid method: {method}')
 
 
 def eval_network_plot(
@@ -2351,7 +2465,6 @@ def plot_node(
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ### {{{                    --     High level helpers     --
 
 BASE_DEFAULT_CONFIG = {
