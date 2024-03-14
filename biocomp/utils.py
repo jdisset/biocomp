@@ -1,4 +1,5 @@
 ### {{{                          --     imports     --
+import yaml
 import json
 import copy
 import xxhash
@@ -28,52 +29,15 @@ import cProfile
 from typing import Union, Tuple, List, Dict, Any, Optional, Callable, Sequence, Iterable
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
+## {{{                           --     types     --
 PathLike = Union[str, Path]
+##────────────────────────────────────────────────────────────────────────────}}}
 
-
-class profiler:
-    def __init__(self, filename):
-        self.filename = filename
-        # mkdir if it doesn't exist
-        Path(filename).parent.mkdir(parents=True, exist_ok=True)
-
-    def __enter__(self):
-        self.profiler = cProfile.Profile()
-        self.profiler.enable()
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.profiler.disable()
-        self.profiler.dump_stats(self.filename)
-
-
-def get_git_commit_hash():
-    bcpath = Path(__file__).parent
-    bcpath = bcpath.resolve()
-    return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=bcpath).decode('ascii').strip()
-
-
-def get_biocomp_version():
-    return get_distribution('biocomp').version
-
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     logging utils     --
 # ···············································································
 
 import logging
 from rich.logging import RichHandler
-
-
-# def setup_logger(lname=None, level=logging.INFO):
-# root_logger = logging.getLogger(lname)
-# root_logger.setLevel(level)
-# ch = RichHandler(rich_tracebacks=True)
-# ch.setFormatter(logging.Formatter("%(message)s"))
-# ch.setLevel(level)
-# root_logger.handlers = [ch]
-# root_logger.propagate = False
-# return root_logger
 
 
 def setup_logger(lname=None, level=logging.INFO):
@@ -123,54 +87,11 @@ def timer(name=None, use_logger=True):
 
 
 #                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
 
-### {{{               --     loading constants and config     --
+# ╭─────────────────────────────────────────────╮
+# │               loading, saving               │
+# ╰───────────────────── ⟱ ─────────────────────╯
 
-from omegaconf import OmegaConf
-from pathlib import Path
-
-
-def load_config(*config_files):  # in order of priority, the last one wins
-    config = OmegaConf.create()
-    for config_file in config_files:
-        if not Path(config_file).exists():
-            logger.warning(f'Config file {config_file} not found.')
-            continue
-        config = OmegaConf.merge(config, OmegaConf.load(config_file))
-    OmegaConf.resolve(config)
-    return config
-
-
-BIOCOMP_BASE_CONFIG = load_config(resource_filename('biocomp', 'config/base.yaml'))
-
-# TODO: switch the following to use the config file
-# we check if there is a file named ~/.biocomp.json
-# if so, we load it and use the paths defined there
-# otherwise, we use the default paths defined above
-GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
-if GLOBAL_CONFIG_PATH.exists():
-    with open(GLOBAL_CONFIG_PATH) as f:
-        config = json.load(f)
-        DEFAULT_XP_PATH = Path(config.get('xp_path', '')).expanduser()
-        DEFAULT_RECIPE_PATH = config.get('recipe_path', '')
-        if isinstance(DEFAULT_RECIPE_PATH, str):
-            DEFAULT_RECIPE_PATH = Path(DEFAULT_RECIPE_PATH).expanduser()
-        elif isinstance(DEFAULT_RECIPE_PATH, list):
-            DEFAULT_RECIPE_PATH = [Path(p).expanduser() for p in DEFAULT_RECIPE_PATH]
-        DEFAULT_LIB_PATH = Path(config.get('lib_path', '')).expanduser()
-
-# we also check the environment variables to see if they define the paths
-# if so, we use them in priority
-
-if 'BIOCOMP_XP_PATH' in os.environ:
-    DEFAULT_XP_PATH = Path(os.environ['BIOCOMP_XP_PATH']).expanduser()
-if 'BIOCOMP_RECIPE_PATH' in os.environ:
-    DEFAULT_RECIPE_PATH = Path(os.environ['BIOCOMP_RECIPE_PATH']).expanduser()
-if 'BIOCOMP_LIB_PATH' in os.environ:
-    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_LIB_PATH']).expanduser()
-
-##────────────────────────────────────────────────────────────────────────────}}}
 # {{{                      --     data load/save     --
 # ···············································································
 import pickle
@@ -200,21 +121,7 @@ def load(path):
 
 
 #                                                                            }}}
-### {{{               --     convenience loading functions     --
-def load_lib(lib_path=DEFAULT_LIB_PATH):
-    return load(lib_path)
-
-
-# convenience loading functions with default paths
-def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH, **kwargs):
-    xp = XP(xpname, xp_path, recipe_path, lib, **kwargs)
-    return xp
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-
-### {{{                           --     cache     --
+## {{{                           --     cache     --
 def get_cache(
     gen_f: Callable, signature: str, cache_location: Optional[PathLike], create_dir: bool = True
 ):
@@ -265,10 +172,462 @@ def get_cache(
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                  --     function serialization     --
+import inspect
+import sys
+from dataclasses import dataclass
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                    --     random misc stuff     --
-# ···············································································
+
+@dataclass
+class EncodedFunction:
+    fname: str
+    kwargs: dict
+    module: Optional[str] = None
+
+    def __init__(self, fname, kwargs=None, module=None):
+        self.fname = fname
+        self.kwargs = kwargs or {}
+        self.module = module
+
+    def get_impl(self, module_names: Optional[list[str]] = None) -> Callable:
+        if not hasattr(self, '__func'):
+            self.__func = decode_function(self, module_names)
+        return self.__func
+
+    def __call__(self, *args, **kw):
+        return self.get_impl()(*args, **kw)
+
+    def __repr__(self):
+        return f'EncodedFunction({self.fname=}, {self.kwargs=}, {self.module}=)'
+
+    def to_dict(self):
+        return {
+            'module': self.module,
+            'fname': self.fname,
+            'kwargs': self.kwargs,
+        }
+
+
+def unwrap_partial_function(implementation):
+    if hasattr(implementation, 'func') and hasattr(implementation, 'keywords'):
+        partial_args = implementation.keywords
+        implementation = implementation.func
+    else:
+        partial_args = {}
+    return implementation, partial_args
+
+
+def encode_function(func: Callable, **kwargs) -> EncodedFunction:
+    func, partial_args = unwrap_partial_function(func)
+    kwargs.update(partial_args)
+
+    # detect if it's in a module
+    module_name = func.__module__
+    if module_name == '__main__':
+        module_name = None
+
+    signature = inspect.signature(func)
+    f_kwargs = {}
+    for name, param in signature.parameters.items():
+        if name in kwargs:
+            f_kwargs[name] = kwargs[name]
+        elif param.default != inspect.Parameter.empty:
+            f_kwargs[name] = param.default
+
+    return EncodedFunction(fname=func.__name__, kwargs=f_kwargs, module=module_name)
+
+
+def decode_function(
+    encoded_func: EncodedFunction, module_names: Optional[list[str]] = None
+) -> Callable:
+
+    if module_names is None:
+        if encoded_func.module is not None:
+            module_names = [encoded_func.module]
+        else:  # use the global namespace
+            module_names = ['__main__']
+
+    for module_name in module_names:
+        if module_name in sys.modules:
+            module = sys.modules[module_name]
+            if hasattr(module, encoded_func.fname):
+                implementation = getattr(module, encoded_func.fname)
+                return partial(implementation, **encoded_func.kwargs)
+
+    raise ValueError(f'No function named {encoded_func.fname} in modules {module_names}')
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+# ╭─────────────────────────────────────────────╮
+# │             configuration utils             │
+# ╰───────────────────── ⟱ ─────────────────────╯
+
+## {{{                       --     config utils     --
+
+
+"""
+A nested configuration is a dictionary that contains the configuration
+for each function in a call stack (i.e. the kwargs for each function).
+To know that a function calls another one and needs a nested config,
+we need 2 things:
+     - the calling function needs to have a parameter named
+        {called_function_name}{function_config_suffix}, e.g. 'makeplot_params'
+
+     - the called function needs to have been declared as configurable
+        (can use the @configurable decorator for that)
+
+Because some modules (such as plotting) rely heavily on nested configurations,
+and because different paths of nested calls might require different configurations,
+(for example heatmap might need a different configuration when called from a
+2d pipeline vs for a 3d slice in a 3d pipeline), we need a way to declare
+configurations that can be progressively specialized depending on the call stack.
+
+The idea is that we can then make configuration files that inherit from the closest base
+configuration (which can also inherit from an upstream declaration, etc...),
+and only override the parameters we want to change.
+
+For example, if we have a function makeplot that calls a function plotdata,
+we can have a configuration file like this:
+
+```
+    f1_params:
+     ... (base parameters for f1)
+
+    f2_params:
+     ... (base parameters for f2)
+
+    f3_params:
+     ... (base parameters for f3)
+
+    f2_params:
+        f3_params:
+            ... (arguments for f3 when called from f2)
+
+    f1_params:
+        f3_params:
+            ... (arguments for f3 when called from f1)
+        f2_params:
+            ... (arguments for f2 when called from f1)
+            f3_params:
+                ... (arguments for "f3 in f2 in f1")
+                    final f3_params will be the result of merging,
+                    from least to most specific:
+                     - base f3_params
+                     - f3 in f1
+                     - f3 in f2
+                     - f3 in f2 in f1
+```
+
+since, for that to work, we need to know the full path of the function in the call stack,
+which would be annoying to write by hand in the config file, we can use the
+generate_base_nested_config function to generate a template for the config file
+and merge it with the (potentially sparse) user's config file to get the full nested config.
+
+"""
+
+import inspect
+
+
+_CONFIGURABLE_FUNCTIONS = {}
+
+
+def get_configurable_functions(namespace: str = 'default') -> Dict:
+    if namespace not in _CONFIGURABLE_FUNCTIONS:
+        _CONFIGURABLE_FUNCTIONS[namespace] = {}
+    return _CONFIGURABLE_FUNCTIONS[namespace]
+
+
+def configurable(func: Callable, namespace: str = 'default') -> Callable:
+    """Decorator to add a function and its arguments to the list of configurable functions."""
+    local_conf_functions = get_configurable_functions(namespace)
+    sig = inspect.signature(func)
+    # fkwargs = list(sig.parameters.keys())
+    local_conf_functions[func.__name__] = {
+        k: v.default for k, v in sig.parameters.items() if v.default is not inspect.Parameter.empty
+    }
+
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def configurable_decorator(namespace: str = 'default') -> Callable:
+    return partial(configurable, namespace=namespace)
+
+
+def generate_base_nested_config(
+    available_functions: Optional[Dict] = None,
+    function_config_suffix: str = '_params',
+    add_defaults: bool = False,
+    namespace: str = 'default',
+):
+
+    if available_functions is None:
+        available_functions = get_configurable_functions(namespace)
+
+    # essentially a template for the full config, that shows
+    # its structure (in terms of nested functions).
+    # for each available function, we can check if it needs a nested config
+    # if it does, we can generate an empty config for it
+
+    emptyconf = {}
+
+    def generate_empty_func_conf(func_name, func_args):
+        subconf = {}
+        for arg in func_args.keys():
+            if arg.endswith(function_config_suffix):
+                fname = arg[: -len(function_config_suffix)]
+                if fname in available_functions:
+                    subconf[arg] = generate_empty_func_conf(fname, available_functions[fname])
+                else:
+                    logger.debug(
+                        f'{func_name} has a nested config {arg} but {fname} is not a known function'
+                    )
+        return subconf
+
+    for func_name, func_args in available_functions.items():
+        argname = f'{func_name}{function_config_suffix}'
+        emptyconf[argname] = generate_empty_func_conf(func_name, func_args)
+
+    if add_defaults:
+        for func_name, func_args in available_functions.items():
+            fdict = emptyconf[func_name + function_config_suffix]
+            for arg, default_val in func_args.items():
+                if not arg.endswith(function_config_suffix):
+                    fdict[arg] = default_val
+
+    return emptyconf
+
+
+def nested_resolve(d: Any, known_node: Optional[Dict] = None, throw_if_non_dict=True):
+    known_node = copy.deepcopy(known_node) or {}
+    if not isinstance(d, dict):
+        if throw_if_non_dict:
+            raise ValueError(f'Expected a dict, got {type(d)}')
+        return d
+    for k, v in d.items():
+        if isinstance(v, dict):
+            known_node[k] = updated_dict(known_node.get(k, {}), v)
+        else:
+            known_node[k] = copy.deepcopy(v)
+    return {k: nested_resolve(known_node[k], known_node, False) for k in d.keys()}
+
+
+def generate_full_nested_config(
+    user_config: Optional[Dict] = None,
+    empty_config: Optional[Dict] = None,
+    namespace: str = 'default',
+    **kw,
+):
+    if empty_config is None:
+        empty_config = generate_base_nested_config(namespace=namespace, **kw)
+    if user_config is None:
+        return empty_config
+    return nested_resolve(updated_dict(user_config, empty_config))
+
+
+class BiocompYamlDumper(yaml.SafeDumper):
+
+    def increase_indent(self, flow=False, indentless=False):
+        return super(BiocompYamlDumper, self).increase_indent(flow, False)
+
+    def ignore_aliases(self, data):
+        return True
+
+    def represent_sequence(self, tag, sequence, flow_style=None):
+        return super(BiocompYamlDumper, self).represent_sequence(tag, sequence, flow_style=True)
+
+
+def delete_empty(d: Any):
+    if isinstance(d, dict):
+        newd = {}
+        for k, v in d.items():
+            if isinstance(v, dict):
+                if len(v) > 0:
+                    newv = delete_empty(v)
+                    if len(newv) > 0:
+                        newd[k] = newv
+            else:
+                newd[k] = copy.deepcopy(v)
+    else:
+        newd = copy.deepcopy(d)
+    return newd
+
+
+def yaml_dump(data, **kw):
+    return yaml.dump(data, Dumper=BiocompYamlDumper, **kw)
+
+from omegaconf import OmegaConf
+
+def dump_default_config(namespace: str = 'default'):
+    baseconf = generate_base_nested_config(add_defaults=True, namespace=namespace)
+    # baseconf = delete_empty(baseconf)
+    return yaml_dump(baseconf)
+    # dump using omegaconf
+    # conf = OmegaConf.create(baseconf)
+    # return OmegaConf.to_yaml(conf)
+
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{               --     loading constants and config     --
+
+from omegaconf import OmegaConf
+from pathlib import Path
+
+
+def load_config(*config_files):  # in order of priority, the last one wins
+    config = OmegaConf.create()
+    for config_file in config_files:
+        if not Path(config_file).exists():
+            logger.warning(f'Config file {config_file} not found.')
+            continue
+        config = OmegaConf.merge(config, OmegaConf.load(config_file))
+    OmegaConf.resolve(config)
+    return config
+
+
+# BIOCOMP_BASE_CONFIG = load_config(resource_filename('biocomp', 'config/base.yaml'))
+
+# TODO: switch the following to use the config file
+# we check if there is a file named ~/.biocomp.json
+# if so, we load it and use the paths defined there
+# otherwise, we use the default paths defined above
+GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
+if GLOBAL_CONFIG_PATH.exists():
+    with open(GLOBAL_CONFIG_PATH) as f:
+        config = json.load(f)
+        DEFAULT_XP_PATH = Path(config.get('xp_path', '')).expanduser()
+        DEFAULT_RECIPE_PATH = config.get('recipe_path', '')
+        if isinstance(DEFAULT_RECIPE_PATH, str):
+            DEFAULT_RECIPE_PATH = Path(DEFAULT_RECIPE_PATH).expanduser()
+        elif isinstance(DEFAULT_RECIPE_PATH, list):
+            DEFAULT_RECIPE_PATH = [Path(p).expanduser() for p in DEFAULT_RECIPE_PATH]
+        DEFAULT_LIB_PATH = Path(config.get('lib_path', '')).expanduser()
+
+# we also check the environment variables to see if they define the paths
+# if so, we use them in priority
+
+if 'BIOCOMP_XP_PATH' in os.environ:
+    DEFAULT_XP_PATH = Path(os.environ['BIOCOMP_XP_PATH']).expanduser()
+if 'BIOCOMP_RECIPE_PATH' in os.environ:
+    DEFAULT_RECIPE_PATH = Path(os.environ['BIOCOMP_RECIPE_PATH']).expanduser()
+if 'BIOCOMP_LIB_PATH' in os.environ:
+    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_LIB_PATH']).expanduser()
+
+
+def load_lib(lib_path=DEFAULT_LIB_PATH):
+    return load(lib_path)
+
+
+# convenience loading functions with default paths
+def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH, **kwargs):
+    xp = XP(xpname, xp_path, recipe_path, lib, **kwargs)
+    return xp
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+# ╭─────────────────────────────────────────────╮
+# │            general purpose utils            │
+# ╰───────────────────── ⟱ ─────────────────────╯
+
+
+## {{{                     --     profiler context     --
+class profiler:
+    def __init__(self, filename):
+        self.filename = filename
+        # mkdir if it doesn't exist
+        Path(filename).parent.mkdir(parents=True, exist_ok=True)
+
+    def __enter__(self):
+        self.profiler = cProfile.Profile()
+        self.profiler.enable()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.profiler.disable()
+        self.profiler.dump_stats(self.filename)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                       --     timing utils     --
+
+
+class Timer:
+    def __init__(self, name, console=None):
+        self.console = console
+        self.name = name
+        self.laps = []
+        self.end_time = []
+
+    def start(self, with_spinner=False):
+        self.start_time = time.time()
+        if with_spinner:
+            assert self.console is not None
+            stat = f"{self.name}..." if not isinstance(with_spinner, str) else with_spinner
+            self.spinner = self.console.status(stat, spinner="dots")
+            self.spinner.start()
+
+    def lap(self):
+        self.end_time.append(time.time() - self.start_time)
+
+    def stop(self):
+        self.lap()
+        if hasattr(self, "spinner"):
+            self.spinner.stop()
+
+    def stop_print(self):
+        self.stop()
+        msg = f"{self.name} took {self.end_time[-1]:.2f} seconds"
+        if self.console is not None:
+            self.console.print(msg)
+        else:
+            print(msg)
+
+
+class TimeStore:
+    def __init__(self, console=None):
+        self.console = console
+        self.timers = {}
+
+    def start(self, name, with_spinner=False):
+        if name not in self.timers:
+            self.timers[name] = Timer(name, self.console)
+        self.timers[name].start(with_spinner=with_spinner)
+        return self.timers[name]
+
+    def lap(self, name):
+        self.timers[name].lap()
+
+    def stop_print(self, name):
+        if isinstance(name, str):
+            assert name in self.timers
+            self.timers[name].stop_print()
+        else:
+            assert isinstance(name, Timer)
+            name.stop_print()
+
+    def stop_all(self):
+        for name in self.starts:
+            self.lap(name)
+
+    def print_all(self):
+        for name in self.times:
+            print(f"{name}: {self.times[name][-1]}")
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                        --     misc utils     --
+def get_git_commit_hash():
+    bcpath = Path(__file__).parent
+    bcpath = bcpath.resolve()
+    return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=bcpath).decode('ascii').strip()
+
+
+def get_biocomp_version():
+    return get_distribution('biocomp').version
 
 
 def np_converter(obj):
@@ -362,20 +721,6 @@ def updated_dict(d1, d2):
 from omegaconf import OmegaConf
 
 
-def nested_resolve(d, known=None, throw_if_non_dict=True):
-    known = copy.deepcopy(known) or {}
-    if not isinstance(d, dict):
-        if throw_if_non_dict:
-            raise ValueError(f'Expected a dict, got {type(d)}')
-        return d
-    for k, v in d.items():
-        if isinstance(v, dict):
-            known[k] = updated_dict(known.get(k, {}), v)
-        else:
-            known[k] = copy.deepcopy(v)
-    return {k: nested_resolve(known[k], known, False) for k in d.keys()}
-
-
 def decode_json(df, cols):
     for col in cols:
         df[col] = df[col].apply(lambda x: json.loads(str(x)))
@@ -438,116 +783,11 @@ def tree_to_np(params):
     return jax.tree_map(lambda x: np.asarray(x), params)
 
 
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
+##────────────────────────────────────────────────────────────────────────────}}}#                                                                            }}}
+## {{{                  --     parameter initializers     --
 
 
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                     --     parameters utils     --
-# ···············································································
-class ParamPath:
-    def __init__(self, path=None):
-        if isinstance(path, str):
-            path = path.strip("/").split("/")
-        self.path = path or []
-
-    def __truediv__(self, key):
-        if isinstance(key, str):
-            key = key.strip("/").split("/")
-        elif isinstance(key, ParamPath):
-            key = key.path
-        return ParamPath(self.path + key)
-
-    def __repr__(self):
-        return "/".join(self.path)
-
-
-NODE_PATH = ParamPath('node')
-SHARED_PATH = ParamPath('shared')
-STATIC_PATH = ParamPath('__static__')
-QVALS_PATH = SHARED_PATH / 'qvals'
-KEYS_PATH = STATIC_PATH / '__keys__'
-MASK_PATH = STATIC_PATH / 'qmasks'
-NAMED_VALUES = STATIC_PATH / 'named_values'
-QNAME_PATH = NAMED_VALUES / 'qnames'
-
-
-def at_path_nested(d: dict, path, val=None, defaultinit=lambda: None):
-    for key in path[:-1]:
-        try:
-            d = d.setdefault(key, dict())
-        except AttributeError as e:
-            msg = (
-                f'Cannot set "{key}" at path {path}: {e}. Did you pass something other than a dict?'
-            )
-            raise AttributeError(msg)
-    if val is not None:
-        d[path[-1]] = val
-        d = d[path[-1]]
-    else:
-        d = d.setdefault(path[-1], defaultinit())
-    return d
-
-
-def at_path(d: dict, path: ParamPath, val=None, defaultinit=lambda: None):
-    return at_path_nested(d, path.path, val, defaultinit)
-
-
-def at_path_flat(d: dict, path: str, val=None, defaultinit=lambda: None):
-    if val is None:
-        return d.setdefault(path, defaultinit())
-    else:
-        d[path] = val
-        return val
-
-
-def delete_path_nested(d, path):
-    for key in path[:-1]:
-        d = d[key]
-    del d[path[-1]]
-
-
-def delete_path_flat(d, path):
-    del d[path]
-
-
-def delete_path(d: dict, path: ParamPath):
-    return delete_path_nested(d, path.path)
-
-
-def split_params_nested(params, static_paths):
-    """Split params into static and dynamic parts."""
-    # any path that is not in static_paths is dynamic
-    dynamic = params.copy()
-    static = {}
-    for path in static_paths:
-        at_path(static, path, at_path(dynamic, path))
-        delete_path(dynamic, path)
-    return dynamic, static
-
-
-def split_params_flat(params, static_paths):
-    """Split params into static and dynamic parts."""
-    static = {}
-    dynamic = {}
-    for k, v in params.items():
-        # if k starts with any of the static_paths, it is static
-        if any(k.startswith(p) for p in static_paths):
-            static[k] = v
-        else:
-            dynamic[k] = v
-    return dynamic, static
-
-
-def split_params(params: dict, static_paths: list[ParamPath]):
-    return split_params_nested(params, static_paths)
-
-
-DEFAULT_MIN_RATE = 0.0
-DEFAULT_MAX_RATE = 1.0
-
-
-def continuous_initializer(rng, shape=(), minval=DEFAULT_MIN_RATE, maxval=DEFAULT_MAX_RATE):
+def continuous_initializer(rng, shape=(), minval=0, maxval=1):
     def init():
         return jax.random.uniform(
             key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32
@@ -570,165 +810,8 @@ def he_initializer(rng, shape):
     return init
 
 
-def path_contains_flat(params, path):
-    """returns the params with a path that contains the given path"""
-    contains, doesnt_contain = {}, {}
-    for k, v in params.items():
-        if path in k:
-            contains[k] = v
-        else:
-            doesnt_contain[k] = v
-    return contains, doesnt_contain
-
-
-def merge_dicts(*dicts):
-    res = {}
-    for d in dicts:
-        res.update(d)
-    return res
-
-
-def assemble_params_flat(dynamic, static):
-    """Assemble params from static and dynamic parts."""
-    res = dynamic.copy()
-    res.update(static)
-    return res
-
-
-def assemble_params_nested(dynamic, static):
-    """Assemble params from static and dynamic parts."""
-    res = updated_dict(dynamic, static)
-    return res
-
-
-# def assemble_params(dynamic, static):
-# return assemble_params_nested(dynamic, static)
-
-
-def assemble_params(*p):
-    res = p[0]
-    for d in p[1:]:
-        res = assemble_params_nested(res, d)
-    return res
-
-
-def flatten_params(params):
-    # TODO: switch to jax.flattten_util.ravel_pytree
-    """Flatten params into a single vector,
-    and also returns a descriptor that can be used
-    to unflatten them."""
-    leaves, treedef = jax.tree_util.tree_flatten(params)
-    flat_leaves = [l.flatten() for l in leaves]
-    shapes = [l.shape for l in leaves]
-    flat_params = jnp.concatenate(flat_leaves)
-    descriptor = (shapes, treedef)
-    return flat_params, descriptor
-
-
-def unflatten_params(flat_params, pdescriptor):
-    # TODO: switch to jax.flattten_util.ravel_pytree
-    """Unflatten params from a single vector and a descriptor."""
-    shapes, treedef = pdescriptor
-    # splits = jnp.cumsum(jnp.array([jnp.prod(jnp.array(s)) for s in shapes]), dtype=jnp.int32)
-    splits = np.cumsum([np.prod(s) for s in shapes], dtype=np.int32)
-    leaves = []
-    start = 0
-    for sp, sh in zip(splits, shapes):
-        leaves.append(flat_params[start:sp].reshape(sh))
-        start = sp
-    params = jax.tree_util.tree_unflatten(treedef, leaves)
-    return params
-
-
-@jax.jit
-def get_params(param_tree, i):
-    return [jit(tree_get, static_argnums=(1,))(t, i) for t in tqdm(param_tree)]
-
-
-def params_to_numpy(params):
-    # use tree_map to convert all the jax arrays to numpy arrays
-    return jax.tree_map(lambda x: x if isinstance(x, float) else np.array(x), params)
-
-
-def params_to_jax(params):
-    return jax.tree_map(lambda x: jnp.array(x) if isinstance(x, np.ndarray) else x, params)
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                        --     time utils     --
-# ···············································································
-
-
-class Timer:
-    def __init__(self, name, console=None):
-        self.console = console
-        self.name = name
-        self.laps = []
-        self.end_time = []
-
-    def start(self, with_spinner=False):
-        self.start_time = time.time()
-        if with_spinner:
-            assert self.console is not None
-            stat = f"{self.name}..." if not isinstance(with_spinner, str) else with_spinner
-            self.spinner = self.console.status(stat, spinner="dots")
-            self.spinner.start()
-
-    def lap(self):
-        self.end_time.append(time.time() - self.start_time)
-
-    def stop(self):
-        self.lap()
-        if hasattr(self, "spinner"):
-            self.spinner.stop()
-
-    def stop_print(self):
-        self.stop()
-        msg = f"{self.name} took {self.end_time[-1]:.2f} seconds"
-        if self.console is not None:
-            self.console.print(msg)
-        else:
-            print(msg)
-
-
-class TimeStore:
-    def __init__(self, console=None):
-        self.console = console
-        self.timers = {}
-
-    def start(self, name, with_spinner=False):
-        if name not in self.timers:
-            self.timers[name] = Timer(name, self.console)
-        self.timers[name].start(with_spinner=with_spinner)
-        return self.timers[name]
-
-    def lap(self, name):
-        self.timers[name].lap()
-
-    def stop_print(self, name):
-        if isinstance(name, str):
-            assert name in self.timers
-            self.timers[name].stop_print()
-        else:
-            assert isinstance(name, Timer)
-            name.stop_print()
-
-    def stop_all(self):
-        for name in self.starts:
-            self.lap(name)
-
-    def print_all(self):
-        for name in self.times:
-            print(f"{name}: {self.times[name][-1]}")
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────
-
-### {{{                   --     log-poly-log transform     --
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                   --     log-poly-log transform     --
 
 
 def logb(x, base=10):
@@ -778,7 +861,7 @@ def cubic_exp_inv(y, threshold, base, scale):
     return E - (F / (D * C)) + (C / (cb2 * D))
 
 
-def log_poly_log(x, threshold=100, base=10, compression=0.5):
+def log_poly_log(x, threshold: float = 100, base: int = 10, compression: float = 0.5):
     """
     bi-logarithm function with smooth transition to cubic polynomial between [-threshold, threshold]
 
@@ -903,8 +986,7 @@ def jax_inverse_log_poly_log(y, threshold=100, base=10, compression=0.5):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{                         --     jaxutils     --
+## {{{                         --     jaxutils     --
 from jax.experimental import host_callback
 
 enable_checks = False
@@ -1175,14 +1257,7 @@ def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | check
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-# at_path = at_path_flat
-# delete_path = delete_path_flat
-# split_params = split_params_flat
-# assemble_params = assemble_params_flat
-# path_contains = path_contains_flat
-
-### {{{                      --     topology analysis helpers     --
+## {{{                      --     topology analysis helpers     --
 
 
 def get_uorf_value(param):
@@ -1326,67 +1401,6 @@ def get_network_family(network):
             family = 'bandpass'
 
     return family, seqtype
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{                  --     function serialization     --
-import inspect
-import sys
-
-
-def unwrap_partial_function(implementation):
-    if hasattr(implementation, 'func') and hasattr(implementation, 'keywords'):
-        partial_args = implementation.keywords
-        implementation = implementation.func
-    else:
-        partial_args = {}
-    return implementation, partial_args
-
-
-def serialize_function(implementation: Callable, **kwargs):
-    implementation, partial_args = unwrap_partial_function(implementation)
-    kwargs.update(partial_args)
-
-    # detect if it's in a module
-    module_name = implementation.__module__
-    if module_name == '__main__':
-        module_name = None
-
-    signature = inspect.signature(implementation)
-    parameters = {}
-    for name, param in signature.parameters.items():
-        if name in kwargs:
-            parameters[name] = kwargs[name]
-        elif param.default != inspect.Parameter.empty:
-            parameters[name] = param.default
-
-    res = {
-        'implementation': implementation.__name__,
-        'parameters': parameters,
-    }
-    if module_name is not None:
-        res['module_name'] = module_name
-    return res
-
-
-def deserialize_function(func_data: dict, module_names: Optional[list[str]] = None):
-
-    if module_names is None:
-        if 'module_name' in func_data:
-            module_names = [func_data['module_name']]
-        else:  # use the global namespace
-            module_names = ['__main__']
-            print('No module name provided, using __main__')
-
-    for module_name in module_names:
-        if module_name in sys.modules:
-            module = sys.modules[module_name]
-            if hasattr(module, func_data['implementation']):
-                implementation = getattr(module, func_data['implementation'])
-                return partial(implementation, **func_data['parameters'])
-
-    raise ValueError(f'No function named {func_data["implementation"]}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

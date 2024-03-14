@@ -2,6 +2,7 @@
 # ···············································································
 import jax
 import jax.numpy as jnp
+from dataclasses import field
 from jax.tree_util import Partial as partial
 from jax import jit, vmap
 import numpy as np
@@ -16,6 +17,7 @@ from . import compute as cmp
 from .compute import ComputeStack
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from dataclasses import dataclass
 
 # from jax.scipy.stats import gaussian_kde
 from scipy.stats import gaussian_kde
@@ -27,141 +29,94 @@ import matplotlib.ticker as ticker
 
 from typing import Optional, Union, List, Tuple, Callable, Collection, Any
 
+ndArray = Union[np.ndarray, jnp.ndarray]
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#                            GENERAL PURPOSE TOOLS
-# ───────────────────────────────────── ▼ ─────────────────────────────────────
-### {{{              --     model retrieval and loss plots     --
-def get_best_run_id(losses, smooth_window=20, return_smooth_losses=False):
-    from scipy.ndimage import gaussian_filter1d
-
-    smoothed_losses = [gaussian_filter1d(loss, smooth_window) for loss in losses]
-    best_loss = np.argmin([loss[-1] for loss in smoothed_losses])
-    if return_smooth_losses:
-        return best_loss, smoothed_losses
-    return best_loss
+## {{{                       --     data rescaler     --
 
 
-def losses_plot(losses, ax=None, smooth_window=200, runs=None):
-    best_loss_id, smoothed_losses = get_best_run_id(
-        losses, smooth_window=smooth_window, return_smooth_losses=True
-    )
-    if ax is None:
-        fig, ax = mkfig(1, 1, (7, 5))
-    for index, loss in enumerate(smoothed_losses):
-        color = '#00A1D9' if index == best_loss_id else 'k'
-        alpha = 1 if index == best_loss_id else 0.25
-        size = 1.5 if index == best_loss_id else 0.5
-        ax.plot(
-            loss,
-            color=color,
-            alpha=alpha,
-            linewidth=size,
-            label='Best run' if index == best_loss_id else None,
+@dataclass
+class ValueRange:
+    min: float = 0
+    max: float = 1
+
+
+@dataclass
+class CompressedSymLogRescaler:
+    """
+    Rescale values from input_range to [0, 1], with tolerance for outside values.
+
+    Uses a symmetric log transform to accept negative values (although they are not recommended).
+    We use a log-poly-log transform where the part [-threshold, threshold] is a cubic polynomial,
+    and the rest is log10.
+
+    Also uses a low_end_compression factor to "squish" low values, which is useful for
+    fluorescence data where low values are often noisy even though they just mean "no fluorescence".
+    """
+
+    # NOTE: with this, low values are squished symmetrically around input_range.min,
+    #       meaning if they get much lower than input_range.min, they will again grow below 0 as fast as
+    #       they grow in the positive direction. Should be fine for our datasets.
+    #       Ideally, we should probably switch to making an asymmetric transform,
+    #       where we still accept negative values, but they get exponentially squished towards 0.
+    #       One option would be to use a sigmoid but I don't like the idea of abandoning log transforms
+    #       because it allows for direct plotting and interpretation of this type of biological data.
+    #       A sigmoid would also compress both ends of the range, which doesn't make sense for
+    #       what we want. Keeping in mind that the neural net is not the only "consumer" of this
+    #       rescale data - (we use it to resample and plot). Could use multiple rescalers, but I think
+    #       there's a way to keep it simple and still have a good rescaler for all purposes.
+    #
+
+    input_range: ValueRange = field(default_factory=lambda: ValueRange(min=500, max=1e8))
+    low_end_compression: float = 100  # compression coefficient for low values
+    poly_region_threshold: float = 300  # where we switch from log to poly
+    poly_region_coef: float = 0.4  # how much we compress the poly part
+
+    def __post_init__(self):
+        self.__symlog = partial(
+            ut.log_poly_log, threshold=self.poly_region_threshold, compression=self.poly_region_coef
         )
-        ax.set_yscale('log')
-    ax.set_xlabel('Batches seen')
-    ax.set_ylabel('Loss')
-    ax.set_ylim(np.min([np.min(s) for s in smoothed_losses]) * 0.7)
-    n_losses = sum(len(l) > 1 for l in smoothed_losses)
-    ax.set_title(f'Smoothed losses for {n_losses} runs')
-    ax.legend()
-    # add name of best run (centered)
-    if runs is not None:
-        best_run = runs[best_loss_id]
-        ax.text(
-            0.5,
-            0.01,
-            f'Best run: "{best_run.name}" with {smoothed_losses[best_loss_id][-1]:.1e}',
-            transform=ax.transAxes,
-            horizontalalignment='center',
-            verticalalignment='bottom',
+        self.__invsymlog = partial(
+            ut.inverse_log_poly_log,
+            threshold=self.poly_region_threshold,
+            compression=self.poly_region_coef,
         )
-    return best_loss_id
+        self.__log_start = self.__symlog(self.input_range.min / self.low_end_compression)
+        self.__log_end = self.__symlog(self.input_range.max / self.low_end_compression)
+
+    def fwd(self, x):
+        xp = self.__symlog(1 + x / self.low_end_compression) - self.__log_start
+        y = xp / (self.__log_end - self.__log_start)
+        return y
+
+    def inv(self, y):
+        yp = y * (self.__log_end - self.__log_start) + self.__log_start
+        ypinv = self.__invsymlog(yp)
+        x = self.low_end_compression * (ypinv - 1)
+        return x
 
 
-def retrieve_wandb_results(project_name, entity='jdisset', with_losses=True, **kw):
-    import wandb
-    import pickle
-    from concurrent.futures import ThreadPoolExecutor
+# TODO, low priority: I'm thinking something like an exp (for negative values) to log transition:
+# class CompressedExpLogRescaler:
+# """
+# Rescale values from input_range to [0, 1], with tolerance for outside values.
+# Lower values will always be > 0, but higher values continue to increase logarithmically.
+# """
 
-    wandb.login()
-    api = wandb.Api()
-    project_path = f"{entity}/{project_name}" if entity else project_name
-    runs = api.runs(project_path, **kw)
+# LOG10 = np.log(10)
+# PLOG10 = scipy.special.lambertw(1/LOG10).real
+# T10 = np.exp(PLOG10) - (np.log(PLOG10 / LOG10) / LOG10)
+# XTHRESH = PLOG10 / LOG10
+# YTHRESH = 10**(XTHRESH)
 
-    if with_losses:
+#     def explog10(self, x):
+# return np.where(x > XTHRESH, np.log10(x)+T10, 10**x)
 
-        def get_loss_history(run):
-            if 'loss' in run.summary and run.summary['loss'] is not None:
-                history = run.scan_history(keys=['loss'], page_size=25000)
-                losses = [row["loss"] for row in history]
-                return np.array(losses)
-            else:
-                return np.array([np.inf])
-
-        with ThreadPoolExecutor() as executor:
-            full_losses = list(tqdm(executor.map(get_loss_history, runs), total=len(runs)))
-
-        return runs, full_losses
-
-    return runs
-
-
-def get_wandb_trained_params(run, save_to=None):
-    if save_to is None:
-        save_to = Path(f'/tmp/biocomp_runs/{run.name}')
-    save_to.mkdir(parents=True, exist_ok=True)
-    param_file = run.file('latest_params.pkl').download(replace=True, root=save_to)
-    trained_params = ut.load(param_file.name)
-    shared_trained_params, local = trained_params.filter_by_tag('shared')
-    compute_config_file = run.file('compute_config.json').download(replace=True, root=save_to)
-    training_config_file = run.file('training_config.json').download(replace=True, root=save_to)
-    compute_config = cmp.ComputeConfigManager.from_file(compute_config_file.name)
-    with open(training_config_file.name, 'r') as f:
-        training_config = json.load(f)
-    shared_trained_params.set_read_only(True)
-    return shared_trained_params, compute_config, training_config, local
-
-
-def get_wandb_archive(run, save_path=None, filename=None):
-    (
-        shared_trained_params,
-        compute_config,
-        training_config,
-        local,
-    ) = get_wandb_trained_params(run, save_to=None)
-
-    archive = {
-        'shared_parameters': shared_trained_params,
-        'local_parameters': local,
-        'compute_config': compute_config,
-        'training_config': training_config,
-        'metadata': run.metadata,
-    }
-
-    archive_path = None
-    if save_path is not None:
-        if filename is None:
-            date_started = run.metadata['startedAt'].split('T')[0]
-            filename = f'{date_started}_{run.name}.pkl'
-        save_path = Path(save_path)
-        save_path.mkdir(parents=True, exist_ok=True)
-        archive_path = save_path / filename
-        with open(archive_path, 'wb') as f:
-            pickle.dump(archive, f)
-            ut.logger.info(f'Saved training archive to {archive_path}')
-
-    return archive, archive_path
+# def inv_explog10(self, y):
+# return np.where(y < YTHRESH, 10**(y-T10), np.log10(y))
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-# ─────────────────────────────────────────────────────────────────────────────
-#                         DATA MANAGEMENT AND BATCHING
-# ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                         --     batches     --
 # ···············································································
 
@@ -190,8 +145,8 @@ def batch(X, Y, batch_size, n_batches=None):
 
 
 #                                                                            }}}
-# {{{                       --     data manager     --
-# ···············································································
+
+## {{{                           --     utils     --
 
 
 def network_data_check(x, y, network):
@@ -216,20 +171,11 @@ def network_data_check(x, y, network):
         assert np.all(x[x_nonan_mask, ipos] == y[y_nonan_mask, outpos])
 
 
-# @jit
-# def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
-# EPSILON = 1e-12
-# HIGH_DENSITIES_PENALTY = 1.00
-# densities = kde.evaluate(X.T) + EPSILON
-# threshold = jnp.quantile(densities, quantile_threshold)
-# diceroll = jax.random.uniform(rng, shape=(len(densities),))
-# selected = (densities < threshold) | (
-# diceroll < (threshold / (densities * HIGH_DENSITIES_PENALTY))
-# )
-# return selected
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                 --     batching & resampling     --
 
 
-# non-jax version
 def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     EPSILON = 1e-12
     HIGH_DENSITIES_PENALTY = 1.00
@@ -243,28 +189,54 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     return selected
 
 
-# @partial(jit, static_argnames=('batch_size', 'n_batches', 'quantile_threshold', 'density_coords'))
 def sample_batches_direct(
-    X, Y, batch_size, n_batches, kde, densities, rng, quantile_threshold=0.05, density_coords=0.3
+    X: ndArray,
+    Y: ndArray,
+    batch_size: int,
+    n_batches: int,
+    kde: gaussian_kde,
+    densities: ndArray,  # densities at each point in X
+    rng,
+    density_threshold_quantile=0.05,  # Compute the density threshold using the quantile of the density distribution
+    density_threshold_coords=0.3,  # Compute the density threshold using the value of the density at this coordinate
 ):
+    """
+    Sample batches from X and Y, with a probability of including a point
+    inversely proportional to the density at that point.
+    This is done to avoid oversampling of high-density regions (usually untransfected cells),
+    which can lead to overfitting.
+
+    We use a threshold on the density distribution to decide which points to always include, and
+    which to randomly sample:below this threshold density, points are always selected,
+    above this density, points are selected with a probability inversely proportional
+    to their density.
+
+    2 ways of setting the threshold:
+    - using a quantile of the density distribution (quantile_threshold)
+        i.e. if quantile_threshold=0.05, any point that is in a neighborhood that's
+        more dense than 95% of the data sees its probability of being selected reduced.
+    - using the value of the density at a specific coordinate (density_coords)
+    when both are set, the minimum of the two is used as the threshold.
+
+    """
+
     assert X.shape[0] == Y.shape[0]
+    assert densities.shape == (X.shape[0],)
+
     EPSILON = 1e-16
     HIGH_DENSITIES_PENALTY = 1.0
 
+    threshold = np.inf
+    if density_threshold_quantile is not None:
+        threshold = np.quantile(densities + EPSILON, density_threshold_quantile)
+    if density_threshold_coords is not None:
+        midX = np.ones((X.shape[1],)) * density_threshold_coords
+        density_at_midX = kde.evaluate(midX.T)
+        if density_at_midX > 0:
+            threshold = np.minimum(threshold, density_at_midX)
+
     # select batch_size * n_batches random points, weight by inverse of density
-    threshold = np.quantile(densities + EPSILON, quantile_threshold)
-    midX = np.ones((X.shape[1],)) * density_coords
-    density_at_midX = kde.evaluate(midX.T)
-    if density_at_midX > 0:
-        threshold = np.minimum(threshold, density_at_midX)
-
-    # with jax:
-    # selection_proba = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
-    # indices = jax.random.choice(rng, X.shape[0], shape=(batch_size * n_batches,), p=selection_proba)
-    # Xsub = np.take(X, indices, axis=0)
-    # Ysub = np.take(Y, indices, axis=0)
-
-    # or with numpy:
+    # with numpy:
     seed = jax.random.randint(rng, (1,), minval=0, maxval=2**28)[0]
     rng = np.random.RandomState(seed)
     selection_proba = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
@@ -287,111 +259,86 @@ def sample_batches_direct(
     Xsub = X[indices]
     Ysub = Y[indices]
 
+    # reshape to (n_batches, batch_size, n_features)
     Xbatches = Xsub.reshape((n_batches, batch_size, Xsub.shape[1]))
     Ybatches = Ysub.reshape((n_batches, batch_size, Ysub.shape[1]))
     return Xbatches, Ybatches
 
 
-# @partial(jit, static_argnames=('batch_size', 'n_batches', 'density_quantile_threshold', 'density_coords'))
-def _get_batches(
-    X,
-    Y,
-    kdes,
-    densities,
-    rng_key,
-    batch_size,
-    n_batches,
-    density_quantile_threshold,
-    density_coords,
-):
-    all_batches = [
-        sample_batches_direct(
-            x,
-            y,
-            batch_size,
-            n_batches,
-            kde,
-            d,
-            rng,
-            quantile_threshold=density_quantile_threshold,
-            density_coords=density_coords,
-        )
-        for x, y, kde, d, rng in tqdm(
-            list(zip(X, Y, kdes, densities, jax.random.split(rng_key, len(X)))),
-            desc='generating batches',
-        )
-    ]
+##────────────────────────────────────────────────────────────────────────────}}}
 
-    xbatches, ybatches = zip(*all_batches)
-    # concat along the feature axis (last dimension)
-    xbatches, ybatches = np.concatenate(tuple(xbatches), axis=2), np.concatenate(
-        tuple(ybatches), axis=2
-    )
-    assert xbatches.shape == (n_batches, batch_size, sum([x.shape[1] for x in X]))
-    assert ybatches.shape == (n_batches, batch_size, sum([y.shape[1] for y in Y]))
-    # (N_BATCHES, BATCH_SIZE, N_MODELS * FEATURES)
-    return xbatches, ybatches
+# {{{                       --     data manager     --
+# ···············································································
 
 
-def tr(x, offset=3e3, maxv=5e7, factor=50, threshold=300, compression=0.4):
-    loff = ut.log_poly_log(offset / factor, threshold=threshold, compression=compression)
-    lmv = ut.log_poly_log(maxv / factor, threshold=threshold, compression=compression)
-    xp = ut.log_poly_log(1 + x / factor, threshold=threshold, compression=compression) - loff
-    y = xp / (lmv - loff)
-    return y
+@dataclass
+class ResamplingConfig:
+    kde_bw_method: float = 0.02
+    kde_samples: int = 4000
+    density_chunksize: int = 50000
+    density_threshold_quantile: float = 0.025
+    density_threshold_coords: float = 0.15
 
 
-def inv_tr(y, offset=3e3, maxv=5e7, factor=50, threshold=300, compression=0.4):
-    loff = ut.log_poly_log(offset / factor, threshold=threshold, compression=compression)
-    lmv = ut.log_poly_log(maxv / factor, threshold=threshold, compression=compression)
-    yp = y * (lmv - loff) + loff
-    ypinv = ut.inverse_log_poly_log(yp, threshold=threshold, compression=compression)
-    x = factor * (ypinv - 1)
-    return x
+@dataclass
+class DataConfig:
+    valid_raw_value_range: ValueRange = field(default_factory=lambda: ValueRange(min=500, max=1e8))
+    acceptable_out_of_range_fraction_in_raw_data: float = 0.05
+    perform_data_checks: bool = True
+
+    resampling: ResamplingConfig = field(default_factory=ResamplingConfig)
+
+    # TODO: could instance rescaler directly from config so it could be any class.
+    rescaler: CompressedSymLogRescaler = field(default_factory=CompressedSymLogRescaler)
 
 
+DEFAULT_DATA_CONFIG = DataConfig()
 DEFAULT_DATA_CACHE_DIR = '../__cache/biocomp_densities_cache'
-DEFAULT_DATA_CONFIG = {
-    'data_min_value': 500,
-    'data_max_value': 100000000.0,
-    'data_log_offset': 3000.0,
-    'data_log_factor': 100,
-    'data_log_poly_threshold': 300,
-    'data_log_poly_compression': 0.4,
-    'data_sampling_kde_bw_method': 0.02,
-    'data_sampling_max_density_samples': 4000,
-    'data_sampling_density_quantile_threshold': 0.025,
-    'data_sampling_coords_for_density_threshold': 0.15,
-}
 
 
 class DataManager:
-    """The DataManager handles XP data and their matching compute stacks"""
+    """
+    The DataManager handles:
+    - storage of, and access to stack data and the associated networks
+    - rescaling of the data to a [0, 1] log space.
+    - batching and density-based resampling (to avoid over-representation of high-density regions)
+    - building and wrapping the matching compute stack
+    """
 
     def __init__(
         self,
-        X: list,
-        Y: list,
-        networks: list,
-        data_cfg: dict = DEFAULT_DATA_CONFIG,
-        data_chekcs=True,
+        X: list[ndArray],
+        Y: list[ndArray],
+        networks: list[bc.Network],
+        data_cfg: DataConfig = DEFAULT_DATA_CONFIG,
         cache_location: Optional[Union[Path, str]] = DEFAULT_DATA_CACHE_DIR,
     ):
+
+        assert len(X) == len(Y) == len(networks)
+
         self.data_cfg = data_cfg
         self.cache_dir = cache_location
         self._raw_X = [np.array(x) for x in X]
         self._raw_Y = [np.array(y) for y in Y]
 
-        # remove invalid values:
+        # remove invalid values (NaNs, out of range)
         for i in range(len(self._raw_X)):
             invalid_at = np.isnan(self._raw_X[i]).any(axis=1)
             invalid_at = invalid_at | (np.isnan(self._raw_Y[i]).any(axis=1))
-            invalid_at = invalid_at | (self._raw_X[i] < data_cfg['data_min_value']).any(axis=1)
-            invalid_at = invalid_at | (self._raw_Y[i] > data_cfg['data_max_value']).any(axis=1)
-            percentnan = 100.0 * invalid_at.sum() / len(invalid_at)
-            if percentnan > 0.0:
+            invalid_at = invalid_at | (self._raw_X[i] < data_cfg.valid_raw_value_range.min).any(
+                axis=1
+            )
+            invalid_at = invalid_at | (self._raw_Y[i] > data_cfg.valid_raw_value_range.max).any(
+                axis=1
+            )
+            invalid_fraction = invalid_at.sum() / len(invalid_at)
+            if invalid_fraction > data_cfg.acceptable_out_of_range_fraction_in_raw_data:
+                raise ValueError(
+                    f'Too many invalid values in {networks[i].name} raw data ({100*invalid_fraction:.2f}%)'
+                )
+            if invalid_fraction > 0.0:
                 ut.logger.debug(
-                    f'Removing {invalid_at.sum()} invalid points for net {i} ({percentnan:.2f} %)'
+                    f'Removing {invalid_at.sum()} invalid points for net {i} ({100*invalid_fraction:.2f}%)'
                 )
                 self._raw_X[i] = self._raw_X[i][~invalid_at]
                 self._raw_Y[i] = self._raw_Y[i][~invalid_at]
@@ -400,14 +347,11 @@ class DataManager:
         self._X = self.rescale(self._raw_X)
         self._Y = self.rescale(self._raw_Y)
 
-        # MAX_VAL = 1.25
-        # assert max([x.max() for x in self._X]) < MAX_VAL, max([x.max() for x in self._X])
-        # assert max([y.max() for y in self._Y]) < MAX_VAL, max([y.max() for y in self._Y])
-        self.gen_kdes()
+        self.generate_kdes()
         self.compute_stack = None
         self._densities = None
         self.individual_compute_stacks = {}
-        if data_chekcs:
+        if self.data_cfg.perform_data_checks:
             ut.logger.debug('Running data checks')
             for x, y, n in zip(self._X, self._Y, self._networks):
                 network_data_check(x, y, n)
@@ -430,29 +374,10 @@ class DataManager:
             raise ValueError('Compute stack not built yet.')
         return self.compute_stack
 
-    def get_individual_compute_stack(self, network_id):
-        """Build/Get a compute stack for a single network"""
-        if network_id not in self.individual_compute_stacks:
-            self.individual_compute_stacks[network_id] = self.compute_stack.make_subset(
-                [network_id]
-            )
-        # actually returns a tuple of (stack, get_param_subset)
-        return self.individual_compute_stacks[network_id]
-
-    def gen_kdes(self, bw=None, max_n=None):
+    def generate_kdes(self):
         """Generate KDEs to get the data densities of each sample"""
-
         ut.logger.debug('Generating KDEs for data density estimation')
-
-        if bw is None:
-            bw = self.data_cfg['data_sampling_kde_bw_method']
-        if max_n is None:
-            max_n = int(self.data_cfg['data_sampling_max_density_samples'])
-
-        # just grap max_n for each self._X using numpy
-        self._kde_bw = bw
-
-        npoints = [min(x.shape[0], max_n) for x in self._X]
+        npoints = [min(x.shape[0], int(self.data_cfg.resampling.kde_samples)) for x in self._X]
         ut.logger.debug(f'Using {npoints} points for KDE estimation')
         xindices = [
             np.random.choice(x.shape[0], size=n, replace=False) for x, n in zip(self._X, npoints)
@@ -460,15 +385,14 @@ class DataManager:
         self._kdes = [
             gaussian_kde(
                 x[xi].T,
-                bw_method=bw,
+                bw_method=self.data_cfg.resampling.kde_bw_method,
             )
             for x, xi in zip(self._X, xindices)
         ]
         ut.logger.debug('Done generating KDEs')
 
-    def compute_densities(self, max_chunk=50000):
+    def compute_densities(self):
         """Compute the densities at each data point in the dataset, for each sample"""
-
         ut.logger.debug('Computing densities')
         ut.logger.debug(f'Using cache dir {self.cache_dir}')
 
@@ -485,11 +409,12 @@ class DataManager:
             allarr = []
             i = 0
             while i < n:
-                allarr.append(kde.evaluate(x[i : min(i + max_chunk, n)].T))
-                i += max_chunk
+                allarr.append(
+                    kde.evaluate(x[i : min(i + self.data_cfg.resampling.density_chunksize, n)].T)
+                )
+                i += self.data_cfg.resampling.density_chunksize
             res = np.concatenate(allarr)
             assert res.shape == (n,)
-
             return res
 
         self._densities = [
@@ -500,76 +425,61 @@ class DataManager:
         ut.logger.debug(f'Done computing {len(self._densities)} densities')
 
     def rescale(self, X):
-        return [
-            tr(
-                x,
-                offset=self.data_cfg['data_log_offset'],
-                maxv=self.data_cfg['data_max_value'],
-                factor=self.data_cfg['data_log_factor'],
-                threshold=self.data_cfg['data_log_poly_threshold'],
-                compression=self.data_cfg['data_log_poly_compression'],
-            )
-            for x in X
-        ]
+        return [self.data_cfg.rescaler.fwd(x) for x in X]
 
     def unscale(self, X):
-        return [
-            inv_tr(
-                x,
-                offset=self.data_cfg['data_log_offset'],
-                maxv=self.data_cfg['data_max_value'],
-                factor=self.data_cfg['data_log_factor'],
-                threshold=self.data_cfg['data_log_poly_threshold'],
-                compression=self.data_cfg['data_log_poly_compression'],
-            )
-            for x in X
-        ]
+        return [self.data_cfg.rescaler.inv(x) for x in X]
 
-    def get_batches(self, n_batches, batch_size, rng_key):
+    def get_batches(self, n_batches, batch_size, rng_key, concat_along_feature_axis=True):
+        """
+        Generate batches of data from the dataset, using the KDEs to resample the data
+        and avoid over-representation of high-density regions.
+        """
         if self._densities is None:
             self.compute_densities()
-        xbatches, ybatches = _get_batches(
-            self.get_X(),
-            self.get_Y(),
-            self.get_kdes(),
-            self._densities,
-            rng_key,
-            batch_size,
-            n_batches,
-            self.data_cfg['data_sampling_density_quantile_threshold'],
-            self.data_cfg['data_sampling_coords_for_density_threshold'],
-        )
-        assert xbatches.shape[2] == sum([n.get_nb_inputs() for n in self._networks])
-        assert ybatches.shape[2] == sum([n.get_nb_outputs() for n in self._networks])
-        return xbatches, ybatches
-
-    def get_uniform_samples(self, rng_key, n_samples=10000):
-        if self._densities is None:
-            self.compute_densities()
-        all_b = [
+            assert self._densities is not None
+        all_batches = [
             sample_batches_direct(
                 x,
                 y,
-                n_samples,
-                1,
+                batch_size,
+                n_batches,
                 kde,
                 d,
                 rng,
-                quantile_threshold=self.data_cfg['data_sampling_density_quantile_threshold'],
-                density_coords=self.data_cfg['data_sampling_coords_for_density_threshold'],
+                density_threshold_quantile=self.data_cfg.resampling.density_threshold_quantile,
+                density_threshold_coords=self.data_cfg.resampling.density_threshold_coords,
             )
-            for x, y, kde, d, rng in zip(
-                self.get_X(),
-                self.get_Y(),
-                self.get_kdes(),
-                self._densities,
-                jax.random.split(rng_key, len(self._networks)),
+            for x, y, kde, d, rng in tqdm(
+                list(
+                    zip(
+                        self.get_X(),
+                        self.get_Y(),
+                        self.get_kdes(),
+                        self._densities,
+                        jax.random.split(rng_key, len(self._networks)),
+                    )
+                ),
+                desc='generating batches',
             )
         ]
-        X, Y = zip(*all_b)
-        X = [x.squeeze() for x in X]
-        Y = [y.squeeze() for y in Y]
-        return X, Y
+        xbatches, ybatches = zip(*all_batches)
+        if concat_along_feature_axis:
+            # concat along the feature axis (last dimension)
+            # resulting shape is (N_BATCHES, BATCH_SIZE, N_MODELS * FEATURES)
+            xbatches, ybatches = np.concatenate(tuple(xbatches), axis=2), np.concatenate(
+                tuple(ybatches), axis=2
+            )
+            assert xbatches.shape == (n_batches, batch_size, sum([x.shape[1] for x in self._X]))
+            assert ybatches.shape == (n_batches, batch_size, sum([y.shape[1] for y in self._Y]))
+            assert xbatches.shape[2] == sum([n.get_nb_inputs() for n in self._networks])
+            assert ybatches.shape[2] == sum([n.get_nb_outputs() for n in self._networks])
+
+        return xbatches, ybatches
+
+    def get_uniform_samples(self, rng_key, n_samples: int):
+        xb, yb = self.get_batches(1, n_samples, rng_key, concat_along_feature_axis=False)
+        return [x.squeeze() for x in xb], [y.squeeze() for y in yb]
 
     def get_networks(self):
         return self._networks
@@ -592,37 +502,6 @@ class DataManager:
     def get_raw_Y(self):
         return self._raw_Y
 
-    @classmethod
-    def from_xps(
-        cls, xplist, config=cmp.DEFAULT_COMPUTE_CONFIG, cache_location=DEFAULT_DATA_CACHE_DIR
-    ):
-
-        # build all networks and get all sample names, for each xp
-        # networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
-        net_sample_pairs = []
-        for xp in xplist:
-            net_sample_pairs.append(
-                ut.get_cache(lambda: xp.build_networks(**kw), f'{str(xp)}_net', cache_location)
-            )
-
-        networks, samples = zip(*net_sample_pairs)
-
-        # get all X (independent vars) and Y (dependent vars) for each xp
-        # X, Y = zip(*[xp.get_XY(n, s) for xp, n, s in zip(xplist, networks, samples)])
-        XY_pairs = []
-        for xp, n, s in zip(xplist, networks, samples):
-            XY_pairs.append(
-                ut.get_cache(lambda: xp.get_XY(n, s, **kw), f'{str(xp)}_XY', cache_location)
-            )
-
-        X, Y = zip(*XY_pairs)
-        # get everything as a long concatenated list
-        X, Y, networks = (
-            list(itertools.chain(*X)),
-            list(itertools.chain(*Y)),
-            list(itertools.chain(*networks)),
-        )
-        return cls(X, Y, networks, config, cache_location=cache_location)
-
 
 #                                                                            }}}
+

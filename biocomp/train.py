@@ -81,7 +81,7 @@ def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_pen
 def start(
     dman: du.DataManager,
     training_config: Dict[str, Any],
-    compute_config: cmp.ComputeConfigManager,
+    compute_config: cmp.ComputeConfig,
     loggers: Optional[List[Tuple[int, Callable]]] = None,
     seed: Optional[int] = None,
 ) -> Tuple[ParameterTree, List[jnp.ndarray]]:
@@ -132,7 +132,7 @@ def start(
 
     # --- loss & update functions
 
-    loss_func_generator = ut.deserialize_function(LOSS_FUNCTION)
+    loss_func_generator = ut.decode_function(LOSS_FUNCTION)
     assert callable(loss_func_generator)
     loss_func = loss_func_generator(stack)
     assert callable(loss_func)
@@ -223,7 +223,7 @@ def start(
 DEFAULT_LOSS = partial(
     quantile_loss_with_grads, huber_quantile_loss_delta=0.1, negative_grad_penalty=0.01
 )
-DEFAULT_LOSS_SERIALIZED = ut.serialize_function(DEFAULT_LOSS)
+DEFAULT_LOSS_SERIALIZED = ut.encode_function(DEFAULT_LOSS)
 
 DEFAULT_TRAINING_CONFIG = {
     # -------- training config --------
@@ -251,225 +251,5 @@ import argparse
 import json
 from pathlib import Path
 
-
-class UpdateConfigAction(argparse.Action):
-    def __init__(self, config_name, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.config_name = config_name
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        updates = getattr(namespace, f"{self.config_name}_updates", None)
-        if updates is None:
-            updates = []
-        updates.append(values)
-        setattr(namespace, f"{self.config_name}_updates", updates)
-
-
-class TrainingProgram:
-    def __init__(self):
-        self.parser = argparse.ArgumentParser()
-        self._add_base_arguments()
-
-    def _add_base_arguments(self):
-        self.parser.add_argument(
-            '--wandb_project', type=str, default=None, help='name of wandb project'
-        )
-        self.parser.add_argument(
-            '--compute_config_file', type=str, default=None, help='path to compute config'
-        )
-        self.parser.add_argument(
-            '--training_config_file', type=str, default=None, help='path to training config'
-        )
-        self.parser.add_argument(
-            '--data_config_file', type=str, default=None, help='path to data config'
-        )
-        self.parser.add_argument(
-            '--local_save_dir', type=str, default='./results', help='path to save results'
-        )
-        self.parser.add_argument(
-            '--seed', type=int, default=None, help='random seed (default: random)'
-        )
-        self.parser.add_argument(
-            '--enable_checks',
-            action='store_true',
-            help='enable checks (default: False)',
-        )
-        self.parser.add_argument(
-            '--loglevel', type=str, default='info', help='log level (default: debug)'
-        )
-        # self.parser.add_argument(
-        # '--device', type=str, default='cpu', help='jax device (default: cpu)'
-        # )
-        self.parser.add_argument(
-            '--data_path',
-            type=str,
-            default='./data/calibrated_data',
-            help='path to xp data directory',
-        )
-        self.parser.add_argument(
-            '--wandb_plot_period',
-            type=int,
-            default=-1,  # only at the end
-            help='wandb plot period, None = no plots, -1 = only at the end',
-        )
-
-        self.parser.add_argument(
-            '--wandb_eval_period',
-            type=int,
-            default=-1,
-            help='wandb eval plot period, None = no plots, -1 = only at the end',
-        )
-        self.parser.add_argument(
-            '--wandb_save_period',
-            type=int,
-            default=-1,
-            help='wandb params save period, None = no save, -1 = only at the end',
-        )
-
-        self.parser.add_argument(
-            '--config',
-            type=str,
-            action=partial(UpdateConfigAction, 'config'),
-            help='update training_config with format: <parameter>=<value>',
-        )
-
-    def add_argument(self, *args, **kwargs):
-        self.parser.add_argument(*args, **kwargs)
-
-    def parse_args(self, default_args=None):
-
-        import sys
-
-        is_notebook = 'ipykernel' in sys.modules
-
-        ut.logger.info(f'is_notebook: {is_notebook}')
-
-        extra_args = default_args if default_args is not None else []
-
-        # combine parsed args and extra_args. parsed args have priority over extra_args.
-        # if we're in a notebook, only use extra_args. Otherwise we can combine them.
-        if is_notebook:
-            self.args = self.parser.parse_args(extra_args)
-        else:
-            self.args = self.parser.parse_args(extra_args + sys.argv[1:])
-            ut.logger.info(f'args: {self.args}')
-
-        # load the 3 config files (training, compute, data)
-        self.training_config = DEFAULT_TRAINING_CONFIG
-        if self.args.training_config_file is not None:
-            if not Path(self.args.training_config_file).is_file():
-                raise ValueError(f'{self.args.training_config_file} is not a file')
-            self.training_config = json.load(open(self.args.training_config_file))
-
-        self.compute_config = cmp.DEFAULT_COMPUTE_CONFIG
-        if self.args.compute_config_file is not None:
-            if not Path(self.args.compute_config_file).is_file():
-                raise ValueError(f'{self.args.compute_config_file} is not a file')
-            self.compute_config = cmp.ComputeConfigManager.from_file(self.args.compute_config_file)
-
-        self.data_config = du.DEFAULT_DATA_CONFIG
-        if self.args.data_config_file is not None:
-            if not Path(self.args.data_config_file).is_file():
-                raise ValueError(f'{self.args.data_config_file} is not a file')
-            self.data_config = json.load(open(self.args.data_config_file))
-
-        if self.args.enable_checks:
-            ut.set_enable_checks(True)
-
-        self.local_save_dir = Path(self.args.local_save_dir)
-        ut.logger.info(f"Saving results to {self.local_save_dir}")
-
-        # loglevel
-        ut.set_loglevel(self.args.loglevel)
-
-        if self.args.seed is not None:
-            self.seed = self.args.seed
-        else:
-            self.seed = np.random.randint(0, 2**32)
-
-    def update_config_from_args(self):
-        # Apply updates to the training_config dict
-        print(f'config_updates: {self.args.config_updates}')
-        updates = getattr(self.args, f"config_updates", [])
-        for update in updates:
-            ut.logger.info(f"Updating training_config with {update}")
-            parameter, value = update.split('=')
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError:
-                pass  # Keep value as a string if it's not JSON-parseable
-            self.training_config[parameter] = value
-
-    def __getattr__(self, attr):
-        if attr in self.__dict__:
-            return self.__dict__[attr]
-        elif hasattr(self, 'args') and hasattr(self.args, attr):
-            return getattr(self.args, attr)
-        else:
-            raise AttributeError(f"{self.__class__.__name__} object has no attribute '{attr}'")
-
-    def __DEPRECATED_start_training(
-        self,
-        training: du.DataManager,
-        validation: Optional[du.DataManager] = None,
-        extra_loggers: List[Tuple[int, Callable]] = [],
-    ):
-
-        # we update the training config with the command line arguments
-        # after parsing the command line arguments, because some other program
-        # might have added some arguments to the training config
-
-        self.update_config_from_args()
-
-        prog_config = self.args.__dict__.copy()
-
-        self.training_config['program_config'] = prog_config
-
-        if self.wandb_project is not None:
-            loggers = tu.setup_wandb_logging(
-                self.wandb_project,
-                training,
-                self.training_config,
-                self.compute_config,
-                self.data_config,
-                plot_period=self.wandb_plot_period,
-                params_save_period=self.wandb_save_period,
-            )
-
-        # if validation is not None:
-        # with ut.timer('Validation stack initialization'):
-        # key = jax.random.PRNGKey(self.seed)
-        # vstack = validation.build_compute_stack(self.compute_config)
-        # base_params = vstack.init(key)
-        # loggers.append(
-        # (
-        # self.wandb_eval_period,
-        # partial(
-        # wandb_plot_pred,
-        # dman=validation,
-        # base_params=base_params,
-        # log_key='Validation',
-        # ),
-        # )
-        # )
-
-        else:
-            loggers = [
-                (1, console_log),
-                (
-                    -1,
-                    partial(
-                        local_save,
-                        compute_config=self.compute_config,
-                        trainer_config=self.training_config,
-                        save_dir=self.local_save_dir,
-                    ),
-                ),
-            ]
-
-        loggers += extra_loggers
-
-        return start(training, self.training_config, self.compute_config, loggers, seed=self.seed)
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
+

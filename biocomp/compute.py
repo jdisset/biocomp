@@ -26,82 +26,59 @@ from . import nodes
 from jax.typing import ArrayLike
 
 PRNGKey = Union[jnp.ndarray, np.ndarray, int]
-ndArray = Union[jnp.ndarray, np.ndarray]
+NdArray = Union[jnp.ndarray, np.ndarray]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                      --     Config manager     --
+## {{{                      --     Config    --
 
 
-class ComputeConfigManager:
-    def __init__(self):
-        self.config = {
-            'functions': {},
-        }
+@dataclass
+class ComputeConfig:
+    """
+    A ComputeConfig is a set of implementations for the different types of nodes
+    that can be found in a network, i.e. a dictionary of {node_name -> function}.
+    It also contains extra information that can be
+    used by the implementations to store and share information across nodes.
+    """
+
+    node_functions: Optional[Dict[str, ut.EncodedFunction]] = None
+    extra: Optional[Dict[str, Any]] = None
+
+    def __init__(self, node_functions: Optional[Dict[str, Callable]] = None, extra=None):
+        self.node_functions = {}
+        if node_functions is not None:
+            for k, v in node_functions.items():
+                self.set_impl(k, v)
+        self.extra = extra
 
     def set_impl(self, node_name: str, implementation: Callable, **kwargs):
-        self.config['functions'][node_name] = ut.serialize_function(implementation, **kwargs)
+        if self.node_functions is None:
+            self.node_functions = {}
+        self.node_functions[node_name] = ut.encode_function(implementation, **kwargs)
 
-    def get_impl(self, node_name, module_name=nd.__name__):
-        if node_name not in self.config['functions']:
-            raise ValueError(f'No implementation for {node_name}')
-        return ut.deserialize_function(
-            self.config['functions'][node_name], module_names=[module_name]
-        )
+    def get_impl(self, node_name: str, module_name: str = nd.__name__):
+        if self.node_functions is None:
+            raise ValueError('No node implementations in this config')
+        if node_name not in self.node_functions:
+            raise ValueError(f'No node implementation for {node_name}')
+        return self.node_functions[node_name].get_impl(module_names=[module_name])
 
-    def export(self, filename):
-        with open(filename, 'w') as f:
-            json.dump(self.config, f)
-
-    def load_file(self, filename):
-        with open(filename, 'r') as f:
-            self.config = json.load(f)
-
-    def dumps(self, indent=4):
-        return json.dumps(self.config, indent=indent)
+    def to_dict(self):
+        node_f = None
+        if self.node_functions is not None:
+            node_f = {k: v.to_dict() for k, v in self.node_functions.items()}
+        return {'node_functions': node_f, 'extra': self.extra}
 
     @classmethod
-    def from_file(cls, filename):
-        ccm = cls()
-        ccm.load_file(filename)
-        return ccm
+    def from_dict(cls, d: dict):
+        node_f = {k: ut.EncodedFunction(**v) for k, v in d.get('node_functions', {}).items()}
+        return cls(node_functions=node_f, extra=d.get('extra'))
 
-    @classmethod
-    def from_dict(cls, d):
-        ccm = cls()
-        ccm.config = d
-        return ccm
-
-    def load(self, config):
-        self.config = config
-
-    def __repr__(self):
-        return self.dumps()
-
-    def __str__(self):
-        return self.__repr__()
-
-
-DEFAULT_COMPUTE_CONFIG = ComputeConfigManager()
-DEFAULT_COMPUTE_CONFIG.set_impl('transcription', nodes.transcription)
-DEFAULT_COMPUTE_CONFIG.set_impl('translation', nodes.translation)
-DEFAULT_COMPUTE_CONFIG.set_impl('inv_transcription', nodes.inv_transcription)
-DEFAULT_COMPUTE_CONFIG.set_impl('inv_translation', nodes.inv_translation)
-DEFAULT_COMPUTE_CONFIG.set_impl('sequestron_ERN', nodes.ERN5p)
-DEFAULT_COMPUTE_CONFIG.set_impl('source', nodes.source)
-DEFAULT_COMPUTE_CONFIG.set_impl('inv_source', nodes.inv_source)
-DEFAULT_COMPUTE_CONFIG.set_impl('bias', nodes.bias)
-# DEFAULT_COMPUTE_CONFIG.set_impl('inv_bias', nodes.inv_bias)
-DEFAULT_COMPUTE_CONFIG.set_impl('numeric', nodes.bias)
-# DEFAULT_COMPUTE_CONFIG.set_impl('inv_numeric', nodes.inv_bias)
-DEFAULT_COMPUTE_CONFIG.set_impl('aggregation', nodes.aggregation)
-DEFAULT_COMPUTE_CONFIG.set_impl('inv_aggregation', nodes.inv_aggregation)
-DEFAULT_COMPUTE_CONFIG.set_impl('output', nodes.grouped_output)
-DEFAULT_COMPUTE_CONFIG.set_impl('deadend', nodes.single_passthrough)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                       --     Virtual Node     --
+## {{{                       --     Virtual Node     --
 
 
 @dataclass
@@ -120,7 +97,9 @@ class VirtualNode:
     batch_order: Optional[int] = 0  # only used for sorting and debugging
 
     @staticmethod
-    def generate_type_signature(network, compute_node_id):
+    def generate_type_signature(network: Network, compute_node_id: int) -> str:
+        assert network.is_built(), 'Network not built'
+        assert network.compute_graph is not None, 'No compute graph'
         ntype = network.compute_graph.at[compute_node_id, 'type']
         n_inputs = len(network.compute_graph.at[compute_node_id, 'input_from'])
         n_outputs = len(network.compute_graph.at[compute_node_id, 'output_to'])
@@ -129,7 +108,7 @@ class VirtualNode:
     @classmethod
     def from_node(
         cls, network_id: int, network: Network, compute_node_id: int, batch_order: int = 0
-    ):
+    ) -> VirtualNode:
         type_signature = VirtualNode.generate_type_signature(network, compute_node_id)
         return cls(
             network_id=network_id,
@@ -139,28 +118,26 @@ class VirtualNode:
             batch_order=batch_order,
         )
 
-    def set_compute_node_column(self, col, value):
-        if self.network is None:
-            return
+    def set_compute_node_column(self, column_name: str, value: Any):
+        assert self.network is not None, 'No network'
         assert self.compute_node_id is not None, 'No compute node id'
         assert self.network.compute_graph is not None, 'No compute graph'
-        self.network.compute_graph.at[self.compute_node_id, col] = value
+        self.network.compute_graph.at[self.compute_node_id, column_name] = value
 
-    def get_compute_node(self, col=None):
+    def get_compute_node(self, column_name: Optional[str] = None) -> Optional[Any]:
         if self.network is None:
             return None
         assert self.compute_node_id is not None, 'No compute node id'
         assert self.network.compute_graph is not None, 'No compute graph'
-        if col is None:
+        if column_name is None:
             return self.network.compute_graph.loc[self.compute_node_id]
         else:
-            return self.network.compute_graph.at[self.compute_node_id, col]
+            return self.network.compute_graph.at[self.compute_node_id, column_name]
 
-    def get_inverse_node(self, stack):
-        if stack is None:
-            return None
+    def get_inverse_node(self, stack: ComputeStack) -> VirtualNode:
         is_inverse_of = self.get_compute_node('is_inverse_of')
-        assert is_inverse_of is not None, 'Node is not an inverse'
+        assert isinstance(is_inverse_of, int), 'Node is not an inverse'
+        assert self.network_id is not None, 'No network id'
         inv = stack.get_node_from_net_and_compute_id(self.network_id, is_inverse_of)
         assert inv is not None, 'Inverse not found'
         return inv
@@ -191,23 +168,26 @@ class VirtualNode:
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                       --     Compute Layer     --
+## {{{                       --     Compute Layer     --
+NodeInput = Tuple[int, int, int]  #  (net_id, compute_node_id, slot_id)
+
+
 @dataclass
 class ComputeLayer:
     nodes: List[VirtualNode]
-    layer_id: int = None
+    layer_id: Optional[int] = None
 
     # information about the function to apply
-    f_type: str = None
-    f_out_shapes: Sequence[Tuple[int]] = None
-    f_input_shapes: Sequence[Tuple[int]] = None
+    f_type: Optional[str] = None
+    f_out_shapes: Optional[Sequence[Tuple[int]]] = None
+    f_input_shapes: Optional[Sequence[Tuple[int]]] = None
 
-    f_prepare: Callable = None
-    f_apply: Callable = None
+    f_prepare: Optional[Callable] = None
+    f_apply: Optional[Callable] = None
 
     is_built: bool = False
 
-    def setup(self, config: ComputeConfigManager, stack: ComputeStack):
+    def setup(self, config: ComputeConfig, stack: ComputeStack):
 
         self.check()
 
@@ -221,7 +201,7 @@ class ComputeLayer:
 
         # get the shapes of the inputs. We'll collect all the inputs for each node
         # to make sure they are all the same
-        node_inputs = []  # list of list of (net_id, compute_node_id, slot_id)
+        node_inputs: List[List[NodeInput]] = []
         for n in self.nodes:
             ninp = n.get_compute_node('input_from')
             node_inputs.append([(n.network_id, *i) for i in ninp])
@@ -282,6 +262,7 @@ class ComputeLayer:
 
 @dataclass
 class ComputeStack:
+
     networks: List[Network]
     layers: Optional[Sequence[ComputeLayer]] = None
 
@@ -305,7 +286,7 @@ class ComputeStack:
 
     ### {{{                     --     public interface     --
 
-    def build(self, config: ComputeConfigManager, **kwargs):
+    def build(self, config: ComputeConfig, **kwargs):
         """
         Split apart all the networks into their constituent nodes
         and put these nodes into ordered layers, maximizing parallelism by ensuring same-type nodes
@@ -965,8 +946,8 @@ class ComputeStack:
         w_grads = [l.f_type in get_grads_for for l in self.layers]
 
         def apply_impl(
-            params: ParameterTree, inputs: ndArray, quantiles: ndArray, key: PRNGKey
-        ) -> Tuple[ndArray, ndArray]:
+            params: ParameterTree, inputs: NdArray, quantiles: NdArray, key: PRNGKey
+        ) -> Tuple[NdArray, NdArray]:
             """The core of the apply method. Everything here should be jittable"""
 
             assert len(inputs) == self.total_nb_of_inputs, 'Mismatched number of inputs'

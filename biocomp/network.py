@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from . import utils as ut
 import sqlite3
-from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast
+from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast, Sequence
 from itertools import product
 
 
@@ -156,7 +156,6 @@ class TranscriptionUnitGenerator:
         return _next([], 0)
 
 
-
 class GraphComputeNode:
     # a simple convenience one-off class to store the information about a node
     def __init__(self, id, type, cdg_input, cdg_output):
@@ -220,6 +219,7 @@ def transcription_unit_from_L1(l1id: str, lib: PartsLibrary) -> TranscriptionUni
 
     return TranscriptionUnit([Slot(lib, p) for p in parts])
 
+
 # main class: a network of interacting transcription units
 class Network:
     def __init__(
@@ -253,27 +253,10 @@ class Network:
         self.__n_inputs = None
         self.__n_outputs = None
 
-
     def copy(self):
         from copy import deepcopy
+
         return deepcopy(self)
-
-
-    # def copy(self):
-        # from copy import deepcopy
-        # # using deepcopy because we don't want to share the same objects
-        # N = Network(self.lib, self.name, custom_outputs=self.custom_outputs)
-        # N.transcription_units = deepcopy(self.transcription_units)
-        # N.central_dogma_graph = deepcopy(self.central_dogma_graph)
-        # N.compute_graph = deepcopy(self.compute_graph)
-        # N.tu_in_sources = deepcopy(self.tu_in_sources)
-        # N.aggregations = deepcopy(self.aggregations)
-        # N.metadata = deepcopy(self.metadata) if self.metadata is not None else None
-        # N.raw_tu_in_sources = deepcopy(self.raw_tu_in_sources)
-        # N.raw_aggregations = deepcopy(self.raw_aggregations)
-        # N = deepcopy(self)
-        # return N
-
 
     ### {{{                    --     static constructors     --
 
@@ -413,13 +396,12 @@ class Network:
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
 
-    def is_built(self):
+    def is_built(self) -> bool:
         return (
             self.compute_graph is not None
             and self.central_dogma_graph is not None
             and self.transcription_units is not None
         )
-
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                           --     utils     --
@@ -969,17 +951,21 @@ class Network:
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
 
-    def get_output_compute_node(self):
+    def get_output_compute_node(self) -> pd.Series:
+        assert self.is_built() and isinstance(self.compute_graph, pd.DataFrame)
         onode = self.compute_graph[self.compute_graph['type'] == 'output']
         assert len(onode) == 1, f'Invalid number of output nodes: {len(onode)}'
         return onode.iloc[0]
 
-    def get_output_proteins(self):
+    def get_output_proteins(self) -> List[str]:
         """Returns the names of the proteins that are outputs of the network"""
         onode = self.get_output_compute_node()
+        if 'cdg_input' not in onode:
+            raise ValueError(f'Invalid output node: {onode}')
+        assert isinstance(self.central_dogma_graph, pd.DataFrame)
         return [self.central_dogma_graph.loc[cdg_id]['content'][0] for cdg_id in onode['cdg_input']]
 
-    def get_nb_outputs(self):
+    def get_nb_outputs(self) -> int:
         if self.__n_outputs is None:
             self.__n_outputs = len(self.get_output_proteins())
         return self.__n_outputs
@@ -996,14 +982,14 @@ class Network:
         mapping = self.get_inverted_input_positions()
         return output_arr[:, [mapping[i] for i in range(len(mapping))]]
 
-    def get_inverted_input_proteins(self, include_biases=False):
+    def get_inverted_input_proteins(self, include_biases: bool = False) -> List[str]:
         """Returns the names of the proteins that are inputs of the inverted network, ordered"""
         mapping = self.get_inverted_input_positions(include_biases)
         output_proteins = self.get_output_proteins()
         assert len(mapping) <= len(output_proteins)
         return [output_proteins[mapping[i]] for i in range(len(mapping))]
 
-    def get_inverted_input_positions(self, include_biases=False):
+    def get_inverted_input_positions(self, include_biases: bool = False) -> Dict[int, int]:
         """Returns a mapping from input position to output position"""
         assert isinstance(self.compute_graph, pd.DataFrame)
         mapping = {}  # input number -> output position
@@ -1020,12 +1006,12 @@ class Network:
         assert len(mapping.keys()) == len(set(mapping.values())), f'Invalid mapping: {mapping}'
         return mapping
 
-    def get_dependent_output_proteins(self):
+    def get_dependent_output_proteins(self) -> List[str]:
         all_outputs = self.get_output_proteins()
         input_proteins = self.get_inverted_input_proteins(include_biases=True)
         return [p for p in all_outputs if p not in input_proteins]
 
-    def set_input_as_bias(self, input_protein_name):
+    def set_input_as_bias(self, input_protein_name: Sequence[str]) -> None:
         """Sets this input protein as a bias node (instead of an input one)"""
         original_mapping = self.get_inverted_input_positions()
         output_proteins = self.get_output_proteins()
@@ -1050,7 +1036,7 @@ class Network:
         assert output_position not in new_mapping.values()
         assert len(self.get_inverted_input_proteins()) == len(new_mapping)
 
-    def compute_node_is_upstream_of(self, node_id, other_node_id):
+    def compute_node_is_upstream_of(self, node_id: int, other_node_id: int) -> bool:
         """Returns True if node_id is upstream of other_node_id"""
         assert isinstance(self.compute_graph, pd.DataFrame)
         if node_id == other_node_id:
@@ -1063,8 +1049,9 @@ class Network:
                 return True
         return False
 
-    def sort_nodes_by_upstream(self, nodes):
+    def sort_nodes_by_upstream(self, nodes: Sequence[int]) -> List[int]:
         from functools import cmp_to_key
+
         def custom_cmp(a, b):
             if self.compute_node_is_upstream_of(a, b):
                 return -1
@@ -1075,7 +1062,7 @@ class Network:
 
         return sorted(nodes, key=cmp_to_key(custom_cmp))
 
-    def topological_order(self, nodes=None):
+    def topological_order(self, nodes: Optional[Sequence[int]] = None) -> List[List[int]]:
         """Returns a list of lists of compute nodes from the network,
         where each node of a sublist can be computed independently of the others,
         but each sublist must be computed in order."""
@@ -1165,11 +1152,6 @@ class Network:
             assert len(self.central_dogma_graph.index) == len(
                 set(self.central_dogma_graph.index)
             ), 'central dogma graph has duplicate ids'
-
-
-
-
-    
 
     def __repr__(self):
         return f'Network(name={self.name}, metadata={self.metadata})'

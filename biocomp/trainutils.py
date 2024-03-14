@@ -372,7 +372,7 @@ ndArray = Union[jnp.ndarray, np.ndarray]
 
 
 def init_stack(
-    compute_config: cmp.ComputeConfigManager,
+    compute_config: cmp.ComputeConfig,
     datamanager: du.DataManager,
     n_replicates: int,
     key: jnp.ndarray,
@@ -453,3 +453,5 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=('loss',)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+
