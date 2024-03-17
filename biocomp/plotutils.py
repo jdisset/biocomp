@@ -127,7 +127,7 @@ def network_figure_2d(network, x, y, rescaler, mkfig_params={}, plot_network_par
 
 
 @configurable
-def network_figure_3d(network, x, y, rescaler, zslices=(0,), mkfig_params={}, **plot_network_params):
+def network_figure_3d(network, x, y, rescaler, zslices=(0,), mkfig_params={}, plot_network_params={}):
     assert network.get_nb_inputs() == 3
     nslices = len(zslices)
     fig, axes = mkfig(1, nslices, **mkfig_params)

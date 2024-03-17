@@ -343,6 +343,7 @@ def configurable(func: Callable, namespace: str = 'default') -> Callable:
     local_conf_functions = get_configurable_functions(namespace)
     sig = inspect.signature(func)
     # fkwargs = list(sig.parameters.keys())
+
     local_conf_functions[func.__name__] = {
         k: v.default for k, v in sig.parameters.items() if v.default is not inspect.Parameter.empty
     }
@@ -620,6 +621,12 @@ class TimeStore:
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                        --     misc utils     --
+
+def remove_keys(d: Dict, keys: Sequence):
+    # ignored_keys = [k for k in keys if k in d]
+    new_dict = {k: v for k, v in d.items() if k not in keys}
+    return new_dict
+
 def get_git_commit_hash():
     bcpath = Path(__file__).parent
     bcpath = bcpath.resolve()

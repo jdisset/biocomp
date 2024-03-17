@@ -42,9 +42,9 @@ from .plotting_core import (
 )
 
 NdArray = Union[np.ndarray, jnp.ndarray]
+configurable = pc.configurable
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-configurable = pc.configurable
 
 # ---- smooth plots (gaussian neighborhood based)
 ### {{{                            --     1D     --
@@ -163,7 +163,6 @@ def knn_grid(
     else:
         xquery = xy
 
-
     tree = cKDTree(x)
     output_values, density = knn_avg(xquery, y, tree=tree, **knn_avg_params)
 
@@ -196,13 +195,19 @@ def smooth_2d(
     draw_colorbar=True,
     knn_grid_params: Dict = {},
     heatmap_params: Dict = {},
-    ) -> Tuple:
+) -> Tuple:
 
     ylims = xlims if ylims == (None, None) else ylims
 
-    input_coords, output_values = knn_grid(X, Y, xlims, ylims, zslice=zslice, **knn_grid_params)
+    input_coords, output_values = knn_grid(
+        X,
+        Y,
+        xlims,
+        ylims,
+        **{**knn_grid_params, 'zslice': zslice},
+    )
 
-    im, cntrs = heatmap(ax, input_coords, output_values, vlims=vlims, **heatmap_params)
+    im, cntrs = heatmap(ax, input_coords, output_values, **{**heatmap_params, 'vlims': vlims})
 
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(input_names[1])

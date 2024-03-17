@@ -2,6 +2,7 @@
 # ···············································································
 import jax
 import jax.numpy as jnp
+import copy
 from matplotlib import scale as mscale
 from functools import partial
 from scipy.spatial import cKDTree
@@ -11,6 +12,7 @@ from biocomp import utils as ut
 from biocomp import datautils as du
 from biocomp import compute as cmp
 from biocomp.datautils import DataManager
+from biocomp.network import Network
 import matplotlib.pyplot as plt
 from jax.scipy.stats import gaussian_kde
 import matplotlib.ticker as ticker
@@ -78,10 +80,10 @@ class DataRescaler:
             self.fwd_transform = partial(self.fwd_transform, **kw)
             self.inv_transform = partial(self.inv_transform, **kw)
 
-    def __call__(self, x: NumLike) -> NumLike:
+    def __call__(self, x: NumLike) -> NdArray:
         return self.fwd_transform(x)
 
-    def inv(self, x: NumLike) -> NumLike:
+    def inv(self, x: NumLike) -> NdArray:
         return self.inv_transform(x)
 
     @classmethod
@@ -103,6 +105,7 @@ BIOCOMP_PLOTTING_DEFAULT_RESCALERS = {
     'log': DataRescaler(lambda x: np.log(x), lambda x: np.exp(x)),
     'log10': DataRescaler(lambda x: np.log10(x), lambda x: 10**x),
 }
+
 
 
 def get_rescaler(rescaler, **kw):
@@ -156,6 +159,7 @@ def powers_of_ten(xmin, xmax, skip_ticklabel_range=None, resolution=1, **_):
 
 
 def format_powers(x, *_, n_decimals=1):
+    x = float(x)
     abs_x = abs(x)
     if abs_x < 1000:
         if np.abs(x - int(x)) < 1e-3:
@@ -273,7 +277,14 @@ def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, **kw):
     return ylims_inv
 
 
-def get_transformed_ticks_and_labels(axis_lims: Sequence[float], rescaler: DataRescaler, **kw):
+TickDict = Dict[str, NdArray]
+LabelList = List[Tuple[NdArray, str]]
+
+
+def get_transformed_ticks_and_labels(
+    axis_lims: Sequence[float], rescaler: DataRescaler, **kw
+) -> Tuple[TickDict, LabelList]:
+
     # will return 2 things:
     # - ticks: a dict with 'major' and 'minor' keys, each containing a list of ticks
     #   ex: ticks={'major': [0, 5, 10, 15, 20], 'minor': [2.5, 7.5, 12.5, 17.5]},
@@ -601,7 +612,12 @@ def to_data_units(y_display, ax):
 
 
 def extract_plot_data_from_network(
-    network, x, y, input_order=None, protein_aliases=None, use_y_as_x=False
+    network: Network,
+    x: NdArray,
+    y: NdArray,
+    input_order: Optional[Sequence[int]] = None,
+    protein_aliases: Optional[Dict[str, str]] = None,
+    use_y_as_x: bool = False,
 ):
     if input_order is None:
         input_order = np.arange(network.get_nb_inputs())
