@@ -402,18 +402,52 @@ def generate_base_nested_config(
     return emptyconf
 
 
-def nested_resolve(d: Any, known_node: Optional[Dict] = None, throw_if_non_dict=True):
-    known_node = copy.deepcopy(known_node) or {}
-    if not isinstance(d, dict):
-        if throw_if_non_dict:
-            raise ValueError(f'Expected a dict, got {type(d)}')
-        return d
-    for k, v in d.items():
-        if isinstance(v, dict):
-            known_node[k] = updated_dict(known_node.get(k, {}), v)
+def resolve_if_ends_with(key: str, suffix: str) -> bool:
+    return key.endswith(suffix)
+
+
+def updated_dict(d1, d2):
+    if not isinstance(d1, dict):
+        return deepcopy(d2) if d2 is not None else deepcopy(d1)
+    if not isinstance(d2, dict):
+        return deepcopy(d1) if d1 is not None else deepcopy(d2)
+    res = {}
+    for key, val in d1.items():
+        if isinstance(val, dict):
+            if key in d2 and isinstance(d2[key], dict):
+                res[key] = updated_dict(d1[key], d2[key])
+            else:
+                res[key] = deepcopy(d1[key])
         else:
-            known_node[k] = copy.deepcopy(v)
-    return {k: nested_resolve(known_node[k], known_node, False) for k in d.keys()}
+            if key in d2 and isinstance(d2[key], dict):
+                res[key] = deepcopy(d2[key])
+            else:
+                res[key] = deepcopy(d1[key])
+    for key, val in d2.items():
+        if not key in d1:
+            res[key] = deepcopy(val)
+    return res
+
+
+def nested_resolve(
+    input_dict: Any,
+    already_seen: Dict = {},
+    resolve_key: Callable[[str], bool] = partial(resolve_if_ends_with, suffix='_params'),
+) -> Dict:
+
+    if not isinstance(input_dict, dict):
+        return deepcopy(input_dict)
+
+    new_seen = deepcopy(already_seen)
+    for k, v in input_dict.items():
+        new_seen[k] = updated_dict(v, already_seen.get(k, None)) if resolve_key(k) else deepcopy(v)
+
+    new_dict = {
+        k: nested_resolve(deepcopy(new_seen[k]), deepcopy(new_seen), resolve_key)
+        for k in input_dict.keys()
+    }
+
+    return new_dict
 
 
 def generate_full_nested_config(
@@ -698,33 +732,6 @@ def flatten(x):
         return [x]
 
 
-def updated_dict(d1, d2):
-    if d1 is None:
-        return copy.deepcopy(d2)
-    if d2 is None:
-        return copy.deepcopy(d1)
-    if not isinstance(d1, dict):
-        return copy.deepcopy(d2)
-    if not isinstance(d2, dict):
-        return copy.deepcopy(d2)
-    res = {}
-    for key, val in d1.items():
-        if isinstance(val, dict):
-            if key in d2 and isinstance(d2[key], dict):
-                res[key] = updated_dict(d1[key], d2[key])
-            else:
-                res[key] = copy.deepcopy(d1[key])
-        else:
-            if key in d2:
-                res[key] = copy.deepcopy(d2[key])
-            else:
-                res[key] = copy.deepcopy(d1[key])
-    for key, val in d2.items():
-        if not key in d1:
-            res[key] = copy.deepcopy(val)
-    return res
-
-
 from omegaconf import OmegaConf
 
 
@@ -745,7 +752,6 @@ class DotDict(dict):
     def __getattr__(*args):
         val = dict.__getitem__(*args)
         return DotDict(val) if type(val) is dict else val
-
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 

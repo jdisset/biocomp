@@ -1,5 +1,6 @@
 # {{{                          --     imports     --
 # ···············································································
+from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from matplotlib import scale as mscale
@@ -39,6 +40,7 @@ from .plotting.plotting_core import (
     configurable,
     mkfig,
     extract_plot_data_from_network,
+    PlotData,
 )
 
 from .plotting.plotting_histogram import (
@@ -61,47 +63,34 @@ configurable = ut.configurable_decorator('biocomp.plotutils')
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
+@dataclass
+class FigureConfig:
+    title: Optional[str] = None
+    size: Optional[Tuple[int, int]] = None
+    dpi: Optional[int] = 300
+
+
 # ---- network/recipe plots
 ### {{{                --     new network plot functions     --
 
+NdArray = Union[np.ndarray, jnp.ndarray]
 
-@configurable
-def plot_network(
-    network,
-    x,
-    y,
-    rescaler,
-    ax=None,
-    kde=None,
-    density_quantile_threshold=0.05,
-    method='smooth',
-    use_y_as_x=False,
-    input_order=None,
-    protein_aliases=None,
-    smooth_params={},
-    scatter_params={},
-    histogram_params={},
-    **kw
-):
-    """plot a network on a given axis (or list of axes)"""
 
-    if kde is not False and kde is not None:
-        rng = jax.random.PRNGKey(0)
-        subsample = du.optimal_density_subsample(
-            x, kde, rng, quantile_threshold=density_quantile_threshold
-        )
-        x, y = x[subsample], y[subsample]
-
-    x, y, input_names, output_name = extract_plot_data_from_network(
-        network, x, y, input_order, protein_aliases, use_y_as_x
-    )
+def auto_plot(
+    plot_data: PlotData,
+    method: str = 'smooth',
+    smooth_params: Dict[str, Any] = {},
+    scatter_params: Dict[str, Any] = {},
+    histogram_params: Dict[str, Any] = {},
+    **kw,
+) -> None:
 
     if method == 'smooth':
-        return smooth(x, y, input_names, output_name, rescaler, ax=ax, **smooth_params, **kw)
+        return smooth(**smooth_params, **kw)
     elif method == 'scatter':
-        return scatter(x, y, input_names, output_name, rescaler, ax=ax, **scatter_params, **kw)
+        return scatter(**scatter_params, **kw)
     elif method == 'histogram':
-        return histogram(x, y, input_names, output_name, rescaler, ax=ax, **histogram_params, **kw)
+        return histogram(**histogram_params, **kw)
     else:
         raise NotImplementedError(f'Unknown plotting method {method}')
 
@@ -111,29 +100,59 @@ def plot_network(
 
 
 @configurable
-def network_figure_1d(network, x, y, rescaler, mkfig_params={}, plot_network_params={}):
-    assert network.get_nb_inputs() == 1
+def network_figure_1d(
+    plot_data: PlotData,
+    mkfig_params={},
+    auto_plot_params={},
+    **kw,
+):
     fig, ax = mkfig(1, 1, **mkfig_params)
-    plot_network(network, x, y, rescaler, ax=ax, **plot_network_params)
+    auto_plot(
+        plot_data,
+        ax=ax,
+        **auto_plot_params,
+        **kw,
+    )
     return fig
 
 
 @configurable
-def network_figure_2d(network, x, y, rescaler, mkfig_params={}, plot_network_params={}):
-    assert network.get_nb_inputs() == 2
+def network_figure_2d(
+    plot_data: PlotData,
+    mkfig_params={},
+    auto_plot_params={},
+    **kw,
+):
     fig, ax = mkfig(1, 1, **mkfig_params)
-    plot_network(network, x, y, rescaler, ax=ax, **plot_network_params)
+    auto_plot(
+        plot_data,
+        ax=ax,
+        **auto_plot_params,
+        **kw,
+    )
     return fig
 
 
 @configurable
-def network_figure_3d(network, x, y, rescaler, zslices=(0,), mkfig_params={}, plot_network_params={}):
-    assert network.get_nb_inputs() == 3
+def network_figure_3d(
+    plot_data: PlotData,
+    zslices=(0,),
+    mkfig_params={},
+    auto_plot_params={},
+    **kw,
+):
     nslices = len(zslices)
     fig, axes = mkfig(1, nslices, **mkfig_params)
     if nslices == 1:
         axes = np.array([axes])
-    plot_network(network, x, y, rescaler, ax=axes, zslices = zslices, **plot_network_params)
+
+    auto_plot(
+        plot_data,
+        ax=axes,
+        **auto_plot_params,
+        **kw,
+    )
+
     return fig
 
 
@@ -146,19 +165,40 @@ def network_figure(
     x,
     y,
     rescaler,
+    input_order=None,
+    protein_aliases: Dict[str, str] = {},
+    use_y_as_x: bool = False,
     network_figure_1d_params={},
     network_figure_2d_params={},
     network_figure_3d_params={},
 ):
     n_inputs = network.get_nb_inputs()
+    if input_order is None:
+        input_order = list(range(n_inputs))
+
     if n_inputs == 1:
-        return network_figure_1d(network, x, y, rescaler, **network_figure_1d_params)
+        f = network_figure_1d
+        params = network_figure_1d_params
     elif n_inputs == 2:
-        return network_figure_2d(network, x, y, rescaler, **network_figure_2d_params)
+        f = network_figure_2d
+        params = network_figure_2d_params
     elif n_inputs == 3:
-        return network_figure_3d(network, x, y, rescaler, **network_figure_3d_params)
+        f = network_figure_3d
+        params = network_figure_3d_params
     else:
         raise ValueError(f'Network with {n_inputs} inputs is not supported')
+
+    plot_data = extract_plot_data_from_network(
+        network=network,
+        x=x,
+        y=y,
+        rescaler=rescaler,
+        input_order=input_order,
+        protein_aliases=protein_aliases,
+        use_y_as_x=use_y_as_x,
+    )
+
+    return f(plot_data, **params)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -167,13 +207,16 @@ def network_figure(
 from .plotting.plotting_3d import smooth_3d
 from .plotting.plotting_smooth import smooth_2d
 
+
 @configurable
-def smooth(X, Y, input_names, output_name, rescaler, smooth_2d_params={}, smooth_3d_params={}, **kw):
-    ninputs = X.shape[1]
+def smooth(
+    x, y, input_names, output_name, rescaler, smooth_2d_params={}, smooth_3d_params={}, **kw
+):
+    ninputs = x.shape[1]
     if ninputs == 2:
-        smooth_2d(X, Y, input_names, output_name, rescaler, **smooth_2d_params, **kw)
+        smooth_2d(x, y, input_names, output_name, rescaler, **smooth_2d_params, **kw)
     elif ninputs == 3:
-        smooth_3d(X, Y, input_names, output_name, rescaler, **smooth_3d_params, **kw)
+        smooth_3d(x, y, input_names, output_name, rescaler, **smooth_3d_params, **kw)
     else:
         raise NotImplementedError(f'Cannot plot {ninputs} inputs in smooth mode')
 

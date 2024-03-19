@@ -107,7 +107,6 @@ BIOCOMP_PLOTTING_DEFAULT_RESCALERS = {
 }
 
 
-
 def get_rescaler(rescaler, **kw):
     if isinstance(rescaler, DataRescaler):
         return rescaler
@@ -610,15 +609,29 @@ def to_data_units(y_display, ax):
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                       --     network utils     --
 
+from dataclasses import dataclass
+
+
+@dataclass
+class PlotData:
+    x: NdArray
+    y: NdArray
+    input_names: List[str]
+    output_name: str
+    rescaler: Callable
+    metadata: Optional[Dict[str, Any]] = None
+
 
 def extract_plot_data_from_network(
     network: Network,
-    x: NdArray,
-    y: NdArray,
+    X: NdArray,
+    Y: NdArray,
+    rescaler: DataRescaler,
     input_order: Optional[Sequence[int]] = None,
     protein_aliases: Optional[Dict[str, str]] = None,
     use_y_as_x: bool = False,
-):
+) -> PlotData:
+
     if input_order is None:
         input_order = np.arange(network.get_nb_inputs())
     if protein_aliases is None:
@@ -634,16 +647,24 @@ def extract_plot_data_from_network(
     if use_y_as_x:
         output_names = network.get_output_proteins()
         xind = [output_names.index(i) for i in input_names]
-        x = y[:, xind]
+        x = Y[:, xind]
     else:
-        x = x[:, input_order]
+        x = X[:, input_order]
 
-    y = y[:, output_pos]
-    y = y.reshape(-1, 1)
+    y = Y[:, output_pos]
+    y = Y.reshape(-1, 1)
 
     assert x.shape[1] == len(input_order)
-    assert y.shape[0] == x.shape[0]
-    return x, y, input_names, output_name
+    assert y.shape[0] == X.shape[0]
+
+    return PlotData(
+        x=x,
+        y=y,
+        input_names=input_names,
+        output_name=output_name,
+        rescaler=rescaler,
+        metadata=network.metadata,
+    )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
