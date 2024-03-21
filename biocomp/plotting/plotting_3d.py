@@ -4,7 +4,7 @@ from .plotting_core import (
     mkfig,
     get_reordered_protein_names,
     format_powers,
-    default_style,
+    apply_style,
     setup_transformed_axis,
     get_transformed_ticks_and_labels,
     extract_plot_data_from_network,
@@ -22,6 +22,7 @@ import numpy as np
 from biocomp import plotutils as pu
 from .plotting_core import NumLike
 from biocomp import utils as ut
+from copy import deepcopy
 
 import jax.numpy as jnp
 
@@ -121,7 +122,7 @@ DEFAULT_LABEL_PROPS = dict(
     bbox=dict(facecolor='white', alpha=1, edgecolor='none', pad=-0.25),
 )
 DEFAULT_SLICE_LABEL_PROPS = dict(ha='left', va='center', fontsize=7)
-DEFAULT_TITLE_PROPS = dict(ha='center', va='center', fontsize=8, rotation=PROJ_ALPHA * 180 / np.pi)
+DEFAULT_TITLE_PROPS = dict(ha='center', va='center', fontsize=8, rotation=PROJ_ALPHA)
 
 DEFAULT_CUBE_EDGE_PROPS = {
     'bottom_right': {
@@ -136,7 +137,7 @@ DEFAULT_CUBE_EDGE_PROPS = {
             'major': {'offset': (10, 0), 'props': DEFAULT_LABEL_PROPS},
             'slice': {'offset': (55, 0), 'props': DEFAULT_SLICE_LABEL_PROPS},
         },
-        'title': {'offset': (40, 0), 'props': DEFAULT_TITLE_PROPS},
+        'zaxis_title': {'offset': (40, 0), 'props': DEFAULT_TITLE_PROPS},
     },
     'bottom_left': CUBE_EDGE_PROPS_HIDDEN,
     'top_left': CUBE_EDGE_PROPS_VISIBLE,
@@ -178,13 +179,15 @@ def draw_text(
     ax: Axes,
     position: V3d,
     label: str,
-    offset: V2d,
     props: Dict[str, Any],
     project: Callable[[V3d], V2d],
+    offset: V2d = (0, 0),
+    offset_units: str = 'axes',
 ):
     position = np.asarray(position)
     offset = np.asarray(offset)
-    offset = np.array([to_data_units(offset[0], ax), to_data_units(offset[1], ax)])
+    if offset_units == 'axes':
+        offset = np.array([to_data_units(offset[0], ax), to_data_units(offset[1], ax)])
     tproj_position = project(position)
     t = ax.text(tproj_position[0] + offset[0], tproj_position[1] + offset[1], label, **props)
     if 'bbox' in props:
@@ -251,11 +254,14 @@ def draw_z_title(
     ypos: float,
     zlim: V2d,
     project: Callable[[V3d], V2d],
-    axis_offset: Optional[V2d] = None,
+    zaxis_labelpad: int = 0,
+    axis_offset: V2d = (0, 0),
     z_title: Optional[str] = None,
     **title_props,
 ):
-    xpos, ypos = np.array([xpos, ypos]) + axis_offset
+
+    labelpad = to_data_units(zaxis_labelpad, ax)
+    xpos, ypos = np.array([xpos, ypos]) + np.asarray(axis_offset) + np.array([labelpad, 0])
     if title_props is not None and z_title is not None:
         tpos_world = np.array([xpos, ypos, np.mean(zlim)])  # center of the axis
         draw_text(ax, position=tpos_world, label=z_title, project=project, **title_props)
@@ -330,6 +336,7 @@ def plot_3d_stack(
     zlabels: Optional[List[Tuple[NumLike, str, str]]] = None,
     cube_edge_props: Dict[str, Any] = DEFAULT_CUBE_EDGE_PROPS,
     z_title: Optional[str] = None,
+    zaxis_labelpad: int = 0,
     **_,
 ):
 
@@ -365,15 +372,16 @@ def plot_3d_stack(
                         ticks=ticks,
                         tick_props=props['ticks'][tick_type],
                     )
-        if 'title' in props:
+        if 'zaxis_title' in props:
             draw_z_title(
                 ax,
                 *get_edge_pos(edge, xlim, ylim),
                 zlim,
                 project=project,
                 z_title=z_title,
+                zaxis_labelpad=zaxis_labelpad,
                 axis_offset=axis_offset,
-                **props['title'],
+                **props['zaxis_title'],
             )
         if props.get('labels') is not None and zlabels is not None:
             assert isinstance(zlabels, list)
@@ -389,7 +397,7 @@ def plot_3d_stack(
     # plot the slices
     for i, (f, z) in enumerate(zip(slice_functions, slice_zpositions)):
         axin = ax.inset_axes([0, 0, 1, 1], zorder=-z)
-        pc.default_style(axin)
+        pc.apply_style(axin)
         f(axin)
         inset_coords_world = np.array([axin.get_xlim(), axin.get_ylim()])
         inset_size_world = np.abs(inset_coords_world[:, 1] - inset_coords_world[:, 0])
@@ -419,7 +427,7 @@ def cube_face(
         hidden_spines = []
     if visible_spines is None:
         visible_spines = []
-    pc.default_style(ax)
+    pc.apply_style(ax)
     ax.set_xlim(xlims)
     ax.set_ylim(ylims)
     # not ticks
@@ -447,7 +455,7 @@ def front_face_bl(
     ylims,
     input_names: Sequence[str],
     rescaler: pc.DataRescaler,
-    labelpad=True,
+    labelpad:Tuple=(20,24),
     ticks=False,
 ):
     # in order to get the correct zorder,
@@ -475,9 +483,8 @@ def front_face_bl(
             margins=0.0,
         )
     # add margin to labels
-    if labelpad and not ticks:
-        ax.xaxis.labelpad = 18
-        ax.yaxis.labelpad = 22
+    ax.xaxis.labelpad = labelpad[0]
+    ax.yaxis.labelpad = labelpad[1]
 
 
 def front_face_tr(
@@ -528,12 +535,15 @@ def smooth_3d(
     colorbar_position=(1.1, 0.4),
     colorbar_size=(0.04, 0.52),
     smooth_2d_params: Dict = {},
+    xaxis_labelpad: int = 20,
+    yaxis_labelpad: int = 24,
+    zaxis_labelpad: int = 0,
     **_,
 ):
 
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
 
-    assert isinstance(ax, (list, tuple, np.ndarray))
+    assert isinstance(ax, (list, tuple, np.ndarray)), f'ax must be a list or tuple, got {ax}'
 
     if len(ax) != len(zslices):
         raise ValueError(
@@ -542,6 +552,7 @@ def smooth_3d(
 
     ylims = xlims if ylims == (None, None) else ylims
     zlims = xlims if zlims == (None, None) else zlims
+
 
     colorbar_location = colorbar_position + colorbar_size
 
@@ -584,9 +595,9 @@ def smooth_3d(
 
             cbar = plt.colorbar(im, cax=colorbar_ax)
             cbar.ax.tick_params(labelsize=6)
-            pc.default_style(cbar.ax)
+            # pc.default_style(cbar.ax)
             cbar.ax.tick_params(axis='both', which='both', direction='out', pad=2, labelsize=8)
-            # ticks and labels to the right
+            # tapply_stylels to the right
             cbar.ax.yaxis.tick_right()
             cbar.ax.yaxis.set_label_position('left')
 
@@ -607,7 +618,7 @@ def smooth_3d(
             )
 
     zticks, zlabels = get_transformed_ticks_and_labels(
-        zlims + np.array((0.1, 0)), rescaler=rescaler, skip_ticklabel_range=(-10, 2000)
+        np.asarray(zlims) + np.array((0.1, 0)), rescaler=rescaler, skip_ticklabel_range=(-10, 2000)
     )
 
     major_zlabels: List[Tuple[NumLike, str, str]] = [(float(z), s, 'major') for z, s in zlabels]
@@ -640,7 +651,7 @@ def smooth_3d(
             [
                 partial(
                     front_face_bl,
-                    labelpad=i == 0,
+                    labelpad=(xaxis_labelpad, yaxis_labelpad),
                     xlims=xlims,
                     ylims=ylims,
                     input_names=input_names,

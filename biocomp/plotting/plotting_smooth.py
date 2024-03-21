@@ -37,7 +37,7 @@ from .plotting_core import (
     knn_avg,
     get_knn_quantile,
     format_powers,
-    default_style,
+    apply_style,
     heatmap,
 )
 
@@ -80,7 +80,7 @@ def smooth_1d(
     x = x[:, input_order]
 
     unscaled_ticks = np.logspace(0, 12, 13)
-    ticks = np.array(rescaler(unscaled_ticks))
+    ticks = np.array(rescaler.fwd(unscaled_ticks))
     ticks = ticks[ticks < xmax]
     tlabels = [
         scformat.format("{:m}", x) if i > 1 else ''
@@ -153,6 +153,12 @@ def knn_grid(
     x, y, xlims, ylims, zslice=None, is_density_plot=False, grid_resolution=200, knn_avg_params={}
 ):
 
+    print(
+        f'knn_grid: {x.shape=}, {y.shape=}, {xlims=}, {ylims=}, {zslice=}, {is_density_plot=}, {grid_resolution=}, {knn_avg_params=}'
+    )
+    # stats on x and y
+    print(f'knn_grid: {np.nanmin(x)=}, {np.nanmax(x)=}, {np.nanmean(y)=}, {np.nanmean(y)=}')
+
     xmin, xmax = xlims
     ymin, ymax = ylims or xlims
     xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
@@ -163,10 +169,17 @@ def knn_grid(
     else:
         xquery = xy
 
+    # stats on xquery
+    print(f'knn_grid: {xquery.shape=}, {np.nanmin(xquery)=}, {np.nanmax(xquery)=}')
+
+
     tree = cKDTree(x)
     output_values, density = knn_avg(xquery, y, tree=tree, **knn_avg_params)
 
     output_values = output_values.squeeze()
+
+    print(f'knn_grid: {xy.shape=}, {output_values.shape=}, {density.shape=}')
+    print(f'knn_grid: {np.nanmin(output_values)=}, {np.nanmax(output_values)=}, {np.nanmin(density)=}, {np.nanmax(density)=}')
 
     if output_values.shape != (xy.shape[0],):
         raise ValueError(f'output_values.shape = {output_values.shape} != {xy.shape[0]}')
@@ -198,6 +211,12 @@ def smooth_2d(
 ) -> Tuple:
 
     ylims = xlims if ylims == (None, None) else ylims
+
+    print(
+        f'smooth_2d: {X.shape=}, {Y.shape=}, {input_names=}, {output_name=}, {rescaler=}, {ax=}, {zslice=}, {title=}, {xlims=}, {ylims=}, {vlims=}, {draw_colorbar=}, {knn_grid_params=}, {heatmap_params=}'
+    )
+
+    print(f'smooth_2d: {np.nanmin(X)=}, {np.nanmax(X)=}, {np.nanmin(Y)=}, {np.nanmax(Y)=}, {np.nanmean(X)=}, {np.nanmean(Y)=}')
 
     input_coords, output_values = knn_grid(
         X,
@@ -235,7 +254,7 @@ def smooth_2d(
         cax = divider.append_axes("right", size="7%", pad=0.5)
         cbar = plt.colorbar(im, cax=cax)
         cbar.ax.tick_params(labelsize=6)
-        default_style(cbar.ax)
+        # apply_style(cbar.ax)
         cbar.ax.tick_params(axis='both', which='both', direction='out', pad=2, labelsize=8)
         for spine in cbar.ax.spines.values():
             spine.set_linewidth(0.2)

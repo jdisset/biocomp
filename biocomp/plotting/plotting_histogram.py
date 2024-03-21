@@ -37,7 +37,7 @@ from .plotting_core import (
     knn_avg,
     get_knn_quantile,
     format_powers,
-    default_style,
+    apply_style,
     heatmap,
 )
 
@@ -45,6 +45,7 @@ NdArray = Union[np.ndarray, jnp.ndarray]
 configurable = pc.configurable
 ##────────────────────────────────────────────────────────────────────────────}}}
 # ---- density histograms
+
 ### {{{                       --     density histogram     --
 
 
@@ -117,7 +118,7 @@ def histogram(
 
     if draw_colorbar:
         cbar = plt.colorbar(im, ax=ax)
-        default_style(cbar.ax)
+        apply_style(cbar.ax)
         clabel = 'log(density)' if use_log_density else 'density'
         cbar.set_label(clabel, fontsize=8)
         for spine in cbar.ax.spines.values():

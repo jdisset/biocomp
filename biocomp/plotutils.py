@@ -1,6 +1,6 @@
 # {{{                          --     imports     --
 # ···············································································
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, field
 import jax
 import jax.numpy as jnp
 from matplotlib import scale as mscale
@@ -33,7 +33,10 @@ from typing import Tuple
 import os
 from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable
 from matplotlib.ticker import ScalarFormatter, NullFormatter, MaxNLocator
+import matplotlib as mpl
 
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 # import plotting_core, plotting_smooth and plotting_histogram, all placed under the plotting/ directory:
 from .plotting.plotting_core import (
@@ -43,16 +46,15 @@ from .plotting.plotting_core import (
     PlotData,
 )
 
-from .plotting.plotting_histogram import (
-    histogram,
-)
+# from .plotting.plotting_histogram import (
+# histogram,
+# )
+# from .plotting.plotting_scatter import (
+# scatter,
+# )
 
-from .plotting.plotting_scatter import (
-    scatter,
-)
 
-
-ndArray = Union[np.ndarray, jnp.ndarray]
+NdArray = Union[np.ndarray, jnp.ndarray]
 
 from .plotting import plotting_core as pc
 
@@ -65,140 +67,99 @@ configurable = ut.configurable_decorator('biocomp.plotutils')
 
 @dataclass
 class FigureConfig:
-    title: Optional[str] = None
-    size: Optional[Tuple[int, int]] = None
-    dpi: Optional[int] = 300
+    axes_size: Tuple[int, int] = (4, 4)  # individual axes size
+    dpi: float = 300
+    # TODO: add support for automatic layout (finding things like zslices for example)
+    layout: Optional[Tuple[int, int]] = (1, 1)  # row, column
+    title: Optional[str] = None  # can use variables from metadata
+
+
+@dataclass
+class DataDimensions:
+    input_dim: int
+    output_dim: int
 
 
 # ---- network/recipe plots
 ### {{{                --     new network plot functions     --
 
-NdArray = Union[np.ndarray, jnp.ndarray]
+
+def get_data_dimensions(plot_data: PlotData) -> DataDimensions:
+    assert (
+        len(plot_data.input_names) == plot_data.x.shape[1]
+    ), f'{plot_data.input_names=}, {plot_data.x.shape=}'
+    assert plot_data.y.shape == (
+        plot_data.x.shape[0],
+        1,
+    ), f'{plot_data.y.shape=}, {plot_data.x.shape=}'
+    return DataDimensions(len(plot_data.input_names), 1)
 
 
+DEFAULT_PLOT_METHOD_PREFERENCE: Dict[int, str] = {
+    1: 'smooth',
+    2: 'smooth',
+    3: 'smooth',
+}
+
+
+@configurable
 def auto_plot(
     plot_data: PlotData,
-    method: str = 'smooth',
+    figure_config: Optional[FigureConfig] = None,
+    ax: Optional[Union[Axes, Sequence[Axes]]] = None,
+    use_plot_method: Optional[str] = 'auto',  # could be 'auto' or None, or a specific method
+    plot_method_per_input_dim: Optional[Dict[int, str]] = DEFAULT_PLOT_METHOD_PREFERENCE,
+    rc_context: Dict[str, Any] = {}, #pc.DEFAULT_RC_PARAMS,
     smooth_params: Dict[str, Any] = {},
     scatter_params: Dict[str, Any] = {},
     histogram_params: Dict[str, Any] = {},
     **kw,
 ) -> None:
 
-    if method == 'smooth':
-        return smooth(**smooth_params, **kw)
-    elif method == 'scatter':
-        return scatter(**scatter_params, **kw)
-    elif method == 'histogram':
-        return histogram(**histogram_params, **kw)
-    else:
-        raise NotImplementedError(f'Unknown plotting method {method}')
+    dim = get_data_dimensions(plot_data)
+    if use_plot_method is None or use_plot_method == 'auto':
+        assert plot_method_per_input_dim is not None
+        use_plot_method = plot_method_per_input_dim.get(dim.input_dim, 'smooth')
 
+    VALID_METHODS = ['smooth', 'scatter', 'histogram']
+    if use_plot_method not in VALID_METHODS:
+        raise ValueError(f'Unknown plotting method {use_plot_method}. Available: {VALID_METHODS}')
 
-# network_figure_*d exist to allow for a different configuration path
-# per number of dimensions (1D, 2D, 3D)
+    if figure_config is None:
+        figure_config = FigureConfig()
 
+    with mpl.rc_context(rc_context):
 
-@configurable
-def network_figure_1d(
-    plot_data: PlotData,
-    mkfig_params={},
-    auto_plot_params={},
-    **kw,
-):
-    fig, ax = mkfig(1, 1, **mkfig_params)
-    auto_plot(
-        plot_data,
-        ax=ax,
-        **auto_plot_params,
-        **kw,
-    )
-    return fig
+        # first we check that we have axes to plot on
+        # if not, we need to make a new figure
+        assert dim.output_dim == 1, 'Only single output plots are supported'
 
+        if ax is None:
+            assert (
+                figure_config.layout is not None
+            ), 'Layout must be specified if axes are not provided'
+            cols, rows = figure_config.layout
+            print(f'Creating new figure with {cols}x{rows} axes')
+            fig, ax = plt.subplots(
+                *figure_config.layout,
+                figsize=(cols * figure_config.axes_size[0], rows * figure_config.axes_size[1]),
+                dpi=figure_config.dpi,
+            )
+        else:
+            if not isinstance(ax, (list, tuple)):
+                assert isinstance(ax, Axes), f'ax type is {type(ax)}'
+                ax = [ax]
+            fig = ax[0].get_figure()
 
-@configurable
-def network_figure_2d(
-    plot_data: PlotData,
-    mkfig_params={},
-    auto_plot_params={},
-    **kw,
-):
-    fig, ax = mkfig(1, 1, **mkfig_params)
-    auto_plot(
-        plot_data,
-        ax=ax,
-        **auto_plot_params,
-        **kw,
-    )
-    return fig
+        assert isinstance(fig, Figure)
+        if figure_config.title is not None:
+            fig.suptitle(figure_config.title)
 
+        if use_plot_method == 'smooth':
+            return smooth(plot_data, ax, **smooth_params, **kw)
 
-@configurable
-def network_figure_3d(
-    plot_data: PlotData,
-    zslices=(0,),
-    mkfig_params={},
-    auto_plot_params={},
-    **kw,
-):
-    nslices = len(zslices)
-    fig, axes = mkfig(1, nslices, **mkfig_params)
-    if nslices == 1:
-        axes = np.array([axes])
-
-    auto_plot(
-        plot_data,
-        ax=axes,
-        **auto_plot_params,
-        **kw,
-    )
-
-    return fig
-
-
-# network_figure is the main entry point for plotting networks
-
-
-@configurable
-def network_figure(
-    network,
-    x,
-    y,
-    rescaler,
-    input_order=None,
-    protein_aliases: Dict[str, str] = {},
-    use_y_as_x: bool = False,
-    network_figure_1d_params={},
-    network_figure_2d_params={},
-    network_figure_3d_params={},
-):
-    n_inputs = network.get_nb_inputs()
-    if input_order is None:
-        input_order = list(range(n_inputs))
-
-    if n_inputs == 1:
-        f = network_figure_1d
-        params = network_figure_1d_params
-    elif n_inputs == 2:
-        f = network_figure_2d
-        params = network_figure_2d_params
-    elif n_inputs == 3:
-        f = network_figure_3d
-        params = network_figure_3d_params
-    else:
-        raise ValueError(f'Network with {n_inputs} inputs is not supported')
-
-    plot_data = extract_plot_data_from_network(
-        network=network,
-        x=x,
-        y=y,
-        rescaler=rescaler,
-        input_order=input_order,
-        protein_aliases=protein_aliases,
-        use_y_as_x=use_y_as_x,
-    )
-
-    return f(plot_data, **params)
+        else:
+            raise NotImplementedError(f'Unimplemented plotting method {method}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -210,15 +171,36 @@ from .plotting.plotting_smooth import smooth_2d
 
 @configurable
 def smooth(
-    x, y, input_names, output_name, rescaler, smooth_2d_params={}, smooth_3d_params={}, **kw
+    plot_data: PlotData, ax, smooth_1d_params={}, smooth_2d_params={}, smooth_3d_params={}, **kw
 ):
-    ninputs = x.shape[1]
-    if ninputs == 2:
-        smooth_2d(x, y, input_names, output_name, rescaler, **smooth_2d_params, **kw)
-    elif ninputs == 3:
-        smooth_3d(x, y, input_names, output_name, rescaler, **smooth_3d_params, **kw)
-    else:
-        raise NotImplementedError(f'Cannot plot {ninputs} inputs in smooth mode')
+    dim = get_data_dimensions(plot_data)
+    match (dim.input_dim, dim.output_dim):
+        case (2, 1):
+            return smooth_2d(
+                X=plot_data.x,
+                Y=plot_data.y,
+                input_names=plot_data.input_names,
+                output_name=plot_data.output_name,
+                rescaler=plot_data.rescaler,
+                ax=ax,
+                **smooth_2d_params,
+                **kw,
+            )
+        case (3, 1):
+            return smooth_3d(
+                X=plot_data.x,
+                Y=plot_data.y,
+                input_names=plot_data.input_names,
+                output_name=plot_data.output_name,
+                rescaler=plot_data.rescaler,
+                ax=ax,
+                **smooth_3d_params,
+                **kw,
+            )
+        case _:
+            raise ValueError(
+                f'Plotting {dim.input_dim} inputs and {dim.output_dim} outputs is not supported'
+            )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

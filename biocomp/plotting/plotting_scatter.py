@@ -37,7 +37,7 @@ from .plotting_core import (
     knn_avg,
     get_knn_quantile,
     format_powers,
-    default_style,
+    # apply_style,
     heatmap,
 )
 

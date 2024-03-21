@@ -2,6 +2,7 @@
 import yaml
 import json
 import copy
+from copy import deepcopy
 import xxhash
 import time
 from pathlib import Path
@@ -177,6 +178,12 @@ import inspect
 import sys
 from dataclasses import dataclass
 
+
+
+# TODO: use a special OmegaConf resolver to decode EncodedFunction
+# could be that the fname is ${EncodedFunction:fname}. The resolver can 
+# access the _parent_ node to decode it and have access to the module and kwargs
+# could even remove the module and just use ${Function:module.fname}
 
 @dataclass
 class EncodedFunction:
@@ -378,7 +385,7 @@ def generate_base_nested_config(
     def generate_empty_func_conf(func_name, func_args):
         subconf = {}
         for arg in func_args.keys():
-            if arg.endswith(function_config_suffix):
+            if isinstance(arg,str) and arg.endswith(function_config_suffix):
                 fname = arg[: -len(function_config_suffix)]
                 if fname in available_functions:
                     subconf[arg] = generate_empty_func_conf(fname, available_functions[fname])
@@ -402,8 +409,8 @@ def generate_base_nested_config(
     return emptyconf
 
 
-def resolve_if_ends_with(key: str, suffix: str) -> bool:
-    return key.endswith(suffix)
+def resolve_if_ends_with(key: Any, suffix: str) -> bool:
+    return isinstance(key, str) and key.endswith(suffix)
 
 
 def updated_dict(d1, d2):

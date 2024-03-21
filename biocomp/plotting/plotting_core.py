@@ -30,6 +30,8 @@ from matplotlib.ticker import ScalarFormatter, NullFormatter, MaxNLocator
 from matplotlib import colors as mcolors
 from pkg_resources import resource_filename
 
+from dataclasses import dataclass, field, asdict
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
@@ -80,11 +82,13 @@ class DataRescaler:
             self.fwd_transform = partial(self.fwd_transform, **kw)
             self.inv_transform = partial(self.inv_transform, **kw)
 
-    def __call__(self, x: NumLike) -> NdArray:
+    def fwd(self, x: NumLike) -> NdArray:
         return self.fwd_transform(x)
+        # return self.inv_transform(x)
 
     def inv(self, x: NumLike) -> NdArray:
-        return self.inv_transform(x)
+        return self.fwd_transform(x)
+        # return self.inv_transform(x)
 
     @classmethod
     def from_data_manager(cls, dm: DataManager):
@@ -237,7 +241,7 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
 
 def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):
     unscaled_ticks = np.logspace(0, 12, 13)
-    ticks = np.array(rescaler(unscaled_ticks))
+    ticks = np.array(rescaler.fwd(unscaled_ticks))
     valid_ticks = (ticks <= xmax) & (ticks >= xmin)
     # valid_ticks = np.ones_like(ticks, dtype=bool)
     ticks = ticks[valid_ticks]
@@ -256,10 +260,10 @@ def setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=0.05, **kw):
     p10 = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1])
     xlims_margin = xlims_tr + np.array([-1, 1]) * margins * np.diff(xlims_tr)
     ax.set_xlim(xlims_margin)
-    ax.set_xticks(rescaler(p10))  # major ticks
+    ax.set_xticks(rescaler.fwd(p10))  # major ticks
     ax.xaxis.set_major_formatter(PowerFormatter(p10, **kw))
     p10_minor = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1], resolution=10)
-    ax.set_xticks(rescaler(p10_minor), minor=True)
+    ax.set_xticks(rescaler.fwd(p10_minor), minor=True)
     return xlims_inv
 
 
@@ -269,10 +273,10 @@ def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, **kw):
     p10 = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1])
     ylims_margin = ylims_tr + np.array([-1, 1]) * margins * np.diff(ylims_tr)
     ax.set_ylim(ylims_margin)
-    ax.set_yticks(rescaler(p10))
+    ax.set_yticks(rescaler.fwd(p10))
     ax.yaxis.set_major_formatter(PowerFormatter(p10, **kw))
     p10_minor = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1], resolution=10)
-    ax.set_yticks(rescaler(p10_minor), minor=True)
+    ax.set_yticks(rescaler.fwd(p10_minor), minor=True)
     return ylims_inv
 
 
@@ -294,9 +298,9 @@ def get_transformed_ticks_and_labels(
     assert lims_inv.shape == (2,)
     p10 = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1])
     p10_minor = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1], resolution=10)
-    ticks = {'major': rescaler(p10), 'minor': rescaler(p10_minor)}
+    ticks = {'major': rescaler.fwd(p10), 'minor': rescaler.fwd(p10_minor)}
     pf = PowerFormatter(p10, **kw)
-    labels = [(rescaler(x), pf(x, i)) for i, x in enumerate(p10)]
+    labels = [(rescaler.fwd(x), pf(x, i)) for i, x in enumerate(p10)]
     return ticks, labels
 
 
@@ -427,6 +431,7 @@ def gausspdf(x, mu, sigma):
 def get_knn(x: NdArray, tree: cKDTree, k: int = 500, min_points: int = 20, radius: float = 0.1):
     """Get the k-nearest neighbors of x in the tree,
     and return their indices together with their weights (from a gaussian kernel)."""
+    print(f'get_knn: {x.shape=}, {tree=}, {k=}, {min_points=}, {radius=}')
     SIGMA_FROM_RADIUS = 1 / 3
     distances, indices = tree.query(x, k=k, distance_upper_bound=radius)
     empty_neighbor_mask = distances == np.inf
@@ -435,17 +440,27 @@ def get_knn(x: NdArray, tree: cKDTree, k: int = 500, min_points: int = 20, radiu
     indices[empty_neighbor_mask] = 0
     weights[empty_neighbor_mask] = 0
     weights[nb_points < min_points, :] = np.nan
+    print(f'get_knn: {indices.shape=}, {weights.shape=}')
+    print(f'get_knn: {indices=}, {weights=}')
+    print(f'get_knn: {nb_points=}')
+    print(f'get_knn: {empty_neighbor_mask=}')
+    print(f'get_knn: {distances=}')
     return indices, weights
 
 
 def get_knn_mean(x, y, tree, **kw):
     """Get the k-nearest neighbors of x in the tree,
     and return their weighted average value together with their density."""
+
+    print(f'get_knn_mean: {x.shape=}, {y.shape=}, {tree=}, {kw=}')
+    print(f'get_knn_mean: {x=}, {y=}')
+
     indices, weights = get_knn(x, tree, **kw)
     assert indices.shape == weights.shape
     normed_w = weights / weights.sum(axis=1)[:, None]
     avg = (y[indices] * normed_w[:, :, None]).sum(axis=1)
     density = np.nansum(weights, axis=1)
+
     return avg, density
 
 
@@ -472,54 +487,157 @@ def knn_avg(xquery, logY, tree, k=500, min_points=20, avg_method='mean', **kw):
 ### {{{                    --     misc plot styling tools     --
 
 
-def setup_clean_fig(title):
-    fig, ax = plt.subplots(1, 1)
-    fig.patch.set_facecolor('white')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['bottom'].set_visible(False)
-    ax.spines['left'].set_visible(False)
-    ax.get_xaxis().set_ticks([])
-    ax.get_yaxis().set_ticks([])
-    plt.suptitle(title)
-    return fig, ax
+DEFAULT_GREY = '#777777'
+
+DEFAULT_RC_PARAMS = {
+    'figure.facecolor': 'white',
+    'font.family': 'sans-serif',
+    'font.style': 'normal',
+    'font.variant': 'normal',
+    'font.weight': 'normal',
+    'font.stretch': 'normal',
+    'font.size': 10,
+    'font.sans-serif': 'Roboto, DejaVu Sans, Bitstream Vera Sans, Computer Modern Sans Serif, Lucida Grande, Verdana, Geneva, Lucid, Arial, Helvetica, Avant Garde, sans-serif',
+    'font.monospace': 'Roboto Mono, DejaVu Sans Mono, Bitstream Vera Sans Mono, Computer Modern Typewriter, Andale Mono, Nimbus Mono L, Courier New, Courier, Fixed, Terminal, monospace',
+
+    'text.usetex': 'True',
+    'text.latex.preamble': '\\usepackage{cmbright}',
+    'mathtext.fontset': 'custom',
+    'mathtext.bf': 'sans:bold',
+    'mathtext.bfit': 'sans:italic:bold',
+    'mathtext.cal': 'cursive',
+    'mathtext.it': 'sans:italic',
+    'mathtext.rm': 'sans',
+    'mathtext.sf': 'sans',
+    'mathtext.tt': 'monospace',
+    'mathtext.fallback': 'stixsans',
+
+    'axes.spines.left': True,
+    'axes.spines.bottom': True,
+    'axes.spines.right': False,
+    'axes.spines.top': False,
+    'axes.labelsize': 10,
+    'axes.labelweight': 'normal',
+    'axes.labelcolor': DEFAULT_GREY,
+    'axes.titlesize': 12,
+    'axes.titleweight': 'normal',
+    'axes.titlecolor': DEFAULT_GREY,
+
+    'xtick.bottom': True,
+    'xtick.labelbottom': True,
+    'xtick.top': False,
+    'xtick.labeltop': False,
+    'xtick.major.size': 5,
+    'xtick.major.width': 0.4,
+    'xtick.minor.size': 2,
+    'xtick.minor.width': 0.2,
+
+    'ytick.left': True,
+    'ytick.labelleft': True,
+    'ytick.right': False,
+    'ytick.labelright': False,
+    'ytick.major.size': 5,
+    'ytick.major.width': 0.4,
+    'ytick.minor.size': 2,
+    'ytick.minor.width': 0.2,
+
+}
 
 
-def default_style(ax):
+
+@dataclass
+class SpineProps:
+    visible: bool = True
+    linewidth: float = 0.5
+    color: str = DEFAULT_GREY
+
+
+DEFAULT_SPINE_PROPS: Dict[str, SpineProps] = {
+    'top': SpineProps(visible=False),
+    'right': SpineProps(visible=False),
+    'bottom': SpineProps(visible=True),
+    'left': SpineProps(visible=True),
+}
+
+DEFAULT_TICK_PARAMS: List[Dict[str, Any]] = [
+    {'axis': 'both', 'which': 'both', 'labelsize': 8, 'direction': 'out'},
+    {'axis': 'both', 'which': 'major', 'length': 5, 'width': 0.4},
+    {'axis': 'both', 'which': 'minor', 'length': 2, 'width': 0.2},
+]
+
+
+
+@dataclass
+class FontProps:
+    family: Optional[str] = 'Arial'
+    size: Optional[int] = 10
+    weight: Optional[str] = 'normal'
+    style: Optional[str] = 'normal'
+    color: Optional[str] = 'black'
+
+@dataclass
+class PlotStyle:
+    facecolor: Optional[str] = 'white'
+    spine_props: Optional[Dict[str, SpineProps]] = field(
+        default_factory=lambda: DEFAULT_SPINE_PROPS
+    )
+    tick_params: Optional[List[Dict[str, Any]]] = field(default_factory=lambda: DEFAULT_TICK_PARAMS)
+    # labelsize: Optional[int] = 10
+    label_font: Optional[FontProps] = field(default_factory=FontProps)
+    title_font: Optional[FontProps] = field(default_factory=FontProps)
+
+
+
+DEFAULT_STYLE = PlotStyle()
+
+
+def apply_style(ax, style: PlotStyle = DEFAULT_STYLE):
     fig = ax.get_figure()
-    fig.patch.set_facecolor('white')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    # long thin ticks
-    ax.spines['bottom'].set_linewidth(0.5)
-    ax.spines['left'].set_linewidth(0.5)
-    ax.spines['bottom'].set_visible(True)
-    ax.spines['left'].set_visible(True)
-    ax.get_xaxis().tick_bottom()
-    ax.get_yaxis().tick_left()
-    # font
-    ax.tick_params(axis='both', which='both', labelsize=8)
-    ax.tick_params(axis='both', which='major', length=5, width=0.4)
-    ax.tick_params(axis='both', which='minor', length=2, width=0.2)
-    ax.xaxis.label.set_size(10)
-    ax.yaxis.label.set_size(10)
-    # tick outside
-    ax.tick_params(axis='both', which='both', direction='out')
 
-    # spine color
-    ax.spines['bottom'].set_color('#777777')
-    ax.spines['left'].set_color('#777777')
+    # if style.facecolor is not None:
+        # fig.patch.set_facecolor(style.facecolor)
+    # if style.spine_props is not None:
+        # for spine, props in style.spine_props.items():
+            # ax.spines[spine].set_visible(props.visible)
+            # ax.spines[spine].set_linewidth(props.linewidth)
+            # ax.spines[spine].set_color(props.color)
+    # if style.tick_params is not None:
+        # for tp in style.tick_params:
+            # ax.tick_params(**tp)
+
+    # if style.label_font is not None:
+        # ax.xaxis.label.set_fontproperties(style.label_font)
+        # ax.yaxis.label.set_fontproperties(style.label_font)
+
+    # if style.title_font is not None:
+        # ax.title.set_fontproperties(style.title_font)
+
+    # ax.get_xaxis().tick_bottom()
+    # ax.get_yaxis().tick_left()
 
 
 @configurable
-def mkfig(rows=1, cols=1, size=(4, 4), dpi=300, **kw):
+def mkfig(
+    rows: int = 1,
+    cols: int = 1,
+    size: Tuple[float, float] = (4, 4),
+    dpi: float = 300,
+    title: Optional[str] = None,
+    style: PlotStyle = DEFAULT_STYLE,
+):
     fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]), dpi=dpi, **kw)
+
     if rows == 1 and cols == 1:
-        default_style(ax)
+        apply_style(ax)
     else:
         for a in ax.flatten():
-            default_style(a)
+            apply_style(a)
+
+    if title is not None:
+        fig.suptitle(str(title))
+
     return fig, ax
+
 
 
 def remove_spines(ax):
@@ -618,8 +736,17 @@ class PlotData:
     y: NdArray
     input_names: List[str]
     output_name: str
-    rescaler: Callable
-    metadata: Optional[Dict[str, Any]] = None
+    rescaler: Any
+
+    def __post_init__(self):
+        # reshape everything to at least 2d
+        if self.x.ndim == 1:
+            self.x = self.x.reshape(-1, 1)
+        if self.y.ndim == 1:
+            self.y = self.y.reshape(-1, 1)
+
+
+
 
 
 def extract_plot_data_from_network(
@@ -663,7 +790,6 @@ def extract_plot_data_from_network(
         input_names=input_names,
         output_name=output_name,
         rescaler=rescaler,
-        metadata=network.metadata,
     )
 
 
@@ -686,6 +812,14 @@ def heatmap(
     cmap=DEFAULT_CMAP_NAME,
     bad_color='#EEEEEE00',
 ):
+
+    print(f'heatmap: {xy_grid.shape=}, {output_values.shape=}, {vlims=}, {cmap=}, {bad_color=}')
+    # some stats:
+    print(f'heatmap: {np.nanmin(output_values)=}, {np.nanmax(output_values)=}')
+    print(f'heatmap: {np.nanmean(output_values)=}, {np.nanstd(output_values)=}')
+    print(f'heatmap: {np.nanmin(xy_grid)=}, {np.nanmax(xy_grid)=}')
+    print(f'heatmap: {np.isnan(output_values).sum()=}')
+
     cmap = plt.get_cmap(cmap)
     cmap.set_bad(color=bad_color)
     full_transform = ax.transData
