@@ -179,11 +179,11 @@ import sys
 from dataclasses import dataclass
 
 
-
 # TODO: use a special OmegaConf resolver to decode EncodedFunction
-# could be that the fname is ${EncodedFunction:fname}. The resolver can 
+# could be that the fname is ${EncodedFunction:fname}. The resolver can
 # access the _parent_ node to decode it and have access to the module and kwargs
 # could even remove the module and just use ${Function:module.fname}
+
 
 @dataclass
 class EncodedFunction:
@@ -385,7 +385,7 @@ def generate_base_nested_config(
     def generate_empty_func_conf(func_name, func_args):
         subconf = {}
         for arg in func_args.keys():
-            if isinstance(arg,str) and arg.endswith(function_config_suffix):
+            if isinstance(arg, str) and arg.endswith(function_config_suffix):
                 fname = arg[: -len(function_config_suffix)]
                 if fname in available_functions:
                     subconf[arg] = generate_empty_func_conf(fname, available_functions[fname])
@@ -413,27 +413,82 @@ def resolve_if_ends_with(key: Any, suffix: str) -> bool:
     return isinstance(key, str) and key.endswith(suffix)
 
 
-def updated_dict(d1, d2):
-    if not isinstance(d1, dict):
-        return deepcopy(d2) if d2 is not None else deepcopy(d1)
-    if not isinstance(d2, dict):
-        return deepcopy(d1) if d1 is not None else deepcopy(d2)
+def dict_like(obj) -> bool:
+    return (
+        hasattr(obj, 'keys')
+        and hasattr(obj, 'get')
+        and hasattr(obj, '__getitem__')
+        and hasattr(obj, '__contains__')
+        and hasattr(obj, '__iter__')
+    )
+
+
+# define valid enum of merge modes: extend, replace, auto
+from typing import Type, Union
+
+
+def replace(d1, d2):
+    return deepcopy(d2)
+
+
+def extend(d1, d2):
+    if d1 is None:
+        return deepcopy(d2)
+    if d2 is None:
+        return deepcopy(d1)
+    return deepcopy(d2) + deepcopy(d1)
+
+
+DEFAULT_MERGE_MODES = {'replace': replace, 'extend': extend, 'auto': 'auto'}
+
+
+def updated_dict(
+    d1, d2, merge_mode: Optional[Dict[Union[Type, str], Union[str, Callable]]] = None
+) -> Dict:
+
+    if merge_mode is None:
+        merge_mode = {}
+
+    t1, t2 = type(d1), type(d2)
+    st1, st2 = str(t1.__name__), str(t2.__name__)
+
+    mmode = 'auto'
+
+    if t1 in merge_mode or st1 in merge_mode:
+        mmode = merge_mode.get(t1, merge_mode.get(st1))
+        if mmode in DEFAULT_MERGE_MODES:
+            mmode = DEFAULT_MERGE_MODES[mmode]
+        if callable(mmode):
+            return mmode(d1, d2)
+
+    if t2 in merge_mode or st2 in merge_mode:
+        mmode = merge_mode.get(t2, merge_mode.get(st2))
+        if mmode in DEFAULT_MERGE_MODES:
+            mmode = DEFAULT_MERGE_MODES[mmode]
+        if callable(mmode):
+            return mmode(d1, d2)
+
+    if mmode == 'auto':
+        if not dict_like(d1):
+            return deepcopy(d2) if d2 is not None else deepcopy(d1)
+        if not dict_like(d2):
+            return deepcopy(d1) if d1 is not None else deepcopy(d2)
+    else:
+        raise NotImplementedError(f'Cannot merge {t1} and {t2}')
+
+    assert mmode == 'auto', f'Invalid merge mode {mmode}'
+    # they're both dicts:
     res = {}
     for key, val in d1.items():
-        if isinstance(val, dict):
-            if key in d2 and isinstance(d2[key], dict):
-                res[key] = updated_dict(d1[key], d2[key])
-            else:
-                res[key] = deepcopy(d1[key])
+        if key in d2:
+            res[key] = updated_dict(d1[key], d2[key], merge_mode)
         else:
-            if key in d2 and isinstance(d2[key], dict):
-                res[key] = deepcopy(d2[key])
-            else:
-                res[key] = deepcopy(d1[key])
+            res[key] = deepcopy(d1[key])
     for key, val in d2.items():
         if not key in d1:
             res[key] = deepcopy(val)
     return res
+
 
 
 def nested_resolve(
@@ -501,7 +556,9 @@ def delete_empty(d: Any):
 def yaml_dump(data, **kw):
     return yaml.dump(data, Dumper=BiocompYamlDumper, **kw)
 
+
 from omegaconf import OmegaConf
+
 
 def dump_default_config(namespace: str = 'default'):
     baseconf = generate_base_nested_config(add_defaults=True, namespace=namespace)
@@ -510,7 +567,6 @@ def dump_default_config(namespace: str = 'default'):
     # dump using omegaconf
     # conf = OmegaConf.create(baseconf)
     # return OmegaConf.to_yaml(conf)
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -578,19 +634,19 @@ def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PAT
 
 
 ## {{{                     --     profiler context     --
-class profiler:
-    def __init__(self, filename):
-        self.filename = filename
-        # mkdir if it doesn't exist
-        Path(filename).parent.mkdir(parents=True, exist_ok=True)
 
-    def __enter__(self):
-        self.profiler = cProfile.Profile()
-        self.profiler.enable()
+# with profiler('profile.prof'):
+#     do_stuff()
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.profiler.disable()
-        self.profiler.dump_stats(self.filename)
+
+@contextmanager
+def profiler(filename='profile.prof'):
+    Path(filename).parent.mkdir(parents=True, exist_ok=True)
+    profiler = cProfile.Profile()
+    profiler.enable()
+    yield
+    profiler.disable()
+    profiler.dump_stats(filename)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -663,10 +719,12 @@ class TimeStore:
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                        --     misc utils     --
 
+
 def remove_keys(d: Dict, keys: Sequence):
     # ignored_keys = [k for k in keys if k in d]
     new_dict = {k: v for k, v in d.items() if k not in keys}
     return new_dict
+
 
 def get_git_commit_hash():
     bcpath = Path(__file__).parent
@@ -759,6 +817,7 @@ class DotDict(dict):
     def __getattr__(*args):
         val = dict.__getitem__(*args)
         return DotDict(val) if type(val) is dict else val
+
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 

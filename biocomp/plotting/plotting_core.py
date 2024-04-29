@@ -1,6 +1,7 @@
 # {{{                          --     imports     --
 # ···············································································
 import jax
+from dataclasses import dataclass
 import jax.numpy as jnp
 import copy
 from matplotlib import scale as mscale
@@ -11,8 +12,7 @@ import numpy as np
 from biocomp import utils as ut
 from biocomp import datautils as du
 from biocomp import compute as cmp
-from biocomp.datautils import DataManager
-from biocomp.network import Network
+from biocomp.datautils import DataManager, DataRescaler
 import matplotlib.pyplot as plt
 from jax.scipy.stats import gaussian_kde
 import matplotlib.ticker as ticker
@@ -28,108 +28,56 @@ import os
 from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable
 from matplotlib.ticker import ScalarFormatter, NullFormatter, MaxNLocator
 from matplotlib import colors as mcolors
-from pkg_resources import resource_filename
 
 from dataclasses import dataclass, field, asdict
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+logger = ut.setup_logger('biocomp.plotting')
+configurable = ut.configurable_decorator('biocomp.plotting')
 
-### {{{                   --     default configuration     --
+# ╭─────────────────────────────────────────────╮
+# │                TOOLS & UTILS                │
+# ╰───────────────────── ⟱ ─────────────────────╯
+
+## {{{                   --     default configuration     --
 
 NumLike = Union[np.ndarray, jnp.ndarray, float, int]
 NdArray = Union[np.ndarray, jnp.ndarray]
 
 os.environ["PATH"] += os.pathsep + '/Library/TeX/texbin'
-logger = ut.setup_logger('biocomp.plotutils')
-configurable = ut.configurable_decorator('biocomp.plotutils')
-
-os.environ["PATH"] += os.pathsep + '/Library/TeX/texbin'
-
-BASE_COLOR_CONFIG = ut.load_config(
-    resource_filename('biocomp', 'biocomp_default_config/colors.yaml')
-)
-cmap_definitions = BASE_COLOR_CONFIG.color_maps or {}
-CUSTOM_CMAPS = {
-    k: mcolors.LinearSegmentedColormap.from_list(k, v, N=256) for k, v in cmap_definitions.items()
-}
-
-# register custom colormaps
-for k, v in CUSTOM_CMAPS.items():
-    # check if it's already registered
-    if k in plt.colormaps():
-        plt.colormaps.unregister(k)
-    plt.colormaps.register(v, name=k)
-
-DEFAULT_CMAP_NAME = BASE_COLOR_CONFIG.default_color_map or 'viridis'
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-# ╭─────────────────────────────────────────────╮
-# │                TOOLS & UTILS                │
-# ╰───────────────────── ⟱ ─────────────────────╯
-### {{{                   --     DataRescaler wrapper     --
+logger = ut.setup_logger('biocomp.plotting')
+configurable = ut.configurable_decorator('biocomp.plotting')
 
 
-class DataRescaler:
-    def __init__(self, fwd_transform, inv_transform):
-        self.fwd_transform = fwd_transform
-        self.inv_transform = inv_transform
-
-    def add_kwargs(self, **kw):
-        assert callable(self.fwd_transform) and callable(self.inv_transform)
-        if kw:
-            self.fwd_transform = partial(self.fwd_transform, **kw)
-            self.inv_transform = partial(self.inv_transform, **kw)
-
-    def fwd(self, x: NumLike) -> NdArray:
-        return self.fwd_transform(x)
-        # return self.inv_transform(x)
-
-    def inv(self, x: NumLike) -> NdArray:
-        return self.fwd_transform(x)
-        # return self.inv_transform(x)
-
-    @classmethod
-    def from_data_manager(cls, dm: DataManager):
-        assert isinstance(dm, DataManager)
-
-        def fwd(x):
-            return dm.rescale([x])[0]
-
-        def inv(x):
-            return dm.unscale([x])[0]
-
-        return cls(fwd, inv)
+from pkg_resources import resource_filename
+try:
+    BASE_COLOR_CONFIG = ut.load_config(
+        resource_filename('biocomp', 'biocomp_default_config/colors.yaml')
+    )
 
 
-BIOCOMP_PLOTTING_DEFAULT_RESCALERS = {
-    None: DataRescaler(lambda x: x, lambda x: x),
-    'identity': DataRescaler(lambda x: x, lambda x: x),
-    'log': DataRescaler(lambda x: np.log(x), lambda x: np.exp(x)),
-    'log10': DataRescaler(lambda x: np.log10(x), lambda x: 10**x),
-}
+    cmap_definitions = BASE_COLOR_CONFIG.color_maps or {}
 
+    CUSTOM_CMAPS = {
+        k: mcolors.LinearSegmentedColormap.from_list(k, v, N=256) for k, v in cmap_definitions.items()
+    }
 
-def get_rescaler(rescaler, **kw):
-    if isinstance(rescaler, DataRescaler):
-        return rescaler
-    if isinstance(rescaler, str):
-        if rescaler in BIOCOMP_PLOTTING_DEFAULT_RESCALERS:
-            r = copy.deepcopy(BIOCOMP_PLOTTING_DEFAULT_RESCALERS[rescaler])
-            r.add_kwargs(**kw)
-            return r
-        else:
-            raise ValueError(f'Unknown rescaler {rescaler}')
-    if isinstance(rescaler, (tuple, list)):
-        assert len(rescaler) == 2, 'Rescaler must be a tuple of (fwd, inv) functions'
-        assert callable(rescaler[0]) and callable(
-            rescaler[1]
-        ), 'Rescaler must be a tuple of (fwd, inv) functions'
-        return DataRescaler(partial(rescaler[0], **kw), partial(rescaler[1], **kw))
+    # register custom colormaps
+    for k, v in CUSTOM_CMAPS.items():
+        # check if it's already registered
+        if k in plt.colormaps():
+            plt.colormaps.unregister(k)
+        plt.colormaps.register(v, name=k)
+
+    DEFAULT_CMAP_NAME = BASE_COLOR_CONFIG.default_color_map or 'viridis'
+
+except :
+    DEFAULT_CMAP_NAME = 'viridis'
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{                   --     log_spline_log scale     --
 
 
@@ -351,7 +299,6 @@ def setup_symlog_axis(
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{              --     knn and spatial partitionning    --
 
-
 @jax.jit
 def weighted_quantile(data, weights, qu):
     ix = jnp.argsort(data)
@@ -484,322 +431,13 @@ def knn_avg(xquery, logY, tree, k=500, min_points=20, avg_method='mean', **kw):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                    --     misc plot styling tools     --
 
-
-DEFAULT_GREY = '#777777'
-
-DEFAULT_RC_PARAMS = {
-    'figure.facecolor': 'white',
-    'font.family': 'sans-serif',
-    'font.style': 'normal',
-    'font.variant': 'normal',
-    'font.weight': 'normal',
-    'font.stretch': 'normal',
-    'font.size': 10,
-    'font.sans-serif': 'Roboto, DejaVu Sans, Bitstream Vera Sans, Computer Modern Sans Serif, Lucida Grande, Verdana, Geneva, Lucid, Arial, Helvetica, Avant Garde, sans-serif',
-    'font.monospace': 'Roboto Mono, DejaVu Sans Mono, Bitstream Vera Sans Mono, Computer Modern Typewriter, Andale Mono, Nimbus Mono L, Courier New, Courier, Fixed, Terminal, monospace',
-
-    'text.usetex': 'True',
-    'text.latex.preamble': '\\usepackage{cmbright}',
-    'mathtext.fontset': 'custom',
-    'mathtext.bf': 'sans:bold',
-    'mathtext.bfit': 'sans:italic:bold',
-    'mathtext.cal': 'cursive',
-    'mathtext.it': 'sans:italic',
-    'mathtext.rm': 'sans',
-    'mathtext.sf': 'sans',
-    'mathtext.tt': 'monospace',
-    'mathtext.fallback': 'stixsans',
-
-    'axes.spines.left': True,
-    'axes.spines.bottom': True,
-    'axes.spines.right': False,
-    'axes.spines.top': False,
-    'axes.labelsize': 10,
-    'axes.labelweight': 'normal',
-    'axes.labelcolor': DEFAULT_GREY,
-    'axes.titlesize': 12,
-    'axes.titleweight': 'normal',
-    'axes.titlecolor': DEFAULT_GREY,
-
-    'xtick.bottom': True,
-    'xtick.labelbottom': True,
-    'xtick.top': False,
-    'xtick.labeltop': False,
-    'xtick.major.size': 5,
-    'xtick.major.width': 0.4,
-    'xtick.minor.size': 2,
-    'xtick.minor.width': 0.2,
-
-    'ytick.left': True,
-    'ytick.labelleft': True,
-    'ytick.right': False,
-    'ytick.labelright': False,
-    'ytick.major.size': 5,
-    'ytick.major.width': 0.4,
-    'ytick.minor.size': 2,
-    'ytick.minor.width': 0.2,
-
-}
-
-
-
-@dataclass
-class SpineProps:
-    visible: bool = True
-    linewidth: float = 0.5
-    color: str = DEFAULT_GREY
-
-
-DEFAULT_SPINE_PROPS: Dict[str, SpineProps] = {
-    'top': SpineProps(visible=False),
-    'right': SpineProps(visible=False),
-    'bottom': SpineProps(visible=True),
-    'left': SpineProps(visible=True),
-}
-
-DEFAULT_TICK_PARAMS: List[Dict[str, Any]] = [
-    {'axis': 'both', 'which': 'both', 'labelsize': 8, 'direction': 'out'},
-    {'axis': 'both', 'which': 'major', 'length': 5, 'width': 0.4},
-    {'axis': 'both', 'which': 'minor', 'length': 2, 'width': 0.2},
-]
-
-
-
-@dataclass
-class FontProps:
-    family: Optional[str] = 'Arial'
-    size: Optional[int] = 10
-    weight: Optional[str] = 'normal'
-    style: Optional[str] = 'normal'
-    color: Optional[str] = 'black'
-
-@dataclass
-class PlotStyle:
-    facecolor: Optional[str] = 'white'
-    spine_props: Optional[Dict[str, SpineProps]] = field(
-        default_factory=lambda: DEFAULT_SPINE_PROPS
-    )
-    tick_params: Optional[List[Dict[str, Any]]] = field(default_factory=lambda: DEFAULT_TICK_PARAMS)
-    # labelsize: Optional[int] = 10
-    label_font: Optional[FontProps] = field(default_factory=FontProps)
-    title_font: Optional[FontProps] = field(default_factory=FontProps)
-
-
-
-DEFAULT_STYLE = PlotStyle()
-
-
-def apply_style(ax, style: PlotStyle = DEFAULT_STYLE):
-    fig = ax.get_figure()
-
-    # if style.facecolor is not None:
-        # fig.patch.set_facecolor(style.facecolor)
-    # if style.spine_props is not None:
-        # for spine, props in style.spine_props.items():
-            # ax.spines[spine].set_visible(props.visible)
-            # ax.spines[spine].set_linewidth(props.linewidth)
-            # ax.spines[spine].set_color(props.color)
-    # if style.tick_params is not None:
-        # for tp in style.tick_params:
-            # ax.tick_params(**tp)
-
-    # if style.label_font is not None:
-        # ax.xaxis.label.set_fontproperties(style.label_font)
-        # ax.yaxis.label.set_fontproperties(style.label_font)
-
-    # if style.title_font is not None:
-        # ax.title.set_fontproperties(style.title_font)
-
-    # ax.get_xaxis().tick_bottom()
-    # ax.get_yaxis().tick_left()
-
-
-@configurable
-def mkfig(
-    rows: int = 1,
-    cols: int = 1,
-    size: Tuple[float, float] = (4, 4),
-    dpi: float = 300,
-    title: Optional[str] = None,
-    style: PlotStyle = DEFAULT_STYLE,
-):
-    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]), dpi=dpi, **kw)
-
-    if rows == 1 and cols == 1:
-        apply_style(ax)
-    else:
-        for a in ax.flatten():
-            apply_style(a)
-
-    if title is not None:
-        fig.suptitle(str(title))
-
-    return fig, ax
-
-
-
-def remove_spines(ax):
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-
-def remove_axis_and_spines(ax):
-    ax.set_xticks([])
-    ax.set_yticks([])
-    remove_spines(ax)
-
-
-class ShortScientificFormatter(string.Formatter):
-    def format_field(self, value, format_spec):
-        if format_spec == 'm':
-            if value < 1000:
-                if value == int(value):
-                    return super().format_field(int(value), '')
-                else:
-                    return super().format_field(value, '.1f')
-            else:
-                if value == int(value):
-                    return super().format_field(value, '.0e').replace('e+0', 'e').replace('e+', 'e')
-                else:
-                    return super().format_field(value, '.1e').replace('e+0', 'e').replace('e+', 'e')
-        else:
-            return super().format_field(value, format_spec)
-
-
-scformat = ShortScientificFormatter()
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                        --     misc utils     --
-def make_xy_grid(xmin, xmax, ymin=None, ymax=None, xres=100, yres=None):
-    ymin = ymin if ymin is not None else xmin
-    ymax = ymax if ymax is not None else xmax
-    yres = yres if yres is not None else xres
-    xx = np.linspace(xmin, xmax, xres)
-    yy = np.linspace(ymin, ymax, yres)
-    X, Y = np.meshgrid(xx, yy)
-    # we want to return as a big array of shape (res**2, 2)
-    return np.vstack([X.ravel(), Y.ravel()]).T
-
-
-def get_web_font(url, font_name):
-    import tempfile
-    from pathlib import Path
-    import urllib
-    from rich import print
-    from matplotlib import font_manager
-
-    # Create a temporary directory for the font file
-    path = Path(tempfile.mkdtemp())
-
-    # URL and downloaded path of the font
-    url_font = url
-    path_font = path / f"{font_name}.ttf"
-
-    # Download the font to our temporary directory
-    urllib.request.urlretrieve(url_font, path_font)
-    # Create a Matplotlib Font object from our `.ttf` file
-    font = font_manager.FontEntry(fname=str(path_font), name=font_name)
-
-    # Register this object with Matplotlib's ttf list
-    font_manager.fontManager.ttflist.append(font)
-    return font
-
-
-def to_display_units(x, ax):
-    """Convert x from data units to display units"""
-    ppd = 72.0 / ax.figure.dpi
-    trans = ax.transData.transform
-    return ((trans((1, x)) - trans((0, 0))) * ppd)[1]
-
-
-def to_data_units(y_display, ax):
-    """Convert y from display units to data units"""
-    ppd = 72.0 / ax.figure.dpi
-    trans_inv = ax.transData.inverted().transform
-    origin = trans_inv((0, 0))
-    point_in_data_units = trans_inv((0, y_display / ppd))
-    return point_in_data_units[1] - origin[1]
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-## {{{                       --     network utils     --
-
-from dataclasses import dataclass
-
-
-@dataclass
-class PlotData:
-    x: NdArray
-    y: NdArray
-    input_names: List[str]
-    output_name: str
-    rescaler: Any
-
-    def __post_init__(self):
-        # reshape everything to at least 2d
-        if self.x.ndim == 1:
-            self.x = self.x.reshape(-1, 1)
-        if self.y.ndim == 1:
-            self.y = self.y.reshape(-1, 1)
-
-
-
-
-
-def extract_plot_data_from_network(
-    network: Network,
-    X: NdArray,
-    Y: NdArray,
-    rescaler: DataRescaler,
-    input_order: Optional[Sequence[int]] = None,
-    protein_aliases: Optional[Dict[str, str]] = None,
-    use_y_as_x: bool = False,
-) -> PlotData:
-
-    if input_order is None:
-        input_order = np.arange(network.get_nb_inputs())
-    if protein_aliases is None:
-        protein_aliases = {}
-
-    protein_order, protein_names = get_reordered_protein_names(
-        network, input_order, protein_aliases
-    )
-
-    input_order, output_pos = protein_order[:-1], protein_order[-1]
-    input_names, output_name = protein_names[:-1], protein_names[-1]
-
-    if use_y_as_x:
-        output_names = network.get_output_proteins()
-        xind = [output_names.index(i) for i in input_names]
-        x = Y[:, xind]
-    else:
-        x = X[:, input_order]
-
-    y = Y[:, output_pos]
-    y = Y.reshape(-1, 1)
-
-    assert x.shape[1] == len(input_order)
-    assert y.shape[0] == X.shape[0]
-
-    return PlotData(
-        x=x,
-        y=y,
-        input_names=input_names,
-        output_name=output_name,
-        rescaler=rescaler,
-    )
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 
 
 # ╭─────────────────────────────────────────────╮
 # │             PLOTTING PRIMITIVES             │
 # ╰───────────────────── ⟱ ─────────────────────╯
-### {{{                          --     heatmap     --
+## {{{                          --     heatmap     --
 @configurable
 def heatmap(
     ax,

@@ -1,13 +1,9 @@
 ## {{{                          --     imports     --
 import numpy as np
 from .plotting_core import (
-    mkfig,
-    get_reordered_protein_names,
     format_powers,
-    apply_style,
     setup_transformed_axis,
     get_transformed_ticks_and_labels,
-    extract_plot_data_from_network,
 )
 from .plotting_smooth import (
     smooth_2d,
@@ -19,10 +15,8 @@ from matplotlib import pyplot as plt
 from functools import partial
 from mpl_toolkits.axes_grid1.inset_locator import InsetPosition
 import numpy as np
-from biocomp import plotutils as pu
 from .plotting_core import NumLike
 from biocomp import utils as ut
-from copy import deepcopy
 
 import jax.numpy as jnp
 

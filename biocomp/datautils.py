@@ -26,6 +26,7 @@ import hashlib
 import pickle
 from matplotlib.ticker import FixedLocator, FuncFormatter
 import matplotlib.ticker as ticker
+from .network import Network
 
 from typing import Optional, Union, List, Tuple, Callable, Collection, Any
 
@@ -33,16 +34,24 @@ ndArray = Union[np.ndarray, jnp.ndarray]
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     data rescaler     --
+from pydantic import BaseModel, ValidationError, Field, field_validator
+
+NumLike = Union[float, int, np.ndarray, jnp.ndarray]
+NdArray = Union[np.ndarray, jnp.ndarray]
+
+class DataRescaler(BaseModel):
+    def fwd(self, x: NumLike) -> NdArray:
+        raise NotImplementedError()
+    def inv(self, y: NumLike) -> NdArray:
+        raise NotImplementedError()
 
 
-@dataclass
-class ValueRange:
+class ValueRange(BaseModel):
     min: float = 0
     max: float = 1
 
 
-@dataclass
-class CompressedSymLogRescaler:
+class CompressedSymLogRescaler(DataRescaler):
     """
     Rescale values from input_range to [0, 1], with tolerance for outside values.
 
@@ -67,7 +76,7 @@ class CompressedSymLogRescaler:
     #       there's a way to keep it simple and still have a good rescaler for all purposes.
     #
 
-    input_range: ValueRange = field(default_factory=lambda: ValueRange(min=500, max=1e8))
+    input_range: ValueRange = Field(default_factory=lambda: ValueRange(min=500, max=1e8))
     low_end_compression: float = 100  # compression coefficient for low values
     poly_region_threshold: float = 300  # where we switch from log to poly
     poly_region_coef: float = 0.4  # how much we compress the poly part
@@ -148,7 +157,6 @@ def batch(X, Y, batch_size, n_batches=None):
 
 ## {{{                           --     utils     --
 
-
 def network_data_check(x, y, network):
     n_inputs = network.get_nb_inputs()
     n_outputs = network.get_nb_outputs()
@@ -170,11 +178,9 @@ def network_data_check(x, y, network):
         assert np.all(x_nonan_mask == y_nonan_mask)
         assert np.all(x[x_nonan_mask, ipos] == y[y_nonan_mask, outpos])
 
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                 --     batching & resampling     --
-
 
 def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     EPSILON = 1e-12
@@ -188,7 +194,6 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     )
     return selected
 
-
 def sample_batches_direct(
     X: ndArray,
     Y: ndArray,
@@ -200,6 +205,7 @@ def sample_batches_direct(
     density_threshold_quantile=0.05,  # Compute the density threshold using the quantile of the density distribution
     density_threshold_coords=0.3,  # Compute the density threshold using the value of the density at this coordinate
 ):
+
     """
     Sample batches from X and Y, with a probability of including a point
     inversely proportional to the density at that point.
@@ -270,9 +276,13 @@ def sample_batches_direct(
 # {{{                       --     data manager     --
 # ···············································································
 
+# in general, could use a custom instancer that's similar to 
+# hydra's: can use the same syntax: a _target_ field will indicate 
+# it needs to be instantiated as an obj of the specified type,
+# but a class can also pass a type that will be the default _target_
 
-@dataclass
-class ResamplingConfig:
+
+class ResamplingConfig(BaseModel):
     kde_bw_method: float = 0.02
     kde_samples: int = 4000
     density_chunksize: int = 50000
@@ -280,23 +290,21 @@ class ResamplingConfig:
     density_threshold_coords: float = 0.15
 
 
-@dataclass
-class DataConfig:
-    valid_raw_value_range: ValueRange = field(default_factory=lambda: ValueRange(min=500, max=1e8))
+class DataConfig(BaseModel):
+    valid_raw_value_range: ValueRange = Field(default_factory=lambda: ValueRange(min=500, max=1e8))
     acceptable_out_of_range_fraction_in_raw_data: float = 0.05
     perform_data_checks: bool = True
 
-    resampling: ResamplingConfig = field(default_factory=ResamplingConfig)
+    resampling: ResamplingConfig = Field(default_factory=ResamplingConfig)
 
-    # TODO: could instance rescaler directly from config so it could be any class.
-    rescaler: CompressedSymLogRescaler = field(default_factory=CompressedSymLogRescaler)
+    rescaler: DataRescaler = Field(default_factory=CompressedSymLogRescaler)
 
 
 DEFAULT_DATA_CONFIG = DataConfig()
 DEFAULT_DATA_CACHE_DIR = '../__cache/biocomp_densities_cache'
 
-
 class DataManager:
+
     """
     The DataManager handles:
     - storage of, and access to stack data and the associated networks
@@ -309,7 +317,7 @@ class DataManager:
         self,
         X: list[ndArray],
         Y: list[ndArray],
-        networks: list[bc.Network],
+        networks: list[Network],
         data_cfg: DataConfig = DEFAULT_DATA_CONFIG,
         cache_location: Optional[Union[Path, str]] = DEFAULT_DATA_CACHE_DIR,
     ):

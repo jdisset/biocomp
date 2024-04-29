@@ -76,7 +76,7 @@ class ComputeConfig:
         return cls(node_functions=node_f, extra=d.get('extra'))
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
+##────────────────────────────────────────────────────────────────────────────}}}compute
 
 ## {{{                       --     Virtual Node     --
 
@@ -137,6 +137,7 @@ class VirtualNode:
     def get_inverse_node(self, stack: ComputeStack) -> VirtualNode:
         is_inverse_of = self.get_compute_node('is_inverse_of')
         assert isinstance(is_inverse_of, int), 'Node is not an inverse'
+        assert is_inverse_of is not None, 'Node is not an inverse'
         assert self.network_id is not None, 'No network id'
         inv = stack.get_node_from_net_and_compute_id(self.network_id, is_inverse_of)
         assert inv is not None, 'Inverse not found'

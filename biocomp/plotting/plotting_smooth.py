@@ -28,16 +28,21 @@ from matplotlib.ticker import ScalarFormatter, NullFormatter, MaxNLocator
 from matplotlib import colors as mcolors
 from pkg_resources import resource_filename
 from . import plotting_core as pc
+
+from biocomp.plotutils import (
+    make_xy_grid,
+    apply_style,
+)
+
+
 from .plotting_core import (
     DEFAULT_CMAP_NAME,
     setup_transformed_axis,
     get_reordered_protein_names,
     network_ticks_and_labels,
-    make_xy_grid,
     knn_avg,
     get_knn_quantile,
     format_powers,
-    apply_style,
     heatmap,
 )
 
