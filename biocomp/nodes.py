@@ -533,6 +533,9 @@ def transform_nn(
     mask_name = f'{rate_name}_quantization_mask'
     quantization_mask_path = f'local/{layer_name}/{mask_name}'
 
+    logstdevs_path = f'shared/quantization/logstdevs/{rate_name}'
+    count_array_path = f'shared/quantization/counts/{rate_name}'
+
     def inner(params, value: ArrayLike, quantile, rate_embedding: ArrayLike, key: PRNGKey):
         """For a single source, computes a latent output from the concatenation of
         the rate embedding and the source value.
@@ -580,6 +583,12 @@ def transform_nn(
             params[quantization_values_path] = qvalues
             # params[quantization_names_path] = tuple(quantization_names)
             # params.tag(quantization_names_path, ['non_jit', 'non_grad'])
+        # Now initialize logstdevs in the same way
+        try:
+            logstdevs = params[logstdevs_path]
+        except KeyError:
+            logstdevs = jnp.zeros((len(quantization_names), rate_dim))
+            params[logstdevs_path] = logstdevs
 
         # assert qvalues.shape == (len(quantization_names), rate_dim)
         # if params[quantization_names_path] != tuple(quantization_names):
@@ -598,6 +607,19 @@ def transform_nn(
                 for node in nodelist
             ]
             params.at(f'{quantization_mask_path}', np.array(qmasks), tags=['non_grad'])
+            try:
+                params.at(
+                    count_array_path,
+                    np.array(qmasks).sum(axis=(0, 1)) + params.at(count_array_path),
+                    overwrite=True,
+                    tags=['non_grad'],
+                )
+            except KeyError:
+                params.at(
+                    count_array_path,
+                    np.array(qmasks).sum(axis=(0, 1)),
+                    tags=['non_grad'],
+                )
 
             # And we also initialize the quantized rates
             params[f'local/{layer_name}/{rate_name}'] = jax.random.uniform(
@@ -659,7 +681,7 @@ def transform_nn(
         node_id: ArrayLike,
         key: PRNGKey,
     ):
-        k1, k2 = jax.random.split(key, 2)
+        k1, k2, k3 = jax.random.split(key, 3)
 
         qid = jnp.squeeze(params[f'local/{layer_name}/quantile_variable_id'][node_id])
         quantile = quantiles[qid]
@@ -668,8 +690,14 @@ def transform_nn(
         rates = params[f'local/{layer_name}/{rate_name}'][node_id]
         assert val.shape == (len(input_shapes), *input_shapes[0])
         assert rates.shape == (len(input_shapes), rate_dim)
-        qrates = qz.get_quantized(
-            rates, params, quantization_values_path, quantization_mask_path, node_id
+        qrates = qz.get_variational_quantized(
+            rates,
+            params,
+            quantization_values_path,
+            quantization_mask_path,
+            logstdevs_path,
+            node_id,
+            k3,
         )
 
         # first we apply the inner stack to all inputs and sum them:
@@ -688,7 +716,7 @@ def transform_nn(
     def commit(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
         for node_id, node in enumerate(nodelist):
             rates = params[f'local/{layer_name}/{rate_name}'][node_id]
-            collapsed_names = qz.get_quantized_rate_names(
+            resolved_parameter_names = qz.get_quantized_rate_names(
                 rates,
                 params,
                 quantization_names,
@@ -696,7 +724,10 @@ def transform_nn(
                 quantization_mask_path,
                 node_id,
             )
-            qz.collapse_quantized_parameter(node, rate_name, collapsed_names)
+            extra = node.get_compute_node('extra') or {}
+            extra['resolved_parameter_names'] = resolved_parameter_names
+            node.set_compute_node_column('extra', extra)
+            qz.collapse_quantized_parameter(node, rate_name, resolved_parameter_names)
 
     output_shape = [(1,)]
 
