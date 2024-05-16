@@ -72,7 +72,9 @@ class ComputeConfig:
 
     @classmethod
     def from_dict(cls, d: dict):
-        node_f = {k: ut.EncodedFunction(**v) for k, v in d.get('node_functions', {}).items()}
+        node_f = {
+            k: ut.EncodedFunction(**v).get_impl() for k, v in d.get('node_functions', {}).items()
+        }
         return cls(node_functions=node_f, extra=d.get('extra'))
 
 
@@ -185,6 +187,7 @@ class ComputeLayer:
 
     f_prepare: Optional[Callable] = None
     f_apply: Optional[Callable] = None
+    f_commit: Optional[Callable] = None
 
     is_built: bool = False
 
@@ -256,6 +259,10 @@ class ComputeLayer:
 
     def check(self):
         assert len(set(n.type_signature for n in self.nodes)) == 1
+
+    def commit(self, params: ParameterTree):
+        if self.f_commit is not None:
+            self.f_commit(params, self.nodes)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -381,6 +388,10 @@ class ComputeStack:
     def copy(self):
         # we only deepcopy the layers, not the networks
         return ComputeStack(self.networks, deepcopy(self.layers))
+
+    def commit(self, params: ParameterTree):
+        for layer in self.layers:
+            layer.commit(params)
 
     def __repr__(self):
         # layers with line breaks

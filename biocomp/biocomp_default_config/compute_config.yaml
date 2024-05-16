@@ -50,7 +50,7 @@ node_functions:
     fname: transform_nn
     kwargs:
       transform_name: tc
-      quantization_names: ${transcription.kwargs.quantization_names}
+      quantization_names: ${node_functions.transcription.kwargs.quantization_names}
       outer_wsize: 64
       outer_depth: 4
       inner_wsize: 64
@@ -66,7 +66,7 @@ node_functions:
     fname: transform_nn
     kwargs:
       transform_name: tl
-      quantization_names: ${translation.kwargs.quantization_names}
+      quantization_names: ${node_functions.translation.kwargs.quantization_names}
       outer_wsize: 64
       outer_depth: 4
       inner_wsize: 64
@@ -144,4 +144,3 @@ node_functions:
     module: biocomp.nodes
 
 extra: null
-
