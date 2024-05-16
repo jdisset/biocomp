@@ -40,6 +40,7 @@ def escape(names):
 # {{{                            --     sql     --
 # ···············································································
 
+
 def create_db(conn):
     sql = """
     CREATE TABLE IF NOT EXISTS `recipes` (
@@ -595,7 +596,7 @@ class XP:
 
             load_data_file(
                 data_file,
-                sample_name,
+                # sample_name,
                 error_handler=err_handler,
                 use_store=self.raw_data,
                 force_reload=force_reload,
@@ -765,6 +766,7 @@ class XP:
 # {{{                           --     tests     --
 # ···············································································
 
+
 def test_module():
     libpath = "./test_data/all_sheets.pickle"
     l = ut.load(libpath)
@@ -785,6 +787,7 @@ def test_module():
         c.execute("SELECT * FROM aggregations")
         # 2 aggregations
         assert len(c.fetchall()) == 2
+
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────

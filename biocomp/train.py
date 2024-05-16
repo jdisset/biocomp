@@ -95,7 +95,7 @@ def start(
     # with epoch=0 and epoch_history=None
 
     ut.logger.debug(f"Training config: {training_config}")
-    ut.logger.debug(f"Compute config: {compute_config.config}")
+    ut.logger.debug(f"Compute config: {compute_config.to_dict()}")
 
     # --- get constants from training config (making sure they are there)
     N_REPLICATES = training_config.get('n_replicates', 1)
@@ -252,4 +252,3 @@ import json
 from pathlib import Path
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-

@@ -39,9 +39,11 @@ from pydantic import BaseModel, ValidationError, Field, field_validator
 NumLike = Union[float, int, np.ndarray, jnp.ndarray]
 NdArray = Union[np.ndarray, jnp.ndarray]
 
+
 class DataRescaler(BaseModel):
     def fwd(self, x: NumLike) -> NdArray:
         raise NotImplementedError()
+
     def inv(self, y: NumLike) -> NdArray:
         raise NotImplementedError()
 
@@ -94,11 +96,13 @@ class CompressedSymLogRescaler(DataRescaler):
         self.__log_end = self.__symlog(self.input_range.max / self.low_end_compression)
 
     def fwd(self, x):
+        self.__post_init__()
         xp = self.__symlog(1 + x / self.low_end_compression) - self.__log_start
         y = xp / (self.__log_end - self.__log_start)
         return y
 
     def inv(self, y):
+        self.__post_init__()
         yp = y * (self.__log_end - self.__log_start) + self.__log_start
         ypinv = self.__invsymlog(yp)
         x = self.low_end_compression * (ypinv - 1)
@@ -157,6 +161,7 @@ def batch(X, Y, batch_size, n_batches=None):
 
 ## {{{                           --     utils     --
 
+
 def network_data_check(x, y, network):
     n_inputs = network.get_nb_inputs()
     n_outputs = network.get_nb_outputs()
@@ -178,9 +183,11 @@ def network_data_check(x, y, network):
         assert np.all(x_nonan_mask == y_nonan_mask)
         assert np.all(x[x_nonan_mask, ipos] == y[y_nonan_mask, outpos])
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                 --     batching & resampling     --
+
 
 def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     EPSILON = 1e-12
@@ -194,6 +201,7 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     )
     return selected
 
+
 def sample_batches_direct(
     X: ndArray,
     Y: ndArray,
@@ -205,7 +213,6 @@ def sample_batches_direct(
     density_threshold_quantile=0.05,  # Compute the density threshold using the quantile of the density distribution
     density_threshold_coords=0.3,  # Compute the density threshold using the value of the density at this coordinate
 ):
-
     """
     Sample batches from X and Y, with a probability of including a point
     inversely proportional to the density at that point.
@@ -276,8 +283,8 @@ def sample_batches_direct(
 # {{{                       --     data manager     --
 # ···············································································
 
-# in general, could use a custom instancer that's similar to 
-# hydra's: can use the same syntax: a _target_ field will indicate 
+# in general, could use a custom instancer that's similar to
+# hydra's: can use the same syntax: a _target_ field will indicate
 # it needs to be instantiated as an obj of the specified type,
 # but a class can also pass a type that will be the default _target_
 
@@ -303,8 +310,8 @@ class DataConfig(BaseModel):
 DEFAULT_DATA_CONFIG = DataConfig()
 DEFAULT_DATA_CACHE_DIR = '../__cache/biocomp_densities_cache'
 
-class DataManager:
 
+class DataManager:
     """
     The DataManager handles:
     - storage of, and access to stack data and the associated networks
@@ -364,6 +371,41 @@ class DataManager:
             for x, y, n in zip(self._X, self._Y, self._networks):
                 network_data_check(x, y, n)
         ut.logger.info(f'Initialized a DataManager with {len(self._networks)} networks')
+
+    @classmethod
+    def from_xps(cls, xplist, config, **kw):
+        network_cache_location = None
+        if 'network_cache_location' in config:
+            network_cache_location = Path(config['network_cache_location'])
+
+        # build all networks and get all sample names, for each xp
+        # networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
+        net_sample_pairs = []
+        for xp in xplist:
+            net_sample_pairs.append(
+                ut.get_cache(
+                    lambda: xp.build_networks(**kw), f'{str(xp)}_net', network_cache_location
+                )
+            )
+
+        networks, samples = zip(*net_sample_pairs)
+
+        # get all X (independent vars) and Y (dependent vars) for each xp
+        # X, Y = zip(*[xp.get_XY(n, s) for xp, n, s in zip(xplist, networks, samples)])
+        XY_pairs = []
+        for xp, n, s in zip(xplist, networks, samples):
+            XY_pairs.append(
+                ut.get_cache(lambda: xp.get_XY(n, s), f'{str(xp)}_XY', network_cache_location)
+            )
+
+        X, Y = zip(*XY_pairs)
+        # get everything as a long concatenated list
+        X, Y, networks = (
+            list(itertools.chain(*X)),
+            list(itertools.chain(*Y)),
+            list(itertools.chain(*networks)),
+        )
+        return cls(X, Y, networks)
 
     def make_subset(self, network_ids):
         sub_x = [self._raw_X[i] for i in network_ids]
@@ -512,4 +554,3 @@ class DataManager:
 
 
 #                                                                            }}}
-
