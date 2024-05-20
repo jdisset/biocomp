@@ -42,14 +42,14 @@ def pretty_str(x):
                 typestr = "jax" if isinstance(x, jnp.ndarray) else "numpy"
                 msg = f"{x.shape} {x.dtype} {typestr} array:\n{np.asarray(x)}"
 
-    elif isinstance(x, (list)):
+    elif isinstance(x, (list, tuple)):
         chars = '()' if isinstance(x, tuple) else '[]'
         max_lines = 5
         max_elem_per_line = 5
         # xspl = x[:::max_elem_per_line]
         # make chunks of max_elem_per_line
         xspl = [x[i : i + max_elem_per_line] for i in range(0, len(x), max_elem_per_line)]
-        msg = chars[0] + '\n'.join([', '.join(x) for x in xspl[:max_lines]])
+        msg = chars[0] + '\n'.join([', '.join(str(x)) for x in xspl[:max_lines]])
         if len(xspl) > max_lines:
             msg += f"\n... {len(xspl) - max_lines} more elements"
         msg += chars[1]

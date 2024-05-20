@@ -23,7 +23,7 @@ from . import utils as ut
 from . import nodes as nodes
 from . import compute as cmp
 from .utils import check, checkwrap
-from .parameters import ParameterTree
+from .parameters import ParameterTree, ParamPath
 
 import wandb as wb
 import os
@@ -50,6 +50,20 @@ def check_XYZ(X, Y, Z, stack):
     ), "Y and Z must have as many columns as the total number of outputs in the stack"
 
 
+def check_XYZ_new(X, Y, Z, stack):
+    nb_inputs = sum([n.get_nb_inputs() for n in stack.networks])
+    nb_outputs = sum([n.get_nb_outputs() for n in stack.networks])
+    nb_nodes = len(stack.node_map)
+    assert X.ndim == Y.ndim == Z.ndim == 2, "X, Y, and Z must have 2 dimensions"
+    assert X.shape[0] == Y.shape[0] == Z.shape[0], "X, Y, and Z must have the same number of rows"
+    assert (
+        X.shape[1] == nb_inputs
+    ), "X must have as many columns as the total number of inputs in the stack"
+    assert (
+        Y.shape[1] == nb_outputs
+    ), "Y must have as many columns as the total number of outputs in the stack"
+
+
 def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_penalty):
 
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
@@ -69,6 +83,39 @@ def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_pen
 
         negative_grads = jnp.mean(jnp.clip(-grads, 0, None))
         return quantile_loss + negative_grad_penalty * negative_grads
+
+    return loss_func
+
+
+def sorting_loss(stack: cmp.ComputeStack):
+    batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+
+    def loss_func(dynamic, static, X, Y, Z, key):
+        check_XYZ_new(X, Y, Z, stack)
+        params = ParameterTree.merge(dynamic, static)
+        keys = jax.random.split(key, X.shape[0])
+        yhat, grads = batch_apply(params, X, Z, keys)
+        assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
+
+        qvalues_dir = ParamPath('shared/quantization/values')
+        logstd_dir = ParamPath('shared/quantization/logstdevs')
+        count_dir = ParamPath('shared/quantization/counts')
+        count_sum = 0
+        kl_loss = 0
+
+        for qvalue, logstd, count in zip(
+            *map(
+                lambda path: params[path].iter_leaves(),
+                (qvalues_dir, logstd_dir, count_dir),
+            )
+        ):
+            assert qvalue[0] == logstd[0] == count[0]
+            qvalue, logstd, count = qvalue[1], logstd[1], count[1]
+            kl_loss += (count * (qvalue**2 + jnp.exp(2 * logstd) / 2 - logstd)).sum()
+            count_sum += count.sum()
+        kl_loss /= count_sum
+
+        return jnp.asarray((yhat.sort(axis=0) - Y.sort(axis=0)) ** 2).sum(axis=0).mean() + kl_loss
 
     return loss_func
 
@@ -140,12 +187,12 @@ def start(
         loss_func, optimizer, fields_to_keep_in_history=KEEP_IN_HISTORY, scannable=True
     )
 
-    def per_replicate_epoch_step(start_params, start_opt_state, key, xbatches, ybatches):
+    def per_replicate_epoch_step(start_params, start_opt_state, key, xbatches, ybatches, num_z):
+        print(num_z)
         assert xbatches.shape[:-1] == (STEPS_PER_EPOCH, BATCH_SIZE)
         assert ybatches.shape[:-1] == (STEPS_PER_EPOCH, BATCH_SIZE)
         pscan = ut.progress_scan(STEPS_PER_EPOCH, message='Training model')
-        zbatches = jax.random.uniform(key, ybatches.shape)
-        assert zbatches.shape == ybatches.shape
+        zbatches = jax.random.uniform(key, (STEPS_PER_EPOCH, BATCH_SIZE) + num_z)
         batch_keys = jax.random.split(key, STEPS_PER_EPOCH)
         sstep = pscan(scannable_step)
         (final_params, final_opt_state), epoch_history = jax.lax.scan(
@@ -155,15 +202,18 @@ def start(
         )
         return final_params, final_opt_state, epoch_history
 
-    def epoch_step(params: ParameterTree, opt_state: optax.OptState, epoch_key, xs, ys):
+    def epoch_step(params: ParameterTree, opt_state: optax.OptState, epoch_key, xs, ys, num_z):
         keys = jax.random.split(epoch_key, N_REPLICATES)
         assert xs.shape[:-1] == ys.shape[:-1] == (N_REPLICATES, STEPS_PER_EPOCH, BATCH_SIZE)
-        return jax.vmap(per_replicate_epoch_step)(params, opt_state, keys, xs, ys)
+        return jax.vmap(Partial(per_replicate_epoch_step, num_z=num_z))(
+            params, opt_state, keys, xs, ys
+        )
 
     with ut.timer('Compiling the epoch_step function'):
         xb = ut.get_looped_slice(xbatches, 0, STEPS_PER_EPOCH, axis=1)
         yb = ut.get_looped_slice(ybatches, 0, STEPS_PER_EPOCH, axis=1)
-        lowered = jax.jit(epoch_step).lower(params, opt_state, key, xb, yb)
+        num_z = tuple(static['global/number_of_quantile_variables'])
+        lowered = jax.jit(Partial(epoch_step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
         compiled_epoch_step = lowered.compile()
 
     # --- main training loop
@@ -220,9 +270,7 @@ def start(
 
 ### {{{                  --     training program helper     --
 
-DEFAULT_LOSS = partial(
-    quantile_loss_with_grads, huber_quantile_loss_delta=0.1, negative_grad_penalty=0.01
-)
+DEFAULT_LOSS = sorting_loss
 DEFAULT_LOSS_SERIALIZED = ut.encode_function(DEFAULT_LOSS)
 
 DEFAULT_TRAINING_CONFIG = {
