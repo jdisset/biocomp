@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import biocomp as bc
 from . import utils as ut
+from .utils import ArbitraryModel
 from pathlib import Path
 import json
 from . import defaults as dft
@@ -27,28 +28,63 @@ import pickle
 from matplotlib.ticker import FixedLocator, FuncFormatter
 import matplotlib.ticker as ticker
 from .network import Network
-
+from pydantic import BaseModel, ValidationError, Field, field_validator
 from typing import Optional, Union, List, Tuple, Callable, Collection, Any
 
 ndArray = Union[np.ndarray, jnp.ndarray]
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     data rescaler     --
-from pydantic import BaseModel, ValidationError, Field, field_validator
 
 NumLike = Union[float, int, np.ndarray, jnp.ndarray]
 NdArray = Union[np.ndarray, jnp.ndarray]
 
-class DataRescaler(BaseModel):
-    def fwd(self, x: NumLike) -> NdArray:
-        raise NotImplementedError()
-    def inv(self, y: NumLike) -> NdArray:
-        raise NotImplementedError()
+
+class DataRescaler(ArbitraryModel):
+    # def fwd(self, x: NdArray) -> NdArray:
+        # raise NotImplementedError()
+    def fwd(self, x):
+        return x
+
+    # def inv(self, y: NdArray) -> NdArray:
+        # raise NotImplementedError()
+    def inv(self, y):
+        return y
 
 
 class ValueRange(BaseModel):
     min: float = 0
     max: float = 1
+
+
+class NoOpRescaler(DataRescaler):
+
+    def fwd(self, x):
+        return x
+
+    def inv(self, y):
+        return y
+
+
+class LogPolyLogRescaler(DataRescaler):
+    poly_region_threshold: float = 300  # where we switch from log to poly
+    poly_region_coef: float = 0.4  # how much we compress the poly part
+
+    def model_post_init(self, *_):
+        self.__symlog = partial(
+            ut.log_poly_log, threshold=self.poly_region_threshold, compression=self.poly_region_coef
+        )
+        self.__invsymlog = partial(
+            ut.inverse_log_poly_log,
+            threshold=self.poly_region_threshold,
+            compression=self.poly_region_coef,
+        )
+
+    def fwd(self, x):
+        return self.__symlog(x)
+
+    def inv(self, y):
+        return self.__invsymlog(y)
 
 
 class CompressedSymLogRescaler(DataRescaler):
@@ -81,7 +117,7 @@ class CompressedSymLogRescaler(DataRescaler):
     poly_region_threshold: float = 300  # where we switch from log to poly
     poly_region_coef: float = 0.4  # how much we compress the poly part
 
-    def __post_init__(self):
+    def model_post_init(self, *_):
         self.__symlog = partial(
             ut.log_poly_log, threshold=self.poly_region_threshold, compression=self.poly_region_coef
         )
@@ -111,16 +147,13 @@ class CompressedSymLogRescaler(DataRescaler):
 # Rescale values from input_range to [0, 1], with tolerance for outside values.
 # Lower values will always be > 0, but higher values continue to increase logarithmically.
 # """
-
 # LOG10 = np.log(10)
 # PLOG10 = scipy.special.lambertw(1/LOG10).real
 # T10 = np.exp(PLOG10) - (np.log(PLOG10 / LOG10) / LOG10)
 # XTHRESH = PLOG10 / LOG10
 # YTHRESH = 10**(XTHRESH)
-
-#     def explog10(self, x):
+# def explog10(self, x):
 # return np.where(x > XTHRESH, np.log10(x)+T10, 10**x)
-
 # def inv_explog10(self, y):
 # return np.where(y < YTHRESH, 10**(y-T10), np.log10(y))
 
@@ -157,6 +190,7 @@ def batch(X, Y, batch_size, n_batches=None):
 
 ## {{{                           --     utils     --
 
+
 def network_data_check(x, y, network):
     n_inputs = network.get_nb_inputs()
     n_outputs = network.get_nb_outputs()
@@ -178,9 +212,11 @@ def network_data_check(x, y, network):
         assert np.all(x_nonan_mask == y_nonan_mask)
         assert np.all(x[x_nonan_mask, ipos] == y[y_nonan_mask, outpos])
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                 --     batching & resampling     --
+
 
 def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     EPSILON = 1e-12
@@ -194,6 +230,7 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     )
     return selected
 
+
 def sample_batches_direct(
     X: ndArray,
     Y: ndArray,
@@ -205,7 +242,6 @@ def sample_batches_direct(
     density_threshold_quantile=0.05,  # Compute the density threshold using the quantile of the density distribution
     density_threshold_coords=0.3,  # Compute the density threshold using the value of the density at this coordinate
 ):
-
     """
     Sample batches from X and Y, with a probability of including a point
     inversely proportional to the density at that point.
@@ -276,8 +312,8 @@ def sample_batches_direct(
 # {{{                       --     data manager     --
 # ···············································································
 
-# in general, could use a custom instancer that's similar to 
-# hydra's: can use the same syntax: a _target_ field will indicate 
+# in general, could use a custom instancer that's similar to
+# hydra's: can use the same syntax: a _target_ field will indicate
 # it needs to be instantiated as an obj of the specified type,
 # but a class can also pass a type that will be the default _target_
 
@@ -303,8 +339,8 @@ class DataConfig(BaseModel):
 DEFAULT_DATA_CONFIG = DataConfig()
 DEFAULT_DATA_CACHE_DIR = '../__cache/biocomp_densities_cache'
 
-class DataManager:
 
+class DataManager:
     """
     The DataManager handles:
     - storage of, and access to stack data and the associated networks
@@ -512,4 +548,3 @@ class DataManager:
 
 
 #                                                                            }}}
-

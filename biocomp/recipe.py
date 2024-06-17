@@ -227,6 +227,7 @@ def import_recipes_to_sql(
     if error_handler is None:
 
         def _handler(msg):
+
             raise RuntimeError(msg)
 
         error_handler = _handler
@@ -284,7 +285,7 @@ def network_from_recipe(
     recipe_path: PathLike, lib: PartsLibrary, db_path=':memory:', metadata=None, **kwargs
 ):
     dbconn = sqlite3.connect(db_path)
-    recipe = import_recipes_to_sql([recipe_path], dbconn, lib)[0]
+    recipe = import_recipes_to_sql([recipe_path], dbconn, lib, show_progress=False)[0]
     if metadata is None:
         metadata = {'recipe_name': recipe['name'], 'recipe_file': recipe_path}
     return build_network(recipe['name'], dbconn, lib, metadata=metadata, **kwargs)

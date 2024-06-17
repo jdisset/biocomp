@@ -54,8 +54,8 @@ configurable = pc.configurable
 # ---- smooth plots (gaussian neighborhood based)
 ### {{{                            --     1D     --
 def smooth_1d(
-    x,
-    y,
+    x: NdArray,
+    y: NdArray,
     network,
     rescaler,
     ax,
@@ -155,14 +155,15 @@ def smooth_1d(
 ### {{{        --     2D     --
 @configurable
 def knn_grid(
-    x, y, xlims, ylims, zslice=None, is_density_plot=False, grid_resolution=200, knn_avg_params={}
+    x: NdArray,
+    y: NdArray,
+    xlims,
+    ylims,
+    zslice=None,
+    is_density_plot=False,
+    grid_resolution=200,
+    knn_avg_params={},
 ):
-
-    print(
-        f'knn_grid: {x.shape=}, {y.shape=}, {xlims=}, {ylims=}, {zslice=}, {is_density_plot=}, {grid_resolution=}, {knn_avg_params=}'
-    )
-    # stats on x and y
-    print(f'knn_grid: {np.nanmin(x)=}, {np.nanmax(x)=}, {np.nanmean(y)=}, {np.nanmean(y)=}')
 
     xmin, xmax = xlims
     ymin, ymax = ylims or xlims
@@ -174,17 +175,10 @@ def knn_grid(
     else:
         xquery = xy
 
-    # stats on xquery
-    print(f'knn_grid: {xquery.shape=}, {np.nanmin(xquery)=}, {np.nanmax(xquery)=}')
-
-
     tree = cKDTree(x)
     output_values, density = knn_avg(xquery, y, tree=tree, **knn_avg_params)
 
     output_values = output_values.squeeze()
-
-    print(f'knn_grid: {xy.shape=}, {output_values.shape=}, {density.shape=}')
-    print(f'knn_grid: {np.nanmin(output_values)=}, {np.nanmax(output_values)=}, {np.nanmin(density)=}, {np.nanmax(density)=}')
 
     if output_values.shape != (xy.shape[0],):
         raise ValueError(f'output_values.shape = {output_values.shape} != {xy.shape[0]}')
@@ -195,6 +189,56 @@ def knn_grid(
         output_values = density
 
     return xy, output_values
+
+
+@configurable
+def colorbar(
+    ax,
+    im,
+    rescaler,
+    vlims=(None, None),
+    label=None,
+    position=(1.1, 0.4),
+    size=(0.04, 0.52),
+    orientation='vertical',
+    label_position='right',
+    label_props={},
+    tick_props={},
+):
+
+    imlims = im.get_clim()
+    c_vmin = imlims[0] if vlims[0] is None else vlims[0]
+    c_vmax = imlims[1] if vlims[1] is None else vlims[1]
+
+    colorbar_ax = ax.inset_axes(position + size)
+    cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation)
+
+    DEFAULT_TICK_PROPS = dict(axis='both', which='both', direction='out', pad=2, labelsize=8)
+
+    cbar.ax.tick_params(**{**DEFAULT_TICK_PROPS, **tick_props}) # type: ignore
+
+    for spine in cbar.ax.spines.values():
+        spine.set_linewidth(0.2)
+    setup_transformed_axis(
+        cbar.ax,
+        yaxis_lims=[c_vmin, c_vmax],
+        xaxis_lims=[c_vmin, c_vmax],
+        margins=0.0,
+        rescaler=rescaler,
+    )
+    if label is not None:
+        if orientation == 'vertical':
+            cbar.ax.yaxis.set_label_position(label_position)
+            cbar.ax.set_ylabel(label, **label_props)
+            cbar.ax.tick_params(axis='x', which='both', size=0)
+            cbar.ax.set_xticks([])
+        else:
+            cbar.ax.xaxis.set_label_position(label_position)
+            cbar.ax.set_xlabel(label, **label_props)
+            cbar.ax.tick_params(axis='y', which='both', size=0)
+            cbar.ax.set_yticks([])
+
+    return cbar
 
 
 @configurable
@@ -210,18 +254,25 @@ def smooth_2d(
     xlims=(0, 1),
     ylims=(None, None),
     vlims=(None, None),
+    draw_xlabel=True,
+    draw_ylabel=True,
     draw_colorbar=True,
+    draw_colorbar_label=True,
+    colorbar_params: Dict = {},
     knn_grid_params: Dict = {},
     heatmap_params: Dict = {},
 ) -> Tuple:
 
     ylims = xlims if ylims == (None, None) else ylims
 
-    print(
-        f'smooth_2d: {X.shape=}, {Y.shape=}, {input_names=}, {output_name=}, {rescaler=}, {ax=}, {zslice=}, {title=}, {xlims=}, {ylims=}, {vlims=}, {draw_colorbar=}, {knn_grid_params=}, {heatmap_params=}'
-    )
+    if isinstance(ax, (list, tuple)):
+        ax = ax[0]
 
-    print(f'smooth_2d: {np.nanmin(X)=}, {np.nanmax(X)=}, {np.nanmin(Y)=}, {np.nanmax(Y)=}, {np.nanmean(X)=}, {np.nanmean(Y)=}')
+    # count any row in x with nan values
+    nans = np.isnan(X).any(axis=1)
+    if nans.any():
+        X = X[~nans]
+        Y = Y[~nans]
 
     input_coords, output_values = knn_grid(
         X,
@@ -233,8 +284,10 @@ def smooth_2d(
 
     im, cntrs = heatmap(ax, input_coords, output_values, **{**heatmap_params, 'vlims': vlims})
 
-    ax.set_xlabel(input_names[0])
-    ax.set_ylabel(input_names[1])
+    if draw_xlabel:
+        ax.set_xlabel(input_names[0])
+    if draw_ylabel:
+        ax.set_ylabel(input_names[1])
 
     if title is not None:
         ax.set_title(title)
@@ -252,24 +305,14 @@ def smooth_2d(
     ax.spines['right'].set_visible(False)
 
     if draw_colorbar:
-        imlims = im.get_clim()
-        c_vmin = imlims[0] if vlims[0] is None else vlims[0]
-        c_vmax = imlims[1] if vlims[1] is None else vlims[1]
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="7%", pad=0.5)
-        cbar = plt.colorbar(im, cax=cax)
-        cbar.ax.tick_params(labelsize=6)
-        # apply_style(cbar.ax)
-        cbar.ax.tick_params(axis='both', which='both', direction='out', pad=2, labelsize=8)
-        for spine in cbar.ax.spines.values():
-            spine.set_linewidth(0.2)
-        setup_transformed_axis(
-            cbar.ax,
-            yaxis_lims=[c_vmin, c_vmax],
-            rescaler=rescaler,
-            margins=0.0,
+        label = output_name if draw_colorbar_label else None
+        colorbar(
+            ax,
+            im,
+            rescaler,
+            vlims,
+            **{**colorbar_params, 'label': label},
         )
-        cbar.ax.set_ylabel(output_name, fontsize=8)
 
     return im, cntrs
 
