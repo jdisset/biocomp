@@ -687,6 +687,9 @@ def load_config(*config_files):  # in order of priority, the last one wins
 # we check if there is a file named ~/.biocomp.json
 # if so, we load it and use the paths defined there
 # otherwise, we use the default paths defined above
+
+DEFAULT_LIB_PATH = resource_filename('biocomp', 'artefacts/parts_library.pickle')
+
 GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
 if GLOBAL_CONFIG_PATH.exists():
     with open(GLOBAL_CONFIG_PATH) as f:
@@ -710,9 +713,9 @@ if 'BIOCOMP_LIB_PATH' in os.environ:
     DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_LIB_PATH']).expanduser()
 
 
+
 def load_lib(lib_path=DEFAULT_LIB_PATH):
     return load(lib_path)
-
 
 # convenience loading functions with default paths
 def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH, **kwargs):
