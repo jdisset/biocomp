@@ -251,6 +251,9 @@ def smooth_2d(
     ax,
     zslice: Optional[NdArray] = None,
     title: Optional[str] = None,
+    xtitle: Optional[str] = None,
+    ytitle: Optional[str] = None,
+    xlabel_img: Optional[str] = None,
     xlims=(0, 1),
     ylims=(None, None),
     vlims=(None, None),
@@ -263,6 +266,8 @@ def smooth_2d(
     heatmap_params: Dict = {},
 ) -> Tuple:
 
+    print(f'heatmap_params: {heatmap_params}')
+
     ylims = xlims if ylims == (None, None) else ylims
 
     if isinstance(ax, (list, tuple)):
@@ -274,6 +279,8 @@ def smooth_2d(
         X = X[~nans]
         Y = Y[~nans]
 
+    zslice = np.asarray(zslice) if zslice is not None else None
+
     input_coords, output_values = knn_grid(
         X,
         Y,
@@ -284,10 +291,14 @@ def smooth_2d(
 
     im, cntrs = heatmap(ax, input_coords, output_values, **{**heatmap_params, 'vlims': vlims})
 
+    # as latex if xtitle not none
+    xlabel = input_names[0] if xtitle is None else xtitle
+    ylabel = input_names[1] if ytitle is None else ytitle
+
     if draw_xlabel:
-        ax.set_xlabel(input_names[0])
+        ax.set_xlabel(xlabel)
     if draw_ylabel:
-        ax.set_ylabel(input_names[1])
+        ax.set_ylabel(ylabel)
 
     if title is not None:
         ax.set_title(title)
