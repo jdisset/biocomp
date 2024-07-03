@@ -694,7 +694,6 @@ GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
 if GLOBAL_CONFIG_PATH.exists():
     with open(GLOBAL_CONFIG_PATH) as f:
         config = json.load(f)
-        DEFAULT_XP_PATH = Path(config.get('xp_path', '')).expanduser()
         DEFAULT_RECIPE_PATH = config.get('recipe_path', '')
         if isinstance(DEFAULT_RECIPE_PATH, str):
             DEFAULT_RECIPE_PATH = Path(DEFAULT_RECIPE_PATH).expanduser()
@@ -705,8 +704,6 @@ if GLOBAL_CONFIG_PATH.exists():
 # we also check the environment variables to see if they define the paths
 # if so, we use them in priority
 
-if 'BIOCOMP_XP_PATH' in os.environ:
-    DEFAULT_XP_PATH = Path(os.environ['BIOCOMP_XP_PATH']).expanduser()
 if 'BIOCOMP_RECIPE_PATH' in os.environ:
     DEFAULT_RECIPE_PATH = Path(os.environ['BIOCOMP_RECIPE_PATH']).expanduser()
 if 'BIOCOMP_LIB_PATH' in os.environ:
@@ -716,11 +713,6 @@ if 'BIOCOMP_LIB_PATH' in os.environ:
 
 def load_lib(lib_path=DEFAULT_LIB_PATH):
     return load(lib_path)
-
-# convenience loading functions with default paths
-def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH, **kwargs):
-    xp = XP(xpname, xp_path, recipe_path, lib, **kwargs)
-    return xp
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
