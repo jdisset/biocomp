@@ -238,9 +238,10 @@ def draw_z_labels(
     for z, label, ltype in labels:
         z = float(z)
         assert ltype in props
-        draw_text(
-            ax, position=np.array([xpos, ypos, z]), project=project, label=label, **props[ltype]
-        )
+        if props[ltype] is not None:
+            draw_text(
+                ax, position=np.array([xpos, ypos, z]), project=project, label=label, **props[ltype]
+            )
 
 
 def draw_z_title(
