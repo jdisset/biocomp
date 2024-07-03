@@ -494,6 +494,8 @@ def heatmap(
 ):
 
 
+    print(f'in heatmap, contours={contours}')
+
     if isinstance(ax, list):
         ax = ax[0]
 
@@ -534,7 +536,7 @@ def heatmap(
     )
 
     cntrs = None
-    if contours is not None:
+    if contours is not None and contours > 0:
         cntrs = ax.contour(
             Z.T,
             levels=contours,
