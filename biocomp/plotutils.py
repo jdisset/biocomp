@@ -547,12 +547,12 @@ def auto_plot(
 from .plotting.plotting_3d import smooth_3d
 from .plotting.plotting_smooth import smooth_2d
 
-
 @configurable
 def smooth(
     plot_data: PlotData,
     ax,
     rescaler: DataRescaler = du.NoOpRescaler(),
+    force_dim: Optional[int] = None,
     smooth_1d_params={},
     smooth_2d_params={},
     smooth_3d_params={},
@@ -563,9 +563,19 @@ def smooth(
     x = rescaler.fwd(plot_data.x)
     y = rescaler.fwd(plot_data.y)
 
-    match (dim.input, dim.output):
-        case (2, 1):
-            return smooth_2d(
+    if force_dim is None:
+        match (dim.input, dim.output):
+            case (2, 1):
+                force_dim=2
+            case (3, 1):
+                force_dim=3
+            case _:
+                raise ValueError(
+                    f'Plotting {dim.input} inputs and {dim.output} outputs is not supported'
+                )
+
+    if force_dim == 2:
+        return smooth_2d(
                 X=x,
                 Y=y,
                 input_names=plot_data.input_names,
@@ -575,8 +585,9 @@ def smooth(
                 **smooth_2d_params,
                 **kw,
             )
-        case (3, 1):
-            return smooth_3d(
+
+    if force_dim == 3:
+        return smooth_3d(
                 X=x,
                 Y=y,
                 input_names=plot_data.input_names,
@@ -586,10 +597,8 @@ def smooth(
                 **smooth_3d_params,
                 **kw,
             )
-        case _:
-            raise ValueError(
-                f'Plotting {dim.input} inputs and {dim.output} outputs is not supported'
-            )
+    else:
+        raise ValueError(f'Unknown force_dim value {force_dim}')
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
