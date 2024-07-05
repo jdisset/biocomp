@@ -45,9 +45,6 @@ dependencies = [
 	"xxhash",
 ]
 
-[tool.setuptools]
-packages = ["biocomp"]
-
 [tool.setuptools.package-data]
 biocomp = ["*.yaml"]
 
