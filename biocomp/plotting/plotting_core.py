@@ -32,6 +32,8 @@ from matplotlib import colors as mcolors
 from dataclasses import dataclass, field, asdict
 
 from copy import deepcopy
+
+import dracon.loader as dr
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 logger = ut.setup_logger('biocomp.plotting')
@@ -53,31 +55,23 @@ logger = ut.setup_logger('biocomp.plotting')
 configurable = ut.configurable_decorator('biocomp.plotting')
 
 
-from pkg_resources import resource_filename
+BIOCOMP_COLORS = dr.load('pkg:biocomp:biocomp_default_config/colors.yaml')
+cmap_definitions = BIOCOMP_COLORS['color_maps'] or {}
 
-try:
-    BASE_COLOR_CONFIG = ut.load_config(
-        resource_filename('biocomp', 'biocomp_default_config/colors.yaml')
-    )
+CUSTOM_CMAPS = {
+    k: mcolors.LinearSegmentedColormap.from_list(k, v, N=256)
+    for k, v in cmap_definitions.items()
+}
 
-    cmap_definitions = BASE_COLOR_CONFIG.color_maps or {}
+# register custom colormaps
+for k, v in CUSTOM_CMAPS.items():
+    # check if it's already registered
+    if k in plt.colormaps():
+        plt.colormaps.unregister(k)
+    plt.colormaps.register(v, name=k)
 
-    CUSTOM_CMAPS = {
-        k: mcolors.LinearSegmentedColormap.from_list(k, v, N=256)
-        for k, v in cmap_definitions.items()
-    }
+DEFAULT_CMAP_NAME = BIOCOMP_COLORS['default_color_map'] or 'viridis'
 
-    # register custom colormaps
-    for k, v in CUSTOM_CMAPS.items():
-        # check if it's already registered
-        if k in plt.colormaps():
-            plt.colormaps.unregister(k)
-        plt.colormaps.register(v, name=k)
-
-    DEFAULT_CMAP_NAME = BASE_COLOR_CONFIG.default_color_map or 'viridis'
-
-except:
-    DEFAULT_CMAP_NAME = 'viridis'
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
