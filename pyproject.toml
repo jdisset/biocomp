@@ -51,3 +51,6 @@ packages = ["biocomp"]
 [tool.setuptools.package-data]
 biocomp = ["*.yaml"]
 
+[tool.setuptools.package-dir]
+biocomp = "biocomp"
+
