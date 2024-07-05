@@ -667,27 +667,8 @@ def dump_default_config(namespace: str = 'default'):
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{               --     loading constants and config     --
 
-from omegaconf import OmegaConf
 from pathlib import Path
 
-
-def load_config(*config_files):  # in order of priority, the last one wins
-    config = OmegaConf.create()
-    for config_file in config_files:
-        if not Path(config_file).exists():
-            logger.warning(f'Config file {config_file} not found.')
-            continue
-        config = OmegaConf.merge(config, OmegaConf.load(config_file))
-    OmegaConf.resolve(config)
-    return config
-
-
-# BIOCOMP_BASE_CONFIG = load_config(resource_filename('biocomp', 'config/base.yaml'))
-
-# TODO: switch the following to use the config file
-# we check if there is a file named ~/.biocomp.json
-# if so, we load it and use the paths defined there
-# otherwise, we use the default paths defined above
 
 BIOCOMP_ROOT_PATH = os.getenv('BIOCOMP_ROOT')
 if BIOCOMP_ROOT_PATH is None:
@@ -696,17 +677,12 @@ if BIOCOMP_ROOT_PATH is None:
 
 DEFAULT_LIB_PATH = Path(BIOCOMP_ROOT_PATH).expanduser() / 'partsdb.sqlite'
 DEFAULT_LIB_PATH = f'sqlite:///{DEFAULT_LIB_PATH}'
-print(f'Using default library path: {DEFAULT_LIB_PATH}')
-
-
-# we also check the environment variables to see if they define the paths
-# if so, we use them in priority
-
+if 'BIOCOMP_PARTS_DB' in os.environ:
+    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_PARTS_DB']).expanduser().resolve()
 
 def load_lib(lib_path=DEFAULT_LIB_PATH):
     lib = buildLibFromDatabase(lib_path)
     return lib
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
