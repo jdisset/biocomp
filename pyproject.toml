@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [tool.pyright]
@@ -11,3 +11,43 @@ typeCheckingMode = "off"
 ignore = ["E741"]
 line-length = 100
 target-version = "py311" # Assume Python 3.11.
+
+[project]
+name = "biocomp"
+authors = [{name = "Jean Disset", email = "jdisset@mit.edu"}]
+version = "0.0.1"
+readme = "README.md"
+description = "Automated design and predictions of neuromorphic synthetic biology circuits."
+requires-python = ">=3.11"
+dependencies = [
+    "hydra-core",
+	"omegaconf",
+	"pydantic",
+	"numpy",
+	"pandas",
+	"plotly",
+	"joblib",
+	"evosax",
+	"matplotlib-label-lines",
+	"ml-dtypes",
+	"jax",
+	"optax",
+	"json5",
+	"omegaconf",
+	"matplotlib",
+	"rich",
+	"base58",
+	"scipy",
+	"tqdm",
+	"wandb",
+	"pyppeteer",
+	"gspread",
+	"xxhash",
+]
+
+[tool.setuptools]
+packages = ["biocomp"]
+
+[tool.setuptools.package-data]
+biocomp = ["*.yaml"]
+
