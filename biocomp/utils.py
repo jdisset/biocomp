@@ -30,6 +30,7 @@ from functools import cached_property
 
 import cProfile
 
+from biocomp.models import buildLibFromDatabase
 
 from pydantic import BaseModel
 
@@ -688,31 +689,24 @@ def load_config(*config_files):  # in order of priority, the last one wins
 # if so, we load it and use the paths defined there
 # otherwise, we use the default paths defined above
 
-DEFAULT_LIB_PATH = resource_filename('biocomp', 'artefacts/parts_library.pickle')
+BIOCOMP_ROOT_PATH = os.getenv('BIOCOMP_ROOT')
+if BIOCOMP_ROOT_PATH is None:
+    logger.warning('BIOCOMP_ROOT not defined. Using default paths.')
+    BIOCOMP_ROOT_PATH = '~/Dropbox (MIT)/Biocomp/'
 
-GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
-if GLOBAL_CONFIG_PATH.exists():
-    with open(GLOBAL_CONFIG_PATH) as f:
-        config = json.load(f)
-        DEFAULT_RECIPE_PATH = config.get('recipe_path', '')
-        if isinstance(DEFAULT_RECIPE_PATH, str):
-            DEFAULT_RECIPE_PATH = Path(DEFAULT_RECIPE_PATH).expanduser()
-        elif isinstance(DEFAULT_RECIPE_PATH, list):
-            DEFAULT_RECIPE_PATH = [Path(p).expanduser() for p in DEFAULT_RECIPE_PATH]
-        DEFAULT_LIB_PATH = Path(config.get('lib_path', '')).expanduser()
+DEFAULT_LIB_PATH = Path(BIOCOMP_ROOT_PATH).expanduser() / 'partsdb.sqlite'
+DEFAULT_LIB_PATH = f'sqlite:///{DEFAULT_LIB_PATH}'
+print(f'Using default library path: {DEFAULT_LIB_PATH}')
+
 
 # we also check the environment variables to see if they define the paths
 # if so, we use them in priority
 
-if 'BIOCOMP_RECIPE_PATH' in os.environ:
-    DEFAULT_RECIPE_PATH = Path(os.environ['BIOCOMP_RECIPE_PATH']).expanduser()
-if 'BIOCOMP_LIB_PATH' in os.environ:
-    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_LIB_PATH']).expanduser()
-
-
 
 def load_lib(lib_path=DEFAULT_LIB_PATH):
-    return load(lib_path)
+    lib = buildLibFromDatabase(lib_path)
+    return lib
+
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
