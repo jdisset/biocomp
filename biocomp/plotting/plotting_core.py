@@ -55,7 +55,7 @@ logger = ut.setup_logger('biocomp.plotting')
 configurable = ut.configurable_decorator('biocomp.plotting')
 
 
-BIOCOMP_COLORS = dr.load('pkg:biocomp:configs/colors.yaml')
+BIOCOMP_COLORS = dr.load('pkg:biocomp:config/colors.yaml')
 cmap_definitions = BIOCOMP_COLORS['color_maps'] or {}
 
 CUSTOM_CMAPS = {
