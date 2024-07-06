@@ -7,9 +7,9 @@ from matplotlib import scale as mscale
 from jax.tree_util import Partial
 from functools import partial
 import numpy as np
-from . import utils as ut
-from . import datautils as du
-from .datautils import DataRescaler
+from biocomp import utils as ut
+from biocomp import datautils as du
+from biocomp.datautils import DataRescaler
 import matplotlib.pyplot as plt
 from biocomp.network import Network
 from biocomp.utils import ArbitraryModel, build_if_has_target
@@ -52,7 +52,7 @@ from pydantic import (
 )
 
 from pathlib import Path
-from .plotting import plotting_core as pc
+from biocomp.plotting import plotting_core as pc
 
 logger = ut.setup_logger('biocomp.plotting')
 configurable = ut.configurable_decorator('biocomp.plotting')
