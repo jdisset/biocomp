@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools > 69"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [tool.pyright]
 reportMissingImports = true
@@ -20,33 +20,30 @@ readme = "README.md"
 description = "Automated design and predictions of neuromorphic synthetic biology circuits."
 requires-python = ">=3.11"
 dependencies = [
-    "hydra-core",
-	"omegaconf",
-	"pydantic",
-	"numpy",
-	"pandas",
-	"plotly",
-	"joblib",
-	"evosax",
-	"matplotlib-label-lines",
-	"ml-dtypes",
-	"jax",
-	"optax",
-	"json5",
-	"omegaconf",
-	"matplotlib",
-	"rich",
-	"base58",
-	"scipy",
-	"tqdm",
-	"wandb",
-	"pyppeteer",
-	"gspread",
-	"xxhash",
+    "numpy",
+    "jax",
+    "ml-dtypes",
+    "optax",
+    "evosax",
+    "pandas",
+    "scipy",
+    "matplotlib",
+    "matplotlib-label-lines",
+    "pydantic",
+    "plotly",
+    "joblib",
+    "json5",
+    "rich",
+    "base58",
+    "tqdm",
+    "xxhash",
+	"dracon",
+	"wandb"
 ]
 
-[tool.setuptools]
+[tool.hatch.build.targets.wheel]
 packages = ["biocomp"]
 
-[tool.setuptools.package-data]
-biocomp = ["biocomp/config/*.yaml"]
+[tool.hatch.build.targets.wheel.sources]
+"biocomp" = "biocomp"
+
