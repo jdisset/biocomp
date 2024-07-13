@@ -21,9 +21,20 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import string
 from labellines import labelLine, labelLines
 from jax.typing import ArrayLike
-from typing import Tuple
 import os
-from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable
+from typing import (
+    Union,
+    Sequence,
+    List,
+    Tuple,
+    Dict,
+    Any,
+    Optional,
+    Callable,
+    TypeVar,
+    TypeAlias,
+    Literal,
+)
 from matplotlib.ticker import ScalarFormatter, NullFormatter, MaxNLocator
 from matplotlib import colors as mcolors
 from pkg_resources import resource_filename
@@ -46,6 +57,8 @@ from .plotting_core import (
     heatmap,
 )
 
+T = TypeVar('T')
+ListOrSingle: TypeAlias = Union[List[T], T]
 NdArray = Union[np.ndarray, jnp.ndarray]
 configurable = pc.configurable
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -200,10 +213,10 @@ def colorbar(
     label=None,
     position=(1.1, 0.4),
     size=(0.04, 0.52),
-    orientation='vertical',
-    label_position='right',
-    label_props={},
-    tick_props={},
+    orientation: str = 'vertical',
+    label_position: Literal['left', 'right', 'bottom', 'top'] = 'right',
+    label_props: Dict = {},
+    tick_props: Optional[ListOrSingle[Dict]] = None,
 ):
 
     imlims = im.get_clim()
@@ -213,9 +226,20 @@ def colorbar(
     colorbar_ax = ax.inset_axes(position + size)
     cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation)
 
-    DEFAULT_TICK_PROPS = dict(axis='both', which='both', direction='out', pad=2, labelsize=8)
+    DEFAULT_TICK_PROPS = {
+        'axis': 'both',
+        'which': 'both',
+        'direction': 'out',
+        'pad': 2,
+        'labelsize': 8,
+    }
+    cbar.ax.tick_params(**DEFAULT_TICK_PROPS)
 
-    cbar.ax.tick_params(**{**DEFAULT_TICK_PROPS, **tick_props}) # type: ignore
+    if tick_props is not None:
+        if not isinstance(tick_props, list):
+            tick_props = [tick_props]
+        for tick_prop in tick_props:
+            cbar.ax.tick_params(**tick_prop)
 
     for spine in cbar.ax.spines.values():
         spine.set_linewidth(0.2)
@@ -228,11 +252,15 @@ def colorbar(
     )
     if label is not None:
         if orientation == 'vertical':
+            if not isinstance(label_position, Literal['left', 'right']):
+                raise ValueError('Vertical orientation: label_position must be left or righ')
             cbar.ax.yaxis.set_label_position(label_position)
             cbar.ax.set_ylabel(label, **label_props)
             cbar.ax.tick_params(axis='x', which='both', size=0)
             cbar.ax.set_xticks([])
         else:
+            if not isinstance(label_position, Literal['bottom', 'top']):
+                raise ValueError('Horizontal orientation: label_position must be bottom or top')
             cbar.ax.xaxis.set_label_position(label_position)
             cbar.ax.set_xlabel(label, **label_props)
             cbar.ax.tick_params(axis='y', which='both', size=0)
@@ -315,7 +343,6 @@ def smooth_2d(
     # spines only on bottom and left
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-
 
     vlabel = output_name if vtitle is None else vtitle
 
