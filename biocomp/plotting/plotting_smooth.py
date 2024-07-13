@@ -253,6 +253,7 @@ def smooth_2d(
     title: Optional[str] = None,
     xtitle: Optional[str] = None,
     ytitle: Optional[str] = None,
+    vtitle: Optional[str] = None,
     xlabel_img: Optional[str] = None,
     xlims=(0, 1),
     ylims=(None, None),
@@ -315,14 +316,17 @@ def smooth_2d(
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
+
+    vlabel = output_name if vtitle is None else vtitle
+
     if draw_colorbar:
-        label = output_name if draw_colorbar_label else None
+        vlabel = vlabel if draw_colorbar_label else None
         colorbar(
             ax,
             im,
             rescaler,
             vlims,
-            **{**colorbar_params, 'label': label},
+            **{**colorbar_params, 'label': vlabel},
         )
 
     return im, cntrs
