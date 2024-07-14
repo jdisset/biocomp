@@ -252,16 +252,16 @@ def colorbar(
     )
     if label is not None:
         if orientation == 'vertical':
-            if not isinstance(label_position, Literal['left', 'right']):
+            if label_position not in ['left', 'right']:
                 raise ValueError('Vertical orientation: label_position must be left or righ')
-            cbar.ax.yaxis.set_label_position(label_position)
+            cbar.ax.yaxis.set_label_position(label_position) #type: ignore
             cbar.ax.set_ylabel(label, **label_props)
             cbar.ax.tick_params(axis='x', which='both', size=0)
             cbar.ax.set_xticks([])
         else:
-            if not isinstance(label_position, Literal['bottom', 'top']):
+            if label_position not in ['bottom', 'top']:
                 raise ValueError('Horizontal orientation: label_position must be bottom or top')
-            cbar.ax.xaxis.set_label_position(label_position)
+            cbar.ax.xaxis.set_label_position(label_position) #type: ignore
             cbar.ax.set_xlabel(label, **label_props)
             cbar.ax.tick_params(axis='y', which='both', size=0)
             cbar.ax.set_yticks([])
