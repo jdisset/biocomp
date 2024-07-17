@@ -33,7 +33,7 @@ from dataclasses import dataclass, field, asdict
 
 from copy import deepcopy
 
-import dracon.loader as dr
+import dracon as dr
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 logger = ut.setup_logger('biocomp.plotting')
