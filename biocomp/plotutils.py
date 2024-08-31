@@ -54,9 +54,9 @@ from pydantic import (
 from pathlib import Path
 from biocomp.plotting import plotting_core as pc
 
-logger = ut.setup_logger('biocomp.plotting')
-configurable = ut.configurable_decorator('biocomp.plotting')
-os.environ["PATH"] += os.pathsep + '/Library/TeX/texbin'
+logger = ut.setup_logger("biocomp.plotting")
+configurable = ut.configurable_decorator("biocomp.plotting")
+os.environ["PATH"] += os.pathsep + "/Library/TeX/texbin"
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -65,7 +65,7 @@ os.environ["PATH"] += os.pathsep + '/Library/TeX/texbin'
 
 ## {{{                      --     plot data class     --
 
-T = TypeVar('T')
+T = TypeVar("T")
 Pair: TypeAlias = Tuple[T, T]
 ListOrSingle: TypeAlias = Union[List[T], T]
 NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
@@ -78,12 +78,11 @@ class DataDimensions(BaseModel):
 
 
 class PlotData(ArbitraryModel):
-
     x: NdArray
     y: NdArray
 
     input_names: List[str] = []
-    output_name: str = 'output'
+    output_name: str = "output"
 
     metadata: Dict[str, Any] = {}
 
@@ -91,9 +90,8 @@ class PlotData(ArbitraryModel):
     def dimensions(self) -> DataDimensions:
         return DataDimensions(input=self.x.shape[1], output=1)
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def check_shapes(self) -> Self:
-
         if self.x.ndim == 1:
             self.x = self.x.reshape(-1, 1)
 
@@ -101,10 +99,10 @@ class PlotData(ArbitraryModel):
             self.y = self.y.reshape(-1, 1)
 
         if self.x.shape[0] != self.y.shape[0]:
-            raise ValueError('X and Y must have the same number of samples')
+            raise ValueError("X and Y must have the same number of samples")
 
         if self.y.shape[1] != 1:
-            raise ValueError('Y must be a 1D array')
+            raise ValueError("Y must be a 1D array")
 
         return self
 
@@ -132,7 +130,6 @@ class FigAx(ArbitraryModel):
 
 
 class FigureLayout(ArbitraryModel):
-
     def make_figure(self) -> FigAx:
         raise NotImplementedError()
 
@@ -159,7 +156,7 @@ ValidatedFigureLayout = Annotated[
     BeforeValidator(
         partial(
             build_if_has_target,
-            available_module_names=['biocomp.plotutils', '__main__'],
+            available_module_names=["biocomp.plotutils", "__main__"],
         )
     ),
 ]
@@ -167,8 +164,8 @@ ValidatedFigureLayout = Annotated[
 
 class FigureSpec(ArbitraryModel):
     title: Optional[str] = None
-    output_dir: str = './'
-    output_file: Optional[str] = 'unnamed.png'
+    output_dir: str = "./"
+    output_file: Optional[str] = "unnamed.png"
     extra_args: Dict[str, Any] = {}
     layout: ValidatedFigureLayout = Field(default_factory=SimpleLayout)
 
@@ -179,7 +176,7 @@ class FigureSpec(ArbitraryModel):
         assert self.output_file is not None
         output_path = Path(self.output_dir) / self.output_file
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        figax.figure.savefig(output_path, bbox_inches='tight')
+        figax.figure.savefig(output_path, bbox_inches="tight")
 
     def finalize(self, figax: FigAx) -> None:
         if self.title is not None:
@@ -202,12 +199,10 @@ def extract_plot_data_from_network(
     use_y_as_x: bool = False,
     **kw,
 ) -> PlotData:
-
-
     if protein_aliases is None:
         protein_aliases = {}
 
-    assert X.shape[0] == Y.shape[0], f'X shape: {X.shape}, Y shape: {Y.shape}'
+    assert X.shape[0] == Y.shape[0], f"X shape: {X.shape}, Y shape: {Y.shape}"
     protein_order, protein_names = pc.get_reordered_protein_names(
         network, input_order, protein_aliases
     )
@@ -223,8 +218,8 @@ def extract_plot_data_from_network(
         x = X[:, input_order]
 
     y = Y[:, output_pos].reshape(-1, 1)
-    assert x.shape[1] == len(input_order), f'X shape: {x.shape}, input_order: {input_order}'
-    assert y.shape[0] == x.shape[0], f'y shape: {y.shape}, x shape: {x.shape}'
+    assert x.shape[1] == len(input_order), f"X shape: {x.shape}, input_order: {input_order}"
+    assert y.shape[0] == x.shape[0], f"y shape: {y.shape}, x shape: {x.shape}"
 
     return PlotData(
         x=x,
@@ -291,55 +286,55 @@ def to_data_units(y_display, ax):
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                    --     misc plot styling tools     --
 
-DEFAULT_GREY = '#777777'
+DEFAULT_GREY = "#777777"
 
 DEFAULT_RC_PARAMS = {
-    'figure.facecolor': 'white',
-    'font.family': 'sans-serif',
-    'font.style': 'normal',
-    'font.variant': 'normal',
-    'font.weight': 'normal',
-    'font.stretch': 'normal',
-    'font.size': 10,
-    'font.sans-serif': 'Roboto, DejaVu Sans, Bitstream Vera Sans, Computer Modern Sans Serif, Lucida Grande, Verdana, Geneva, Lucid, Arial, Helvetica, Avant Garde, sans-serif',
-    'font.monospace': 'Roboto Mono, DejaVu Sans Mono, Bitstream Vera Sans Mono, Computer Modern Typewriter, Andale Mono, Nimbus Mono L, Courier New, Courier, Fixed, Terminal, monospace',
-    'text.usetex': 'True',
-    'text.latex.preamble': '\\usepackage{cmbright}',
-    'mathtext.fontset': 'custom',
-    'mathtext.bf': 'sans:bold',
-    'mathtext.bfit': 'sans:italic:bold',
-    'mathtext.cal': 'cursive',
-    'mathtext.it': 'sans:italic',
-    'mathtext.rm': 'sans',
-    'mathtext.sf': 'sans',
-    'mathtext.tt': 'monospace',
-    'mathtext.fallback': 'stixsans',
-    'axes.spines.left': True,
-    'axes.spines.bottom': True,
-    'axes.spines.right': False,
-    'axes.spines.top': False,
-    'axes.labelsize': 10,
-    'axes.labelweight': 'normal',
-    'axes.labelcolor': DEFAULT_GREY,
-    'axes.titlesize': 12,
-    'axes.titleweight': 'normal',
-    'axes.titlecolor': DEFAULT_GREY,
-    'xtick.bottom': True,
-    'xtick.labelbottom': True,
-    'xtick.top': False,
-    'xtick.labeltop': False,
-    'xtick.major.size': 5,
-    'xtick.major.width': 0.4,
-    'xtick.minor.size': 2,
-    'xtick.minor.width': 0.2,
-    'ytick.left': True,
-    'ytick.labelleft': True,
-    'ytick.right': False,
-    'ytick.labelright': False,
-    'ytick.major.size': 5,
-    'ytick.major.width': 0.4,
-    'ytick.minor.size': 2,
-    'ytick.minor.width': 0.2,
+    "figure.facecolor": "white",
+    "font.family": "sans-serif",
+    "font.style": "normal",
+    "font.variant": "normal",
+    "font.weight": "normal",
+    "font.stretch": "normal",
+    "font.size": 10,
+    "font.sans-serif": "Roboto, DejaVu Sans, Bitstream Vera Sans, Computer Modern Sans Serif, Lucida Grande, Verdana, Geneva, Lucid, Arial, Helvetica, Avant Garde, sans-serif",
+    "font.monospace": "Roboto Mono, DejaVu Sans Mono, Bitstream Vera Sans Mono, Computer Modern Typewriter, Andale Mono, Nimbus Mono L, Courier New, Courier, Fixed, Terminal, monospace",
+    "text.usetex": "True",
+    "text.latex.preamble": "\\usepackage{cmbright}",
+    "mathtext.fontset": "custom",
+    "mathtext.bf": "sans:bold",
+    "mathtext.bfit": "sans:italic:bold",
+    "mathtext.cal": "cursive",
+    "mathtext.it": "sans:italic",
+    "mathtext.rm": "sans",
+    "mathtext.sf": "sans",
+    "mathtext.tt": "monospace",
+    "mathtext.fallback": "stixsans",
+    "axes.spines.left": True,
+    "axes.spines.bottom": True,
+    "axes.spines.right": False,
+    "axes.spines.top": False,
+    "axes.labelsize": 10,
+    "axes.labelweight": "normal",
+    "axes.labelcolor": DEFAULT_GREY,
+    "axes.titlesize": 12,
+    "axes.titleweight": "normal",
+    "axes.titlecolor": DEFAULT_GREY,
+    "xtick.bottom": True,
+    "xtick.labelbottom": True,
+    "xtick.top": False,
+    "xtick.labeltop": False,
+    "xtick.major.size": 5,
+    "xtick.major.width": 0.4,
+    "xtick.minor.size": 2,
+    "xtick.minor.width": 0.2,
+    "ytick.left": True,
+    "ytick.labelleft": True,
+    "ytick.right": False,
+    "ytick.labelright": False,
+    "ytick.major.size": 5,
+    "ytick.major.width": 0.4,
+    "ytick.minor.size": 2,
+    "ytick.minor.width": 0.2,
 }
 
 
@@ -351,31 +346,31 @@ class SpineProps:
 
 
 DEFAULT_SPINE_PROPS: Dict[str, SpineProps] = {
-    'top': SpineProps(visible=False),
-    'right': SpineProps(visible=False),
-    'bottom': SpineProps(visible=True),
-    'left': SpineProps(visible=True),
+    "top": SpineProps(visible=False),
+    "right": SpineProps(visible=False),
+    "bottom": SpineProps(visible=True),
+    "left": SpineProps(visible=True),
 }
 
 DEFAULT_TICK_PARAMS: List[Dict[str, Any]] = [
-    {'axis': 'both', 'which': 'both', 'labelsize': 8, 'direction': 'out'},
-    {'axis': 'both', 'which': 'major', 'length': 5, 'width': 0.4},
-    {'axis': 'both', 'which': 'minor', 'length': 2, 'width': 0.2},
+    {"axis": "both", "which": "both", "labelsize": 8, "direction": "out"},
+    {"axis": "both", "which": "major", "length": 5, "width": 0.4},
+    {"axis": "both", "which": "minor", "length": 2, "width": 0.2},
 ]
 
 
 @dataclass
 class FontProps:
-    family: Optional[str] = 'Arial'
+    family: Optional[str] = "Arial"
     size: Optional[int] = 10
-    weight: Optional[str] = 'normal'
-    style: Optional[str] = 'normal'
-    color: Optional[str] = 'black'
+    weight: Optional[str] = "normal"
+    style: Optional[str] = "normal"
+    color: Optional[str] = "black"
 
 
 @dataclass
 class PlotStyle:
-    facecolor: Optional[str] = 'white'
+    facecolor: Optional[str] = "white"
     spine_props: Optional[Dict[str, SpineProps]] = field(
         default_factory=lambda: DEFAULT_SPINE_PROPS
     )
@@ -449,18 +444,18 @@ def remove_axis_and_spines(ax):
 
 class ShortScientificFormatter(string.Formatter):
     def format_field(self, value, format_spec, precision=1):
-        if format_spec == 'm':
+        if format_spec == "m":
             if value < 1000:
                 if value == int(value):
-                    return super().format_field(int(value), '')
+                    return super().format_field(int(value), "")
                 else:
                     # use required precision:
-                    return super().format_field(value, f'.{precision}f')
+                    return super().format_field(value, f".{precision}f")
             else:
                 if value == int(value):
-                    return super().format_field(value, '.0e').replace('e+0', 'e').replace('e+', 'e')
+                    return super().format_field(value, ".0e").replace("e+0", "e").replace("e+", "e")
                 else:
-                    return super().format_field(value, '.1e').replace('e+0', 'e').replace('e+', 'e')
+                    return super().format_field(value, ".1e").replace("e+0", "e").replace("e+", "e")
         else:
             return super().format_field(value, format_spec)
 
@@ -475,9 +470,9 @@ scformat = ShortScientificFormatter()
 
 
 DEFAULT_PLOT_METHOD_PREFERENCE: Dict[int, str] = {
-    1: 'smooth',
-    2: 'smooth',
-    3: 'smooth',
+    1: "smooth",
+    2: "smooth",
+    3: "smooth",
 }
 
 
@@ -486,7 +481,7 @@ def auto_plot(
     plot_data: PlotData,
     figure_spec: Optional[FigureSpec] = None,
     ax: Optional[Union[Axes, Sequence[Axes]]] = None,
-    use_plot_method: Optional[str] = 'auto',  # could be 'auto' or None, or a specific method
+    use_plot_method: Optional[str] = "auto",  # could be 'auto' or None, or a specific method
     plot_method_per_input_dim: Optional[Dict[int, str]] = DEFAULT_PLOT_METHOD_PREFERENCE,
     rc_context: Dict[str, Any] = {},  # pc.DEFAULT_RC_PARAMS,
     smooth_params: Dict[str, Any] = {},
@@ -494,29 +489,27 @@ def auto_plot(
     histogram_params: Dict[str, Any] = {},
     **kw,
 ) -> None:
-
     dim = plot_data.dimensions
-    if use_plot_method is None or use_plot_method == 'auto':
+    if use_plot_method is None or use_plot_method == "auto":
         assert plot_method_per_input_dim is not None
-        use_plot_method = plot_method_per_input_dim.get(dim.input, 'smooth')
+        use_plot_method = plot_method_per_input_dim.get(dim.input, "smooth")
 
-    VALID_METHODS = ['smooth', 'scatter', 'histogram']
+    VALID_METHODS = ["smooth", "scatter", "histogram"]
     if use_plot_method not in VALID_METHODS:
-        raise ValueError(f'Unknown plotting method {use_plot_method}. Available: {VALID_METHODS}')
+        raise ValueError(f"Unknown plotting method {use_plot_method}. Available: {VALID_METHODS}")
 
     if figure_spec is None:
         figure_spec = FigureSpec()
 
     with mpl.rc_context(rc_context):
-
         # first we check that we have axes to plot on
         # if not, we need to make a new figure
-        assert dim.output == 1, 'Only single output plots are supported'
+        assert dim.output == 1, "Only single output plots are supported"
 
         if ax is None:
             assert (
                 figure_spec.layout is not None
-            ), 'Layout must be specified if axes are not provided'
+            ), "Layout must be specified if axes are not provided"
             cols, rows = figure_spec.layout
             fig, ax = plt.subplots(
                 *figure_spec.layout,
@@ -525,7 +518,7 @@ def auto_plot(
             )
         else:
             if not isinstance(ax, (list, tuple)):
-                assert isinstance(ax, Axes), f'ax type is {type(ax)}'
+                assert isinstance(ax, Axes), f"ax type is {type(ax)}"
                 ax = [ax]
             fig = ax[0].get_figure()
 
@@ -533,11 +526,11 @@ def auto_plot(
         if figure_spec.title is not None:
             fig.suptitle(figure_spec.title)
 
-        if use_plot_method == 'smooth':
+        if use_plot_method == "smooth":
             return smooth(plot_data, ax, **smooth_params, **kw)
 
         else:
-            raise NotImplementedError(f'Unimplemented plotting method {method}')
+            raise NotImplementedError(f"Unimplemented plotting method {method}")
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -545,103 +538,113 @@ def auto_plot(
 ## {{{                          --     main smooth dispatcher (route to 1D, 2D, 3D)    --
 
 from .plotting.plotting_3d import smooth_3d
-from .plotting.plotting_smooth import smooth_2d
+from .plotting.plotting_smooth import smooth_2d, smooth_1d
 
 @configurable
 def smooth(
     plot_data: PlotData,
     ax,
-    rescaler: DataRescaler = du.NoOpRescaler(),
+    rescaler: DataRescaler,
     force_dim: Optional[int] = None,
     smooth_1d_params={},
     smooth_2d_params={},
     smooth_3d_params={},
     **kw,
 ):
-
     dim = plot_data.dimensions
     x = rescaler.fwd(plot_data.x)
     y = rescaler.fwd(plot_data.y)
 
     if force_dim is None:
         match (dim.input, dim.output):
+            case (1, 1):
+                force_dim = 1
             case (2, 1):
-                force_dim=2
+                force_dim = 2
             case (3, 1):
-                force_dim=3
+                force_dim = 3
             case _:
                 raise ValueError(
-                    f'Plotting {dim.input} inputs and {dim.output} outputs is not supported'
+                    f"Plotting {dim.input} inputs and {dim.output} outputs is not supported"
                 )
+
+    if force_dim == 1:
+        return smooth_1d(
+            X=x,
+            Y=y,
+            input_names=plot_data.input_names,
+            output_name=plot_data.output_name,
+            rescaler=rescaler,
+            ax=ax,
+            **smooth_1d_params,
+            **kw,
+        )
 
     if force_dim == 2:
         return smooth_2d(
-                X=x,
-                Y=y,
-                input_names=plot_data.input_names,
-                output_name=plot_data.output_name,
-                rescaler=rescaler,
-                ax=ax,
-                **smooth_2d_params,
-                **kw,
-            )
+            X=x,
+            Y=y,
+            input_names=plot_data.input_names,
+            output_name=plot_data.output_name,
+            rescaler=rescaler,
+            ax=ax,
+            **smooth_2d_params,
+            **kw,
+        )
 
     if force_dim == 3:
         return smooth_3d(
-                X=x,
-                Y=y,
-                input_names=plot_data.input_names,
-                output_name=plot_data.output_name,
-                rescaler=rescaler,
-                ax=ax,
-                **smooth_3d_params,
-                **kw,
-            )
+            X=x,
+            Y=y,
+            input_names=plot_data.input_names,
+            output_name=plot_data.output_name,
+            rescaler=rescaler,
+            ax=ax,
+            **smooth_3d_params,
+            **kw,
+        )
     else:
-        raise ValueError(f'Unknown force_dim value {force_dim}')
+        raise ValueError(f"Unknown force_dim value {force_dim}")
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
 DEFAULT_VIOLIN_PARAMS = {
-    'showmeans': False,
-    'showmedians': True,
-    'showextrema': False,
-    'bw_method': 0.1,
-    'points': 2000,
-    'vert': True,
+    "showmeans": False,
+    "showmedians": True,
+    "showextrema": False,
+    "bw_method": 0.1,
+    "points": 2000,
+    "vert": True,
 }
 
 
 @configurable
 def violin_style(
     parts,
-    facecolor='#bbb',
-    edgecolor='#777',
+    facecolor="#bbb",
+    edgecolor="#777",
     linewidth=0.5,
-    cmean_color='#000',
-    cmedian_color='#222',
+    cmean_color="#000",
+    cmedian_color="#222",
     alpha=0.5,
 ):
-
-
-    for pc in parts['bodies']:
+    for pc in parts["bodies"]:
         pc.set_facecolor(facecolor)
         pc.set_edgecolor(edgecolor)
         pc.set_linewidth(linewidth)
         pc.set_alpha(alpha)
 
-    if 'cmeans' in parts:
-        for pc in ut.as_list(parts['cmeans']):
+    if "cmeans" in parts:
+        for pc in ut.as_list(parts["cmeans"]):
             pc.set_color(cmean_color)
             pc.set_linewidth(linewidth)
 
-    if 'cmedians' in parts:
-        for pc in ut.as_list(parts['cmedians']):
+    if "cmedians" in parts:
+        for pc in ut.as_list(parts["cmedians"]):
             pc.set_color(cmedian_color)
             pc.set_linewidth(linewidth)
-
 
 
 @configurable
@@ -659,27 +662,26 @@ def normalized_violin(
     cmap=pc.DEFAULT_CMAP_NAME,
     violin_params={},
     violin_style_params={},
-    mean_marker='o',
-    mean_color='black',
+    mean_marker="o",
+    mean_color="black",
     mean_size=7,
     mean_linewidth=0.3,
     mean_linealpha=0.25,
     ratio_uses_rescaled_values=True,
     whisker_pos=(0.1, 0.9),
-    whisker_color='#333333',
+    whisker_color="#333333",
     whisker_linewidth=0.5,
     write_y_bounds=True,
     use_log_density=True,
 ):
-
     violin_params = {**DEFAULT_VIOLIN_PARAMS, **violin_params}
 
     dim = plot_data.dimensions
 
     x = rescaler.fwd(plot_data.x)
     y = rescaler.fwd(plot_data.y)
-    assert dim.output == 1, 'Only single output plots are supported'
-    assert dim.input == 2, 'Only 2D input plots are supported'
+    assert dim.output == 1, "Only single output plots are supported"
+    assert dim.input == 2, "Only 2D input plots are supported"
 
     # keep only inbounds data
     xlims = (
@@ -698,7 +700,6 @@ def normalized_violin(
     )
     x = x[mask]
     y = y[mask]
-
 
     # now for each bin in x1, we want to plot a violin plot of y/x2
     x1 = x[:, 0]
@@ -720,7 +721,6 @@ def normalized_violin(
     binned_normed_y = [normed_y[bin_inds == i] for i in range(1, len(x1_bins))]
     mean_ys = np.array([np.nanmean(ny) for ny in binned_normed_y])
 
-
     for i, x1_center in enumerate(x1_centers):
         ny = binned_normed_y[i]
         if ny.size == 0:
@@ -738,41 +738,49 @@ def normalized_violin(
         # meany = np.nanmean(ny)
         meany = mean_ys[i]
         facecolor = mpl.colors.rgb2hex(cmap(meany))
-        violin_style(parts, **{'facecolor': facecolor, **violin_style_params})
+        violin_style(parts, **{"facecolor": facecolor, **violin_style_params})
         # add whiskers
         ax.plot([x1_center, x1_center], quantiles, color=whisker_color, linewidth=whisker_linewidth)
         # add mean markers
-    ax.scatter(x1_centers, mean_ys, marker=mean_marker, color=mean_color, s=mean_size, linewidth=mean_linewidth, zorder=10)
+    ax.scatter(
+        x1_centers,
+        mean_ys,
+        marker=mean_marker,
+        color=mean_color,
+        s=mean_size,
+        linewidth=mean_linewidth,
+        zorder=10,
+    )
     if mean_linealpha > 0 and mean_linewidth > 0:
-        ax.plot(x1_centers, mean_ys, color=mean_color, linewidth=mean_linewidth, alpha=mean_linealpha)
-
+        ax.plot(
+            x1_centers, mean_ys, color=mean_color, linewidth=mean_linewidth, alpha=mean_linealpha
+        )
 
     pc.setup_transformed_xaxis(
         ax,
         xaxis_lims=xlims,
         rescaler=rescaler,
-        margins=0.,
+        margins=0.0,
     )
 
     ax.set_ylim(vlims)
 
     if write_y_bounds:
         tr_min, tr_max = rescaler.inv(np.array(ylims).reshape(-1, 1))
-        tr_min = scformat.format_field(tr_min[0], 'm', 0)
-        tr_max = scformat.format_field(tr_max[0], 'm', 0)
-        latext = f'{plot_data.input_names[1]} $\\in [{tr_min}, {tr_max}]$'
+        tr_min = scformat.format_field(tr_min[0], "m", 0)
+        tr_max = scformat.format_field(tr_max[0], "m", 0)
+        latext = f"{plot_data.input_names[1]} $\\in [{tr_min}, {tr_max}]$"
         ax.text(
             0.7,
             0.9,
             latext,
             fontsize=7,
             transform=ax.transAxes,
-            fontdict={'family': 'monospace'},
+            fontdict={"family": "monospace"},
             color=DEFAULT_GREY,
-            ha='left',
-            va='top',
+            ha="left",
+            va="top",
         )
-
 
     if title is not None:
         ax.set_title(title)
@@ -780,4 +788,4 @@ def normalized_violin(
     if draw_xlabel:
         ax.set_xlabel(plot_data.input_names[0])
     if draw_ylabel:
-        ax.set_ylabel(f'{plot_data.output_name} / {plot_data.input_names[1]}')
+        ax.set_ylabel(f"{plot_data.output_name} / {plot_data.input_names[1]}")

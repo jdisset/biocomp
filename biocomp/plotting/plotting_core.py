@@ -36,8 +36,8 @@ from copy import deepcopy
 import dracon as dr
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-logger = ut.setup_logger('biocomp.plotting')
-configurable = ut.configurable_decorator('biocomp.plotting')
+logger = ut.setup_logger("biocomp.plotting")
+configurable = ut.configurable_decorator("biocomp.plotting")
 
 # ╭─────────────────────────────────────────────╮
 # │                TOOLS & UTILS                │
@@ -50,17 +50,16 @@ NumLike: TypeAlias = Union[np.ndarray, jnp.ndarray, float, int]
 
 from matplotlib import colors as mcolors
 
-os.environ["PATH"] += os.pathsep + '/Library/TeX/texbin'
-logger = ut.setup_logger('biocomp.plotting')
-configurable = ut.configurable_decorator('biocomp.plotting')
+os.environ["PATH"] += os.pathsep + "/Library/TeX/texbin"
+logger = ut.setup_logger("biocomp.plotting")
+configurable = ut.configurable_decorator("biocomp.plotting")
 
 
-BIOCOMP_COLORS = dr.load('pkg:biocomp:config/colors.yaml')
-cmap_definitions = BIOCOMP_COLORS['color_maps'] or {}
+BIOCOMP_COLORS = dr.load("pkg:biocomp:config/colors.yaml")
+cmap_definitions = BIOCOMP_COLORS["color_maps"] or {}
 
 CUSTOM_CMAPS = {
-    k: mcolors.LinearSegmentedColormap.from_list(k, v, N=256)
-    for k, v in cmap_definitions.items()
+    k: mcolors.LinearSegmentedColormap.from_list(k, v, N=256) for k, v in cmap_definitions.items()
 }
 
 # register custom colormaps
@@ -70,8 +69,7 @@ for k, v in CUSTOM_CMAPS.items():
         plt.colormaps.unregister(k)
     plt.colormaps.register(v, name=k)
 
-DEFAULT_CMAP_NAME = BIOCOMP_COLORS['default_color_map'] or 'viridis'
-
+DEFAULT_CMAP_NAME = BIOCOMP_COLORS["default_color_map"] or "viridis"
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -114,15 +112,15 @@ def format_powers(x, *_, n_decimals=1):
     abs_x = abs(x)
     if abs_x < 1000:
         if np.abs(x - int(x)) < 1e-3:
-            return f'{int(x)}'  # No decimal point
+            return f"{int(x)}"  # No decimal point
         else:
-            return f'{x:.1f}'  # Up to 1 decimal point
+            return f"{x:.1f}"  # Up to 1 decimal point
     else:
         E = int(np.log10(abs_x))
         if x == int(x):
-            return r'${0:.0f}e{1}$'.format(x // 10**E, E)
+            return r"${0:.0f}e{1}$".format(x // 10**E, E)
         else:
-            return r'${0:.{2}f}e{1}$'.format(x / 10**E, E, n_decimals)
+            return r"${0:.{2}f}e{1}$".format(x / 10**E, E, n_decimals)
 
 
 class PowerFormatter(ticker.Formatter):
@@ -137,15 +135,15 @@ class PowerFormatter(ticker.Formatter):
             and np.abs(v) < self.skip_ticklabel_range[1]
             and np.abs(v) > self.skip_ticklabel_range[0]
         ):
-            return ''
+            return ""
         return format_powers(v, None)
 
 
-def get_bio_color(name, default='k'):
-    colors = {'ebfp': '#529edb', 'eyfp': '#fbda73', 'mkate': '#f75a5a', 'neongreen': '#33f397'}
-    colors['fitc'] = colors['neongreen']
-    colors['pe_texas_red'] = colors['mkate']
-    colors['pacific_blue'] = colors['ebfp']
+def get_bio_color(name, default="k"):
+    colors = {"ebfp": "#529edb", "eyfp": "#fbda73", "mkate": "#f75a5a", "neongreen": "#33f397"}
+    colors["fitc"] = colors["neongreen"]
+    colors["pe_texas_red"] = colors["mkate"]
+    colors["pacific_blue"] = colors["ebfp"]
     closest = difflib.get_close_matches(name.lower(), colors.keys(), n=1)
     if len(closest) == 0:
         color = default
@@ -157,8 +155,8 @@ def get_bio_color(name, default='k'):
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{               --     get rescaled network ticks and labels     --
 
-def get_reordered_protein_names(network, input_order=None, protein_aliases=None, **_):
 
+def get_reordered_protein_names(network, input_order=None, protein_aliases=None, **_):
     """
     input_order can be a mix of protein names, protein aliases, integers, and '*'
     - protein names and aliases will be converted to lowercase to find matches
@@ -170,7 +168,9 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
     output_names = network.get_output_proteins()
 
     lower_input_names = [n.lower() for n in input_names]
-    lower_protein_aliases = {k.lower(): v for k, v in protein_aliases.items()} if protein_aliases else {}
+    lower_protein_aliases = (
+        {k.lower(): v for k, v in protein_aliases.items()} if protein_aliases else {}
+    )
 
     if input_order is not None:
         old_order = deepcopy(input_order)
@@ -179,27 +179,29 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
             input_order = []
             for iname in old_order:
                 if isinstance(iname, str):
-                    if iname == '*':
-                        input_order.append('*')
+                    if iname == "*":
+                        input_order.append("*")
                     else:
                         iname = iname.lower()
                         if iname in lower_input_names:
                             input_order.append(lower_input_names.index(iname))
                         elif iname in lower_protein_aliases:
-                            input_order.append(lower_input_names.index(lower_protein_aliases[iname]))
+                            input_order.append(
+                                lower_input_names.index(lower_protein_aliases[iname])
+                            )
                         else:
-                            raise ValueError(f'Invalid protein name: {iname}')
+                            raise ValueError(f"Invalid protein name: {iname}")
                 else:
                     # should be a regular index
-                    assert isinstance(iname, (int, np.integer)), f'Invalid protein index: {iname}'
-                    assert iname in range(len(input_names)), f'Invalid protein index: {iname}'
+                    assert isinstance(iname, (int, np.integer)), f"Invalid protein index: {iname}"
+                    assert iname in range(len(input_names)), f"Invalid protein index: {iname}"
                     input_order.append(iname)
 
-        assert len(input_order) == len(input_names), f'Wrong number of inputs: {input_order}'
+        assert len(input_order) == len(input_names), f"Wrong number of inputs: {input_order}"
 
-        if '*' in input_order:
+        if "*" in input_order:
             missing = set(range(len(input_names))) - set(input_order)
-            input_order = [i if i != '*' else missing.pop() for i in input_order]
+            input_order = [i if i != "*" else missing.pop() for i in input_order]
 
         reordered_input_names = [input_names[i] for i in input_order]
         in_order = input_order
@@ -280,7 +282,6 @@ LabelList = List[Tuple[NdArray, str]]
 def get_transformed_ticks_and_labels(
     axis_lims: Sequence[float], rescaler: DataRescaler, **kw
 ) -> Tuple[TickDict, LabelList]:
-
     # will return 2 things:
     # - ticks: a dict with 'major' and 'minor' keys, each containing a list of ticks
     #   ex: ticks={'major': [0, 5, 10, 15, 20], 'minor': [2.5, 7.5, 12.5, 17.5]},
@@ -291,7 +292,7 @@ def get_transformed_ticks_and_labels(
     assert lims_inv.shape == (2,)
     p10 = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1])
     p10_minor = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1], resolution=10)
-    ticks = {'major': rescaler.fwd(p10), 'minor': rescaler.fwd(p10_minor)}
+    ticks = {"major": rescaler.fwd(p10), "minor": rescaler.fwd(p10_minor)}
     pf = PowerFormatter(p10, **kw)
     labels = [(rescaler.fwd(x), pf(x, i)) for i, x in enumerate(p10)]
     return ticks, labels
@@ -343,6 +344,7 @@ def setup_symlog_axis(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{              --     knn and spatial partitionning    --
+
 
 @jax.jit
 def weighted_quantile(data, weights, qu):
@@ -416,18 +418,25 @@ class NaiveGridSpacePartitioner:
         return nearest_distances, np.array(nearest_indices)
 
 
+
+
 def gausspdf(x, mu, sigma):
     return 1 / (sigma * np.sqrt(2 * np.pi)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
 
-
-def get_knn(x: NdArray, tree: cKDTree, k: int = 500, min_points: int = 20, radius: float = 0.1):
+def get_gaussian_weighted_knn(
+    x: NdArray,
+    tree: cKDTree,
+    k: int = 500, # number of neighbors to consider
+    min_points: int = 20, # minimum number of points to consider a neighborhood. fewer = nan
+    radius: float = 0.1,
+    sigma_in_radius: float = 3, # sigma of the gaussian kernel in units of radius
+):
     """Get the k-nearest neighbors of x in the tree,
     and return their indices together with their weights (from a gaussian kernel)."""
-    SIGMA_FROM_RADIUS = 1 / 3
     distances, indices = tree.query(x, k=k, distance_upper_bound=radius)
     empty_neighbor_mask = distances == np.inf
     nb_points = (~empty_neighbor_mask).sum(axis=1)
-    weights = gausspdf(distances, 0, radius * SIGMA_FROM_RADIUS)
+    weights = gausspdf(distances, 0, radius / sigma_in_radius)
     indices[empty_neighbor_mask] = 0
     weights[empty_neighbor_mask] = 0
     weights[nb_points < min_points, :] = np.nan
@@ -438,32 +447,57 @@ def get_knn_mean(x, y, tree, **kw):
     """Get the k-nearest neighbors of x in the tree,
     and return their weighted average value together with their density."""
 
-
-    indices, weights = get_knn(x, tree, **kw)
+    indices, weights = get_gaussian_weighted_knn(x, tree, **kw)
     assert indices.shape == weights.shape
     normed_w = weights / weights.sum(axis=1)[:, None]
-    avg = (y[indices] * normed_w[:, :, None]).sum(axis=1)
+    weighted_mean = (y[indices] * normed_w[:, :, None]).sum(axis=1)
+
     density = np.nansum(weights, axis=1)
 
-    return avg, density
+    return weighted_mean, density
+
+
+def get_knn_std(x, y, tree, **kw):
+    """
+    Get the k-nearest neighbors of x in the tree,
+    and return their weighted standard deviation.
+    """
+
+    indices, weights = get_gaussian_weighted_knn(x, tree, **kw)
+    assert indices.shape == weights.shape
+    normed_w = weights / weights.sum(axis=1)[:, None]
+    weighted_mean = (y[indices] * normed_w[:, :, None]).sum(axis=1)
+
+    # Compute weighted variance (and then std)
+    squared_diff = (y[indices] - weighted_mean[:, None, :]) ** 2
+    weighted_squared_diff = squared_diff * normed_w[:, :, None]
+    variance = weighted_squared_diff.sum(axis=1)
+
+    return jnp.sqrt(variance)
 
 
 def get_knn_quantile(x, y, tree, qu, **kw):
-    indices, weights = get_knn(x, tree, **kw)
+    indices, weights = get_gaussian_weighted_knn(x, tree, **kw)
     q = jax.vmap(weighted_quantile, in_axes=(0, 0, None))(y[indices], weights, qu)
     density = np.nansum(weights, axis=1)
     return q, density
 
 
 @configurable
-def knn_avg(xquery, logY, tree, k=500, min_points=20, avg_method='mean', **kw):
-    if avg_method == 'mean':
+def knn_avg(xquery, logY, tree, k=500, min_points=20, avg_method="mean", **kw):
+    if avg_method == "mean":
         Z, p = get_knn_mean(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
-    elif avg_method == 'quantile':
-        assert 'qu' in kw
+    elif avg_method == "quantile":
+        assert "qu" in kw
         Z, p = get_knn_quantile(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
+    elif avg_method == "std":
+        print(
+            f"computing std with k={k}, min_points={min_points}. xshape={xquery.shape}, yshape={logY.shape}"
+        )
+        Z = get_knn_std(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
+        p = np.ones
     else:
-        raise ValueError(f'Unknown method {avg_method}')
+        raise ValueError(f"Unknown method {avg_method}")
     return Z, p
 
 
@@ -484,11 +518,9 @@ def heatmap(
     opacities=None,
     axtransform=None,
     cmap=DEFAULT_CMAP_NAME,
-    bad_color='#EEEEEE00',
+    bad_color="#EEEEEE00",
 ):
-
-
-    print(f'in heatmap, contours={contours}')
+    print(f"in heatmap, contours={contours}")
 
     if isinstance(ax, list):
         ax = ax[0]
@@ -518,13 +550,13 @@ def heatmap(
 
     im = ax.imshow(
         Z.T,
-        origin='lower',
+        origin="lower",
         aspect=1,
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
         transform=full_transform,
-        interpolation='none',
+        interpolation="none",
         alpha=opacities.T,
         extent=[*xlims, *ylims],
     )
@@ -535,14 +567,14 @@ def heatmap(
             Z.T,
             levels=contours,
             linewidths=0.25,
-            linestyles='solid',
+            linestyles="solid",
             extent=[*xlims, *ylims],
             transform=full_transform,
             alpha=0.3,
-            colors='k',
+            colors="k",
         )
 
     return im, cntrs
 
-##────────────────────────────────────────────────────────────────────────────}}}
 
+##────────────────────────────────────────────────────────────────────────────}}}
