@@ -52,12 +52,13 @@ from .plotting_core import (
     get_reordered_protein_names,
     network_ticks_and_labels,
     knn_avg,
+    get_knn_std,
     get_knn_quantile,
     format_powers,
     heatmap,
 )
 
-T = TypeVar('T')
+T = TypeVar("T")
 ListOrSingle: TypeAlias = Union[List[T], T]
 NdArray = Union[np.ndarray, jnp.ndarray]
 configurable = pc.configurable
@@ -65,103 +66,201 @@ configurable = pc.configurable
 
 
 # ---- smooth plots (gaussian neighborhood based)
+
+
 ### {{{                            --     1D     --
+DEFAULT_MARKER_ROTATION: tuple = ("o", "x", "s", "^", "*", "v", "+", "<", ">", "d", "p", "P", "h", "H")
+
+def make_n_props(n: int, props: Optional[Dict|List]) -> List[Dict]:
+    if props is None:
+        props = [{}] * n
+    elif not isinstance(props, list):
+        props = [props] * n
+    if len(props) != n:
+        raise ValueError(f"props must have length {n}")
+    return props
+
+@configurable
 def smooth_1d(
-    x: NdArray,
-    y: NdArray,
-    network,
+    X: NdArray,
+    Y: NdArray,
+    input_names: Sequence[str],
+    output_name: str,
     rescaler,
     ax,
+    slices: Optional[NdArray] = None,
+    title: Optional[str] = None,
+    xtitle: Optional[str] = None,
+    ytitle: Optional[str] = None,
+    xlims=(0, 1),
+    vlims=(0, None),
+    draw_xlabel=True,
+    draw_ylabel=True,
     res=500,
-    xmin=0,
-    xmax=None,
-    quantiles=None,
-    quantiles_alpha=0.2,
-    color=plt.get_cmap(DEFAULT_CMAP_NAME)(0.7),
-    radius=0.075,
-    knn=2000,
-    min_points=500,
-    **kw,
+    show_std=True,
+    show_legend=True,
+    std_alpha: float = 0.15,
+    std_mode: str = "errorbar",  # "errorbar" or "fill"
+    n_errorbars: int = 5,
+    lineplot_props: Optional[List[Dict] | Dict] = None,
+    errorbar_props: Optional[List[Dict] | Dict] = None,
+    colors: Optional[List[Any]] = None,
+    knn_avg_params: Dict = {},
 ):
-    if xmax is None:
-        xmax = x.max()
+    knn_radius = knn_avg_params.get("radius", 0.075)
+    knn_avg_params["radius"] = knn_radius
+    knn_avg_params.pop("avg_method", None)
 
-    tree = cKDTree(x)
 
-    protein_order, protein_names = get_reordered_protein_names(network, **kw)
-    input_order, output_pos = protein_order[:-1], protein_order[-1]
-    input_names, output_name = protein_names[:-1], protein_names[-1]
 
-    assert len(input_names) == 1
+    # remove nans
+    nans = np.isnan(X).any(axis=1)
+    if nans.any():
+        X = X[~nans]
+        Y = Y[~nans]
 
-    y = y[:, output_pos]
-    x = x[:, input_order]
+    if slices is not None:
+        slices = np.asarray(slices)
+    nslices = 1 if slices is None else slices.shape[0]
+    n_input = X.shape[1]
+    if n_input > 1:
+        if slices is None:
+            raise ValueError("slices must be provided for multi-dimensional input")
+        if slices.shape[1] != n_input - 1:
+            raise ValueError(f"slices shape must be (nslices, n_input - 1). Got {slices.shape}")
 
-    unscaled_ticks = np.logspace(0, 12, 13)
-    ticks = np.array(rescaler.fwd(unscaled_ticks))
-    ticks = ticks[ticks < xmax]
-    tlabels = [
-        scformat.format("{:m}", x) if i > 1 else ''
-        for i, x in enumerate(unscaled_ticks[: len(ticks)])
-    ]
+    lineplot_props = make_n_props(nslices, lineplot_props)
+    errorbar_props = make_n_props(nslices, errorbar_props)
 
-    xquery_max = min(xmax, x.max() - radius)
+    if colors is not None:
+        assert len(colors) == nslices
+    else:
+        colors = plt.get_cmap(DEFAULT_CMAP_NAME)(np.linspace(0.25, 1, nslices))
+    assert colors is not None
 
-    xquery = np.linspace(xmin, xquery_max, res).reshape(-1, 1)
-    z, _ = knn_avg(
-        xquery, y, tree, avg_method='mean', radius=radius, k=knn, min_points=min_points, **kw
-    )
-    if len(z) == 0:
-        return
-    try:
-        ax.plot(xquery, z, color=color)
-    except ValueError as e:
-        ut.logger.warning(f'Could not plot: {e}.\nxx: {xquery}\nz: {z}')
-        pass
-    try:
-        if quantiles is None:
-            quantiles = [0.1, 0.9]
-        if quantiles != False:
-            assert len(quantiles) == 2
-            zq1, _ = knn_avg(
-                xquery,
-                y,
-                tree,
-                avg_method='quantile',
-                qu=quantiles[0],
-                radius=radius,
-                k=knn,
-                min_points=min_points,
-                **kw,
-            )
-            zq9, _ = knn_avg(
-                xquery,
-                y,
-                tree,
-                avg_method='quantile',
-                qu=quantiles[1],
-                radius=radius,
-                k=knn,
-                min_points=min_points,
-                **kw,
-            )
-            ax.fill_between(xquery[:, 0], zq1, zq9, alpha=quantiles_alpha, color=color)
-    except ValueError as e:
-        ut.logger.warning(f'Could not fill between: {e}.\nzq1: {zq1}\nzq9: {zq9}')
-        pass
+    tree = cKDTree(X)
 
-    xlims = np.array([xmin, xmax])
+    xmin, xmax = xlims
+    xmax = X[:, 0].max() if xmax is None else xmax
+    xmin = X[:, 0].min() if xmin is None else xmin
+
+    xquery_max = min(float(xmax), X[:, 0].max() - knn_radius)
+    xquery_min = max(float(xmin), X[:, 0].min() + knn_radius * 0.5)
+
+    xquery = np.linspace(xquery_min, xquery_max, res).reshape(-1, 1)
+
+
+    minz, maxz = np.inf, -np.inf
+    for i in range(nslices):
+        query = xquery
+        if n_input > 1:
+            assert slices is not None and slices.shape[1] == n_input - 1
+            query = np.hstack([query, np.tile(slices[i], (query.shape[0], 1))])
+
+        z, _ = knn_avg(query, Y, tree, avg_method="mean", **knn_avg_params)
+
+        minz = min(minz, z.min())
+        maxz = max(maxz, z.max())
+
+        legend_label = ""
+        for j in range(n_input - 1):
+            iname = r"$X_{" + str(j + 2) + r"} \approx $"
+            legend_label += f"{iname} {format_powers(rescaler.inv(slices[i][j]), n_decimals=0)}"
+            if j < n_input - 2:
+                legend_label += ", "
+
+        marker = lineplot_props[i].get("marker", DEFAULT_MARKER_ROTATION[i % len(DEFAULT_MARKER_ROTATION)])
+
+        DEFAULT_LINEPLOT_PROPS = {
+            "lw": 1,
+            "color": colors[i],
+            "label": legend_label,
+            "marker": marker,
+            # use marker but don't show it, it's only for the legend:
+            "markevery": -1,
+
+        }
+        lineplot_props[i] = {**DEFAULT_LINEPLOT_PROPS, **lineplot_props[i]}
+
+        ax.plot(xquery, z, **lineplot_props[i])
+
+        if show_std:
+            # print shape of query, z and Y
+            print(f"query.shape = {query.shape}, z.shape = {z.shape}, Y.shape = {Y.shape}")
+
+            # std instead:
+            std, _ = knn_avg(query, Y, tree, avg_method="std", **knn_avg_params)
+            minz = min(minz, z.min() - std.max())
+            maxz = max(maxz, z.max() + std.max())
+
+            if std_mode == "errorbar":
+                n = len(z) // n_errorbars
+                # shift proportional to i so that errorbars don't overlap
+                shift = i * n // nslices
+                qxquery = xquery[shift::n].squeeze()
+                qz = z[shift::n].squeeze()
+                yerr = std[shift::n].squeeze()
+
+                DEFAULT_ERRORBAR_PROPS = {
+                    "fmt": marker,
+                    "color": colors[i],
+                    "lw": 0,
+                    "capsize": 2,
+                    "capthick": 0.5,
+                    "elinewidth": 0.5,
+                    "markevery": 1,
+                }
+                errorbar_props[i] = {**DEFAULT_ERRORBAR_PROPS, **errorbar_props[i]}
+
+                ax.errorbar(
+                    qxquery,
+                    qz,
+                    yerr=yerr[::n].squeeze(),
+                    **errorbar_props[i],
+                )
+            else:
+                assert std_mode == "fill", f"std_mode must be 'errorbar' or 'fill'. Got {std_mode}"
+                ax.fill_between(
+                    xquery.squeeze(),
+                    (z - std).squeeze(),
+                    (z + std).squeeze(),
+                    alpha=std_alpha,
+                    color=colors[i],
+                    lw=0,
+                )
+
+    print(f"minz = {minz}, maxz = {maxz}")
+    minz = minz - 0.02 * (maxz - minz)
+    maxz = maxz + 0.02 * (maxz - minz)
+
+    vlims = [minz if vlims[0] is None else vlims[0], maxz if vlims[1] is None else vlims[1]]
+    print(f"vlims = {vlims}")
+
     setup_transformed_axis(
         ax,
         xaxis_lims=xlims,
-        yaxis_lims=xlims,
+        yaxis_lims=vlims,
         rescaler=rescaler,
         margins=0.0,
-        **kw,
     )
 
-    ax.set_xlabel(input_names[0])
-    ax.set_ylabel(output_name)
+    # Show only bottom and left spines
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    xlabel = input_names[0] if xtitle is None else xtitle
+    ylabel = output_name if ytitle is None else ytitle
+
+    if nslices > 1 and show_legend:
+        ax.legend(loc="upper right")
+
+    if draw_xlabel:
+        ax.set_xlabel(xlabel)
+    if draw_ylabel:
+        ax.set_ylabel(ylabel)
+
+    if title is not None:
+        ax.set_title(title)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -177,7 +276,6 @@ def knn_grid(
     grid_resolution=200,
     knn_avg_params={},
 ):
-
     xmin, xmax = xlims
     ymin, ymax = ylims or xlims
     xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
@@ -194,9 +292,9 @@ def knn_grid(
     output_values = output_values.squeeze()
 
     if output_values.shape != (xy.shape[0],):
-        raise ValueError(f'output_values.shape = {output_values.shape} != {xy.shape[0]}')
+        raise ValueError(f"output_values.shape = {output_values.shape} != {xy.shape[0]}")
     if density.shape != (xy.shape[0],):
-        raise ValueError(f'density.shape = {density.shape} != {xy.shape[0]}')
+        raise ValueError(f"density.shape = {density.shape} != {xy.shape[0]}")
 
     if is_density_plot:
         output_values = density
@@ -210,15 +308,15 @@ def colorbar(
     im,
     rescaler,
     vlims=(None, None),
+    yslice=None,
     label=None,
     position=(1.1, 0.4),
     size=(0.04, 0.52),
-    orientation: str = 'vertical',
-    label_position: Literal['left', 'right', 'bottom', 'top'] = 'right',
+    orientation: str = "vertical",
+    label_position: Literal["left", "right", "bottom", "top"] = "right",
     label_props: Dict = {},
     tick_props: Optional[ListOrSingle[Dict]] = None,
 ):
-
     imlims = im.get_clim()
     c_vmin = imlims[0] if vlims[0] is None else vlims[0]
     c_vmax = imlims[1] if vlims[1] is None else vlims[1]
@@ -227,11 +325,11 @@ def colorbar(
     cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation)
 
     DEFAULT_TICK_PROPS = {
-        'axis': 'both',
-        'which': 'both',
-        'direction': 'out',
-        'pad': 2,
-        'labelsize': 8,
+        "axis": "both",
+        "which": "both",
+        "direction": "out",
+        "pad": 2,
+        "labelsize": 8,
     }
     cbar.ax.tick_params(**DEFAULT_TICK_PROPS)
 
@@ -251,19 +349,19 @@ def colorbar(
         rescaler=rescaler,
     )
     if label is not None:
-        if orientation == 'vertical':
-            if label_position not in ['left', 'right']:
-                raise ValueError('Vertical orientation: label_position must be left or righ')
-            cbar.ax.yaxis.set_label_position(label_position) #type: ignore
+        if orientation == "vertical":
+            if label_position not in ["left", "right"]:
+                raise ValueError("Vertical orientation: label_position must be left or righ")
+            cbar.ax.yaxis.set_label_position(label_position)  # type: ignore
             cbar.ax.set_ylabel(label, **label_props)
-            cbar.ax.tick_params(axis='x', which='both', size=0)
+            cbar.ax.tick_params(axis="x", which="both", size=0)
             cbar.ax.set_xticks([])
         else:
-            if label_position not in ['bottom', 'top']:
-                raise ValueError('Horizontal orientation: label_position must be bottom or top')
-            cbar.ax.xaxis.set_label_position(label_position) #type: ignore
+            if label_position not in ["bottom", "top"]:
+                raise ValueError("Horizontal orientation: label_position must be bottom or top")
+            cbar.ax.xaxis.set_label_position(label_position)  # type: ignore
             cbar.ax.set_xlabel(label, **label_props)
-            cbar.ax.tick_params(axis='y', which='both', size=0)
+            cbar.ax.tick_params(axis="y", which="both", size=0)
             cbar.ax.set_yticks([])
 
     return cbar
@@ -282,7 +380,6 @@ def smooth_2d(
     xtitle: Optional[str] = None,
     ytitle: Optional[str] = None,
     vtitle: Optional[str] = None,
-    xlabel_img: Optional[str] = None,
     xlims=(0, 1),
     ylims=(None, None),
     vlims=(None, None),
@@ -294,8 +391,7 @@ def smooth_2d(
     knn_grid_params: Dict = {},
     heatmap_params: Dict = {},
 ) -> Tuple:
-
-    print(f'heatmap_params: {heatmap_params}')
+    print(f"heatmap_params: {heatmap_params}")
 
     ylims = xlims if ylims == (None, None) else ylims
 
@@ -315,10 +411,10 @@ def smooth_2d(
         Y,
         xlims,
         ylims,
-        **{**knn_grid_params, 'zslice': zslice},
+        **{**knn_grid_params, "zslice": zslice},
     )
 
-    im, cntrs = heatmap(ax, input_coords, output_values, **{**heatmap_params, 'vlims': vlims})
+    im, cntrs = heatmap(ax, input_coords, output_values, **{**heatmap_params, "vlims": vlims})
 
     # as latex if xtitle not none
     xlabel = input_names[0] if xtitle is None else xtitle
@@ -341,8 +437,8 @@ def smooth_2d(
     )
 
     # spines only on bottom and left
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
     vlabel = output_name if vtitle is None else vtitle
 
@@ -353,7 +449,7 @@ def smooth_2d(
             im,
             rescaler,
             vlims,
-            **{**colorbar_params, 'label': vlabel},
+            **{**colorbar_params, "label": vlabel},
         )
 
     return im, cntrs
@@ -425,7 +521,7 @@ def smooth_line_plot(
             sample_quantiles_at,
             zqlow[::markevery],
             yerr=zqhigh[::markevery] - zqlow[::markevery],
-            fmt='none',
+            fmt="none",
             color=color,
             alpha=0.3,
             lw=2,
@@ -440,8 +536,8 @@ def smooth_line_plot(
     ax.set_ylabel(output_name)
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(0, 1)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
     vmin, vmax = vlims
     vmin = vmin if vmin is not None else np.nanmin(z)
@@ -461,12 +557,12 @@ def smooth_line_slices(
     ax=None,
     xmin=0,
     xmax=None,
-    color_mode='inner_slice',
-    markers=['x', 'o', '^', 'v', '<', '>', '1', '2', '3', '4', '8', 'p', 'P', '*', 'h', 'H'],
+    color_mode="inner_slice",
+    markers=["x", "o", "^", "v", "<", ">", "1", "2", "3", "4", "8", "p", "P", "*", "h", "H"],
     **kwargs,
 ):
     # slices is a list of list of slice values. (max 2 dimensions)
-    assert len(slices) <= 2, 'Can only slice maximum 2 dimensions'
+    assert len(slices) <= 2, "Can only slice maximum 2 dimensions"
     outerslices = slices[1] if len(slices) > 1 else []
     innerslices = slices[0] if len(slices) > 0 else []
 
@@ -484,19 +580,19 @@ def smooth_line_slices(
     if same_ax:
         assert ax is not None
     else:
-        assert len(axes) == len(outerslices), 'Number of axes must match number of outer slices'
+        assert len(axes) == len(outerslices), "Number of axes must match number of outer slices"
 
-    color = 'k'
+    color = "k"
     # cmap = plt.cm.YlGnBu
     cmap = plt.cm.Spectral
     vlims = np.array([np.inf, -np.inf])
     ivlims = np.tile(vlims, (len(outerslices), 1))
     for i, outsl in enumerate(outerslices):
         iax = ax if same_ax else axes[i]
-        if color_mode == 'outer_slice':
+        if color_mode == "outer_slice":
             color = cmap(i / len(outerslices))
         for j, insl in enumerate(innerslices):
-            if color_mode == 'inner_slice':
+            if color_mode == "inner_slice":
                 color = cmap(j / len(innerslices))
             vl = smooth_line_plot(
                 x,
@@ -507,7 +603,7 @@ def smooth_line_slices(
                 slice_at=[insl, outsl],
                 input_order=input_order,
                 xmax=x.max(),
-                label=f'{input_names[input_order[1]]} ≈ {format_powers(rescaler.inv(insl), n_decimals=0)}',
+                label=f"{input_names[input_order[1]]} ≈ {format_powers(rescaler.inv(insl), n_decimals=0)}",
                 tree=tree,
                 color=color,
                 marker=markers[i],
