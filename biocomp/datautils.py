@@ -40,6 +40,7 @@ NumLike = Union[float, int, np.ndarray, jnp.ndarray]
 NdArray = Union[np.ndarray, jnp.ndarray]
 
 
+
 class DataRescaler(ArbitraryModel):
     # def fwd(self, x: NdArray) -> NdArray:
     # raise NotImplementedError()
@@ -169,11 +170,13 @@ class CompressedSymLogRescaler(DataRescaler):
         self.__log_end = self.__symlog(self.input_range.max / self.low_end_compression)
 
     def fwd(self, x):
+        self.__post_init__()
         xp = self.__symlog(1 + x / self.low_end_compression) - self.__log_start
         y = xp / (self.__log_end - self.__log_start)
         return y
 
     def inv(self, y):
+        self.__post_init__()
         yp = y * (self.__log_end - self.__log_start) + self.__log_start
         ypinv = self.__invsymlog(yp)
         x = self.low_end_compression * (ypinv - 1)
@@ -439,6 +442,41 @@ class DataManager:
             for x, y, n in zip(self._X, self._Y, self._networks):
                 network_data_check(x, y, n)
         ut.logger.info(f"Initialized a DataManager with {len(self._networks)} networks")
+
+    @classmethod
+    def from_xps(cls, xplist, config, **kw):
+        network_cache_location = None
+        if 'network_cache_location' in config:
+            network_cache_location = Path(config['network_cache_location'])
+
+        # build all networks and get all sample names, for each xp
+        # networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
+        net_sample_pairs = []
+        for xp in xplist:
+            net_sample_pairs.append(
+                ut.get_cache(
+                    lambda: xp.build_networks(**kw), f'{str(xp)}_net', network_cache_location
+                )
+            )
+
+        networks, samples = zip(*net_sample_pairs)
+
+        # get all X (independent vars) and Y (dependent vars) for each xp
+        # X, Y = zip(*[xp.get_XY(n, s) for xp, n, s in zip(xplist, networks, samples)])
+        XY_pairs = []
+        for xp, n, s in zip(xplist, networks, samples):
+            XY_pairs.append(
+                ut.get_cache(lambda: xp.get_XY(n, s), f'{str(xp)}_XY', network_cache_location)
+            )
+
+        X, Y = zip(*XY_pairs)
+        # get everything as a long concatenated list
+        X, Y, networks = (
+            list(itertools.chain(*X)),
+            list(itertools.chain(*Y)),
+            list(itertools.chain(*networks)),
+        )
+        return cls(X, Y, networks)
 
     def make_subset(self, network_ids):
         sub_x = [self._raw_X[i] for i in network_ids]
