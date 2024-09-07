@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import biocomp as bc
 from . import utils as ut
+from .utils import ArbitraryModel
 from pathlib import Path
 import json
 from . import defaults as dft
@@ -27,30 +28,59 @@ import pickle
 from matplotlib.ticker import FixedLocator, FuncFormatter
 import matplotlib.ticker as ticker
 from .network import Network
-
+from pydantic import BaseModel, ValidationError, Field, field_validator
 from typing import Optional, Union, List, Tuple, Callable, Collection, Any
 
 ndArray = Union[np.ndarray, jnp.ndarray]
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     data rescaler     --
-from pydantic import BaseModel, ValidationError, Field, field_validator
 
 NumLike = Union[float, int, np.ndarray, jnp.ndarray]
 NdArray = Union[np.ndarray, jnp.ndarray]
 
 
-class DataRescaler(BaseModel):
-    def fwd(self, x: NumLike) -> NdArray:
-        raise NotImplementedError()
+class DataRescaler(ArbitraryModel):
+    def fwd(self, x):
+        return x
 
-    def inv(self, y: NumLike) -> NdArray:
-        raise NotImplementedError()
+    def inv(self, y):
+        return y
 
 
 class ValueRange(BaseModel):
     min: float = 0
     max: float = 1
+
+
+class NoOpRescaler(DataRescaler):
+
+    def fwd(self, x):
+        return x
+
+    def inv(self, y):
+        return y
+
+
+class LogPolyLogRescaler(DataRescaler):
+    poly_region_threshold: float = 300  # where we switch from log to poly
+    poly_region_coef: float = 0.4  # how much we compress the poly part
+
+    def model_post_init(self, *_):
+        self.__symlog = partial(
+            ut.log_poly_log, threshold=self.poly_region_threshold, compression=self.poly_region_coef
+        )
+        self.__invsymlog = partial(
+            ut.inverse_log_poly_log,
+            threshold=self.poly_region_threshold,
+            compression=self.poly_region_coef,
+        )
+
+    def fwd(self, x):
+        return self.__symlog(x)
+
+    def inv(self, y):
+        return self.__invsymlog(y)
 
 
 class CompressedSymLogRescaler(DataRescaler):
@@ -83,7 +113,7 @@ class CompressedSymLogRescaler(DataRescaler):
     poly_region_threshold: float = 300  # where we switch from log to poly
     poly_region_coef: float = 0.4  # how much we compress the poly part
 
-    def __post_init__(self):
+    def model_post_init(self, *_):
         self.__symlog = partial(
             ut.log_poly_log, threshold=self.poly_region_threshold, compression=self.poly_region_coef
         )
@@ -115,16 +145,13 @@ class CompressedSymLogRescaler(DataRescaler):
 # Rescale values from input_range to [0, 1], with tolerance for outside values.
 # Lower values will always be > 0, but higher values continue to increase logarithmically.
 # """
-
 # LOG10 = np.log(10)
 # PLOG10 = scipy.special.lambertw(1/LOG10).real
 # T10 = np.exp(PLOG10) - (np.log(PLOG10 / LOG10) / LOG10)
 # XTHRESH = PLOG10 / LOG10
 # YTHRESH = 10**(XTHRESH)
-
-#     def explog10(self, x):
+# def explog10(self, x):
 # return np.where(x > XTHRESH, np.log10(x)+T10, 10**x)
-
 # def inv_explog10(self, y):
 # return np.where(y < YTHRESH, 10**(y-T10), np.log10(y))
 

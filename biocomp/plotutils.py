@@ -2,6 +2,7 @@
 # ···············································································
 from dataclasses import dataclass, field
 import jax.numpy as jnp
+from scipy.stats import gaussian_kde
 from matplotlib import scale as mscale
 from jax.tree_util import Partial
 from functools import partial
@@ -11,6 +12,7 @@ from . import datautils as du
 from .datautils import DataRescaler
 import matplotlib.pyplot as plt
 from biocomp.network import Network
+from biocomp.utils import ArbitraryModel, build_if_has_target
 import matplotlib.ticker as ticker
 import plotly.graph_objs as go
 import matplotlib.pyplot as plt
@@ -25,6 +27,7 @@ import os
 from typing import (
     Union,
     Self,
+    Annotated,
     Sequence,
     List,
     Tuple,
@@ -41,8 +44,14 @@ import matplotlib as mpl
 
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-from pydantic import BaseModel, ValidationError, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    model_validator,
+    BeforeValidator,
+)
 
+from pathlib import Path
 from .plotting import plotting_core as pc
 
 logger = ut.setup_logger('biocomp.plotting')
@@ -57,7 +66,8 @@ os.environ["PATH"] += os.pathsep + '/Library/TeX/texbin'
 ## {{{                      --     plot data class     --
 
 T = TypeVar('T')
-Pair = Tuple[T, T]
+Pair: TypeAlias = Tuple[T, T]
+ListOrSingle: TypeAlias = Union[List[T], T]
 NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
 NumLike: TypeAlias = Union[np.ndarray, jnp.ndarray, float, int]
 
@@ -67,20 +77,19 @@ class DataDimensions(BaseModel):
     output: int
 
 
-class PlotData(BaseModel):
+class PlotData(ArbitraryModel):
 
     x: NdArray
     y: NdArray
 
-    input_names: Optional[List[str]]
-    output_name: Optional[str]
+    input_names: List[str] = []
+    output_name: str = 'output'
 
-    rescaler: Optional[DataRescaler] = None
+    metadata: Dict[str, Any] = {}
 
     @property
     def dimensions(self) -> DataDimensions:
         return DataDimensions(input=self.x.shape[1], output=1)
-
 
     @model_validator(mode='after')
     def check_shapes(self) -> Self:
@@ -99,57 +108,88 @@ class PlotData(BaseModel):
 
         return self
 
-    class Config:
-        arbitrary_types_allowed = True
+
+def ax_to_list(ax) -> Sequence:
+    if isinstance(ax, np.ndarray):
+        return ax.tolist()
+    return ut.as_list(ax)
 
 
-@dataclass(kw_only=True)
-class FigureLayout:
-    pass
+SequenceND: TypeAlias = Sequence[T] | Sequence[Sequence[T]] | Sequence[Sequence[Sequence[T]]]
 
 
-@dataclass(kw_only=True)
-class SimpleFigureLayout(FigureLayout):
-    cols: int = 1
+class FigAx(ArbitraryModel):
+    figure: Figure
+    ax: Annotated[SequenceND[Axes], BeforeValidator(ax_to_list)]
+
+    @property
+    def flat_ax(self) -> List[Axes]:
+        return ut.flatten(self.ax)
+
+    @property
+    def n_axes(self) -> int:
+        return len(self.flat_ax)
+
+
+class FigureLayout(ArbitraryModel):
+
+    def make_figure(self) -> FigAx:
+        raise NotImplementedError()
+
+
+class SimpleLayout(FigureLayout):
     rows: int = 1
-    axes_size: Pair[int] = (5, 5)
-    dpi: int = 300
+    cols: int = 1
+    axes_size: Pair[float] = (5, 5)
+    kwargs: Dict[str, Any] = {}
 
-    def make_figure(self) -> Tuple[Figure, Axes]:
+    def make_figure(self, **kw) -> FigAx:
         fig, ax = plt.subplots(
             self.rows,
             self.cols,
             figsize=(self.cols * self.axes_size[0], self.rows * self.axes_size[1]),
-            dpi=self.dpi,
+            **self.kwargs,
+            **kw,
         )
-        return fig, ax
+        return FigAx(figure=fig, ax=ax)
 
 
-@dataclass(kw_only=True)
-class FigureSpec:
+ValidatedFigureLayout = Annotated[
+    FigureLayout,
+    BeforeValidator(
+        partial(
+            build_if_has_target,
+            available_module_names=['biocomp.plotutils', '__main__'],
+        )
+    ),
+]
+
+
+class FigureSpec(ArbitraryModel):
     title: Optional[str] = None
     output_dir: str = './'
-    output_file: str = 'unnamed.png'
-    extra_info: Optional[Dict[str, Any]] = None
-    layout: FigureLayout = field(default_factory=SimpleFigureLayout)
+    output_file: Optional[str] = 'unnamed.png'
+    extra_args: Dict[str, Any] = {}
+    layout: ValidatedFigureLayout = Field(default_factory=SimpleLayout)
+
+    def make_figure(self) -> FigAx:
+        return self.layout.make_figure(**self.extra_args)
+
+    def save_figure(self, figax: FigAx) -> None:
+        assert self.output_file is not None
+        output_path = Path(self.output_dir) / self.output_file
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        figax.figure.savefig(output_path, bbox_inches='tight')
+
+    def finalize(self, figax: FigAx) -> None:
+        if self.title is not None:
+            figax.figure.suptitle(self.title)
+        if self.output_file is not None:
+            self.save_figure(figax)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
-## {{{                   --     DataRescaler wrapper     --
-def get_rescaler(rescaler, **kw):
-    if isinstance(rescaler, DataRescaler):
-        return rescaler
-    if isinstance(rescaler, (tuple, list)):
-        assert len(rescaler) == 2, 'Rescaler must be a tuple of (fwd, inv) functions'
-        assert callable(rescaler[0]) and callable(
-            rescaler[1]
-        ), 'Rescaler must be a tuple of (fwd, inv) functions'
-        return DataRescaler(partial(rescaler[0], **kw), partial(rescaler[1], **kw))
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                       --     network utils     --
 
 
@@ -157,18 +197,18 @@ def extract_plot_data_from_network(
     network: Network,
     X: NdArray,
     Y: NdArray,
-    rescaler: DataRescaler,
-    input_order: Optional[Sequence[int]] = None,
+    input_order: Optional[Sequence[int] | Sequence[str]] = None,
     protein_aliases: Optional[Dict[str, str]] = None,
     use_y_as_x: bool = False,
+    **kw,
 ) -> PlotData:
 
-    if input_order is None:
-        input_order = np.arange(network.get_nb_inputs())
+
     if protein_aliases is None:
         protein_aliases = {}
 
-    protein_order, protein_names = get_reordered_protein_names(
+    assert X.shape[0] == Y.shape[0], f'X shape: {X.shape}, Y shape: {Y.shape}'
+    protein_order, protein_names = pc.get_reordered_protein_names(
         network, input_order, protein_aliases
     )
 
@@ -182,18 +222,16 @@ def extract_plot_data_from_network(
     else:
         x = X[:, input_order]
 
-    y = Y[:, output_pos]
-    y = Y.reshape(-1, 1)
-
-    assert x.shape[1] == len(input_order)
-    assert y.shape[0] == X.shape[0]
+    y = Y[:, output_pos].reshape(-1, 1)
+    assert x.shape[1] == len(input_order), f'X shape: {x.shape}, input_order: {input_order}'
+    assert y.shape[0] == x.shape[0], f'y shape: {y.shape}, x shape: {x.shape}'
 
     return PlotData(
         x=x,
         y=y,
         input_names=input_names,
         output_name=output_name,
-        rescaler=rescaler,
+        **kw,
     )
 
 
@@ -410,13 +448,14 @@ def remove_axis_and_spines(ax):
 
 
 class ShortScientificFormatter(string.Formatter):
-    def format_field(self, value, format_spec):
+    def format_field(self, value, format_spec, precision=1):
         if format_spec == 'm':
             if value < 1000:
                 if value == int(value):
                     return super().format_field(int(value), '')
                 else:
-                    return super().format_field(value, '.1f')
+                    # use required precision:
+                    return super().format_field(value, f'.{precision}f')
             else:
                 if value == int(value):
                     return super().format_field(value, '.0e').replace('e+0', 'e').replace('e+', 'e')
@@ -430,6 +469,7 @@ scformat = ShortScientificFormatter()
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 
 ## {{{                --     new network plot functions     --
 
@@ -455,10 +495,10 @@ def auto_plot(
     **kw,
 ) -> None:
 
-    dim = get_data_dimensions(plot_data)
+    dim = plot_data.dimensions
     if use_plot_method is None or use_plot_method == 'auto':
         assert plot_method_per_input_dim is not None
-        use_plot_method = plot_method_per_input_dim.get(dim.input_dim, 'smooth')
+        use_plot_method = plot_method_per_input_dim.get(dim.input, 'smooth')
 
     VALID_METHODS = ['smooth', 'scatter', 'histogram']
     if use_plot_method not in VALID_METHODS:
@@ -471,14 +511,13 @@ def auto_plot(
 
         # first we check that we have axes to plot on
         # if not, we need to make a new figure
-        assert dim.output_dim == 1, 'Only single output plots are supported'
+        assert dim.output == 1, 'Only single output plots are supported'
 
         if ax is None:
             assert (
                 figure_spec.layout is not None
             ), 'Layout must be specified if axes are not provided'
             cols, rows = figure_spec.layout
-            print(f'Creating new figure with {cols}x{rows} axes')
             fig, ax = plt.subplots(
                 *figure_spec.layout,
                 figsize=(cols * figure_spec.axes_size[0], rows * figure_spec.axes_size[1]),
@@ -511,36 +550,225 @@ from .plotting.plotting_smooth import smooth_2d
 
 @configurable
 def smooth(
-    plot_data: PlotData, ax, smooth_1d_params={}, smooth_2d_params={}, smooth_3d_params={}, **kw
+    plot_data: PlotData,
+    ax,
+    rescaler: DataRescaler = du.NoOpRescaler(),
+    smooth_1d_params={},
+    smooth_2d_params={},
+    smooth_3d_params={},
+    **kw,
 ):
-    dim = get_data_dimensions(plot_data)
-    match (dim.input_dim, dim.output_dim):
+
+    dim = plot_data.dimensions
+    x = rescaler.fwd(plot_data.x)
+    y = rescaler.fwd(plot_data.y)
+
+    match (dim.input, dim.output):
         case (2, 1):
             return smooth_2d(
-                X=plot_data.x,
-                Y=plot_data.y,
+                X=x,
+                Y=y,
                 input_names=plot_data.input_names,
                 output_name=plot_data.output_name,
-                rescaler=plot_data.rescaler,
+                rescaler=rescaler,
                 ax=ax,
                 **smooth_2d_params,
                 **kw,
             )
         case (3, 1):
             return smooth_3d(
-                X=plot_data.x,
-                Y=plot_data.y,
+                X=x,
+                Y=y,
                 input_names=plot_data.input_names,
                 output_name=plot_data.output_name,
-                rescaler=plot_data.rescaler,
+                rescaler=rescaler,
                 ax=ax,
                 **smooth_3d_params,
                 **kw,
             )
         case _:
             raise ValueError(
-                f'Plotting {dim.input_dim} inputs and {dim.output_dim} outputs is not supported'
+                f'Plotting {dim.input} inputs and {dim.output} outputs is not supported'
             )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+
+DEFAULT_VIOLIN_PARAMS = {
+    'showmeans': False,
+    'showmedians': True,
+    'showextrema': False,
+    'bw_method': 0.1,
+    'points': 2000,
+    'vert': True,
+}
+
+
+@configurable
+def violin_style(
+    parts,
+    facecolor='#bbb',
+    edgecolor='#777',
+    linewidth=0.5,
+    cmean_color='#000',
+    cmedian_color='#222',
+    alpha=0.5,
+):
+
+
+    for pc in parts['bodies']:
+        pc.set_facecolor(facecolor)
+        pc.set_edgecolor(edgecolor)
+        pc.set_linewidth(linewidth)
+        pc.set_alpha(alpha)
+
+    if 'cmeans' in parts:
+        for pc in ut.as_list(parts['cmeans']):
+            pc.set_color(cmean_color)
+            pc.set_linewidth(linewidth)
+
+    if 'cmedians' in parts:
+        for pc in ut.as_list(parts['cmedians']):
+            pc.set_color(cmedian_color)
+            pc.set_linewidth(linewidth)
+
+
+
+@configurable
+def normalized_violin(
+    plot_data: PlotData,
+    ax,
+    rescaler,
+    title: Optional[str] = None,
+    xlims=(0, 1),
+    ylims=(0, 1),
+    vlims=(0, 1.5),
+    xbins=20,
+    draw_xlabel=True,
+    draw_ylabel=True,
+    cmap=pc.DEFAULT_CMAP_NAME,
+    violin_params={},
+    violin_style_params={},
+    mean_marker='o',
+    mean_color='black',
+    mean_size=7,
+    mean_linewidth=0.3,
+    mean_linealpha=0.25,
+    ratio_uses_rescaled_values=True,
+    whisker_pos=(0.1, 0.9),
+    whisker_color='#333333',
+    whisker_linewidth=0.5,
+    write_y_bounds=True,
+    use_log_density=True,
+):
+
+    violin_params = {**DEFAULT_VIOLIN_PARAMS, **violin_params}
+
+    dim = plot_data.dimensions
+
+    x = rescaler.fwd(plot_data.x)
+    y = rescaler.fwd(plot_data.y)
+    assert dim.output == 1, 'Only single output plots are supported'
+    assert dim.input == 2, 'Only 2D input plots are supported'
+
+    # keep only inbounds data
+    xlims = (
+        xlims[0] if xlims[0] is not None else x[:, 0].min(),
+        xlims[1] if xlims[1] is not None else x[:, 0].max(),
+    )
+    ylims = (
+        ylims[0] if ylims[0] is not None else x[:, 1].min(),
+        ylims[1] if ylims[1] is not None else x[:, 1].max(),
+    )
+    mask = (
+        (x[:, 0] >= xlims[0])
+        & (x[:, 0] <= xlims[1])
+        & (x[:, 1] >= ylims[0])
+        & (x[:, 1] <= ylims[1])
+    )
+    x = x[mask]
+    y = y[mask]
+
+
+    # now for each bin in x1, we want to plot a violin plot of y/x2
+    x1 = x[:, 0]
+    x2 = x[:, 1]
+
+    if ratio_uses_rescaled_values:
+        normed_y = y / x2[:, None]
+    else:
+        normed_y = rescaler.inv(y) / rescaler.inv(x2[:, None])
+
+    x1_bins = np.linspace(*xlims, xbins)
+    bin_inds = np.digitize(x1, x1_bins)
+    x1_centers = 0.5 * (x1_bins[:-1] + x1_bins[1:])
+
+    width = (x1_bins[1] - x1_bins[0]) * 0.8
+
+    cmap = plt.get_cmap(cmap)
+    quantiles = np.nanquantile(normed_y, whisker_pos, axis=0)
+    binned_normed_y = [normed_y[bin_inds == i] for i in range(1, len(x1_bins))]
+    mean_ys = np.array([np.nanmean(ny) for ny in binned_normed_y])
+
+
+    for i, x1_center in enumerate(x1_centers):
+        ny = binned_normed_y[i]
+        if ny.size == 0:
+            continue
+
+        parts = ax.violinplot(ny, positions=[x1_center], widths=width, **violin_params)
+
+        # # now we actually want to use the log density so we will compute the kde separately
+        # kde = gaussian_kde(ny)
+        # x = np.linspace(vlims[0], vlims[1], 1000)
+        # y = kde(x)
+        # # we can use mpl violin now
+        # parts = ax.violin(x=x1_center, y=y, **violin_params)
+
+        # meany = np.nanmean(ny)
+        meany = mean_ys[i]
+        facecolor = mpl.colors.rgb2hex(cmap(meany))
+        violin_style(parts, **{'facecolor': facecolor, **violin_style_params})
+        # add whiskers
+        ax.plot([x1_center, x1_center], quantiles, color=whisker_color, linewidth=whisker_linewidth)
+        # add mean markers
+    ax.scatter(x1_centers, mean_ys, marker=mean_marker, color=mean_color, s=mean_size, linewidth=mean_linewidth, zorder=10)
+    if mean_linealpha > 0 and mean_linewidth > 0:
+        ax.plot(x1_centers, mean_ys, color=mean_color, linewidth=mean_linewidth, alpha=mean_linealpha)
+
+
+    pc.setup_transformed_xaxis(
+        ax,
+        xaxis_lims=xlims,
+        rescaler=rescaler,
+        margins=0.,
+    )
+
+    ax.set_ylim(vlims)
+
+    if write_y_bounds:
+        tr_min, tr_max = rescaler.inv(np.array(ylims).reshape(-1, 1))
+        tr_min = scformat.format_field(tr_min[0], 'm', 0)
+        tr_max = scformat.format_field(tr_max[0], 'm', 0)
+        latext = f'{plot_data.input_names[1]} $\\in [{tr_min}, {tr_max}]$'
+        ax.text(
+            0.7,
+            0.9,
+            latext,
+            fontsize=7,
+            transform=ax.transAxes,
+            fontdict={'family': 'monospace'},
+            color=DEFAULT_GREY,
+            ha='left',
+            va='top',
+        )
+
+
+    if title is not None:
+        ax.set_title(title)
+
+    if draw_xlabel:
+        ax.set_xlabel(plot_data.input_names[0])
+    if draw_ylabel:
+        ax.set_ylabel(f'{plot_data.output_name} / {plot_data.input_names[1]}')

@@ -77,7 +77,6 @@ def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_pen
 
 ### {{{                       --     main training function     --
 
-
 def start(
     dman: du.DataManager,
     training_config: Dict[str, Any],

@@ -19,7 +19,7 @@ from rich import print as pprint
 from . import nodes as nd
 from .network import Network
 from . import utils as ut
-from .utils import check, checkwrap
+from .utils import ArbitraryModel, PartialFunction
 from .parameters import ParameterTree, ParamPath
 from . import nodes
 
@@ -33,8 +33,7 @@ NdArray = Union[jnp.ndarray, np.ndarray]
 ## {{{                      --     Config    --
 
 
-@dataclass
-class ComputeConfig:
+class ComputeConfig(ArbitraryModel):
     """
     A ComputeConfig is a set of implementations for the different types of nodes
     that can be found in a network, i.e. a dictionary of {node_name -> function}.
@@ -42,7 +41,7 @@ class ComputeConfig:
     used by the implementations to store and share information across nodes.
     """
 
-    node_functions: Optional[Dict[str, ut.EncodedFunction]] = None
+    node_functions: Optional[Dict[str, ut.PartialFunction]] = None
     extra: Optional[Dict[str, Any]] = None
 
     def __init__(self, node_functions: Optional[Dict[str, Callable]] = None, extra=None):
@@ -67,14 +66,12 @@ class ComputeConfig:
     def to_dict(self):
         node_f = None
         if self.node_functions is not None:
-            node_f = {k: v.to_dict() for k, v in self.node_functions.items()}
+            node_f = {k: v.model_dump() for k, v in self.node_functions.items()}
         return {'node_functions': node_f, 'extra': self.extra}
 
     @classmethod
     def from_dict(cls, d: dict):
-        node_f = {
-            k: ut.EncodedFunction(**v).get_impl() for k, v in d.get('node_functions', {}).items()
-        }
+        node_f = {k: ut.PartialFunction(**v) for k, v in d.get('node_functions', {}).items()}
         return cls(node_functions=node_f, extra=d.get('extra'))
 
 
