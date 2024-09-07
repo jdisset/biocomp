@@ -1,21 +1,26 @@
 from sqlmodel import Field, SQLModel, Relationship
 from sqlmodel import SQLModel, create_engine, Session, select
+from sqlalchemy.orm import registry
 from sqlmodel._compat import SQLModelConfig
 from typing import List, Optional
 from sqlalchemy import Column, JSON
 from biocomp.library import PartsLibrary
 import pandas as pd
 
-class PartsDB(SQLModel):
+
+class PartsDB(SQLModel, registry=registry()):
     pass
 
+
 # SUPER HACKY but waiting for sqlmodel to fix serialization_alias support:
-ALIASES = { 'utr5': "5'UTR", 'utr3': "3'UTR", "uid": "UID" }
+ALIASES = {"utr5": "5'UTR", "utr3": "3'UTR", "uid": "UID"}
+
 
 class Category(PartsDB, table=True):
     name: str = Field(primary_key=True)
     transcripted: int
     translated: int
+
 
 class Part(PartsDB, table=True):
     name: str = Field(primary_key=True)
@@ -47,14 +52,19 @@ class L1(PartsDB, table=True):
     backbone: str
     insulator: Optional[str] = Field(default=None, foreign_key="l0.id")
     promoter: Optional[str] = Field(default=None, foreign_key="l0.id")
-    utr5: Optional[str] = Field(default=None, foreign_key="l0.id", sa_column_kwargs={"name": "5'UTR"}, alias="5'UTR")
+    utr5: Optional[str] = Field(
+        default=None, foreign_key="l0.id", sa_column_kwargs={"name": "5'UTR"}, alias="5'UTR"
+    )
     gene: Optional[str] = Field(default=None, foreign_key="l0.id")
-    utr3: Optional[str] = Field(default=None, foreign_key="l0.id", sa_column_kwargs={"name": "3'UTR"}, alias="3'UTR")
+    utr3: Optional[str] = Field(
+        default=None, foreign_key="l0.id", sa_column_kwargs={"name": "3'UTR"}, alias="3'UTR"
+    )
     terminator: Optional[str] = Field(default=None, foreign_key="l0.id")
 
     class Config:
         # SUPER HACKY but waiting for sqlmodel to fix serialization_alias support...
         alias_generator = lambda field_name: ALIASES.get(field_name, field_name)
+
 
 class L2(PartsDB, table=True):
     id: str = Field(primary_key=True)
@@ -92,7 +102,6 @@ class Sequestron(PartsDB, table=True):
     output_part: str
 
 
-
 def getAllPartsFromDatabase(db_url: str):
     engine = create_engine(db_url)
     SQLModel.metadata.create_all(engine)
@@ -107,19 +116,24 @@ def getAllPartsFromDatabase(db_url: str):
         sequestrons = session.exec(select(Sequestron)).all()
 
     return {
-        'categories': categories,
-        'parts': parts,
-        'L0s': L0s,
-        'L1s': L1s,
-        'L2s': L2s,
-        'sequestron_types': sequestron_types,
-        'sequestrons': sequestrons
+        "categories": categories,
+        "parts": parts,
+        "L0s": L0s,
+        "L1s": L1s,
+        "L2s": L2s,
+        "sequestron_types": sequestron_types,
+        "sequestrons": sequestrons,
     }
 
 
 def buildLibFromDatabase(db_url: str):
     parts = getAllPartsFromDatabase(db_url)
     # first need to turn everything into pandas dataframes
+
+    if len(parts['parts']) == 0:
+        print("No parts found in parts database")
+        return None
+
     parts_dict = {}
     for key, value in parts.items():
         # we also need to use the primary key as the index
@@ -130,6 +144,12 @@ def buildLibFromDatabase(db_url: str):
         parts_dict[key] = df
 
     lib = PartsLibrary(
-        parts_dict['parts'], parts_dict['L0s'], parts_dict['L1s'], parts_dict['L2s'], parts_dict['categories'], parts_dict['sequestrons'], parts_dict['sequestron_types']
+        parts_dict["parts"],
+        parts_dict["L0s"],
+        parts_dict["L1s"],
+        parts_dict["L2s"],
+        parts_dict["categories"],
+        parts_dict["sequestrons"],
+        parts_dict["sequestron_types"],
     )
     return lib
