@@ -16,36 +16,72 @@ parameter_to_default_part = {'tl_rate': '00_empty_tc', 'tc_rate': 'hEF1a'}
 # ···············································································
 
 
-def fuse_consecutive(cg: pd.DataFrame, types_to_fuse: Tuple[str, str], new_type: str):
-    """Fuse 2 consecutive nodes in a graph when they are of the types specified in types_to_fuse"""
-    assert len(types_to_fuse) == 2
-    has_fused = True
-    while has_fused:
-        has_fused = False
-        for first_id, first in cg[cg['type'] == types_to_fuse[0]].iterrows():
-            second = [o[0] for o in first['output_to'] if cg.loc[o[0]]['type'] == types_to_fuse[1]]
-            if len(second) > 0:
-                second = cg.loc[second[0]]
-                new_node = first.copy()
-                new_node.update(
-                    {
-                        'type': new_type,
-                        'output_to': second['output_to'],
-                        'cdg_output': second['cdg_output'],
-                        'extra': {
-                            p: second['extra'][p] for p in second['extra'] if p.count('input') == 0
-                        }.update(
-                            {p: first['extra'][p] for p in first['extra'] if p.count('output') == 0}
-                        ),
-                    }
-                )
-                cg.loc[first_id] = new_node
-                # then we also need to update the input_from of the nodes that were connected to second
-                for i, to in enumerate(second['output_to']):
-                    cg.loc[to[0]]['input_from'][to[1]] = (first_id, i)
-                cg.drop(second.name, inplace=True)
-                has_fused = True
-                break
+def get_prt_content_from_tu_id(cdg, tu_id):
+    cdg = cdg.copy()
+    cdg = cdg[cdg.tu_id.apply(lambda x: tu_id in x)]
+    prt = cdg[cdg.type == 'PRT']
+    genes = prt['content'].tolist()
+    genes = ut.flatten(genes)
+    genes = '_'.join(genes)
+    return genes
+
+
+def get_ratio(fwd_agg, cdg):
+    out_tuid = fwd_agg.cdg_output
+    genes = [get_prt_content_from_tu_id(cdg, tu_id) for tu_id in out_tuid]
+    ratios = np.array(fwd_agg['extra']['ratios'])
+    min_ratio = np.maximum(ratios.min(), 1e-6)
+    normed_ratios = np.round(ratios / min_ratio, 2)
+
+    def is_round(x):
+        return x == int(x)
+
+    normed_ratios = [str(int(r)) if is_round(r) else str(r) for r in normed_ratios]
+    return tuple(genes), tuple(normed_ratios)
+
+
+def get_ratios(net):
+    cmp = net.compute_graph
+    cdg = net.central_dogma_graph
+    agg = cmp[cmp.type == 'aggregation']
+    all_ratios = [get_ratio(a, cdg) for _, a in agg.iterrows()]
+    return all_ratios
+
+
+
+def cotx_ratios_str(cotx):
+    lines = []
+    for tus, ratios in cotx:
+        lines.append(':'.join(tus) + ' -> ' + ':'.join(ratios))
+    return '\n'.join(lines)
+
+def generate_network_info(net):
+    """Generate a dictionnary of information for a network"""
+    # NOT the string version but the raw dict
+    arch, seqtype = ut.get_network_family(net)
+    uorf_vals, uorf_names = ut.get_all_uorf_values(net)
+    cdg = net.central_dogma_graph
+    genes = ut.flatten(cdg[cdg.type == 'PRT']['content'].tolist())
+    markers = tuple(sorted(net.get_inverted_input_proteins()))
+    all_outputs = tuple(sorted(net.get_output_proteins()))
+    dependent_outputs = tuple(sorted(list(set(all_outputs) - set(markers))))
+    ern_names = ut.get_all_ERNs_names(net)
+    cotx = get_ratios(net)
+    net_info = {
+        'sequestron_type': seqtype,
+        'architecture': arch,
+        'ern_names': ern_names,
+        'uorf_values': uorf_vals,
+        'uorf_names': ut.flatten(uorf_names),
+        'genes': genes,
+        'markers': markers,
+        'output_proteins': all_outputs,
+        'dependent_outputs': dependent_outputs,
+        'cotx': cotx,
+        'cotx_str': cotx_ratios_str(cotx),
+        'ern_names_str': ', '.join(ern_names),
+    }
+    return net_info
 
 
 #                                                                            }}}
@@ -216,7 +252,6 @@ def transcription_unit_from_L1(l1id: str, lib: PartsLibrary) -> TranscriptionUni
             msg += f'\nlib.L0s[{l}]: {lib.L0s.loc[l]}'
             msg += f'\nlib.L0s: {lib.L0s}'
             raise NetworkConstructionError(msg)
-
     return TranscriptionUnit([Slot(lib, p) for p in parts])
 
 
@@ -324,7 +359,7 @@ class Network:
         transcription_units: dict[str, TranscriptionUnit],  # dict of {TU_name: TU}
         raw_tu_in_sources: List[Tuple[str, str, int]],  # list of (source_name, TU_name, position)
         raw_aggregations: List[Tuple[int, str, float]],  # list of (agg_id, source_name, ratio)
-        build: bool = True,  # whether to build the network after loading the raw data
+        build: bool = True,  # whether to build the network's graph
         use_cache: Optional[str] = None,  # path to cache
         **kwargs,
     ):
@@ -347,7 +382,10 @@ class Network:
                 n.build()
             return n
 
-        return ut.get_cache(lambda: actually_build(), n.get_signature(), use_cache)
+        n = ut.get_cache(lambda: actually_build(), n.get_signature(), use_cache)
+
+        return n
+
 
     @classmethod
     def __obsolete__from_dict(
@@ -395,6 +433,7 @@ class Network:
         assert len(self.transcription_units) > 0, f'No transcription units in recipe {self.name}'
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
+
 
     def is_built(self) -> bool:
         return (

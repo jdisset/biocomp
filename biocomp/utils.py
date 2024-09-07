@@ -1,6 +1,7 @@
 ### {{{                          --     imports     --
 import yaml
 import json
+from rich import print as rprint
 import copy
 from copy import deepcopy
 import xxhash
@@ -8,6 +9,7 @@ import time
 from pathlib import Path
 from tqdm import tqdm
 import jax
+from omegaconf import OmegaConf, DictConfig, ListConfig
 from jax.experimental import host_callback
 from jax import jit, vmap, lax
 from jax import tree_util as pytree
@@ -24,16 +26,58 @@ from .recipe import XP
 import rich
 import subprocess
 import os
+from functools import cached_property
 
 import cProfile
 
-from typing import Union, Tuple, List, Dict, Any, Optional, Callable, Sequence, Iterable
+from biocomp.models import buildLibFromDatabase
+
+from pydantic import BaseModel
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
-PathLike = Union[str, Path]
-##────────────────────────────────────────────────────────────────────────────}}}
+from typing import (
+    Union,
+    List,
+    Dict,
+    Any,
+    Optional,
+    Callable,
+    Sequence,
+    TypeVar,
+    Generic,
+    Type,
+)
 
+T = TypeVar('T')
+R = TypeVar('R')
+PathLike = Union[str, Path]
+DictLike = Union[Dict, DictConfig]
+
+
+class ArbitraryModel(BaseModel):
+
+    class Config:
+        arbitrary_types_allowed = True
+        extra = 'forbid'
+        validate_default = True
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        return super().model_dump(serialize_as_any=True, **kwargs)
+
+    def model_dump_json(self, **kwargs) -> str:
+        return super().model_dump_json(serialize_as_any=True, **kwargs)
+
+    def model_dump_yaml(self, **kwargs) -> str:
+        dict_repr = self.model_dump()
+        return yaml_dump(dict_repr, **kwargs)
+
+
+    def __str__(self):
+        return self.__repr__()
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 # {{{                       --     logging utils     --
 # ···············································································
 
@@ -44,29 +88,28 @@ from rich.logging import RichHandler
 def setup_logger(lname=None, level=logging.INFO):
     log = logging.getLogger(lname)
     if log.hasHandlers():
-        log.handlers.clear()
+        for handler in log.handlers:
+            log.removeHandler(handler)
     logging_handler = RichHandler()
     logging_handler.setFormatter(logging.Formatter(datefmt="%Y-%m-%dT%H:%M:%S%z "))
-    logging_handler._log_render.show_path = False
+    logging_handler._log_render.show_path = True
+    # no propagate:
+    log.propagate = False
+    # add origin (source) to log messages
     log.addHandler(logging_handler)
     log.setLevel(level)
     return log
 
 
 setup_logger()
-setup_logger('jax')
-logger = setup_logger('biocomp')
-logger.propagate = False
+setup_logger('jax', logging.WARNING)
+logger = setup_logger('biocomp', logging.WARNING)
 
-
-def set_loglevel(level: str):
-    global logger
-    level = level.upper()
-    logger.propagate = False
-    logger.setLevel(level)
-    logger.info(f"Log level set to {level}")
-    return level
-
+def set_loglevel(lname, level):
+    log = logging.getLogger(lname)
+    log.setLevel(level)
+    log.propagate = False
+    return log
 
 @contextmanager
 def timer(name=None, use_logger=True):
@@ -98,7 +141,7 @@ def timer(name=None, use_logger=True):
 import pickle
 
 
-def save(data, path, overwrite=False, rename_if_exists=True):
+def save(data: Any, path: Union[str, Path], overwrite: bool = False, rename_if_exists: bool = True):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -112,7 +155,7 @@ def save(data, path, overwrite=False, rename_if_exists=True):
         pickle.dump(data, file)
 
 
-def load(path):
+def load(path: Union[str, Path]) -> Any:
     path = Path(path)
     if not path.is_file():
         raise ValueError(f'Not a file: {path}')
@@ -123,9 +166,14 @@ def load(path):
 
 #                                                                            }}}
 ## {{{                           --     cache     --
+
+
 def get_cache(
-    gen_f: Callable, signature: str, cache_location: Optional[PathLike], create_dir: bool = True
-):
+    gen_f: Callable[[], T],
+    signature: str,
+    cache_location: Optional[PathLike],
+    create_dir: bool = True,
+) -> T:
     """
     Get a cached value or generate it if it doesn't exist.
     Args:
@@ -173,46 +221,41 @@ def get_cache(
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 ## {{{                  --     function serialization     --
 import inspect
 import sys
-from dataclasses import dataclass
+from functools import lru_cache
 
 
-# TODO: use a special OmegaConf resolver to decode EncodedFunction
-# could be that the fname is ${EncodedFunction:fname}. The resolver can
-# access the _parent_ node to decode it and have access to the module and kwargs
-# could even remove the module and just use ${Function:module.fname}
+class PartialFunction(ArbitraryModel, Generic[T, R]):
+    func: Union[str, Callable]  # 'module.fname' or 'fname' or function
+    args: list = []
+    kwargs: dict = {}
+    modules: list = []
 
-
-@dataclass
-class EncodedFunction:
-    fname: str
-    kwargs: dict
-    module: Optional[str] = None
-
-    def __init__(self, fname, kwargs=None, module=None):
-        self.fname = fname
-        self.kwargs = kwargs or {}
-        self.module = module
-
-    def get_impl(self, module_names: Optional[list[str]] = None) -> Callable:
-        if not hasattr(self, '__func'):
-            self.__func = decode_function(self, module_names)
-        return self.__func
+    def get_impl(self, extra_module_names: Optional[List[str]] = None) -> Callable:
+        if extra_module_names is None:
+            extra_module_names = []
+        if isinstance(self.func, str):
+            implementation = decode_type(self.func, self.modules + extra_module_names)
+            assert callable(implementation), f'{self.func} is not a function'
+            self.func = partial(implementation, *self.args, **self.kwargs)
+        return self.func
 
     def __call__(self, *args, **kw):
         return self.get_impl()(*args, **kw)
 
     def __repr__(self):
-        return f'EncodedFunction({self.fname=}, {self.kwargs=}, {self.module}=)'
+        return f'PartialFunction({self.func=}, {self.args=}, {self.kwargs=})'
 
-    def to_dict(self):
-        return {
-            'module': self.module,
-            'fname': self.fname,
-            'kwargs': self.kwargs,
-        }
+    def get_name(self) -> str:
+        if isinstance(self.func, str):
+            spl = self.func.rsplit('.', 1)
+            if len(spl) == 2:
+                return spl[1]
+            return self.func
+        return self.func.__name__
 
 
 def unwrap_partial_function(implementation):
@@ -224,7 +267,7 @@ def unwrap_partial_function(implementation):
     return implementation, partial_args
 
 
-def encode_function(func: Callable, **kwargs) -> EncodedFunction:
+def encode_function(func: Callable, **kwargs) -> PartialFunction:
     func, partial_args = unwrap_partial_function(func)
     kwargs.update(partial_args)
 
@@ -241,27 +284,72 @@ def encode_function(func: Callable, **kwargs) -> EncodedFunction:
         elif param.default != inspect.Parameter.empty:
             f_kwargs[name] = param.default
 
-    return EncodedFunction(fname=func.__name__, kwargs=f_kwargs, module=module_name)
+    fname = func.__name__
+    if module_name is not None:
+        fname = f'{module_name}.{fname}'
+
+    return PartialFunction(func=fname, kwargs=f_kwargs)
 
 
-def decode_function(
-    encoded_func: EncodedFunction, module_names: Optional[list[str]] = None
-) -> Callable:
+def decode_type(
+    type_str: str,
+    available_module_names: Optional[List[str]] = None,
+) -> Type:
+    """
+    If it exists, returns the first type found
+    with the given name in the given modules
+    format: 'module.type' or 'type'
+    """
 
-    if module_names is None:
-        if encoded_func.module is not None:
-            module_names = [encoded_func.module]
-        else:  # use the global namespace
-            module_names = ['__main__']
 
-    for module_name in module_names:
+    if available_module_names is None:
+        available_module_names = ['__main__']
+
+    spl = type_str.rsplit('.', 1)
+    if len(spl) == 2:
+        module_name, type_name = spl
+        available_module_names = [module_name] + available_module_names
+    else:
+        type_name = type_str
+
+    for module_name in available_module_names:
         if module_name in sys.modules:
             module = sys.modules[module_name]
-            if hasattr(module, encoded_func.fname):
-                implementation = getattr(module, encoded_func.fname)
-                return partial(implementation, **encoded_func.kwargs)
+        else:
+            # load module
+            module = __import__(module_name, fromlist=[type_name])
+        if hasattr(module, type_name):
+            return getattr(module, type_name)
 
-    raise ValueError(f'No function named {encoded_func.fname} in modules {module_names}')
+    raise ValueError(f'No type named {type_str} in modules {available_module_names}')
+
+
+def build_if_has_target(
+    value: Union[DictLike, T],
+    available_module_names: Optional[List[str]] = None,
+    enforce_type: Optional[Type[T]] = None,
+) -> Union[T, DictLike]:
+
+    """
+    If the dictionary has a key '_target_', will instantiate
+    an object of this type with the remaining keys as arguments.
+    """
+
+    if not dict_like(value):
+        if enforce_type is not None and not isinstance(value, enforce_type):
+            raise ValueError(f'Value {value} is not an instance of {enforce_type}')
+        return value
+
+    assert isinstance(value, DictLike)
+
+    if not '_target_' in value:  # type: ignore
+        return value
+
+    target_type = decode_type(value['_target_'], available_module_names)
+    if enforce_type is not None and not issubclass(target_type, enforce_type):
+        raise ValueError(f'Target type {target_type} not a subclass of {enforce_type}')
+    ctor_dict = {str(k): value[k] for k in value if k != '_target_'}
+    return target_type(**ctor_dict)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -372,6 +460,7 @@ def generate_base_nested_config(
     namespace: str = 'default',
 ):
 
+
     if available_functions is None:
         available_functions = get_configurable_functions(namespace)
 
@@ -381,6 +470,7 @@ def generate_base_nested_config(
     # if it does, we can generate an empty config for it
 
     emptyconf = {}
+
 
     def generate_empty_func_conf(func_name, func_args):
         subconf = {}
@@ -420,6 +510,7 @@ def dict_like(obj) -> bool:
         and hasattr(obj, '__getitem__')
         and hasattr(obj, '__contains__')
         and hasattr(obj, '__iter__')
+        and hasattr(obj, 'items')
     )
 
 
@@ -442,8 +533,15 @@ def extend(d1, d2):
 DEFAULT_MERGE_MODES = {'replace': replace, 'extend': extend, 'auto': 'auto'}
 
 
+def maybecopy(obj, deep: bool = True):
+    return deepcopy(obj) if deep else obj
+
+
 def updated_dict(
-    d1, d2, merge_mode: Optional[Dict[Union[Type, str], Union[str, Callable]]] = None
+    d1,
+    d2,
+    merge_mode: Optional[Dict[Union[Type, str], Union[str, Callable]]] = None,
+    deep: bool = True,
 ) -> Dict:
 
     if merge_mode is None:
@@ -470,9 +568,9 @@ def updated_dict(
 
     if mmode == 'auto':
         if not dict_like(d1):
-            return deepcopy(d2) if d2 is not None else deepcopy(d1)
+            return maybecopy(d2, deep) if d2 is not None else maybecopy(d1, deep)
         if not dict_like(d2):
-            return deepcopy(d1) if d1 is not None else deepcopy(d2)
+            return maybecopy(d1, deep) if d1 is not None else maybecopy(d2, deep)
     else:
         raise NotImplementedError(f'Cannot merge {t1} and {t2}')
 
@@ -483,12 +581,11 @@ def updated_dict(
         if key in d2:
             res[key] = updated_dict(d1[key], d2[key], merge_mode)
         else:
-            res[key] = deepcopy(d1[key])
+            res[key] = maybecopy(d1[key], deep)
     for key, val in d2.items():
         if not key in d1:
-            res[key] = deepcopy(val)
+            res[key] = maybecopy(val, deep)
     return res
-
 
 
 def nested_resolve(
@@ -502,7 +599,7 @@ def nested_resolve(
 
     new_seen = deepcopy(already_seen)
     for k, v in input_dict.items():
-        new_seen[k] = updated_dict(v, already_seen.get(k, None)) if resolve_key(k) else deepcopy(v)
+        new_seen[k] = updated_dict(already_seen.get(k, None), v) if resolve_key(k) else deepcopy(v)
 
     new_dict = {
         k: nested_resolve(deepcopy(new_seen[k]), deepcopy(new_seen), resolve_key)
@@ -522,7 +619,8 @@ def generate_full_nested_config(
         empty_config = generate_base_nested_config(namespace=namespace, **kw)
     if user_config is None:
         return empty_config
-    return nested_resolve(updated_dict(user_config, empty_config))
+    merged = nested_resolve(updated_dict(user_config, empty_config))
+    return merged
 
 
 class BiocompYamlDumper(yaml.SafeDumper):
@@ -557,9 +655,6 @@ def yaml_dump(data, **kw):
     return yaml.dump(data, Dumper=BiocompYamlDumper, **kw)
 
 
-from omegaconf import OmegaConf
-
-
 def dump_default_config(namespace: str = 'default'):
     baseconf = generate_base_nested_config(add_defaults=True, namespace=namespace)
     # baseconf = delete_empty(baseconf)
@@ -572,58 +667,22 @@ def dump_default_config(namespace: str = 'default'):
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{               --     loading constants and config     --
 
-from omegaconf import OmegaConf
 from pathlib import Path
 
 
-def load_config(*config_files):  # in order of priority, the last one wins
-    config = OmegaConf.create()
-    for config_file in config_files:
-        if not Path(config_file).exists():
-            logger.warning(f'Config file {config_file} not found.')
-            continue
-        config = OmegaConf.merge(config, OmegaConf.load(config_file))
-    OmegaConf.resolve(config)
-    return config
+BIOCOMP_ROOT_PATH = os.getenv('BIOCOMP_ROOT')
+if BIOCOMP_ROOT_PATH is None:
+    logger.warning('BIOCOMP_ROOT not defined. Using default paths.')
+    BIOCOMP_ROOT_PATH = '~/Dropbox (MIT)/Biocomp/'
 
-
-# BIOCOMP_BASE_CONFIG = load_config(resource_filename('biocomp', 'config/base.yaml'))
-
-# TODO: switch the following to use the config file
-# we check if there is a file named ~/.biocomp.json
-# if so, we load it and use the paths defined there
-# otherwise, we use the default paths defined above
-GLOBAL_CONFIG_PATH = Path.home() / '.biocomp.json'
-if GLOBAL_CONFIG_PATH.exists():
-    with open(GLOBAL_CONFIG_PATH) as f:
-        config = json.load(f)
-        DEFAULT_XP_PATH = Path(config.get('xp_path', '')).expanduser()
-        DEFAULT_RECIPE_PATH = config.get('recipe_path', '')
-        if isinstance(DEFAULT_RECIPE_PATH, str):
-            DEFAULT_RECIPE_PATH = Path(DEFAULT_RECIPE_PATH).expanduser()
-        elif isinstance(DEFAULT_RECIPE_PATH, list):
-            DEFAULT_RECIPE_PATH = [Path(p).expanduser() for p in DEFAULT_RECIPE_PATH]
-        DEFAULT_LIB_PATH = Path(config.get('lib_path', '')).expanduser()
-
-# we also check the environment variables to see if they define the paths
-# if so, we use them in priority
-
-if 'BIOCOMP_XP_PATH' in os.environ:
-    DEFAULT_XP_PATH = Path(os.environ['BIOCOMP_XP_PATH']).expanduser()
-if 'BIOCOMP_RECIPE_PATH' in os.environ:
-    DEFAULT_RECIPE_PATH = Path(os.environ['BIOCOMP_RECIPE_PATH']).expanduser()
-if 'BIOCOMP_LIB_PATH' in os.environ:
-    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_LIB_PATH']).expanduser()
-
+DEFAULT_LIB_PATH = Path(BIOCOMP_ROOT_PATH).expanduser() / 'partsdb.sqlite'
+DEFAULT_LIB_PATH = f'sqlite:///{DEFAULT_LIB_PATH}'
+if 'BIOCOMP_PARTS_DB' in os.environ:
+    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_PARTS_DB']).expanduser().resolve()
 
 def load_lib(lib_path=DEFAULT_LIB_PATH):
-    return load(lib_path)
-
-
-# convenience loading functions with default paths
-def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PATH, **kwargs):
-    xp = XP(xpname, xp_path, recipe_path, lib, **kwargs)
-    return xp
+    lib = buildLibFromDatabase(lib_path)
+    return lib
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -632,6 +691,73 @@ def load_xp(xpname, lib, xp_path=DEFAULT_XP_PATH, recipe_path=DEFAULT_RECIPE_PAT
 # │            general purpose utils            │
 # ╰───────────────────── ⟱ ─────────────────────╯
 
+## {{{                        --     list utils     --
+
+ListLike = Union[list, tuple, ListConfig]
+
+
+def list_like(obj) -> bool:
+    return isinstance(obj, (list, tuple, ListConfig))
+
+
+
+
+
+
+def as_list(obj:Any) -> Union[list, tuple]:
+    """Put obj in a list if it's not already a list or tuple"""
+    return [obj] if not isinstance(obj, (list, tuple)) else obj
+
+
+def flatten_single(t) -> list:
+    """Flatten a single level of a nested list"""
+    return [item for sublist in t for item in sublist]
+
+
+def flatten(x) -> list:
+    """Flatten nested lists of lists. (always returns a list)"""
+    return [a for i in x for a in flatten(i)] if list_like(x) else [x]
+
+
+def set_list_item(lst: list, i: int, val: Any):
+    """make sure that a list has at least i elements and then assign val to the ith element"""
+    if len(lst) <= i:
+        lst.extend([None] * (i - len(lst) + 1))
+    lst[i] = val
+
+
+def isSubset(l1: Sequence, l2: Sequence) -> bool:
+    """Check if all elements of l1 are in l2"""
+    for e in l1:
+        if e not in l2:
+            return False
+    return True
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                        --     dict utils     --
+
+
+def remove_keys(d: Dict, keys: Sequence):
+    # ignored_keys = [k for k in keys if k in d]
+    new_dict = {k: v for k, v in d.items() if k not in keys}
+    return new_dict
+
+
+def dict_print(d: dict, indent=4):
+    res = ''
+    def dict_print_impl(d, indentlvl):
+        nonlocal res
+        for k, v in d.items():
+            if dict_like(v):
+                res += ' ' * indentlvl + f'{k}:\n'
+                dict_print_impl(v, indentlvl + indent)
+            else:
+                res += ' ' * indentlvl + f'{k}: {v}\n'
+    dict_print_impl(d, 0)
+    rprint(res)
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                     --     profiler context     --
 
@@ -647,6 +773,45 @@ def profiler(filename='profile.prof'):
     yield
     profiler.disable()
     profiler.dump_stats(filename)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                        --     json utils     --
+
+
+def load_json5(path: PathLike):
+    with open(path) as f:
+        return json5.load(f)
+
+
+def np_converter(obj):
+    import jax.numpy as jnp
+
+    if isinstance(obj, (np.integer, jnp.integer)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, jnp.floating)):
+        return float(obj)
+    elif isinstance(obj, (np.ndarray, jnp.ndarray)):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_) or isinstance(obj, jnp.bool_):
+        return bool(obj)
+    elif np.isnan(obj) or jnp.isnan(obj):
+        return None
+
+
+def make_json_compatible(o, converter=np_converter, float_precision=None):
+    if float_precision is not None:
+        return json.loads(
+            json.dumps(o, default=converter), parse_float=lambda x: round(float(x), float_precision)
+        )
+    else:
+        return json.loads(json.dumps(o, default=converter))
+
+
+def decode_json(df, cols):
+    for col in cols:
+        df[col] = df[col].apply(lambda x: json.loads(str(x)))
+    return df
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -685,184 +850,7 @@ class Timer:
             print(msg)
 
 
-class TimeStore:
-    def __init__(self, console=None):
-        self.console = console
-        self.timers = {}
-
-    def start(self, name, with_spinner=False):
-        if name not in self.timers:
-            self.timers[name] = Timer(name, self.console)
-        self.timers[name].start(with_spinner=with_spinner)
-        return self.timers[name]
-
-    def lap(self, name):
-        self.timers[name].lap()
-
-    def stop_print(self, name):
-        if isinstance(name, str):
-            assert name in self.timers
-            self.timers[name].stop_print()
-        else:
-            assert isinstance(name, Timer)
-            name.stop_print()
-
-    def stop_all(self):
-        for name in self.starts:
-            self.lap(name)
-
-    def print_all(self):
-        for name in self.times:
-            print(f"{name}: {self.times[name][-1]}")
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
-## {{{                        --     misc utils     --
-
-
-def remove_keys(d: Dict, keys: Sequence):
-    # ignored_keys = [k for k in keys if k in d]
-    new_dict = {k: v for k, v in d.items() if k not in keys}
-    return new_dict
-
-
-def get_git_commit_hash():
-    bcpath = Path(__file__).parent
-    bcpath = bcpath.resolve()
-    return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=bcpath).decode('ascii').strip()
-
-
-def get_biocomp_version():
-    return get_distribution('biocomp').version
-
-
-def np_converter(obj):
-    import jax.numpy as jnp
-
-    if isinstance(obj, (np.integer, jnp.integer)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, jnp.floating)):
-        return float(obj)
-    elif isinstance(obj, (np.ndarray, jnp.ndarray)):
-        return obj.tolist()
-    elif isinstance(obj, np.bool_) or isinstance(obj, jnp.bool_):
-        return bool(obj)
-    elif np.isnan(obj) or jnp.isnan(obj):
-        return None
-
-
-# parse_float=lambda x: round(float(x), 3)
-def make_json_compatible(o, converter=np_converter, float_precision=None):
-    if float_precision is not None:
-        return json.loads(
-            json.dumps(o, default=converter), parse_float=lambda x: round(float(x), float_precision)
-        )
-    else:
-        return json.loads(json.dumps(o, default=converter))
-
-
-def apply_constraints(par, cons):
-    newpar = par.copy()
-    F = {'clip': jnp.clip}
-    for ctype in cons.keys():
-        assert ctype in F.keys(), f'constraint type {ctype} not implemented'
-        f = F[ctype]
-        for c in cons[ctype]:
-            x = at_path(newpar, c[0])
-            assert x is not None, f'path {c[0]} not found in parameters'
-            at_path(newpar, c[0], f(x, *c[1]))
-    return newpar
-
-
-def uniqueIdGenerator(start=0):
-    unique_id = int(start)
-
-    def uniqueId():
-        nonlocal unique_id
-        unique_id += 1
-        return unique_id - 1
-
-    return uniqueId
-
-
-def flatten_single(t):
-    """Flattens a single level of a nested list"""
-    return [item for sublist in t for item in sublist]
-
-
-def flatten(x):
-    if isinstance(x, list):
-        return [a for i in x for a in flatten(i)]
-    else:
-        return [x]
-
-
-from omegaconf import OmegaConf
-
-
-def decode_json(df, cols):
-    for col in cols:
-        df[col] = df[col].apply(lambda x: json.loads(str(x)))
-    return df
-
-
-def isSubset(l1, l2):
-    for e in l1:
-        if e not in l2:
-            return False
-    return True
-
-
-class DotDict(dict):
-    def __getattr__(*args):
-        val = dict.__getitem__(*args)
-        return DotDict(val) if type(val) is dict else val
-
-    __setattr__ = dict.__setitem__
-    __delattr__ = dict.__delitem__
-
-
-# make sure that a list has at least i elements and then assign val to the ith element
-def set_list_item(lst, i, val):
-    if len(lst) <= i:
-        lst.extend([None] * (i - len(lst) + 1))
-    lst[i] = val
-
-
-def load_json5(path: PathLike):
-    with open(path) as f:
-        return json5.load(f)
-
-
-def flat_concat(*arrays):
-    return jnp.concatenate([jnp.asarray(a).ravel() for a in arrays])
-
-
-def flatten_list(x):
-    """Flatten nested lists of lists."""
-    if isinstance(x, list):
-        return [a for i in x for a in flatten_list(i)]
-    else:
-        return [x]
-
-
-def str_to_int_array(s):
-    return np.array([ord(c) for c in s], dtype=np.int32)
-
-
-def int_array_to_str(a):
-    return ''.join([chr(int(c)) for c in a])
-
-
-def tree_to_jax(params):
-    return jax.tree_map(lambda x: jnp.asarray(x), params)
-
-
-def tree_to_np(params):
-    return jax.tree_map(lambda x: np.asarray(x), params)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}#                                                                            }}}
 ## {{{                  --     parameter initializers     --
 
 
@@ -898,7 +886,7 @@ def logb(x, base=10):
     return np.log(x) / np.log(base)
 
 
-def cubic_exp_fwd(x, threshold, base, scale=1):
+def cubic_exp_fwd(x, threshold, base, scale: float = 1):
     """
     cubic polynomial that goes through (0,0) and has same first
     and second derivative as the log (in given base) at the threshold.
@@ -918,7 +906,7 @@ def cubic_exp_fwd(x, threshold, base, scale=1):
     return a * x**3 + b * x**2 + c * x
 
 
-def cubic_exp_inv(y, threshold, base, scale):
+def cubic_exp_inv(y, threshold, base, scale: float):
     """
     inverse of cubic_exp_fwd (on [0,threshold])
     """
@@ -962,7 +950,7 @@ def log_poly_log(x, threshold: float = 100, base: int = 10, compression: float =
     return x * sign
 
 
-def inverse_log_poly_log(y, threshold=100, base=10, compression=0.5):
+def inverse_log_poly_log(y, threshold: float = 100, base: int = 10, compression: float = 0.5):
     """
     inverse of log_poly_log
     """
@@ -1335,6 +1323,26 @@ def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | check
         return wrapped_function
 
 
+def flat_concat(*arrays):
+    return jnp.concatenate([jnp.asarray(a).ravel() for a in arrays])
+
+
+def str_to_int_array(s):
+    return np.array([ord(c) for c in s], dtype=np.int32)
+
+
+def int_array_to_str(a):
+    return ''.join([chr(int(c)) for c in a])
+
+
+def tree_to_jax(params):
+    return jax.tree_map(lambda x: jnp.asarray(x), params)
+
+
+def tree_to_np(params):
+    return jax.tree_map(lambda x: np.asarray(x), params)
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                      --     topology analysis helpers     --
 
@@ -1483,3 +1491,28 @@ def get_network_family(network):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+## {{{                        --     misc utils     --
+
+
+def get_git_commit_hash():
+    bcpath = Path(__file__).parent
+    bcpath = bcpath.resolve()
+    return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=bcpath).decode('ascii').strip()
+
+
+def get_biocomp_version():
+    return get_distribution('biocomp').version
+
+
+def uniqueIdGenerator(start=0):
+    unique_id = int(start)
+
+    def uniqueId():
+        nonlocal unique_id
+        unique_id += 1
+        return unique_id - 1
+
+    return uniqueId
+
+
+##────────────────────────────────────────────────────────────────────────────}}}#                                                                            }}}

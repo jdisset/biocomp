@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import biocomp as bc
 from . import utils as ut
+from .utils import ArbitraryModel
 from pathlib import Path
 import json
 from . import defaults as dft
@@ -27,25 +28,29 @@ import pickle
 from matplotlib.ticker import FixedLocator, FuncFormatter
 import matplotlib.ticker as ticker
 from .network import Network
-
+from pydantic import BaseModel, ValidationError, Field, field_validator
 from typing import Optional, Union, List, Tuple, Callable, Collection, Any
 
 ndArray = Union[np.ndarray, jnp.ndarray]
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     data rescaler     --
-from pydantic import BaseModel, ValidationError, Field, field_validator
 
 NumLike = Union[float, int, np.ndarray, jnp.ndarray]
 NdArray = Union[np.ndarray, jnp.ndarray]
 
 
-class DataRescaler(BaseModel):
-    def fwd(self, x: NumLike) -> NdArray:
-        raise NotImplementedError()
 
-    def inv(self, y: NumLike) -> NdArray:
-        raise NotImplementedError()
+class DataRescaler(ArbitraryModel):
+    # def fwd(self, x: NdArray) -> NdArray:
+    # raise NotImplementedError()
+    def fwd(self, x):
+        return x
+
+    # def inv(self, y: NdArray) -> NdArray:
+    # raise NotImplementedError()
+    def inv(self, y):
+        return y
 
 
 class ValueRange(BaseModel):
@@ -53,6 +58,73 @@ class ValueRange(BaseModel):
     max: float = 1
 
 
+class NoOpRescaler(DataRescaler):
+    def fwd(self, x):
+        return x
+
+    def inv(self, y):
+        return y
+
+
+class LogPolyLogRescaler(DataRescaler):
+    poly_region_threshold: float = 300  # where we switch from log to poly
+    poly_region_coef: float = 0.4  # how much we compress the poly part
+
+    def model_post_init(self, *_):
+        self.__symlog = partial(
+            ut.log_poly_log, threshold=self.poly_region_threshold, compression=self.poly_region_coef
+        )
+        self.__invsymlog = partial(
+            ut.inverse_log_poly_log,
+            threshold=self.poly_region_threshold,
+            compression=self.poly_region_coef,
+        )
+
+    def fwd(self, x):
+        return self.__symlog(x)
+
+    def inv(self, y):
+        return self.__invsymlog(y)
+
+
+class LogisticLogRescaler(DataRescaler):
+    """
+    Rescale values from input_range to [0, 1], switching from a logistic to a logarithmic function at T.
+    """
+
+    max_val: float = 1e8  # point at which f = 1
+    thresh: float = 100  # transition point
+    k: float = 0.1  # steepness of the logistic function
+    lshift: float = 1  # shift in the logarithmic part
+
+    def model_post_init(self, *_):
+        self._A, self._B = self.calculate_log_constants()
+
+    def calculate_log_constants(self):
+        A = 1 / np.log(self.max_val - self.thresh + self.lshift)
+        B = 1 / (1 + np.exp(-self.k * (self.thresh - self.thresh))) - A * np.log(self.lshift)
+        return A, B
+
+    def logistic(self, x, T, k):
+        return 1 / (1 + np.exp(-k * (x - T)))
+
+    def fwd(self, x: np.ndarray) -> np.ndarray:
+        result = np.where(
+            x < self.thresh,
+            self.logistic(x, self.thresh, self.k),
+            self._A * np.log(x - self.thresh + self.lshift) + self._B,
+        )
+        return result
+
+    def inv(self, y: np.ndarray) -> np.ndarray:
+        # Inverse function
+        inv_log = (y - self._B) / self._A
+        result = np.where(
+            y < self.logistic(self.thresh, self.thresh, self.k),
+            self.thresh - (1 / self.k) * np.log((1 / y) - 1),
+            np.exp(inv_log) + self.thresh - self.lshift,
+        )
+        return result
 class CompressedSymLogRescaler(DataRescaler):
     """
     Rescale values from input_range to [0, 1], with tolerance for outside values.
@@ -64,6 +136,8 @@ class CompressedSymLogRescaler(DataRescaler):
     Also uses a low_end_compression factor to "squish" low values, which is useful for
     fluorescence data where low values are often noisy even though they just mean "no fluorescence".
     """
+
+    # (log(1+x/C) - log(m/C) ) / (log(M/C) - log(m/C)) = y
 
     # NOTE: with this, low values are squished symmetrically around input_range.min,
     #       meaning if they get much lower than input_range.min, they will again grow below 0 as fast as
@@ -83,7 +157,7 @@ class CompressedSymLogRescaler(DataRescaler):
     poly_region_threshold: float = 300  # where we switch from log to poly
     poly_region_coef: float = 0.4  # how much we compress the poly part
 
-    def __post_init__(self):
+    def model_post_init(self, *_):
         self.__symlog = partial(
             ut.log_poly_log, threshold=self.poly_region_threshold, compression=self.poly_region_coef
         )
@@ -115,16 +189,13 @@ class CompressedSymLogRescaler(DataRescaler):
 # Rescale values from input_range to [0, 1], with tolerance for outside values.
 # Lower values will always be > 0, but higher values continue to increase logarithmically.
 # """
-
 # LOG10 = np.log(10)
 # PLOG10 = scipy.special.lambertw(1/LOG10).real
 # T10 = np.exp(PLOG10) - (np.log(PLOG10 / LOG10) / LOG10)
 # XTHRESH = PLOG10 / LOG10
 # YTHRESH = 10**(XTHRESH)
-
-#     def explog10(self, x):
+# def explog10(self, x):
 # return np.where(x > XTHRESH, np.log10(x)+T10, 10**x)
-
 # def inv_explog10(self, y):
 # return np.where(y < YTHRESH, 10**(y-T10), np.log10(y))
 
@@ -261,7 +332,7 @@ def sample_batches_direct(
     except ValueError:
         n_nans = np.sum(np.isnan(selection_proba))
         ut.logger.warning(
-            f'Sampling failed, {n_nans} / {len(selection_proba)} NaNs in selection_proba.'
+            f"Sampling failed, {n_nans} / {len(selection_proba)} NaNs in selection_proba."
         )
         selection_proba[np.isnan(selection_proba)] = 0.0
         selection_proba /= np.sum(selection_proba)
@@ -304,11 +375,12 @@ class DataConfig(BaseModel):
 
     resampling: ResamplingConfig = Field(default_factory=ResamplingConfig)
 
-    rescaler: DataRescaler = Field(default_factory=CompressedSymLogRescaler)
+    # rescaler: DataRescaler = Field(default_factory=CompressedSymLogRescaler)
+    rescaler: DataRescaler
 
 
-DEFAULT_DATA_CONFIG = DataConfig()
-DEFAULT_DATA_CACHE_DIR = '../__cache/biocomp_densities_cache'
+DEFAULT_DATA_CONFIG = DataConfig(rescaler=CompressedSymLogRescaler())
+DEFAULT_DATA_CACHE_DIR = "../__cache/biocomp_densities_cache"
 
 
 class DataManager:
@@ -328,7 +400,6 @@ class DataManager:
         data_cfg: DataConfig = DEFAULT_DATA_CONFIG,
         cache_location: Optional[Union[Path, str]] = DEFAULT_DATA_CACHE_DIR,
     ):
-
         assert len(X) == len(Y) == len(networks)
 
         self.data_cfg = data_cfg
@@ -349,11 +420,11 @@ class DataManager:
             invalid_fraction = invalid_at.sum() / len(invalid_at)
             if invalid_fraction > data_cfg.acceptable_out_of_range_fraction_in_raw_data:
                 raise ValueError(
-                    f'Too many invalid values in {networks[i].name} raw data ({100*invalid_fraction:.2f}%)'
+                    f"Too many invalid values in {networks[i].name} raw data ({100*invalid_fraction:.2f}%)"
                 )
             if invalid_fraction > 0.0:
                 ut.logger.debug(
-                    f'Removing {invalid_at.sum()} invalid points for net {i} ({100*invalid_fraction:.2f}%)'
+                    f"Removing {invalid_at.sum()} invalid points for net {i} ({100*invalid_fraction:.2f}%)"
                 )
                 self._raw_X[i] = self._raw_X[i][~invalid_at]
                 self._raw_Y[i] = self._raw_Y[i][~invalid_at]
@@ -367,10 +438,10 @@ class DataManager:
         self._densities = None
         self.individual_compute_stacks = {}
         if self.data_cfg.perform_data_checks:
-            ut.logger.debug('Running data checks')
+            ut.logger.debug("Running data checks")
             for x, y, n in zip(self._X, self._Y, self._networks):
                 network_data_check(x, y, n)
-        ut.logger.info(f'Initialized a DataManager with {len(self._networks)} networks')
+        ut.logger.info(f"Initialized a DataManager with {len(self._networks)} networks")
 
     @classmethod
     def from_xps(cls, xplist, config, **kw):
@@ -421,14 +492,14 @@ class DataManager:
 
     def get_compute_stack(self):
         if self.compute_stack is None:
-            raise ValueError('Compute stack not built yet.')
+            raise ValueError("Compute stack not built yet.")
         return self.compute_stack
 
     def generate_kdes(self):
         """Generate KDEs to get the data densities of each sample"""
-        ut.logger.debug('Generating KDEs for data density estimation')
+        ut.logger.debug("Generating KDEs for data density estimation")
         npoints = [min(x.shape[0], int(self.data_cfg.resampling.kde_samples)) for x in self._X]
-        ut.logger.debug(f'Using {npoints} points for KDE estimation')
+        ut.logger.debug(f"Using {npoints} points for KDE estimation")
         xindices = [
             np.random.choice(x.shape[0], size=n, replace=False) for x, n in zip(self._X, npoints)
         ]
@@ -439,19 +510,19 @@ class DataManager:
             )
             for x, xi in zip(self._X, xindices)
         ]
-        ut.logger.debug('Done generating KDEs')
+        ut.logger.debug("Done generating KDEs")
 
     def compute_densities(self):
         """Compute the densities at each data point in the dataset, for each sample"""
-        ut.logger.debug('Computing densities')
-        ut.logger.debug(f'Using cache dir {self.cache_dir}')
+        ut.logger.debug("Computing densities")
+        ut.logger.debug(f"Using cache dir {self.cache_dir}")
 
         def get_signature(kde, x):
             n = x.shape[0]
             stepsize = max(n // 100, 1)
-            xsig = f'{x.shape}_{x[::stepsize]}'
-            ksig = f'{kde.factor:.20f}_{kde.n}_{kde.d}'
-            return f'{xsig}_{ksig}'
+            xsig = f"{x.shape}_{x[::stepsize]}"
+            ksig = f"{kde.factor:.20f}_{kde.n}_{kde.d}"
+            return f"{xsig}_{ksig}"
 
         def compute_d(kde, x):
             # cut in chunks to avoid memory issues
@@ -469,10 +540,10 @@ class DataManager:
 
         self._densities = [
             ut.get_cache(lambda: compute_d(kde, x), get_signature(kde, x), self.cache_dir)
-            for kde, x in tqdm(list(zip(self._kdes, self._X)), desc='computing densities')
+            for kde, x in tqdm(list(zip(self._kdes, self._X)), desc="computing densities")
         ]
 
-        ut.logger.debug(f'Done computing {len(self._densities)} densities')
+        ut.logger.debug(f"Done computing {len(self._densities)} densities")
 
     def rescale(self, X):
         return [self.data_cfg.rescaler.fwd(x) for x in X]
@@ -510,15 +581,16 @@ class DataManager:
                         jax.random.split(rng_key, len(self._networks)),
                     )
                 ),
-                desc='generating batches',
+                desc="generating batches",
             )
         ]
         xbatches, ybatches = zip(*all_batches)
         if concat_along_feature_axis:
             # concat along the feature axis (last dimension)
             # resulting shape is (N_BATCHES, BATCH_SIZE, N_MODELS * FEATURES)
-            xbatches, ybatches = np.concatenate(tuple(xbatches), axis=2), np.concatenate(
-                tuple(ybatches), axis=2
+            xbatches, ybatches = (
+                np.concatenate(tuple(xbatches), axis=2),
+                np.concatenate(tuple(ybatches), axis=2),
             )
             assert xbatches.shape == (n_batches, batch_size, sum([x.shape[1] for x in self._X]))
             assert ybatches.shape == (n_batches, batch_size, sum([y.shape[1] for y in self._Y]))

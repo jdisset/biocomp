@@ -25,5 +25,7 @@ from . import parameters as parameters
 from . import quantization as quantization
 from . import plotutils as plotutils
 from . import jaxutils as jaxutils
+from . import models as models
+from . import plotting as plotting
 
 from .utils import logger as logger

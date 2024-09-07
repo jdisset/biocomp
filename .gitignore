@@ -16,7 +16,7 @@ biocomp-static
 *.py[cod]
 *$py.class
 *package-lock.json
-*.pickle
+#*.pickle
 # C extensions
 *.so
 

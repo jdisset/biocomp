@@ -10,6 +10,7 @@ from .plotting_smooth import (
 )
 
 from . import plotting_core as pc
+from biocomp.plotutils import apply_style
 from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable
 from matplotlib import pyplot as plt
 from functools import partial
@@ -237,9 +238,10 @@ def draw_z_labels(
     for z, label, ltype in labels:
         z = float(z)
         assert ltype in props
-        draw_text(
-            ax, position=np.array([xpos, ypos, z]), project=project, label=label, **props[ltype]
-        )
+        if props[ltype] is not None:
+            draw_text(
+                ax, position=np.array([xpos, ypos, z]), project=project, label=label, **props[ltype]
+            )
 
 
 def draw_z_title(
@@ -391,7 +393,7 @@ def plot_3d_stack(
     # plot the slices
     for i, (f, z) in enumerate(zip(slice_functions, slice_zpositions)):
         axin = ax.inset_axes([0, 0, 1, 1], zorder=-z)
-        pc.apply_style(axin)
+        apply_style(axin)
         f(axin)
         inset_coords_world = np.array([axin.get_xlim(), axin.get_ylim()])
         inset_size_world = np.abs(inset_coords_world[:, 1] - inset_coords_world[:, 0])
@@ -421,7 +423,7 @@ def cube_face(
         hidden_spines = []
     if visible_spines is None:
         visible_spines = []
-    pc.apply_style(ax)
+    apply_style(ax)
     ax.set_xlim(xlims)
     ax.set_ylim(ylims)
     # not ticks
@@ -536,6 +538,9 @@ def smooth_3d(
 ):
 
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
+
+    if isinstance(ax, Axes):
+        ax = [ax]
 
     assert isinstance(ax, (list, tuple, np.ndarray)), f'ax must be a list or tuple, got {ax}'
 
