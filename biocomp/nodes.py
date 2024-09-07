@@ -41,6 +41,8 @@ class LayerInstance:
     apply: Callable
     output_shapes: Sequence[Tuple[int]]
     commit: Callable = None
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                 --     quantile variable helpers     --
@@ -189,10 +191,10 @@ def single_passthrough(input_shapes: Sequence[Tuple[int]], *_, **__) -> LayerIns
 # really we're just duplicating the input so we could also just use a passthrough node
 # or skip the node altogether (for a future version with an optimizer)
 
+
 # For now, input_shapes will always be [(1,)]
 def source(input_shapes: Sequence[Tuple[int]], n_outputs: int, **_) -> LayerInstance:
     assert len(input_shapes) == 1, f'A source node should have 1 input, got {len(input_shapes)}'
-
 
     def apply(value: ArrayLike, *_, **__) -> ArrayLike:
         return jnp.repeat(value, n_outputs, axis=0)
@@ -205,6 +207,128 @@ def source(input_shapes: Sequence[Tuple[int]], n_outputs: int, **_) -> LayerInst
 # inverse of source is just a passthrough, as it's only inverted when only one output and one input
 def inv_source(*args, **kwargs):
     return single_passthrough(*args, **kwargs)
+
+
+def source_new(
+    input_shapes: Sequence[Tuple[int]],
+    n_outputs: int,
+    layer_id: int,
+    stack: ComputeStack = None,
+    max_L1s: int = 5,
+    hidden_s=64,
+    depth=3,
+    **_,
+) -> LayerInstance:
+    assert len(input_shapes) == 1, f'A source node should have 1 input, got {len(input_shapes)}'
+
+    # vmap dense multilayer on same value and input, adding also a second input
+    # which is the position
+    # you want everything to be in the range 0-1, so define a maximum amount of
+    # L1s (5) and normalise
+
+    # TODO: change max_L1s, hidden_s, depth to compute config
+
+    local_layer_name = generate_layer_name(stack, layer_id, f'source{n_outputs}x')
+    namespace = f'local/{local_layer_name}'
+    pname = 'shapes'
+
+    def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key, **_):
+        params[f'{namespace}/{pname}'] = input_shapes
+        MLP_head(np.zeros((2,)), params, key)
+
+    def MLP_head(vals, params, key):
+        return dense_multilevel(
+            vals,
+            hidden_s,
+            1,
+            depth=depth,
+            activation=ACTIVATION_FUNCTIONS[DEFAULT_ACTIVATION],
+            key=key,
+            param_f=partial(init_if_needed, params, base_path='shared'),
+            name='NN/source',
+        )
+
+    def apply(
+        value: ArrayLike,
+        quantiles: ArrayLike,
+        params: ParameterTree,
+        node_id: ArrayLike,
+        key,
+    ) -> ArrayLike:
+        return jax.vmap(lambda position: MLP_head(ut.flat_concat(value, position), params, key))(
+            np.arange(max_L1s)[:n_outputs] / max_L1s
+        )
+
+    output_shapes = list(input_shapes) * n_outputs
+
+    return LayerInstance(prepare, apply, output_shapes)
+
+
+def inv_source_new(
+    input_shapes: Sequence[Tuple[int]],
+    n_outputs: int,
+    stack: ComputeStack,
+    layer_id: int,
+    max_L1s: int = 5,
+    hidden_s=64,
+    depth=3,
+    **_,
+) -> LayerInstance:
+    # need to pass which slot is being inverted
+    # look at how inv_aggregation is done
+    # instead of having a division you have an MLP head
+    # in param tree store index of position being inverted
+
+    local_layer_name = generate_layer_name(stack, layer_id, 'inverse_source')
+    namespace = f'local/{local_layer_name}'
+    pname = 'shapes'
+
+    def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key, **_):
+        if stack is not None:
+            ref = ArrayRef(params.data)
+            for node in nodelist:
+                extra = node.get_compute_node('extra')
+                assert extra['original_output_slot'] < extra['original_output_len']
+                original_slot = extra['original_output_slot']
+
+                fwd_node = node.get_inverse_node(stack)
+                fwd_layer, fwd_loc = fwd_node.get_layer_and_local_id(stack)
+                fwd_n_output = stack.layers[fwd_layer].get_n_outputs()
+                fwd_namespace = (
+                    f"local/{generate_layer_name(stack, fwd_layer, f'source_{fwd_n_output}x')}"
+                )
+                ref.push_back(f'{fwd_namespace}/{pname}', (fwd_loc, original_slot))
+
+            params[f'{namespace}/{pname}'] = ref
+            # params.at(f'{namespace}/{pname}', ref, overwrite=None)
+        MLP_head(np.zeros((2,)), params, key)
+
+    def MLP_head(vals, params, key, hidden_s=64, depth=3):
+        return dense_multilevel(
+            vals,
+            hidden_s,
+            1,
+            depth=depth,
+            activation=ACTIVATION_FUNCTIONS[DEFAULT_ACTIVATION],
+            key=key,
+            param_f=partial(init_if_needed, params, base_path='shared'),
+            name='NN/source',
+        )
+
+    def apply(
+        value: ArrayLike,
+        quantiles: ArrayLike,
+        params: ParameterTree,
+        node_id: ArrayLike,
+        key,
+    ) -> ArrayLike:
+        return jax.vmap(lambda position: MLP_head(ut.flat_concat(value, position), params, key))(
+            np.arange(max_L1s)[:n_outputs] / max_L1s
+        )
+
+    output_shapes = list(input_shapes) * n_outputs
+
+    return LayerInstance(prepare, apply, output_shapes)
 
 
 def bias(
@@ -361,6 +485,7 @@ def inv_aggregation(
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
 
 # =========================== Neural Nodes ===========================
 ### {{{                   --     transform node (tc, tl)     --
@@ -702,6 +827,7 @@ def sequestron_ERN(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 ### {{{                    --     output (fluorescence) node     --
 def grouped_output(
     input_shapes: Sequence[Tuple[int, ...]],
@@ -734,9 +860,7 @@ def grouped_output(
             activation=inner_activation,
         )
 
-
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey):
-
 
         # --------- quantile var
         quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
@@ -764,7 +888,6 @@ def grouped_output(
 
         inputs = jnp.asarray(inputs)
 
-
         assert len(inputs) == len(input_shapes)
 
         qid = jnp.squeeze(params[f'local/{layer_name}/quantile_variable_id'][node_id])
@@ -773,7 +896,6 @@ def grouped_output(
             quantiles = quantiles.reshape((1,))
         if qid.ndim == 0:
             qid = qid.reshape((1,))
-
 
         res = vmap(
             partial(MLP_head, rng_key=key, params=params),
@@ -838,4 +960,3 @@ inv_translation = partial(
 ERN5p = partial(sequestron_ERN, subtype='5p', affinity_names=DEFAULT_AVAILABLE_5P_AFFINITIES)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
