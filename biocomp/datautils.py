@@ -40,15 +40,10 @@ NumLike = Union[float, int, np.ndarray, jnp.ndarray]
 NdArray = Union[np.ndarray, jnp.ndarray]
 
 
-
 class DataRescaler(ArbitraryModel):
-    # def fwd(self, x: NdArray) -> NdArray:
-    # raise NotImplementedError()
     def fwd(self, x):
         return x
 
-    # def inv(self, y: NdArray) -> NdArray:
-    # raise NotImplementedError()
     def inv(self, y):
         return y
 
