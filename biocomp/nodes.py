@@ -48,22 +48,31 @@ class LayerInstance:
 ### {{{                 --     quantile variable helpers     --
 
 
-def get_quantile_variable_ids(node, stack):
-    extra = node.get_compute_node('extra')
-    if extra is not None:
-        assert 'quantile_variable_id' in extra
-        qid = np.array(extra['quantile_variable_id']).astype(int)
-    else:
-        # it's a purely virtual node, we're probably just in the tracer or analyzer...
-        qid = np.zeros(1, dtype=int)
+def get_prev_num_quantile_vars(params: ParameterTree):
+    try:
+        return params['global/number_of_quantile_variables']
+    except:
+        return 0
 
-    if stack is not None:
-        qid = np.array(
-            [stack.get_network_global_output_id(node.network_id, q) for q in qid]
-        ).astype(int)
-        assert qid.ndim == 1
 
-    return qid.squeeze()
+def add_quantile_var_ids(params: ParameterTree, num: int, num_per_node, layer_name: str):
+    prev_num_quantile_vars = get_prev_num_quantile_vars(params)
+    new_num_quantile_vars = prev_num_quantile_vars + num * num_per_node
+    quantile_var_ids = jnp.arange(prev_num_quantile_vars, new_num_quantile_vars).reshape(
+        (num, num_per_node)
+    )
+    params.at(
+        f'local/{layer_name}/quantile_variable_id',
+        quantile_var_ids,
+        tags=['non_grad'],
+        overwrite=None,
+    )
+    params.at(
+        'global/number_of_quantile_variables',
+        new_num_quantile_vars,
+        tags=['non_grad'],
+        overwrite=True,
+    )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -233,8 +242,9 @@ def source_new(
     pname = 'shapes'
 
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key, **_):
+        add_quantile_var_ids(params, len(nodelist), len(input_shapes), local_layer_name)
         params[f'{namespace}/{pname}'] = input_shapes
-        MLP_head(np.zeros((2,)), params, key)
+        MLP_head(np.zeros((2 + len(input_shapes),)), params, key)
 
     def MLP_head(vals, params, key):
         return dense_multilevel(
@@ -255,9 +265,11 @@ def source_new(
         node_id: ArrayLike,
         key,
     ) -> ArrayLike:
-        return jax.vmap(lambda position: MLP_head(ut.flat_concat(value, position), params, key))(
-            np.arange(max_L1s)[:n_outputs] / max_L1s
-        )
+        qid = params[f'{namespace}/quantile_variable_id'][node_id]
+        quantile = quantiles[qid]
+        return jax.vmap(
+            lambda position: MLP_head(ut.flat_concat(value, position, quantile), params, key)
+        )(np.arange(max_L1s)[:n_outputs] / max_L1s)
 
     output_shapes = list(input_shapes) * n_outputs
 
@@ -284,6 +296,7 @@ def inv_source_new(
     pname = 'shapes'
 
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key, **_):
+        add_quantile_var_ids(params, len(nodelist), len(input_shapes), local_layer_name)
         if stack is not None:
             ref = ArrayRef(params.data)
             for node in nodelist:
@@ -301,7 +314,7 @@ def inv_source_new(
 
             params[f'{namespace}/{pname}'] = ref
             # params.at(f'{namespace}/{pname}', ref, overwrite=None)
-        MLP_head(np.zeros((2,)), params, key)
+        MLP_head(np.zeros((2 + len(input_shapes),)), params, key)
 
     def MLP_head(vals, params, key, hidden_s=64, depth=3):
         return dense_multilevel(
@@ -322,9 +335,11 @@ def inv_source_new(
         node_id: ArrayLike,
         key,
     ) -> ArrayLike:
-        return jax.vmap(lambda position: MLP_head(ut.flat_concat(value, position), params, key))(
-            np.arange(max_L1s)[:n_outputs] / max_L1s
-        )
+        qid = params[f'{namespace}/quantile_variable_id'][node_id]
+        quantile = quantiles[qid]
+        return jax.vmap(
+            lambda position: MLP_head(ut.flat_concat(value, position, quantile), params, key)
+        )(np.arange(max_L1s)[:n_outputs] / max_L1s)
 
     output_shapes = list(input_shapes) * n_outputs
 
@@ -528,10 +543,13 @@ def transform_nn(
     shared_layer_name = f"{'inv' if is_inverse else 'fwd'}_{transform_name}"
     layer_name = make_layer_name(layer_id, is_inverse)
 
-    quantization_values_path = f'shared/quantization/{rate_name}_values'
-    quantization_names_path = f'shared/quantization/{rate_name}_names'  # for sanity check
+    quantization_values_path = f'shared/quantization/values/{rate_name}'
+    quantization_names_path = f'shared/quantization/names/{rate_name}'  # for sanity check
     mask_name = f'{rate_name}_quantization_mask'
     quantization_mask_path = f'local/{layer_name}/{mask_name}'
+
+    logstdevs_path = f'shared/quantization/logstdevs/{rate_name}'
+    count_array_path = f'shared/quantization/counts/{rate_name}'
 
     def inner(params, value: ArrayLike, quantile, rate_embedding: ArrayLike, key: PRNGKey):
         """For a single source, computes a latent output from the concatenation of
@@ -580,6 +598,12 @@ def transform_nn(
             params[quantization_values_path] = qvalues
             # params[quantization_names_path] = tuple(quantization_names)
             # params.tag(quantization_names_path, ['non_jit', 'non_grad'])
+        # Now initialize logstdevs in the same way
+        try:
+            logstdevs = params[logstdevs_path]
+        except KeyError:
+            logstdevs = jnp.zeros((len(quantization_names), rate_dim))
+            params[logstdevs_path] = logstdevs
 
         # assert qvalues.shape == (len(quantization_names), rate_dim)
         # if params[quantization_names_path] != tuple(quantization_names):
@@ -598,6 +622,19 @@ def transform_nn(
                 for node in nodelist
             ]
             params.at(f'{quantization_mask_path}', np.array(qmasks), tags=['non_grad'])
+            try:
+                params.at(
+                    count_array_path,
+                    np.array(qmasks).sum(axis=(0, 1)) + params.at(count_array_path),
+                    overwrite=True,
+                    tags=['non_grad'],
+                )
+            except KeyError:
+                params.at(
+                    count_array_path,
+                    np.array(qmasks).sum(axis=(0, 1)),
+                    tags=['non_grad'],
+                )
 
             # And we also initialize the quantized rates
             params[f'local/{layer_name}/{rate_name}'] = jax.random.uniform(
@@ -624,18 +661,19 @@ def transform_nn(
             params.tag(f'local/{layer_name}/{mask_name}', ['non_grad'])
 
         # --------- quantile var
-        quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
+        # quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
         # assert quantile_var_ids.shape == (len(nodelist),), quantile_var_ids
-        params.at(
-            f'local/{layer_name}/quantile_variable_id',
-            quantile_var_ids,
-            tags=['non_grad'],
-        )
+        add_quantile_var_ids(params, len(nodelist), len(input_shapes) + 1, layer_name)
 
         fake_vals = [np.zeros(s) for s in input_shapes]
-        maxq = np.max(quantile_var_ids)
 
-        apply(*fake_vals, quantiles=np.zeros(maxq + 1), params=params, node_id=0, key=key1)
+        apply(
+            *fake_vals,
+            quantiles=np.zeros(get_prev_num_quantile_vars(params) + 1),
+            params=params,
+            node_id=0,
+            key=key1,
+        )
 
     def outer(inner_out: ArrayLike, params, key: PRNGKey):
 
@@ -659,26 +697,33 @@ def transform_nn(
         node_id: ArrayLike,
         key: PRNGKey,
     ):
-        k1, k2 = jax.random.split(key, 2)
+        k1, k2, k3 = jax.random.split(key, 3)
 
-        qid = jnp.squeeze(params[f'local/{layer_name}/quantile_variable_id'][node_id])
+        qid = params[f'local/{layer_name}/quantile_variable_id'][node_id]
         quantile = quantiles[qid]
 
         val = jnp.array(values)
         rates = params[f'local/{layer_name}/{rate_name}'][node_id]
         assert val.shape == (len(input_shapes), *input_shapes[0])
         assert rates.shape == (len(input_shapes), rate_dim)
-        qrates = qz.get_quantized(
-            rates, params, quantization_values_path, quantization_mask_path, node_id
+        assert quantile.shape == (len(input_shapes) + 1,)
+        qrates = qz.get_variational_quantized(
+            rates,
+            params,
+            quantization_values_path,
+            quantization_mask_path,
+            logstdevs_path,
+            node_id,
+            k3,
         )
 
         # first we apply the inner stack to all inputs and sum them:
         inner_keys = jax.random.split(k1, val.shape[0])
         inner_out = sum(
-            inner(params, value=v, quantile=quantile, rate_embedding=r, key=k)
-            for v, r, k in zip(val, qrates, inner_keys)
+            inner(params, value=v, quantile=quantile[i], rate_embedding=r, key=k)
+            for i, (v, r, k) in enumerate(zip(val, qrates, inner_keys))
         )
-        inner_out = ut.flat_concat(inner_out, quantile)
+        inner_out = ut.flat_concat(inner_out, quantile[len(input_shapes)])
 
         assert inner_out.shape == (inner_outsize + 1,)
 
@@ -688,7 +733,7 @@ def transform_nn(
     def commit(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
         for node_id, node in enumerate(nodelist):
             rates = params[f'local/{layer_name}/{rate_name}'][node_id]
-            collapsed_names = qz.get_quantized_rate_names(
+            resolved_parameter_names = qz.get_quantized_rate_names(
                 rates,
                 params,
                 quantization_names,
@@ -696,7 +741,10 @@ def transform_nn(
                 quantization_mask_path,
                 node_id,
             )
-            qz.collapse_quantized_parameter(node, rate_name, collapsed_names)
+            extra = node.get_compute_node('extra') or {}
+            extra['resolved_parameter_names'] = resolved_parameter_names
+            node.set_compute_node_column('extra', extra)
+            qz.collapse_quantized_parameter(node, rate_name, resolved_parameter_names)
 
     output_shape = [(1,)]
 
@@ -757,12 +805,7 @@ def sequestron_ERN(
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey):
 
         # --------- quantile var
-        quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
-        params.at(
-            f'local/{local_layer_name}/quantile_variable_id',
-            quantile_var_ids,
-            tags=['non_grad'],
-        )
+        add_quantile_var_ids(params, len(nodelist), 1, local_layer_name)
 
         init_if_needed(
             params,
@@ -810,7 +853,7 @@ def sequestron_ERN(
         affinity = params[f'local/{local_layer_name}/affinity'][node_id]
         assert affinity.shape == (affinity_dim,)
 
-        qid = jnp.squeeze(params[f'local/{local_layer_name}/quantile_variable_id'][node_id])
+        qid = params[f'local/{local_layer_name}/quantile_variable_id'][node_id]
 
         return MLP(
             *values,
@@ -861,19 +904,8 @@ def grouped_output(
         )
 
     def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey):
-
         # --------- quantile var
-        quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
-
-        # assert quantile_var_ids.shape == (
-        # len(input_shapes),
-        # ), f'{quantile_var_ids.shape} != {len(input_shapes)}'
-
-        params.at(
-            f'local/{layer_name}/quantile_variable_id',
-            quantile_var_ids,
-            tags=['non_grad'],
-        )
+        add_quantile_var_ids(params, len(nodelist), len(input_shapes), layer_name)
 
         # --------- shared MLP layers
         MLP_head(x=np.zeros(input_shapes[0]), q=np.zeros((1,)), rng_key=key, params=params)
@@ -889,14 +921,9 @@ def grouped_output(
         inputs = jnp.asarray(inputs)
 
         assert len(inputs) == len(input_shapes)
+        quantiles_per_node = len(input_shapes)
 
-        qid = jnp.squeeze(params[f'local/{layer_name}/quantile_variable_id'][node_id])
-        # make quantiles at least 1D
-        if quantiles.ndim == 0:
-            quantiles = quantiles.reshape((1,))
-        if qid.ndim == 0:
-            qid = qid.reshape((1,))
-
+        qid = params[f'local/{layer_name}/quantile_variable_id'][node_id]
         res = vmap(
             partial(MLP_head, rng_key=key, params=params),
         )(inputs, quantiles[qid])

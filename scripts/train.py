@@ -51,9 +51,6 @@ with ut.timer(f"Loading data and building networks for {XP.keys()}"):
     }
     training = du.DataManager.from_xps(loadedxp.values(), training_config, inverse="all")
 
-stack = training.build_compute_stack(config)
-key = jax.random.PRNGKey(training_config["rng_key"])
-params = stack.init(key)
 params, loss_history, epoch_history = bc.train.start(
     training,
     training_config,

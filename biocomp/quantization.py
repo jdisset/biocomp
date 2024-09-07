@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 from . import utils as ut
 from .parameters import ParameterTree
+from jax import random as random
 
 ### {{{                       --     actual quantization functions    --
 
@@ -32,6 +33,7 @@ def quantize_masked_impl(x, qvalues, mask):
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{               --     quantized parameters helpers     --
+
 
 def get_quantized(
     values_to_quantize,
@@ -61,7 +63,10 @@ def get_quantized(
         values_to_quantize, possible_values, masks
     )
 
-def get_quantized_rate_names(values_to_quantize, params, qnames, quantization_values_path, quantization_mask_path, node_id):
+
+def get_quantized_rate_names(
+    values_to_quantize, params, qnames, quantization_values_path, quantization_mask_path, node_id
+):
     possible_values = jnp.atleast_1d(params[quantization_values_path].squeeze())
     masks = params[quantization_mask_path][node_id]
     assert masks.shape == (values_to_quantize.shape[0], len(possible_values))
@@ -70,7 +75,6 @@ def get_quantized_rate_names(values_to_quantize, params, qnames, quantization_va
         _, i = quantize_masked_impl(v, possible_values, m)
         names.append(qnames[i])
     return names
-
 
 
 def get_all_possible_quantization_params(network) -> dict[str, list[str]]:
@@ -184,6 +188,32 @@ def collapse_quantized_parameter(vnode, param_name, value):
         assert param_name in current_params, f'Param {param_name} not available for cdg node {cid}'
         current_params[param_name] = val
         cdg.at[cid, 'params'] = current_params
+
+
+def get_variational_quantized(
+    values_to_quantize,
+    params: ParameterTree,
+    quantization_values_path,
+    quantization_mask_path,
+    logstdevs_path,
+    node_id,
+    key,
+):
+    values = get_quantized(
+        values_to_quantize,
+        params,
+        quantization_values_path,
+        quantization_mask_path,
+        node_id,
+    )
+    possible_values = jnp.atleast_1d(params[quantization_values_path].squeeze())
+    masks = params[quantization_mask_path][node_id]
+    logstdevs = params[logstdevs_path][node_id]
+    assert masks.shape == (values_to_quantize.shape[0], len(possible_values))
+    logstd = vmap(
+        lambda value, mask: logstdevs[quantize_masked_impl(value, possible_values, mask)[1]],
+    )(values_to_quantize, masks)
+    return values + jnp.exp(logstd.reshape(values.shape)) * random.normal(key, values.shape)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
