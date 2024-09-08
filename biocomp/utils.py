@@ -2,6 +2,9 @@
 import yaml
 import json
 from rich import print as rprint
+import inspect
+import sys
+from functools import lru_cache
 import copy
 from copy import deepcopy
 import xxhash
@@ -223,9 +226,7 @@ def get_cache(
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                  --     function serialization     --
-import inspect
-import sys
-from functools import lru_cache
+
 
 
 class PartialFunction(ArbitraryModel, Generic[T, R]):

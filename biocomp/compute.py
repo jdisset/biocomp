@@ -23,6 +23,9 @@ from .utils import ArbitraryModel, PartialFunction
 from .parameters import ParameterTree, ParamPath
 from . import nodes
 
+from typing import Annotated
+from pydantic import BaseModel, Field, BeforeValidator
+
 from jax.typing import ArrayLike
 
 PRNGKey = Union[jnp.ndarray, np.ndarray, int]
@@ -30,7 +33,9 @@ NdArray = Union[jnp.ndarray, np.ndarray]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-## {{{                      --     Config    --
+## {{{                      --     Config    --{{{
+
+EncodedPartialFunction = Annotated[ut.PartialFunction, BeforeValidator(ut.encode_function)]
 
 
 class ComputeConfig(ArbitraryModel):
@@ -41,41 +46,24 @@ class ComputeConfig(ArbitraryModel):
     used by the implementations to store and share information across nodes.
     """
 
-    node_functions: Optional[Dict[str, ut.PartialFunction]] = None
+    node_functions: Optional[Dict[str, EncodedPartialFunction]] = None
     extra: Optional[Dict[str, Any]] = None
-
-    def __init__(self, node_functions: Optional[Dict[str, Callable]] = None, extra=None):
-        self.node_functions = {}
-        if node_functions is not None:
-            for k, v in node_functions.items():
-                self.set_impl(k, v)
-        self.extra = extra
-
-    def set_impl(self, node_name: str, implementation: Callable, **kwargs):
-        if self.node_functions is None:
-            self.node_functions = {}
-        self.node_functions[node_name] = ut.encode_function(implementation, **kwargs)
 
     def get_impl(self, node_name: str, module_name: str = nd.__name__):
         if self.node_functions is None:
-            raise ValueError('No node implementations in this config')
+            raise ValueError("No node implementations in this config")
         if node_name not in self.node_functions:
-            raise ValueError(f'No node implementation for {node_name}')
-        return self.node_functions[node_name].get_impl(module_names=[module_name])
+            raise ValueError(f"No node implementation for {node_name}")
 
-    def to_dict(self):
-        node_f = None
-        if self.node_functions is not None:
-            node_f = {k: v.model_dump() for k, v in self.node_functions.items()}
-        return {'node_functions': node_f, 'extra': self.extra}
+        return self.node_functions[node_name].get_impl(extra_module_names=[module_name])
 
     @classmethod
     def from_dict(cls, d: dict):
-        node_f = {k: ut.PartialFunction(**v) for k, v in d.get('node_functions', {}).items()}
-        return cls(node_functions=node_f, extra=d.get('extra'))
+        node_f = {k: ut.PartialFunction(**v) for k, v in d.get("node_functions", {}).items()}
+        return cls(node_functions=node_f, extra=d.get("extra"))
 
 
-##────────────────────────────────────────────────────────────────────────────}}}compute
+##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     Virtual Node     --
 
@@ -97,12 +85,12 @@ class VirtualNode:
 
     @staticmethod
     def generate_type_signature(network: Network, compute_node_id: int) -> str:
-        assert network.is_built(), 'Network not built'
-        assert network.compute_graph is not None, 'No compute graph'
-        ntype = network.compute_graph.at[compute_node_id, 'type']
-        n_inputs = len(network.compute_graph.at[compute_node_id, 'input_from'])
-        n_outputs = len(network.compute_graph.at[compute_node_id, 'output_to'])
-        return f'{ntype}_{n_inputs}_{n_outputs}'
+        assert network.is_built(), "Network not built"
+        assert network.compute_graph is not None, "No compute graph"
+        ntype = network.compute_graph.at[compute_node_id, "type"]
+        n_inputs = len(network.compute_graph.at[compute_node_id, "input_from"])
+        n_outputs = len(network.compute_graph.at[compute_node_id, "output_to"])
+        return f"{ntype}_{n_inputs}_{n_outputs}"
 
     @classmethod
     def from_node(
@@ -118,28 +106,28 @@ class VirtualNode:
         )
 
     def set_compute_node_column(self, column_name: str, value: Any):
-        assert self.network is not None, 'No network'
-        assert self.compute_node_id is not None, 'No compute node id'
-        assert self.network.compute_graph is not None, 'No compute graph'
+        assert self.network is not None, "No network"
+        assert self.compute_node_id is not None, "No compute node id"
+        assert self.network.compute_graph is not None, "No compute graph"
         self.network.compute_graph.at[self.compute_node_id, column_name] = value
 
     def get_compute_node(self, column_name: Optional[str] = None) -> Optional[Any]:
         if self.network is None:
             return None
-        assert self.compute_node_id is not None, 'No compute node id'
-        assert self.network.compute_graph is not None, 'No compute graph'
+        assert self.compute_node_id is not None, "No compute node id"
+        assert self.network.compute_graph is not None, "No compute graph"
         if column_name is None:
             return self.network.compute_graph.loc[self.compute_node_id]
         else:
             return self.network.compute_graph.at[self.compute_node_id, column_name]
 
     def get_inverse_node(self, stack: ComputeStack) -> VirtualNode:
-        is_inverse_of = self.get_compute_node('is_inverse_of')
-        assert isinstance(is_inverse_of, int), 'Node is not an inverse'
-        assert is_inverse_of is not None, 'Node is not an inverse'
-        assert self.network_id is not None, 'No network id'
+        is_inverse_of = self.get_compute_node("is_inverse_of")
+        assert isinstance(is_inverse_of, int), "Node is not an inverse"
+        assert is_inverse_of is not None, "Node is not an inverse"
+        assert self.network_id is not None, "No network id"
         inv = stack.get_node_from_net_and_compute_id(self.network_id, is_inverse_of)
-        assert inv is not None, 'Inverse not found'
+        assert inv is not None, "Inverse not found"
         return inv
 
     def get_layer_and_local_id(self, stack):
@@ -148,8 +136,8 @@ class VirtualNode:
         return stack.node_map[(self.network_id, self.compute_node_id)]
 
     def __repr__(self):
-        out = f'{self.network_id}/{self.compute_node_id}/{self.node_id if self.node_id is not None else self.batch_order}-{self.type_signature}'
-        return f'{out}'
+        out = f"{self.network_id}/{self.compute_node_id}/{self.node_id if self.node_id is not None else self.batch_order}-{self.type_signature}"
+        return f"{out}"
 
     def __hash__(self):
         return hash((self.network_id, self.node_id, self.type_signature, self.batch_order))
@@ -159,7 +147,7 @@ class VirtualNode:
         new_obj = self.__class__.__new__(self.__class__)
         memo[id(self)] = new_obj
         for k, v in self.__dict__.items():
-            if k == 'network':
+            if k == "network":
                 setattr(new_obj, k, v)
             else:
                 setattr(new_obj, k, deepcopy(v, memo))
@@ -189,12 +177,11 @@ class ComputeLayer:
     is_built: bool = False
 
     def setup(self, config: ComputeConfig, stack: ComputeStack):
-
         self.check()
 
-        self.f_type = self.nodes[0].get_compute_node('type')
+        self.f_type = self.nodes[0].get_compute_node("type")
 
-        if self.f_type == 'input':
+        if self.f_type == "input":
             self.f_out_shapes = [(1,)]
             self.f_input_shapes = [(1,)]
             self.is_built = True
@@ -204,7 +191,7 @@ class ComputeLayer:
         # to make sure they are all the same
         node_inputs: List[List[NodeInput]] = []
         for n in self.nodes:
-            ninp = n.get_compute_node('input_from')
+            ninp = n.get_compute_node("input_from")
             node_inputs.append([(n.network_id, *i) for i in ninp])
 
         # get the shapes of the inputs
@@ -213,12 +200,12 @@ class ComputeLayer:
             input_shapes = []
             for input_net_id, input_compute_node_id, input_slot_id in n_inp:
                 input_layer_id, _ = stack.node_map[(input_net_id, input_compute_node_id)]
-                assert input_layer_id < self.layer_id, 'Input node is in a later layer'
-                assert stack.layers[input_layer_id].is_built, 'Input layer is not built'
+                assert input_layer_id < self.layer_id, "Input node is in a later layer"
+                assert stack.layers[input_layer_id].is_built, "Input layer is not built"
                 input_layer_output_shapes = stack.layers[input_layer_id].f_out_shapes
                 assert input_slot_id < len(
                     input_layer_output_shapes
-                ), f'Input slot {input_slot_id} is out of range'
+                ), f"Input slot {input_slot_id} is out of range"
                 input_shapes.append(input_layer_output_shapes[input_slot_id])
             all_input_shapes.append(tuple(input_shapes))
         # they should all be the same
@@ -241,15 +228,15 @@ class ComputeLayer:
         self.is_built = True
 
     def get_n_outputs(self):
-        output_to = self.nodes[0].get_compute_node('output_to')
+        output_to = self.nodes[0].get_compute_node("output_to")
         return len(output_to)
 
     def flattened_output_shape(self):
         return int(len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes]))
 
     def __repr__(self):
-        ftype = self.nodes[0].get_compute_node('type')
-        return f'Layer {self.layer_id} ({ftype}) with {len(self.nodes)} nodes'
+        ftype = self.nodes[0].get_compute_node("type")
+        return f"Layer {self.layer_id} ({ftype}) with {len(self.nodes)} nodes"
 
     def __hash__(self):
         return hash(tuple(self.nodes))
@@ -267,7 +254,6 @@ class ComputeLayer:
 
 @dataclass
 class ComputeStack:
-
     networks: List[Network]
     layers: Optional[Sequence[ComputeLayer]] = None
 
@@ -300,11 +286,11 @@ class ComputeStack:
         of all nodes in each layers, as well as the correct mapping and chaining of
         their inputs and outputs.
         """
-        with ut.timer('Building compute stack'):
+        with ut.timer("Building compute stack"):
             self.config = config
             self._assemble_stack(**kwargs)
             self._refresh()
-            assert self.layers is not None, 'No layers'
+            assert self.layers is not None, "No layers"
             for layer in self.layers:
                 layer.setup(config, stack=self)
                 self._refresh()
@@ -316,24 +302,24 @@ class ComputeStack:
         """
         Generates a randomly initilized dictionary of parameters for the stack
         """
-        assert self.is_built, 'Stack not built'
+        assert self.is_built, "Stack not built"
         params = ParameterTree()
         # for l_id, layer in enumerate(self.layers):
         # let's initialize the stacj it in reverse order
         # so that the inverse nodes can reference fwd ones after init
-        assert self.layers is not None, 'No layers'
-        assert self.layers_start_index is not None, 'No layers start index'
+        assert self.layers is not None, "No layers"
+        assert self.layers_start_index is not None, "No layers start index"
         for l_id, layer in reversed(list(enumerate(self.layers))):
-            assert layer.is_built, 'Layer not built'
-            assert l_id == layer.layer_id, 'Layer id mismatch'
+            assert layer.is_built, "Layer not built"
+            assert l_id == layer.layer_id, "Layer id mismatch"
             rng_key, _ = jax.random.split(rng_key)
             ut.logger.debug(
-                f'Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}'
+                f"Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}"
             )
             if layer.f_prepare is not None:
                 layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
-        params.tag('local', 'local')
-        params.tag('shared', 'shared')
+        params.tag("local", "local")
+        params.tag("shared", "shared")
         # pp_params = self.post_process(params)
         # assert pp_params == params, 'Post process changed params'
         return params
@@ -374,11 +360,11 @@ class ComputeStack:
     ) -> VirtualNode:
         """Returns the virtual node corresponding to the given network and compute node ids"""
         assert self.node_map is not None
-        assert self.layers is not None, 'Stack has no layers'
+        assert self.layers is not None, "Stack has no layers"
         assert (
             network_id,
             compute_node_id,
-        ) in self.node_map, f'Node not found: {network_id}/{compute_node_id}'
+        ) in self.node_map, f"Node not found: {network_id}/{compute_node_id}"
         layer_id, node_loc = self.node_map[(network_id, compute_node_id)]
         return self.layers[layer_id].nodes[node_loc]
 
@@ -393,8 +379,8 @@ class ComputeStack:
     def __repr__(self):
         # layers with line breaks
         if self.layers is None:
-            return 'Empty stack'
-        return '\n'.join([l.__repr__() for l in self.layers])
+            return "Empty stack"
+        return "\n".join([l.__repr__() for l in self.layers])
 
     def __hash__(self):
         if self.layers is None:
@@ -403,13 +389,13 @@ class ComputeStack:
 
     def __call__(self, *args, **kwargs):
         if not self.is_built:
-            raise ValueError('Compute stack is not built, can\'t call it')
-        assert self.apply is not None, 'No apply method'
+            raise ValueError("Compute stack is not built, can't call it")
+        assert self.apply is not None, "No apply method"
         res, _ = self.apply(*args, **kwargs)
         return res
 
     def each_node(self):
-        assert self.layers is not None, 'Stack has no layers'
+        assert self.layers is not None, "Stack has no layers"
         for layer in self.layers:
             for node in layer.nodes:
                 yield node
@@ -448,7 +434,7 @@ class ComputeStack:
             l.check()
             for n in l.nodes:
                 assert id(n.network) == id(self.networks[n.network_id])
-        assert self.layers[0].nodes[0].get_compute_node().type == 'input'
+        assert self.layers[0].nodes[0].get_compute_node().type == "input"
         for net_id in range(len(self.networks)):
             prev = -1
             for l in self.layers:
@@ -456,7 +442,7 @@ class ComputeStack:
                     if n.network_id == net_id:
                         assert (
                             n.batch_order >= prev
-                        ), f'wrong batch order ({n.batch_order} < {prev} for {n})'
+                        ), f"wrong batch order ({n.batch_order} < {prev} for {n})"
                         prev = n.batch_order
 
     def get_all_nodes(self):
@@ -469,9 +455,9 @@ class ComputeStack:
         in the flattened full-stack output array"""
         assert self.node_map is not None
         if self.layers is None:
-            raise ValueError('No layers')
+            raise ValueError("No layers")
 
-        input_compute_node_id, input_compute_node_outslot = node.get_compute_node('input_from')[
+        input_compute_node_id, input_compute_node_outslot = node.get_compute_node("input_from")[
             input_slot
         ]
 
@@ -480,7 +466,7 @@ class ComputeStack:
         ]
         this_node_layer_id, _ = self.node_map[(node.network_id, node.compute_node_id)]
 
-        assert input_layer_id < this_node_layer_id, 'input layer must be before this layer'
+        assert input_layer_id < this_node_layer_id, "input layer must be before this layer"
 
         this_layer = self.layers[this_node_layer_id]
         input_layer = self.layers[input_layer_id]
@@ -528,11 +514,11 @@ class ComputeStack:
             independent = [
                 i
                 for i, row in graph.iterrows()
-                if (not row['input_from'] or all([x[0] in visited for x in row['input_from']]))
+                if (not row["input_from"] or all([x[0] in visited for x in row["input_from"]]))
                 and i not in visited
             ]
             if not independent:
-                msg = f'No independent node. Remaining:{set(graph.index) - visited}. Visited:{visited}'
+                msg = f"No independent node. Remaining:{set(graph.index) - visited}. Visited:{visited}"
                 raise ValueError(msg)
             visited.update(independent)
             batches.append(independent)
@@ -624,10 +610,10 @@ class ComputeStack:
                 node_diff = len(current_type_dict[t]) - len(new_type_dict[t])
                 substack = ComputeStack(current_stack.networks, [l])
                 path_entry = (
-                    f'{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types'
+                    f"{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types"
                 )
 
-                assert n == node_diff, f'{n} != {node_diff}'
+                assert n == node_diff, f"{n} != {node_diff}"
 
                 bfs_queue.append((substack, new_type_dict, path + [path_entry], depth + 1))
 
@@ -643,7 +629,6 @@ class ComputeStack:
         max_depth=70,
         max_t=1,
     ):
-
         if path == None:
             path = []
 
@@ -681,7 +666,7 @@ class ComputeStack:
             # without the nodes that were used in the layer
             node_diff = len(type_dict[t]) - len(new_type_dict[t])
             substack = ComputeStack(stack.networks, [l])
-            path_entry = f'{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types'
+            path_entry = f"{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types"
             candidate_stacks.append(
                 ComputeStack.make_smallest_stack_dfs(
                     substack, new_type_dict, path + [path_entry], depth + 1, max_depth, max_t
@@ -711,7 +696,7 @@ class ComputeStack:
         if not total_nodes_left:
             return 0
 
-        min_nodes_left = float('inf')
+        min_nodes_left = float("inf")
         for t, nodes in type_dict.items():
             nodes_left = sum(1 for n in nodes if n.batch_order is not None)
             min_nodes_left = min(min_nodes_left, nodes_left)
@@ -766,7 +751,7 @@ class ComputeStack:
                 node_diff = len(current_type_dict[t]) - len(new_type_dict[t])
                 substack = ComputeStack(current_stack.networks, [l])
                 new_path = current_path + [
-                    f'{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types'
+                    f"{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types"
                 ]
 
                 # Calculate the priority for A* search
@@ -797,7 +782,7 @@ class ComputeStack:
             else:
                 new_type_dict[t].append(deepcopy(n))
 
-        assert used > 0, f'used {used} nodes of type {t} to make layer'
+        assert used > 0, f"used {used} nodes of type {t} to make layer"
         return ComputeLayer(layer_nodes), new_type_dict
 
     def _assemble_stack(self, **kwargs):
@@ -808,22 +793,22 @@ class ComputeStack:
         minstack = ComputeStack.make_smallest_stack_dfs(
             ComputeStack(self.networks, []), type_dict, **kwargs
         )
-        ut.logger.debug(f'Final stack size: {len(minstack.layers) if minstack.layers else 0}')
+        ut.logger.debug(f"Final stack size: {len(minstack.layers) if minstack.layers else 0}")
         self.layers = minstack.layers
 
     def _make_layer_input_getters(self, layer_id: int):
         """Returns a list of input_getter functions that return the input values for each node in the given layer
         from the flattened output array"""
-        assert self.layers is not None, 'No layers'
-        assert len(self.layers) > layer_id, 'Layer id out of range'
+        assert self.layers is not None, "No layers"
+        assert len(self.layers) > layer_id, "Layer id out of range"
 
         layer = self.layers[layer_id]
-        assert layer.is_built, 'Layer not built'
+        assert layer.is_built, "Layer not built"
         input_shapes = layer.f_input_shapes  # list of tuples, one for each input
         input_lengths = [int(np.prod(s)) for s in input_shapes]  # flattened length of each input
 
         # input layer is a special case as it doesn't take values from the stack output
-        if layer.f_type == 'input':
+        if layer.f_type == "input":
             assert len(input_shapes) == 1  # each node has one "input"
             assert layer_id == 0  # input layer is the first layer
             assert input_shapes == layer.f_out_shapes
@@ -871,7 +856,7 @@ class ComputeStack:
 
     def _refresh(self):
         """Refreshes all the meta information, indexing and mapping of the stack"""
-        assert self.layers is not None, 'No layers'
+        assert self.layers is not None, "No layers"
         allbuilt = True
         self.total_nb_of_outputs = 0
         self.total_nb_of_inputs = 0
@@ -912,7 +897,7 @@ class ComputeStack:
         self.is_assembled = allbuilt
 
     def _generate_apply_method(
-        self, get_grads_for: Sequence[str] = ('translation', 'transcription', 'output')
+        self, get_grads_for: Sequence[str] = ("translation", "transcription", "output")
     ):
         """
         Generates the apply method, which will call the apply of all layers of the stack
@@ -936,9 +921,9 @@ class ComputeStack:
         # from the array of all outputs of the stack. Of course this assumes correct ordering, i.e
         # each layer is taking inputs from a layer that has already been applied.
 
-        assert self.layers is not None, 'No layers'
-        assert self.layers_start_index is not None, 'No layers start index'
-        assert self.node_map is not None, 'No node map'
+        assert self.layers is not None, "No layers"
+        assert self.layers_start_index is not None, "No layers start index"
+        assert self.node_map is not None, "No node map"
 
         input_getters_f = [self._make_layer_input_getters(l_id) for l_id in range(len(self.layers))]
 
@@ -959,16 +944,15 @@ class ComputeStack:
         ) -> Tuple[NdArray, NdArray]:
             """The core of the apply method. Everything here should be jittable"""
 
-            assert len(inputs) == self.total_nb_of_inputs, 'Mismatched number of inputs'
-            assert self.layers is not None, 'No layers'
-            assert self.layers_start_index is not None, 'No layers start index'
-            assert self.node_map is not None, 'No node map'
+            assert len(inputs) == self.total_nb_of_inputs, "Mismatched number of inputs"
+            assert self.layers is not None, "No layers"
+            assert self.layers_start_index is not None, "No layers start index"
+            assert self.node_map is not None, "No node map"
 
             out = inputs.reshape(-1)
             grads = jnp.array([])
 
             for lid in range(1, len(self.layers)):  # skip the input layer
-
                 assert out.shape[0] == self.layers_start_index[lid]
 
                 n_nodes = len(self.layers[lid].nodes)

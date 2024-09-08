@@ -347,15 +347,18 @@ def load_data_file(
     if use_store is None:
         use_store = {}
 
-    if data_file_path is None:
-        return error_handler(f"Data file is null.")
-
     f = Path(data_file_path)
     if not f.exists():
         return error_handler(f"Data file {f} not found")
 
     if data_file_path not in use_store or force_reload:
-        content = pd.read_csv(f, engine="pyarrow")
+        ext = f.suffix
+        if ext == ".csv":
+            content = pd.read_csv(f, engine="pyarrow")
+        elif ext == ".parquet":
+            content = pd.read_parquet(f)
+        else:
+            return error_handler(f"Unsupported data file format {ext}")
         assert isinstance(content, pd.DataFrame)
         use_store[data_file_path] = content
 
@@ -381,10 +384,12 @@ def get_network_data(
     **kwargs,
 ) -> Optional[np.ndarray]:
     # we want to reorder data columns to match the network's output
+
     out_proteins = escape(network.get_output_proteins())
     if color_aliases is not None:
         aliases = escape(color_aliases)
         out_proteins = [aliases.get(p, p) for p in out_proteins]
+
     return load_data_file(data_file_path, proteins=out_proteins, **kwargs)
 
 

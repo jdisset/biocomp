@@ -65,7 +65,6 @@ def check_XYZ_new(X, Y, Z, stack):
 
 
 def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_penalty):
-
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
     def loss_func(dynamic, static, X, Y, Z, key):
@@ -124,6 +123,7 @@ def sorting_loss(stack: cmp.ComputeStack):
 
 ### {{{                       --     main training function     --
 
+
 def start(
     dman: du.DataManager,
     training_config: Dict[str, Any],
@@ -131,7 +131,6 @@ def start(
     loggers: Optional[List[Tuple[int, Callable]]] = None,
     seed: Optional[int] = None,
 ) -> Tuple[ParameterTree, List[jnp.ndarray]]:
-
     # Note on loggers:
     # loggers is a list of tuples (period:int, logger: Callable)
     # period is the number of epochs between two calls to the logger
@@ -141,17 +140,17 @@ def start(
     # with epoch=0 and epoch_history=None
 
     ut.logger.debug(f"Training config: {training_config}")
-    ut.logger.debug(f"Compute config: {compute_config.to_dict()}")
+    ut.logger.debug(f"Compute config: {compute_config}")
 
     # --- get constants from training config (making sure they are there)
-    N_REPLICATES = training_config.get('n_replicates', 1)
-    N_BATCHES = training_config['n_batches']
-    N_EPOCHS = training_config['n_epochs']
-    BATCH_SIZE = training_config['batch_size']
-    KEEP_IN_HISTORY = training_config.get('keep_in_history', ['loss'])
-    STEPS_PER_EPOCH = max(1, int(training_config['steps_per_epoch']))
-    RNG_KEY = seed or training_config['rng_key']
-    LOSS_FUNCTION = training_config['loss_function']
+    N_REPLICATES = training_config.get("n_replicates", 1)
+    N_BATCHES = training_config["n_batches"]
+    N_EPOCHS = training_config["n_epochs"]
+    BATCH_SIZE = training_config["batch_size"]
+    KEEP_IN_HISTORY = training_config.get("keep_in_history", ["loss"])
+    STEPS_PER_EPOCH = max(1, int(training_config["steps_per_epoch"]))
+    RNG_KEY = seed or training_config["rng_key"]
+    LOSS_FUNCTION = training_config["loss_function"]
 
     # --- init & batches generation
 
@@ -163,7 +162,7 @@ def start(
 
     xbatches, ybatches = tu.generate_batches(dman, N_REPLICATES, N_BATCHES, BATCH_SIZE, key)
 
-    static, dynamic = params.filter_by_tag(['non_grad', 'local'])
+    static, dynamic = params.filter_by_tag(["non_grad", "local"])
 
     optimizer = tu.get_optimizer(training_config)
     opt_state = vmap(optimizer.init)(dynamic)
@@ -178,7 +177,8 @@ def start(
 
     # --- loss & update functions
 
-    loss_func_generator = ut.decode_function(LOSS_FUNCTION)
+    # loss_func_generator = ut.decode_function(LOSS_FUNCTION)
+    loss_func_generator = LOSS_FUNCTION.get_impl()
     assert callable(loss_func_generator)
     loss_func = loss_func_generator(stack)
     assert callable(loss_func)
@@ -190,8 +190,9 @@ def start(
         print(num_z)
         assert xbatches.shape[:-1] == (STEPS_PER_EPOCH, BATCH_SIZE)
         assert ybatches.shape[:-1] == (STEPS_PER_EPOCH, BATCH_SIZE)
-        pscan = ut.progress_scan(STEPS_PER_EPOCH, message='Training model')
-        zbatches = jax.random.uniform(key, (STEPS_PER_EPOCH, BATCH_SIZE) + num_z)
+        pscan = ut.progress_scan(STEPS_PER_EPOCH, message="Training model")
+        zbatches = jax.random.uniform(key, ybatches.shape)
+        assert zbatches.shape == ybatches.shape
         batch_keys = jax.random.split(key, STEPS_PER_EPOCH)
         sstep = pscan(scannable_step)
         (final_params, final_opt_state), epoch_history = jax.lax.scan(
@@ -208,7 +209,7 @@ def start(
             params, opt_state, keys, xs, ys
         )
 
-    with ut.timer('Compiling the epoch_step function'):
+    with ut.timer("Compiling the epoch_step function"):
         xb = ut.get_looped_slice(xbatches, 0, STEPS_PER_EPOCH, axis=1)
         yb = ut.get_looped_slice(ybatches, 0, STEPS_PER_EPOCH, axis=1)
         num_z = tuple(static['global/number_of_quantile_variables'])
@@ -226,7 +227,7 @@ def start(
     for _, l in loggers:
         l(epoch=0, training_config=training_config)
 
-    ut.logger.info(f'Begin training for {N_EPOCHS} epochs')
+    ut.logger.info(f"Begin training for {N_EPOCHS} epochs")
 
     epoch_history = {}
 
@@ -237,10 +238,10 @@ def start(
         xb = ut.get_looped_slice(xbatches, i * STEPS_PER_EPOCH, (i + 1) * STEPS_PER_EPOCH, axis=1)
         yb = ut.get_looped_slice(ybatches, i * STEPS_PER_EPOCH, (i + 1) * STEPS_PER_EPOCH, axis=1)
         params, opt_state, epoch_history = compiled_epoch_step(params, opt_state, epoch_key, xb, yb)
-        epoch_history['epoch_time'] = time.time() - t0
-        epoch_history['latest_params'] = params
-        if 'loss' in epoch_history:
-            loss_history.append(epoch_history['loss'])
+        epoch_history["epoch_time"] = time.time() - t0
+        epoch_history["latest_params"] = params
+        if "loss" in epoch_history:
+            loss_history.append(epoch_history["loss"])
 
         for t, l in loggers:
             if t is not None:
@@ -260,7 +261,7 @@ def start(
                 epoch_history=epoch_history,
             )
 
-    ut.logger.info(f'End of training for {N_EPOCHS} epochs')
+    ut.logger.info(f"End of training for {N_EPOCHS} epochs")
 
     return params, loss_history, epoch_history
 
@@ -278,24 +279,20 @@ DEFAULT_TRAINING_CONFIG = {
     "rng_key": 42,
     "negative_grad_penalty": 0.1,
     "huber_quantile_loss_delta": 0.1,
-    'optimizer': 'adam',
-    'n_epochs': 150,
-    'schedule': 'cosine',
-    'learning_rate': 1e-3,
-    'end_learning_rate': 1e-5,
-    'warmup_epochs': 15,
-    'steps_per_epoch': 128,
-    'decay_epochs': 130,
-    'adam_w_decay': 0.001,
-    'max_gradient_norm': 1.0,
+    "optimizer": "adam",
+    "n_epochs": 150,
+    "schedule": "cosine",
+    "learning_rate": 1e-3,
+    "end_learning_rate": 1e-5,
+    "warmup_epochs": 15,
+    "steps_per_epoch": 128,
+    "decay_epochs": 130,
+    "adam_w_decay": 0.001,
+    "max_gradient_norm": 1.0,
     # batches
     "batch_size": 32,
     "n_batches": 2048,
     "loss_function": DEFAULT_LOSS_SERIALIZED,
 }
-
-import argparse
-import json
-from pathlib import Path
 
 ##────────────────────────────────────────────────────────────────────────────}}}

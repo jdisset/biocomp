@@ -120,6 +120,8 @@ class LogisticLogRescaler(DataRescaler):
             np.exp(inv_log) + self.thresh - self.lshift,
         )
         return result
+
+
 class CompressedSymLogRescaler(DataRescaler):
     """
     Rescale values from input_range to [0, 1], with tolerance for outside values.
@@ -131,8 +133,6 @@ class CompressedSymLogRescaler(DataRescaler):
     Also uses a low_end_compression factor to "squish" low values, which is useful for
     fluorescence data where low values are often noisy even though they just mean "no fluorescence".
     """
-
-    # (log(1+x/C) - log(m/C) ) / (log(M/C) - log(m/C)) = y
 
     # NOTE: with this, low values are squished symmetrically around input_range.min,
     #       meaning if they get much lower than input_range.min, they will again grow below 0 as fast as
@@ -165,17 +165,17 @@ class CompressedSymLogRescaler(DataRescaler):
         self.__log_end = self.__symlog(self.input_range.max / self.low_end_compression)
 
     def fwd(self, x):
-        self.__post_init__()
         xp = self.__symlog(1 + x / self.low_end_compression) - self.__log_start
         y = xp / (self.__log_end - self.__log_start)
         return y
 
     def inv(self, y):
-        self.__post_init__()
         yp = y * (self.__log_end - self.__log_start) + self.__log_start
         ypinv = self.__invsymlog(yp)
         x = self.low_end_compression * (ypinv - 1)
         return x
+
+
 
 
 # TODO, low priority: I'm thinking something like an exp (for negative values) to log transition:

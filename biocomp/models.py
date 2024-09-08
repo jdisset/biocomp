@@ -2,10 +2,11 @@ from sqlmodel import Field, SQLModel, Relationship
 from sqlmodel import SQLModel, create_engine, Session, select
 from sqlalchemy.orm import registry
 from sqlmodel._compat import SQLModelConfig
-from typing import List, Optional
+from typing import List, Optional, Annotated
 from sqlalchemy import Column, JSON
 from biocomp.library import PartsLibrary
 import pandas as pd
+from pydantic import BaseModel, BeforeValidator
 
 
 class PartsDB(SQLModel, registry=registry()):
@@ -18,14 +19,20 @@ ALIASES = {"utr5": "5'UTR", "utr3": "3'UTR", "uid": "UID"}
 
 class Category(PartsDB, table=True):
     name: str = Field(primary_key=True)
-    transcripted: int
-    translated: int
+    transcripted: bool
+    translated: bool
+
+
+def int_or_none(s: str) -> Optional[int]:
+    return int(s) if s else None
 
 
 class Part(PartsDB, table=True):
     name: str = Field(primary_key=True)
     category: str = Field(foreign_key="category.name")
-    uid: Optional[int] = Field(default=None, sa_column_kwargs={"name": "UID"}, alias="UID")
+    uid: Annotated[Optional[int], BeforeValidator(int_or_none)] = Field(
+        default=None, sa_column_kwargs={"name": "UID"}, alias="UID"
+    )
 
     class Config:
         # SUPER HACKY but waiting for sqlmodel to fix serialization_alias support...
@@ -130,7 +137,7 @@ def buildLibFromDatabase(db_url: str):
     parts = getAllPartsFromDatabase(db_url)
     # first need to turn everything into pandas dataframes
 
-    if len(parts['parts']) == 0:
+    if len(parts["parts"]) == 0:
         print("No parts found in parts database")
         return None
 
