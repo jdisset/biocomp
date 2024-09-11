@@ -20,6 +20,12 @@ from . import datautils as du
 from . import plotutils as pu
 from . import trainutils as tu
 from . import utils as ut
+from biocomp.utils import (
+    EncodedPartialFunction,
+    PartialFunction,
+    ArbitraryModel,
+    PartialFunctionResult,
+)
 from . import nodes as nodes
 from . import compute as cmp
 from .utils import check, checkwrap
@@ -31,6 +37,7 @@ import time
 from tqdm import tqdm
 
 from typing import List, Tuple, Dict, Any, Callable, Collection, Optional, Union
+from pydantic import Field
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -96,9 +103,9 @@ def sorting_loss(stack: cmp.ComputeStack):
         yhat, grads = batch_apply(params, X, Z, keys)
         assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
 
-        qvalues_dir = ParamPath('shared/quantization/values')
-        logstd_dir = ParamPath('shared/quantization/logstdevs')
-        count_dir = ParamPath('shared/quantization/counts')
+        qvalues_dir = ParamPath("shared/quantization/values")
+        logstd_dir = ParamPath("shared/quantization/logstdevs")
+        count_dir = ParamPath("shared/quantization/counts")
         count_sum = 0
         kl_loss = 0
 
@@ -121,46 +128,81 @@ def sorting_loss(stack: cmp.ComputeStack):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+### {{{                  --     training config     --
+
+DEFAULT_OPTIMIZER = [
+    PartialFunction(
+        func=optax.clip_by_global_norm,
+        kwargs={"max_norm": 1.0},
+    ),
+    PartialFunction(
+        func=optax.adam,
+        kwargs={
+            "learning_rate": PartialFunctionResult(
+                func="optax.warmup_cosine_decay_schedule",
+                kwargs={
+                    "init_value": 1e-7,
+                    "peak_value": 1e-3,
+                    "warmup_steps": 15,
+                    "decay_steps": 130,
+                    "end_value": 1e-5,
+                },
+            )
+        },
+    ),
+]
+
+
+class TrainingConfig(ArbitraryModel):
+    # training parameters
+    loss_function: EncodedPartialFunction = Field(default=sorting_loss)
+    optimizer_stack: list[EncodedPartialFunction] = DEFAULT_OPTIMIZER
+
+    seed: Optional[int] = None
+    negative_grad_penalty: float = 0.1
+    n_epochs: int = 150
+    steps_per_epoch: int = 128
+    batch_size: int = 32
+    n_batches: int = 2048
+    n_replicates: int = 1
+
+    keep_in_history: List[str] = ["loss"]
+
+    # compute config
+    compute_config: cmp.ComputeConfig = cmp.DEFAULT_COMPUTE_CONFIG
+
+    @property
+    def optimizer(self):
+        return optax.chain(*[comp() for comp in self.optimizer_stack])
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
 ### {{{                       --     main training function     --
 
 
 def start(
     dman: du.DataManager,
-    training_config: Dict[str, Any],
+    training_config: TrainingConfig,
     compute_config: cmp.ComputeConfig,
     loggers: Optional[List[Tuple[int, Callable]]] = None,
-    seed: Optional[int] = None,
-) -> Tuple[ParameterTree, List[jnp.ndarray]]:
-    # Note on loggers:
-    # loggers is a list of tuples (period:int, logger: Callable)
-    # period is the number of epochs between two calls to the logger
-    # if period is -1 or None, the logger will be called at the end of the training
-    # if period is 0 or 1, the logger will be called at every epoch
-    # all loggers are called at the beginning of the training run
-    # with epoch=0 and epoch_history=None
-
+):
     ut.logger.debug(f"Training config: {training_config}")
     ut.logger.debug(f"Compute config: {compute_config}")
 
-    # --- get constants from training config (making sure they are there)
-    N_REPLICATES = training_config.get("n_replicates", 1)
-    N_BATCHES = training_config["n_batches"]
-    N_EPOCHS = training_config["n_epochs"]
-    BATCH_SIZE = training_config["batch_size"]
-    KEEP_IN_HISTORY = training_config.get("keep_in_history", ["loss"])
-    STEPS_PER_EPOCH = max(1, int(training_config["steps_per_epoch"]))
-    RNG_KEY = seed or training_config["rng_key"]
-    LOSS_FUNCTION = training_config["loss_function"]
-
     # --- init & batches generation
+    assert training_config.seed is not None, "Seed must be set"
+    key = jax.random.PRNGKey(training_config.seed)
 
-    key = jax.random.PRNGKey(RNG_KEY)
+    stack, params = tu.init_stack(compute_config, dman, training_config.n_replicates, key)
 
-    stack, params = tu.init_stack(compute_config, dman, N_REPLICATES, key)
-    assert stack.apply is not None
-    assert params is not None
-
-    xbatches, ybatches = tu.generate_batches(dman, N_REPLICATES, N_BATCHES, BATCH_SIZE, key)
+    xbatches, ybatches = tu.generate_batches(
+        dman,
+        training_config.n_replicates,
+        training_config.n_batches,
+        training_config.batch_size,
+        key,
+    )
 
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
 
@@ -169,50 +211,59 @@ def start(
 
     ut.logger.info(
         f"""Done initializing optimizer,
-        n_replicates: {N_REPLICATES}
+        n_replicates: {training_config.n_replicates}
         batches: {xbatches.shape[1]}
-        steps per epoch: {STEPS_PER_EPOCH}
-        random seed: {RNG_KEY}"""
+        steps per epoch: {training_config.steps_per_epoch}
+        random seed: {training_config.seed}"""
     )
 
     # --- loss & update functions
 
-    # loss_func_generator = ut.decode_function(LOSS_FUNCTION)
-    loss_func_generator = LOSS_FUNCTION.get_impl()
-    assert callable(loss_func_generator)
+    loss_func_generator = training_config.loss_function.get_impl()
     loss_func = loss_func_generator(stack)
     assert callable(loss_func)
     scannable_step = tu.make_training_step(
-        loss_func, optimizer, fields_to_keep_in_history=KEEP_IN_HISTORY, scannable=True
+        loss_func,
+        optimizer,
+        fields_to_keep_in_history=training_config.keep_in_history,
+        scannable=True,
     )
 
     def per_replicate_epoch_step(start_params, start_opt_state, key, xbatches, ybatches, num_z):
         print(num_z)
-        assert xbatches.shape[:-1] == (STEPS_PER_EPOCH, BATCH_SIZE)
-        assert ybatches.shape[:-1] == (STEPS_PER_EPOCH, BATCH_SIZE)
-        pscan = ut.progress_scan(STEPS_PER_EPOCH, message="Training model")
+        assert xbatches.shape[:-1] == (training_config.steps_per_epoch, training_config.batch_size)
+        assert ybatches.shape[:-1] == (training_config.steps_per_epoch, training_config.batch_size)
+        pscan = ut.progress_scan(training_config.steps_per_epoch, message="Training model")
         zbatches = jax.random.uniform(key, ybatches.shape)
         assert zbatches.shape == ybatches.shape
-        batch_keys = jax.random.split(key, STEPS_PER_EPOCH)
+        batch_keys = jax.random.split(key, training_config.steps_per_epoch)
         sstep = pscan(scannable_step)
         (final_params, final_opt_state), epoch_history = jax.lax.scan(
             sstep,
             (start_params, start_opt_state),
-            (jnp.arange(STEPS_PER_EPOCH), xbatches, ybatches, zbatches, batch_keys),
+            (jnp.arange(training_config.steps_per_epoch), xbatches, ybatches, zbatches, batch_keys),
         )
         return final_params, final_opt_state, epoch_history
 
     def epoch_step(params: ParameterTree, opt_state: optax.OptState, epoch_key, xs, ys, num_z):
-        keys = jax.random.split(epoch_key, N_REPLICATES)
-        assert xs.shape[:-1] == ys.shape[:-1] == (N_REPLICATES, STEPS_PER_EPOCH, BATCH_SIZE)
+        keys = jax.random.split(epoch_key, training_config.n_replicates)
+        assert (
+            xs.shape[:-1]
+            == ys.shape[:-1]
+            == (
+                training_config.n_replicates,
+                training_config.steps_per_epoch,
+                training_config.batch_size,
+            )
+        )
         return jax.vmap(Partial(per_replicate_epoch_step, num_z=num_z))(
             params, opt_state, keys, xs, ys
         )
 
     with ut.timer("Compiling the epoch_step function"):
-        xb = ut.get_looped_slice(xbatches, 0, STEPS_PER_EPOCH, axis=1)
-        yb = ut.get_looped_slice(ybatches, 0, STEPS_PER_EPOCH, axis=1)
-        num_z = tuple(static['global/number_of_quantile_variables'])
+        xb = ut.get_looped_slice(xbatches, 0, training_config.steps_per_epoch, axis=1)
+        yb = ut.get_looped_slice(ybatches, 0, training_config.steps_per_epoch, axis=1)
+        num_z = tuple(static["global/number_of_quantile_variables"])
         lowered = jax.jit(Partial(epoch_step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
         compiled_epoch_step = lowered.compile()
 
@@ -227,16 +278,24 @@ def start(
     for _, l in loggers:
         l(epoch=0, training_config=training_config)
 
-    ut.logger.info(f"Begin training for {N_EPOCHS} epochs")
+    ut.logger.info(f"Begin training for {training_config.n_epochs} epochs")
 
-    epoch_history = {}
+    epoch_history, loss_history = {}, []
 
-    loss_history = []
-
-    for i, epoch_key in enumerate(jax.random.split(key, N_EPOCHS), 1):
+    for i, epoch_key in enumerate(jax.random.split(key, training_config.n_epochs), 1):
         t0 = time.time()
-        xb = ut.get_looped_slice(xbatches, i * STEPS_PER_EPOCH, (i + 1) * STEPS_PER_EPOCH, axis=1)
-        yb = ut.get_looped_slice(ybatches, i * STEPS_PER_EPOCH, (i + 1) * STEPS_PER_EPOCH, axis=1)
+        xb = ut.get_looped_slice(
+            xbatches,
+            i * training_config.steps_per_epoch,
+            (i + 1) * training_config.steps_per_epoch,
+            axis=1,
+        )
+        yb = ut.get_looped_slice(
+            ybatches,
+            i * training_config.steps_per_epoch,
+            (i + 1) * training_config.steps_per_epoch,
+            axis=1,
+        )
         params, opt_state, epoch_history = compiled_epoch_step(params, opt_state, epoch_key, xb, yb)
         epoch_history["epoch_time"] = time.time() - t0
         epoch_history["latest_params"] = params
@@ -245,54 +304,25 @@ def start(
 
         for t, l in loggers:
             if t is not None:
-                if (t == 0 or (i % t == 0 and t > 0)) or i == N_EPOCHS:
+                if (t == 0 or (i % t == 0 and t > 0)) or i == training_config.n_epochs:
                     l(
                         epoch=i,
                         training_config=training_config,
                         epoch_history=epoch_history,
-                        nbatches=STEPS_PER_EPOCH,
+                        nbatches=training_config.steps_per_epoch,
                     )
 
     for t, l in loggers:
         if t is None or t == -1:
             l(
-                epoch=N_EPOCHS,
+                epoch=training_config.n_epochs,
                 training_config=training_config,
                 epoch_history=epoch_history,
             )
 
-    ut.logger.info(f"End of training for {N_EPOCHS} epochs")
+    ut.logger.info(f"End of training for {training_config.n_epochs} epochs")
 
     return params, loss_history, epoch_history
 
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{                  --     training program helper     --
-
-DEFAULT_LOSS = sorting_loss
-DEFAULT_LOSS_SERIALIZED = ut.encode_function(DEFAULT_LOSS)
-
-DEFAULT_TRAINING_CONFIG = {
-    # -------- training config --------
-    # training loop
-    "rng_key": 42,
-    "negative_grad_penalty": 0.1,
-    "huber_quantile_loss_delta": 0.1,
-    "optimizer": "adam",
-    "n_epochs": 150,
-    "schedule": "cosine",
-    "learning_rate": 1e-3,
-    "end_learning_rate": 1e-5,
-    "warmup_epochs": 15,
-    "steps_per_epoch": 128,
-    "decay_epochs": 130,
-    "adam_w_decay": 0.001,
-    "max_gradient_norm": 1.0,
-    # batches
-    "batch_size": 32,
-    "n_batches": 2048,
-    "loss_function": DEFAULT_LOSS_SERIALIZED,
-}
 
 ##────────────────────────────────────────────────────────────────────────────}}}

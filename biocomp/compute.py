@@ -19,11 +19,10 @@ from rich import print as pprint
 from . import nodes as nd
 from .network import Network
 from . import utils as ut
-from .utils import ArbitraryModel, PartialFunction
+from biocomp.utils import ArbitraryModel, PartialFunction, EncodedPartialFunction
 from .parameters import ParameterTree, ParamPath
 from . import nodes
 
-from typing import Annotated
 from pydantic import BaseModel, Field, BeforeValidator
 
 from jax.typing import ArrayLike
@@ -34,8 +33,6 @@ NdArray = Union[jnp.ndarray, np.ndarray]
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                      --     Config    --{{{
-
-EncodedPartialFunction = Annotated[ut.PartialFunction, BeforeValidator(ut.encode_function)]
 
 
 class ComputeConfig(ArbitraryModel):
@@ -49,7 +46,7 @@ class ComputeConfig(ArbitraryModel):
     node_functions: Optional[Dict[str, EncodedPartialFunction]] = None
     extra: Optional[Dict[str, Any]] = None
 
-    def get_impl(self, node_name: str, module_name: str = nd.__name__):
+    def get_node_implementation(self, node_name: str, module_name: str = nd.__name__):
         if self.node_functions is None:
             raise ValueError("No node implementations in this config")
         if node_name not in self.node_functions:
@@ -57,10 +54,26 @@ class ComputeConfig(ArbitraryModel):
 
         return self.node_functions[node_name].get_impl(extra_module_names=[module_name])
 
-    @classmethod
-    def from_dict(cls, d: dict):
-        node_f = {k: ut.PartialFunction(**v) for k, v in d.get("node_functions", {}).items()}
-        return cls(node_functions=node_f, extra=d.get("extra"))
+
+DEFAULT_COMPUTE_CONFIG = ComputeConfig.model_validate(
+    {
+        "node_functions": {
+            "transcription": nodes.transcription,
+            "translation": nodes.translation,
+            "inv_transcription": nodes.inv_transcription,
+            "inv_translation": nodes.inv_translation,
+            "sequestron_ERN": nodes.ERN5p,
+            "source": nodes.source_new,
+            "inv_source": nodes.inv_source_new,
+            "bias": nodes.bias,
+            "numeric": nodes.bias,
+            "aggregation": nodes.aggregation,
+            "inv_aggregation": nodes.inv_aggregation,
+            "output": nodes.grouped_output,
+            "deadend": nodes.single_passthrough,
+        }
+    }
+)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -214,7 +227,7 @@ class ComputeLayer:
 
         n_outputs = self.get_n_outputs()
 
-        impl = config.get_impl(self.f_type)(
+        impl = config.get_node_implementation(self.f_type)(
             input_shapes=self.f_input_shapes,
             n_outputs=n_outputs,
             stack=stack,

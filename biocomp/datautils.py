@@ -367,11 +367,8 @@ class DataConfig(BaseModel):
     valid_raw_value_range: ValueRange = Field(default_factory=lambda: ValueRange(min=500, max=1e8))
     acceptable_out_of_range_fraction_in_raw_data: float = 0.05
     perform_data_checks: bool = True
-
     resampling: ResamplingConfig = Field(default_factory=ResamplingConfig)
-
-    # rescaler: DataRescaler = Field(default_factory=CompressedSymLogRescaler)
-    rescaler: DataRescaler
+    rescaler: DataRescaler = Field(default_factory=CompressedSymLogRescaler)
 
 
 DEFAULT_DATA_CONFIG = DataConfig(rescaler=CompressedSymLogRescaler())
