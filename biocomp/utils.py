@@ -1,10 +1,11 @@
 ### {{{                          --     imports     --
 import yaml
 import json
+import logging
+from rich.logging import RichHandler
 from rich import print as rprint
 import inspect
 import sys
-from functools import lru_cache
 import copy
 from copy import deepcopy
 import xxhash
@@ -12,7 +13,7 @@ import time
 from pathlib import Path
 from tqdm import tqdm
 import jax
-from omegaconf import OmegaConf, DictConfig, ListConfig
+from omegaconf import DictConfig, ListConfig
 from jax.experimental import host_callback
 from jax import jit, vmap, lax
 from jax import tree_util as pytree
@@ -21,21 +22,18 @@ import pickle
 import json5
 import numpy as np
 import logging
-from rich.logging import RichHandler
 from jax.tree_util import Partial as partial
 from contextlib import contextmanager
 from pkg_resources import get_distribution, resource_filename
-from .recipe import XP
 import rich
 import subprocess
 import os
-from functools import cached_property
 
 import cProfile
 
 from biocomp.models import buildLibFromDatabase
 
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
@@ -49,20 +47,20 @@ from typing import (
     Sequence,
     TypeVar,
     Generic,
+    Annotated,
     Type,
 )
 
-T = TypeVar('T')
-R = TypeVar('R')
+T = TypeVar("T")
+R = TypeVar("R")
 PathLike = Union[str, Path]
 DictLike = Union[Dict, DictConfig]
 
 
 class ArbitraryModel(BaseModel):
-
     class Config:
         arbitrary_types_allowed = True
-        extra = 'forbid'
+        extra = "forbid"
         validate_default = True
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
@@ -75,7 +73,6 @@ class ArbitraryModel(BaseModel):
         dict_repr = self.model_dump()
         return yaml_dump(dict_repr, **kwargs)
 
-
     def __str__(self):
         return self.__repr__()
 
@@ -83,9 +80,6 @@ class ArbitraryModel(BaseModel):
 ##────────────────────────────────────────────────────────────────────────────}}}
 # {{{                       --     logging utils     --
 # ···············································································
-
-import logging
-from rich.logging import RichHandler
 
 
 def setup_logger(lname=None, level=logging.INFO):
@@ -105,14 +99,16 @@ def setup_logger(lname=None, level=logging.INFO):
 
 
 setup_logger()
-setup_logger('jax', logging.WARNING)
-logger = setup_logger('biocomp', logging.WARNING)
+setup_logger("jax", logging.WARNING)
+logger = setup_logger("biocomp", logging.WARNING)
+
 
 def set_loglevel(lname, level):
     log = logging.getLogger(lname)
     log.setLevel(level)
     log.propagate = False
     return log
+
 
 @contextmanager
 def timer(name=None, use_logger=True):
@@ -151,18 +147,18 @@ def save(data: Any, path: Union[str, Path], overwrite: bool = False, rename_if_e
         if overwrite:
             path.unlink()
         elif rename_if_exists:
-            path = path.with_name(path.stem + '_' + path.suffix)
+            path = path.with_name(path.stem + "_" + path.suffix)
         else:
-            raise RuntimeError(f'File {path} already exists.')
-    with open(path, 'wb') as file:
+            raise RuntimeError(f"File {path} already exists.")
+    with open(path, "wb") as file:
         pickle.dump(data, file)
 
 
 def load(path: Union[str, Path]) -> Any:
     path = Path(path)
     if not path.is_file():
-        raise ValueError(f'Not a file: {path}')
-    with open(path, 'rb') as file:
+        raise ValueError(f"Not a file: {path}")
+    with open(path, "rb") as file:
         data = pickle.load(file)
     return data
 
@@ -196,27 +192,27 @@ def get_cache(
                 cache_location.mkdir(parents=True, exist_ok=True)
             elif not cache_location.exists():
                 raise FileNotFoundError(
-                    f'Path {cache_location} doesn\'t exist and create_dir is False'
+                    f"Path {cache_location} doesn't exist and create_dir is False"
                 )
             cachepath = cache_location / sighash
             cachepath = cachepath.resolve()
         except Exception as e:
-            logger.error(f'Error creating cache directory: {e}')
-            logger.error(f'Not using cache.')
+            logger.error(f"Error creating cache directory: {e}")
+            logger.error(f"Not using cache.")
             return gen_f()
         if cachepath.exists():
-            logger.debug(f'Loading {sighash} from cache.')
-            with open(cachepath, 'rb') as file:
+            logger.debug(f"Loading {sighash} from cache.")
+            with open(cachepath, "rb") as file:
                 data = pickle.load(file)
         else:
-            logger.debug(f'No such signature in cache: {signature}')
-            logger.debug(f'Generating {sighash} and saving to cache.')
+            logger.debug(f"No such signature in cache: {signature}")
+            logger.debug(f"Generating {sighash} and saving to cache.")
             data = gen_f()
             try:
-                with open(cachepath, 'wb') as file:
+                with open(cachepath, "wb") as file:
                     pickle.dump(data, file)
             except Exception as e:
-                logger.error(f'Error generating {sighash}: {e}')
+                logger.error(f"Error generating {sighash}: {e}")
     else:
         # no cache location = caching is disabled
         data = gen_f()
@@ -228,39 +224,89 @@ def get_cache(
 ## {{{                  --     function serialization     --
 
 
-
 class PartialFunction(ArbitraryModel, Generic[T, R]):
+    """
+    A partial function that can be serialized and deserialized
+    """
+
     func: Union[str, Callable]  # 'module.fname' or 'fname' or function
     args: list = []
     kwargs: dict = {}
     modules: list = []
 
-    def get_impl(self, extra_module_names: Optional[List[str]] = None) -> Callable:
+    def model_post_init(self, *a, **kw):
+        super().model_post_init(*a, **kw)
+        self._func = None
+
+    def get_impl(
+        self,
+        extra_module_names: Optional[List[str]] = None,
+        force_refresh=False,
+    ) -> Callable:
+        if self._func is not None and not force_refresh:
+            return self._func
+
         if extra_module_names is None:
             extra_module_names = []
-        if isinstance(self.func, str):
-            implementation = decode_type(self.func, self.modules + extra_module_names)
-            assert callable(implementation), f'{self.func} is not a function'
-            self.func = partial(implementation, *self.args, **self.kwargs)
-        return self.func
+
+        implem = self.func
+        if isinstance(implem, str):
+            implem = decode_type(implem, self.modules + extra_module_names)
+
+        assert callable(implem), f"{implem} is not a function"
+        args, kwargs = self.parsed_args()
+        self._func = partial(implem, *args, **kwargs)
+
+        return self._func
+
+    def parsed_args(self):
+        args = [arg() if isinstance(arg, PartialFunctionResult) else arg for arg in self.args]
+        kwargs = {
+            k: v() if isinstance(v, PartialFunctionResult) else v for k, v in self.kwargs.items()
+        }
+        return args, kwargs
 
     def __call__(self, *args, **kw):
         return self.get_impl()(*args, **kw)
 
     def __repr__(self):
-        return f'PartialFunction({self.func=}, {self.args=}, {self.kwargs=})'
+        return f"PartialFunction({self.func=}, {self.args=}, {self.kwargs=})"
 
     def get_name(self) -> str:
         if isinstance(self.func, str):
-            spl = self.func.rsplit('.', 1)
+            spl = self.func.rsplit(".", 1)
             if len(spl) == 2:
                 return spl[1]
             return self.func
         return self.func.__name__
 
 
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+class PartialFunctionResult(PartialFunction[T, R]):
+    """
+    Meant to signal to PartialFunction that the function should be called
+    when it's used as argument (and the argument therefore is the result of the function)
+    """
+
+    pass
+
+
+class ExecuteFunction(PartialFunction[T, R]):
+    """
+    Execute on instantiation (and return result)
+    """
+
+    def __new__(cls, **data):
+        instance = super().__new__(cls)
+        instance.__init__(**data)
+        return instance()
+
+
 def unwrap_partial_function(implementation):
-    if hasattr(implementation, 'func') and hasattr(implementation, 'keywords'):
+    if hasattr(implementation, "func") and hasattr(implementation, "keywords"):
         partial_args = implementation.keywords
         implementation = implementation.func
     else:
@@ -268,14 +314,28 @@ def unwrap_partial_function(implementation):
     return implementation, partial_args
 
 
-def encode_function(func: Callable, **kwargs) -> PartialFunction:
-    func, partial_args = unwrap_partial_function(func)
-    kwargs.update(partial_args)
-
-    # detect if it's in a module
+def get_fname(func: Callable) -> str:
     module_name = func.__module__
-    if module_name == '__main__':
+    if module_name == "__main__":
         module_name = None
+    fname = func.__name__
+    if module_name is not None:
+        fname = f"{module_name}.{fname}"
+    return fname
+
+
+def encode_function(func: Callable, **kwargs) -> PartialFunction:
+    if isinstance(func, (PartialFunction, PartialFunctionResult)):
+        new_pf = func
+        new_pf.kwargs.update(kwargs)
+        if not isinstance(new_pf.func, str):
+            new_pf.func = get_fname(new_pf.func)
+        return new_pf
+
+    else:
+        func, partial_args = unwrap_partial_function(func)
+
+    kwargs.update(partial_args)
 
     signature = inspect.signature(func)
     f_kwargs = {}
@@ -285,11 +345,12 @@ def encode_function(func: Callable, **kwargs) -> PartialFunction:
         elif param.default != inspect.Parameter.empty:
             f_kwargs[name] = param.default
 
-    fname = func.__name__
-    if module_name is not None:
-        fname = f'{module_name}.{fname}'
+    fname = get_fname(func)
 
     return PartialFunction(func=fname, kwargs=f_kwargs)
+
+
+EncodedPartialFunction = Annotated[PartialFunction, BeforeValidator(encode_function)]
 
 
 def decode_type(
@@ -302,11 +363,10 @@ def decode_type(
     format: 'module.type' or 'type'
     """
 
-
     if available_module_names is None:
-        available_module_names = ['__main__']
+        available_module_names = ["__main__"]
 
-    spl = type_str.rsplit('.', 1)
+    spl = type_str.rsplit(".", 1)
     if len(spl) == 2:
         module_name, type_name = spl
         available_module_names = [module_name] + available_module_names
@@ -322,7 +382,7 @@ def decode_type(
         if hasattr(module, type_name):
             return getattr(module, type_name)
 
-    raise ValueError(f'No type named {type_str} in modules {available_module_names}')
+    raise ValueError(f"No type named {type_str} in modules {available_module_names}")
 
 
 def build_if_has_target(
@@ -330,7 +390,6 @@ def build_if_has_target(
     available_module_names: Optional[List[str]] = None,
     enforce_type: Optional[Type[T]] = None,
 ) -> Union[T, DictLike]:
-
     """
     If the dictionary has a key '_target_', will instantiate
     an object of this type with the remaining keys as arguments.
@@ -338,18 +397,18 @@ def build_if_has_target(
 
     if not dict_like(value):
         if enforce_type is not None and not isinstance(value, enforce_type):
-            raise ValueError(f'Value {value} is not an instance of {enforce_type}')
+            raise ValueError(f"Value {value} is not an instance of {enforce_type}")
         return value
 
     assert isinstance(value, DictLike)
 
-    if not '_target_' in value:  # type: ignore
+    if not "_target_" in value:  # type: ignore
         return value
 
-    target_type = decode_type(value['_target_'], available_module_names)
+    target_type = decode_type(value["_target_"], available_module_names)
     if enforce_type is not None and not issubclass(target_type, enforce_type):
-        raise ValueError(f'Target type {target_type} not a subclass of {enforce_type}')
-    ctor_dict = {str(k): value[k] for k in value if k != '_target_'}
+        raise ValueError(f"Target type {target_type} not a subclass of {enforce_type}")
+    ctor_dict = {str(k): value[k] for k in value if k != "_target_"}
     return target_type(**ctor_dict)
 
 
@@ -428,13 +487,13 @@ import inspect
 _CONFIGURABLE_FUNCTIONS = {}
 
 
-def get_configurable_functions(namespace: str = 'default') -> Dict:
+def get_configurable_functions(namespace: str = "default") -> Dict:
     if namespace not in _CONFIGURABLE_FUNCTIONS:
         _CONFIGURABLE_FUNCTIONS[namespace] = {}
     return _CONFIGURABLE_FUNCTIONS[namespace]
 
 
-def configurable(func: Callable, namespace: str = 'default') -> Callable:
+def configurable(func: Callable, namespace: str = "default") -> Callable:
     """Decorator to add a function and its arguments to the list of configurable functions."""
     local_conf_functions = get_configurable_functions(namespace)
     sig = inspect.signature(func)
@@ -450,18 +509,16 @@ def configurable(func: Callable, namespace: str = 'default') -> Callable:
     return wrapper
 
 
-def configurable_decorator(namespace: str = 'default') -> Callable:
+def configurable_decorator(namespace: str = "default") -> Callable:
     return partial(configurable, namespace=namespace)
 
 
 def generate_base_nested_config(
     available_functions: Optional[Dict] = None,
-    function_config_suffix: str = '_params',
+    function_config_suffix: str = "_params",
     add_defaults: bool = False,
-    namespace: str = 'default',
+    namespace: str = "default",
 ):
-
-
     if available_functions is None:
         available_functions = get_configurable_functions(namespace)
 
@@ -472,7 +529,6 @@ def generate_base_nested_config(
 
     emptyconf = {}
 
-
     def generate_empty_func_conf(func_name, func_args):
         subconf = {}
         for arg in func_args.keys():
@@ -482,12 +538,12 @@ def generate_base_nested_config(
                     subconf[arg] = generate_empty_func_conf(fname, available_functions[fname])
                 else:
                     logger.debug(
-                        f'{func_name} has a nested config {arg} but {fname} is not a known function'
+                        f"{func_name} has a nested config {arg} but {fname} is not a known function"
                     )
         return subconf
 
     for func_name, func_args in available_functions.items():
-        argname = f'{func_name}{function_config_suffix}'
+        argname = f"{func_name}{function_config_suffix}"
         emptyconf[argname] = generate_empty_func_conf(func_name, func_args)
 
     if add_defaults:
@@ -506,12 +562,12 @@ def resolve_if_ends_with(key: Any, suffix: str) -> bool:
 
 def dict_like(obj) -> bool:
     return (
-        hasattr(obj, 'keys')
-        and hasattr(obj, 'get')
-        and hasattr(obj, '__getitem__')
-        and hasattr(obj, '__contains__')
-        and hasattr(obj, '__iter__')
-        and hasattr(obj, 'items')
+        hasattr(obj, "keys")
+        and hasattr(obj, "get")
+        and hasattr(obj, "__getitem__")
+        and hasattr(obj, "__contains__")
+        and hasattr(obj, "__iter__")
+        and hasattr(obj, "items")
     )
 
 
@@ -531,7 +587,7 @@ def extend(d1, d2):
     return deepcopy(d2) + deepcopy(d1)
 
 
-DEFAULT_MERGE_MODES = {'replace': replace, 'extend': extend, 'auto': 'auto'}
+DEFAULT_MERGE_MODES = {"replace": replace, "extend": extend, "auto": "auto"}
 
 
 def maybecopy(obj, deep: bool = True):
@@ -544,14 +600,13 @@ def updated_dict(
     merge_mode: Optional[Dict[Union[Type, str], Union[str, Callable]]] = None,
     deep: bool = True,
 ) -> Dict:
-
     if merge_mode is None:
         merge_mode = {}
 
     t1, t2 = type(d1), type(d2)
     st1, st2 = str(t1.__name__), str(t2.__name__)
 
-    mmode = 'auto'
+    mmode = "auto"
 
     if t1 in merge_mode or st1 in merge_mode:
         mmode = merge_mode.get(t1, merge_mode.get(st1))
@@ -567,15 +622,15 @@ def updated_dict(
         if callable(mmode):
             return mmode(d1, d2)
 
-    if mmode == 'auto':
+    if mmode == "auto":
         if not dict_like(d1):
             return maybecopy(d2, deep) if d2 is not None else maybecopy(d1, deep)
         if not dict_like(d2):
             return maybecopy(d1, deep) if d1 is not None else maybecopy(d2, deep)
     else:
-        raise NotImplementedError(f'Cannot merge {t1} and {t2}')
+        raise NotImplementedError(f"Cannot merge {t1} and {t2}")
 
-    assert mmode == 'auto', f'Invalid merge mode {mmode}'
+    assert mmode == "auto", f"Invalid merge mode {mmode}"
     # they're both dicts:
     res = {}
     for key, val in d1.items():
@@ -592,9 +647,8 @@ def updated_dict(
 def nested_resolve(
     input_dict: Any,
     already_seen: Dict = {},
-    resolve_key: Callable[[str], bool] = partial(resolve_if_ends_with, suffix='_params'),
+    resolve_key: Callable[[str], bool] = partial(resolve_if_ends_with, suffix="_params"),
 ) -> Dict:
-
     if not isinstance(input_dict, dict):
         return deepcopy(input_dict)
 
@@ -613,7 +667,7 @@ def nested_resolve(
 def generate_full_nested_config(
     user_config: Optional[Dict] = None,
     empty_config: Optional[Dict] = None,
-    namespace: str = 'default',
+    namespace: str = "default",
     **kw,
 ):
     if empty_config is None:
@@ -625,7 +679,6 @@ def generate_full_nested_config(
 
 
 class BiocompYamlDumper(yaml.SafeDumper):
-
     def increase_indent(self, flow=False, indentless=False):
         return super(BiocompYamlDumper, self).increase_indent(flow, False)
 
@@ -656,7 +709,7 @@ def yaml_dump(data, **kw):
     return yaml.dump(data, Dumper=BiocompYamlDumper, **kw)
 
 
-def dump_default_config(namespace: str = 'default'):
+def dump_default_config(namespace: str = "default"):
     baseconf = generate_base_nested_config(add_defaults=True, namespace=namespace)
     # baseconf = delete_empty(baseconf)
     return yaml_dump(baseconf)
@@ -671,15 +724,16 @@ def dump_default_config(namespace: str = 'default'):
 from pathlib import Path
 
 
-BIOCOMP_ROOT_PATH = os.getenv('BIOCOMP_ROOT')
+BIOCOMP_ROOT_PATH = os.getenv("BIOCOMP_ROOT")
 if BIOCOMP_ROOT_PATH is None:
-    logger.warning('BIOCOMP_ROOT not defined. Using default paths.')
-    BIOCOMP_ROOT_PATH = '~/Dropbox (MIT)/Biocomp/'
+    logger.warning("BIOCOMP_ROOT not defined. Using default paths.")
+    BIOCOMP_ROOT_PATH = "~/Dropbox (MIT)/Biocomp/"
 
-DEFAULT_LIB_PATH = Path(BIOCOMP_ROOT_PATH).expanduser() / 'partsdb.sqlite'
-DEFAULT_LIB_PATH = f'sqlite:///{DEFAULT_LIB_PATH}'
-if 'BIOCOMP_PARTS_DB' in os.environ:
-    DEFAULT_LIB_PATH = Path(os.environ['BIOCOMP_PARTS_DB']).expanduser().resolve()
+DEFAULT_LIB_PATH = Path(BIOCOMP_ROOT_PATH).expanduser() / "partsdb.sqlite"
+DEFAULT_LIB_PATH = f"sqlite:///{DEFAULT_LIB_PATH}"
+if "BIOCOMP_PARTS_DB" in os.environ:
+    DEFAULT_LIB_PATH = Path(os.environ["BIOCOMP_PARTS_DB"]).expanduser().resolve()
+
 
 def load_lib(lib_path=DEFAULT_LIB_PATH):
     lib = buildLibFromDatabase(lib_path)
@@ -701,11 +755,7 @@ def list_like(obj) -> bool:
     return isinstance(obj, (list, tuple, ListConfig))
 
 
-
-
-
-
-def as_list(obj:Any) -> Union[list, tuple]:
+def as_list(obj: Any) -> Union[list, tuple]:
     """Put obj in a list if it's not already a list or tuple"""
     return [obj] if not isinstance(obj, (list, tuple)) else obj
 
@@ -746,17 +796,20 @@ def remove_keys(d: Dict, keys: Sequence):
 
 
 def dict_print(d: dict, indent=4):
-    res = ''
+    res = ""
+
     def dict_print_impl(d, indentlvl):
         nonlocal res
         for k, v in d.items():
             if dict_like(v):
-                res += ' ' * indentlvl + f'{k}:\n'
+                res += " " * indentlvl + f"{k}:\n"
                 dict_print_impl(v, indentlvl + indent)
             else:
-                res += ' ' * indentlvl + f'{k}: {v}\n'
+                res += " " * indentlvl + f"{k}: {v}\n"
+
     dict_print_impl(d, 0)
     rprint(res)
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -767,7 +820,7 @@ def dict_print(d: dict, indent=4):
 
 
 @contextmanager
-def profiler(filename='profile.prof'):
+def profiler(filename="profile.prof"):
     Path(filename).parent.mkdir(parents=True, exist_ok=True)
     profiler = cProfile.Profile()
     profiler.enable()
@@ -1066,7 +1119,7 @@ def grid_map(F, xrange, yrange, meshres):
     XX, YY = np.meshgrid(
         np.linspace(xrange[0], xrange[1], meshres[0]),
         np.linspace(yrange[0], yrange[1], meshres[1]),
-        indexing='xy',
+        indexing="xy",
     )
     coords = np.column_stack((XX.ravel(), YY.ravel()))
     ZZ = jax.vmap(F)(coords).reshape(XX.shape)
@@ -1333,7 +1386,7 @@ def str_to_int_array(s):
 
 
 def int_array_to_str(a):
-    return ''.join([chr(int(c)) for c in a])
+    return "".join([chr(int(c)) for c in a])
 
 
 def tree_to_jax(params):
@@ -1349,13 +1402,13 @@ def tree_to_np(params):
 
 
 def get_uorf_value(param):
-    if 'tl_rate' in param:
-        u = param['tl_rate'][0].split('_')[0]
+    if "tl_rate" in param:
+        u = param["tl_rate"][0].split("_")[0]
         try:
             v = int(u[:-1]) * 10
         except ValueError:
             v = 0
-        if u[-1] == 'w':
+        if u[-1] == "w":
             v = v - 5
         return v
     else:
@@ -1363,28 +1416,28 @@ def get_uorf_value(param):
 
 
 UORF_DICT = {
-    0: 'No uORF',
-    5: 'weak uORF',
-    10: '1x uORF',
-    20: '2x uORF',
-    30: '3x uORF',
-    40: '4x uORF',
-    50: '5x uORF',
-    60: '6x uORF',
-    70: '7x uORF',
-    80: '8x uORF',
+    0: "No uORF",
+    5: "weak uORF",
+    10: "1x uORF",
+    20: "2x uORF",
+    30: "3x uORF",
+    40: "4x uORF",
+    50: "5x uORF",
+    60: "6x uORF",
+    70: "7x uORF",
+    80: "8x uORF",
 }
 
 
 def get_all_ERN_ids(network):
-    ERN_ids = network.compute_graph[network.compute_graph['type'] == 'sequestron_ERN'].index.values
+    ERN_ids = network.compute_graph[network.compute_graph["type"] == "sequestron_ERN"].index.values
     return network.sort_nodes_by_upstream(ERN_ids)
 
 
 def get_all_ERNs_names(network):
     ERNs = network.compute_graph.loc[get_all_ERN_ids(network)]
-    ERN_extras = ERNs['extra'].values
-    ERN_names = [e['seq_name'].split('#')[0].split('::')[-1] for e in ERN_extras]
+    ERN_extras = ERNs["extra"].values
+    ERN_names = [e["seq_name"].split("#")[0].split("::")[-1] for e in ERN_extras]
     return ERN_names
 
 
@@ -1394,7 +1447,7 @@ def get_uorf_names(uorf_values, ern_names):
         ERN_uorf, REC_uorf = uorf
         ERN_uorf = UORF_DICT[ERN_uorf]
         REC_uorf = UORF_DICT[REC_uorf]
-        uorf_names.append((f'{ern_name} ERN: {ERN_uorf}', f'{ern_name} REC: {REC_uorf}'))
+        uorf_names.append((f"{ern_name} ERN: {ERN_uorf}", f"{ern_name} REC: {REC_uorf}"))
     return uorf_names
 
 
@@ -1402,7 +1455,7 @@ def get_all_uorf_values(network):
     cdg = network.central_dogma_graph
     ERNs = network.compute_graph.loc[get_all_ERN_ids(network)]
     ERN_names = get_all_ERNs_names(network)
-    ERN_inputs = ERNs['cdg_input'].values
+    ERN_inputs = ERNs["cdg_input"].values
     values = []
     for inp in ERN_inputs:
         cdgin = cdg.loc[inp]
@@ -1418,18 +1471,18 @@ from typing import List, Callable
 
 
 def get_ERN_ids(network):
-    return network.compute_graph[network.compute_graph['type'] == 'sequestron_ERN'].index.values
+    return network.compute_graph[network.compute_graph["type"] == "sequestron_ERN"].index.values
 
 
 def get_RCB_ids(network):
     return network.compute_graph[
-        network.compute_graph['type'].str.startswith('sequestron_R')
+        network.compute_graph["type"].str.startswith("sequestron_R")
     ].index.values
 
 
 def get_sequestron_ids(network):
     return network.compute_graph[
-        network.compute_graph['type'].str.startswith('sequestron_')
+        network.compute_graph["type"].str.startswith("sequestron_")
     ].index.values
 
 
@@ -1454,7 +1507,7 @@ def topological_sort(
         ]
 
         if not independent:
-            raise ValueError('Cycle detected in graph')
+            raise ValueError("Cycle detected in graph")
         visited.update(independent)
         batches.append(independent)
     return batches
@@ -1466,27 +1519,27 @@ def get_network_family(network):
     seqs = get_sequestron_ids(network)
     ts = topological_sort(seqs, make_is_upstream(network))
 
-    seqtype = 'none'
-    family = 'unknown'
+    seqtype = "none"
+    family = "unknown"
     match (len(erns) > 0, len(rcbs) > 0):
         case (True, True):
-            seqtype = 'hybrid'
+            seqtype = "hybrid"
         case (True, False):
-            seqtype = 'ERN'
+            seqtype = "ERN"
         case (False, True):
-            seqtype = 'RCB'
+            seqtype = "RCB"
 
     match (len(seqs), len(ts)):
         case (0, 0):
-            family = 'no device'
+            family = "no device"
         case (1, 1):
-            family = 'single'
+            family = "single"
         case (2, 2):
-            family = 'cascade'
+            family = "cascade"
         case (2, 1):
-            family = 'dual region'
+            family = "dual region"
         case (3, 2):
-            family = 'bandpass'
+            family = "bandpass"
 
     return family, seqtype
 
@@ -1498,11 +1551,11 @@ def get_network_family(network):
 def get_git_commit_hash():
     bcpath = Path(__file__).parent
     bcpath = bcpath.resolve()
-    return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=bcpath).decode('ascii').strip()
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=bcpath).decode("ascii").strip()
 
 
 def get_biocomp_version():
-    return get_distribution('biocomp').version
+    return get_distribution("biocomp").version
 
 
 def uniqueIdGenerator(start=0):
