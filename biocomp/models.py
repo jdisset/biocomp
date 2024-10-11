@@ -133,13 +133,12 @@ def getAllPartsFromDatabase(db_url: str):
     }
 
 
-def buildLibFromDatabase(db_url: str):
+def buildLibFromDatabase(db_url: str) -> PartsLibrary:
     parts = getAllPartsFromDatabase(db_url)
     # first need to turn everything into pandas dataframes
 
     if len(parts["parts"]) == 0:
-        print("No parts found in parts database")
-        return None
+        raise ValueError("No parts found in database")
 
     parts_dict = {}
     for key, value in parts.items():
@@ -150,7 +149,7 @@ def buildLibFromDatabase(db_url: str):
         df.set_index(pk_field_name, inplace=True)
         parts_dict[key] = df
 
-    lib = PartsLibrary(
+    return PartsLibrary(
         parts_dict["parts"],
         parts_dict["L0s"],
         parts_dict["L1s"],
@@ -159,4 +158,3 @@ def buildLibFromDatabase(db_url: str):
         parts_dict["sequestrons"],
         parts_dict["sequestron_types"],
     )
-    return lib

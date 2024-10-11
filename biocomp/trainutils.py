@@ -36,42 +36,6 @@ from typing import List, Tuple, Dict, Any, Callable, Collection, Optional, Union
 ### {{{                       --     logging tools     --
 
 
-def initialize_wandb(project, entity, full_config, **kw):
-    import wandb as wb
-
-    wb.init(config=full_config, project=project, entity=entity, **kw)
-    return wb
-
-
-def setup_wandb_logging(
-    project,
-    training_config,
-    compute_config,
-    data_config,
-    params_save_period=-1,  # only at the end
-    entity='jdisset',
-    **kw,
-):
-
-    full_config = {**training_config, **compute_config.config, **data_config}
-    wb = initialize_wandb(project, entity, full_config, **kw)
-    save_dir = Path(wb.run.dir)
-    loggers = [
-        (1, console_log),
-        (
-            params_save_period,
-            partial(
-                local_save,
-                compute_config=compute_config,
-                training_config=training_config,
-                data_config=data_config,
-                save_dir=save_dir,
-            ),
-        ),
-        (1, wandb_log_epoch),
-    ]
-    return loggers
-
 
 @Partial(jit, static_argnums=(1,))
 def compstats(v, smooth_win=1):
@@ -98,69 +62,6 @@ def get_epoch_stats(epoch_data, smooth_win=1):
         for k, v in epoch_data['params']['shared'].items():
             stats['params'][k] = compstats(v)
     return stats
-
-
-def local_save(
-    epoch,
-    compute_config,
-    training_config,
-    data_config,
-    epoch_history=None,
-    save_dir=None,
-    full_save=False,
-    **_,
-):
-    assert save_dir is not None
-    if epoch_history is None:
-        return
-
-    if 'latest_params' not in epoch_history:
-        ut.logger.warning("No params for plotting evaluations")
-        return
-
-    t0 = time.time()
-
-    if not Path(save_dir).exists():
-        Path(save_dir).mkdir(parents=True)
-
-    if compute_config is not None:
-        compute_conf_path = Path(save_dir) / 'compute_config.json'
-        if not compute_conf_path.exists():
-            compute_config.export(compute_conf_path)
-
-
-    if training_config is not None:
-        training_conf_path = Path(save_dir) / 'training_config.json'
-        if not training_conf_path.exists():
-            with open(training_conf_path, 'w') as f:
-                json.dump(training_config, f)
-
-    if data_config is not None:
-        data_conf_path = Path(save_dir) / 'data_config.json'
-        if not data_conf_path.exists():
-            with open(data_conf_path, 'w') as f:
-                json.dump(data_config, f)
-
-
-    if full_save:
-        full_save_until_epoch = full_save if isinstance(full_save, int) else 2
-        if epoch <= full_save_until_epoch:
-            ut.save(epoch_history, f'{save_dir}/epoch_{epoch}_full.pkl')
-
-    params = epoch_history['latest_params']
-
-    # first we rename the old params
-    for f in Path(save_dir).glob('latest_params.pkl'):
-        f.rename(f'{save_dir}/old_params.pkl')
-
-    # then we save the new ones
-    ut.save(params, f'{save_dir}/latest_params.pkl')
-
-    # then we delete the old one
-    for f in Path(save_dir).glob('old_params.pkl'):
-        f.unlink()
-
-    ut.logger.info(f"Saving epoch to disk took {time.time() - t0:.2f}s")
 
 
 def wandb_plot_pred(
@@ -251,102 +152,11 @@ def wandb_plot_pred(
         wb.log({f'{log_key}_err': prederr})
 
 
-def wandb_log_epoch(epoch_history=None, **_):
-    if epoch_history is not None:
-        losses = np.array(epoch_history['loss'])
-        # shape of losses = (n_replicates, n_batches)
-        if losses.ndim == 1:
-            for loss in losses:
-                wb.log({'loss': loss})
-        else:
-            epoch = epoch_history.get('epoch', 0)
-            mean_loss = np.mean(losses, axis=0)
-            std_loss = np.std(losses, axis=0)
-            min_loss = np.min(losses, axis=0)
-            max_loss = np.max(losses, axis=0)
 
-            for i in range(mean_loss.shape[0]):
-                wb.log(
-                    {
-                        'loss/avg': mean_loss[i],
-                        'loss/std': std_loss[i],
-                        'loss/min': min_loss[i],
-                        'loss/max': max_loss[i],
-                    }
-                )
-
-        wb.log({'epoch_time': epoch_history['epoch_time']})
-
-
-def console_log(epoch, training_config, epoch_history=None, **_):
-    if epoch_history is not None and len(epoch_history['loss']) > 0:
-        losses = np.array(epoch_history['loss'])
-        # make it 2d if it's 1d
-        if losses.ndim == 1:
-            losses = losses[:, None]
-
-        avg_losses = np.mean(losses, axis=1)
-        best_id = np.argmin(avg_losses)
-        best_std = np.std(losses[best_id])
-        avg_std = np.std(avg_losses)
-        avg_avg = np.mean(avg_losses)
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-
-        fmt = lambda x: f'{x:.1e}' if x < 1e-3 or x > 1e3 else f'{x:.3f}'
-
-        ut.logger.info(
-            f"""[{epoch}/{training_config["n_epochs"]} in {epoch_history["epoch_time"]:.2f}s]
-             best loss: {fmt(avg_losses[best_id])} ± {fmt(best_std)} (replicate n° {best_id+1}/{len(losses)})
-             replicates avg: {fmt(avg_avg)} ± {fmt(avg_std)} """
-        )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{                       --     get_optimizer     --
-
-
-def get_optimizer(cfg):
-
-    learning_rate = cfg['learning_rate']
-
-    if 'schedule' in cfg:
-        if cfg['schedule'] == 'cosine':
-            steps_per_epoch = cfg['steps_per_epoch']
-            max_learning_rate = cfg['learning_rate']
-            warmup_steps = cfg['warmup_epochs'] * steps_per_epoch
-            decay_steps = cfg['decay_epochs'] * steps_per_epoch
-            end_learning_rate = cfg['end_learning_rate']
-            learning_rate = optax.warmup_cosine_decay_schedule(
-                init_value=1e-7,
-                peak_value=max_learning_rate,
-                warmup_steps=warmup_steps,
-                decay_steps=decay_steps,
-                end_value=end_learning_rate,
-            )
-        elif cfg['schedule'] == 'constant':
-            learning_rate = cfg['learning_rate']
-        else:
-            raise ValueError(f"Unknown learning rate schedule {cfg['schedule']}")
-
-    optimizers = {
-        'sgd': optax.sgd(learning_rate=learning_rate),
-        'adamw': optax.adamw(learning_rate=learning_rate, weight_decay=cfg['adam_w_decay']),
-        'adam': optax.adam(learning_rate=learning_rate),
-        'amsgrad': optax.amsgrad(learning_rate=learning_rate),
-    }
-    assert (
-        cfg['optimizer'] in optimizers.keys()
-    ), f"Optimizer {cfg['optimizer']} not available. Available optimizers are {optimizers.keys()}"
-    optimizer = optimizers[cfg['optimizer']]
-
-    gradient_clip = optax.clip_by_global_norm(cfg['max_gradient_norm'])
-    optimizer = optax.chain(gradient_clip, optimizer)
-
-    return optimizer
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                    --     base loss functions     --
 

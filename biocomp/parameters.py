@@ -943,6 +943,8 @@ class ParameterTree:
         return tcopy2
 
 
+
+
 def flatten_ParameterTree(ptree):
     flat_contents = (ptree.data,)
     aux_data = (ptree.read_only, ptree.tagnames, ptree.tags)

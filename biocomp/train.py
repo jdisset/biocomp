@@ -160,16 +160,22 @@ class TrainingConfig(ArbitraryModel):
 
     seed: Optional[int] = None
     negative_grad_penalty: float = 0.1
-    n_epochs: int = 150
-    steps_per_epoch: int = 128
+    batches_per_step: int = 128
     batch_size: int = 32
-    n_batches: int = 2048
+    n_epochs: float = 3
+    n_batches: int = 2048  # can't really have "real" epochs because each network has a different qtty of data points
     n_replicates: int = 1
 
     keep_in_history: List[str] = ["loss"]
 
     # compute config
     compute_config: cmp.ComputeConfig = cmp.DEFAULT_COMPUTE_CONFIG
+
+    def model_post_init(self, *_, **__):
+        if self.seed is None:
+            import random
+
+            self.seed = random.randint(0, 2**32 - 1)
 
     @property
     def optimizer(self):
@@ -206,14 +212,18 @@ def start(
 
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
 
-    optimizer = tu.get_optimizer(training_config)
+    optimizer = training_config.optimizer
     opt_state = vmap(optimizer.init)(dynamic)
+
+    total_steps = int(
+        training_config.n_epochs * training_config.n_batches / training_config.batches_per_step
+    )
 
     ut.logger.info(
         f"""Done initializing optimizer,
         n_replicates: {training_config.n_replicates}
         batches: {xbatches.shape[1]}
-        steps per epoch: {training_config.steps_per_epoch}
+        batch per step: {training_config.batches_per_step}
         random seed: {training_config.seed}"""
     )
 
@@ -229,100 +239,122 @@ def start(
         scannable=True,
     )
 
-    def per_replicate_epoch_step(start_params, start_opt_state, key, xbatches, ybatches, num_z):
+    def per_replicate_step(start_params, start_opt_state, key, xbatches, ybatches, num_z):
         print(num_z)
-        assert xbatches.shape[:-1] == (training_config.steps_per_epoch, training_config.batch_size)
-        assert ybatches.shape[:-1] == (training_config.steps_per_epoch, training_config.batch_size)
-        pscan = ut.progress_scan(training_config.steps_per_epoch, message="Training model")
-        zbatches = jax.random.uniform(key, ybatches.shape)
-        assert zbatches.shape == ybatches.shape
-        batch_keys = jax.random.split(key, training_config.steps_per_epoch)
+        assert xbatches.shape[:-1] == (
+            training_config.batches_per_step,
+            training_config.batch_size,
+        )
+        assert ybatches.shape[:-1] == (
+            training_config.batches_per_step,
+            training_config.batch_size,
+        )
+        pscan = ut.progress_scan(training_config.batches_per_step, message="Training model")
+
+        zbatches = jax.random.uniform(
+            key, (training_config.batches_per_step, training_config.batch_size, num_z)
+        )
+
+        batch_keys = jax.random.split(key, training_config.batches_per_step)
         sstep = pscan(scannable_step)
-        (final_params, final_opt_state), epoch_history = jax.lax.scan(
+        (final_params, final_opt_state), step_history = jax.lax.scan(
             sstep,
             (start_params, start_opt_state),
-            (jnp.arange(training_config.steps_per_epoch), xbatches, ybatches, zbatches, batch_keys),
+            (
+                jnp.arange(training_config.batches_per_step),
+                xbatches,
+                ybatches,
+                zbatches,
+                batch_keys,
+            ),
         )
-        return final_params, final_opt_state, epoch_history
+        return final_params, final_opt_state, step_history
 
-    def epoch_step(params: ParameterTree, opt_state: optax.OptState, epoch_key, xs, ys, num_z):
-        keys = jax.random.split(epoch_key, training_config.n_replicates)
+    def step(params: ParameterTree, opt_state: optax.OptState, step_key, xs, ys, num_z):
+        keys = jax.random.split(step_key, training_config.n_replicates)
         assert (
             xs.shape[:-1]
             == ys.shape[:-1]
             == (
                 training_config.n_replicates,
-                training_config.steps_per_epoch,
+                training_config.batches_per_step,
                 training_config.batch_size,
             )
         )
-        return jax.vmap(Partial(per_replicate_epoch_step, num_z=num_z))(
-            params, opt_state, keys, xs, ys
-        )
+        return jax.vmap(Partial(per_replicate_step, num_z=num_z))(params, opt_state, keys, xs, ys)
 
-    with ut.timer("Compiling the epoch_step function"):
-        xb = ut.get_looped_slice(xbatches, 0, training_config.steps_per_epoch, axis=1)
-        yb = ut.get_looped_slice(ybatches, 0, training_config.steps_per_epoch, axis=1)
-        num_z = tuple(static["global/number_of_quantile_variables"])
-        lowered = jax.jit(Partial(epoch_step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
-        compiled_epoch_step = lowered.compile()
+    with ut.timer("Compiling the step function"):
+        xb = ut.get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
+        yb = ut.get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
+        num_z = static["global/number_of_quantile_variables"]
+        print(f"num_z: {num_z}")
+        assert num_z.shape == (training_config.n_replicates,)
+        assert jnp.all(num_z == num_z[0]), "All replicates must have the same number of quantile variables"
+        num_z = int(num_z[0])
+        lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
+        compiled_step = lowered.compile()
 
     # --- main training loop
-
-    if loggers is None:
-        loggers = [(1, tu.console_log)]
-
-    assert isinstance(loggers, list)
+    loggers = loggers or []
 
     # call all loggers at the beginning of the training
     for _, l in loggers:
-        l(epoch=0, training_config=training_config)
+        l(step=0, training_config=training_config)
 
-    ut.logger.info(f"Begin training for {training_config.n_epochs} epochs")
+    ut.logger.info(f"Begin training for {total_steps} steps")
 
-    epoch_history, loss_history = {}, []
+    step_history, loss_history = {}, []
 
-    for i, epoch_key in enumerate(jax.random.split(key, training_config.n_epochs), 1):
+    epoch = -1
+    step_per_epoch = training_config.n_batches // training_config.batches_per_step
+
+    for i, step_key in enumerate(jax.random.split(key, total_steps), 1):
+        if i % step_per_epoch == 0:
+            epoch += 1
+            ut.logger.info(f"Starting epoch {epoch}")
+
         t0 = time.time()
         xb = ut.get_looped_slice(
             xbatches,
-            i * training_config.steps_per_epoch,
-            (i + 1) * training_config.steps_per_epoch,
+            i * training_config.batches_per_step,
+            (i + 1) * training_config.batches_per_step,
             axis=1,
         )
         yb = ut.get_looped_slice(
             ybatches,
-            i * training_config.steps_per_epoch,
-            (i + 1) * training_config.steps_per_epoch,
+            i * training_config.batches_per_step,
+            (i + 1) * training_config.batches_per_step,
             axis=1,
         )
-        params, opt_state, epoch_history = compiled_epoch_step(params, opt_state, epoch_key, xb, yb)
-        epoch_history["epoch_time"] = time.time() - t0
-        epoch_history["latest_params"] = params
-        if "loss" in epoch_history:
-            loss_history.append(epoch_history["loss"])
+
+        params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
+
+        step_history["step_time"] = time.time() - t0
+        step_history["latest_params"] = params
+
+        if "loss" in step_history:
+            loss_history.append(step_history["loss"])
 
         for t, l in loggers:
             if t is not None:
-                if (t == 0 or (i % t == 0 and t > 0)) or i == training_config.n_epochs:
+                if (t == 0 or (i % t == 0 and t > 0)) or i == total_steps:
                     l(
-                        epoch=i,
+                        step=i,
                         training_config=training_config,
-                        epoch_history=epoch_history,
-                        nbatches=training_config.steps_per_epoch,
+                        step_history=step_history,
                     )
 
     for t, l in loggers:
         if t is None or t == -1:
             l(
-                epoch=training_config.n_epochs,
+                step=total_steps,
                 training_config=training_config,
-                epoch_history=epoch_history,
+                step_history=step_history,
             )
 
     ut.logger.info(f"End of training for {training_config.n_epochs} epochs")
 
-    return params, loss_history, epoch_history
+    return params, loss_history, step_history
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

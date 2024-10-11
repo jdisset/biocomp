@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from queue import PriorityQueue
 
 from collections import deque
-from typing import Tuple, List, Dict, Callable, Optional, Union, Any, Iterable, Sequence, NewType
+from typing import Tuple, List, Dict, Callable, Optional, Union, Any, Iterable, NewType
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -180,8 +180,8 @@ class ComputeLayer:
 
     # information about the function to apply
     f_type: Optional[str] = None
-    f_out_shapes: Optional[Sequence[Tuple[int]]] = None
-    f_input_shapes: Optional[Sequence[Tuple[int]]] = None
+    f_out_shapes: Optional[List[Tuple[int]]] = None
+    f_input_shapes: Optional[List[Tuple[int]]] = None
 
     f_prepare: Optional[Callable] = None
     f_apply: Optional[Callable] = None
@@ -268,7 +268,7 @@ class ComputeLayer:
 @dataclass
 class ComputeStack:
     networks: List[Network]
-    layers: Optional[Sequence[ComputeLayer]] = None
+    layers: Optional[List[ComputeLayer]] = None
 
     layers_start_index: Optional[List[int]] = None
     output_shape: Optional[Tuple[int]] = None
@@ -910,7 +910,7 @@ class ComputeStack:
         self.is_assembled = allbuilt
 
     def _generate_apply_method(
-        self, get_grads_for: Sequence[str] = ("translation", "transcription", "output")
+        self, get_grads_for: List[str] = ("translation", "transcription", "output")
     ):
         """
         Generates the apply method, which will call the apply of all layers of the stack

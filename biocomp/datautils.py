@@ -176,8 +176,6 @@ class CompressedSymLogRescaler(DataRescaler):
         return x
 
 
-
-
 # TODO, low priority: I'm thinking something like an exp (for negative values) to log transition:
 # class CompressedExpLogRescaler:
 # """
@@ -438,27 +436,23 @@ class DataManager:
     @classmethod
     def from_xps(cls, xplist, config, **kw):
         network_cache_location = None
-        if 'network_cache_location' in config:
-            network_cache_location = Path(config['network_cache_location'])
+        if "network_cache_location" in config:
+            network_cache_location = Path(config["network_cache_location"])
 
-        # build all networks and get all sample names, for each xp
-        # networks, samples = zip(*[xp.build_networks(**kw) for xp in xplist])
         net_sample_pairs = []
         for xp in xplist:
             net_sample_pairs.append(
                 ut.get_cache(
-                    lambda: xp.build_networks(**kw), f'{str(xp)}_net', network_cache_location
+                    lambda: xp.build_networks(**kw), f"{str(xp)}_net", network_cache_location
                 )
             )
 
         networks, samples = zip(*net_sample_pairs)
 
-        # get all X (independent vars) and Y (dependent vars) for each xp
-        # X, Y = zip(*[xp.get_XY(n, s) for xp, n, s in zip(xplist, networks, samples)])
         XY_pairs = []
         for xp, n, s in zip(xplist, networks, samples):
             XY_pairs.append(
-                ut.get_cache(lambda: xp.get_XY(n, s), f'{str(xp)}_XY', network_cache_location)
+                ut.get_cache(lambda: xp.get_XY(n, s), f"{str(xp)}_XY", network_cache_location)
             )
 
         X, Y = zip(*XY_pairs)

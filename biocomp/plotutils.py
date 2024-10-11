@@ -177,6 +177,7 @@ class FigureSpec(ArbitraryModel):
         output_path = Path(self.output_dir) / self.output_file
         output_path.parent.mkdir(parents=True, exist_ok=True)
         figax.figure.savefig(output_path, bbox_inches="tight")
+        print(f"Saved figure to {output_path}")
 
     def finalize(self, figax: FigAx) -> None:
         if self.title is not None:
@@ -539,6 +540,7 @@ def auto_plot(
 
 from .plotting.plotting_3d import smooth_3d
 from .plotting.plotting_smooth import smooth_2d, smooth_1d
+
 
 @configurable
 def smooth(

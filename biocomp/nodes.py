@@ -11,13 +11,13 @@ from . import quantization as qz
 
 from .parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from .compute import ComputeNode, ComputeStack
 
 from jax.typing import ArrayLike
-from typing import Callable, Tuple, Sequence
+from typing import Callable, Tuple, List
 from typing import NewType
 from dataclasses import dataclass
 
@@ -28,19 +28,19 @@ PRNGKey = ArrayLike
 ### {{{                 --     misc    --
 def generate_layer_name(stack, layer_id, name):
     if stack is None:
-        return f'{layer_id}/{name}'
+        return f"{layer_id}/{name}"
     else:
         n_nodes = len(stack.layers[layer_id].nodes)
         n_layers = len(stack.layers)
-        return f'{layer_id}/{name} ({n_nodes})'
+        return f"{layer_id}/{name} ({n_nodes})"
 
 
 @dataclass
 class LayerInstance:
     prepare: Callable
     apply: Callable
-    output_shapes: Sequence[Tuple[int]]
-    commit: Callable = None
+    output_shapes: List[Tuple[int]]
+    commit: Optional[Callable] = None
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -50,27 +50,33 @@ class LayerInstance:
 
 def get_prev_num_quantile_vars(params: ParameterTree):
     try:
-        return params['global/number_of_quantile_variables']
+        return params["global/number_of_quantile_variables"]
     except:
         return 0
 
 
-def add_quantile_var_ids(params: ParameterTree, num: int, num_per_node, layer_name: str):
+def add_quantile_var_ids(params: ParameterTree, num_nodes: int, num_per_node, layer_name: str):
+    """
+    Updates:
+        - global/number_of_quantile_variables
+        - local/{layer_name}/quantile_variable_id -> id array of shape (num_nodes, num_per_node)
+    """
+
     prev_num_quantile_vars = get_prev_num_quantile_vars(params)
-    new_num_quantile_vars = prev_num_quantile_vars + num * num_per_node
+    new_num_quantile_vars = prev_num_quantile_vars + num_nodes * num_per_node
     quantile_var_ids = jnp.arange(prev_num_quantile_vars, new_num_quantile_vars).reshape(
-        (num, num_per_node)
+        (num_nodes, num_per_node)
     )
     params.at(
-        f'local/{layer_name}/quantile_variable_id',
+        f"local/{layer_name}/quantile_variable_id",
         quantile_var_ids,
-        tags=['non_grad'],
+        tags=["non_grad"],
         overwrite=None,
     )
     params.at(
-        'global/number_of_quantile_variables',
+        "global/number_of_quantile_variables",
         new_num_quantile_vars,
-        tags=['non_grad'],
+        tags=["non_grad"],
         overwrite=True,
     )
 
@@ -88,13 +94,13 @@ def sigmoid(x):
 
 
 ACTIVATION_FUNCTIONS = {
-    'leaky_relu': leaky_relu,
-    'sigmoid': sigmoid,
-    'none': lambda x: x,
+    "leaky_relu": leaky_relu,
+    "sigmoid": sigmoid,
+    "none": lambda x: x,
 }
 
-DEFAULT_ACTIVATION = 'leaky_relu'
-DEFAULT_OUT_ACTIVATION = 'sigmoid'
+DEFAULT_ACTIVATION = "leaky_relu"
+DEFAULT_OUT_ACTIVATION = "sigmoid"
 
 
 def dense_layer(
@@ -103,25 +109,25 @@ def dense_layer(
     assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
     input_size = 1 if input_values.shape == () else input_values.shape[0]
 
-    w = param_f(f'{name}/w', init_f=ut.he_initializer(key, (input_size, output_size)))
-    b = param_f(f'{name}/b', init_f=lambda: np.zeros((output_size,)))
+    w = param_f(f"{name}/w", init_f=ut.he_initializer(key, (input_size, output_size)))
+    b = param_f(f"{name}/b", init_f=lambda: np.zeros((output_size,)))
 
     assert input_values.shape == (
         input_size,
-    ), f'In {name}: {input_values.shape} != {(input_size,)}'
+    ), f"In {name}: {input_values.shape} != {(input_size,)}"
     assert w.shape == (
         input_size,
         output_size,
-    ), f'In {name}: {w.shape} != {(input_size, output_size)}'
-    assert b.shape == (output_size,), f'In {name}: {b.shape} != {(output_size,)}'
+    ), f"In {name}: {w.shape} != {(input_size, output_size)}"
+    assert b.shape == (output_size,), f"In {name}: {b.shape} != {(output_size,)}"
 
     assert w.shape == (
         input_size,
         output_size,
-    ), f'In {name}: {w.shape} != {(input_size, output_size)}'
+    ), f"In {name}: {w.shape} != {(input_size, output_size)}"
 
     res = jnp.dot(input_values, w) + b
-    assert res.shape == (output_size,), f'In {name}: {res.shape} != {(output_size,)}'
+    assert res.shape == (output_size,), f"In {name}: {res.shape} != {(output_size,)}"
     return res
 
 
@@ -149,11 +155,11 @@ def dense_multilevel(
     res = input_values
     keys = jax.random.split(key, depth)
     for i in range(depth - 1):
-        res = activation(dense_layer(res, hidden_s, param_f, keys[i], f'{name}/l{i}'))
-        assert res.shape == (hidden_s,), f'In {name}: {res.shape} != {(hidden_s,)}'
+        res = activation(dense_layer(res, hidden_s, param_f, keys[i], f"{name}/l{i}"))
+        assert res.shape == (hidden_s,), f"In {name}: {res.shape} != {(hidden_s,)}"
 
-    res = dense_layer(res, output_s, param_f, keys[-1], f'{name}/l{depth - 1}')
-    assert res.shape == (output_s,), f'In {name}: {res.shape} != {(output_s,)}'
+    res = dense_layer(res, output_s, param_f, keys[-1], f"{name}/l{depth - 1}")
+    assert res.shape == (output_s,), f"In {name}: {res.shape} != {(output_s,)}"
     return res
 
 
@@ -183,9 +189,8 @@ def empty_prepare(*_, **__):
 
 
 # input_shapes is a list of shape tuples, one for each input
-def single_passthrough(input_shapes: Sequence[Tuple[int]], *_, **__) -> LayerInstance:
-
-    assert len(input_shapes) == 1, f'Passthrough expects 1 input, got {len(input_shapes)}'
+def single_passthrough(input_shapes: List[Tuple[int]], *_, **__) -> LayerInstance:
+    assert len(input_shapes) == 1, f"Passthrough expects 1 input, got {len(input_shapes)}"
 
     def apply(value: ArrayLike, **___) -> ArrayLike:
         return value
@@ -202,8 +207,8 @@ def single_passthrough(input_shapes: Sequence[Tuple[int]], *_, **__) -> LayerIns
 
 
 # For now, input_shapes will always be [(1,)]
-def source(input_shapes: Sequence[Tuple[int]], n_outputs: int, **_) -> LayerInstance:
-    assert len(input_shapes) == 1, f'A source node should have 1 input, got {len(input_shapes)}'
+def source(input_shapes: List[Tuple[int]], n_outputs: int, **_) -> LayerInstance:
+    assert len(input_shapes) == 1, f"A source node should have 1 input, got {len(input_shapes)}"
 
     def apply(value: ArrayLike, *_, **__) -> ArrayLike:
         return jnp.repeat(value, n_outputs, axis=0)
@@ -219,7 +224,7 @@ def inv_source(*args, **kwargs):
 
 
 def source_new(
-    input_shapes: Sequence[Tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     layer_id: int,
     stack: ComputeStack = None,
@@ -228,7 +233,7 @@ def source_new(
     depth=3,
     **_,
 ) -> LayerInstance:
-    assert len(input_shapes) == 1, f'A source node should have 1 input, got {len(input_shapes)}'
+    assert len(input_shapes) == 1, f"A source node should have 1 input, got {len(input_shapes)}"
 
     # vmap dense multilayer on same value and input, adding also a second input
     # which is the position
@@ -237,13 +242,13 @@ def source_new(
 
     # TODO: change max_L1s, hidden_s, depth to compute config
 
-    local_layer_name = generate_layer_name(stack, layer_id, f'source{n_outputs}x')
-    namespace = f'local/{local_layer_name}'
-    pname = 'shapes'
+    local_layer_name = generate_layer_name(stack, layer_id, f"source{n_outputs}x")
+    namespace = f"local/{local_layer_name}"
+    pname = "shapes"
 
-    def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key, **_):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
         add_quantile_var_ids(params, len(nodelist), len(input_shapes), local_layer_name)
-        params[f'{namespace}/{pname}'] = input_shapes
+        params[f"{namespace}/{pname}"] = input_shapes
         MLP_head(np.zeros((2 + len(input_shapes),)), params, key)
 
     def MLP_head(vals, params, key):
@@ -254,8 +259,8 @@ def source_new(
             depth=depth,
             activation=ACTIVATION_FUNCTIONS[DEFAULT_ACTIVATION],
             key=key,
-            param_f=partial(init_if_needed, params, base_path='shared'),
-            name='NN/source',
+            param_f=partial(init_if_needed, params, base_path="shared"),
+            name="NN/source",
         )
 
     def apply(
@@ -265,7 +270,7 @@ def source_new(
         node_id: ArrayLike,
         key,
     ) -> ArrayLike:
-        qid = params[f'{namespace}/quantile_variable_id'][node_id]
+        qid = params[f"{namespace}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
         return jax.vmap(
             lambda position: MLP_head(ut.flat_concat(value, position, quantile), params, key)
@@ -277,7 +282,7 @@ def source_new(
 
 
 def inv_source_new(
-    input_shapes: Sequence[Tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     stack: ComputeStack,
     layer_id: int,
@@ -291,18 +296,18 @@ def inv_source_new(
     # instead of having a division you have an MLP head
     # in param tree store index of position being inverted
 
-    local_layer_name = generate_layer_name(stack, layer_id, 'inverse_source')
-    namespace = f'local/{local_layer_name}'
-    pname = 'shapes'
+    local_layer_name = generate_layer_name(stack, layer_id, "inverse_source")
+    namespace = f"local/{local_layer_name}"
+    pname = "shapes"
 
-    def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key, **_):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
         add_quantile_var_ids(params, len(nodelist), len(input_shapes), local_layer_name)
         if stack is not None:
             ref = ArrayRef(params.data)
             for node in nodelist:
-                extra = node.get_compute_node('extra')
-                assert extra['original_output_slot'] < extra['original_output_len']
-                original_slot = extra['original_output_slot']
+                extra = node.get_compute_node("extra")
+                assert extra["original_output_slot"] < extra["original_output_len"]
+                original_slot = extra["original_output_slot"]
 
                 fwd_node = node.get_inverse_node(stack)
                 fwd_layer, fwd_loc = fwd_node.get_layer_and_local_id(stack)
@@ -310,9 +315,9 @@ def inv_source_new(
                 fwd_namespace = (
                     f"local/{generate_layer_name(stack, fwd_layer, f'source_{fwd_n_output}x')}"
                 )
-                ref.push_back(f'{fwd_namespace}/{pname}', (fwd_loc, original_slot))
+                ref.push_back(f"{fwd_namespace}/{pname}", (fwd_loc, original_slot))
 
-            params[f'{namespace}/{pname}'] = ref
+            params[f"{namespace}/{pname}"] = ref
             # params.at(f'{namespace}/{pname}', ref, overwrite=None)
         MLP_head(np.zeros((2 + len(input_shapes),)), params, key)
 
@@ -324,8 +329,8 @@ def inv_source_new(
             depth=depth,
             activation=ACTIVATION_FUNCTIONS[DEFAULT_ACTIVATION],
             key=key,
-            param_f=partial(init_if_needed, params, base_path='shared'),
-            name='NN/source',
+            param_f=partial(init_if_needed, params, base_path="shared"),
+            name="NN/source",
         )
 
     def apply(
@@ -335,7 +340,7 @@ def inv_source_new(
         node_id: ArrayLike,
         key,
     ) -> ArrayLike:
-        qid = params[f'{namespace}/quantile_variable_id'][node_id]
+        qid = params[f"{namespace}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
         return jax.vmap(
             lambda position: MLP_head(ut.flat_concat(value, position, quantile), params, key)
@@ -347,31 +352,30 @@ def inv_source_new(
 
 
 def bias(
-    input_shapes: Sequence[Tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     layer_id: int,
     stack,
     shape: Tuple[int] = (1,),
     **_,
 ) -> LayerInstance:
-
-    assert n_outputs == 1, f'Bias node should have 1 output, got {n_outputs}'
+    assert n_outputs == 1, f"Bias node should have 1 output, got {n_outputs}"
     assert len(input_shapes) == 0
 
-    local_layer_name = generate_layer_name(stack, layer_id, 'bias')
-    namespace = f'local/{local_layer_name}'
+    local_layer_name = generate_layer_name(stack, layer_id, "bias")
+    namespace = f"local/{local_layer_name}"
 
-    def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key, **_):
-        params[f'{namespace}/value'] = jax.random.uniform(key, (len(nodelist), *shape))
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
+        params[f"{namespace}/value"] = jax.random.uniform(key, (len(nodelist), *shape))
 
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> ArrayLike:
-        return params[f'{namespace}/value'][node_id]
+        return params[f"{namespace}/value"][node_id]
 
-    def commit(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
+    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for i, n in enumerate(nodelist):
-            extra = n.get_compute_node('extra') or {}
-            extra['bias_value'] = params[f'{namespace}/value'][i]
-            n.set_compute_node_column('extra', extra)
+            extra = n.get_compute_node("extra") or {}
+            extra["bias_value"] = params[f"{namespace}/value"][i]
+            n.set_compute_node_column("extra", extra)
 
     output_shapes = [shape]
 
@@ -383,41 +387,40 @@ def bias(
 
 
 def aggregation(
-    input_shapes: Sequence[Tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     layer_id: int,
     stack: ComputeStack = None,
     **_,
 ) -> LayerInstance:
+    assert len(input_shapes) == 1, f"Aggregation expects 1 input, got {len(input_shapes)}"
 
-    assert len(input_shapes) == 1, f'Aggregation expects 1 input, got {len(input_shapes)}'
-
-    local_layer_name = generate_layer_name(stack, layer_id, f'aggregation_{n_outputs}x')
-    namespace = f'local/{local_layer_name}'
+    local_layer_name = generate_layer_name(stack, layer_id, f"aggregation_{n_outputs}x")
+    namespace = f"local/{local_layer_name}"
     pname = f"ratios"
 
-    def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey, **_):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey, **_):
         ratios = []
         for i, node in enumerate(nodelist):
-            extra = node.get_compute_node('extra')
-            if 'ratios' in extra:
-                assert len(extra['ratios']) == n_outputs
-                ratio_v = jnp.array(extra['ratios'], dtype=jnp.float32)
+            extra = node.get_compute_node("extra")
+            if "ratios" in extra:
+                assert len(extra["ratios"]) == n_outputs
+                ratio_v = jnp.array(extra["ratios"], dtype=jnp.float32)
             else:
                 ratio_v = jax.random.uniform(key, (n_outputs,))
             # pad to max_outputs if necessary
             ratios.append(ratio_v)
 
         ratios = jnp.stack(ratios)
-        assert ratios.shape == (len(nodelist), n_outputs), f'Invalid ratio shape {ratios.shape}'
-        params[f'{namespace}/{pname}'] = ratios
+        assert ratios.shape == (len(nodelist), n_outputs), f"Invalid ratio shape {ratios.shape}"
+        params[f"{namespace}/{pname}"] = ratios
 
         def normalize_ratios_cb(params: ParameterTree, **__):
-            current_ratios = params[f'{namespace}/{pname}']
+            current_ratios = params[f"{namespace}/{pname}"]
             assert current_ratios.shape == (len(nodelist), n_outputs)
             max_ratios = jnp.maximum(jnp.max(current_ratios, axis=1), 1e-9)
             normed_ratios = current_ratios / max_ratios[:, None]
-            return params.tree_set_at(f'{namespace}/{pname}', jnp.clip(normed_ratios, 0, 1))
+            return params.tree_set_at(f"{namespace}/{pname}", jnp.clip(normed_ratios, 0, 1))
 
         stack.register_post_process(normalize_ratios_cb)
 
@@ -428,15 +431,15 @@ def aggregation(
         node_id: ArrayLike,
         key: PRNGKey,
     ) -> ArrayLike:
-        assert input.shape == input_shapes[0], f'Invalid input shape {input.shape}'
-        ratios = params[f'{namespace}/{pname}'][node_id][:n_outputs]
+        assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
+        ratios = params[f"{namespace}/{pname}"][node_id][:n_outputs]
         return jnp.abs(jnp.array(ratios)) * input
 
-    def commit(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
+    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for i, n in enumerate(nodelist):
-            extra = n.get_compute_node('extra') or {}
-            extra['ratios'] = params[f'{namespace}/{pname}'][i]
-            n.set_compute_node_column('extra', extra)
+            extra = n.get_compute_node("extra") or {}
+            extra["ratios"] = params[f"{namespace}/{pname}"][i]
+            n.set_compute_node_column("extra", extra)
 
     output_shape = input_shapes * n_outputs
 
@@ -444,29 +447,26 @@ def aggregation(
 
 
 def inv_aggregation(
-    input_shapes: Sequence[Tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     stack: ComputeStack,
     layer_id: int,
     **_,
 ) -> LayerInstance:
-
     # an inverse aggregation node always has 1 input and 1 output
-    assert len(input_shapes) == 1, f'inverse_Aggregation expects 1 input, got {len(input_shapes)}'
-    assert n_outputs == 1, f'inverse_Aggregation expects 1 output, got {n_outputs}'
+    assert len(input_shapes) == 1, f"inverse_Aggregation expects 1 input, got {len(input_shapes)}"
+    assert n_outputs == 1, f"inverse_Aggregation expects 1 output, got {n_outputs}"
 
-    local_layer_name = generate_layer_name(stack, layer_id, f'inverse_aggregation')
-    namespace = f'local/{local_layer_name}'
+    local_layer_name = generate_layer_name(stack, layer_id, f"inverse_aggregation")
+    namespace = f"local/{local_layer_name}"
 
-    def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
-
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], **_):
         if stack is not None:
             ref = ArrayRef(params.data)
             for node in nodelist:
-
-                extra = node.get_compute_node('extra')
-                assert extra['original_output_slot'] < extra['original_output_len']
-                original_slot = extra['original_output_slot']
+                extra = node.get_compute_node("extra")
+                assert extra["original_output_slot"] < extra["original_output_len"]
+                original_slot = extra["original_output_slot"]
 
                 fwd_node = node.get_inverse_node(stack)
                 fwd_layer, fwd_loc = fwd_node.get_layer_and_local_id(stack)
@@ -474,9 +474,9 @@ def inv_aggregation(
                 fwd_namespace = (
                     f'local/{generate_layer_name(stack, fwd_layer, f"aggregation_{fwd_n_output}x")}'
                 )
-                ref.push_back(f'{fwd_namespace}/ratios', (fwd_loc, original_slot))
+                ref.push_back(f"{fwd_namespace}/ratios", (fwd_loc, original_slot))
 
-            params.at(f'{namespace}/ratios', ref, overwrite=None)
+            params.at(f"{namespace}/ratios", ref, overwrite=None)
 
     EPSILON = 1e-9
 
@@ -487,9 +487,8 @@ def inv_aggregation(
         node_id: ArrayLike,
         key,
     ) -> ArrayLike:
-
         if stack is not None:
-            ratio = jnp.abs(params[f'{namespace}/ratios'][node_id])
+            ratio = jnp.abs(params[f"{namespace}/ratios"][node_id])
         else:
             ratio = jnp.ones((1,))
 
@@ -505,12 +504,12 @@ def inv_aggregation(
 # =========================== Neural Nodes ===========================
 ### {{{                   --     transform node (tc, tl)     --
 def transform_nn(
-    input_shapes: Sequence[Tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     stack: ComputeStack,
     layer_id: int,
     transform_name: str,
-    quantization_names: Sequence[str],  # ordered list. ex: ['1xuorf', '2xuorf', ...]
+    quantization_names: List[str],  # ordered list. ex: ['1xuorf', '2xuorf', ...]
     outer_wsize: int = 64,
     outer_depth: int = 4,
     inner_wsize: int = 64,
@@ -522,14 +521,13 @@ def transform_nn(
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
     **_,
 ):
-
-    assert n_outputs == 1, f'NN transform only supports 1 output, got {n_outputs}'
+    assert n_outputs == 1, f"NN transform only supports 1 output, got {n_outputs}"
     if is_inverse and len(input_shapes) != 1:
-        raise ValueError(f'Inverse {transform_name} should have 1 input, got {len(input_shapes)}')
+        raise ValueError(f"Inverse {transform_name} should have 1 input, got {len(input_shapes)}")
 
     if not all(s == input_shapes[0] for s in input_shapes):
         raise ValueError(
-            f'All inputs of a transformation should have the same shape, got {input_shapes}'
+            f"All inputs of a transformation should have the same shape, got {input_shapes}"
         )
 
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
@@ -539,17 +537,17 @@ def transform_nn(
         return generate_layer_name(stack, l_id, f"{'inverse_' if is_inv else ''}{transform_name}")
 
     rate_shape = (len(input_shapes), rate_dim)
-    rate_name = f'{transform_name}_rate'  # _x{len(input_shapes)}'
+    rate_name = f"{transform_name}_rate"  # _x{len(input_shapes)}'
     shared_layer_name = f"{'inv' if is_inverse else 'fwd'}_{transform_name}"
     layer_name = make_layer_name(layer_id, is_inverse)
 
-    quantization_values_path = f'shared/quantization/values/{rate_name}'
-    quantization_names_path = f'shared/quantization/names/{rate_name}'  # for sanity check
-    mask_name = f'{rate_name}_quantization_mask'
-    quantization_mask_path = f'local/{layer_name}/{mask_name}'
+    quantization_values_path = f"shared/quantization/values/{rate_name}"
+    quantization_names_path = f"shared/quantization/names/{rate_name}"  # for sanity check
+    mask_name = f"{rate_name}_quantization_mask"
+    quantization_mask_path = f"local/{layer_name}/{mask_name}"
 
-    logstdevs_path = f'shared/quantization/logstdevs/{rate_name}'
-    count_array_path = f'shared/quantization/counts/{rate_name}'
+    logstdevs_path = f"shared/quantization/logstdevs/{rate_name}"
+    count_array_path = f"shared/quantization/counts/{rate_name}"
 
     def inner(params, value: ArrayLike, quantile, rate_embedding: ArrayLike, key: PRNGKey):
         """For a single source, computes a latent output from the concatenation of
@@ -561,7 +559,7 @@ def transform_nn(
         if rate_embedding.ndim == 0:
             rate_embedding = rate_embedding.reshape((1,))
 
-        assert value.ndim == 1, f'In {transform_name}: {value.ndim} != 1: {value}'
+        assert value.ndim == 1, f"In {transform_name}: {value.ndim} != 1: {value}"
         assert rate_embedding.ndim == 1
 
         inputs = ut.flat_concat(value, rate_embedding, quantile)
@@ -574,8 +572,8 @@ def transform_nn(
                 depth=inner_depth,
                 activation=inner_activation,
                 key=key,
-                param_f=partial(init_if_needed, params, base_path='shared'),
-                name=f'NN/{shared_layer_name}/inner',
+                param_f=partial(init_if_needed, params, base_path="shared"),
+                name=f"NN/{shared_layer_name}/inner",
             )
         )
 
@@ -583,8 +581,7 @@ def transform_nn(
 
         return out
 
-    def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey):
-
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
         key0, key1 = jax.random.split(key, 2)
         n_nodes = len(nodelist)
 
@@ -621,23 +618,23 @@ def transform_nn(
                 )
                 for node in nodelist
             ]
-            params.at(f'{quantization_mask_path}', np.array(qmasks), tags=['non_grad'])
+            params.at(f"{quantization_mask_path}", np.array(qmasks), tags=["non_grad"])
             try:
                 params.at(
                     count_array_path,
                     np.array(qmasks).sum(axis=(0, 1)) + params.at(count_array_path),
                     overwrite=True,
-                    tags=['non_grad'],
+                    tags=["non_grad"],
                 )
             except KeyError:
                 params.at(
                     count_array_path,
                     np.array(qmasks).sum(axis=(0, 1)),
-                    tags=['non_grad'],
+                    tags=["non_grad"],
                 )
 
             # And we also initialize the quantized rates
-            params[f'local/{layer_name}/{rate_name}'] = jax.random.uniform(
+            params[f"local/{layer_name}/{rate_name}"] = jax.random.uniform(
                 key1, (n_nodes, *rate_shape)
             )
 
@@ -649,16 +646,16 @@ def transform_nn(
                 fwd_node = node.get_inverse_node(stack)
                 fwd_layer_id, fwd_loc = fwd_node.get_layer_and_local_id(stack)
                 fwd_layer_name = make_layer_name(fwd_layer_id, is_inv=False)
-                return f'local/{fwd_layer_name}', fwd_loc
+                return f"local/{fwd_layer_name}", fwd_loc
 
             fwd_paths, fwd_loc = zip(*[get_fwd(node) for node in nodelist])
 
             # make view will create 2 subtrees of ArrayRef, one for the rates and one for the masks
             # that point to the same underlying data as the forward nodes
             make_view(
-                params, f'local/{layer_name}', fwd_paths, fwd_loc, leaves=[rate_name, mask_name]
+                params, f"local/{layer_name}", fwd_paths, fwd_loc, leaves=[rate_name, mask_name]
             )
-            params.tag(f'local/{layer_name}/{mask_name}', ['non_grad'])
+            params.tag(f"local/{layer_name}/{mask_name}", ["non_grad"])
 
         # --------- quantile var
         # quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
@@ -676,16 +673,15 @@ def transform_nn(
         )
 
     def outer(inner_out: ArrayLike, params, key: PRNGKey):
-
         return outer_activation(
             dense_multilevel(
                 inner_out,
                 outer_wsize,
                 1,
                 depth=outer_depth,
-                param_f=partial(init_if_needed, params, base_path='shared'),
+                param_f=partial(init_if_needed, params, base_path="shared"),
                 key=key,
-                name=f'NN/{shared_layer_name}/outer',
+                name=f"NN/{shared_layer_name}/outer",
                 activation=inner_activation,
             )
         )
@@ -699,11 +695,11 @@ def transform_nn(
     ):
         k1, k2, k3 = jax.random.split(key, 3)
 
-        qid = params[f'local/{layer_name}/quantile_variable_id'][node_id]
+        qid = params[f"local/{layer_name}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
 
         val = jnp.array(values)
-        rates = params[f'local/{layer_name}/{rate_name}'][node_id]
+        rates = params[f"local/{layer_name}/{rate_name}"][node_id]
         assert val.shape == (len(input_shapes), *input_shapes[0])
         assert rates.shape == (len(input_shapes), rate_dim)
         assert quantile.shape == (len(input_shapes) + 1,)
@@ -730,9 +726,9 @@ def transform_nn(
         # then we apply a final outer layer to the summed output:
         return outer(inner_out, params, k2)
 
-    def commit(params: ParameterTree, nodelist: Sequence[ComputeNode], **_):
+    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for node_id, node in enumerate(nodelist):
-            rates = params[f'local/{layer_name}/{rate_name}'][node_id]
+            rates = params[f"local/{layer_name}/{rate_name}"][node_id]
             resolved_parameter_names = qz.get_quantized_rate_names(
                 rates,
                 params,
@@ -741,9 +737,9 @@ def transform_nn(
                 quantization_mask_path,
                 node_id,
             )
-            extra = node.get_compute_node('extra') or {}
-            extra['resolved_parameter_names'] = resolved_parameter_names
-            node.set_compute_node_column('extra', extra)
+            extra = node.get_compute_node("extra") or {}
+            extra["resolved_parameter_names"] = resolved_parameter_names
+            node.set_compute_node_column("extra", extra)
             qz.collapse_quantized_parameter(node, rate_name, resolved_parameter_names)
 
     output_shape = [(1,)]
@@ -754,21 +750,20 @@ def transform_nn(
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                         --     ERN node     --
 def sequestron_ERN(
-    input_shapes: Sequence[Tuple[int, ...]],
+    input_shapes: List[Tuple[int, ...]],
     n_outputs: int,
     stack: ComputeStack,
     layer_id: int,
-    affinity_names: Sequence[str],
+    affinity_names: List[str],
     affinity_dim: int = 1,
     wsize: int = 128,
     depth: int = 4,
     out_dim: int = 1,
-    subtype: str = '5p',
+    subtype: str = "5p",
     inner_activation_name: str = DEFAULT_ACTIVATION,
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
     **_,
 ) -> LayerInstance:
-
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
 
@@ -776,11 +771,11 @@ def sequestron_ERN(
     assert len(input_shapes) == 2
     assert (
         input_shapes[0] == input_shapes[1]
-    ), f'ERN inputs must have same shape, got {input_shapes}'
-    assert n_outputs == 1, f'ERN only supports 1 output, got {n_outputs}'
+    ), f"ERN inputs must have same shape, got {input_shapes}"
+    assert n_outputs == 1, f"ERN only supports 1 output, got {n_outputs}"
 
-    shared_layer_name = f'ERN_{subtype}'
-    local_layer_name = generate_layer_name(stack, layer_id, f'ERN_{subtype}')
+    shared_layer_name = f"ERN_{subtype}"
+    local_layer_name = generate_layer_name(stack, layer_id, f"ERN_{subtype}")
 
     def MLP(
         neg: ArrayLike,
@@ -797,19 +792,18 @@ def sequestron_ERN(
             depth,
             param_f=param_f,
             key=key,
-            name=f'NN/ERN_{subtype}',
+            name=f"NN/ERN_{subtype}",
             activation=inner_activation,
         )
         return outer_activation(res)
 
-    def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey):
-
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
         # --------- quantile var
         add_quantile_var_ids(params, len(nodelist), 1, local_layer_name)
 
         init_if_needed(
             params,
-            f'shared/{shared_layer_name}/affinities',
+            f"shared/{shared_layer_name}/affinities",
             init_f=ut.continuous_initializer(key, (len(affinity_names), affinity_dim)),
         )
 
@@ -826,18 +820,18 @@ def sequestron_ERN(
         ref = ArrayRef(params.data)
         for node in nodelist:
             # we need to know which affinity value to use for this node
-            seq_name = node.get_compute_node('extra')['seq_name']  # ex: 'CasE5p'
+            seq_name = node.get_compute_node("extra")["seq_name"]  # ex: 'CasE5p'
             if seq_name not in affinity_names:
-                raise ValueError(f'Unknown affinity name {seq_name}. Available: {affinity_names}')
+                raise ValueError(f"Unknown affinity name {seq_name}. Available: {affinity_names}")
             affinity_id = affinity_names.index(seq_name)
-            ref.push_back(f'shared/{shared_layer_name}/affinities', affinity_id)
-        params.at(f'local/{local_layer_name}/affinity', ref, overwrite=None)
+            ref.push_back(f"shared/{shared_layer_name}/affinities", affinity_id)
+        params.at(f"local/{local_layer_name}/affinity", ref, overwrite=None)
 
         MLP(
             *[np.zeros(shape) for shape in input_shapes],
             affinity=np.zeros((affinity_dim,)),
             quantile=0,
-            param_f=partial(init_if_needed, params, base_path='shared'),
+            param_f=partial(init_if_needed, params, base_path="shared"),
             key=key,
         )
 
@@ -850,16 +844,16 @@ def sequestron_ERN(
     ):
         assert len(values) == len(input_shapes)
 
-        affinity = params[f'local/{local_layer_name}/affinity'][node_id]
+        affinity = params[f"local/{local_layer_name}/affinity"][node_id]
         assert affinity.shape == (affinity_dim,)
 
-        qid = params[f'local/{local_layer_name}/quantile_variable_id'][node_id]
+        qid = params[f"local/{local_layer_name}/quantile_variable_id"][node_id]
 
         return MLP(
             *values,
             affinity=affinity,
             quantile=quantiles[qid],
-            param_f=partial(get_param, params, base_path='shared'),
+            param_f=partial(get_param, params, base_path="shared"),
             key=key,
         )
 
@@ -873,7 +867,7 @@ def sequestron_ERN(
 
 ### {{{                    --     output (fluorescence) node     --
 def grouped_output(
-    input_shapes: Sequence[Tuple[int, ...]],
+    input_shapes: List[Tuple[int, ...]],
     n_outputs: int,  # unused
     stack: ComputeStack,
     layer_id: int,
@@ -889,7 +883,7 @@ def grouped_output(
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
 
-    layer_name = generate_layer_name(stack, layer_id, 'grouped_output')
+    layer_name = generate_layer_name(stack, layer_id, "grouped_output")
 
     def MLP_head(x, q, rng_key, params):
         return dense_multilevel(
@@ -897,13 +891,13 @@ def grouped_output(
             wsize,
             1,
             depth,
-            param_f=partial(init_if_needed, params, base_path='shared'),
+            param_f=partial(init_if_needed, params, base_path="shared"),
             key=rng_key,
-            name='NN/grouped_output',
+            name="NN/grouped_output",
             activation=inner_activation,
         )
 
-    def prepare(params: ParameterTree, nodelist: Sequence[ComputeNode], key: PRNGKey):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
         # --------- quantile var
         add_quantile_var_ids(params, len(nodelist), len(input_shapes), layer_name)
 
@@ -917,13 +911,12 @@ def grouped_output(
         node_id: ArrayLike,
         key,
     ):
-
         inputs = jnp.asarray(inputs)
 
         assert len(inputs) == len(input_shapes)
         quantiles_per_node = len(input_shapes)
 
-        qid = params[f'local/{layer_name}/quantile_variable_id'][node_id]
+        qid = params[f"local/{layer_name}/quantile_variable_id"][node_id]
         res = vmap(
             partial(MLP_head, rng_key=key, params=params),
         )(inputs, quantiles[qid])
@@ -938,52 +931,52 @@ def grouped_output(
 ##────────────────────────────────────────────────────────────────────────────}}}##
 
 ### {{{                    --     defaults & aliases     --
-DEFAULT_AVAILABLE_TC_RATES = ['hEF1a']
+DEFAULT_AVAILABLE_TC_RATES = ["hEF1a"]
 
 DEFAULT_AVAILABLE_TL_RATES = [
-    '00_empty_tc',
-    '1w_uORF',
-    '1x_uORF',
-    '2x_uORF',
-    '3x_uORF',
-    '4x_uORF',
-    '5x_uORF',
-    '6x_uORF',
-    '8x_uORF',
-    '9x_uORF',
-    '10x_uORF',
-    '11x_uORF',
-    '12x_uORF',
+    "00_empty_tc",
+    "1w_uORF",
+    "1x_uORF",
+    "2x_uORF",
+    "3x_uORF",
+    "4x_uORF",
+    "5x_uORF",
+    "6x_uORF",
+    "8x_uORF",
+    "9x_uORF",
+    "10x_uORF",
+    "11x_uORF",
+    "12x_uORF",
 ]
 
-ERN_DEFAULT_NEG_PARTS = ['CasE', 'Csy4', 'PgU']
-ERN_DEFAULT_POS_PARTS = [['CasE_rec'], ['Csy4_rec'], ['PgU_rec']]
+ERN_DEFAULT_NEG_PARTS = ["CasE", "Csy4", "PgU"]
+ERN_DEFAULT_POS_PARTS = [["CasE_rec"], ["Csy4_rec"], ["PgU_rec"]]
 DEFAULT_AVAILABLE_5P_AFFINITIES = []
 for i, positive_part in enumerate(ERN_DEFAULT_NEG_PARTS):
     for negative_part in ERN_DEFAULT_POS_PARTS[i]:
-        DEFAULT_AVAILABLE_5P_AFFINITIES.append(f'ERN::{positive_part}#{negative_part}')
+        DEFAULT_AVAILABLE_5P_AFFINITIES.append(f"ERN::{positive_part}#{negative_part}")
 
 
 transcription = partial(
-    transform_nn, transform_name='tc', quantization_names=DEFAULT_AVAILABLE_TC_RATES
+    transform_nn, transform_name="tc", quantization_names=DEFAULT_AVAILABLE_TC_RATES
 )
 translation = partial(
-    transform_nn, transform_name='tl', quantization_names=DEFAULT_AVAILABLE_TL_RATES
+    transform_nn, transform_name="tl", quantization_names=DEFAULT_AVAILABLE_TL_RATES
 )
 
 inv_transcription = partial(
     transform_nn,
-    transform_name='tc',
+    transform_name="tc",
     is_inverse=True,
     quantization_names=DEFAULT_AVAILABLE_TC_RATES,
 )
 inv_translation = partial(
     transform_nn,
-    transform_name='tl',
+    transform_name="tl",
     is_inverse=True,
     quantization_names=DEFAULT_AVAILABLE_TL_RATES,
 )
 
-ERN5p = partial(sequestron_ERN, subtype='5p', affinity_names=DEFAULT_AVAILABLE_5P_AFFINITIES)
+ERN5p = partial(sequestron_ERN, subtype="5p", affinity_names=DEFAULT_AVAILABLE_5P_AFFINITIES)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
