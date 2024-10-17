@@ -102,6 +102,7 @@ def sorting_loss(stack: cmp.ComputeStack):
         keys = jax.random.split(key, X.shape[0])
         yhat, grads = batch_apply(params, X, Z, keys)
         assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
+        print("yhat has shape", yhat.shape)
 
         qvalues_dir = ParamPath("shared/quantization/values")
         logstd_dir = ParamPath("shared/quantization/logstdevs")
@@ -119,9 +120,13 @@ def sorting_loss(stack: cmp.ComputeStack):
             qvalue, logstd, count = qvalue[1], logstd[1], count[1]
             kl_loss += (count * (qvalue**2 + jnp.exp(2 * logstd) / 2 - logstd)).sum()
             count_sum += count.sum()
-        kl_loss /= count_sum
+        weight = 1e-2
+        kl_loss *= weight / count_sum
 
-        return jnp.asarray((yhat.sort(axis=0) - Y.sort(axis=0)) ** 2).sum(axis=0).mean() + kl_loss
+        jax.debug.print("kl_loss: {}", kl_loss)
+        sorting_loss_l2 = jnp.asarray((yhat.sort(axis=1) - Y.sort(axis=1)) ** 2).sum(axis=0)
+        jax.debug.print("sorting_loss: {}", sorting_loss_l2)
+        return sorting_loss_l2.mean() + kl_loss
 
     return loss_func
 
@@ -163,7 +168,9 @@ class TrainingConfig(ArbitraryModel):
     batches_per_step: int = 128
     batch_size: int = 32
     n_epochs: float = 3
-    n_batches: int = 2048  # can't really have "real" epochs because each network has a different qtty of data points
+    n_batches: int = (
+        2048  # can't really have "real" epochs because each network has a different qtty of data points
+    )
     n_replicates: int = 1
 
     keep_in_history: List[str] = ["loss"]
@@ -238,9 +245,44 @@ def start(
         fields_to_keep_in_history=training_config.keep_in_history,
         scannable=True,
     )
+    non_scannable_step = tu.make_training_step(
+        loss_func,
+        optimizer,
+        fields_to_keep_in_history=training_config.keep_in_history,
+        scannable=False,
+    )
+
+    def per_replicate_step_nonscan(start_params, start_opt_state, key, xbatches, ybatches, num_z):
+        assert xbatches.shape[:-1] == (
+            training_config.batches_per_step,
+            training_config.batch_size,
+        )
+        assert ybatches.shape[:-1] == (
+            training_config.batches_per_step,
+            training_config.batch_size,
+        )
+
+        zbatches = jax.random.uniform(
+            key, (training_config.batches_per_step, training_config.batch_size, num_z)
+        )
+
+        batch_keys = jax.random.split(key, training_config.batches_per_step)
+        xs = (
+            jnp.arange(training_config.batches_per_step),
+            xbatches,
+            ybatches,
+            zbatches,
+            batch_keys,
+        )
+        history = {'loss': []}
+        params, opt_state = (start_params, start_opt_state)
+        for i, x, y, z, k in zip(*xs):
+            updt = non_scannable_step(params, opt_state, x, y, z, k)
+            params, opt_state = updt['params'], updt['opt']
+            history['loss'].append(updt['loss'])
+        return params, opt_state, history
 
     def per_replicate_step(start_params, start_opt_state, key, xbatches, ybatches, num_z):
-        print(num_z)
         assert xbatches.shape[:-1] == (
             training_config.batches_per_step,
             training_config.batch_size,
@@ -257,16 +299,18 @@ def start(
 
         batch_keys = jax.random.split(key, training_config.batches_per_step)
         sstep = pscan(scannable_step)
+        carry = (start_params, start_opt_state)
+        xs = (
+            jnp.arange(training_config.batches_per_step),
+            xbatches,
+            ybatches,
+            zbatches,
+            batch_keys,
+        )
         (final_params, final_opt_state), step_history = jax.lax.scan(
             sstep,
-            (start_params, start_opt_state),
-            (
-                jnp.arange(training_config.batches_per_step),
-                xbatches,
-                ybatches,
-                zbatches,
-                batch_keys,
-            ),
+            carry,
+            xs,
         )
         return final_params, final_opt_state, step_history
 
@@ -281,7 +325,9 @@ def start(
                 training_config.batch_size,
             )
         )
-        return jax.vmap(Partial(per_replicate_step, num_z=num_z))(params, opt_state, keys, xs, ys)
+        return jax.vmap(Partial(per_replicate_step_nonscan, num_z=num_z))(
+            params, opt_state, keys, xs, ys
+        )
 
     with ut.timer("Compiling the step function"):
         xb = ut.get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
@@ -289,10 +335,18 @@ def start(
         num_z = static["global/number_of_quantile_variables"]
         print(f"num_z: {num_z}")
         assert num_z.shape == (training_config.n_replicates,)
-        assert jnp.all(num_z == num_z[0]), "All replicates must have the same number of quantile variables"
+        assert jnp.all(
+            num_z == num_z[0]
+        ), "All replicates must have the same number of quantile variables"
         num_z = int(num_z[0])
-        lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
-        compiled_step = lowered.compile()
+
+        # print("Lowering")
+        # lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
+        # print("Compiling")
+        # compiled_step = lowered.compile()
+        # print("Done compiling")
+        compiled_step = Partial(step, num_z=num_z)
+        compiled_step_2 = jax.jit(Partial(step, num_z=num_z))
 
     # --- main training loop
     loggers = loggers or []
@@ -327,13 +381,15 @@ def start(
             axis=1,
         )
 
-        params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
+        # compiled_step(params, opt_state, step_key, xb, yb)
+        params, opt_state, step_history = compiled_step_2(params, opt_state, step_key, xb, yb)
 
         step_history["step_time"] = time.time() - t0
         step_history["latest_params"] = params
 
         if "loss" in step_history:
             loss_history.append(step_history["loss"])
+        print(step_history["loss"])
 
         for t, l in loggers:
             if t is not None:

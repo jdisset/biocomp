@@ -24,7 +24,7 @@ def quantize_masked_impl(x, qvalues, mask):
     element in mask is True. Passthrough for x gradient.
     """
     zero = x - jax.lax.stop_gradient(x)  # for straight-through gradient
-    dist = jnp.where(mask, jnp.abs(qvalues - x), jnp.inf)
+    dist = jnp.where(mask, jnp.abs(qvalues - x), 1e9)
     amin = jnp.argmin(dist)
     res = zero + qvalues[amin]
     return res, amin
