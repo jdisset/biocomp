@@ -238,6 +238,35 @@ class PartialFunction(ArbitraryModel, Generic[T, R]):
         super().model_post_init(*a, **kw)
         self._func = None
 
+    def set_missing_kwargs(self, new_kwargs: dict):
+        """only overwrite the kwargs that are not already set, and are in the signature"""
+        import inspect
+
+        if isinstance(self.func, str):
+            func = decode_type(self.func, self.modules)
+        else:
+            func = self.func
+
+        assert callable(func), "The resolved function is not callable"
+
+        print(f"Setting missing kwargs for {func}: {new_kwargs}")
+
+        sig = inspect.signature(func)
+        has_param = False
+        for k in new_kwargs:
+            if k in self.kwargs:
+                continue
+            if k in sig.parameters:
+                has_param = True
+            # or, detect if the method has a ** like parameter
+            if not has_param:
+                for p in sig.parameters.values():
+                    if p.kind == p.VAR_KEYWORD:
+                        has_param = True
+                        break
+            if has_param:
+                self.kwargs[k] = new_kwargs[k]
+
     def get_impl(
         self,
         extra_module_names: Optional[List[str]] = None,

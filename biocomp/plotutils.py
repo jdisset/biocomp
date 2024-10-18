@@ -78,8 +78,8 @@ class DataDimensions(BaseModel):
 
 
 class PlotData(ArbitraryModel):
-    x: NdArray
-    y: NdArray
+    xval: Optional[NdArray]
+    yval: Optional[NdArray]
 
     input_names: List[str] = []
     output_name: str = "output"
@@ -87,24 +87,65 @@ class PlotData(ArbitraryModel):
     metadata: Dict[str, Any] = {}
 
     @property
+    def x(self) -> NdArray:
+        assert self.xval is not None
+        self.check_shapes()
+        return self.xval
+
+    @property
+    def y(self) -> NdArray:
+        assert self.yval is not None
+        self.check_shapes()
+        return self.yval
+
+    @property
     def dimensions(self) -> DataDimensions:
         return DataDimensions(input=self.x.shape[1], output=1)
 
-    @model_validator(mode="after")
     def check_shapes(self) -> Self:
-        if self.x.ndim == 1:
-            self.x = self.x.reshape(-1, 1)
+        assert self.xval is not None
+        assert self.yval is not None
 
-        if self.y.ndim == 1:
-            self.y = self.y.reshape(-1, 1)
+        if self.xval.ndim == 1:
+            self.xval = self.xval.reshape(-1, 1)
 
-        if self.x.shape[0] != self.y.shape[0]:
+        if self.yval.ndim == 1:
+            self.yval = self.yval.reshape(-1, 1)
+
+        if self.xval.shape[0] != self.yval.shape[0]:
             raise ValueError("X and Y must have the same number of samples")
 
-        if self.y.shape[1] != 1:
+        if self.yval.shape[1] != 1:
             raise ValueError("Y must be a 1D array")
 
         return self
+
+
+class LazyPlotData(PlotData):
+    get_xy: Callable[[PlotData], Tuple[NdArray, NdArray]]
+
+    xval: Optional[NdArray] = None
+    yval: Optional[NdArray] = None
+
+    @property
+    def x(self) -> NdArray:
+        self.set_xy()
+        assert self.xval is not None
+        return self.xval
+
+    @property
+    def y(self) -> NdArray:
+        self.set_xy()
+        assert self.yval is not None
+        return self.yval
+
+    def set_xy(self):
+        if self.xval is None:
+            self.xval, self.yval = self.get_xy.__call__(self)
+
+    @property
+    def dimensions(self) -> DataDimensions:
+        return DataDimensions(input=self.x.shape[1], output=1)
 
 
 def ax_to_list(ax) -> Sequence:
@@ -191,40 +232,69 @@ class FigureSpec(ArbitraryModel):
 ## {{{                       --     network utils     --
 
 
+def get_reordered_protein_names(
+    network: Network,
+    input_order: Optional[Sequence[int] | Sequence[str]] = None,
+    protein_aliases: Optional[Dict[str, str]] = None,
+):
+    protein_aliases = protein_aliases or {}
+    protein_order, protein_names = pc.get_reordered_protein_names(
+        network,
+        input_order,
+        protein_aliases,
+    )
+    input_order, output_pos = protein_order[:-1], protein_order[-1]
+    input_names, output_name = protein_names[:-1], protein_names[-1]
+
+    return input_order, output_pos, input_names, output_name
+
+
 def extract_plot_data_from_network(
     network: Network,
     X: NdArray,
     Y: NdArray,
     input_order: Optional[Sequence[int] | Sequence[str]] = None,
     protein_aliases: Optional[Dict[str, str]] = None,
-    use_y_as_x: bool = False,
     **kw,
 ) -> PlotData:
-    if protein_aliases is None:
-        protein_aliases = {}
-
-    assert X.shape[0] == Y.shape[0], f"X shape: {X.shape}, Y shape: {Y.shape}"
-    protein_order, protein_names = pc.get_reordered_protein_names(
+    input_order, output_pos, input_names, output_name = get_reordered_protein_names(
         network, input_order, protein_aliases
     )
 
-    input_order, output_pos = protein_order[:-1], protein_order[-1]
-    input_names, output_name = protein_names[:-1], protein_names[-1]
-
-    if use_y_as_x:
-        output_names = network.get_output_proteins()
-        xind = [output_names.index(i) for i in input_names]
-        x = Y[:, xind]
-    else:
-        x = X[:, input_order]
-
+    assert X.shape[0] == Y.shape[0], f"X shape: {X.shape}, Y shape: {Y.shape}"
+    x = X[:, input_order]
     y = Y[:, output_pos].reshape(-1, 1)
     assert x.shape[1] == len(input_order), f"X shape: {x.shape}, input_order: {input_order}"
     assert y.shape[0] == x.shape[0], f"y shape: {y.shape}, x shape: {x.shape}"
 
     return PlotData(
-        x=x,
-        y=y,
+        xval=x,
+        yval=y,
+        input_names=input_names,
+        output_name=output_name,
+        **kw,
+    )
+
+
+def extract_lazy_plot_data_from_network(
+    network: Network,
+    get_XY: Callable[[PlotData], Tuple[NdArray, NdArray]],
+    input_order: Optional[Sequence[int] | Sequence[str]] = None,
+    protein_aliases: Optional[Dict[str, str]] = None,
+    **kw,
+) -> LazyPlotData:
+    input_order, output_pos, input_names, output_name = get_reordered_protein_names(
+        network, input_order, protein_aliases
+    )
+
+    def get_xy(pdata):
+        X, Y = get_XY(pdata)
+        x = X[:, input_order]
+        y = Y[:, output_pos].reshape(-1, 1)
+        return x, y
+
+    return LazyPlotData(
+        get_xy=get_xy,
         input_names=input_names,
         output_name=output_name,
         **kw,
