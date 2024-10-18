@@ -143,8 +143,8 @@ def sorting_loss(stack: cmp.ComputeStack, training_config):
             / counts.sum()
             * kl_weight
         )
-
         sorting_loss_l2 = jnp.asarray((yhat.sort(axis=1) - Y.sort(axis=1)) ** 2).sum(axis=0).mean()
+
         return sorting_loss_l2 + kl_loss
 
     return loss_func
@@ -357,8 +357,9 @@ def start(
         ), "All replicates must have the same number of quantile variables"
         num_z = int(num_z[0])
 
-        lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
-        compiled_step = lowered.compile()
+        # lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
+        # compiled_step = lowered.compile()
+        compiled_step_2 = jax.jit(Partial(step, num_z=num_z))
 
     # --- main training loop
     loggers = loggers or []
@@ -393,7 +394,7 @@ def start(
             axis=1,
         )
 
-        params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
+        params, opt_state, step_history = compiled_step_2(params, opt_state, step_key, xb, yb)
 
         step_history["step_time"] = time.time() - t0
         step_history["latest_params"] = params

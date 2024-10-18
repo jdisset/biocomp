@@ -85,12 +85,17 @@ def add_quantile_var_ids(params: ParameterTree, num_nodes: int, num_per_node, la
 ### {{{                    --     neural utils     --
 
 
+import jax.nn
+
+
 def leaky_relu(x, alpha=0.2):
-    return jnp.where(x > 0, x, alpha * x)
+    return jax.nn.leaky_relu(x, negative_slope=alpha)
+    # return jnp.where(x > 0, x, alpha * x)
 
 
 def sigmoid(x):
-    return 1 / (1 + jnp.exp(-x))
+    return jax.nn.sigmoid(x)
+    # return 1 / (1 + jnp.exp(-x))
 
 
 ACTIVATION_FUNCTIONS = {
