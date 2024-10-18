@@ -93,7 +93,7 @@ def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_pen
     return loss_func
 
 
-def sorting_loss(stack: cmp.ComputeStack):
+def silly_loss(stack: cmp.ComputeStack, training_config):
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
     def loss_func(dynamic, static, X, Y, Z, key):
@@ -102,31 +102,50 @@ def sorting_loss(stack: cmp.ComputeStack):
         keys = jax.random.split(key, X.shape[0])
         yhat, grads = batch_apply(params, X, Z, keys)
         assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
-        print("yhat has shape", yhat.shape)
 
         qvalues_dir = ParamPath("shared/quantization/values")
         logstd_dir = ParamPath("shared/quantization/logstdevs")
         count_dir = ParamPath("shared/quantization/counts")
-        count_sum = 0
-        kl_loss = 0
+        qvalues, logstds, counts = map(
+            lambda path: jnp.concatenate(
+                tuple(map(lambda t: t[1], params[path].iter_leaves()))
+            ).flatten(),
+            (qvalues_dir, logstd_dir, count_dir),
+        )
+        jax.debug.print("{}", qvalues)
+        return (qvalues**2).sum()
 
-        for qvalue, logstd, count in zip(
-            *map(
-                lambda path: params[path].iter_leaves(),
-                (qvalues_dir, logstd_dir, count_dir),
-            )
-        ):
-            assert qvalue[0] == logstd[0] == count[0]
-            qvalue, logstd, count = qvalue[1], logstd[1], count[1]
-            kl_loss += (count * (qvalue**2 + jnp.exp(2 * logstd) / 2 - logstd)).sum()
-            count_sum += count.sum()
-        weight = 1e-2
-        kl_loss *= weight / count_sum
+    return loss_func
 
-        jax.debug.print("kl_loss: {}", kl_loss)
-        sorting_loss_l2 = jnp.asarray((yhat.sort(axis=1) - Y.sort(axis=1)) ** 2).sum(axis=0)
-        jax.debug.print("sorting_loss: {}", sorting_loss_l2)
-        return sorting_loss_l2.mean() + kl_loss
+
+def sorting_loss(stack: cmp.ComputeStack, training_config):
+    kl_weight = training_config.kl_weight
+    batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+
+    def loss_func(dynamic, static, X, Y, Z, key):
+        check_XYZ_new(X, Y, Z, stack)
+        params = ParameterTree.merge(dynamic, static)
+        keys = jax.random.split(key, X.shape[0])
+        yhat, grads = batch_apply(params, X, Z, keys)
+        assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
+
+        qvalues_dir = ParamPath("shared/quantization/values")
+        logstd_dir = ParamPath("shared/quantization/logstdevs")
+        count_dir = ParamPath("shared/quantization/counts")
+        qvalues, logstds, counts = map(
+            lambda path: jnp.concatenate(
+                tuple(map(lambda t: t[1], params[path].iter_leaves()))
+            ).flatten(),
+            (qvalues_dir, logstd_dir, count_dir),
+        )
+        kl_loss = (
+            (counts * (qvalues**2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)).sum()
+            / counts.sum()
+            * kl_weight
+        )
+
+        sorting_loss_l2 = jnp.asarray((yhat.sort(axis=1) - Y.sort(axis=1)) ** 2).sum(axis=0).mean()
+        return sorting_loss_l2 + kl_loss
 
     return loss_func
 
@@ -165,6 +184,7 @@ class TrainingConfig(ArbitraryModel):
 
     seed: Optional[int] = None
     negative_grad_penalty: float = 0.1
+    kl_weight: float = 1
     batches_per_step: int = 128
     batch_size: int = 32
     n_epochs: float = 3
@@ -237,7 +257,7 @@ def start(
     # --- loss & update functions
 
     loss_func_generator = training_config.loss_function.get_impl()
-    loss_func = loss_func_generator(stack)
+    loss_func = loss_func_generator(stack, training_config)
     assert callable(loss_func)
     scannable_step = tu.make_training_step(
         loss_func,
@@ -325,28 +345,20 @@ def start(
                 training_config.batch_size,
             )
         )
-        return jax.vmap(Partial(per_replicate_step_nonscan, num_z=num_z))(
-            params, opt_state, keys, xs, ys
-        )
+        return jax.vmap(Partial(per_replicate_step, num_z=num_z))(params, opt_state, keys, xs, ys)
 
     with ut.timer("Compiling the step function"):
         xb = ut.get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
         yb = ut.get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
         num_z = static["global/number_of_quantile_variables"]
-        print(f"num_z: {num_z}")
         assert num_z.shape == (training_config.n_replicates,)
         assert jnp.all(
             num_z == num_z[0]
         ), "All replicates must have the same number of quantile variables"
         num_z = int(num_z[0])
 
-        # print("Lowering")
-        # lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
-        # print("Compiling")
-        # compiled_step = lowered.compile()
-        # print("Done compiling")
-        compiled_step = Partial(step, num_z=num_z)
-        compiled_step_2 = jax.jit(Partial(step, num_z=num_z))
+        lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
+        compiled_step = lowered.compile()
 
     # --- main training loop
     loggers = loggers or []
@@ -381,15 +393,17 @@ def start(
             axis=1,
         )
 
-        # compiled_step(params, opt_state, step_key, xb, yb)
-        params, opt_state, step_history = compiled_step_2(params, opt_state, step_key, xb, yb)
+        params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
 
         step_history["step_time"] = time.time() - t0
         step_history["latest_params"] = params
 
         if "loss" in step_history:
             loss_history.append(step_history["loss"])
-        print(step_history["loss"])
+        print("Loss:", step_history["loss"])
+        qvalues_dir = ParamPath("shared/quantization/values")
+        qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
+        jax.debug.print("qvalues: {}", qvalues)
 
         for t, l in loggers:
             if t is not None:

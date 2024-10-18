@@ -591,7 +591,7 @@ def transform_nn(
         try:
             qvalues = params[quantization_values_path]
         except KeyError:
-            qvalues = jax.random.uniform(key0, (len(quantization_names), rate_dim))
+            qvalues = jax.random.normal(key0, (len(quantization_names), rate_dim))
             params[quantization_values_path] = qvalues
             # params[quantization_names_path] = tuple(quantization_names)
             # params.tag(quantization_names_path, ['non_jit', 'non_grad'])
