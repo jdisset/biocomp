@@ -375,10 +375,22 @@ def start(
     epoch = -1
     step_per_epoch = training_config.n_batches // training_config.batches_per_step
 
+    def reshuffle_batches(xbatches, ybatches, key):
+        # shape is (n_replicates, n_batches, batch_size, n_inputs)
+        # so make it (nrepl, n_batches * batch_size, n_inputs)
+        # then shuffle, then reshape back
+        reshaped_x = xbatches.reshape(xbatches.shape[0], -1, xbatches.shape[-1])
+        reshaped_y = ybatches.reshape(ybatches.shape[0], -1, ybatches.shape[-1])
+        perm = jax.random.permutation(key, reshaped_x.shape[1])
+        return reshaped_x[:, perm, :].reshape(xbatches.shape), reshaped_y[:, perm, :].reshape(
+            ybatches.shape
+        )
+
     for i, step_key in enumerate(jax.random.split(key, total_steps), 1):
         if i % step_per_epoch == 0:
             epoch += 1
             ut.logger.info(f"Starting epoch {epoch}")
+            xbatches, ybatches = reshuffle_batches(xbatches, ybatches, step_key)
 
         t0 = time.time()
         xb = ut.get_looped_slice(
