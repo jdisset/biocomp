@@ -100,7 +100,7 @@ class PlotData(ArbitraryModel):
 
     @property
     def dimensions(self) -> DataDimensions:
-        return DataDimensions(input=self.x.shape[1], output=1)
+        return DataDimensions(input=len(self.input_names), output=1)
 
     def check_shapes(self) -> Self:
         assert self.xval is not None
@@ -117,6 +117,11 @@ class PlotData(ArbitraryModel):
 
         if self.yval.shape[1] != 1:
             raise ValueError("Y must be a 1D array")
+
+        if self.xval.shape[1] != len(self.input_names):
+            raise ValueError(
+                f"X shape {self.xval.shape} does not match input names {self.input_names}"
+            )
 
         return self
 
@@ -174,6 +179,9 @@ class FigureLayout(ArbitraryModel):
     def make_figure(self) -> FigAx:
         raise NotImplementedError()
 
+    def finalize(self, figax: FigAx) -> None:
+        pass
+
 
 class SimpleLayout(FigureLayout):
     rows: int = 1
@@ -190,6 +198,10 @@ class SimpleLayout(FigureLayout):
             **kw,
         )
         return FigAx(figure=fig, ax=ax)
+
+    def finalize(self, figax: FigAx) -> None:
+        # make it tight
+        figax.figure.tight_layout()
 
 
 ValidatedFigureLayout = Annotated[
@@ -223,6 +235,7 @@ class FigureSpec(ArbitraryModel):
     def finalize(self, figax: FigAx) -> None:
         if self.title is not None:
             figax.figure.suptitle(self.title)
+        self.layout.finalize(figax)
         if self.output_file is not None:
             self.save_figure(figax)
 
@@ -612,6 +625,13 @@ from .plotting.plotting_3d import smooth_3d
 from .plotting.plotting_smooth import smooth_2d, smooth_1d
 
 
+def combine_dicts(*kwarg_lists):
+    res = {}
+    for kw in kwarg_lists:
+        res.update(kw)
+    return res
+
+
 @configurable
 def smooth(
     plot_data: PlotData,
@@ -648,8 +668,10 @@ def smooth(
             output_name=plot_data.output_name,
             rescaler=rescaler,
             ax=ax,
-            **smooth_1d_params,
-            **kw,
+            **combine_dicts(
+                smooth_1d_params,
+                kw,
+            ),
         )
 
     if force_dim == 2:
@@ -660,8 +682,10 @@ def smooth(
             output_name=plot_data.output_name,
             rescaler=rescaler,
             ax=ax,
-            **smooth_2d_params,
-            **kw,
+            **combine_dicts(
+                smooth_2d_params,
+                kw,
+            ),
         )
 
     if force_dim == 3:
@@ -672,8 +696,10 @@ def smooth(
             output_name=plot_data.output_name,
             rescaler=rescaler,
             ax=ax,
-            **smooth_3d_params,
-            **kw,
+            **combine_dicts(
+                smooth_3d_params,
+                kw,
+            ),
         )
     else:
         raise ValueError(f"Unknown force_dim value {force_dim}")

@@ -2,26 +2,15 @@
 # ···············································································
 import jax
 import jax.numpy as jnp
-from matplotlib import scale as mscale
 from functools import partial
-from scipy.spatial import cKDTree
+
 from jax import jit, vmap
 import numpy as np
 from biocomp import utils as ut
 from biocomp import datautils as du
 from biocomp import compute as cmp
-from biocomp.datautils import DataManager
 import matplotlib.pyplot as plt
-from jax.scipy.stats import gaussian_kde
-import matplotlib.ticker as ticker
-import matplotlib.pyplot as plt
-import numpy as np
-import difflib
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-import string
-from labellines import labelLine, labelLines
 from jax.typing import ArrayLike
-import os
 from typing import (
     Union,
     Sequence,
@@ -30,19 +19,14 @@ from typing import (
     Dict,
     Any,
     Optional,
-    Callable,
     TypeVar,
     TypeAlias,
     Literal,
 )
-from matplotlib.ticker import ScalarFormatter, NullFormatter, MaxNLocator
-from matplotlib import colors as mcolors
-from pkg_resources import resource_filename
 from . import plotting_core as pc
 
 from biocomp.plotutils import (
     make_xy_grid,
-    apply_style,
 )
 
 
@@ -50,13 +34,15 @@ from .plotting_core import (
     DEFAULT_CMAP_NAME,
     setup_transformed_axis,
     get_reordered_protein_names,
-    network_ticks_and_labels,
     knn_avg,
-    get_knn_std,
     get_knn_quantile,
     format_powers,
     heatmap,
+    # SpatialQueryGrid as KDTree,
 )
+from scipy.spatial import KDTree
+
+KDtree = partial(KDTree, leafsize=32)
 
 T = TypeVar("T")
 ListOrSingle: TypeAlias = Union[List[T], T]
@@ -69,9 +55,25 @@ configurable = pc.configurable
 
 
 ### {{{                            --     1D     --
-DEFAULT_MARKER_ROTATION: tuple = ("o", "x", "s", "^", "*", "v", "+", "<", ">", "d", "p", "P", "h", "H")
+DEFAULT_MARKER_ROTATION: tuple = (
+    "o",
+    "x",
+    "s",
+    "^",
+    "*",
+    "v",
+    "+",
+    "<",
+    ">",
+    "d",
+    "p",
+    "P",
+    "h",
+    "H",
+)
 
-def make_n_props(n: int, props: Optional[Dict|List]) -> List[Dict]:
+
+def make_n_props(n: int, props: Optional[Dict | List]) -> List[Dict]:
     if props is None:
         props = [{}] * n
     elif not isinstance(props, list):
@@ -79,6 +81,7 @@ def make_n_props(n: int, props: Optional[Dict|List]) -> List[Dict]:
     if len(props) != n:
         raise ValueError(f"props must have length {n}")
     return props
+
 
 @configurable
 def smooth_1d(
@@ -111,8 +114,6 @@ def smooth_1d(
     knn_avg_params["radius"] = knn_radius
     knn_avg_params.pop("avg_method", None)
 
-
-
     # remove nans
     nans = np.isnan(X).any(axis=1)
     if nans.any():
@@ -138,7 +139,7 @@ def smooth_1d(
         colors = plt.get_cmap(DEFAULT_CMAP_NAME)(np.linspace(0.25, 1, nslices))
     assert colors is not None
 
-    tree = cKDTree(X)
+    tree = KDTree(X)
 
     xmin, xmax = xlims
     xmax = X[:, 0].max() if xmax is None else xmax
@@ -148,7 +149,6 @@ def smooth_1d(
     xquery_min = max(float(xmin), X[:, 0].min() + knn_radius * 0.5)
 
     xquery = np.linspace(xquery_min, xquery_max, res).reshape(-1, 1)
-
 
     minz, maxz = np.inf, -np.inf
     for i in range(nslices):
@@ -169,7 +169,9 @@ def smooth_1d(
             if j < n_input - 2:
                 legend_label += ", "
 
-        marker = lineplot_props[i].get("marker", DEFAULT_MARKER_ROTATION[i % len(DEFAULT_MARKER_ROTATION)])
+        marker = lineplot_props[i].get(
+            "marker", DEFAULT_MARKER_ROTATION[i % len(DEFAULT_MARKER_ROTATION)]
+        )
 
         DEFAULT_LINEPLOT_PROPS = {
             "lw": 1,
@@ -178,7 +180,6 @@ def smooth_1d(
             "marker": marker,
             # use marker but don't show it, it's only for the legend:
             "markevery": -1,
-
         }
         lineplot_props[i] = {**DEFAULT_LINEPLOT_PROPS, **lineplot_props[i]}
 
@@ -286,7 +287,7 @@ def knn_grid(
     else:
         xquery = xy
 
-    tree = cKDTree(x)
+    tree = KDTree(x)
     output_values, density = knn_avg(xquery, y, tree=tree, **knn_avg_params)
 
     output_values = output_values.squeeze()
@@ -487,7 +488,7 @@ def smooth_line_plot(
 
     if tree is None:
         x = x[:, input_order]
-        tree = cKDTree(x)
+        tree = KDTree(x)
 
     xquery = np.linspace(xmin, xmax, res).reshape(-1, 1)
     slice_at = np.array([]) if slice_at is None else np.array(slice_at)
@@ -571,7 +572,7 @@ def smooth_line_slices(
     input_names, output_name = protein_names[:-1], protein_names[-1]
 
     x = x[:, input_order]
-    tree = cKDTree(x)
+    tree = KDTree(x)
 
     xmin = xmin if xmin is not None else x[:, 0].min()
     xmax = xmax if xmax is not None else x[:, 0].max()

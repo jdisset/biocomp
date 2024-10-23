@@ -1,35 +1,21 @@
 # {{{                          --     imports     --
 # ···············································································
 import jax
-from dataclasses import dataclass
 import jax.numpy as jnp
-import copy
-from matplotlib import scale as mscale
+from scipy.stats import norm
 from functools import partial
-from scipy.spatial import cKDTree
+
 from jax import jit, vmap
 import numpy as np
 from biocomp import utils as ut
-from biocomp import datautils as du
-from biocomp import compute as cmp
-from biocomp.datautils import DataManager, DataRescaler
+from biocomp.datautils import DataRescaler
 import matplotlib.pyplot as plt
-from jax.scipy.stats import gaussian_kde
 import matplotlib.ticker as ticker
-import matplotlib.pyplot as plt
-import numpy as np
 import difflib
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-import string
-from labellines import labelLine, labelLines
 from jax.typing import ArrayLike
-from typing import Tuple
 import os
-from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable, TypeAlias
-from matplotlib.ticker import ScalarFormatter, NullFormatter, MaxNLocator
+from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable, TypeAlias, Literal
 from matplotlib import colors as mcolors
-
-from dataclasses import dataclass, field, asdict
 
 from copy import deepcopy
 
@@ -346,6 +332,149 @@ def setup_symlog_axis(
 ### {{{              --     knn and spatial partitionning    --
 
 
+class SpatialQueryGrid:
+    def __init__(
+        self,
+        data: np.ndarray,
+        resolution: int = 200,
+    ):
+        """Initialize the spatial grid structure"""
+        self.__data = data
+        self.__resolution = resolution
+        # save data to /tmp/datadump.npy
+        # np.save("/tmp/datadump.npy", data)
+
+        self.make_grid()
+        self.make_query_fn()
+
+    def make_grid(self, bin_capacity: int | Literal["auto"] = "auto") -> None:
+        """Create the spatial grid structure. Specifying bin_capacity instead 'auto' allows this method to be jitted."""
+
+        @jax.jit
+        def get_bin(point: ArrayLike) -> int:
+            nd_pos = self.get_bin_nd(point)
+            return jnp.ravel_multi_index(nd_pos, self.__grid_shape, mode="clip")  # type: ignore
+
+        self.__lower = jnp.min(self.__data, axis=0)
+        self.__upper = jnp.max(self.__data, axis=0)
+
+        self.__binsize = jnp.min((self.__upper - self.__lower) / self.__resolution)
+        self.__grid_shape = tuple(
+            np.ceil((self.__upper - self.__lower) / self.__binsize).astype(int)
+        )
+
+        n_points = len(self.__data)
+
+        point_indices = jnp.arange(n_points)
+        point_positions = vmap(get_bin)(self.__data)
+        bin_counts = jnp.bincount(point_positions)
+        sorted_point_positions = point_indices[jnp.argsort(point_positions)]
+
+        if bin_capacity == "auto":
+            bin_capacity = int(jnp.max(bin_counts))
+        else:
+            bin_capacity = bin_capacity
+
+        print(f"bin_capacity: {bin_capacity}")
+        print(f"grid_shape: {self.__grid_shape}")
+        print(f"n_points: {n_points}")
+        print(f"lower: {self.__lower}, upper: {self.__upper}")
+
+        last_elt = jnp.full((1, bin_capacity), -1)  # just so that grid[-1] returns an "empty" bin
+
+        @jax.jit
+        def make_grid(bin_counts):
+            csum = jnp.cumsum(bin_counts)
+            start_idx = jnp.concatenate((jnp.zeros(1), csum[:-1])).astype(int)
+
+            @vmap
+            def impl(start_idx, end_idx):
+                sortedpos = jax.lax.dynamic_slice(
+                    sorted_point_positions, (start_idx,), (bin_capacity,)
+                )
+                cell_bincount = end_idx - start_idx
+                cell_indices = jnp.where(
+                    jnp.arange(bin_capacity) < cell_bincount,
+                    sortedpos,
+                    -1,
+                )
+                return cell_indices
+
+            grid = impl(start_idx, csum)
+            grid = jnp.concatenate((grid, last_elt), axis=0)
+            return grid
+
+        self.__grid = make_grid(bin_counts)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def get_bin_nd(self, point: ArrayLike) -> ArrayLike:
+        """Get n-dimensional bin coordinates for a point"""
+        return jnp.floor((jnp.array(point) - self.__lower) / self.__binsize).astype(int)
+
+    def make_query_fn(self) -> None:
+        binsize = np.asarray(self.__binsize)
+        grid_shape = np.asarray(self.__grid_shape)
+        grid = jnp.asarray(self.__grid)
+        data = jnp.asarray(self.__data)
+
+        def query_impl(xquery, k, distance_upper_bound):
+            """
+            Query the spatial grid for k nearest neighbors within radius.
+
+            Args:
+                xquery: Query point
+                k: Number of neighbors to return
+                qradius: Search radius
+
+            Returns:
+                Tuple of (distances, indices) to nearest neighbors
+            """
+            qrange = int(np.ceil(distance_upper_bound / binsize))
+            qlower = self.get_bin_nd(xquery) - qrange
+
+            query_bins = jnp.meshgrid(*[jnp.arange(qrange * 2) + ql for ql in qlower])
+            query_bins = jnp.stack([q.flatten() for q in query_bins], axis=-1)
+
+            in_bounds = jnp.all((query_bins >= 0) & (query_bins < jnp.array(grid_shape)), axis=1)
+            query_ids = jnp.ravel_multi_index(query_bins.T, grid_shape, mode="clip")  # type: ignore
+            query_ids = jnp.where(in_bounds, query_ids, -1)
+            candidates = grid[query_ids].flatten()
+            candidates = jnp.pad(candidates, (0, k), constant_values=-1)
+            candidate_positions = data[candidates]
+
+            sqdists = jnp.sum(jnp.square(candidate_positions - xquery), axis=1)
+
+            mask = (sqdists < distance_upper_bound**2) & (candidates != -1)
+            sqdists = jnp.where(mask, sqdists, jnp.inf)
+            candidates = jnp.where(mask, candidates, -1)
+            topk_dist, topk_ids = jax.lax.top_k(-sqdists, k=k)
+            topk = candidates[topk_ids]
+            topk_dist = jnp.sqrt(-topk_dist)
+            topk_dist = jnp.where(topk != -1, topk_dist, jnp.inf)
+
+            return topk_dist, topk
+
+        jitquery = jit(vmap(query_impl, in_axes=(0, None, None)), static_argnums=(1, 2))
+
+        def query(xquery, k, distance_upper_bound):
+            return jitquery(xquery, k, distance_upper_bound)
+
+        self.query = query
+
+
+@partial(jax.jit, static_argnums=(1, 2))
+@partial(jax.vmap, in_axes=(None, 0, None, None))
+def bfquery(data, xquery, k, distance_upper_bound):
+    distances = jnp.sum(jnp.square(data - xquery), axis=1)
+    topk_dist, topk_ids = jax.lax.approx_max_k(-distances, k=k, recall_target=0.98)
+    topk_dist = -topk_dist
+    mask = topk_dist < (distance_upper_bound**2)
+    topk_dist = jnp.where(mask, topk_dist, jnp.inf)
+    topk_ids = jnp.where(mask, topk_ids, -1)
+    topk_dist = jnp.sqrt(topk_dist)
+    return topk_dist, topk_ids
+
+
 @jax.jit
 def weighted_quantile(data, weights, qu):
     ix = jnp.argsort(data)
@@ -355,84 +484,25 @@ def weighted_quantile(data, weights, qu):
     return jnp.interp(qu, cdf, data)
 
 
-class NaiveGridSpacePartitioner:
-    # TODO: optimize, use jax (currently not jittable and too slow to use)
-    def __init__(self, data: np.ndarray, lower: ArrayLike, upper: ArrayLike, binsize: float):
-        """Create a uniform grid space partitioner in N dimensions,
-        with lower and upper coordinates and a binsize"""
-        self.data = data
-        self.lower = np.array(lower)
-        self.upper = np.array(upper)
-        self.binsize = binsize
-        assert len(lower) == len(upper) == data.shape[1]
-
-        # Determine number of bins along each dimension
-        self.num_bins = np.ceil((self.upper - self.lower) / self.binsize).astype(int)
-        self.grid = {}  # TODO: use dense array instead
-
-        # Store data points in their corresponding grid cells
-        for idx, point in enumerate(data):
-            bin_indices = self._get_bin(point)
-            if bin_indices not in self.grid:
-                self.grid[bin_indices] = []
-            self.grid[bin_indices].append(idx)
-
-    def _get_bin(self, point: ArrayLike) -> Tuple[int, ...]:
-        """Determine which bin a point belongs to."""
-        return tuple(((np.array(point) - self.lower) / self.binsize).astype(int))
-
-    def query(
-        self, x: ArrayLike, k: int, distance_upper_bound: float
-    ) -> Tuple[ArrayLike, ArrayLike]:
-        """
-        Query the partitioner for the k nearest neighbors of x,
-        within a maximum distance of distance_upper_bound.
-        Returns a pair of array: first one is the distances, second one is the indices.
-        Pads with np.inf and -1 respectively, if there are less than k neighbors.
-        """
-
-        bin_indices = self._get_bin(x)
-        neighbors = []
-
-        # Compute the range of bins to search in each dimension
-        search_range = int(np.ceil(distance_upper_bound / self.binsize))
-
-        # Iterate over nearby bins
-        for offset in np.ndindex(tuple([2 * search_range + 1] * len(bin_indices))):
-            target_bin = tuple((np.array(bin_indices) - search_range + np.array(offset)).tolist())
-            if target_bin in self.grid:
-                neighbors.extend(self.grid[target_bin])
-
-        # Calculate distances and sort neighbors by distance
-        distances = np.linalg.norm(self.data[neighbors] - np.array(x), axis=1)
-        sorted_indices = np.argsort(distances)
-
-        nearest_indices = [neighbors[i] for i in sorted_indices[:k]]
-        nearest_distances = distances[sorted_indices[:k]]
-
-        # Padding if there are less than k neighbors
-        while len(nearest_indices) < k:
-            nearest_indices.append(-1)
-            nearest_distances = np.append(nearest_distances, np.inf)
-
-        return nearest_distances, np.array(nearest_indices)
-
-
-
-
 def gausspdf(x, mu, sigma):
-    return 1 / (sigma * np.sqrt(2 * np.pi)) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+    return norm.pdf(x, loc=mu, scale=sigma)
 
-def get_gaussian_weighted_knn(
+
+def jax_gausspdf(x, mu, sigma):
+    return jax.scipy.stats.norm.pdf(x, loc=mu, scale=sigma)
+
+
+def get_gaussian_weighted_knn_nojax(
     x: NdArray,
-    tree: cKDTree,
-    k: int = 500, # number of neighbors to consider
-    min_points: int = 20, # minimum number of points to consider a neighborhood. fewer = nan
+    tree,
+    k: int = 500,  # number of neighbors to consider
+    min_points: int = 20,  # minimum number of points to consider a neighborhood. fewer = nan
     radius: float = 0.1,
-    sigma_in_radius: float = 3, # sigma of the gaussian kernel in units of radius
+    sigma_in_radius: float = 3,  # sigma of the gaussian kernel in units of radius
 ):
     """Get the k-nearest neighbors of x in the tree,
     and return their indices together with their weights (from a gaussian kernel)."""
+
     distances, indices = tree.query(x, k=k, distance_upper_bound=radius)
     empty_neighbor_mask = distances == np.inf
     nb_points = (~empty_neighbor_mask).sum(axis=1)
@@ -440,7 +510,55 @@ def get_gaussian_weighted_knn(
     indices[empty_neighbor_mask] = 0
     weights[empty_neighbor_mask] = 0
     weights[nb_points < min_points, :] = np.nan
+
     return indices, weights
+
+
+@partial(jax.jit, static_argnums=(2, 3, 4, 5, 6))
+def get_gaussian_weighted_knn_jax(
+    x: NdArray,
+    data,
+    k: int = 500,  # number of neighbors to consider
+    min_points: int = 20,  # minimum number of points to consider a neighborhood. fewer = nan
+    radius: float = 0.1,
+    sigma_in_radius: float = 3,  # sigma of the gaussian kernel in units of radius
+    n_devices: int = 1,
+):
+    """Get the k-nearest neighbors of x in the tree,
+    and return their indices together with their weights (from a gaussian kernel)."""
+
+    # pad x to be divisible by n_devices
+    n_padding = n_devices - x.shape[0] % n_devices
+    padded_x = jnp.pad(x, ((0, n_padding), (0, 0)))
+    batches = jnp.asarray(jnp.split(padded_x, n_devices))
+
+    res = jax.pmap(lambda x: bfquery(data, x, k, radius))(batches)
+
+    distances = jnp.vstack(res[0])
+    indices = jnp.vstack(res[1])
+
+    # remove padding
+    distances = distances[: x.shape[0]]
+    indices = indices[: x.shape[0]]
+
+    empty_neighbor_mask = indices == -1
+    nb_points = (~empty_neighbor_mask).sum(axis=1)
+    weights = jax_gausspdf(distances, 0, radius / sigma_in_radius)
+    weights = jnp.where(empty_neighbor_mask, 0, weights)
+    nbinferior = nb_points < min_points
+    weights = jnp.where(nbinferior[:, None], jnp.nan, weights)
+
+    return indices, weights
+
+
+def get_gaussian_weighted_knn(x, tree, **kw):
+    print(f"{jax.devices()=}")
+    if jax.devices()[0].platform == "gpu" or jax.devices()[0].platform == "tpu":
+        return get_gaussian_weighted_knn_jax(x, tree.data, **kw)
+    elif len(jax.devices()) > 1:
+        return get_gaussian_weighted_knn_jax(x, tree.data, n_devices=len(jax.devices()), **kw)
+    else:
+        return get_gaussian_weighted_knn_nojax(x, tree, **kw)
 
 
 def get_knn_mean(x, y, tree, **kw):
@@ -448,6 +566,7 @@ def get_knn_mean(x, y, tree, **kw):
     and return their weighted average value together with their density."""
 
     indices, weights = get_gaussian_weighted_knn(x, tree, **kw)
+
     assert indices.shape == weights.shape
     normed_w = weights / weights.sum(axis=1)[:, None]
     weighted_mean = (y[indices] * normed_w[:, :, None]).sum(axis=1)
