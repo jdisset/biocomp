@@ -2,26 +2,13 @@
 # ···············································································
 from dataclasses import dataclass, field
 import jax.numpy as jnp
-from scipy.stats import gaussian_kde
-from matplotlib import scale as mscale
-from jax.tree_util import Partial
 from functools import partial
 import numpy as np
 from biocomp import utils as ut
-from biocomp import datautils as du
 from biocomp.datautils import DataRescaler
 import matplotlib.pyplot as plt
 from biocomp.network import Network
 from biocomp.utils import ArbitraryModel, build_if_has_target
-import matplotlib.ticker as ticker
-import plotly.graph_objs as go
-import matplotlib.pyplot as plt
-import plotly.offline as pyo
-import plotly.graph_objects as go
-import plotly.graph_objs as go
-import plotly.graph_objects as go
-import plotly.offline as pyo
-import numpy as np
 import string
 import os
 from typing import (
@@ -36,10 +23,8 @@ from typing import (
     Optional,
     Callable,
     TypeVar,
-    Tuple,
     TypeAlias,
 )
-from matplotlib.ticker import ScalarFormatter, NullFormatter, MaxNLocator
 import matplotlib as mpl
 
 from matplotlib.axes import Axes
@@ -47,14 +32,15 @@ from matplotlib.figure import Figure
 from pydantic import (
     BaseModel,
     Field,
-    model_validator,
     BeforeValidator,
 )
 
 from pathlib import Path
 from biocomp.plotting import plotting_core as pc
+from biocomp.logging_config import get_logger
 
-logger = ut.setup_logger("biocomp.plotting")
+logger = get_logger(__name__)
+
 configurable = ut.configurable_decorator("biocomp.plotting")
 os.environ["PATH"] += os.pathsep + "/Library/TeX/texbin"
 

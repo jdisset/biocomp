@@ -1,23 +1,8 @@
 ### {{{                          --     imports     --
-import jax
-from typing import Tuple
-from datetime import datetime
-import jax.numpy as jnp
-from jax import jit, vmap, grad, value_and_grad
-from pathlib import Path
-from jax.tree_util import Partial
+
 
 # original partial:
-from functools import partial
-import json
-import pandas as pd
-import optax
-import matplotlib.pyplot as plt
-import numpy as np
-import joblib
-from joblib import Parallel, delayed
 from . import datautils as du
-from . import plotutils as pu
 from . import trainutils as tu
 from . import utils as ut
 from biocomp.utils import (
@@ -28,16 +13,15 @@ from biocomp.utils import (
 )
 from . import nodes as nodes
 from . import compute as cmp
-from .utils import check, checkwrap
 from .parameters import ParameterTree, ParamPath
 
-import wandb as wb
-import os
 import time
-from tqdm import tqdm
 
-from typing import List, Tuple, Dict, Any, Callable, Collection, Optional, Union
+from typing import List, Tuple, Callable, Optional
 from pydantic import Field
+import jax
+import jax.numpy as jnp
+import optax
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -72,6 +56,9 @@ def check_XYZ_new(X, Y, Z, stack):
 
 
 def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_penalty):
+    import jax
+    import jax.numpy as jnp
+
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
     def loss_func(dynamic, static, X, Y, Z, key):
@@ -89,31 +76,6 @@ def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_pen
 
         negative_grads = jnp.mean(jnp.clip(-grads, 0, None))
         return quantile_loss + negative_grad_penalty * negative_grads
-
-    return loss_func
-
-
-def silly_loss(stack: cmp.ComputeStack, training_config):
-    batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
-
-    def loss_func(dynamic, static, X, Y, Z, key):
-        check_XYZ_new(X, Y, Z, stack)
-        params = ParameterTree.merge(dynamic, static)
-        keys = jax.random.split(key, X.shape[0])
-        yhat, grads = batch_apply(params, X, Z, keys)
-        assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
-
-        qvalues_dir = ParamPath("shared/quantization/values")
-        logstd_dir = ParamPath("shared/quantization/logstdevs")
-        count_dir = ParamPath("shared/quantization/counts")
-        qvalues, logstds, counts = map(
-            lambda path: jnp.concatenate(
-                tuple(map(lambda t: t[1], params[path].iter_leaves()))
-            ).flatten(),
-            (qvalues_dir, logstd_dir, count_dir),
-        )
-        jax.debug.print("{}", qvalues)
-        return (qvalues**2).sum()
 
     return loss_func
 
@@ -220,6 +182,10 @@ def start(
     compute_config: cmp.ComputeConfig,
     loggers: Optional[List[Tuple[int, Callable]]] = None,
 ):
+
+
+    import optax
+
     ut.logger.debug(f"Training config: {training_config}")
     ut.logger.debug(f"Compute config: {compute_config}")
 

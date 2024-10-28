@@ -2,7 +2,6 @@
 # ···············································································
 import jax
 import jax.numpy as jnp
-from scipy.stats import norm
 from functools import partial
 
 from jax import jit, vmap
@@ -20,9 +19,12 @@ from matplotlib import colors as mcolors
 from copy import deepcopy
 
 import dracon as dr
+from biocomp.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-logger = ut.setup_logger("biocomp.plotting")
 configurable = ut.configurable_decorator("biocomp.plotting")
 
 # ╭─────────────────────────────────────────────╮
@@ -37,7 +39,6 @@ NumLike: TypeAlias = Union[np.ndarray, jnp.ndarray, float, int]
 from matplotlib import colors as mcolors
 
 os.environ["PATH"] += os.pathsep + "/Library/TeX/texbin"
-logger = ut.setup_logger("biocomp.plotting")
 configurable = ut.configurable_decorator("biocomp.plotting")
 
 
@@ -485,6 +486,8 @@ def weighted_quantile(data, weights, qu):
 
 
 def gausspdf(x, mu, sigma):
+    from scipy.stats import norm
+
     return norm.pdf(x, loc=mu, scale=sigma)
 
 

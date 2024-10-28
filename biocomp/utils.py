@@ -4,6 +4,7 @@ import json
 import logging
 from rich.logging import RichHandler
 from rich import print as rprint
+from biocomp.logging_config import setup_logging, get_logger
 import inspect
 import sys
 import copy
@@ -21,7 +22,6 @@ import jax.numpy as jnp
 import pickle
 import json5
 import numpy as np
-import logging
 from jax.tree_util import Partial as partial
 from contextlib import contextmanager
 from pkg_resources import get_distribution, resource_filename
@@ -33,7 +33,7 @@ import cProfile
 
 from biocomp.models import buildLibFromDatabase
 
-from pydantic import BaseModel, BeforeValidator
+from pydantic import BaseModel, BeforeValidator, ConfigDict
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
@@ -58,10 +58,16 @@ DictLike = Union[Dict, DictConfig]
 
 
 class ArbitraryModel(BaseModel):
-    class Config:
-        arbitrary_types_allowed = True
-        extra = "forbid"
-        validate_default = True
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="forbid",
+        validate_default=True,
+    )
+
+    # class Config:
+    # arbitrary_types_allowed = True
+    # extra = "forbid"
+    # validate_default = True
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
         return super().model_dump(serialize_as_any=True, **kwargs)
@@ -82,32 +88,7 @@ class ArbitraryModel(BaseModel):
 # ···············································································
 
 
-def setup_logger(lname=None, level=logging.INFO):
-    log = logging.getLogger(lname)
-    if log.hasHandlers():
-        for handler in log.handlers:
-            log.removeHandler(handler)
-    logging_handler = RichHandler()
-    logging_handler.setFormatter(logging.Formatter(datefmt="%Y-%m-%dT%H:%M:%S%z "))
-    logging_handler._log_render.show_path = True
-    # no propagate:
-    log.propagate = False
-    # add origin (source) to log messages
-    log.addHandler(logging_handler)
-    log.setLevel(level)
-    return log
-
-
-setup_logger()
-setup_logger("jax", logging.WARNING)
-logger = setup_logger("biocomp", logging.WARNING)
-
-
-def set_loglevel(lname, level):
-    log = logging.getLogger(lname)
-    log.setLevel(level)
-    log.propagate = False
-    return log
+logger = get_logger(__name__)
 
 
 @contextmanager

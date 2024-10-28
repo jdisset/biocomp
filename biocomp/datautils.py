@@ -2,33 +2,17 @@
 # ···············································································
 import jax
 import jax.numpy as jnp
-from dataclasses import field
 from jax.tree_util import Partial as partial
-from jax import jit, vmap
 import numpy as np
-import pandas as pd
-import biocomp as bc
 from . import utils as ut
 from .utils import ArbitraryModel
 from pathlib import Path
-import json
-from . import defaults as dft
-from . import nodes as nd
-from . import compute as cmp
 from .compute import ComputeStack
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-from dataclasses import dataclass
 
-# from jax.scipy.stats import gaussian_kde
-from scipy.stats import gaussian_kde
 import itertools
-import hashlib
-import pickle
-from matplotlib.ticker import FixedLocator, FuncFormatter
-import matplotlib.ticker as ticker
 from .network import Network
-from pydantic import BaseModel, ValidationError, Field, field_validator
+from pydantic import BaseModel, Field
 from typing import Optional, Union, List, Tuple, Callable, Collection, Any
 
 ndArray = Union[np.ndarray, jnp.ndarray]
@@ -271,7 +255,7 @@ def sample_batches_direct(
     Y: ndArray,
     batch_size: int,
     n_batches: int,
-    kde: gaussian_kde,
+    kde,
     densities: ndArray,  # densities at each point in X
     rng,
     density_threshold_quantile=0.05,  # Compute the density threshold using the quantile of the density distribution
@@ -483,6 +467,8 @@ class DataManager:
 
     def generate_kdes(self):
         """Generate KDEs to get the data densities of each sample"""
+        from scipy.stats import gaussian_kde
+
         ut.logger.debug("Generating KDEs for data density estimation")
         npoints = [min(x.shape[0], int(self.data_cfg.resampling.kde_samples)) for x in self._X]
         ut.logger.debug(f"Using {npoints} points for KDE estimation")

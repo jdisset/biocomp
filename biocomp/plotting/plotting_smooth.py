@@ -1,16 +1,10 @@
 # {{{                          --     imports     --
 # ···············································································
-import jax
 import jax.numpy as jnp
 from functools import partial
 
-from jax import jit, vmap
 import numpy as np
-from biocomp import utils as ut
-from biocomp import datautils as du
-from biocomp import compute as cmp
 import matplotlib.pyplot as plt
-from jax.typing import ArrayLike
 from typing import (
     Union,
     Sequence,
@@ -38,8 +32,8 @@ from .plotting_core import (
     get_knn_quantile,
     format_powers,
     heatmap,
-    # SpatialQueryGrid as KDTree,
 )
+
 from scipy.spatial import KDTree
 
 KDtree = partial(KDTree, leafsize=32)
