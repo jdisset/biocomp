@@ -361,10 +361,17 @@ def debug_raw_string(s, label="String"):
     print(f"\n--- Debugging {label} ---")
     print(f"Raw repr(): {repr(s)}")
     print(f"Raw str(): {str(s)}")
-    print(f"ASCII encoded/decoded: {s.encode('ascii').decode('unicode-escape')}")
-    print("Contains double backslashes:", r"\\" in s)
-    print("Contains single backslashes:", "\\" in s)
-    print("-" * 40)
+    try:
+        ascii_ver = s.encode('ascii').decode('unicode-escape')
+        print(f"ASCII encoded/decoded: {ascii_ver}")
+    except UnicodeError:
+        print("ASCII encoding failed - string contains non-ASCII characters:")
+        print(f"Unicode points: {[ord(c) for c in s]}")
+        print(f"Hex representation: {s.encode('utf-8').hex()}")
+    
+    print(f"Contains double backslashes: {r'\\' in s}")
+    print(f"Contains single backslashes: {'\\' in s}")
+    print("="*40)
 
 
 @configurable

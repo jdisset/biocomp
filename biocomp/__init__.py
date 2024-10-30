@@ -1,3 +1,4 @@
+from biocomp.logging_config import setup_logging, get_logger
 from . import utils as ut
 from .library import PartsLibrary as PartsLibrary
 
