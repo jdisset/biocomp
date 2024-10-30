@@ -180,9 +180,6 @@ def smooth_1d(
         ax.plot(xquery, z, **lineplot_props[i])
 
         if show_std:
-            # print shape of query, z and Y
-            print(f"query.shape = {query.shape}, z.shape = {z.shape}, Y.shape = {Y.shape}")
-
             # std instead:
             std, _ = knn_avg(query, Y, tree, avg_method="std", **knn_avg_params)
             minz = min(minz, z.min() - std.max())
@@ -224,12 +221,10 @@ def smooth_1d(
                     lw=0,
                 )
 
-    print(f"minz = {minz}, maxz = {maxz}")
     minz = minz - 0.02 * (maxz - minz)
     maxz = maxz + 0.02 * (maxz - minz)
 
     vlims = [minz if vlims[0] is None else vlims[0], maxz if vlims[1] is None else vlims[1]]
-    print(f"vlims = {vlims}")
 
     setup_transformed_axis(
         ax,
@@ -362,6 +357,16 @@ def colorbar(
     return cbar
 
 
+def debug_raw_string(s, label="String"):
+    print(f"\n--- Debugging {label} ---")
+    print(f"Raw repr(): {repr(s)}")
+    print(f"Raw str(): {str(s)}")
+    print(f"ASCII encoded/decoded: {s.encode('ascii').decode('unicode-escape')}")
+    print("Contains double backslashes:", r"\\" in s)
+    print("Contains single backslashes:", "\\" in s)
+    print("-" * 40)
+
+
 @configurable
 def smooth_2d(
     X: NdArray,
@@ -386,8 +391,6 @@ def smooth_2d(
     knn_grid_params: Dict = {},
     heatmap_params: Dict = {},
 ) -> Tuple:
-    print(f"heatmap_params: {heatmap_params}")
-
     ylims = xlims if ylims == (None, None) else ylims
 
     if isinstance(ax, (list, tuple)):
@@ -414,6 +417,9 @@ def smooth_2d(
     # as latex if xtitle not none
     xlabel = input_names[0] if xtitle is None else xtitle
     ylabel = input_names[1] if ytitle is None else ytitle
+
+    debug_raw_string(xlabel, "xlabel")
+    debug_raw_string(ylabel, "ylabel")
 
     if draw_xlabel:
         ax.set_xlabel(xlabel)

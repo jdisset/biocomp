@@ -376,11 +376,6 @@ class SpatialQueryGrid:
         else:
             bin_capacity = bin_capacity
 
-        print(f"bin_capacity: {bin_capacity}")
-        print(f"grid_shape: {self.__grid_shape}")
-        print(f"n_points: {n_points}")
-        print(f"lower: {self.__lower}, upper: {self.__upper}")
-
         last_elt = jnp.full((1, bin_capacity), -1)  # just so that grid[-1] returns an "empty" bin
 
         @jax.jit
@@ -555,7 +550,6 @@ def get_gaussian_weighted_knn_jax(
 
 
 def get_gaussian_weighted_knn(x, tree, **kw):
-    print(f"{jax.devices()=}")
     if jax.devices()[0].platform == "gpu" or jax.devices()[0].platform == "tpu":
         return get_gaussian_weighted_knn_jax(x, tree.data, **kw)
     elif len(jax.devices()) > 1:
@@ -613,9 +607,6 @@ def knn_avg(xquery, logY, tree, k=500, min_points=20, avg_method="mean", **kw):
         assert "qu" in kw
         Z, p = get_knn_quantile(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
     elif avg_method == "std":
-        print(
-            f"computing std with k={k}, min_points={min_points}. xshape={xquery.shape}, yshape={logY.shape}"
-        )
         Z = get_knn_std(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
         p = np.ones
     else:
@@ -642,7 +633,6 @@ def heatmap(
     cmap=DEFAULT_CMAP_NAME,
     bad_color="#EEEEEE00",
 ):
-    print(f"in heatmap, contours={contours}")
 
     if isinstance(ax, list):
         ax = ax[0]

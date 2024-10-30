@@ -111,6 +111,9 @@ class PlotData(ArbitraryModel):
 
         return self
 
+    def __deepcopy__(self, memo):
+        return self
+
 
 class LazyPlotData(PlotData):
     get_xy: Callable[[PlotData], Tuple[NdArray, NdArray]]
@@ -137,6 +140,9 @@ class LazyPlotData(PlotData):
     @property
     def dimensions(self) -> DataDimensions:
         return DataDimensions(input=self.x.shape[1], output=1)
+
+    def __deepcopy__(self, memo):
+        return self
 
 
 def ax_to_list(ax) -> Sequence:
@@ -186,8 +192,8 @@ class SimpleLayout(FigureLayout):
         return FigAx(figure=fig, ax=ax)
 
     def finalize(self, figax: FigAx) -> None:
-        # make it tight
         figax.figure.tight_layout()
+        pass
 
 
 ValidatedFigureLayout = Annotated[
@@ -213,10 +219,9 @@ class FigureSpec(ArbitraryModel):
 
     def save_figure(self, figax: FigAx) -> None:
         assert self.output_file is not None
-        output_path = Path(self.output_dir) / self.output_file
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        figax.figure.savefig(output_path, bbox_inches="tight")
-        print(f"Saved figure to {output_path}")
+        self._output_path = Path(self.output_dir) / self.output_file
+        self._output_path.parent.mkdir(parents=True, exist_ok=True)
+        figax.figure.savefig(self._output_path, bbox_inches="tight")
 
     def finalize(self, figax: FigAx) -> None:
         if self.title is not None:
@@ -224,6 +229,8 @@ class FigureSpec(ArbitraryModel):
         self.layout.finalize(figax)
         if self.output_file is not None:
             self.save_figure(figax)
+
+        plt.close(figax.figure)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -292,12 +299,14 @@ def extract_lazy_plot_data_from_network(
         y = Y[:, output_pos].reshape(-1, 1)
         return x, y
 
-    return LazyPlotData(
+    pdata = LazyPlotData(
         get_xy=get_xy,
         input_names=input_names,
         output_name=output_name,
         **kw,
     )
+    print(f"Lazy plot data: {pdata.input_names} -> {pdata.output_name}")
+    return pdata
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -317,7 +326,6 @@ def get_web_font(url, font_name):
     import tempfile
     from pathlib import Path
     import urllib
-    from rich import print
     from matplotlib import font_manager
 
     # Create a temporary directory for the font file

@@ -1,10 +1,10 @@
 ### {{{                          --     imports     --
+from biocomp.logging_config import setup_logging, get_logger
 import yaml
 import json
 import logging
 from rich.logging import RichHandler
 from rich import print as rprint
-from biocomp.logging_config import setup_logging, get_logger
 import inspect
 import sys
 import copy
@@ -229,8 +229,6 @@ class PartialFunction(ArbitraryModel, Generic[T, R]):
             func = self.func
 
         assert callable(func), "The resolved function is not callable"
-
-        print(f"Setting missing kwargs for {func}: {new_kwargs}")
 
         sig = inspect.signature(func)
         has_param = False

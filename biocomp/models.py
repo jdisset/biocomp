@@ -24,15 +24,18 @@ class Category(PartsDB, table=True):
 
 
 def int_or_none(s: str) -> Optional[int]:
-    return int(s) if s else None
+    try:
+        return int(s)
+    except Exception:
+        return None
 
 
 class Part(PartsDB, table=True):
     name: str = Field(primary_key=True)
     category: str = Field(foreign_key="category.name")
-    uid: Annotated[Optional[int], BeforeValidator(int_or_none)] = Field(
-        default=None, sa_column_kwargs={"name": "UID"}, alias="UID"
-    )
+    # uid: Annotated[Optional[int], BeforeValidator(int_or_none)] = Field(
+    # default=None, sa_column_kwargs={"name": "UID"}, alias="UID"
+    # )
 
     class Config:
         # SUPER HACKY but waiting for sqlmodel to fix serialization_alias support...
@@ -94,8 +97,6 @@ class SequestronType(PartsDB, table=True):
     positive_level: str
     output_level: str
     output_side: str
-    # output_category: List[str] = Field(sa_column=Column(JSON))
-    # parameter_list: List[str] = Field(sa_column=Column(JSON))
     output_category: str
     parameter_list: str
 
@@ -105,7 +106,6 @@ class Sequestron(PartsDB, table=True):
     type: str = Field(foreign_key="sequestrontype.name")
     negative_part: str = Field(foreign_key="part.name")
     positive_part: str = Field(foreign_key="part.name")
-    # output_part: List[str] = Field(sa_column=Column(JSON))
     output_part: str
 
 
