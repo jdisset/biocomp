@@ -399,6 +399,7 @@ def smooth_2d(
     heatmap_params: Dict = {},
 ) -> Tuple:
     ylims = xlims if ylims == (None, None) else ylims
+    print("ytitl", ytitle)
 
     if isinstance(ax, (list, tuple)):
         ax = ax[0]

@@ -219,6 +219,8 @@ class PartialFunction(ArbitraryModel, Generic[T, R]):
         super().model_post_init(*a, **kw)
         self._func = None
 
+        print("Post init function: ", self.model_dump())
+
     def set_missing_kwargs(self, new_kwargs: dict):
         """only overwrite the kwargs that are not already set, and are in the signature"""
         import inspect
