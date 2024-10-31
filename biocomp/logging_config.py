@@ -4,21 +4,16 @@ from rich.logging import RichHandler
 from typing import Optional, Dict
 from pathlib import Path
 
-# Disable matplotlib's font manager debug logs before it's even imported
-logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
+logging.getLogger("matplotlib.font_manager").setLevel(logging.INFO)
 
-# Prevent matplotlib from setting up handlers on its own
-matplotlib.set_loglevel("WARNING")
+matplotlib.set_loglevel("INFO")
 
-# Default format includes timestamp, logger name, and message
 DEFAULT_FORMAT = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
 DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-# Configure default levels for various loggers
 DEFAULT_LOGGER_LEVELS: Dict[str, int] = {
-    # External libraries
     "matplotlib": logging.WARNING,
-    "matplotlib.font_manager": logging.ERROR,  # Belt and suspenders approach
+    "matplotlib.font_manager": logging.INFO,
     "PIL": logging.WARNING,
     "jax": logging.WARNING,
     "ray": logging.WARNING,
@@ -27,18 +22,13 @@ DEFAULT_LOGGER_LEVELS: Dict[str, int] = {
     "h5py": logging.WARNING,
     "numba": logging.WARNING,
     "parso": logging.WARNING,
-    # Project-specific default levels
     "biocomp": logging.INFO,
     "biocomp.plotting": logging.INFO,
 }
 
-# Set critical loggers immediately
-for logger_name in ["matplotlib.font_manager", "ray._private.worker"]:
-    logging.getLogger(logger_name).setLevel(logging.ERROR)
-
 
 def setup_logging(
-    default_level: int = logging.DEBUG,
+    default_level: int = logging.INFO,
     log_file: Optional[Path] = None,
     rich_logging: bool = True,
     logger_levels: Optional[Dict[str, int]] = None,

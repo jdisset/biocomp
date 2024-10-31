@@ -1,9 +1,5 @@
 # {{{                          --     imports     --
 # ···············································································
-import logging
-import matplotlib as mpl
-mpl.set_loglevel("debug")
-
 
 import jax.numpy as jnp
 from functools import partial
@@ -363,25 +359,6 @@ def colorbar(
     return cbar
 
 
-def debug_raw_string(s, label="String"):
-    print(f"\n--- Debugging {label} ---")
-    print(f"Raw repr(): {repr(s)}")
-    print(f"Raw str(): {str(s)}")
-    try:
-        ascii_ver = s.encode("ascii").decode("unicode-escape")
-        print(f"ASCII encoded/decoded: {ascii_ver}")
-    except UnicodeError:
-        print("ASCII encoding failed - string contains non-ASCII characters:")
-        print(f"Unicode points: {[ord(c) for c in s]}")
-        print(f"Hex representation: {s.encode('utf-8').hex()}")
-
-    print("Contains double backslashes: ", r"\\" in s)
-    print("Contains single backslashes: ", "\\" in s)
-    print("=" * 40)
-
-
-
-
 @configurable
 def smooth_2d(
     X: NdArray,
@@ -407,8 +384,6 @@ def smooth_2d(
     heatmap_params: Dict = {},
 ) -> Tuple:
     ylims = xlims if ylims == (None, None) else ylims
-    print("ytitl", ytitle)
-    ytitle = r"\begin{center} Bandpass (Top-Left Bottom-Right) \\ Bias (mMaroon1): CasE\textsubscript{RS}\_Csy4 + pgu + Csy4\textsubscript{RS}\_mNG \end{center}"
 
     if isinstance(ax, (list, tuple)):
         ax = ax[0]
@@ -434,15 +409,6 @@ def smooth_2d(
     # as latex if xtitle not none
     xlabel = input_names[0] if xtitle is None else xtitle
     ylabel = input_names[1] if ytitle is None else ytitle
-
-    debug_raw_string(xlabel, "xlabel")
-    debug_raw_string(ylabel, "ylabel")
-
-
-    print("\nCurrent Matplotlib rcParams:")
-    for key, value in plt.rcParams.items():
-        print(f"{key}: {value}")
-
 
     if draw_xlabel:
         ax.set_xlabel(xlabel)
