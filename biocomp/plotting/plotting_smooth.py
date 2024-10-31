@@ -374,6 +374,8 @@ def debug_raw_string(s, label="String"):
     print("=" * 40)
 
 
+
+
 @configurable
 def smooth_2d(
     X: NdArray,
@@ -402,6 +404,10 @@ def smooth_2d(
     print("ytitl", ytitle)
     ytitle = r"\begin{center} Bandpass (Top-Left Bottom-Right) \\ Bias (mMaroon1): CasE\textsubscript{RS}\_Csy4 + pgu + Csy4\textsubscript{RS}\_mNG \end{center}"
 
+
+
+
+
     if isinstance(ax, (list, tuple)):
         ax = ax[0]
 
@@ -429,6 +435,12 @@ def smooth_2d(
 
     debug_raw_string(xlabel, "xlabel")
     debug_raw_string(ylabel, "ylabel")
+
+
+    print("\nCurrent Matplotlib rcParams:")
+    for key, value in plt.rcParams.items():
+        print(f"{key}: {value}")
+
 
     if draw_xlabel:
         ax.set_xlabel(xlabel)
