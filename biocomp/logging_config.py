@@ -38,7 +38,7 @@ for logger_name in ["matplotlib.font_manager", "ray._private.worker"]:
 
 
 def setup_logging(
-    default_level: int = logging.INFO,
+    default_level: int = logging.DEBUG,
     log_file: Optional[Path] = None,
     rich_logging: bool = True,
     logger_levels: Optional[Dict[str, int]] = None,

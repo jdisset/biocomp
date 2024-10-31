@@ -1,5 +1,10 @@
 # {{{                          --     imports     --
 # ···············································································
+import logging
+import matplotlib as mpl
+mpl.set_loglevel("debug")
+
+
 import jax.numpy as jnp
 from functools import partial
 
@@ -42,6 +47,7 @@ T = TypeVar("T")
 ListOrSingle: TypeAlias = Union[List[T], T]
 NdArray = Union[np.ndarray, jnp.ndarray]
 configurable = pc.configurable
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
@@ -403,10 +409,6 @@ def smooth_2d(
     ylims = xlims if ylims == (None, None) else ylims
     print("ytitl", ytitle)
     ytitle = r"\begin{center} Bandpass (Top-Left Bottom-Right) \\ Bias (mMaroon1): CasE\textsubscript{RS}\_Csy4 + pgu + Csy4\textsubscript{RS}\_mNG \end{center}"
-
-
-
-
 
     if isinstance(ax, (list, tuple)):
         ax = ax[0]
