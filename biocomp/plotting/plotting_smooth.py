@@ -400,6 +400,7 @@ def smooth_2d(
 ) -> Tuple:
     ylims = xlims if ylims == (None, None) else ylims
     print("ytitl", ytitle)
+    ytitle = r"\begin{center} Bandpass (Top-Left Bottom-Right) \\ Bias (mMaroon1): CasE\textsubscript{RS}\_Csy4 + pgu + Csy4\textsubscript{RS}\_mNG \end{center}"
 
     if isinstance(ax, (list, tuple)):
         ax = ax[0]
