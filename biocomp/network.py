@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from . import utils as ut
 import sqlite3
-from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast, Sequence
+from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast, Sequence, Literal
 from itertools import product
+from pydantic.dataclasses import dataclass
 
 
-part_type_to_parameter_name = {'promoter': 'tc_rate', 'uORF_group': 'tl_rate'}
-parameter_to_default_part = {'tl_rate': '00_empty_tc', 'tc_rate': 'hEF1a'}
+part_type_to_parameter_name = {"promoter": "tc_rate", "uORF_group": "tl_rate"}
+parameter_to_default_part = {"tl_rate": "00_empty_tc", "tc_rate": "hEF1a"}
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -16,20 +17,102 @@ parameter_to_default_part = {'tl_rate': '00_empty_tc', 'tc_rate': 'hEF1a'}
 # ···············································································
 
 
-def get_prt_content_from_tu_id(cdg, tu_id):
+def target_site_formatter(x):
+    return x.replace("_rec", "_{RS}")
+
+
+INTERESTING_PART_TYPES = [("RNA", "ERN_recog_site_5p", target_site_formatter), ("PRT", None, None)]
+
+
+@dataclass
+class TUInfo:
+    content: str
+    content_types: tuple[str, ...]
+
+
+def find_interesting_part(
+    cdg: pd.DataFrame,
+    tu_id: str,
+    part_level: Literal["DNA", "RNA", "PRT"],
+    part_type: Optional[str] = None,
+    formatter: Optional[Callable[[str], str]] = None,
+) -> tuple[list[str], list[tuple[str, ...]]]:
+    """Modified to return both content and content_types"""
     cdg = cdg.copy()
+    formatter = formatter or (lambda x: x)
     cdg = cdg[cdg.tu_id.apply(lambda x: tu_id in x)]
-    prt = cdg[cdg.type == 'PRT']
-    genes = prt['content'].tolist()
-    genes = ut.flatten(genes)
-    genes = '_'.join(genes)
-    return genes
+    level_data = cdg[cdg.type == part_level]
+
+    interesting_parts = []
+    content_types_list = []
+
+    for _, row in level_data.iterrows():
+        content_types = row["content_type"]
+        contents = row["content"]
+        if not isinstance(content_types, (list, tuple)) or not isinstance(contents, (list, tuple)):
+            continue
+
+        content_types = tuple(content_types)
+        contents = tuple(contents)
+
+        if part_type:
+            try:
+                pos = content_types.index(part_type)
+                interesting_parts.append(formatter(contents[pos]))
+                content_types_list.append(content_types)
+            except (ValueError, IndexError):
+                continue
+        else:
+            interesting_parts.extend(formatter(content) for content in contents)
+            content_types_list.extend([content_types] * len(contents))
+
+    return interesting_parts, content_types_list
 
 
-def get_ratio(fwd_agg, cdg):
+def get_content_from_tu_id(
+    cdg: pd.DataFrame, tu_id: str, interesting_part_types=INTERESTING_PART_TYPES
+) -> TUInfo:
+    contents = []
+    all_content_types = []
+
+    for part_level, part_type, formatter in interesting_part_types:
+        parts, types = find_interesting_part(cdg, tu_id, part_level, part_type, formatter)
+        contents.extend(parts)
+        all_content_types.extend(types)
+
+    return TUInfo(
+        content=r"\_".join(contents),
+        content_types=tuple(ct for types in all_content_types for ct in types),
+    )
+
+
+def sort_tus(tu_info: TUInfo) -> tuple[int, int]:
+    # hierarchically sort TUs based on content types
+    has_recog_site = "ERN_recog_site_5p" in tu_info.content_types
+    only_fluo = all(
+        ct == "fluo_marker" for ct in tu_info.content_types if ct not in ("insulator", "terminator")
+    )
+    return (
+        -int(has_recog_site),  # having recog site is more important
+        int(only_fluo),
+    )
+
+
+def get_ratio(
+    fwd_agg: pd.Series,
+    cdg: pd.DataFrame,
+    sort_tus: Callable = sort_tus,
+) -> tuple[tuple[TUInfo, ...], tuple[str, ...]]:
+    """
+    Returns two tuples:
+    - The TUInfo objects for each TU in the aggregation
+    - The ratios as strings (rounded to 2 decimal places)
+    """
+
     out_tuid = fwd_agg.cdg_output
-    genes = [get_prt_content_from_tu_id(cdg, tu_id) for tu_id in out_tuid]
-    ratios = np.array(fwd_agg['extra']['ratios'])
+    tu_infos = [get_content_from_tu_id(cdg, tu_id) for tu_id in out_tuid]
+
+    ratios = np.array(fwd_agg["extra"]["ratios"])
     min_ratio = np.maximum(ratios.min(), 1e-6)
     normed_ratios = np.round(ratios / min_ratio, 2)
 
@@ -37,23 +120,27 @@ def get_ratio(fwd_agg, cdg):
         return x == int(x)
 
     normed_ratios = [str(int(r)) if is_round(r) else str(r) for r in normed_ratios]
-    return tuple(genes), tuple(normed_ratios)
+
+    # Sort both tu_infos and ratios together
+    sorted_pairs = sorted(zip(tu_infos, normed_ratios), key=lambda x: sort_tus(x[0]))
+    sorted_tu_infos, sorted_ratios = zip(*sorted_pairs)
+
+    return (tuple((tu.content for tu in sorted_tu_infos)), tuple(sorted_ratios))
 
 
-def get_ratios(net):
+def get_ratios(net) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
     cmp = net.compute_graph
     cdg = net.central_dogma_graph
-    agg = cmp[cmp.type == 'aggregation']
+    agg = cmp[cmp.type == "aggregation"]
     all_ratios = [get_ratio(a, cdg) for _, a in agg.iterrows()]
     return all_ratios
-
 
 
 def cotx_ratios_str(cotx):
     lines = []
     for tus, ratios in cotx:
-        lines.append(':'.join(tus) + ' -> ' + ':'.join(ratios))
-    return '\n'.join(lines)
+        lines.append(":".join(tus) + " -> " + ":".join(ratios))
+    return "\n".join(lines)
 
 def generate_network_info(net):
     """Generate a dictionnary of information for a network"""
@@ -61,25 +148,25 @@ def generate_network_info(net):
     arch, seqtype = ut.get_network_family(net)
     uorf_vals, uorf_names = ut.get_all_uorf_values(net)
     cdg = net.central_dogma_graph
-    genes = ut.flatten(cdg[cdg.type == 'PRT']['content'].tolist())
+    genes = ut.flatten(cdg[cdg.type == "PRT"]["content"].tolist())
     markers = tuple(sorted(net.get_inverted_input_proteins()))
     all_outputs = tuple(sorted(net.get_output_proteins()))
     dependent_outputs = tuple(sorted(list(set(all_outputs) - set(markers))))
     ern_names = ut.get_all_ERNs_names(net)
     cotx = get_ratios(net)
     net_info = {
-        'sequestron_type': seqtype,
-        'architecture': arch,
-        'ern_names': ern_names,
-        'uorf_values': uorf_vals,
-        'uorf_names': ut.flatten(uorf_names),
-        'genes': genes,
-        'markers': markers,
-        'output_proteins': all_outputs,
-        'dependent_outputs': dependent_outputs,
-        'cotx': cotx,
-        'cotx_str': cotx_ratios_str(cotx),
-        'ern_names_str': ', '.join(ern_names),
+        "sequestron_type": seqtype,
+        "architecture": arch,
+        "ern_names": ern_names,
+        "uorf_values": uorf_vals,
+        "uorf_names": ut.flatten(uorf_names),
+        "genes": genes,
+        "markers": markers,
+        "output_proteins": all_outputs,
+        "dependent_outputs": dependent_outputs,
+        "cotx": cotx,
+        "cotx_str": cotx_ratios_str(cotx),
+        "ern_names_str": ", ".join(ern_names),
     }
     return net_info
 
@@ -109,7 +196,7 @@ class Slot:
                 set([self.__mapped_parameter(lib, p) for p in self.part if p is not None])
             )
             if len(mapped) != 1:
-                raise ValueError(f'{self.part} maps to {len(mapped)} parameters ({mapped})')
+                raise ValueError(f"{self.part} maps to {len(mapped)} parameters ({mapped})")
             self.maps_to_parameter = mapped[0]
         else:
             self.maps_to_parameter = self.__mapped_parameter(lib, self.part)
@@ -121,26 +208,26 @@ class Slot:
         """Returns the name of the parameter a part maps to, or None if it doesn't map to any"""
         if part_name is not None:
             if part_name in lib.pc.index:
-                category = lib.pc.loc[part_name, 'category']
+                category = lib.pc.loc[part_name, "category"]
                 if category in part_type_to_parameter_name:
                     return part_type_to_parameter_name[category]
             else:
-                raise ValueError(f'Unknown part: {part_name}')
+                raise ValueError(f"Unknown part: {part_name}")
         return None
 
     def __repr__(self):
         if self.maps_to_parameter is None:
             if self.part is None:
-                return '<empty slot>'
+                return "<empty slot>"
             else:
-                return f'<{self.part}>'
-        return f'<{self.part} -> {self.maps_to_parameter}>'
+                return f"<{self.part}>"
+        return f"<{self.part} -> {self.maps_to_parameter}>"
 
 
 # transcription unit: 1 per L1, multiple per L2
 class TranscriptionUnit:
     def __init__(self, slots):
-        self.name = ''
+        self.name = ""
         self.slots = slots
         self.params = {}
         self.__get_parameters()
@@ -156,18 +243,18 @@ class TranscriptionUnit:
                 try:
                     self.params[p] = [parameter_to_default_part[p]]
                 except KeyError:
-                    msg = f'No default part for parameter {p}'
-                    msg += f' (part_type_to_parameter_name: {part_type_to_parameter_name})'
-                    msg += f' (parameter_to_default_part: {parameter_to_default_part})'
+                    msg = f"No default part for parameter {p}"
+                    msg += f" (part_type_to_parameter_name: {part_type_to_parameter_name})"
+                    msg += f" (parameter_to_default_part: {parameter_to_default_part})"
                     raise ValueError(msg)
 
     def __repr__(self):
-        return f'L1({self.slots})'
+        return f"L1({self.slots})"
 
 
 class TranscriptionUnitGenerator:
     def __init__(self, part_generators):
-        self.name = ''
+        self.name = ""
         self.part_generators = part_generators
         # a generator is a function that takes a library
         # and a list of previously generated slots in this TU
@@ -241,16 +328,16 @@ def transcription_unit_from_L1(l1id: str, lib: PartsLibrary) -> TranscriptionUni
     that are in the L1"""
     l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
     L0s = lib.L1s.loc[l1id][l0_cols].tolist()
-    part_cols = [f'part_{i}' for i in range(1, 7)]
+    part_cols = [f"part_{i}" for i in range(1, 7)]
     parts: List[str] = []
     for l in L0s:
         try:
             parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
         except Exception as e:
-            msg = f'Error in L0 {l} of L1 {l1id}: {e}'
-            msg += f'\npart_cols: {part_cols}'
-            msg += f'\nlib.L0s[{l}]: {lib.L0s.loc[l]}'
-            msg += f'\nlib.L0s: {lib.L0s}'
+            msg = f"Error in L0 {l} of L1 {l1id}: {e}"
+            msg += f"\npart_cols: {part_cols}"
+            msg += f"\nlib.L0s[{l}]: {lib.L0s.loc[l]}"
+            msg += f"\nlib.L0s: {lib.L0s}"
             raise NetworkConstructionError(msg)
     return TranscriptionUnit([Slot(lib, p) for p in parts])
 
@@ -306,13 +393,12 @@ class Network:
         metadata: Optional[Dict] = None,
         use_cache: Optional[str] = None,
     ):
-
-        assert recipe_db is not None, 'recipe_db cannot be None'
+        assert recipe_db is not None, "recipe_db cannot be None"
         recipe_db.commit()
         c = recipe_db.cursor()
         # first let's check that there is a recipe with this name
-        c.execute('SELECT * FROM recipes WHERE name=?', (name,))
-        assert c.fetchone() is not None, f'No recipe named {name} in database {recipe_db}.'
+        c.execute("SELECT * FROM recipes WHERE name=?", (name,))
+        assert c.fetchone() is not None, f"No recipe named {name} in database {recipe_db}."
         # Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
         # get the transcription units
         c.execute(
@@ -370,12 +456,12 @@ class Network:
 
         def actually_build():
             n.tu_in_sources = pd.DataFrame(
-                n.raw_tu_in_sources, columns=['source', 'TU', 'position']
+                n.raw_tu_in_sources, columns=["source", "TU", "position"]
             )
-            n.tu_in_sources.sort_values(by='position', inplace=True)
+            n.tu_in_sources.sort_values(by="position", inplace=True)
             n.aggregations = (
-                pd.DataFrame(n.raw_aggregations, columns=['id', 'source', 'ratio'])
-                .groupby('id')
+                pd.DataFrame(n.raw_aggregations, columns=["id", "source", "ratio"])
+                .groupby("id")
                 .agg(list)
             )
             if build:
@@ -385,7 +471,6 @@ class Network:
         n = ut.get_cache(lambda: actually_build(), n.get_signature(), use_cache)
 
         return n
-
 
     @classmethod
     def __obsolete__from_dict(
@@ -399,20 +484,20 @@ class Network:
         # sources =  {source_name: [TU1, TU2, TU3, ...], ...}
         n.tu_in_sources = pd.DataFrame(
             [
-                {'source': s, 'TU': t, 'position': i}
+                {"source": s, "TU": t, "position": i}
                 for s, tuids in sources.items()
                 for i, t in enumerate(tuids)
             ]
         )
-        n.tu_in_sources.sort_values(by='position', inplace=True)
+        n.tu_in_sources.sort_values(by="position", inplace=True)
 
         # aggregations = [[source1, source2, source3, ...], ...]
         assert n.aggregations is None
         n.aggregations = (
             pd.DataFrame(
-                [{'id': i, 'source': s, 'ratio': 1} for i, a in enumerate(aggregations) for s in a]
+                [{"id": i, "source": s, "ratio": 1} for i, a in enumerate(aggregations) for s in a]
             )
-            .groupby('id')
+            .groupby("id")
             .agg(list)
         )
 
@@ -425,15 +510,14 @@ class Network:
 
     def get_compute_types(self):
         assert isinstance(self.compute_graph, pd.DataFrame)
-        node_dict = self.compute_graph.groupby('type').apply(lambda x: x.index.to_list()).to_dict()
+        node_dict = self.compute_graph.groupby("type").apply(lambda x: x.index.to_list()).to_dict()
         return node_dict
 
     def build(self):
         assert self.transcription_units is not None
-        assert len(self.transcription_units) > 0, f'No transcription units in recipe {self.name}'
+        assert len(self.transcription_units) > 0, f"No transcription units in recipe {self.name}"
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
-
 
     def is_built(self) -> bool:
         return (
@@ -465,10 +549,10 @@ class Network:
         return content, params
 
     def __getRna(self, tu: TranscriptionUnit):
-        return self.__getDownstream(tu, transform='transcripted')
+        return self.__getDownstream(tu, transform="transcripted")
 
     def __getPrt(self, tu: TranscriptionUnit):
-        return self.__getDownstream(tu, transform='translated')
+        return self.__getDownstream(tu, transform="translated")
 
     def __isOutputedBy(
         self, cdg_input_node: int, compute_nodes: List[GraphComputeNode]
@@ -495,7 +579,7 @@ class Network:
         for node_id in node_map.keys():
             if node_id not in visited:
                 if dfs(node_id, visited, rec_stack):
-                    raise NetworkConstructionError('Cycle detected in compute graph')
+                    raise NetworkConstructionError("Cycle detected in compute graph")
 
     def __checkUniqueNodeIDs(self, nodes):
         node_ids = {node.id for node in nodes}
@@ -549,82 +633,82 @@ class Network:
             prt, prt_params = self.__getPrt(t)
             tu.append(
                 {
-                    'name': tuid,
-                    'DNA': dna,
-                    'DNA_params': dna_params,
-                    'DNA_params_hashable': make_hashable(dna_params),
-                    'RNA': rna,
-                    'RNA_params': rna_params,
-                    'RNA_params_hashable': make_hashable(rna_params),
-                    'PRT': prt,
-                    'PRT_params': prt_params,
-                    'PRT_params_hashable': make_hashable(prt_params),
+                    "name": tuid,
+                    "DNA": dna,
+                    "DNA_params": dna_params,
+                    "DNA_params_hashable": make_hashable(dna_params),
+                    "RNA": rna,
+                    "RNA_params": rna_params,
+                    "RNA_params_hashable": make_hashable(rna_params),
+                    "PRT": prt,
+                    "PRT_params": prt_params,
+                    "PRT_params_hashable": make_hashable(prt_params),
                 }
             )
         assert tu is not None
         tudf = pd.DataFrame(tu)
 
         # transcription units are never grouped
-        dna_df = pd.DataFrame({'tu_id': [[x] for x in cast(str, tudf['name'])], 'type': 'DNA'})
+        dna_df = pd.DataFrame({"tu_id": [[x] for x in cast(str, tudf["name"])], "type": "DNA"})
 
         def only_one_value_per_param(params: Dict[str, List[str]]) -> bool:
             return all(len(parts) <= 1 for _, parts in params.items())
 
         rna_tuids_noparams = list(
-            tudf[tudf['RNA_params'].map(len) == 0].groupby(by='RNA').agg(list).name  # type: ignore
+            tudf[tudf["RNA_params"].map(len) == 0].groupby(by="RNA").agg(list).name  # type: ignore
         )
 
         try:
             rna_tuids_oneparamvalue = (
-                tudf[tudf['RNA_params'].map(len) > 0]
-                .groupby(by='RNA')
-                .filter(lambda x: only_one_value_per_param(x['RNA_params']))
-                .groupby(by=['RNA', 'RNA_params_hashable'])
+                tudf[tudf["RNA_params"].map(len) > 0]
+                .groupby(by="RNA")
+                .filter(lambda x: only_one_value_per_param(x["RNA_params"]))
+                .groupby(by=["RNA", "RNA_params_hashable"])
                 .agg(list)
             )
         except Exception as e:
-            msg = f'Error while grouping RNA that have one params: {e}\n'
-            msg += f'tudf: \n{tudf}'
+            msg = f"Error while grouping RNA that have one params: {e}\n"
+            msg += f"tudf: \n{tudf}"
             raise NetworkConstructionError(msg)
 
         rna_tuids_oneparamvalue = (
             [] if rna_tuids_oneparamvalue.empty else list(rna_tuids_oneparamvalue.name)
         )
 
-        rna_tuids_manyparamvalues = list(tudf[tudf['RNA_params'].map(len) > 1].name)
+        rna_tuids_manyparamvalues = list(tudf[tudf["RNA_params"].map(len) > 1].name)
         rna_tuids = rna_tuids_noparams + rna_tuids_oneparamvalue + rna_tuids_manyparamvalues
-        rna_df = pd.DataFrame({'tu_id': rna_tuids, 'type': 'RNA'})
+        rna_df = pd.DataFrame({"tu_id": rna_tuids, "type": "RNA"})
 
         prt_tuids_noparams = list(
-            tudf[tudf['PRT_params'].map(len) == 0].groupby(by='PRT').agg(list).name
+            tudf[tudf["PRT_params"].map(len) == 0].groupby(by="PRT").agg(list).name
         )
         # we group PRT with same content and same parameters if they have a single parameters
         prt_tuids_oneparamvalue = (
-            tudf[tudf['PRT_params'].map(len) > 0]
-            .groupby(by='PRT')
-            .filter(lambda x: only_one_value_per_param(x['PRT_params']))
-            .groupby(by=['PRT', 'PRT_params_hashable'])
+            tudf[tudf["PRT_params"].map(len) > 0]
+            .groupby(by="PRT")
+            .filter(lambda x: only_one_value_per_param(x["PRT_params"]))
+            .groupby(by=["PRT", "PRT_params_hashable"])
             .agg(list)
         )
         prt_tuids_oneparamvalue = (
             [] if prt_tuids_oneparamvalue.empty else list(prt_tuids_oneparamvalue.name)
         )
-        prt_tuids_manyparamvalues = list(tudf[tudf['PRT_params'].map(len) > 1].name)
+        prt_tuids_manyparamvalues = list(tudf[tudf["PRT_params"].map(len) > 1].name)
         prt_tuids = prt_tuids_noparams + prt_tuids_oneparamvalue + prt_tuids_manyparamvalues
-        prt_df = pd.DataFrame({'tu_id': prt_tuids, 'type': 'PRT'})
+        prt_df = pd.DataFrame({"tu_id": prt_tuids, "type": "PRT"})
 
-        tudf.set_index('name', inplace=True)
+        tudf.set_index("name", inplace=True)
 
         # Then concatenate them:
         cdg = pd.concat([dna_df, rna_df, prt_df], sort=False).reset_index(drop=True)
-        cdg['predecessor'] = None
-        cdg['successor'] = None
+        cdg["predecessor"] = None
+        cdg["successor"] = None
 
         # connect DNA to RNA through successor list
-        dna_nodes = cdg[cdg.type == 'DNA']
-        rna_nodes = cdg[cdg.type == 'RNA']
+        dna_nodes = cdg[cdg.type == "DNA"]
+        rna_nodes = cdg[cdg.type == "RNA"]
         if len(rna_nodes) == 0:
-            raise NetworkConstructionError('No RNA nodes in central dogma graph')
+            raise NetworkConstructionError("No RNA nodes in central dogma graph")
         for i, r in dna_nodes.iterrows():
             successors = []
             for ii, rr in rna_nodes.iterrows():
@@ -634,54 +718,54 @@ class Network:
 
                 if r.tu_id[0] in rr.tu_id:  # if we have an RNA that has the same TU as the DNA
                     successors.append(ii)
-            cdg.loc[i, 'successor'] = successors
+            cdg.loc[i, "successor"] = successors
 
         # connect RNA to PRT through successor list
         for i_r, rna in rna_nodes.iterrows():  # for each RNA
             successors = []
-            for i_p, prt in cdg[cdg.type == 'PRT'].iterrows():  # for each PRT
+            for i_p, prt in cdg[cdg.type == "PRT"].iterrows():  # for each PRT
                 if set(rna.tu_id).issubset(set(prt.tu_id)):
                     successors.append(i_p)
-            cdg.loc[i_r, 'successor'] = successors
+            cdg.loc[i_r, "successor"] = successors
 
         # now deduce the predecessor lists
-        cdg['predecessor'] = [list() for _ in range(len(cdg))]
+        cdg["predecessor"] = [list() for _ in range(len(cdg))]
         for i, r in cdg.iterrows():
             if r.successor is not None:
                 for s in r.successor:
-                    cdg.loc[s, 'predecessor'].append(i)
-        cdg.loc[~cdg.predecessor.astype(bool), 'predecessor'] = None
-        ut.logger.debug(f'cdg: \n{cdg}\n')
+                    cdg.loc[s, "predecessor"].append(i)
+        cdg.loc[~cdg.predecessor.astype(bool), "predecessor"] = None
+        ut.logger.debug(f"cdg: \n{cdg}\n")
 
         # We explicitly describe the part content of each node:
         try:
-            cdg['content'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type], axis=1)
+            cdg["content"] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type], axis=1)
 
-            cdg['content_type'] = cdg.apply(
+            cdg["content_type"] = cdg.apply(
                 lambda x: tuple([self.lib.parts.loc[p].iloc[0] for p in x.content]), axis=1
             )
 
         except Exception as e:
-            msg = f'Error while building central dogma graph. Error: {e}'
-            msg += f'\ntudf: \n{tudf}'
-            msg += f'\n\ncdg: \n{cdg}'
+            msg = f"Error while building central dogma graph. Error: {e}"
+            msg += f"\ntudf: \n{tudf}"
+            msg += f"\n\ncdg: \n{cdg}"
             raise NetworkConstructionError(msg)
 
         # and add the available paras with their possible parts
-        cdg['params'] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type + '_params'], axis=1)
+        cdg["params"] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type + "_params"], axis=1)
 
         # And finally add information about the output of the whole graph:
         # by default outputs are all parts whose category is fluo_marker
         outputs = (custom_outputs if custom_outputs is not None else []) + self.lib.parts[
-            self.lib.parts['category'] == 'fluo_marker'
+            self.lib.parts["category"] == "fluo_marker"
         ].index.tolist()
 
         containsOutput = lambda l, outputs: any([o in l for o in outputs])
-        cdg['is_output'] = False
-        cdg.loc[cdg.type == 'PRT', 'is_output'] = cdg.loc[cdg.type == 'PRT'].tu_id.apply(
+        cdg["is_output"] = False
+        cdg.loc[cdg.type == "PRT", "is_output"] = cdg.loc[cdg.type == "PRT"].tu_id.apply(
             lambda x: containsOutput(tudf.loc[x].PRT.tolist()[0], outputs)
         )
-        cdg['is_input'] = None
+        cdg["is_input"] = None
         self.central_dogma_graph = cdg
 
     #                                                                            }}}
@@ -700,15 +784,15 @@ class Network:
         # merge TUs that are from a same source into a single source node (aka plasmid)
 
         sources_tuids = self.central_dogma_graph.loc[
-            cdf[cdf.type == 'source'].cdg_output
+            cdf[cdf.type == "source"].cdg_output
         ].tu_id.apply(lambda x: x[0])
 
         tmpdf = pd.DataFrame(
-            {'compute_id': cdf[cdf.type == 'source'].index, 'tuid': sources_tuids}
-        ).set_index('compute_id')
+            {"compute_id": cdf[cdf.type == "source"].index, "tuid": sources_tuids}
+        ).set_index("compute_id")
         # tmpdf is a mapping between the computegraph ids of every sources and their TUids
 
-        cdf['source_id'] = None
+        cdf["source_id"] = None
         # cdf['extra'] = None
 
         sources = {}  # plasmid name -> list of compute nodes ids
@@ -716,33 +800,33 @@ class Network:
         # tu_in_sources contains the list of TUs in each source, sorted by position
         assert self.tu_in_sources is not None
 
-        for i, r in self.tu_in_sources.groupby('source').agg(list).iterrows():
+        for i, r in self.tu_in_sources.groupby("source").agg(list).iterrows():
             # but you can have sources in the db that are not in the recipe
             group = []  # group will contain the compute nodes ids of the TUs in the source
-            for t in r['TU']:
+            for t in r["TU"]:
                 try:
                     group.append(tmpdf[tmpdf.tuid == t].index[0])
                 except IndexError:
-                    msg = f'Error while merging sources. TU {t} not found in tmpdf.'
-                    msg += f'\n\ntmpdf: \n{tmpdf}'
-                    msg += f'\nsources_tuids: \n{sources_tuids}'
-                    msg += f'\ncentral dogma graph: \n{self.central_dogma_graph}'
-                    msg += f'\ncdf: \n{cdf}'
+                    msg = f"Error while merging sources. TU {t} not found in tmpdf."
+                    msg += f"\n\ntmpdf: \n{tmpdf}"
+                    msg += f"\nsources_tuids: \n{sources_tuids}"
+                    msg += f"\ncentral dogma graph: \n{self.central_dogma_graph}"
+                    msg += f"\ncdf: \n{cdf}"
                     raise NetworkConstructionError(msg)
 
             sources[i] = group
 
         for k, v in sources.items():
             nid = uidGen()
-            newsource = GraphComputeNode(nid, 'source', None, [cdf.loc[vv].cdg_output for vv in v])
+            newsource = GraphComputeNode(nid, "source", None, [cdf.loc[vv].cdg_output for vv in v])
             newsource.output_to = [cdf.loc[vv].output_to[0] for vv in v]
             # and update input_from of these nodes too
-            cdf.loc[[o[0] for o in newsource.output_to], 'input_from'] = [nid] * len(
+            cdf.loc[[o[0] for o in newsource.output_to], "input_from"] = [nid] * len(
                 newsource.output_to
             )
-            cdf = pd.concat([cdf, pd.DataFrame([newsource.toDict()]).set_index('id')]).drop(v)
+            cdf = pd.concat([cdf, pd.DataFrame([newsource.toDict()]).set_index("id")]).drop(v)
 
-            cdf.loc[nid, 'source_id'] = k
+            cdf.loc[nid, "source_id"] = k
 
         # turn every input_from that's a single int into a list
         cdf.input_from = cdf.input_from.apply(lambda x: [x] if isinstance(x, int) else x)
@@ -753,48 +837,48 @@ class Network:
         for i, r in self.aggregations.iterrows():
             if len(r.source) > 1:
                 nid = uidGen()
-                newaggregation = GraphComputeNode(nid, 'aggregation', None, r.source)
+                newaggregation = GraphComputeNode(nid, "aggregation", None, r.source)
                 # find the compute node id through the source_id column
                 try:
                     newaggregation.output_to = [
                         (cdf[cdf.source_id == s].index[0], 0) for s in r.source
                     ]
                 except Exception as e:
-                    msg = f'Error while adding aggregation node {nid} to compute graph'
-                    msg += f' (recipe {self.name}, aggregation {i}, sources {r.source})'
-                    msg += f'\n\naggregations: \n{self.aggregations}\n'
-                    msg += f'\n{e}'
-                    msg += f'\n{cdf}'
+                    msg = f"Error while adding aggregation node {nid} to compute graph"
+                    msg += f" (recipe {self.name}, aggregation {i}, sources {r.source})"
+                    msg += f"\n\naggregations: \n{self.aggregations}\n"
+                    msg += f"\n{e}"
+                    msg += f"\n{cdf}"
                     raise NetworkConstructionError(msg)
                 # problem: some sources have no ids!!
 
                 # add the input_from to the cooresponding sources
                 for s in r.source:
                     for source in cdf[cdf.source_id == s].index:
-                        cdf.at[source, 'input_from'] = [nid]
+                        cdf.at[source, "input_from"] = [nid]
 
                 # For aggregations, we will store a dictionnary with the name of the aggregation and the ratio of each source
-                tmp = pd.DataFrame([newaggregation.toDict()]).set_index('id')
-                tmp['extra'] = [{'id': i, 'qtty': np.sum(r.ratio), 'ratios': r.ratio}]
+                tmp = pd.DataFrame([newaggregation.toDict()]).set_index("id")
+                tmp["extra"] = [{"id": i, "qtty": np.sum(r.ratio), "ratios": r.ratio}]
                 cdf = pd.concat([cdf, tmp])
 
             else:
                 # no need for an aggregation node if there is only one source
-                cdf.loc[cdf.source_id == r.source[0], 'extra'] = [{'qtty': np.sum(r.ratio)}]
+                cdf.loc[cdf.source_id == r.source[0], "extra"] = [{"qtty": np.sum(r.ratio)}]
 
         return cdf
 
     def __buildRawGraph(self, uidGen: Callable[[], int]) -> List[GraphComputeNode]:
         cdg = self.central_dogma_graph
-        ut.logger.debug(f'Building compute graph for recipe {self.name}')
-        ut.logger.debug(f'cdg: \n{cdg}\n')
-        assert cdg is not None, 'central dogma graph not built'
+        ut.logger.debug(f"Building compute graph for recipe {self.name}")
+        ut.logger.debug(f"cdg: \n{cdg}\n")
+        assert cdg is not None, "central dogma graph not built"
         assert isinstance(cdg, pd.DataFrame)
         newnodes = []
 
         # we start building the compute graph by adding the output:
         output_gene_nodes = cdg[cdg.is_output]
-        onode = GraphComputeNode(uidGen(), 'output', [], None)
+        onode = GraphComputeNode(uidGen(), "output", [], None)
         for i, r in output_gene_nodes.iterrows():
             onode.cdg_input += [i]
         newnodes.append(onode)
@@ -815,32 +899,32 @@ class Network:
             oparts = olvl[olvl.content.apply(lambda x: ut.isSubset(r.output_part, x))]
             if len(nparts) > 0 and len(pparts) > 0 and len(oparts.index) > 0:
                 if len(pparts) != 1:
-                    msg = f'Found {len(pparts)} positive parts for sequestron {r.type} (expected 1)'
-                    msg += f'\n\nparts: {pparts}'
+                    msg = f"Found {len(pparts)} positive parts for sequestron {r.type} (expected 1)"
+                    msg += f"\n\nparts: {pparts}"
                     raise NetworkConstructionError(msg)
 
                 if len(nparts) != 1:
-                    msg = f'Found {len(nparts)} negative parts for sequestron {r.type} (expected 1)'
-                    msg += f'\n\nparts: {nparts}'
+                    msg = f"Found {len(nparts)} negative parts for sequestron {r.type} (expected 1)"
+                    msg += f"\n\nparts: {nparts}"
                     raise NetworkConstructionError(msg)
                 try:
                     cnode = GraphComputeNode(
                         uidGen(),
-                        f'sequestron_{r.type}',
+                        f"sequestron_{r.type}",
                         [int(nparts.index[0]), int(pparts.index[0])],
                         int(oparts.index[0]),
                     )
                     # we get a unique name for the  sequestron by concatenating the name of the negative and positive parts
-                    cnode.extra = {'seq_name': f'{r.type}::{r.negative_part}#{r.positive_part}'}
+                    cnode.extra = {"seq_name": f"{r.type}::{r.negative_part}#{r.positive_part}"}
                     newnodes.append(cnode)
                     # useful to track which tus are in use
-                    tu_in_sequestron.update(oparts['tu_id'].iloc[0])
-                    tu_in_sequestron.update(nparts['tu_id'].iloc[0])
-                    tu_in_sequestron.update(pparts['tu_id'].iloc[0])
+                    tu_in_sequestron.update(oparts["tu_id"].iloc[0])
+                    tu_in_sequestron.update(nparts["tu_id"].iloc[0])
+                    tu_in_sequestron.update(pparts["tu_id"].iloc[0])
                 except Exception as e:
-                    msg = f'Error while building compute graph for recipe {self.name}:\n{e}'
-                    msg += f'Sequestron {r.type}.\nnparts: {nparts}, pparts: {pparts}, oparts: {oparts}'
-                    msg += f'\nolevel: {olvl}, oparts: {oparts}, outlevel: {r.output_level}, outpart: {r.output_part}'
+                    msg = f"Error while building compute graph for recipe {self.name}:\n{e}"
+                    msg += f"Sequestron {r.type}.\nnparts: {nparts}, pparts: {pparts}, oparts: {oparts}"
+                    msg += f"\nolevel: {olvl}, oparts: {oparts}, outlevel: {r.output_level}, outpart: {r.output_part}"
                     raise NetworkConstructionError(msg)
 
         cg = []
@@ -849,8 +933,8 @@ class Network:
 
         newnodes_str = pformat([n.toDict() for n in newnodes])
 
-        ut.logger.debug(f'tu_in_sequestron: {tu_in_sequestron}')
-        ut.logger.debug(f'newnodes: {newnodes_str}')
+        ut.logger.debug(f"tu_in_sequestron: {tu_in_sequestron}")
+        ut.logger.debug(f"newnodes: {newnodes_str}")
 
         # right now newnodes contains only the output node and the sequestron nodes
         # we're now going to go upstream from these nodes, adding the relevant translation/transcription
@@ -866,25 +950,25 @@ class Network:
         # instead of simply fluorescent proteins. So we can't just wish them away.
         deadend_nodes = cdg[
             (cdg.is_output == False)
-            & (cdg.type == 'PRT')
+            & (cdg.type == "PRT")
             & (cdg.tu_id.apply(lambda x: all([xx not in tu_in_sequestron for xx in x])))
         ]
         for i, r in deadend_nodes.iterrows():
-            cnode = GraphComputeNode(uidGen(), 'deadend', [i], None)
+            cnode = GraphComputeNode(uidGen(), "deadend", [i], None)
             newnodes.append(cnode)
 
         # At first, each TU also has a corresponding source node that we need to add.
         # We will merge sources later (for TUs that are on a same plasmid)
         while newnodes:
             n: GraphComputeNode = newnodes.pop()
-            ut.logger.debug(f'Processing node {n.id} of type {n.type}')
-            if n.type != 'source':
+            ut.logger.debug(f"Processing node {n.id} of type {n.type}")
+            if n.type != "source":
                 # for every cdg node that is an input of n
                 if n.cdg_input is None:
-                    msg = f'Error while building compute graph for recipe {self.name}:\n'
-                    msg += f'No cdg_input for node {n.id} of type {n.type}:\n{n}'
-                    msg += f'Content of its cdg_output node:\n{cdg.loc[n.cdg_output]}'
-                    msg += f'CDG:\n{cdg}'
+                    msg = f"Error while building compute graph for recipe {self.name}:\n"
+                    msg += f"No cdg_input for node {n.id} of type {n.type}:\n{n}"
+                    msg += f"Content of its cdg_output node:\n{cdg.loc[n.cdg_output]}"
+                    msg += f"CDG:\n{cdg}"
                     raise NetworkConstructionError(msg)
                 for i, n_inp in enumerate(n.cdg_input):
                     # list all other nodes that also output n_inp
@@ -901,7 +985,7 @@ class Network:
                         # we just need to know what type of transform we have.
                         # for example, if the input cdg node that our compute node expects is a protein,
                         # that means that we need to add a translation node, etc...
-                        ntype = {'PRT': 'translation', 'RNA': 'transcription', 'DNA': 'source'}[
+                        ntype = {"PRT": "translation", "RNA": "transcription", "DNA": "source"}[
                             upstream_cdg_node.type
                         ]
                         newn = GraphComputeNode(
@@ -912,7 +996,7 @@ class Network:
                         newnodes.append(newn)
                         n.input_from += [int(nid)]
                         ut.logger.debug(
-                            f'Added node {newn.id} of type {newn.type}: {pformat(newn.toDict())}'
+                            f"Added node {newn.id} of type {newn.type}: {pformat(newn.toDict())}"
                         )
             cg += [n]
         return cg
@@ -920,27 +1004,27 @@ class Network:
     def __addNumericNodes(self, cdf, uidGen):
         # we add 1 numeric node per source or aggregation that's "at the top",
         # i.e its input_from is empty.
-        ut.logger.debug(f'comp graph before adding numeric nodes: \n{cdf}')
+        ut.logger.debug(f"comp graph before adding numeric nodes: \n{cdf}")
         topnodes = cdf[cdf.input_from.apply(len) == 0]
-        ut.logger.debug(f'Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}')
+        ut.logger.debug(f"Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}")
         for i, r in topnodes.iterrows():
             nid = uidGen()
-            newnode = GraphComputeNode(nid, 'numeric', None, 1)
+            newnode = GraphComputeNode(nid, "numeric", None, 1)
             newnode.output_to = [(i, 0)]
-            tmp = pd.DataFrame([newnode.toDict()]).set_index('id')
+            tmp = pd.DataFrame([newnode.toDict()]).set_index("id")
             extra = {
-                'role': 'copy_number',
+                "role": "copy_number",
             }
-            if r.extra is not None and 'qtty' in r.extra:
-                extra['qtty'] = r.extra['qtty']
-            tmp['extra'] = [extra]
+            if r.extra is not None and "qtty" in r.extra:
+                extra["qtty"] = r.extra["qtty"]
+            tmp["extra"] = [extra]
             cdf = pd.concat([cdf, tmp])
             # don't forget to add the new node as input_from to the top node
-            cdf.loc[i, 'input_from'] = [[nid]]
+            cdf.loc[i, "input_from"] = [[nid]]
         return cdf
 
     def __build_compute_graph(self):
-        assert self.central_dogma_graph is not None, 'central dogma graph not built yet'
+        assert self.central_dogma_graph is not None, "central dogma graph not built yet"
 
         uidGen = ut.uniqueIdGenerator()
 
@@ -952,24 +1036,24 @@ class Network:
         self.__removeShortcuts(cg, 0)
 
         # convert to dataframe
-        self.compute_graph = pd.DataFrame([n.toDict() for n in cg]).set_index('id').sort_index()
+        self.compute_graph = pd.DataFrame([n.toDict() for n in cg]).set_index("id").sort_index()
 
         # first sanity check:
         # there should be the same number of sources in the cdf compute graph as DNA nodes in the cdg
-        nsources = len(self.compute_graph[self.compute_graph.type == 'source'])
-        ndna = len(self.central_dogma_graph[self.central_dogma_graph.type == 'DNA'])
+        nsources = len(self.compute_graph[self.compute_graph.type == "source"])
+        ndna = len(self.central_dogma_graph[self.central_dogma_graph.type == "DNA"])
         if nsources != ndna:
             dna_in_compute_graph = self.compute_graph[
-                self.compute_graph.type == 'source'
+                self.compute_graph.type == "source"
             ].cdg_output.tolist()
 
             extradna = []
-            for i, r in self.central_dogma_graph[self.central_dogma_graph.type == 'DNA'].iterrows():
+            for i, r in self.central_dogma_graph[self.central_dogma_graph.type == "DNA"].iterrows():
                 if i not in dna_in_compute_graph:
                     extradna += r.tu_id
-            msg = f'When building compute graph for recipe {self.name}, '
-            msg += f'found {nsources} DNA sources in the graph, but {ndna} DNA nodes total.'
-            msg += f'\nExtra DNA nodes: {extradna}'
+            msg = f"When building compute graph for recipe {self.name}, "
+            msg += f"found {nsources} DNA sources in the graph, but {ndna} DNA nodes total."
+            msg += f"\nExtra DNA nodes: {extradna}"
             raise NetworkConstructionError(msg)
 
         self.compute_graph = self.__mergeSources(
@@ -992,17 +1076,17 @@ class Network:
 
     def get_output_compute_node(self) -> pd.Series:
         assert self.is_built() and isinstance(self.compute_graph, pd.DataFrame)
-        onode = self.compute_graph[self.compute_graph['type'] == 'output']
-        assert len(onode) == 1, f'Invalid number of output nodes: {len(onode)}'
+        onode = self.compute_graph[self.compute_graph["type"] == "output"]
+        assert len(onode) == 1, f"Invalid number of output nodes: {len(onode)}"
         return onode.iloc[0]
 
     def get_output_proteins(self) -> List[str]:
         """Returns the names of the proteins that are outputs of the network"""
         onode = self.get_output_compute_node()
-        if 'cdg_input' not in onode:
-            raise ValueError(f'Invalid output node: {onode}')
+        if "cdg_input" not in onode:
+            raise ValueError(f"Invalid output node: {onode}")
         assert isinstance(self.central_dogma_graph, pd.DataFrame)
-        return [self.central_dogma_graph.loc[cdg_id]['content'][0] for cdg_id in onode['cdg_input']]
+        return [self.central_dogma_graph.loc[cdg_id]["content"][0] for cdg_id in onode["cdg_input"]]
 
     def get_nb_outputs(self) -> int:
         if self.__n_outputs is None:
@@ -1032,17 +1116,17 @@ class Network:
         """Returns a mapping from input position to output position"""
         assert isinstance(self.compute_graph, pd.DataFrame)
         mapping = {}  # input number -> output position
-        mask = self.compute_graph['type'] == 'input'
+        mask = self.compute_graph["type"] == "input"
         if include_biases:
-            mask = mask | (self.compute_graph['type'] == 'bias')
+            mask = mask | (self.compute_graph["type"] == "bias")
         inputs = self.compute_graph[mask]
         for _, row in inputs.iterrows():
-            assert 'input_position' in row.extra, f'input_position not in {row.extra}'
-            assert 'input_from_output' in row.extra, f'input_from_output not in {row.extra}'
-            assert row.extra['input_position'] not in mapping
-            mapping[row.extra['input_position']] = row.extra['input_from_output']
-        assert set(mapping.keys()) == set(range(len(mapping.keys()))), f'Invalid mapping: {mapping}'
-        assert len(mapping.keys()) == len(set(mapping.values())), f'Invalid mapping: {mapping}'
+            assert "input_position" in row.extra, f"input_position not in {row.extra}"
+            assert "input_from_output" in row.extra, f"input_from_output not in {row.extra}"
+            assert row.extra["input_position"] not in mapping
+            mapping[row.extra["input_position"]] = row.extra["input_from_output"]
+        assert set(mapping.keys()) == set(range(len(mapping.keys()))), f"Invalid mapping: {mapping}"
+        assert len(mapping.keys()) == len(set(mapping.values())), f"Invalid mapping: {mapping}"
         return mapping
 
     def get_dependent_output_proteins(self) -> List[str]:
@@ -1056,22 +1140,22 @@ class Network:
         output_proteins = self.get_output_proteins()
         assert (
             input_protein_name in output_proteins
-        ), f'Invalid input protein name: {input_protein_name}'
+        ), f"Invalid input protein name: {input_protein_name}"
         output_position = output_proteins.index(input_protein_name)
         assert output_position in original_mapping.values()
         assert isinstance(self.compute_graph, pd.DataFrame)
-        inputs = self.compute_graph[self.compute_graph['type'] == 'input']
+        inputs = self.compute_graph[self.compute_graph["type"] == "input"]
         found = False
         for i, row in inputs.iterrows():
-            assert 'input_position' in row.extra, f'input_position not in {row.extra}'
-            assert 'input_from_output' in row.extra, f'input_from_output not in {row.extra}'
-            if row.extra['input_from_output'] == output_position:
-                self.compute_graph.at[i, 'type'] = 'bias'
+            assert "input_position" in row.extra, f"input_position not in {row.extra}"
+            assert "input_from_output" in row.extra, f"input_from_output not in {row.extra}"
+            if row.extra["input_from_output"] == output_position:
+                self.compute_graph.at[i, "type"] = "bias"
                 found = True
                 break
-        assert found, f'Could not find input protein {input_protein_name} in compute graph'
+        assert found, f"Could not find input protein {input_protein_name} in compute graph"
         new_mapping = self.get_inverted_input_positions()
-        assert len(new_mapping) == len(original_mapping) - 1, f'Invalid mapping: {new_mapping}'
+        assert len(new_mapping) == len(original_mapping) - 1, f"Invalid mapping: {new_mapping}"
         assert output_position not in new_mapping.values()
         assert len(self.get_inverted_input_proteins()) == len(new_mapping)
 
@@ -1081,9 +1165,9 @@ class Network:
         if node_id == other_node_id:
             return True
         node = self.compute_graph.loc[node_id]
-        if node.type == 'output':
+        if node.type == "output":
             return False
-        for downstream_id, _ in node['output_to']:
+        for downstream_id, _ in node["output_to"]:
             if self.compute_node_is_upstream_of(downstream_id, other_node_id):
                 return True
         return False
@@ -1113,11 +1197,11 @@ class Network:
             independent = [
                 i
                 for i, row in self.compute_graph.iterrows()
-                if (not row['input_from'] or all([x[0] in visited for x in row['input_from']]))
+                if (not row["input_from"] or all([x[0] in visited for x in row["input_from"]]))
                 and i not in visited
             ]
             if not independent:
-                msg = f'No independent node. Remaining:{set(self.compute_graph.index) - visited}. Visited:{visited}'
+                msg = f"No independent node. Remaining:{set(self.compute_graph.index) - visited}. Visited:{visited}"
                 raise ValueError(msg)
             visited.update(independent)
             batches.append([i for i in independent if i in nodes])
@@ -1146,24 +1230,24 @@ class Network:
                     self.compute_graph.output_to.apply(lambda x: i in [y[0] for y in x])
                 ]
                 try:
-                    self.compute_graph.at[i, 'input_from'] = [None] * len(output_to_me)
+                    self.compute_graph.at[i, "input_from"] = [None] * len(output_to_me)
                 except Exception as e:
-                    msg = f'Error cleaning up compute graph: {e}\n'
-                    msg += f'Trying to construct input_froms of node {i} from upstream outputs.\n'
-                    msg += f'{r}'
-                    msg += f'\nDetected upstream outputs:\n{output_to_me}'
+                    msg = f"Error cleaning up compute graph: {e}\n"
+                    msg += f"Trying to construct input_froms of node {i} from upstream outputs.\n"
+                    msg += f"{r}"
+                    msg += f"\nDetected upstream outputs:\n{output_to_me}"
                     raise NetworkConstructionError(msg)
 
             # then fill it
             for i, r in self.compute_graph.iterrows():
                 for p, o in enumerate(r.output_to):
                     try:
-                        self.compute_graph.at[o[0], 'input_from'][o[1]] = (i, p)
+                        self.compute_graph.at[o[0], "input_from"][o[1]] = (i, p)
                     except Exception as e:
-                        msg = f'Error cleaning up compute graph: {e}\n'
-                        msg += f'currently processing {o}.\n'
-                        msg += f'\ninput node is:\n{r}'
-                        msg += f'\noutput node is:\n{self.compute_graph.loc[o[0]]}'
+                        msg = f"Error cleaning up compute graph: {e}\n"
+                        msg += f"currently processing {o}.\n"
+                        msg += f"\ninput node is:\n{r}"
+                        msg += f"\noutput node is:\n{self.compute_graph.loc[o[0]]}"
                         raise NetworkConstructionError(msg)
 
             # make sure the proper quantile variable is assigned to each node
@@ -1176,31 +1260,31 @@ class Network:
         if self.compute_graph is not None:
             assert len(self.compute_graph.index) == len(
                 set(self.compute_graph.index)
-            ), 'compute graph has duplicate ids'
+            ), "compute graph has duplicate ids"
 
             # every source node should have a source_id
-            for i, r in self.compute_graph[self.compute_graph.type == 'source'].iterrows():
+            for i, r in self.compute_graph[self.compute_graph.type == "source"].iterrows():
                 if r.source_id is None:
                     msg = (
-                        f'In compute graph for recipe {self.name}, source node {i} has no source_id'
+                        f"In compute graph for recipe {self.name}, source node {i} has no source_id"
                     )
-                    msg += f'\n{self.compute_graph}'
+                    msg += f"\n{self.compute_graph}"
                     raise NetworkConstructionError(msg)
 
         if self.central_dogma_graph is not None:
             assert len(self.central_dogma_graph.index) == len(
                 set(self.central_dogma_graph.index)
-            ), 'central dogma graph has duplicate ids'
+            ), "central dogma graph has duplicate ids"
 
     def __repr__(self):
-        return f'Network(name={self.name}, metadata={self.metadata})'
+        return f"Network(name={self.name}, metadata={self.metadata})"
 
     def get_signature(self):
-        signature = f'{self.name}:{self.metadata}\n'
+        signature = f"{self.name}:{self.metadata}\n"
         for k in sorted(self.transcription_units.keys()):
-            signature += f'{k}: {self.transcription_units[k]}\n'
-        signature += f'{self.raw_tu_in_sources}\n'
-        signature += f'{self.raw_aggregations}'
+            signature += f"{k}: {self.transcription_units[k]}\n"
+        signature += f"{self.raw_tu_in_sources}\n"
+        signature += f"{self.raw_aggregations}"
         return signature
 
     def _assign_quantile_variable(self):
@@ -1215,19 +1299,19 @@ class Network:
         cg = self.compute_graph
 
         def propagate_upstream(node, quantile_id, output_id):
-            node['extra'].setdefault('quantile_variable_id', [])
+            node["extra"].setdefault("quantile_variable_id", [])
             if node.is_inverse_of is not None:
-                node['extra']['quantile_variable_id'] = cg.loc[node.is_inverse_of]['extra'].get(
-                    'quantile_variable_id', []
+                node["extra"]["quantile_variable_id"] = cg.loc[node.is_inverse_of]["extra"].get(
+                    "quantile_variable_id", []
                 )
             else:
-                if len(node['extra']['quantile_variable_id']) <= output_id:
+                if len(node["extra"]["quantile_variable_id"]) <= output_id:
                     # append -1 until the right size
-                    node['extra']['quantile_variable_id'].extend(
-                        [-1] * (output_id - len(node['extra']['quantile_variable_id']) + 1)
+                    node["extra"]["quantile_variable_id"].extend(
+                        [-1] * (output_id - len(node["extra"]["quantile_variable_id"]) + 1)
                     )
-                if node['extra']['quantile_variable_id'][output_id] == -1:
-                    node['extra']['quantile_variable_id'][output_id] = quantile_id
+                if node["extra"]["quantile_variable_id"][output_id] == -1:
+                    node["extra"]["quantile_variable_id"][output_id] = quantile_id
                 else:
                     # another node already set the quantile var!
                     # It means we found a node with a single output but linked to multiple downstream
@@ -1236,7 +1320,7 @@ class Network:
                     # At the time I'm writing this the only case that would happen are for the numeric nodes
                     # or the inputs. They definitely don't need the quantile var.
                     # We change the existing value to None for this special case.
-                    node['extra']['quantile_variable_id'][output_id] = None
+                    node["extra"]["quantile_variable_id"][output_id] = None
 
             if node.input_from:
                 for nid, oid in node.input_from:
@@ -1244,11 +1328,11 @@ class Network:
 
         # first let's remove all "quantile_variable_id" from the extra column:
         for _, node in cg.iterrows():
-            node['extra'].pop('quantile_variable_id', None)
+            node["extra"].pop("quantile_variable_id", None)
 
-        output_node = cg[cg.type == 'output'].iloc[0]
+        output_node = cg[cg.type == "output"].iloc[0]
         # add the quantile variable to the output node
-        output_node['extra']['quantile_variable_id'] = list(range(len(output_node.input_from)))
+        output_node["extra"]["quantile_variable_id"] = list(range(len(output_node.input_from)))
         self.__n_outputs = len(output_node.input_from)
         for i, (nid, oid) in enumerate(output_node.input_from):
             propagate_upstream(cg.loc[nid], i, oid)
@@ -1256,7 +1340,7 @@ class Network:
         # treat the case where we have a "deadend" node, i.e a branch that ends
         # without being connected to the output node. The node type is litteraly "deadend"
         # we'll just assign quantile 0
-        deadend_nodes = cg[cg.type == 'deadend'].index
+        deadend_nodes = cg[cg.type == "deadend"].index
         for node_id in deadend_nodes:
             propagate_upstream(cg.loc[node_id], 0, 0)
 
@@ -1291,7 +1375,7 @@ DEFAULT_INVERSE_DICT = {
 
 def get_invertible_paths(network, start_node_id, inverse_dict):
     def _is_invertible(node):
-        invertible = node.type in inverse_dict and len(node['input_from']) <= 1
+        invertible = node.type in inverse_dict and len(node["input_from"]) <= 1
         return invertible
 
     paths = []
@@ -1303,7 +1387,7 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
         nonlocal paths
         node = network.compute_graph.loc[node_id]
 
-        if node.type == 'output':
+        if node.type == "output":
             # we reached an output node, we store the path and stop the search
             # output is a special case where the slot tells which output is used
             assert input_slot is not None
@@ -1312,7 +1396,7 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
 
         if node_id not in visited and _is_invertible(node):
             visited.add(node_id)
-            for output_slot, (downstream_id, downstream_input_slot) in enumerate(node['output_to']):
+            for output_slot, (downstream_id, downstream_input_slot) in enumerate(node["output_to"]):
                 _get_invertible_paths(
                     network,
                     downstream_id,
@@ -1331,12 +1415,12 @@ from rich import print as rprint
 
 def inverted_network(
     network: Network,
-    nodes: str = 'auto',
+    nodes: str = "auto",
     inverse_dict=DEFAULT_INVERSE_DICT,
-    mode='shortest',
+    mode="shortest",
     use_cache=None,
 ):
-    ut.logger.debug(f'Inverting network {network.name}')
+    ut.logger.debug(f"Inverting network {network.name}")
 
     # inverse_dict: node_type -> inverse_node_type
 
@@ -1345,9 +1429,9 @@ def inverted_network(
     # A path is invertible if each of its nodes has been marked as having an inverted equivalent in the inverse_dict
     # We then prepend an input node + the inverted nodes to the original network, and that's what we
     # call an inverted network.
-    if nodes == 'auto':  # numeric nodes as start nodes
+    if nodes == "auto":  # numeric nodes as start nodes
         start_nodes = network.compute_graph[
-            network.compute_graph['type'] == 'numeric'
+            network.compute_graph["type"] == "numeric"
         ].index.tolist()
     elif not isinstance(nodes, Iterable):
         raise ValueError(f"Unrecognized node mode: {nodes}. Use 'auto' or a list of node ids.")
@@ -1363,9 +1447,9 @@ def inverted_network(
         # In the 'all' mode, we want to return every possible combination of paths per start node
         # e.g. if we have 2 start nodes, and 2 paths for each, we want to return 4 paths
         # (the cartesian product of the paths)
-        if mode == 'shortest':
+        if mode == "shortest":
             inversions = [{n: min(p, key=len) for n, p in inv_paths.items() if p}]
-        elif mode == 'all':
+        elif mode == "all":
             inversions = [dict(zip(inv_paths.keys(), p)) for p in product(*inv_paths.values())]
         else:
             raise ValueError(f"Unrecognized mode: {mode}. Use 'shortest' or 'all'.")
@@ -1376,16 +1460,16 @@ def inverted_network(
             new_network = network.copy()
             uidGen = ut.uniqueIdGenerator(start=new_network.compute_graph.index.max() + 1)
             for start_n, path in paths.items():
-                assert len(path) > 1, 'path should not be empty'
-                assert start_n == path[0][0], 'first node of path should be the start node'
+                assert len(path) > 1, "path should not be empty"
+                assert start_n == path[0][0], "first node of path should be the start node"
 
                 # first we remove the start node
                 original_node = new_network.compute_graph.loc[
                     start_n
                 ]  # the non inverted start node
-                assert path[0][1] == 0, 'first node of path should have output slot 0'
+                assert path[0][1] == 0, "first node of path should have output slot 0"
                 # the output_to column is a list of tuples (node_id, slot_id). We just need the node_id
-                connected_node_id = original_node['output_to'][0][0]
+                connected_node_id = original_node["output_to"][0][0]
                 new_network.compute_graph.drop(start_n, inplace=True)
 
                 prev = connected_node_id
@@ -1393,29 +1477,29 @@ def inverted_network(
                 for i, (node_id, output_slot) in enumerate(path[1:], 1):
                     # slot is output_id for nodes, input_id for output
                     original_node = new_network.compute_graph.loc[node_id]  # the non inverted node
-                    n_type = original_node['type']  # its type
+                    n_type = original_node["type"]  # its type
                     nid = uidGen()  # the new node id
 
-                    if n_type == 'output':  # special case when we reach the output
-                        assert i == len(path) - 1, 'output node should be the last node in the path'
+                    if n_type == "output":  # special case when we reach the output
+                        assert i == len(path) - 1, "output node should be the last node in the path"
                         # we add an input node
-                        in_n = GraphComputeNode(nid, 'input', None, None)
+                        in_n = GraphComputeNode(nid, "input", None, None)
                         in_n.output_to = [
                             (prev, 0)
                         ]  # the input node is connected to the last inverted node
                         in_n.input_from = []  # the input node has no input
-                        in_n.extra = {'input_from_output': output_slot, 'input_position': inputpos}
+                        in_n.extra = {"input_from_output": output_slot, "input_position": inputpos}
                         inputpos += 1
                         new_network.compute_graph = pd.concat(
                             [
                                 new_network.compute_graph,
-                                pd.DataFrame([in_n.toDict()]).set_index('id'),
+                                pd.DataFrame([in_n.toDict()]).set_index("id"),
                             ]
                         )
                         break
 
                     # General case, create a new node and prepend to prev
-                    cdg_in = new_network.compute_graph.loc[prev, 'cdg_output']
+                    cdg_in = new_network.compute_graph.loc[prev, "cdg_output"]
                     if isinstance(cdg_in, list):
                         cdg_in = cdg_in[output_slot]
                     new_n = GraphComputeNode(
@@ -1430,14 +1514,14 @@ def inverted_network(
                     # but we need to know which path, i.e slot, to use)
                     new_n.is_inverse_of = node_id
                     new_n.extra = {
-                        'original_output_slot': output_slot,
-                        'original_output_len': len(original_node['output_to']),
+                        "original_output_slot": output_slot,
+                        "original_output_len": len(original_node["output_to"]),
                     }
 
                     # set prev input_from to new nodes
-                    new_network.compute_graph.at[prev, 'input_from'] = [(nid, 0)]
+                    new_network.compute_graph.at[prev, "input_from"] = [(nid, 0)]
                     new_network.compute_graph = pd.concat(
-                        [new_network.compute_graph, pd.DataFrame([new_n.toDict()]).set_index('id')]
+                        [new_network.compute_graph, pd.DataFrame([new_n.toDict()]).set_index("id")]
                     )
 
                     prev = nid
@@ -1446,7 +1530,7 @@ def inverted_network(
             new_networks.append(new_network)
         return new_networks
 
-    signature = f'{nodes}::{mode}::{inverse_dict}::{network.get_signature()}'
+    signature = f"{nodes}::{mode}::{inverse_dict}::{network.get_signature()}"
 
     return ut.get_cache(lambda: _inverted_network(), signature, cache_location=use_cache)
 

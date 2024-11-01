@@ -175,13 +175,22 @@ class FigureLayout(ArbitraryModel):
         pass
 
 
+def get_figsize_default():
+    fs = mpl.rcParams["figure.figsize"]
+    print(f"Default figsize: {fs}")
+    return fs
+
+
 class SimpleLayout(FigureLayout):
     rows: int = 1
     cols: int = 1
-    axes_size: Pair[float] = (5, 5)
+    axes_size: Optional[Pair[float]] = None 
     kwargs: Dict[str, Any] = {}
 
     def make_figure(self, **kw) -> FigAx:
+        if self.axes_size is None:
+            self.axes_size = get_figsize_default()
+
         fig, ax = plt.subplots(
             self.rows,
             self.cols,
@@ -365,55 +374,6 @@ def to_data_units(y_display, ax):
 ## {{{                    --     misc plot styling tools     --
 
 DEFAULT_GREY = "#777777"
-
-DEFAULT_RC_PARAMS = {
-    "figure.facecolor": "white",
-    "font.family": "sans-serif",
-    "font.style": "normal",
-    "font.variant": "normal",
-    "font.weight": "normal",
-    "font.stretch": "normal",
-    "font.size": 10,
-    "font.sans-serif": "Roboto, DejaVu Sans, Bitstream Vera Sans, Computer Modern Sans Serif, Lucida Grande, Verdana, Geneva, Lucid, Arial, Helvetica, Avant Garde, sans-serif",
-    "font.monospace": "Roboto Mono, DejaVu Sans Mono, Bitstream Vera Sans Mono, Computer Modern Typewriter, Andale Mono, Nimbus Mono L, Courier New, Courier, Fixed, Terminal, monospace",
-    "text.usetex": "True",
-    "text.latex.preamble": "\\usepackage{cmbright}",
-    "mathtext.fontset": "custom",
-    "mathtext.bf": "sans:bold",
-    "mathtext.bfit": "sans:italic:bold",
-    "mathtext.cal": "cursive",
-    "mathtext.it": "sans:italic",
-    "mathtext.rm": "sans",
-    "mathtext.sf": "sans",
-    "mathtext.tt": "monospace",
-    "mathtext.fallback": "stixsans",
-    "axes.spines.left": True,
-    "axes.spines.bottom": True,
-    "axes.spines.right": False,
-    "axes.spines.top": False,
-    "axes.labelsize": 10,
-    "axes.labelweight": "normal",
-    "axes.labelcolor": DEFAULT_GREY,
-    "axes.titlesize": 12,
-    "axes.titleweight": "normal",
-    "axes.titlecolor": DEFAULT_GREY,
-    "xtick.bottom": True,
-    "xtick.labelbottom": True,
-    "xtick.top": False,
-    "xtick.labeltop": False,
-    "xtick.major.size": 5,
-    "xtick.major.width": 0.4,
-    "xtick.minor.size": 2,
-    "xtick.minor.width": 0.2,
-    "ytick.left": True,
-    "ytick.labelleft": True,
-    "ytick.right": False,
-    "ytick.labelright": False,
-    "ytick.major.size": 5,
-    "ytick.major.width": 0.4,
-    "ytick.minor.size": 2,
-    "ytick.minor.width": 0.2,
-}
 
 
 @dataclass

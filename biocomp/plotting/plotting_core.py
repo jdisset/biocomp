@@ -10,6 +10,7 @@ from biocomp import utils as ut
 from biocomp.datautils import DataRescaler
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+import matplotlib.font_manager as font_manager
 import difflib
 from jax.typing import ArrayLike
 import os
@@ -26,6 +27,7 @@ logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 configurable = ut.configurable_decorator("biocomp.plotting")
+
 
 # ╭─────────────────────────────────────────────╮
 # │                TOOLS & UTILS                │
@@ -99,9 +101,9 @@ def format_powers(x, *_, n_decimals=1):
     abs_x = abs(x)
     if abs_x < 1000:
         if np.abs(x - int(x)) < 1e-3:
-            return f"{int(x)}"  # No decimal point
+            return rf"${int(x)}$"  # No decimal point
         else:
-            return f"{x:.1f}"  # Up to 1 decimal point
+            return rf"${x:.1f}$"  # Up to 1 decimal point
     else:
         E = int(np.log10(abs_x))
         if x == int(x):
@@ -241,7 +243,7 @@ def setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=0.05, **kw):
         p10_minor = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1], resolution=10)
         ax.set_xticks(rescaler.fwd(p10_minor), minor=True)
     except ValueError as e:
-        ...
+        logger.error(f"Error setting up x-axis: {e}")
 
     return xlims_inv
 
@@ -257,8 +259,10 @@ def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, **kw):
         ax.yaxis.set_major_formatter(PowerFormatter(p10, **kw))
         p10_minor = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1], resolution=10)
         ax.set_yticks(rescaler.fwd(p10_minor), minor=True)
+
     except Exception as e:
-        ...
+        logger.error(f"Error setting up y-axis: {e}")
+
     return ylims_inv
 
 
@@ -282,6 +286,7 @@ def get_transformed_ticks_and_labels(
     ticks = {"major": rescaler.fwd(p10), "minor": rescaler.fwd(p10_minor)}
     pf = PowerFormatter(p10, **kw)
     labels = [(rescaler.fwd(x), pf(x, i)) for i, x in enumerate(p10)]
+
     return ticks, labels
 
 
@@ -292,6 +297,7 @@ def setup_transformed_axis(
         xaxis_lims = setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=margins, **kw)
     if yaxis_lims is not None:
         yaxis_lims = setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=margins, **kw)
+
     return xaxis_lims, yaxis_lims
 
 
@@ -633,12 +639,13 @@ def heatmap(
     cmap=DEFAULT_CMAP_NAME,
     bad_color="#EEEEEE00",
 ):
-
     if isinstance(ax, list):
         ax = ax[0]
 
     cmap = plt.get_cmap(cmap)
     cmap.set_bad(color=bad_color)
+    has_bad = np.isnan(output_values)
+
     full_transform = ax.transData
     if axtransform is not None:
         full_transform = full_transform + axtransform
@@ -655,7 +662,7 @@ def heatmap(
     Z = output_values.reshape((xres, yres)).T
 
     opacities = np.ones_like(Z) if opacities is None else opacities.reshape((xres, yres)).T
-    opacities = np.where(np.isnan(Z), 0, opacities)
+    # opacities = np.where(np.isnan(Z), 0, opacities)
 
     if np.isnan(Z).all():
         Z = np.zeros_like(Z)
@@ -667,8 +674,8 @@ def heatmap(
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
-        transform=full_transform,
-        interpolation="none",
+        # transform=full_transform,
+        interpolation=None,
         alpha=opacities.T,
         extent=[*xlims, *ylims],
     )
@@ -681,7 +688,7 @@ def heatmap(
             linewidths=0.25,
             linestyles="solid",
             extent=[*xlims, *ylims],
-            transform=full_transform,
+            # transform=full_transform,
             alpha=0.3,
             colors="k",
         )

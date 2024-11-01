@@ -3,6 +3,7 @@
 
 import jax.numpy as jnp
 from functools import partial
+import matplotlib as mpl
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -46,6 +47,9 @@ configurable = pc.configurable
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+def print_rc_params():
+    for key, value in mpl.rcParams.items():
+        print(f"{key}: {value}")
 
 # ---- smooth plots (gaussian neighborhood based)
 
@@ -304,10 +308,11 @@ def colorbar(
     label=None,
     position=(1.1, 0.4),
     size=(0.04, 0.52),
-    orientation: str = "vertical",
+    orientation: Literal["horizontal", "vertical"] = "vertical",
     label_position: Literal["left", "right", "bottom", "top"] = "right",
     label_props: Dict = {},
     tick_props: Optional[ListOrSingle[Dict]] = None,
+    border_width=0.7,
 ):
     imlims = im.get_clim()
     c_vmin = imlims[0] if vlims[0] is None else vlims[0]
@@ -316,12 +321,15 @@ def colorbar(
     colorbar_ax = ax.inset_axes(position + size)
     cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation)
 
+
     DEFAULT_TICK_PROPS = {
         "axis": "both",
         "which": "both",
         "direction": "out",
         "pad": 2,
         "labelsize": 8,
+        # thickness:
+        "width": 0.7,
     }
     cbar.ax.tick_params(**DEFAULT_TICK_PROPS)
 
@@ -332,7 +340,8 @@ def colorbar(
             cbar.ax.tick_params(**tick_prop)
 
     for spine in cbar.ax.spines.values():
-        spine.set_linewidth(0.2)
+        spine.set_linewidth(border_width)
+
     setup_transformed_axis(
         cbar.ax,
         yaxis_lims=[c_vmin, c_vmax],
@@ -340,6 +349,7 @@ def colorbar(
         margins=0.0,
         rescaler=rescaler,
     )
+
     if label is not None:
         if orientation == "vertical":
             if label_position not in ["left", "right"]:
@@ -357,6 +367,7 @@ def colorbar(
             cbar.ax.set_yticks([])
 
     return cbar
+
 
 
 @configurable

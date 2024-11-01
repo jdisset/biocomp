@@ -4,15 +4,12 @@ from rich.logging import RichHandler
 from typing import Optional, Dict
 from pathlib import Path
 
-logging.getLogger("matplotlib.font_manager").setLevel(logging.INFO)
-
-matplotlib.set_loglevel("INFO")
 
 DEFAULT_FORMAT = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
 DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 DEFAULT_LOGGER_LEVELS: Dict[str, int] = {
-    "matplotlib": logging.WARNING,
+    "matplotlib": logging.INFO,
     "matplotlib.font_manager": logging.INFO,
     "PIL": logging.WARNING,
     "jax": logging.WARNING,
