@@ -327,7 +327,7 @@ def get_fname(func: Callable) -> str:
     return fname
 
 
-def encode_function(func: Callable, **kwargs) -> PartialFunction:
+def encode_function(func: Callable | Any, **kwargs) -> PartialFunction:
     if isinstance(func, (PartialFunction, PartialFunctionResult)):
         new_pf = func
         new_pf.kwargs.update(kwargs)
