@@ -64,11 +64,6 @@ class ArbitraryModel(BaseModel):
         validate_default=True,
     )
 
-    # class Config:
-    # arbitrary_types_allowed = True
-    # extra = "forbid"
-    # validate_default = True
-
     def model_dump(self, **kwargs) -> dict[str, Any]:
         return super().model_dump(serialize_as_any=True, **kwargs)
 
@@ -342,6 +337,9 @@ def encode_function(func: Callable, **kwargs) -> PartialFunction:
 
     else:
         func, partial_args = unwrap_partial_function(func)
+
+    if not isinstance(func, Callable):
+        return func
 
     kwargs.update(partial_args)
 
