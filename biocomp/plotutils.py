@@ -59,8 +59,8 @@ NumLike: TypeAlias = Union[np.ndarray, jnp.ndarray, float, int]
 
 
 class DataDimensions(BaseModel):
-    input: int
-    output: int
+    input: int = 0
+    output: int = 0
 
 
 class PlotData(ArbitraryModel):
@@ -86,7 +86,12 @@ class PlotData(ArbitraryModel):
 
     @property
     def dimensions(self) -> DataDimensions:
-        return DataDimensions(input=len(self.input_names), output=1)
+        if not isinstance(self.input_names, list):
+            logger.warning(f"Input names are not a list: {self.input_names}")
+            return DataDimensions()
+        if len(self.input_names) > 0:
+            return DataDimensions(input=len(self.input_names), output=1)
+        return DataDimensions(input=0, output=1)
 
     def check_shapes(self) -> Self:
         assert self.xval is not None
@@ -139,7 +144,12 @@ class LazyPlotData(PlotData):
 
     @property
     def dimensions(self) -> DataDimensions:
-        return DataDimensions(input=self.x.shape[1], output=1)
+        if not isinstance(self.input_names, list):
+            logger.warning(f"Input names are not a list: {self.input_names}")
+            return DataDimensions()
+        if len(self.input_names) > 0:
+            return DataDimensions(input=len(self.input_names), output=1)
+        return DataDimensions(input=0, output=1)
 
     def __deepcopy__(self, memo):
         return self
@@ -177,20 +187,22 @@ class FigureLayout(ArbitraryModel):
 
 def get_figsize_default():
     fs = mpl.rcParams["figure.figsize"]
-    print(f"Default figsize: {fs}")
     return fs
 
 
 class SimpleLayout(FigureLayout):
     rows: int = 1
     cols: int = 1
-    axes_size: Optional[Pair[float]] = None 
+    axes_size: Optional[Pair[float]] = None
     kwargs: Dict[str, Any] = {}
+    wspace: Optional[float] = None
+    hspace: Optional[float] = None
 
     def make_figure(self, **kw) -> FigAx:
         if self.axes_size is None:
             self.axes_size = get_figsize_default()
 
+        # Create figure and axes
         fig, ax = plt.subplots(
             self.rows,
             self.cols,
@@ -198,11 +210,24 @@ class SimpleLayout(FigureLayout):
             **self.kwargs,
             **kw,
         )
+
+        # Configure subplot spacing if specified
+        if self.wspace is not None or self.hspace is not None:
+            gridspec = fig.get_gridspec()
+            current_wspace = gridspec.get_width_ratios()
+            current_hspace = gridspec.get_height_ratios()
+
+            fig.subplots_adjust(
+                wspace=self.wspace if self.wspace is not None else current_wspace,
+                hspace=self.hspace if self.hspace is not None else current_hspace,
+            )
+
         return FigAx(figure=fig, ax=ax)
 
     def finalize(self, figax: FigAx) -> None:
-        figax.figure.tight_layout()
-        pass
+        # Only apply tight_layout if no custom spacing is defined
+        if self.wspace is None and self.hspace is None:
+            figax.figure.tight_layout()
 
 
 ValidatedFigureLayout = Annotated[
@@ -314,7 +339,6 @@ def extract_lazy_plot_data_from_network(
         output_name=output_name,
         **kw,
     )
-    print(f"Lazy plot data: {pdata.input_names} -> {pdata.output_name}")
     return pdata
 
 

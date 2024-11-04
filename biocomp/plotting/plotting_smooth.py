@@ -47,9 +47,11 @@ configurable = pc.configurable
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+
 def print_rc_params():
     for key, value in mpl.rcParams.items():
         print(f"{key}: {value}")
+
 
 # ---- smooth plots (gaussian neighborhood based)
 
@@ -277,7 +279,8 @@ def knn_grid(
     xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
     if x.shape[1] > 2:
         assert zslice is not None
-        assert zslice.shape == (x.shape[1] - 2,)
+        if zslice.shape != (x.shape[1] - 2,):
+            raise ValueError(f"zslice.shape = {zslice.shape} != {x.shape[1] - 2}")
         xquery = np.hstack([xy, [zslice] * xy.shape[0]])
     else:
         xquery = xy
@@ -320,7 +323,6 @@ def colorbar(
 
     colorbar_ax = ax.inset_axes(position + size)
     cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation)
-
 
     DEFAULT_TICK_PROPS = {
         "axis": "both",
@@ -367,7 +369,6 @@ def colorbar(
             cbar.ax.set_yticks([])
 
     return cbar
-
 
 
 @configurable

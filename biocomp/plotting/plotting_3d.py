@@ -34,11 +34,11 @@ from matplotlib.axes import Axes
 
 # TODO: move to config system
 
-CUBE_SPINE_PROPS = dict(linewidth=0.5, color='#888888', linestyle='-')
-CUBE_SPINE_PROPS_HIDDEN = ut.updated_dict(CUBE_SPINE_PROPS, dict(linestyle=':', alpha=0.5))
+CUBE_SPINE_PROPS = dict(linewidth=0.5, color="#888888", linestyle="-")
+CUBE_SPINE_PROPS_HIDDEN = ut.updated_dict(CUBE_SPINE_PROPS, dict(linestyle=":", alpha=0.5))
 
 
-def plot_face(ax, visible_spines=('bottom', 'left'), hidden_spines=('top', 'right')):
+def plot_face(ax, visible_spines=("bottom", "left"), hidden_spines=("top", "right")):
     if hidden_spines is None:
         hidden_spines = []
     if visible_spines is None:
@@ -49,7 +49,7 @@ def plot_face(ax, visible_spines=('bottom', 'left'), hidden_spines=('top', 'righ
     ax.set_xticks([], minor=True)
     ax.set_yticks([], minor=True)
     # remove facecolor
-    ax.patch.set_facecolor('none')
+    ax.patch.set_facecolor("none")
     # linewidth and color of spines using the CUBE_SPINE_PROPS
     for spine in ax.spines.values():
         spine.set_visible(False)
@@ -85,64 +85,64 @@ PROJ_D = 0.5
 
 DEFAULT_SLICE_TICKS_PROPS = [
     {
-        'length': 54,
-        'direction': (1, 0, 0),
-        'props': dict(color='k', linewidth=0.2, dashes=[5, 5], alpha=0.5),
+        "length": 54,
+        "direction": (1, 0, 0),
+        "props": dict(color="k", linewidth=0.2, dashes=[5, 5], alpha=0.5),
     }
 ]
 
 
 DEFAULT_MAJOR_TICKS_PROPS = [
-    {'length': 8, 'direction': (1, 0, 0), 'props': dict(color='k', linewidth=0.4)},
+    {"length": 8, "direction": (1, 0, 0), "props": dict(color="k", linewidth=0.4)},
 ]
 DEFAULT_MINOR_TICKS_PROPS = [
-    {'length': 2, 'direction': (1, 0, 0), 'props': dict(color='k', linewidth=0.2)},
+    {"length": 2, "direction": (1, 0, 0), "props": dict(color="k", linewidth=0.2)},
 ]
 
 max_int = np.iinfo(np.int32).max
 CUBE_EDGE_PROPS_VISIBLE = {
-    'props': {**CUBE_SPINE_PROPS, 'zorder': +max_int - 10},
-    'offset': (0, 0),
+    "props": {**CUBE_SPINE_PROPS, "zorder": +max_int - 10},
+    "offset": (0, 0),
 }
 
 CUBE_EDGE_PROPS_HIDDEN = {
-    'props': {**CUBE_SPINE_PROPS_HIDDEN, 'zorder': -max_int + 10},
-    'offset': (0, 0),
+    "props": {**CUBE_SPINE_PROPS_HIDDEN, "zorder": -max_int + 10},
+    "offset": (0, 0),
 }
 
 DEFAULT_LABEL_PROPS = dict(
-    ha='left',
-    va='center',
+    ha="left",
+    va="center",
     fontsize=8,
-    bbox=dict(facecolor='white', alpha=1, edgecolor='none', pad=-0.25),
+    bbox=dict(facecolor="white", alpha=1, edgecolor="none", pad=-0.25),
 )
-DEFAULT_SLICE_LABEL_PROPS = dict(ha='left', va='center', fontsize=7)
-DEFAULT_TITLE_PROPS = dict(ha='center', va='center', fontsize=8, rotation=PROJ_ALPHA)
+DEFAULT_SLICE_LABEL_PROPS = dict(ha="left", va="center", fontsize=7)
+DEFAULT_TITLE_PROPS = dict(ha="center", va="center", fontsize=8, rotation=PROJ_ALPHA)
 
 DEFAULT_CUBE_EDGE_PROPS = {
-    'bottom_right': {
+    "bottom_right": {
         **CUBE_EDGE_PROPS_VISIBLE,
-        'offset': (0.0, 0),  # percentage of axes units
-        'ticks': {
-            'major': DEFAULT_MAJOR_TICKS_PROPS,
-            'minor': DEFAULT_MINOR_TICKS_PROPS,
-            'slice': DEFAULT_SLICE_TICKS_PROPS,
+        "offset": (0.0, 0),  # percentage of axes units
+        "ticks": {
+            "major": DEFAULT_MAJOR_TICKS_PROPS,
+            "minor": DEFAULT_MINOR_TICKS_PROPS,
+            "slice": DEFAULT_SLICE_TICKS_PROPS,
         },
-        'labels': {
-            'major': {'offset': (10, 0), 'props': DEFAULT_LABEL_PROPS},
-            'slice': {'offset': (55, 0), 'props': DEFAULT_SLICE_LABEL_PROPS},
+        "labels": {
+            "major": {"offset": (10, 0), "props": DEFAULT_LABEL_PROPS},
+            "slice": {"offset": (55, 0), "props": DEFAULT_SLICE_LABEL_PROPS},
         },
-        'zaxis_title': {'offset': (40, 0), 'props': DEFAULT_TITLE_PROPS},
+        "zaxis_title": {"offset": (40, 0), "props": DEFAULT_TITLE_PROPS},
     },
-    'bottom_left': CUBE_EDGE_PROPS_HIDDEN,
-    'top_left': CUBE_EDGE_PROPS_VISIBLE,
-    'top_right': CUBE_EDGE_PROPS_VISIBLE,
+    "bottom_left": CUBE_EDGE_PROPS_HIDDEN,
+    "top_left": CUBE_EDGE_PROPS_VISIBLE,
+    "top_right": CUBE_EDGE_PROPS_VISIBLE,
 }
 
 plot_front = partial(
-    plot_face, visible_spines=['bottom', 'left', 'top', 'right'], hidden_spines=None
+    plot_face, visible_spines=["bottom", "left", "top", "right"], hidden_spines=None
 )
-plot_back = partial(plot_face, visible_spines=['top', 'right'], hidden_spines=['bottom', 'left'])
+plot_back = partial(plot_face, visible_spines=["top", "right"], hidden_spines=["bottom", "left"])
 
 from typing import List, Tuple, Dict, Any, Optional, Sequence, Union
 
@@ -159,7 +159,6 @@ def draw_tick(
     props: Dict[str, Any],
     project: Callable[[V3d], V2d],
 ):
-
     # , position, direction, length, props, project):
     # position and direction are in 3d world coordinates
     # length is in display units
@@ -177,16 +176,16 @@ def draw_text(
     props: Dict[str, Any],
     project: Callable[[V3d], V2d],
     offset: V2d = (0, 0),
-    offset_units: str = 'axes',
+    offset_units: str = "axes",
 ):
     position = np.asarray(position)
     offset = np.asarray(offset)
-    if offset_units == 'axes':
+    if offset_units == "axes":
         offset = np.array([to_data_units(offset[0], ax), to_data_units(offset[1], ax)])
     tproj_position = project(position)
     t = ax.text(tproj_position[0] + offset[0], tproj_position[1] + offset[1], label, **props)
-    if 'bbox' in props:
-        t.set_bbox(props['bbox'])
+    if "bbox" in props:
+        t.set_bbox(props["bbox"])
 
 
 def draw_z_axis(
@@ -255,7 +254,6 @@ def draw_z_title(
     z_title: Optional[str] = None,
     **title_props,
 ):
-
     labelpad = to_data_units(zaxis_labelpad, ax)
     xpos, ypos = np.array([xpos, ypos]) + np.asarray(axis_offset) + np.array([labelpad, 0])
     if title_props is not None and z_title is not None:
@@ -273,8 +271,8 @@ def main_ax_lims(ax, xlim, ylim, set_lims=True):
     ax_lims += np.array([[-1, 1], [-1, 1]]) * 0.05 * np.abs(ax_lims[:, 1] - ax_lims[:, 0])
     ax_size = np.abs(ax_lims[:, 1] - ax_lims[:, 0])
     if set_lims:
-        ax.axis('off')
-        ax.set_aspect('equal')
+        ax.axis("off")
+        ax.set_aspect("equal")
         ax.set_xlim(ax_lims[0])
         ax.set_ylim(ax_lims[1])
     return ax_lims, ax_size
@@ -282,10 +280,10 @@ def main_ax_lims(ax, xlim, ylim, set_lims=True):
 
 def get_edge_pos(edge, xlim, ylim):
     # now edge is bottom_right, bottom_left, top_left, top_right
-    spl_edge = edge.split('_')
+    spl_edge = edge.split("_")
     return (
-        xlim[0] if spl_edge[1] == 'left' else xlim[1],
-        ylim[0] if spl_edge[0] == 'bottom' else ylim[1],
+        xlim[0] if spl_edge[1] == "left" else xlim[1],
+        ylim[0] if spl_edge[0] == "bottom" else ylim[1],
     )
 
 
@@ -310,8 +308,8 @@ def cabinet_project(pos: V3d, alpha: float = 45.0, d: float = 0.5) -> V2d:
 def get_axis_offsets(cube_edge_props: Dict[str, Any], xlim: V2d, ylim: V2d):
     axis_offsets = {}
     for edge, props in cube_edge_props.items():
-        if 'offset' in props:
-            axis_offset = props.pop('offset', None)
+        if "offset" in props:
+            axis_offset = props.pop("offset", None)
             axis_offset = np.array((0, 0)) if axis_offset is None else np.array(axis_offset)
             axis_offset = axis_offset * np.array((xlim[1] - xlim[0], ylim[1] - ylim[0]))
             axis_offsets[edge] = axis_offset
@@ -335,10 +333,9 @@ def plot_3d_stack(
     zaxis_labelpad: int = 0,
     **_,
 ):
-
     if zlabels is None:
-        if zticks is not None and 'major' in zticks:
-            zlabels = [(z, str(z), 'major') for z in zticks['major']]
+        if zticks is not None and "major" in zticks:
+            zlabels = [(z, str(z), "major") for z in zticks["major"]]
 
     axis_offsets = get_axis_offsets(cube_edge_props, xlim, ylim)
 
@@ -357,18 +354,18 @@ def plot_3d_stack(
 
     for edge, props in cube_edge_props.items():
         axis_offset = axis_offsets.get(edge, None)
-        if 'ticks' in props:
+        if "ticks" in props:
             for tick_type, ticks in zticks.items():
-                if tick_type in props['ticks']:
+                if tick_type in props["ticks"]:
                     draw_z_ticks_along_axis(
                         ax,
                         *get_edge_pos(edge, xlim, ylim),
                         project=project,
                         axis_offset=axis_offset,
                         ticks=ticks,
-                        tick_props=props['ticks'][tick_type],
+                        tick_props=props["ticks"][tick_type],
                     )
-        if 'zaxis_title' in props:
+        if "zaxis_title" in props:
             draw_z_title(
                 ax,
                 *get_edge_pos(edge, xlim, ylim),
@@ -377,9 +374,9 @@ def plot_3d_stack(
                 z_title=z_title,
                 zaxis_labelpad=zaxis_labelpad,
                 axis_offset=axis_offset,
-                **props['zaxis_title'],
+                **props["zaxis_title"],
             )
-        if props.get('labels') is not None and zlabels is not None:
+        if props.get("labels") is not None and zlabels is not None:
             assert isinstance(zlabels, list)
             draw_z_labels(
                 ax,
@@ -387,7 +384,7 @@ def plot_3d_stack(
                 project=project,
                 labels=zlabels,
                 axis_offset=axis_offset,
-                **props['labels'],
+                **props["labels"],
             )
 
     # plot the slices
@@ -415,9 +412,9 @@ def cube_face(
     ax,
     xlims,
     ylims,
-    facecolor='none',
-    visible_spines=('bottom', 'left'),
-    hidden_spines=('top', 'right'),
+    facecolor="none",
+    visible_spines=("bottom", "left"),
+    hidden_spines=("top", "right"),
 ):
     if hidden_spines is None:
         hidden_spines = []
@@ -451,7 +448,7 @@ def front_face_bl(
     ylims,
     input_names: Sequence[str],
     rescaler: pc.DataRescaler,
-    labelpad:Tuple=(20,24),
+    labelpad: Tuple = (20, 24),
     ticks=False,
 ):
     # in order to get the correct zorder,
@@ -462,8 +459,8 @@ def front_face_bl(
         ax,
         xlims,
         ylims,
-        facecolor='none',
-        visible_spines=['bottom', 'left'],
+        facecolor="none",
+        visible_spines=["bottom", "left"],
         hidden_spines=[],
     )
     ax.set_xlabel(input_names[0])
@@ -493,8 +490,8 @@ def front_face_tr(
         ax,
         xlims,
         ylims,
-        facecolor='none',
-        visible_spines=['top', 'right'],
+        facecolor="none",
+        visible_spines=["top", "right"],
         hidden_spines=[],
     )
     ax.set_zorder(max_int - 10)
@@ -505,9 +502,9 @@ def back_face(ax, xlims, ylims):
         ax,
         xlims,
         ylims,
-        facecolor='none',
-        visible_spines=['top', 'right'],
-        hidden_spines=['bottom', 'left'],
+        facecolor="none",
+        visible_spines=["top", "right"],
+        hidden_spines=["bottom", "left"],
     )
 
 
@@ -530,35 +527,39 @@ def smooth_3d(
     projection_diag_coef: float = PROJ_D,
     colorbar_position=(1.1, 0.4),
     colorbar_size=(0.04, 0.52),
+    show_inner_spines=True,
     smooth_2d_params: Dict = {},
     xaxis_labelpad: int = 20,
     yaxis_labelpad: int = 24,
     zaxis_labelpad: int = 0,
     **_,
 ):
-
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
 
     if isinstance(ax, Axes):
         ax = [ax]
 
-    assert isinstance(ax, (list, tuple, np.ndarray)), f'ax must be a list or tuple, got {ax}'
+    assert isinstance(ax, (list, tuple, np.ndarray)), f"ax must be a list or tuple, got {ax}"
 
     if len(ax) != len(zslices):
         raise ValueError(
-            f'axes and slices must have the same length, got {len(ax)} and {len(zslices)}'
+            f"axes and slices must have the same length, got {len(ax)} and {len(zslices)}"
         )
 
     ylims = xlims if ylims == (None, None) else ylims
     zlims = xlims if zlims == (None, None) else zlims
 
-
     colorbar_location = colorbar_position + colorbar_size
 
     def format_value(x: float):
-        return f'{format_powers(rescaler.inv(x), n_decimals=0)}'
+        return f"{format_powers(rescaler.inv(x), n_decimals=0)}"
 
-    def plot_smooth_data_slice(sl_ax: Axes, zslice: NdArray, colorbar_ax: Optional[Axes] = None):
+    def plot_smooth_data_slice(
+        sl_ax: Axes,
+        zslice: NdArray,
+        colorbar_ax: Optional[Axes] = None,
+        show_spines=show_inner_spines,
+    ):
         im, contour = smooth_2d(
             X,
             Y,
@@ -577,28 +578,36 @@ def smooth_3d(
             },
         )
 
-        if contour is not None:
-            sl_ax.clabel(contour, inline_spacing=20, fontsize=5, fmt=format_value)
         # remove x and y labels
-        sl_ax.set_xlabel('')
-        sl_ax.set_ylabel('')
-        sl_ax.set_facecolor('none')
+        sl_ax.set_xlabel("")
+        sl_ax.set_ylabel("")
+        sl_ax.set_facecolor("none")
         # zorder of ticklabels:
         sl_ax.yaxis.label.set_zorder(2)
         sl_ax.xaxis.label.set_zorder(2)
 
+        if not show_spines:
+            sl_ax.spines["top"].set_visible(False)
+            sl_ax.spines["right"].set_visible(False)
+            sl_ax.spines["bottom"].set_visible(False)
+            sl_ax.spines["left"].set_visible(False)
+            # remove all ticks
+            sl_ax.set_xticks([])
+            sl_ax.set_yticks([])
+            sl_ax.set_xticks([], minor=True)
+            sl_ax.set_yticks([], minor=True)
+
         for label in sl_ax.get_xticklabels() + sl_ax.get_yticklabels():
-            label.set_bbox(dict(facecolor='white', edgecolor='None', alpha=1, pad=0.75, zorder=1.5))
+            label.set_bbox(dict(facecolor="white", edgecolor="None", alpha=1, pad=0.75, zorder=1.5))
 
         if colorbar_ax is not None:
-
             cbar = plt.colorbar(im, cax=colorbar_ax)
             cbar.ax.tick_params(labelsize=6)
             # pc.default_style(cbar.ax)
-            cbar.ax.tick_params(axis='both', which='both', direction='out', pad=2, labelsize=8)
+            cbar.ax.tick_params(axis="both", which="both", direction="out", pad=2, labelsize=8)
             # tapply_stylels to the right
             cbar.ax.yaxis.tick_right()
-            cbar.ax.yaxis.set_label_position('left')
+            cbar.ax.yaxis.set_label_position("left")
 
             # add title to the right, vertical, along the colorbar
             # using the y axis for labels
@@ -620,14 +629,14 @@ def smooth_3d(
         np.asarray(zlims) + np.array((0.1, 0)), rescaler=rescaler, skip_ticklabel_range=(-10, 2000)
     )
 
-    major_zlabels: List[Tuple[NumLike, str, str]] = [(float(z), s, 'major') for z, s in zlabels]
+    major_zlabels: List[Tuple[NumLike, str, str]] = [(float(z), s, "major") for z, s in zlabels]
 
     # remove first major ticks
-    zticks['major'] = np.asarray(zticks['major'])
-    zticks['major'] = zticks['major'][zticks['major'] > 0.0]
+    zticks["major"] = np.asarray(zticks["major"])
+    zticks["major"] = zticks["major"][zticks["major"] > 0.0]
     # same for minor ticks
-    zticks['minor'] = np.asarray(zticks['minor'])
-    zticks['minor'] = zticks['minor'][zticks['minor'] > 0.0]
+    zticks["minor"] = np.asarray(zticks["minor"])
+    zticks["minor"] = zticks["minor"][zticks["minor"] > 0.0]
 
     import copy
 
@@ -635,15 +644,28 @@ def smooth_3d(
         # now add a special tick for the slices
         slice_ax = ax[i]
 
-        s = np.array([s])
+        data_slices_positions = np.atleast_1d(s)
+
         s_zticks = copy.deepcopy(zticks)
         s_zlabels = copy.deepcopy(major_zlabels)
-        s_zticks['slice'] = s
-        slice_label = f'$ \\approx $ {format_powers(rescaler.inv(s), n_decimals=0)}'
-        s_zlabels.append((s, slice_label, 'slice'))
-
         cbar_should_be_drawn = draw_colorbar if draw_colorbar is not None else i == len(zslices) - 1
         cbar_ax = slice_ax.inset_axes(colorbar_location) if cbar_should_be_drawn else None
+
+        data_slices = []
+        slice_ticks = []
+        slice_labels = []
+
+        for pos in data_slices_positions:
+            data_slices.append(
+                partial(plot_smooth_data_slice, zslice=np.atleast_1d(pos), colorbar_ax=cbar_ax)
+            )
+            slice_ticks.append(pos)
+            slice_labels.append(
+                (pos, f"$ \\approx $ {format_powers(rescaler.inv(pos), n_decimals=0)}", "slice")
+            )
+
+        s_zticks["slice"] = np.asarray(slice_ticks)
+        s_zlabels += slice_labels
 
         plot_3d_stack(
             slice_ax,
@@ -657,10 +679,10 @@ def smooth_3d(
                     rescaler=rescaler,
                 ),
                 partial(front_face_tr, xlims=xlims, ylims=ylims),
-                partial(plot_smooth_data_slice, zslice=s, colorbar_ax=cbar_ax),
+                *data_slices,
                 partial(back_face, xlims=xlims, ylims=ylims),
             ],
-            [zlims[0], zlims[0], s, zlims[1]],
+            [zlims[0], zlims[0], *data_slices_positions, zlims[1]],
             xlim=xlims,
             ylim=ylims,
             zlim=zlims,

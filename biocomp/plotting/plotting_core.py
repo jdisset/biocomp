@@ -634,7 +634,13 @@ def heatmap(
     output_values,
     vlims=(None, None),
     contours=3,
+    contours_alpha=1,
+    contours_color="k",
+    contours_linewidth=0.5,
+    contours_linestyle="solid",
+    contours_print=False,
     opacities=None,
+    show_image=True,
     axtransform=None,
     cmap=DEFAULT_CMAP_NAME,
     bad_color="#EEEEEE00",
@@ -667,31 +673,35 @@ def heatmap(
     if np.isnan(Z).all():
         Z = np.zeros_like(Z)
 
-    im = ax.imshow(
-        Z.T,
-        origin="lower",
-        aspect=1,
-        cmap=cmap,
-        vmin=vmin,
-        vmax=vmax,
-        # transform=full_transform,
-        interpolation=None,
-        alpha=opacities.T,
-        extent=[*xlims, *ylims],
-    )
+    im = None
+    if show_image:
+        im = ax.imshow(
+            Z.T,
+            origin="lower",
+            aspect=1,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            # transform=full_transform,
+            interpolation=None,
+            alpha=opacities.T,
+            extent=[*xlims, *ylims],
+        )
 
     cntrs = None
-    if contours is not None and contours > 0:
+    if contours is not None:
         cntrs = ax.contour(
             Z.T,
             levels=contours,
-            linewidths=0.25,
-            linestyles="solid",
+            linewidths=contours_linewidth,
+            linestyles=contours_linestyle,
             extent=[*xlims, *ylims],
-            # transform=full_transform,
-            alpha=0.3,
-            colors="k",
+            alpha=contours_alpha,
+            colors=contours_color,
         )
+
+        if contours_print:
+            ax.clabel(cntrs, inline=True, fontsize=8)
 
     return im, cntrs
 

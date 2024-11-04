@@ -1539,13 +1539,15 @@ def get_network_family(network):
 
     match (len(seqs), len(ts)):
         case (0, 0):
-            family = "no device"
+            family = ""
         case (1, 1):
             family = "single"
         case (2, 2):
             family = "cascade"
         case (2, 1):
             family = "dual region"
+        case (3, 1):
+            family = "triple region"
         case (3, 2):
             family = "bandpass"
 

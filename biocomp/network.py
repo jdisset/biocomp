@@ -136,11 +136,28 @@ def get_ratios(net) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
     return all_ratios
 
 
+def get_default_input_order(net, cotx):
+    """
+    Get the default input order for a network:
+    priority to cotx that contain an ERN
+    then to cotx that contain a ERN_recog_site_5p
+    then to the rest
+
+    need to use net.get_input_proteins() which returns the name of the fluo marker 
+    in each cotx. 
+    We then use that original order to specify a new order based on the priority rules
+    TODO
+
+    """
+
+
+
 def cotx_ratios_str(cotx):
     lines = []
     for tus, ratios in cotx:
         lines.append(":".join(tus) + " -> " + ":".join(ratios))
     return "\n".join(lines)
+
 
 def generate_network_info(net):
     """Generate a dictionnary of information for a network"""
@@ -154,6 +171,7 @@ def generate_network_info(net):
     dependent_outputs = tuple(sorted(list(set(all_outputs) - set(markers))))
     ern_names = ut.get_all_ERNs_names(net)
     cotx = get_ratios(net)
+    default_input_order = get_default_input_order(net, cotx)
     net_info = {
         "sequestron_type": seqtype,
         "architecture": arch,
