@@ -34,7 +34,7 @@ from matplotlib.axes import Axes
 
 # TODO: move to config system
 
-CUBE_SPINE_PROPS = dict(linewidth=0.5, color="#888888", linestyle="-")
+CUBE_SPINE_PROPS = dict(linewidth=0.5, color="#000000", linestyle="-")
 CUBE_SPINE_PROPS_HIDDEN = ut.updated_dict(CUBE_SPINE_PROPS, dict(linestyle=":", alpha=0.5))
 
 
@@ -450,6 +450,8 @@ def front_face_bl(
     rescaler: pc.DataRescaler,
     labelpad: Tuple = (20, 24),
     ticks=False,
+    xtitle=None,
+    ytitle=None,
 ):
     # in order to get the correct zorder,
     # we plot the face in 2 steps, first the ones that can be covered,
@@ -463,8 +465,12 @@ def front_face_bl(
         visible_spines=["bottom", "left"],
         hidden_spines=[],
     )
-    ax.set_xlabel(input_names[0])
-    ax.set_ylabel(input_names[1])
+    xtitle = input_names[0] if xtitle is None else xtitle
+    ytitle = input_names[1] if ytitle is None else ytitle
+
+    ax.set_xlabel(xtitle)
+    ax.set_ylabel(ytitle)
+
     ax.set_zorder(-max_int)
 
     if ticks:
@@ -528,7 +534,13 @@ def smooth_3d(
     colorbar_position=(1.1, 0.4),
     colorbar_size=(0.04, 0.52),
     show_inner_spines=True,
+    show_slice_ticks=True,
     smooth_2d_params: Dict = {},
+    show_front_face_ticks: bool = False,
+    xtitle: Optional[str] = None,
+    ytitle: Optional[str] = None,
+    ztitle: Optional[str] = None,
+    title: Optional[str] = None,
     xaxis_labelpad: int = 20,
     yaxis_labelpad: int = 24,
     zaxis_labelpad: int = 0,
@@ -640,6 +652,8 @@ def smooth_3d(
 
     import copy
 
+    ztitle = ztitle if ztitle is not None else input_names[2]
+
     for i, s in enumerate(zslices):
         # now add a special tick for the slices
         slice_ax = ax[i]
@@ -659,10 +673,11 @@ def smooth_3d(
             data_slices.append(
                 partial(plot_smooth_data_slice, zslice=np.atleast_1d(pos), colorbar_ax=cbar_ax)
             )
-            slice_ticks.append(pos)
-            slice_labels.append(
-                (pos, f"$ \\approx $ {format_powers(rescaler.inv(pos), n_decimals=0)}", "slice")
-            )
+            if show_slice_ticks:
+                slice_ticks.append(pos)
+                slice_labels.append(
+                    (pos, f"$ \\approx $ {format_powers(rescaler.inv(pos), n_decimals=0)}", "slice")
+                )
 
         s_zticks["slice"] = np.asarray(slice_ticks)
         s_zlabels += slice_labels
@@ -677,6 +692,9 @@ def smooth_3d(
                     ylims=ylims,
                     input_names=input_names,
                     rescaler=rescaler,
+                    ticks=show_front_face_ticks,
+                    xtitle=xtitle,
+                    ytitle=ytitle,
                 ),
                 partial(front_face_tr, xlims=xlims, ylims=ylims),
                 *data_slices,
@@ -690,5 +708,8 @@ def smooth_3d(
             zticks=s_zticks,
             zlabels=s_zlabels,
             cube_edge_props=cube_edge_props,
-            z_title=input_names[2],
+            z_title=ztitle,
         )
+
+    if title is not None:
+        ax[0].set_title(title)

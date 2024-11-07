@@ -8,6 +8,7 @@ from jax import jit, vmap
 import numpy as np
 from biocomp import utils as ut
 from biocomp.datautils import DataRescaler
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import matplotlib.font_manager as font_manager
@@ -643,7 +644,12 @@ def heatmap(
     show_image=True,
     axtransform=None,
     cmap=DEFAULT_CMAP_NAME,
+    transparent_below=None,
+    transparent_above=None,
+    image_interpolation=None,
+    opacity=1,
     bad_color="#EEEEEE00",
+    clip_to_lowest_contour=False,
 ):
     if isinstance(ax, list):
         ax = ax[0]
@@ -668,31 +674,32 @@ def heatmap(
     Z = output_values.reshape((xres, yres)).T
 
     opacities = np.ones_like(Z) if opacities is None else opacities.reshape((xres, yres)).T
-    # opacities = np.where(np.isnan(Z), 0, opacities)
+    opacities *= opacity
+
+    if transparent_below is not None:
+        opacities = np.where(Z < transparent_below, 0, opacities)
+
+    if transparent_above is not None:
+        opacities = np.where(Z > transparent_above, 0, opacities)
 
     if np.isnan(Z).all():
         Z = np.zeros_like(Z)
 
-    im = None
-    if show_image:
-        im = ax.imshow(
-            Z.T,
-            origin="lower",
-            aspect=1,
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-            # transform=full_transform,
-            interpolation=None,
-            alpha=opacities.T,
-            extent=[*xlims, *ylims],
-        )
-
+    # Create the contours first
     cntrs = None
+    clip_cntrs = None  # New variable for invisible clipping contours
     if contours is not None:
+        Z_contour = Z.copy()
+        # also set the border to 0
+        Z_contour[:, 0] = 0
+        Z_contour[:, -1] = 0
+        Z_contour[0, :] = 0
+        Z_contour[-1, :] = 0
+
+        # Main visible contours (solid lines)
         cntrs = ax.contour(
-            Z.T,
-            levels=contours,
+            Z_contour.T,
+            levels=contours if isinstance(contours, (list, np.ndarray)) else contours,
             linewidths=contours_linewidth,
             linestyles=contours_linestyle,
             extent=[*xlims, *ylims],
@@ -700,8 +707,66 @@ def heatmap(
             colors=contours_color,
         )
 
+        if clip_to_lowest_contour:
+            # set nans to 0, so that contours are not broken
+            Z_contour = np.nan_to_num(Z_contour)  # this allows to close contours that are open
+
+            # invisible contours for clipping
+            clip_cntrs = ax.contour(
+                Z_contour.T,
+                levels=cntrs.levels
+                if isinstance(cntrs.levels, (list, np.ndarray))
+                else [cntrs.levels],
+                extent=[*xlims, *ylims],
+                alpha=0,
+                colors="none",
+            )
+
+            # dashed contours around NaN regions
+            nan_mask = np.isnan(Z)
+            if np.any(nan_mask):
+                ax.contour(
+                    Z_contour.T,
+                    levels=cntrs.levels
+                    if isinstance(cntrs.levels, (list, np.ndarray))
+                    else [cntrs.levels],
+                    extent=[*xlims, *ylims],
+                    alpha=0.4,
+                    linewidths=contours_linewidth * 0.95,
+                    linestyles=[(0, (1, 3))],
+                    dash_capstyle = 'round',
+                    colors=contours_color,
+                )
+
         if contours_print:
             ax.clabel(cntrs, inline=True, fontsize=8)
+
+    im = None
+    if show_image:
+        if clip_to_lowest_contour and cntrs is not None:
+            Z = np.nan_to_num(Z)
+
+        im = ax.imshow(
+            Z.T,
+            origin="lower",
+            aspect=1,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            interpolation=image_interpolation,
+            alpha=opacities.T,
+            extent=[*xlims, *ylims],
+        )
+
+        if clip_to_lowest_contour and clip_cntrs is not None:
+            # Use the invisible solid contours for clipping
+            all_paths = clip_cntrs.collections[0].get_paths()
+            if len(all_paths) > 0:
+                lowest_contour_path = all_paths[0]
+                clip_path = mpl.patches.PathPatch(lowest_contour_path, transform=ax.transData)
+                im.set_clip_path(clip_path)
+            else:  # we "clip" everything out i.e. we delete the image
+                im.remove()
 
     return im, cntrs
 
