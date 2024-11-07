@@ -232,7 +232,14 @@ def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):
     return *rpnames, ticks, tlabels, secondary_ticks
 
 
-def setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=0.05, show_minor=False, **kw):
+def setup_transformed_xaxis(
+    ax,
+    xaxis_lims,
+    rescaler,
+    margins=0.05,
+    show_minor=False,
+    **kw,
+):
     xlims_tr = np.asarray(xaxis_lims)
     xlims_inv = rescaler.inv(np.asarray(xlims_tr))
     p10 = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1])
@@ -263,7 +270,7 @@ def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, show_minor=F
         p10_minor = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1], resolution=10)
         ax.set_yticks(rescaler.fwd(p10_minor), minor=True)
         if show_minor:
-            ax.xaxis.set_minor_formatter(PowerFormatter(p10_minor, **kw))
+            ax.yaxis.set_minor_formatter(PowerFormatter(p10_minor, **kw))
 
     except Exception as e:
         logger.error(f"Error setting up y-axis: {e}")
@@ -296,12 +303,24 @@ def get_transformed_ticks_and_labels(
 
 
 def setup_transformed_axis(
-    ax, xaxis_lims=None, yaxis_lims=None, rescaler=None, margins=0.05, transform=None, **kw
+    ax,
+    xaxis_lims=None,
+    yaxis_lims=None,
+    rescaler=None,
+    margins=0.05,
+    transform=None,
+    show_minor_xticks=False,
+    show_minor_yticks=False,
+    **kw,
 ):
     if xaxis_lims is not None:
-        xaxis_lims = setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=margins, **kw)
+        xaxis_lims = setup_transformed_xaxis(
+            ax, xaxis_lims, rescaler, margins=margins, show_minor=show_minor_xticks, **kw
+        )
     if yaxis_lims is not None:
-        yaxis_lims = setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=margins, **kw)
+        yaxis_lims = setup_transformed_yaxis(
+            ax, yaxis_lims, rescaler, margins=margins, show_minor=show_minor_yticks, **kw
+        )
 
     return xaxis_lims, yaxis_lims
 
@@ -654,6 +673,7 @@ def heatmap(
     opacity=1,
     bad_color="#EEEEEE00",
     clip_to_lowest_contour=False,
+    heatmap_kwargs=None,
 ):
     if isinstance(ax, list):
         ax = ax[0]
