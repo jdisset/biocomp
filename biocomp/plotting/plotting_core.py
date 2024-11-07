@@ -67,6 +67,17 @@ DEFAULT_CMAP_NAME = BIOCOMP_COLORS["default_color_map"] or "viridis"
 
 
 def powers_of_ten(xmin, xmax, skip_ticklabel_range=None, resolution=1, **_):
+    """Generate power-of-ten tick locations, with option for minor ticks.
+
+    Args:
+        xmin: Minimum value
+        xmax: Maximum value
+        skip_ticklabel_range: Optional range of values to skip labels for
+        resolution: If 1, return major ticks only. If >1, include intermediate values
+
+    Returns:
+        Array of tick positions
+    """
     bounds = np.array([xmin, xmax])
     logbounds = np.sign(bounds) * np.floor(
         np.maximum(np.log10(np.maximum(np.abs(bounds), 0.1)), 0)
@@ -89,12 +100,21 @@ def powers_of_ten(xmin, xmax, skip_ticklabel_range=None, resolution=1, **_):
 
     base_powers = np.power(10, powers)
 
-    increments = np.arange(1, resolution + 1).reshape(-1, 1)
-    values = (base_powers * increments).flatten()
+    if resolution > 1:
+        # Generate minor ticks between each power of 10
+        minor_values = []
+        for power in base_powers:
+            # Generate logarithmically spaced values between this power and the next
+            minors = np.logspace(np.log10(power), np.log10(power * 10), resolution + 1)[:-1]
+            minor_values.extend(minors)
+        values = np.array(minor_values)
+    else:
+        # Just use the major ticks
+        values = base_powers
 
     # Filter values to be within the bounds
     values = values[(values >= xmin) & (values <= xmax)]
-    return values
+    return np.sort(values)
 
 
 def format_powers(x, *_, n_decimals=1):
