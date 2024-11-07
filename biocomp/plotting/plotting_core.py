@@ -117,13 +117,23 @@ class PowerFormatter(ticker.Formatter):
     def __init__(self, values, skip_ticklabel_range=None, **_):
         self.values = values
         self.skip_ticklabel_range = skip_ticklabel_range
+        # Create a mapping of transformed values to original values
+        self.value_map = {
+            transformed: original for transformed, original in zip(self.values, self.values)
+        }
 
-    def __call__(self, x, pos):
-        v = self.values[pos]
+    def __call__(self, x, pos=None):
+        if pos is not None and pos < len(self.values):
+            v = self.values[pos]
+        else:
+            # Find the closest value for minor ticks
+            closest_val = min(self.value_map.keys(), key=lambda k: abs(k - x))
+            v = self.value_map[closest_val]
+
         if (
             self.skip_ticklabel_range is not None
-            and np.abs(v) < self.skip_ticklabel_range[1]
-            and np.abs(v) > self.skip_ticklabel_range[0]
+            and abs(v) < self.skip_ticklabel_range[1]
+            and abs(v) > self.skip_ticklabel_range[0]
         ):
             return ""
         return format_powers(v, None)
