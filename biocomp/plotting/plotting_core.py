@@ -232,7 +232,7 @@ def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):
     return *rpnames, ticks, tlabels, secondary_ticks
 
 
-def setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=0.05, **kw):
+def setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=0.05, show_minor=False, **kw):
     xlims_tr = np.asarray(xaxis_lims)
     xlims_inv = rescaler.inv(np.asarray(xlims_tr))
     p10 = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1])
@@ -243,13 +243,15 @@ def setup_transformed_xaxis(ax, xaxis_lims, rescaler, margins=0.05, **kw):
         ax.xaxis.set_major_formatter(PowerFormatter(p10, **kw))
         p10_minor = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1], resolution=10)
         ax.set_xticks(rescaler.fwd(p10_minor), minor=True)
+        if show_minor:
+            ax.xaxis.set_minor_formatter(PowerFormatter(p10_minor, **kw))
     except ValueError as e:
         logger.error(f"Error setting up x-axis: {e}")
 
     return xlims_inv
 
 
-def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, **kw):
+def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, show_minor=False, **kw):
     ylims_tr = np.asarray(yaxis_lims)
     ylims_inv = rescaler.inv(np.asarray(ylims_tr))
     p10 = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1])
@@ -260,6 +262,8 @@ def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, **kw):
         ax.yaxis.set_major_formatter(PowerFormatter(p10, **kw))
         p10_minor = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1], resolution=10)
         ax.set_yticks(rescaler.fwd(p10_minor), minor=True)
+        if show_minor:
+            ax.xaxis.set_minor_formatter(PowerFormatter(p10_minor, **kw))
 
     except Exception as e:
         logger.error(f"Error setting up y-axis: {e}")
@@ -734,7 +738,7 @@ def heatmap(
                     alpha=0.4,
                     linewidths=contours_linewidth * 0.95,
                     linestyles=[(0, (1, 3))],
-                    dash_capstyle = 'round',
+                    dash_capstyle="round",
                     colors=contours_color,
                 )
 

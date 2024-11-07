@@ -391,6 +391,7 @@ def smooth_2d(
     draw_ylabel=True,
     draw_colorbar=True,
     draw_colorbar_label=True,
+    show_minor_ticks=False,
     colorbar_params: Dict = {},
     knn_grid_params: Dict = {},
     heatmap_params: Dict = {},
@@ -436,6 +437,7 @@ def smooth_2d(
         yaxis_lims=ylims,
         rescaler=rescaler,
         margins=0.0,
+        show_minor=show_minor_ticks,
     )
 
     # spines only on bottom and left

@@ -544,6 +544,7 @@ def smooth_3d(
     xaxis_labelpad: int = 20,
     yaxis_labelpad: int = 24,
     zaxis_labelpad: int = 0,
+    show_progress=True,
     **_,
 ):
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
@@ -654,7 +655,9 @@ def smooth_3d(
 
     ztitle = ztitle if ztitle is not None else input_names[2]
 
-    for i, s in enumerate(zslices):
+    # for i, s in enumerate(zslices):
+    zgen = enumerate(zslices) if show_progress else ut.progress(enumerate(zslices), total=len(zslices))
+    for i, s in zgen:
         # now add a special tick for the slices
         slice_ax = ax[i]
 
