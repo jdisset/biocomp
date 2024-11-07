@@ -345,8 +345,8 @@ def colorbar(
     for spine in cbar.ax.spines.values():
         spine.set_linewidth(border_width)
 
-    mxticks = orientation == "vertical" and show_minor_ticks
-    myticks = orientation == "horizontal" and show_minor_ticks
+    mxticks = orientation == "horizontal" and show_minor_ticks
+    myticks = orientation == "vertical" and show_minor_ticks
 
     setup_transformed_axis(
         cbar.ax,
