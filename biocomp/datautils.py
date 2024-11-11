@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 import itertools
 from .network import Network
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Union, List, Tuple, Callable, Collection, Any
 
 ndArray = Union[np.ndarray, jnp.ndarray]
@@ -25,6 +25,8 @@ NdArray = Union[np.ndarray, jnp.ndarray]
 
 
 class DataRescaler(ArbitraryModel):
+    model_config = ConfigDict(extra='allow')
+
     def fwd(self, x):
         return x
 
