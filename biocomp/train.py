@@ -17,6 +17,7 @@ from .parameters import ParameterTree, ParamPath
 
 import time
 
+from jax_tqdm import scan_tqdm
 from typing import List, Tuple, Callable, Optional
 from pydantic import Field
 import jax
@@ -184,7 +185,6 @@ def start(
     loggers: Optional[List[Tuple[int, Callable]]] = None,
 ):
 
-
     import optax
 
     ut.logger.debug(f"Training config: {training_config}")
@@ -285,7 +285,7 @@ def start(
         )
 
         batch_keys = jax.random.split(key, training_config.batches_per_step)
-        sstep = pscan(scannable_step)
+        sstep = scan_tqdm(training_config.batches_per_step)(scannable_step)
         carry = (start_params, start_opt_state)
         xs = (
             jnp.arange(training_config.batches_per_step),
