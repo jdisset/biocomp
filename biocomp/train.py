@@ -20,6 +20,7 @@ import time
 from typing import List, Tuple, Callable, Optional
 from pydantic import Field
 import jax
+from jax.tree_util import Partial
 import jax.numpy as jnp
 import optax
 
@@ -206,7 +207,7 @@ def start(
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
 
     optimizer = training_config.optimizer
-    opt_state = vmap(optimizer.init)(dynamic)
+    opt_state = jax.vmap(optimizer.init)(dynamic)
 
     total_steps = int(
         training_config.n_epochs * training_config.n_batches / training_config.batches_per_step
