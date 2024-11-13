@@ -65,100 +65,6 @@ DEFAULT_CMAP_NAME = BIOCOMP_COLORS["default_color_map"] or "viridis"
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                   --     log_spline_log scale     --
 
-
-def powers_of_ten(xmin, xmax, skip_ticklabel_range=None, resolution=1, **_):
-    """Generate power-of-ten tick locations, with option for minor ticks.
-
-    Args:
-        xmin: Minimum value
-        xmax: Maximum value
-        skip_ticklabel_range: Optional range of values to skip labels for
-        resolution: If 1, return major ticks only. If >1, include intermediate values
-
-    Returns:
-        Array of tick positions
-    """
-    bounds = np.array([xmin, xmax])
-    logbounds = np.sign(bounds) * np.floor(
-        np.maximum(np.log10(np.maximum(np.abs(bounds), 0.1)), 0)
-    ).astype(int)
-    if logbounds[0] == logbounds[1]:
-        logbounds[1] += 1
-
-    try:
-        powers = np.arange(logbounds[0], logbounds[1] + 1)
-    except ValueError:
-        powers = np.arange(1)
-
-    if skip_ticklabel_range is not None:
-        skip_power_low = np.floor(np.log10(max(skip_ticklabel_range[0], 0.1))).astype(int)
-        skip_power_high = np.ceil(np.log10(skip_ticklabel_range[1])).astype(int)
-        powers = np.delete(
-            powers,
-            np.where((np.abs(powers) >= skip_power_low) & (np.abs(powers) <= skip_power_high)),
-        )
-
-    base_powers = np.power(10, powers)
-
-    if resolution > 1:
-        # Generate minor ticks between each power of 10
-        minor_values = []
-        for power in base_powers:
-            # Generate logarithmically spaced values between this power and the next
-            minors = np.logspace(np.log10(power), np.log10(power * 10), resolution + 1)[:-1]
-            minor_values.extend(minors)
-        values = np.array(minor_values)
-    else:
-        # Just use the major ticks
-        values = base_powers
-
-    # Filter values to be within the bounds
-    values = values[(values >= xmin) & (values <= xmax)]
-    return np.sort(values)
-
-
-def format_powers(x, *_, n_decimals=1):
-    x = float(x)
-    abs_x = abs(x)
-    if abs_x < 1000:
-        if np.abs(x - int(x)) < 1e-3:
-            return rf"${int(x)}$"  # No decimal point
-        else:
-            return rf"${x:.1f}$"  # Up to 1 decimal point
-    else:
-        E = int(np.log10(abs_x))
-        if x == int(x):
-            return r"${0:.0f}e{1}$".format(x // 10**E, E)
-        else:
-            return r"${0:.{2}f}e{1}$".format(x / 10**E, E, n_decimals)
-
-
-class PowerFormatter(ticker.Formatter):
-    def __init__(self, values, skip_ticklabel_range=None, **_):
-        self.values = values
-        self.skip_ticklabel_range = skip_ticklabel_range
-        # Create a mapping of transformed values to original values
-        self.value_map = {
-            transformed: original for transformed, original in zip(self.values, self.values)
-        }
-
-    def __call__(self, x, pos=None):
-        if pos is not None and pos < len(self.values):
-            v = self.values[pos]
-        else:
-            # Find the closest value for minor ticks
-            closest_val = min(self.value_map.keys(), key=lambda k: abs(k - x))
-            v = self.value_map[closest_val]
-
-        if (
-            self.skip_ticklabel_range is not None
-            and abs(v) < self.skip_ticklabel_range[1]
-            and abs(v) > self.skip_ticklabel_range[0]
-        ):
-            return ""
-        return format_powers(v, None)
-
-
 def get_bio_color(name, default="k"):
     colors = {"ebfp": "#529edb", "eyfp": "#fbda73", "mkate": "#f75a5a", "neongreen": "#33f397"}
     colors["fitc"] = colors["neongreen"]
@@ -260,6 +166,73 @@ def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):
     rpnames = get_reordered_protein_names(network, **kw)
 
     return *rpnames, ticks, tlabels, secondary_ticks
+
+
+def powers_of_ten(xmin, xmax, skip_ticklabel_range=None, resolution=1, **_):
+    bounds = np.array([xmin, xmax])
+    logbounds = np.sign(bounds) * np.floor(
+        np.maximum(np.log10(np.maximum(np.abs(bounds), 0.1)), 0)
+    ).astype(int)
+    if logbounds[0] == logbounds[1]:
+        logbounds[1] += 1
+
+    try:
+        powers = np.arange(logbounds[0], logbounds[1] + 1)
+    except ValueError:
+        powers = np.arange(1)
+
+    if skip_ticklabel_range is not None:
+        skip_power_low = np.floor(np.log10(max(skip_ticklabel_range[0], 0.1))).astype(int)
+        skip_power_high = np.ceil(np.log10(skip_ticklabel_range[1])).astype(int)
+        powers = np.delete(
+            powers,
+            np.where((np.abs(powers) >= skip_power_low) & (np.abs(powers) <= skip_power_high)),
+        )
+
+    base_powers = np.power(10, powers)
+
+    if resolution > 1:
+        increments = np.arange(2, resolution).reshape(-1, 1)
+    else:
+        increments = np.array([[1]])
+
+    values = (base_powers * increments).flatten()
+
+    values = values[(values >= xmin) & (values <= xmax)]
+    return values
+
+
+def format_powers(x, *_, n_decimals=1):
+    x = float(x)
+    abs_x = abs(x)
+    if abs_x < 1000:
+        if np.abs(x - int(x)) < 1e-3:
+            return rf"${int(x)}$"  # No decimal point
+        else:
+            return rf"${x:.1f}$"  # Up to 1 decimal point
+    else:
+        E = int(np.log10(abs_x))
+        if x == int(x):
+            return r"${0:.0f}e{1}$".format(x // 10**E, E)
+        else:
+            return r"${0:.{2}f}e{1}$".format(x / 10**E, E, n_decimals)
+
+
+class PowerFormatter(ticker.Formatter):
+    def __init__(self, values, skip_ticklabel_range=None, **_):
+        self.values = values
+        self.skip_ticklabel_range = skip_ticklabel_range
+
+    def __call__(self, x, pos):
+        v = self.values[pos]
+        if (
+            self.skip_ticklabel_range is not None
+            and np.abs(v) < self.skip_ticklabel_range[1]
+            and np.abs(v) > self.skip_ticklabel_range[0]
+        ):
+            return ""
+        return format_powers(v, None)
+
 
 
 def setup_transformed_xaxis(

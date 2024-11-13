@@ -268,7 +268,6 @@ class FigureSpec(ArbitraryModel):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ## {{{                       --     network utils     --
 
 
@@ -354,155 +353,10 @@ def make_xy_grid(xmin, xmax, ymin=None, ymax=None, xres=100, yres=None):
     # we want to return as a big array of shape (res**2, 2)
     return np.vstack([X.ravel(), Y.ravel()]).T
 
-
-def get_web_font(url, font_name):
-    import tempfile
-    from pathlib import Path
-    import urllib
-    from matplotlib import font_manager
-
-    # Create a temporary directory for the font file
-    path = Path(tempfile.mkdtemp())
-
-    # URL and downloaded path of the font
-    url_font = url
-    path_font = path / f"{font_name}.ttf"
-
-    # Download the font to our temporary directory
-    urllib.request.urlretrieve(url_font, path_font)
-    # Create a Matplotlib Font object from our `.ttf` file
-    font = font_manager.FontEntry(fname=str(path_font), name=font_name)
-
-    # Register this object with Matplotlib's ttf list
-    font_manager.fontManager.ttflist.append(font)
-    return font
-
-
-def to_display_units(x, ax):
-    """Convert x from data units to display units"""
-    ppd = 72.0 / ax.figure.dpi
-    trans = ax.transData.transform
-    return ((trans((1, x)) - trans((0, 0))) * ppd)[1]
-
-
-def to_data_units(y_display, ax):
-    """Convert y from display units to data units"""
-    ppd = 72.0 / ax.figure.dpi
-    trans_inv = ax.transData.inverted().transform
-    origin = trans_inv((0, 0))
-    point_in_data_units = trans_inv((0, y_display / ppd))
-    return point_in_data_units[1] - origin[1]
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                    --     misc plot styling tools     --
 
 DEFAULT_GREY = "#777777"
-
-
-@dataclass
-class SpineProps:
-    visible: bool = True
-    linewidth: float = 0.5
-    color: str = DEFAULT_GREY
-
-
-DEFAULT_SPINE_PROPS: Dict[str, SpineProps] = {
-    "top": SpineProps(visible=False),
-    "right": SpineProps(visible=False),
-    "bottom": SpineProps(visible=True),
-    "left": SpineProps(visible=True),
-}
-
-DEFAULT_TICK_PARAMS: List[Dict[str, Any]] = [
-    {"axis": "both", "which": "both", "labelsize": 8, "direction": "out"},
-    {"axis": "both", "which": "major", "length": 5, "width": 0.4},
-    {"axis": "both", "which": "minor", "length": 2, "width": 0.2},
-]
-
-
-@dataclass
-class FontProps:
-    family: Optional[str] = "Arial"
-    size: Optional[int] = 10
-    weight: Optional[str] = "normal"
-    style: Optional[str] = "normal"
-    color: Optional[str] = "black"
-
-
-@dataclass
-class PlotStyle:
-    facecolor: Optional[str] = "white"
-    spine_props: Optional[Dict[str, SpineProps]] = field(
-        default_factory=lambda: DEFAULT_SPINE_PROPS
-    )
-    tick_params: Optional[List[Dict[str, Any]]] = field(default_factory=lambda: DEFAULT_TICK_PARAMS)
-    # labelsize: Optional[int] = 10
-    label_font: Optional[FontProps] = field(default_factory=FontProps)
-    title_font: Optional[FontProps] = field(default_factory=FontProps)
-
-
-DEFAULT_STYLE = PlotStyle()
-
-
-def apply_style(ax, style: PlotStyle = DEFAULT_STYLE):
-    fig = ax.get_figure()
-
-    # if style.facecolor is not None:
-    # fig.patch.set_facecolor(style.facecolor)
-    # if style.spine_props is not None:
-    # for spine, props in style.spine_props.items():
-    # ax.spines[spine].set_visible(props.visible)
-    # ax.spines[spine].set_linewidth(props.linewidth)
-    # ax.spines[spine].set_color(props.color)
-    # if style.tick_params is not None:
-    # for tp in style.tick_params:
-    # ax.tick_params(**tp)
-
-    # if style.label_font is not None:
-    # ax.xaxis.label.set_fontproperties(style.label_font)
-    # ax.yaxis.label.set_fontproperties(style.label_font)
-
-    # if style.title_font is not None:
-    # ax.title.set_fontproperties(style.title_font)
-
-    # ax.get_xaxis().tick_bottom()
-    # ax.get_yaxis().tick_left()
-
-
-@configurable
-def mkfig(
-    rows: int = 1,
-    cols: int = 1,
-    size: Tuple[float, float] = (4, 4),
-    dpi: float = 300,
-    title: Optional[str] = None,
-    style: PlotStyle = DEFAULT_STYLE,
-):
-    fig, ax = plt.subplots(rows, cols, figsize=(cols * size[0], rows * size[1]), dpi=dpi, **kw)
-
-    if rows == 1 and cols == 1:
-        apply_style(ax)
-    else:
-        for a in ax.flatten():
-            apply_style(a)
-
-    if title is not None:
-        fig.suptitle(str(title))
-
-    return fig, ax
-
-
-def remove_spines(ax):
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-
-def remove_axis_and_spines(ax):
-    ax.set_xticks([])
-    ax.set_yticks([])
-    remove_spines(ax)
-
 
 class ShortScientificFormatter(string.Formatter):
     def format_field(self, value, format_spec, precision=1):
@@ -526,77 +380,6 @@ scformat = ShortScientificFormatter()
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-
-## {{{                --     new network plot functions     --
-
-
-DEFAULT_PLOT_METHOD_PREFERENCE: Dict[int, str] = {
-    1: "smooth",
-    2: "smooth",
-    3: "smooth",
-}
-
-
-@configurable
-def auto_plot(
-    plot_data: PlotData,
-    figure_spec: Optional[FigureSpec] = None,
-    ax: Optional[Union[Axes, Sequence[Axes]]] = None,
-    use_plot_method: Optional[str] = "auto",  # could be 'auto' or None, or a specific method
-    plot_method_per_input_dim: Optional[Dict[int, str]] = DEFAULT_PLOT_METHOD_PREFERENCE,
-    rc_context: Dict[str, Any] = {},  # pc.DEFAULT_RC_PARAMS,
-    smooth_params: Dict[str, Any] = {},
-    scatter_params: Dict[str, Any] = {},
-    histogram_params: Dict[str, Any] = {},
-    **kw,
-) -> None:
-    dim = plot_data.dimensions
-    if use_plot_method is None or use_plot_method == "auto":
-        assert plot_method_per_input_dim is not None
-        use_plot_method = plot_method_per_input_dim.get(dim.input, "smooth")
-
-    VALID_METHODS = ["smooth", "scatter", "histogram"]
-    if use_plot_method not in VALID_METHODS:
-        raise ValueError(f"Unknown plotting method {use_plot_method}. Available: {VALID_METHODS}")
-
-    if figure_spec is None:
-        figure_spec = FigureSpec()
-
-    with mpl.rc_context(rc_context):
-        # first we check that we have axes to plot on
-        # if not, we need to make a new figure
-        assert dim.output == 1, "Only single output plots are supported"
-
-        if ax is None:
-            assert (
-                figure_spec.layout is not None
-            ), "Layout must be specified if axes are not provided"
-            cols, rows = figure_spec.layout
-            fig, ax = plt.subplots(
-                *figure_spec.layout,
-                figsize=(cols * figure_spec.axes_size[0], rows * figure_spec.axes_size[1]),
-                dpi=figure_spec.dpi,
-            )
-        else:
-            if not isinstance(ax, (list, tuple)):
-                assert isinstance(ax, Axes), f"ax type is {type(ax)}"
-                ax = [ax]
-            fig = ax[0].get_figure()
-
-        assert isinstance(fig, Figure)
-        if figure_spec.title is not None:
-            fig.suptitle(figure_spec.title)
-
-        if use_plot_method == "smooth":
-            return smooth(plot_data, ax, **smooth_params, **kw)
-
-        else:
-            raise NotImplementedError(f"Unimplemented plotting method {method}")
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
 ## {{{                          --     main smooth dispatcher (route to 1D, 2D, 3D)    --
 
 from .plotting.plotting_3d import smooth_3d
