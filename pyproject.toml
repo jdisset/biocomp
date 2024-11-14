@@ -38,7 +38,8 @@ dependencies = [
     "tqdm",
     "xxhash",
 	"dracon",
-	"wandb"
+	"wandb",
+	"jax-tqdm",
 ]
 
 [tool.hatch.build.targets.wheel]
