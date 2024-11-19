@@ -210,24 +210,17 @@ class SimpleLayout(FigureLayout):
             **self.kwargs,
             **kw,
         )
-
-        # Configure subplot spacing if specified
-        if self.wspace is not None or self.hspace is not None:
-            gridspec = fig.get_gridspec()
-            current_wspace = gridspec.get_width_ratios()
-            current_hspace = gridspec.get_height_ratios()
-
-            fig.subplots_adjust(
-                wspace=self.wspace if self.wspace is not None else current_wspace,
-                hspace=self.hspace if self.hspace is not None else current_hspace,
-            )
-
         return FigAx(figure=fig, ax=ax)
 
     def finalize(self, figax: FigAx) -> None:
-        # Only apply tight_layout if no custom spacing is defined
         if self.wspace is None and self.hspace is None:
             figax.figure.tight_layout()
+        else:
+            # figax.figure.subplots_adjust(wspace=self.wspace, hspace=self.hspace)
+            figax.figure.tight_layout(w_pad=self.wspace, h_pad=self.hspace)
+
+
+
 
 
 ValidatedFigureLayout = Annotated[
