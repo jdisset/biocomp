@@ -263,6 +263,8 @@ def smooth_1d(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{        --     2D     --
+
+
 @configurable
 def knn_grid(
     x: NdArray,
@@ -323,7 +325,8 @@ def colorbar(
     c_vmax = imlims[1] if vlims[1] is None else vlims[1]
 
     colorbar_ax = ax.inset_axes(position + size)
-    cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation)
+    cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation, aspect=20)
+    # cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation)
 
     DEFAULT_TICK_PROPS = {
         "axis": "both",

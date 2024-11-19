@@ -248,14 +248,18 @@ class FigureSpec(ArbitraryModel):
     extra_args: Dict[str, Any] = {}
     layout: ValidatedFigureLayout = Field(default_factory=SimpleLayout)
 
+    @property
+    def output_path(self) -> Path:
+        assert self.output_file is not None
+        return Path(self.output_dir) / self.output_file
+
     def make_figure(self) -> FigAx:
         return self.layout.make_figure(**self.extra_args)
 
     def save_figure(self, figax: FigAx) -> None:
         assert self.output_file is not None
-        self._output_path = Path(self.output_dir) / self.output_file
-        self._output_path.parent.mkdir(parents=True, exist_ok=True)
-        figax.figure.savefig(self._output_path, bbox_inches="tight")
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        figax.figure.savefig(self.output_path, bbox_inches="tight")
 
     def finalize(self, figax: FigAx) -> None:
         if self.title is not None:
@@ -353,10 +357,12 @@ def make_xy_grid(xmin, xmax, ymin=None, ymax=None, xres=100, yres=None):
     # we want to return as a big array of shape (res**2, 2)
     return np.vstack([X.ravel(), Y.ravel()]).T
 
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                    --     misc plot styling tools     --
 
 DEFAULT_GREY = "#777777"
+
 
 class ShortScientificFormatter(string.Formatter):
     def format_field(self, value, format_spec, precision=1):
@@ -384,6 +390,7 @@ scformat = ShortScientificFormatter()
 
 from .plotting.plotting_3d import smooth_3d
 from .plotting.plotting_smooth import smooth_2d, smooth_1d
+from .plotting.plotting_scatter import grid_histogram
 
 
 def combine_dicts(*kwarg_lists):
@@ -391,6 +398,37 @@ def combine_dicts(*kwarg_lists):
     for kw in kwarg_lists:
         res.update(kw)
     return res
+
+
+@configurable
+def histogram(
+    plot_data: PlotData,
+    ax,
+    rescaler: DataRescaler,
+    grid_histogram_params={},
+):
+    dim = plot_data.dimensions
+    x = rescaler.fwd(plot_data.x)
+    y = rescaler.fwd(plot_data.y)
+
+    if (dim.input, dim.output) != (1, 1):
+        raise ValueError(
+            f"Histogram plotting currently only supports 1 input and 1 output, "
+            f"got {dim.input} inputs and {dim.output} outputs"
+        )
+
+    return grid_histogram(
+        X=x,
+        Y=y,
+        input_names=plot_data.input_names,
+        output_name=plot_data.output_name,
+        rescaler=rescaler,
+        ax=ax,
+        **combine_dicts(
+            grid_histogram_params,
+            kw,
+        ),
+    )
 
 
 @configurable

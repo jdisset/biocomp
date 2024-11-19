@@ -544,6 +544,7 @@ def smooth_3d(
     show_progress=True,
     **_,
 ):
+
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
 
     if isinstance(ax, Axes):

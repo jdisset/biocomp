@@ -25,13 +25,11 @@ NdArray = Union[np.ndarray, jnp.ndarray]
 
 
 class DataRescaler(ArbitraryModel):
-    model_config = ConfigDict(extra='allow')
-
     def fwd(self, x):
-        return x
+        raise NotImplementedError
 
     def inv(self, y):
-        return y
+        raise NotImplementedError
 
 
 class ValueRange(BaseModel):
@@ -39,12 +37,21 @@ class ValueRange(BaseModel):
     max: float = 1
 
 
-class NoOpRescaler(DataRescaler):
+class IdentityRescaler(DataRescaler):
     def fwd(self, x):
         return x
 
     def inv(self, y):
         return y
+
+class LogPlusOneRescaler(DataRescaler):
+
+    def fwd(self, x):
+        return np.log10(x + 1)
+
+    def inv(self, y):
+        return 10**y - 1
+
 
 
 class LogPolyLogRescaler(DataRescaler):

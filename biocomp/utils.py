@@ -535,16 +535,20 @@ def generate_base_nested_config(
 
     emptyconf = {}
 
-    def generate_empty_func_conf(func_name, func_args):
+    def generate_empty_func_conf(func_name, func_args, visited=None):
+        if visited is None:
+            visited = set()
+        if func_name in visited:
+            return {}  # cyclic dependencies
+        visited.add(func_name)
+
         subconf = {}
         for arg in func_args.keys():
             if isinstance(arg, str) and arg.endswith(function_config_suffix):
                 fname = arg[: -len(function_config_suffix)]
                 if fname in available_functions:
-                    subconf[arg] = generate_empty_func_conf(fname, available_functions[fname])
-                else:
-                    logger.debug(
-                        f"{func_name} has a nested config {arg} but {fname} is not a known function"
+                    subconf[arg] = generate_empty_func_conf(
+                        fname, available_functions[fname], visited
                     )
         return subconf
 

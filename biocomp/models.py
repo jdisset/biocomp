@@ -1,6 +1,7 @@
 from sqlmodel import Field, SQLModel, Relationship
 from sqlmodel import SQLModel, create_engine, Session, select
 from sqlalchemy.orm import registry
+import sqlalchemy as sa
 from sqlmodel._compat import SQLModelConfig
 from typing import List, Optional, Annotated
 from sqlalchemy import Column, JSON
@@ -33,9 +34,6 @@ def int_or_none(s: str) -> Optional[int]:
 class Part(PartsDB, table=True):
     name: str = Field(primary_key=True)
     category: str = Field(foreign_key="category.name")
-    # uid: Annotated[Optional[int], BeforeValidator(int_or_none)] = Field(
-    # default=None, sa_column_kwargs={"name": "UID"}, alias="UID"
-    # )
 
     class Config:
         # SUPER HACKY but waiting for sqlmodel to fix serialization_alias support...

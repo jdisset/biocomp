@@ -383,7 +383,6 @@ def start(
         print("Loss:", step_history["loss"])
         qvalues_dir = ParamPath("shared/quantization/values")
         qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
-        jax.debug.print("qvalues: {}", qvalues)
 
         for t, l in loggers:
             if t is not None:
