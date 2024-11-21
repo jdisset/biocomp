@@ -159,8 +159,7 @@ class TrainingConfig(ArbitraryModel):
 
     keep_in_history: List[str] = ["loss"]
 
-    # compute config
-    compute_config: cmp.ComputeConfig = cmp.DEFAULT_COMPUTE_CONFIG
+    # compute_config: cmp.ComputeConfig = cmp.DEFAULT_COMPUTE_CONFIG
 
     def model_post_init(self, *_, **__):
         if self.seed is None:
