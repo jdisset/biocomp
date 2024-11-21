@@ -82,6 +82,20 @@ def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_pen
     return loss_func
 
 
+def l2_loss(stack: cmp.ComputeStack, training_config):
+    batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+
+    def loss_func(dynamic, static, X, Y, Z, key):
+        check_XYZ_new(X, Y, Z, stack)
+        params = ParameterTree.merge(dynamic, static)
+        keys = jax.random.split(key, X.shape[0])
+        yhat, grads = batch_apply(params, X, Z, keys)
+        assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
+        return ((yhat - Y) ** 2).mean()
+
+    return loss_func
+
+
 def sorting_loss(stack: cmp.ComputeStack, training_config):
     kl_weight = training_config.kl_weight
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
@@ -107,7 +121,10 @@ def sorting_loss(stack: cmp.ComputeStack, training_config):
             / counts.sum()
             * kl_weight
         )
-        sorting_loss_l2 = jnp.asarray((yhat.sort(axis=1) - Y.sort(axis=1)) ** 2).sum(axis=0).mean()
+        sorting_loss_l2 = ((yhat.sort(axis=0) - Y.sort(axis=0)) ** 2).mean()
+        jax.debug.print("y {} yhat {}", Y, yhat)
+
+        Y_1, Y_2 = Y[::2], Y[1::2]
 
         return sorting_loss_l2 + kl_loss
 
@@ -148,7 +165,7 @@ class TrainingConfig(ArbitraryModel):
 
     seed: Optional[int] = None
     negative_grad_penalty: float = 0.1
-    kl_weight: float = 1
+    kl_weight: float = 0
     batches_per_step: int = 128
     batch_size: int = 32
     n_epochs: float = 3
@@ -379,7 +396,6 @@ def start(
 
         if "loss" in step_history:
             loss_history.append(step_history["loss"])
-        print("Loss:", step_history["loss"])
         qvalues_dir = ParamPath("shared/quantization/values")
         qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
 
