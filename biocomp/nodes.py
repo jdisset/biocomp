@@ -282,9 +282,10 @@ def source_new(
     ) -> ArrayLike:
         qid = params[f"{namespace}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
-        return jax.vmap(
+        ans = jax.vmap(
             lambda position: MLP_head(ut.flat_concat(value, position, quantile), params, key)
         )(np.arange(max_L1s)[:n_outputs] / max_L1s)
+        return ans + jnp.broadcast_to(value, ans.shape)
 
     output_shapes = list(input_shapes) * n_outputs
 
@@ -352,9 +353,10 @@ def inv_source_new(
     ) -> ArrayLike:
         qid = params[f"{namespace}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
-        return jax.vmap(
+        ans = jax.vmap(
             lambda position: MLP_head(ut.flat_concat(value, position, quantile), params, key)
         )(np.arange(max_L1s)[:n_outputs] / max_L1s)
+        return ans + value.reshape(ans.shape)
 
     output_shapes = list(input_shapes) * n_outputs
 
@@ -734,7 +736,8 @@ def transform_nn(
         assert inner_out.shape == (inner_outsize + 1,)
 
         # then we apply a final outer layer to the summed output:
-        return outer(inner_out, params, k2)
+        ans = outer(inner_out, params, k2)
+        return ans + val.reshape(ans.shape)
 
     def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for node_id, node in enumerate(nodelist):
@@ -931,7 +934,8 @@ def grouped_output(
             partial(MLP_head, rng_key=key, params=params),
         )(inputs, quantiles[qid])
 
-        return outer_activation(res)
+        ans = outer_activation(res)
+        return ans + inputs
 
     output_shape = [(1,)] * len(input_shapes)
 

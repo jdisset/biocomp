@@ -92,7 +92,7 @@ def as_schedule(value_or_callable):
     return f
 
 
-def l2_loss(stack: cmp.ComputeStack, training_config, negative_grad_penalty=1.0):
+def l2_loss(stack: cmp.ComputeStack, training_config, negative_grad_penalty=1.0, kl_weight=1):
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
     def loss_func(dynamic, static, X, Y, Z, key, step):
@@ -103,12 +103,26 @@ def l2_loss(stack: cmp.ComputeStack, training_config, negative_grad_penalty=1.0)
         assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
         aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
 
+        qvalues_dir = ParamPath("shared/quantization/values")
+        logstd_dir = ParamPath("shared/quantization/logstdevs")
+        count_dir = ParamPath("shared/quantization/counts")
+        klw = as_schedule(kl_weight)(step)
+        qvalues, logstds, counts = map(
+            lambda path: jnp.concatenate(
+                tuple(map(lambda t: t[1], params[path].iter_leaves()))
+            ).flatten(),
+            (qvalues_dir, logstd_dir, count_dir),
+        )
+        kl_loss = (
+            counts * (qvalues**2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)
+        ).sum() / counts.sum()
+
         mse = ((yhat - Y) ** 2).mean()
         negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
 
         ngp = as_schedule(negative_grad_penalty)(step)
 
-        loss = mse + ngp * negative_grads
+        loss = mse + ngp * negative_grads + klw * kl_loss
 
         return loss, aux
 
@@ -216,7 +230,9 @@ class TrainingConfig(ArbitraryModel):
     batches_per_step: int = 128
     batch_size: int = 32
     n_epochs: float = 3
-    n_batches: int = 2048  # can't really have "real" epochs because each network has a different qtty of data points
+    n_batches: int = (
+        2048  # can't really have "real" epochs because each network has a different qtty of data points
+    )
     n_replicates: int = 1
     keep_in_history: List[str] = ["loss"]
 

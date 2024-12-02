@@ -910,7 +910,14 @@ class ComputeStack:
         self.is_assembled = allbuilt
 
     def _generate_apply_method(
-        self, get_grads_for: List[str] = ("translation", "transcription", "output")
+        self,
+        get_grads_for: List[str] = (
+            "translation",
+            "transcription",
+            "output",
+            "source_new",
+            "inv_source_new",
+        ),
     ):
         """
         Generates the apply method, which will call the apply of all layers of the stack
