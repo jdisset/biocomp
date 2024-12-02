@@ -1006,20 +1006,13 @@ class ComputeStack:
 
             return out, grads
 
-        def apply_with_trace(*args, **kwargs):
-            # returns the whole output array, i.e
-            # both the output of the final layer AND the "trace" of all intermediate ones
-            o, _ = apply_impl(*args, **kwargs)
-            return o
-
         def apply(*args, **kwargs):
-            # returns only the final outputs (of the last layer)
-            # and the gradients wrt the inputs of the nodes for which we want to compute gradients
+            # returns only the final outputs (of the last layer) + the gradients + the full trace
             o, g = apply_impl(*args, **kwargs)
-            return o[output_indices], g
+            return o[output_indices], (g, o)
 
         self.apply = apply
-        self.apply_with_trace = apply_with_trace
+        self.output_indices = output_indices
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

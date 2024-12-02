@@ -100,6 +100,11 @@ def sigmoid(x):
 
 ACTIVATION_FUNCTIONS = {
     "leaky_relu": leaky_relu,
+    "relu": jax.nn.relu,
+    "elu": jax.nn.elu,
+    "selu": jax.nn.selu,
+    "tanh": jax.nn.tanh,
+    "softplus": jax.nn.softplus,
     "sigmoid": sigmoid,
     "none": lambda x: x,
 }

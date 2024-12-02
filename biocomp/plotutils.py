@@ -399,6 +399,7 @@ def histogram(
     ax,
     rescaler: DataRescaler,
     grid_histogram_params={},
+    **kw,
 ):
     dim = plot_data.dimensions
     x = rescaler.fwd(plot_data.x)

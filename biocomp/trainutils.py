@@ -36,7 +36,6 @@ from typing import List, Tuple, Dict, Any, Callable, Collection, Optional, Union
 ### {{{                       --     logging tools     --
 
 
-
 @Partial(jit, static_argnums=(1,))
 def compstats(v, smooth_win=1):
     medians = vmap(jnp.median)(v)
@@ -45,29 +44,28 @@ def compstats(v, smooth_win=1):
     p20s = vmap(lambda x: jnp.percentile(x, 20))(v)
     p80s = vmap(lambda x: jnp.percentile(x, 80))(v)
     if smooth_win > 1:
-        medians = jnp.convolve(medians, jnp.ones(smooth_win) / smooth_win, mode='same')
-        p80s = jnp.convolve(p80s, jnp.ones(smooth_win) / smooth_win, mode='same')
-        p20s = jnp.convolve(p20s, jnp.ones(smooth_win) / smooth_win, mode='same')
-        maxs = jnp.convolve(maxs, jnp.ones(smooth_win) / smooth_win, mode='same')
-        mins = jnp.convolve(mins, jnp.ones(smooth_win) / smooth_win, mode='same')
+        medians = jnp.convolve(medians, jnp.ones(smooth_win) / smooth_win, mode="same")
+        p80s = jnp.convolve(p80s, jnp.ones(smooth_win) / smooth_win, mode="same")
+        p20s = jnp.convolve(p20s, jnp.ones(smooth_win) / smooth_win, mode="same")
+        maxs = jnp.convolve(maxs, jnp.ones(smooth_win) / smooth_win, mode="same")
+        mins = jnp.convolve(mins, jnp.ones(smooth_win) / smooth_win, mode="same")
     return medians, p20s, p80s, mins, maxs
 
 
 def get_epoch_stats(epoch_data, smooth_win=1):
-    stats = {'grad': {}, 'params': {}}
-    if 'grad' in epoch_data:
-        for k, v in epoch_data['grad']['shared'].items():
-            stats['grad'][k] = compstats(v)
-    if 'params' in epoch_data:
-        for k, v in epoch_data['params']['shared'].items():
-            stats['params'][k] = compstats(v)
+    stats = {"grad": {}, "params": {}}
+    if "grad" in epoch_data:
+        for k, v in epoch_data["grad"]["shared"].items():
+            stats["grad"][k] = compstats(v)
+    if "params" in epoch_data:
+        for k, v in epoch_data["params"]["shared"].items():
+            stats["params"][k] = compstats(v)
     return stats
 
 
 def wandb_plot_pred(
     dman: du.DataManager, params: ParameterTree, local_params=None, log_key=None, **_
 ):
-
     import matplotlib
 
     # matplotlib.pyplot.switch_backend('Agg')
@@ -78,11 +76,11 @@ def wandb_plot_pred(
     stack = dman.get_compute_stack()
 
     if local_params is not None:
-        local, _ = local_params.filter_by_tag(['local'])
-        _, shared = params.filter_by_tag(['local'])
+        local, _ = local_params.filter_by_tag(["local"])
+        _, shared = params.filter_by_tag(["local"])
         params = ParameterTree.merge(local, shared)
 
-    with ut.timer('wandb_plot_pred'):
+    with ut.timer("wandb_plot_pred"):
         N_SAMPLES_PER_CHUNK = 2000
         N_CHUNKS = 5
 
@@ -112,7 +110,7 @@ def wandb_plot_pred(
 
         YHAT = []
 
-        for chunk_id, XX in enumerate(tqdm(ALLX_CHUNKS, desc='wandb_plot_pred chunks')):
+        for chunk_id, XX in enumerate(tqdm(ALLX_CHUNKS, desc="wandb_plot_pred chunks")):
             Q = jax.random.uniform(key, (N_SAMPLES_PER_CHUNK, stack.total_nb_of_outputs))
             keys = jax.random.split(key, N_SAMPLES_PER_CHUNK)
             key = keys[-1]
@@ -130,10 +128,10 @@ def wandb_plot_pred(
                 assert yhat.shape == y.shape, f"{yhat.shape} != {y.shape}"
                 error = np.abs(y - yhat).mean()
                 fig = pu.report(params, dman, index, use_x_y_yhat=(x, y, yhat), res=64)
-                img = wb.Image(fig, caption=f'{networks[index].name}, error={error:.4f}')
+                img = wb.Image(fig, caption=f"{networks[index].name}, error={error:.4f}")
                 plt.close()
                 plt.close(fig)
-                plt.close('all')
+                plt.close("all")
                 return img, error
 
             except Exception as e:
@@ -146,13 +144,10 @@ def wandb_plot_pred(
         predimg, prederr = zip(*pred)
 
         if log_key is None:
-            log_key = 'Evaluations'
+            log_key = "Evaluations"
 
-        wb.log({f'{log_key}': predimg})
-        wb.log({f'{log_key}_err': prederr})
-
-
-
+        wb.log({f"{log_key}": predimg})
+        wb.log({f"{log_key}_err": prederr})
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -187,10 +182,9 @@ def init_stack(
     n_replicates: int,
     key: jnp.ndarray,
 ) -> Tuple[cmp.ComputeStack, ParameterTree]:
-
     stack = datamanager.build_compute_stack(compute_config)
     assert stack.init is not None
-    with ut.timer('Stack initialization'):
+    with ut.timer("Stack initialization"):
         params = vmap(stack.init)(jax.random.split(key, n_replicates))
     return stack, params
 
@@ -202,10 +196,9 @@ def generate_batches(
     batch_size: int,
     key: ndArray,
 ) -> Tuple[ndArray, ndArray]:
-
     total_n_batches = n_replicates * n_batches
 
-    with ut.timer('Generating batches'):
+    with ut.timer("Generating batches"):
         xbatches, ybatches = datamanager.get_batches(total_n_batches, batch_size, key)
     # current shape is (R*B,N,F), final shape should be (R,B,N,F)
     # R: replicates, B: batches, N: data, F: features
@@ -229,19 +222,37 @@ def generate_batches(
     return xbatches, ybatches
 
 
-def make_training_step(loss_func, optimizer, fields_to_keep_in_history=('loss',), scannable=True):
+def get_step_count(opt_state):
+    # Navigate through the optimizer state chain until we find the adam state
+    for state in opt_state:
+        if hasattr(
+            state, "count"
+        ):  # Adam state has a count attribute, as well as most other optimizers
+            return state.count
+    return 0
 
+
+def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",), scannable=True):
     def base_training_step(params, opt_state, x, y, z, key):
-        static, dynamic = params.filter_by_tag(['non_grad', 'local'])
-        loss, grads = value_and_grad(loss_func, has_aux=False)(dynamic, static, x, y, z, key)
+        static, dynamic = params.filter_by_tag(["non_grad", "local"])
+
+        (loss, aux), grads = value_and_grad(loss_func, has_aux=True)(
+            dynamic, static, x, y, z, key, opt_state[0].count
+        )
+
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
         dynamic = optax.apply_updates(dynamic, updates)
         params = ParameterTree.merge(static, dynamic)
         res = {
-            'params': params,
-            'loss': loss,
-            'grad': grads,
-            'opt': opt_state,
+            "params": params,
+            "loss": loss,
+            "grad": grads,
+            "opt": opt_state,
+            "x": x,
+            "y": y,
+            "z": z,
+            "key": key,
+            **aux,
         }
         return res
 
@@ -253,7 +264,7 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=('loss',)
             params, opt_state = carry
             i, x, y, z, k = i_x_y_z_k
             updt = base_training_step(params, opt_state, x, y, z, k)
-            params, opt_state = updt['params'], updt['opt']
+            params, opt_state = updt["params"], updt["opt"]
             history = {k: updt[k] for k in fields_to_keep_in_history}
             return (params, opt_state), history
 
@@ -263,5 +274,3 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=('loss',)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-

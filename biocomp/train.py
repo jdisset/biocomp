@@ -18,7 +18,7 @@ from .parameters import ParameterTree, ParamPath
 import time
 
 from jax_tqdm import scan_tqdm
-from typing import List, Tuple, Callable, Optional
+from typing import List, Tuple, Callable, Optional, NamedTuple
 from pydantic import Field
 import jax
 from jax.tree_util import Partial
@@ -82,34 +82,61 @@ def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_pen
     return loss_func
 
 
-def l2_loss(stack: cmp.ComputeStack, training_config):
+def as_schedule(value_or_callable):
+    if callable(value_or_callable):
+        return value_or_callable
+
+    def f(step):
+        return value_or_callable
+
+    return f
+
+
+def l2_loss(stack: cmp.ComputeStack, training_config, negative_grad_penalty=1.0):
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
-    def loss_func(dynamic, static, X, Y, Z, key):
+    def loss_func(dynamic, static, X, Y, Z, key, step):
         check_XYZ_new(X, Y, Z, stack)
         params = ParameterTree.merge(dynamic, static)
         keys = jax.random.split(key, X.shape[0])
-        yhat, grads = batch_apply(params, X, Z, keys)
+        yhat, (grads_wrt_inputs, full_output) = batch_apply(params, X, Z, keys)
         assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
-        return ((yhat - Y) ** 2).mean()
+        aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
+
+        mse = ((yhat - Y) ** 2).mean()
+        negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
+
+        ngp = as_schedule(negative_grad_penalty)(step)
+
+        loss = mse + ngp * negative_grads
+
+        return loss, aux
 
     return loss_func
 
 
-def sorting_loss(stack: cmp.ComputeStack, training_config):
-    kl_weight = training_config.kl_weight
+def sorting_loss(
+    stack: cmp.ComputeStack,
+    training_config,
+    negative_grad_penalty=1.0,
+    kl_weight=0.1,
+    sorting_mse_weight=0.1,
+):
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
-    def loss_func(dynamic, static, X, Y, Z, key):
+    def loss_func(dynamic, static, X, Y, Z, key, step):
         check_XYZ_new(X, Y, Z, stack)
         params = ParameterTree.merge(dynamic, static)
         keys = jax.random.split(key, X.shape[0])
-        yhat, grads = batch_apply(params, X, Z, keys)
+        yhat, (grads_wrt_inputs, full_output) = batch_apply(params, X, Z, keys)
         assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
+        aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
 
+        # kl
         qvalues_dir = ParamPath("shared/quantization/values")
         logstd_dir = ParamPath("shared/quantization/logstdevs")
         count_dir = ParamPath("shared/quantization/counts")
+        klw = as_schedule(kl_weight)(step)
         qvalues, logstds, counts = map(
             lambda path: jnp.concatenate(
                 tuple(map(lambda t: t[1], params[path].iter_leaves()))
@@ -119,14 +146,21 @@ def sorting_loss(stack: cmp.ComputeStack, training_config):
         kl_loss = (
             (counts * (qvalues**2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)).sum()
             / counts.sum()
-            * kl_weight
+            * klw
         )
-        sorting_loss_l2 = ((yhat.sort(axis=0) - Y.sort(axis=0)) ** 2).mean()
-        jax.debug.print("y {} yhat {}", Y, yhat)
 
-        Y_1, Y_2 = Y[::2], Y[1::2]
+        # negative grads
+        negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
+        ngp = as_schedule(negative_grad_penalty)(step)
+        ng_loss = negative_grads * ngp
 
-        return sorting_loss_l2 + kl_loss
+        # mse and sorted mse
+        mse = ((yhat - Y) ** 2).mean()
+        sorting_mse = ((yhat.sort(axis=0) - Y.sort(axis=0)) ** 2).mean()
+        smp = as_schedule(sorting_mse_weight)(step)
+        sorting_loss = sorting_mse * smp + mse * (1 - smp)
+
+        return sorting_loss + kl_loss + ng_loss, aux
 
     return loss_func
 
@@ -141,7 +175,7 @@ DEFAULT_OPTIMIZER = [
         kwargs={"max_norm": 1.0},
     ),
     PartialFunction(
-        func=optax.adam,
+        func=optax.adamw,
         kwargs={
             "learning_rate": PartialFunctionResult(
                 func="optax.warmup_cosine_decay_schedule",
@@ -158,25 +192,33 @@ DEFAULT_OPTIMIZER = [
 ]
 
 
+def create_counter() -> optax.GradientTransformation:
+    """Creates a no-op gradient transformation that just counts steps."""
+
+    class CounterState(NamedTuple):
+        count: jnp.ndarray  # type: ignore
+
+    def init_fn(params):
+        return CounterState(count=jnp.zeros([], jnp.int32))
+
+    def update_fn(updates, state, params=None):
+        return updates, CounterState(count=state.count + 1)
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
 class TrainingConfig(ArbitraryModel):
     # training parameters
-    loss_function: EncodedPartialFunction = Field(default=sorting_loss)
+    loss_function: EncodedPartialFunction = Field(default=l2_loss)
     optimizer_stack: list[EncodedPartialFunction] = DEFAULT_OPTIMIZER
 
     seed: Optional[int] = None
-    negative_grad_penalty: float = 0.1
-    kl_weight: float = 0
     batches_per_step: int = 128
     batch_size: int = 32
     n_epochs: float = 3
-    n_batches: int = (
-        2048  # can't really have "real" epochs because each network has a different qtty of data points
-    )
+    n_batches: int = 2048  # can't really have "real" epochs because each network has a different qtty of data points
     n_replicates: int = 1
-
     keep_in_history: List[str] = ["loss"]
-
-    # compute_config: cmp.ComputeConfig = cmp.DEFAULT_COMPUTE_CONFIG
 
     def model_post_init(self, *_, **__):
         if self.seed is None:
@@ -186,7 +228,8 @@ class TrainingConfig(ArbitraryModel):
 
     @property
     def optimizer(self):
-        return optax.chain(*[comp() for comp in self.optimizer_stack])
+        main_chain = [comp() for comp in self.optimizer_stack]
+        return optax.chain(create_counter(), *main_chain)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -200,7 +243,6 @@ def start(
     compute_config: cmp.ComputeConfig,
     loggers: Optional[List[Tuple[int, Callable]]] = None,
 ):
-
     import optax
 
     ut.logger.debug(f"Training config: {training_config}")
@@ -277,12 +319,12 @@ def start(
             zbatches,
             batch_keys,
         )
-        history = {'loss': []}
+        history = {"loss": []}
         params, opt_state = (start_params, start_opt_state)
         for i, x, y, z, k in zip(*xs):
             updt = non_scannable_step(params, opt_state, x, y, z, k)
-            params, opt_state = updt['params'], updt['opt']
-            history['loss'].append(updt['loss'])
+            params, opt_state = updt["params"], updt["opt"]
+            history["loss"].append(updt["loss"])
         return params, opt_state, history
 
     def per_replicate_step(start_params, start_opt_state, key, xbatches, ybatches, num_z):
@@ -294,8 +336,6 @@ def start(
             training_config.batches_per_step,
             training_config.batch_size,
         )
-        pscan = ut.progress_scan(training_config.batches_per_step, message="Training model")
-
         zbatches = jax.random.uniform(
             key, (training_config.batches_per_step, training_config.batch_size, num_z)
         )
