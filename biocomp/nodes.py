@@ -601,9 +601,9 @@ def transform_nn(
         # First, initializing quantization values for the rates (if not already done)
         # qnames is a list of names for the rate values available in this stack (1xuORf, ...)
         try:
-            qvalues = params[quantization_values_path]
+            qvalues = 1000 * params[quantization_values_path]
         except KeyError:
-            qvalues = jax.random.normal(key0, (len(quantization_names), rate_dim))
+            qvalues = jax.random.normal(key0, (len(quantization_names), rate_dim)) / 1000
             params[quantization_values_path] = qvalues
             # params[quantization_names_path] = tuple(quantization_names)
             # params.tag(quantization_names_path, ['non_jit', 'non_grad'])
@@ -611,7 +611,7 @@ def transform_nn(
         try:
             logstdevs = params[logstdevs_path]
         except KeyError:
-            logstdevs = jnp.zeros((len(quantization_names), rate_dim))
+            logstdevs = jnp.zeros((len(quantization_names), rate_dim)) - 4
             params[logstdevs_path] = logstdevs
 
         # assert qvalues.shape == (len(quantization_names), rate_dim)
