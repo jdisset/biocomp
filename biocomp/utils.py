@@ -1,30 +1,29 @@
 ### {{{                          --     imports     --
-from biocomp.logging_config import setup_logging, get_logger
-import yaml
+from biocomp.logging_config import get_logger
 import json
-import logging
-from rich.logging import RichHandler
-from rich import print as rprint
+from jax.experimental import checkify
+from pathlib import Path
+import pickle
 import inspect
+from dracon.merge import dict_like
+from typing import Type, Union
+from rich import print as rprint
 import sys
-import copy
 from copy import deepcopy
 import xxhash
 import time
-from pathlib import Path
 from tqdm import tqdm
 import jax
 from omegaconf import DictConfig, ListConfig
 from jax.experimental import host_callback
-from jax import jit, vmap, lax
+from jax import jit, lax
 from jax import tree_util as pytree
 import jax.numpy as jnp
-import pickle
 import json5
 import numpy as np
 from jax.tree_util import Partial as partial
 from contextlib import contextmanager
-from pkg_resources import get_distribution, resource_filename
+from pkg_resources import get_distribution
 import rich
 import subprocess
 import os
@@ -38,7 +37,6 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
 from typing import (
-    Union,
     List,
     Dict,
     Any,
@@ -48,7 +46,6 @@ from typing import (
     TypeVar,
     Generic,
     Annotated,
-    Type,
 )
 
 T = TypeVar("T")
@@ -58,6 +55,7 @@ DictLike = Union[Dict, DictConfig]
 
 
 class ArbitraryModel(BaseModel):
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         extra="forbid",
@@ -69,10 +67,6 @@ class ArbitraryModel(BaseModel):
 
     def model_dump_json(self, **kwargs) -> str:
         return super().model_dump_json(serialize_as_any=True, **kwargs)
-
-    def model_dump_yaml(self, **kwargs) -> str:
-        dict_repr = self.model_dump()
-        return yaml_dump(dict_repr, **kwargs)
 
     def __str__(self):
         return self.__repr__()
@@ -113,7 +107,6 @@ def timer(name=None, use_logger=True):
 
 # {{{                      --     data load/save     --
 # ···············································································
-import pickle
 
 
 def save(data: Any, path: Union[str, Path], overwrite: bool = False, rename_if_exists: bool = True):
@@ -174,7 +167,7 @@ def get_cache(
             cachepath = cachepath.resolve()
         except Exception as e:
             logger.error(f"Error creating cache directory: {e}")
-            logger.error(f"Not using cache.")
+            logger.error("Not using cache.")
             return gen_f()
         if cachepath.exists():
             logger.debug(f"Loading {sighash} from cache.")
@@ -196,7 +189,6 @@ def get_cache(
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ## {{{                  --     function serialization     --
 
 
@@ -391,33 +383,6 @@ def decode_type(
     raise ValueError(f"No type named {type_str} in modules {available_module_names}")
 
 
-def build_if_has_target(
-    value: Union[DictLike, T],
-    available_module_names: Optional[List[str]] = None,
-    enforce_type: Optional[Type[T]] = None,
-) -> Union[T, DictLike]:
-    """
-    If the dictionary has a key '_target_', will instantiate
-    an object of this type with the remaining keys as arguments.
-    """
-
-    if not dict_like(value):
-        if enforce_type is not None and not isinstance(value, enforce_type):
-            raise ValueError(f"Value {value} is not an instance of {enforce_type}")
-        return value
-
-    assert isinstance(value, DictLike)
-
-    if not "_target_" in value:  # type: ignore
-        return value
-
-    target_type = decode_type(value["_target_"], available_module_names)
-    if enforce_type is not None and not issubclass(target_type, enforce_type):
-        raise ValueError(f"Target type {target_type} not a subclass of {enforce_type}")
-    ctor_dict = {str(k): value[k] for k in value if k != "_target_"}
-    return target_type(**ctor_dict)
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 # ╭─────────────────────────────────────────────╮
@@ -486,8 +451,6 @@ generate_base_nested_config function to generate a template for the config file
 and merge it with the (potentially sparse) user's config file to get the full nested config.
 
 """
-
-import inspect
 
 
 _CONFIGURABLE_FUNCTIONS = {}
@@ -570,108 +533,31 @@ def resolve_if_ends_with(key: Any, suffix: str) -> bool:
     return isinstance(key, str) and key.endswith(suffix)
 
 
-def dict_like(obj) -> bool:
-    return (
-        hasattr(obj, "keys")
-        and hasattr(obj, "get")
-        and hasattr(obj, "__getitem__")
-        and hasattr(obj, "__contains__")
-        and hasattr(obj, "__iter__")
-        and hasattr(obj, "items")
-    )
+def updated_dict(d1, d2):
+    from dracon.merge import merged, MergeKey
 
-
-# define valid enum of merge modes: extend, replace, auto
-from typing import Type, Union
-
-
-def replace(d1, d2):
-    return deepcopy(d2)
-
-
-def extend(d1, d2):
-    if d1 is None:
-        return deepcopy(d2)
-    if d2 is None:
-        return deepcopy(d1)
-    return deepcopy(d2) + deepcopy(d1)
-
-
-DEFAULT_MERGE_MODES = {"replace": replace, "extend": extend, "auto": "auto"}
-
-
-def maybecopy(obj, deep: bool = True):
-    return deepcopy(obj) if deep else obj
-
-
-def updated_dict(
-    d1,
-    d2,
-    merge_mode: Optional[Dict[Union[Type, str], Union[str, Callable]]] = None,
-    deep: bool = True,
-) -> Dict:
-    if merge_mode is None:
-        merge_mode = {}
-
-    t1, t2 = type(d1), type(d2)
-    st1, st2 = str(t1.__name__), str(t2.__name__)
-
-    mmode = "auto"
-
-    if t1 in merge_mode or st1 in merge_mode:
-        mmode = merge_mode.get(t1, merge_mode.get(st1))
-        if mmode in DEFAULT_MERGE_MODES:
-            mmode = DEFAULT_MERGE_MODES[mmode]
-        if callable(mmode):
-            return mmode(d1, d2)
-
-    if t2 in merge_mode or st2 in merge_mode:
-        mmode = merge_mode.get(t2, merge_mode.get(st2))
-        if mmode in DEFAULT_MERGE_MODES:
-            mmode = DEFAULT_MERGE_MODES[mmode]
-        if callable(mmode):
-            return mmode(d1, d2)
-
-    if mmode == "auto":
-        if not dict_like(d1):
-            return maybecopy(d2, deep) if d2 is not None else maybecopy(d1, deep)
-        if not dict_like(d2):
-            return maybecopy(d1, deep) if d1 is not None else maybecopy(d2, deep)
-    else:
-        raise NotImplementedError(f"Cannot merge {t1} and {t2}")
-
-    assert mmode == "auto", f"Invalid merge mode {mmode}"
-    # they're both dicts:
-    res = {}
-    for key, val in d1.items():
-        if key in d2:
-            res[key] = updated_dict(d1[key], d2[key], merge_mode)
-        else:
-            res[key] = maybecopy(d1[key], deep)
-    for key, val in d2.items():
-        if not key in d1:
-            res[key] = maybecopy(val, deep)
-    return res
+    return merged(d1, d2, MergeKey(raw="<<{+<}[~<]"))
 
 
 def nested_resolve(
     input_dict: Any,
-    already_seen: Dict = {},
+    already_seen: Optional[Dict] = None,
     resolve_key: Callable[[str], bool] = partial(resolve_if_ends_with, suffix="_params"),
 ) -> Dict:
-    if not isinstance(input_dict, dict):
+    if already_seen is None:
+        already_seen = {}
+
+    if not dict_like(input_dict):
         return deepcopy(input_dict)
 
-    new_seen = deepcopy(already_seen)
+    new_seen = {}
     for k, v in input_dict.items():
-        new_seen[k] = updated_dict(already_seen.get(k, None), v) if resolve_key(k) else deepcopy(v)
+        if resolve_key(k):
+            new_seen[k] = updated_dict(already_seen.get(k), v) if k in already_seen else deepcopy(v)
+        else:
+            new_seen[k] = deepcopy(v)
 
-    new_dict = {
-        k: nested_resolve(deepcopy(new_seen[k]), deepcopy(new_seen), resolve_key)
-        for k in input_dict.keys()
-    }
-
-    return new_dict
+    return {k: nested_resolve(new_seen[k], new_seen, resolve_key) for k in input_dict.keys()}
 
 
 def generate_full_nested_config(
@@ -688,50 +574,8 @@ def generate_full_nested_config(
     return merged
 
 
-class BiocompYamlDumper(yaml.SafeDumper):
-    def increase_indent(self, flow=False, indentless=False):
-        return super(BiocompYamlDumper, self).increase_indent(flow, False)
-
-    def ignore_aliases(self, data):
-        return True
-
-    def represent_sequence(self, tag, sequence, flow_style=None):
-        return super(BiocompYamlDumper, self).represent_sequence(tag, sequence, flow_style=True)
-
-
-def delete_empty(d: Any):
-    if isinstance(d, dict):
-        newd = {}
-        for k, v in d.items():
-            if isinstance(v, dict):
-                if len(v) > 0:
-                    newv = delete_empty(v)
-                    if len(newv) > 0:
-                        newd[k] = newv
-            else:
-                newd[k] = copy.deepcopy(v)
-    else:
-        newd = copy.deepcopy(d)
-    return newd
-
-
-def yaml_dump(data, **kw):
-    return yaml.dump(data, Dumper=BiocompYamlDumper, **kw)
-
-
-def dump_default_config(namespace: str = "default"):
-    baseconf = generate_base_nested_config(add_defaults=True, namespace=namespace)
-    # baseconf = delete_empty(baseconf)
-    return yaml_dump(baseconf)
-    # dump using omegaconf
-    # conf = OmegaConf.create(baseconf)
-    # return OmegaConf.to_yaml(conf)
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{               --     loading constants and config     --
-
-from pathlib import Path
 
 
 BIOCOMP_ROOT_PATH = os.getenv("BIOCOMP_ROOT")
@@ -822,7 +666,6 @@ def dict_print(d: dict, indent=4):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
 ## {{{                     --     profiler context     --
 
 # with profiler('profile.prof'):
@@ -1136,39 +979,6 @@ def grid_map(F, xrange, yrange, meshres):
     return XX, YY, ZZ
 
 
-def hooked_scan(num_samples, on_update, call_rate=1):
-    import jax
-    from jax import lax
-    from jax.experimental import host_callback
-
-    def update(args, transform):
-        result, iternum = args
-        carry, acc = result
-        on_update(acc, iternum)
-
-    def _update_(result, iter_num):
-        return lax.cond(
-            (iter_num % call_rate == 0) | (iter_num == num_samples - 1),
-            lambda _: host_callback.id_tap(update, (result, iter_num), result=result),
-            lambda _: result,
-            operand=None,
-        )
-
-    def _hooked_scan(func):
-        @jax.jit
-        def wrapper(carry, x):
-            if type(x) is tuple:
-                iter_num, *_ = x
-            else:
-                iter_num = x
-            result = func(carry, x)
-            return _update_(result, iter_num)
-
-        return wrapper
-
-    return _hooked_scan
-
-
 def get_jaxpr(fun, *args, **kwargs):
     import jax
 
@@ -1182,6 +992,7 @@ def print_jaxpr(fun, *args, **kwargs):
 def get_xla(fun, *args, static_argnums=(), **kwargs):
     import jax
     import jaxlib.xla_extension as xla_ext
+    from rich.console import Console
 
     console = Console(highlighter=rich.highlighter.ReprHighlighter())
     c = jax.xla_computation(fun, static_argnums=static_argnums)(*args, **kwargs)
@@ -1219,98 +1030,6 @@ def value_and_jacrev(f, x):
     basis = jnp.eye(y.size, dtype=y.dtype)
     jac = jax.vmap(pullback)(basis)
     return y, jac
-
-
-class TQDMProgress:
-    def __init__(self, num_samples, message):
-        self.bar = tqdm(range(num_samples))
-        self.bar.set_description(message, refresh=False)
-
-    def update(self, count):
-        self.bar.update(count)
-
-    def close(self):
-        self.bar.close()
-        pass
-
-
-# --- tqdm progress bar for jax scan ---
-# This code is from this blog post: https://www.jeremiecoullon.com/2021/01/29/jax_progress_bar/
-def progress_scan(num_samples, progress_type=TQDMProgress, message=None, print_rate=None):
-    "Progress bar for a JAX scan"
-    if message is None:
-        message = ""
-        # message = f"Running for {num_samples:,} iterations"
-    bars = {}
-
-    if print_rate is None:
-        print_rate = max(1, int(num_samples / 100))
-
-    remainder = num_samples % print_rate
-
-    def create(arg, transform):
-        bars[0] = progress_type(num_samples, message)
-        pass
-
-    def update(arg, transform):
-        bars[0].update(arg)
-
-    def _update_progress_bar(iter_num):
-        "Updates tqdm progress bar of a JAX scan or loop"
-        _ = lax.cond(
-            iter_num == 0,
-            lambda _: host_callback.id_tap(create, None, result=iter_num),
-            lambda _: iter_num,
-            operand=None,
-        )
-
-        _ = lax.cond(
-            # update every multiple of `print_rate` except at the end
-            (iter_num % print_rate == 0) & (iter_num != num_samples - remainder),
-            lambda _: host_callback.id_tap(update, print_rate, result=iter_num),
-            lambda _: iter_num,
-            operand=None,
-        )
-
-        _ = lax.cond(
-            # update by `remainder`
-            iter_num == num_samples - remainder,
-            lambda _: host_callback.id_tap(update, remainder, result=iter_num),
-            lambda _: iter_num,
-            operand=None,
-        )
-
-    def close(arg, transform):
-        bars[0].close()
-
-    def _close_progress_bar(result, iter_num):
-        return lax.cond(
-            iter_num == num_samples - 1,
-            lambda _: host_callback.id_tap(close, None, result=result),
-            lambda _: result,
-            operand=None,
-        )
-
-    def _progress_bar_scan(func):
-        """Decorator that adds a progress bar to `body_fun` used in `lax.scan`.
-        Note that `body_fun` must either be looping over `np.arange(num_samples)`,
-        or be looping over a tuple who's first element is `np.arange(num_samples)`
-        This means that `iter_num` is the current iteration number
-        """
-
-        @jit
-        def wrapper_progress_bar(carry, x):
-            if type(x) is tuple:
-                iter_num, *_ = x
-            else:
-                iter_num = x
-            _update_progress_bar(iter_num)
-            result = func(carry, x)
-            return _close_progress_bar(result, iter_num)
-
-        return wrapper_progress_bar
-
-    return _progress_bar_scan
 
 
 def freeze(struct):
@@ -1358,9 +1077,6 @@ def set_enable_checks(value: bool):
     enable_checks = value
 
 
-from jax.experimental import checkify
-
-
 def check(*args, **kwargs):
     global enable_checks
     if enable_checks:
@@ -1370,10 +1086,9 @@ def check(*args, **kwargs):
         assert args[0](*args[1:], **kwargs)
 
 
-from jax.experimental.checkify import Error
-
-
 def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | checkify.float_checks)):
+    from jax.experimental.checkify import Error
+
     global enable_checks
     if enable_checks:
         logger.info(f"checkwrap enabled for {func}")

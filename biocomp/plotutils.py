@@ -1,14 +1,12 @@
 # {{{                          --     imports     --
 # ···············································································
-from dataclasses import dataclass, field
 import jax.numpy as jnp
-from functools import partial
 import numpy as np
 from biocomp import utils as ut
 from biocomp.datautils import DataRescaler
 import matplotlib.pyplot as plt
 from biocomp.network import Network
-from biocomp.utils import ArbitraryModel, build_if_has_target
+from biocomp.utils import ArbitraryModel
 import string
 import os
 from typing import (
@@ -216,30 +214,97 @@ class SimpleLayout(FigureLayout):
         if self.wspace is None and self.hspace is None:
             figax.figure.tight_layout()
         else:
-            # figax.figure.subplots_adjust(wspace=self.wspace, hspace=self.hspace)
             figax.figure.tight_layout(w_pad=self.wspace, h_pad=self.hspace)
 
 
+class GridLayout(FigureLayout):
+    rows: int = 1
+    cols: int = 1
+    axes_size: Optional[Pair[float]] = None
+    kwargs: Dict[str, Any] = {}
+    wspace: Optional[float] = None
+    hspace: Optional[float] = None
+    col_widths: Optional[List[float]] = None
+    row_heights: Optional[List[float]] = None
 
+    def __init__(self, **data):
+        super().__init__(**data)
+        self._validate_dimensions()
 
+    def _validate_dimensions(self) -> None:
+        if self.col_widths is not None:
+            if len(self.col_widths) != self.cols:
+                raise ValueError(f"col_widths must have length {self.cols}")
+            if abs(sum(self.col_widths) - 1.0) > 1e-6:
+                raise ValueError("col_widths must sum to 1")
 
-ValidatedFigureLayout = Annotated[
-    FigureLayout,
-    BeforeValidator(
-        partial(
-            build_if_has_target,
-            available_module_names=["biocomp.plotutils", "__main__"],
+        if self.row_heights is not None:
+            if len(self.row_heights) != self.rows:
+                raise ValueError(f"row_heights must have length {self.rows}")
+            if abs(sum(self.row_heights) - 1.0) > 1e-6:
+                raise ValueError("row_heights must sum to 1")
+
+    def make_figure(self, **kw) -> FigAx:
+        if self.axes_size is None:
+            default_size = get_figsize_default()
+            self.axes_size = default_size
+
+        wspace = 0.2 if self.wspace is None else self.wspace
+        hspace = 0.2 if self.hspace is None else self.hspace
+
+        spacing_width = wspace * (self.cols - 1) * self.axes_size[0]
+        spacing_height = hspace * (self.rows - 1) * self.axes_size[1]
+
+        margin = 0.05
+        margin_width = 2 * margin * self.axes_size[0]
+        margin_height = 2 * margin * self.axes_size[1]
+
+        # total figure size including spacing and margins
+        fig_width = (self.axes_size[0] * self.cols) + spacing_width + margin_width
+        fig_height = (self.axes_size[1] * self.rows) + spacing_height + margin_height
+
+        fig = plt.figure(figsize=(fig_width, fig_height))
+
+        gs = fig.add_gridspec(
+            self.rows,
+            self.cols,
+            width_ratios=self.col_widths,
+            height_ratios=self.row_heights,
+            wspace=wspace,
+            hspace=hspace,
+            top=1 - margin,
+            bottom=margin,
+            left=margin,
+            right=1 - margin,
+            **self.kwargs,
+            **kw,
         )
-    ),
-]
+
+        # Create axes as a nested list structure
+        axes = []
+        for i in range(self.rows):
+            row = []
+            for j in range(self.cols):
+                row.append(fig.add_subplot(gs[i, j]))
+            axes.append(row)
+
+        return FigAx(figure=fig, ax=axes)
+
+    def finalize(self, figax: FigAx) -> None:
+        """
+        Finalize the figure layout.
+        """
+        if self.wspace is None and self.hspace is None:
+            figax.figure.tight_layout()
 
 
 class FigureSpec(ArbitraryModel):
     title: Optional[str] = None
+    title_kwargs: Dict[str, Any] = {}
     output_dir: str = "./"
     output_file: Optional[str] = "unnamed.png"
     extra_args: Dict[str, Any] = {}
-    layout: ValidatedFigureLayout = Field(default_factory=SimpleLayout)
+    layout: FigureLayout = Field(default_factory=SimpleLayout)
 
     @property
     def output_path(self) -> Path:
@@ -256,7 +321,7 @@ class FigureSpec(ArbitraryModel):
 
     def finalize(self, figax: FigAx) -> None:
         if self.title is not None:
-            figax.figure.suptitle(self.title)
+            figax.figure.suptitle(self.title, **self.title_kwargs)
         self.layout.finalize(figax)
         if self.output_file is not None:
             self.save_figure(figax)

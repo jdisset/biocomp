@@ -242,10 +242,6 @@ def smooth_1d(
         margins=0.0,
     )
 
-    # Show only bottom and left spines
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
     xlabel = input_names[0] if xtitle is None else xtitle
     ylabel = output_name if ytitle is None else ytitle
 
@@ -253,9 +249,9 @@ def smooth_1d(
         # black line around
         ax.legend(loc="upper right", frameon=True, edgecolor="black")
 
-    if draw_xlabel:
+    if draw_xlabel and xlabel:
         ax.set_xlabel(xlabel)
-    if draw_ylabel:
+    if draw_ylabel and ylabel:
         ax.set_ylabel(ylabel)
 
     if title is not None:
@@ -317,9 +313,9 @@ def colorbar(
     orientation: Literal["horizontal", "vertical"] = "vertical",
     label_position: Literal["left", "right", "bottom", "top"] = "right",
     label_props: Dict = {},
-    show_minor_ticks=False,
     tick_props: Optional[ListOrSingle[Dict]] = None,
     border_width=0.7,
+    setup_transformed_axis_params: Dict = {},
 ):
     imlims = im.get_clim()
     c_vmin = imlims[0] if vlims[0] is None else vlims[0]
@@ -349,17 +345,12 @@ def colorbar(
     for spine in cbar.ax.spines.values():
         spine.set_linewidth(border_width)
 
-    mxticks = orientation == "horizontal" and show_minor_ticks
-    myticks = orientation == "vertical" and show_minor_ticks
-
     setup_transformed_axis(
         cbar.ax,
         yaxis_lims=[c_vmin, c_vmax],
         xaxis_lims=[c_vmin, c_vmax],
-        margins=0.0,
         rescaler=rescaler,
-        show_minor_xticks=mxticks,
-        show_minor_yticks=myticks,
+        **setup_transformed_axis_params,
     )
 
     if label is not None:
@@ -401,11 +392,10 @@ def smooth_2d(
     draw_ylabel=True,
     draw_colorbar=True,
     draw_colorbar_label=True,
-    show_minor_xticks=False,
-    show_minor_yticks=False,
     colorbar_params: Dict = {},
     knn_grid_params: Dict = {},
     heatmap_params: Dict = {},
+    setup_transformed_axis_params: Dict = {},
 ) -> Tuple:
     ylims = xlims if ylims == (None, None) else ylims
 
@@ -434,9 +424,9 @@ def smooth_2d(
     xlabel = input_names[0] if xtitle is None else xtitle
     ylabel = input_names[1] if ytitle is None else ytitle
 
-    if draw_xlabel:
+    if draw_xlabel and xlabel:
         ax.set_xlabel(xlabel)
-    if draw_ylabel:
+    if draw_ylabel and ylabel:
         ax.set_ylabel(ylabel)
 
     if title is not None:
@@ -447,14 +437,8 @@ def smooth_2d(
         xaxis_lims=xlims,
         yaxis_lims=ylims,
         rescaler=rescaler,
-        margins=0.0,
-        show_minor_xticks=show_minor_xticks,
-        show_minor_yticks=show_minor_yticks,
+        **setup_transformed_axis_params,
     )
-
-    # spines only on bottom and left
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
 
     vlabel = output_name if vtitle is None else vtitle
 
@@ -552,8 +536,6 @@ def smooth_line_plot(
     ax.set_ylabel(output_name)
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(0, 1)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
 
     vmin, vmax = vlims
     vmin = vmin if vmin is not None else np.nanmin(z)

@@ -65,6 +65,7 @@ DEFAULT_CMAP_NAME = BIOCOMP_COLORS["default_color_map"] or "viridis"
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                   --     log_spline_log scale     --
 
+
 def get_bio_color(name, default="k"):
     colors = {"ebfp": "#529edb", "eyfp": "#fbda73", "mkate": "#f75a5a", "neongreen": "#33f397"}
     colors["fitc"] = colors["neongreen"]
@@ -234,51 +235,65 @@ class PowerFormatter(ticker.Formatter):
         return format_powers(v, None)
 
 
+# def setup_transformed_xaxis(
+#     ax,
+#     xaxis_lims,
+#     rescaler,
+#     margins=0.05,
+#     show_minor=False,
+#     **kw,
+# ):
+#     xlims_tr = np.asarray(xaxis_lims)
+#     xlims_inv = rescaler.inv(np.asarray(xlims_tr))
+#     p10 = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1])
+#     xlims_margin = xlims_tr + np.array([-1, 1]) * margins * np.diff(xlims_tr)
+#     try:
+#         ax.set_xlim(xlims_margin)
+#         ax.set_xticks(rescaler.fwd(p10))  # major ticks
+#         ax.xaxis.set_major_formatter(PowerFormatter(p10, **kw))
+#         p10_minor = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1], resolution=10)
+#         ax.set_xticks(rescaler.fwd(p10_minor), minor=True)
+#         if show_minor:
+#             ax.xaxis.set_minor_formatter(PowerFormatter(p10_minor, **kw))
+#
+#         ax.tick_params(
+#             bottom=plt.rcParams["xtick.bottom"],
+#             labelbottom=plt.rcParams["xtick.labelbottom"],
+#             which="both",
+#         )
+#         ax.spines["bottom"].set_visible(plt.rcParams["xtick.bottom"])
+#
+#     except ValueError as e:
+#         logger.error(f"Error setting up x-axis: {e}")
+#
+#     return xlims_inv
 
-def setup_transformed_xaxis(
-    ax,
-    xaxis_lims,
-    rescaler,
-    margins=0.05,
-    show_minor=False,
-    **kw,
-):
-    xlims_tr = np.asarray(xaxis_lims)
-    xlims_inv = rescaler.inv(np.asarray(xlims_tr))
-    p10 = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1])
-    xlims_margin = xlims_tr + np.array([-1, 1]) * margins * np.diff(xlims_tr)
-    try:
-        ax.set_xlim(xlims_margin)
-        ax.set_xticks(rescaler.fwd(p10))  # major ticks
-        ax.xaxis.set_major_formatter(PowerFormatter(p10, **kw))
-        p10_minor = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1], resolution=10)
-        ax.set_xticks(rescaler.fwd(p10_minor), minor=True)
-        if show_minor:
-            ax.xaxis.set_minor_formatter(PowerFormatter(p10_minor, **kw))
-    except ValueError as e:
-        logger.error(f"Error setting up x-axis: {e}")
 
-    return xlims_inv
-
-
-def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, show_minor=False, **kw):
-    ylims_tr = np.asarray(yaxis_lims)
-    ylims_inv = rescaler.inv(np.asarray(ylims_tr))
-    p10 = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1])
-    ylims_margin = ylims_tr + np.array([-1, 1]) * margins * np.diff(ylims_tr)
-    try:
-        ax.set_ylim(ylims_margin)
-        ax.set_yticks(rescaler.fwd(p10))
-        ax.yaxis.set_major_formatter(PowerFormatter(p10, **kw))
-        p10_minor = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1], resolution=10)
-        ax.set_yticks(rescaler.fwd(p10_minor), minor=True)
-        if show_minor:
-            ax.yaxis.set_minor_formatter(PowerFormatter(p10_minor, **kw))
-
-    except Exception as e:
-        logger.error(f"Error setting up y-axis: {e}")
-
-    return ylims_inv
+# def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, show_minor=False, **kw):
+#     ylims_tr = np.asarray(yaxis_lims)
+#     ylims_inv = rescaler.inv(np.asarray(ylims_tr))
+#     p10 = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1])
+#     ylims_margin = ylims_tr + np.array([-1, 1]) * margins * np.diff(ylims_tr)
+#     try:
+#         ax.set_ylim(ylims_margin)
+#         ax.set_yticks(rescaler.fwd(p10))
+#         ax.yaxis.set_major_formatter(PowerFormatter(p10, **kw))
+#         p10_minor = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1], resolution=10)
+#         ax.set_yticks(rescaler.fwd(p10_minor), minor=True)
+#         if show_minor:
+#             ax.yaxis.set_minor_formatter(PowerFormatter(p10_minor, **kw))
+#
+#         ax.tick_params(
+#             left=plt.rcParams["ytick.left"],
+#             labelleft=plt.rcParams["ytick.labelleft"],
+#             which="both",
+#         )
+#         ax.spines["left"].set_visible(plt.rcParams["ytick.left"])
+#
+#     except Exception as e:
+#         logger.error(f"Error setting up y-axis: {e}")
+#
+#     return ylims_inv
 
 
 TickDict = Dict[str, NdArray]
@@ -305,24 +320,134 @@ def get_transformed_ticks_and_labels(
     return ticks, labels
 
 
+def setup_transformed_axis_generic(
+    ax,
+    axis_lims,
+    rescaler,
+    axis="x",  # 'x' or 'y'
+    margins=0.0,
+    show_minor=False,
+    major_tick_length=None,
+    major_tick_width=None,
+    minor_tick_length=None,
+    minor_tick_width=None,
+    label_fontsize=None,
+    show_labels=True,
+    **kw,
+):
+    # Get the appropriate axis object and methods based on axis parameter
+    axis_obj = getattr(ax, f"{axis}axis")
+    set_lim = getattr(ax, f"set_{axis}lim")
+    set_ticks = getattr(ax, f"set_{axis}ticks")
+
+    # Get the appropriate rcParams prefix
+    rc_prefix = f"{axis}tick"
+
+    lims_tr = np.asarray(axis_lims)
+    lims_inv = rescaler.inv(np.asarray(lims_tr))
+    p10 = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1])
+    lims_margin = lims_tr + np.array([-1, 1]) * margins * np.diff(lims_tr)
+
+    try:
+        set_lim(lims_margin)
+        set_ticks(rescaler.fwd(p10))  # major ticks
+        axis_obj.set_major_formatter(PowerFormatter(p10, **kw))
+
+        p10_minor = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1], resolution=10)
+        set_ticks(rescaler.fwd(p10_minor), minor=True)
+        if show_minor:
+            axis_obj.set_minor_formatter(PowerFormatter(p10_minor, **kw))
+
+        # get the appropriate spine and tick params
+        spine_name = "bottom" if axis == "x" else "left"
+        tick_params_dict = {
+            spine_name: plt.rcParams[f"{rc_prefix}.{spine_name}"],
+            f"label{spine_name}": plt.rcParams[f"{rc_prefix}.label{spine_name}"],
+            "which": "both",
+        }
+
+        # reapply all tick and spine visibility settings
+        ax.tick_params(axis=axis, **tick_params_dict)
+
+        # major tick properties
+        if major_tick_length is not None or major_tick_width is not None:
+            ax.tick_params(
+                axis=axis,
+                which="major",
+                length=major_tick_length
+                if major_tick_length is not None
+                else plt.rcParams[f"{rc_prefix}.major.size"],
+                width=major_tick_width
+                if major_tick_width is not None
+                else plt.rcParams[f"{rc_prefix}.major.width"],
+            )
+
+        # minor tick properties
+        if minor_tick_length is not None or minor_tick_width is not None:
+            ax.tick_params(
+                axis=axis,
+                which="minor",
+                length=minor_tick_length
+                if minor_tick_length is not None
+                else plt.rcParams[f"{rc_prefix}.minor.size"],
+                width=minor_tick_width
+                if minor_tick_width is not None
+                else plt.rcParams[f"{rc_prefix}.minor.width"],
+            )
+
+        if label_fontsize is not None:
+            ax.tick_params(axis=axis, labelsize=label_fontsize)
+
+        if not show_labels:
+            if axis == "x":
+                ax.set_xticklabels([])
+            else:
+                ax.set_yticklabels([])
+
+        # reapply spine visibility
+        ax.spines[spine_name].set_visible(plt.rcParams[f"{rc_prefix}.{spine_name}"])
+
+    except ValueError as e:
+        logger.error(f"Error setting up {axis}-axis: {e}")
+    return lims_inv
+
+
+@configurable
+def setup_xaxis(ax, xaxis_lims, rescaler, **kw):
+    return setup_transformed_axis_generic(ax, xaxis_lims, rescaler, axis="x", **kw)
+
+
+@configurable
+def setup_yaxis(ax, yaxis_lims, rescaler, **kw):
+    return setup_transformed_axis_generic(ax, yaxis_lims, rescaler, axis="y", **kw)
+
+
+@configurable
 def setup_transformed_axis(
     ax,
     xaxis_lims=None,
     yaxis_lims=None,
     rescaler=None,
-    margins=0.05,
-    transform=None,
-    show_minor_xticks=False,
-    show_minor_yticks=False,
+    setup_xaxis_params={},
+    setup_yaxis_params={},
     **kw,
 ):
     if xaxis_lims is not None:
-        xaxis_lims = setup_transformed_xaxis(
-            ax, xaxis_lims, rescaler, margins=margins, show_minor=show_minor_xticks, **kw
+        xaxis_lims = setup_xaxis(
+            ax,
+            xaxis_lims,
+            rescaler,
+            **setup_xaxis_params,
+            **kw,
         )
+
     if yaxis_lims is not None:
-        yaxis_lims = setup_transformed_yaxis(
-            ax, yaxis_lims, rescaler, margins=margins, show_minor=show_minor_yticks, **kw
+        yaxis_lims = setup_yaxis(
+            ax,
+            yaxis_lims,
+            rescaler,
+            **setup_yaxis_params,
+            **kw,
         )
 
     return xaxis_lims, yaxis_lims
@@ -676,14 +801,12 @@ def heatmap(
     opacity=1,
     bad_color="#EEEEEE00",
     clip_to_lowest_contour=False,
-    heatmap_kwargs=None,
 ):
     if isinstance(ax, list):
         ax = ax[0]
 
     cmap = plt.get_cmap(cmap)
     cmap.set_bad(color=bad_color)
-    has_bad = np.isnan(output_values)
 
     full_transform = ax.transData
     if axtransform is not None:
@@ -712,9 +835,8 @@ def heatmap(
     if np.isnan(Z).all():
         Z = np.zeros_like(Z)
 
-    # Create the contours first
     cntrs = None
-    clip_cntrs = None  # New variable for invisible clipping contours
+    clip_cntrs = None
     if contours is not None:
         Z_contour = Z.copy()
         # also set the border to 0
