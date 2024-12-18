@@ -143,13 +143,12 @@ def get_default_input_order(net, cotx):
     then to cotx that contain a ERN_recog_site_5p
     then to the rest
 
-    need to use net.get_input_proteins() which returns the name of the fluo marker 
-    in each cotx. 
+    need to use net.get_input_proteins() which returns the name of the fluo marker
+    in each cotx.
     We then use that original order to specify a new order based on the priority rules
     TODO
 
     """
-
 
 
 def cotx_ratios_str(cotx):

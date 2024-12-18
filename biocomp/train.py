@@ -99,6 +99,8 @@ def l2_loss(stack: cmp.ComputeStack, training_config, negative_grad_penalty=1.0,
         check_XYZ_new(X, Y, Z, stack)
         params = ParameterTree.merge(dynamic, static)
         keys = jax.random.split(key, X.shape[0])
+        # jax.debug.print("X {}", X)
+        # jax.debug.print("Z {}", Z)
         yhat, (grads_wrt_inputs, full_output) = batch_apply(params, X, Z, keys)
         assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
         aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
@@ -117,12 +119,17 @@ def l2_loss(stack: cmp.ComputeStack, training_config, negative_grad_penalty=1.0,
             counts * (qvalues**2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)
         ).sum() / counts.sum()
 
+        # jax.debug.print("yhat {}", yhat)
+        # jax.debug.print("Y {}", Y)
+
         mse = ((yhat - Y) ** 2).mean()
+        # jax.debug.print("mse {}", mse)
         negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
 
         ngp = as_schedule(negative_grad_penalty)(step)
 
         loss = mse + ngp * negative_grads + klw * kl_loss
+        # jax.debug.print("loss {}", loss)
 
         return loss, aux
 
@@ -135,6 +142,7 @@ def sorting_loss(
     negative_grad_penalty=1.0,
     kl_weight=0.1,
     sorting_mse_weight=0.1,
+    percent=1,
 ):
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
@@ -158,7 +166,7 @@ def sorting_loss(
             (qvalues_dir, logstd_dir, count_dir),
         )
         kl_loss = (
-            (counts * (qvalues**2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)).sum()
+            (counts * ((qvalues * 1000) ** 2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)).sum()
             / counts.sum()
             * klw
         )
@@ -168,9 +176,21 @@ def sorting_loss(
         ngp = as_schedule(negative_grad_penalty)(step)
         ng_loss = negative_grads * ngp
 
+        pct = as_schedule(percent)(step)
+        select = jnp.linspace(0, 1, X.shape[0]) > pct
+        Y = jnp.where(
+            select[:, None],
+            jnp.zeros(Y.shape),
+            Y,
+        )
+        yhat = jnp.where(
+            select[:, None],
+            jnp.zeros(Y.shape),
+            yhat,
+        )
         # mse and sorted mse
         mse = ((yhat - Y) ** 2).mean()
-        sorting_mse = ((yhat.sort(axis=0) - Y.sort(axis=0)) ** 2).mean()
+        sorting_mse = ((yhat.sort(axis=0) - Y.sort(axis=0)) ** 2).mean() / pct
         smp = as_schedule(sorting_mse_weight)(step)
         sorting_loss = sorting_mse * smp + mse * (1 - smp)
 
@@ -454,6 +474,7 @@ def start(
             loss_history.append(step_history["loss"])
         qvalues_dir = ParamPath("shared/quantization/values")
         qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
+        jax.debug.print("qvalues {}", qvalues)
 
         for t, l in loggers:
             if t is not None:
