@@ -6,6 +6,8 @@ import sqlite3
 from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast, Sequence, Literal
 from itertools import product
 from pydantic.dataclasses import dataclass
+from pydantic import BaseModel, Field, ConfigDict
+from typing import Optional, Dict, List, Tuple
 
 
 part_type_to_parameter_name = {"promoter": "tc_rate", "uORF_group": "tl_rate"}
@@ -252,7 +254,9 @@ class TranscriptionUnit:
     def __get_parameters(self):
         for s in self.slots:
             if s.maps_to_parameter is not None:
-                assert s.maps_to_parameter not in self.params
+                assert (
+                    s.maps_to_parameter not in self.params
+                ), f"Parameter {s.maps_to_parameter} already in params"
                 self.params[s.maps_to_parameter] = s.part
         # then for each param that is not in the slots, add it with default value
         for _, p in part_type_to_parameter_name.items():
@@ -359,38 +363,67 @@ def transcription_unit_from_L1(l1id: str, lib: PartsLibrary) -> TranscriptionUni
     return TranscriptionUnit([Slot(lib, p) for p in parts])
 
 
-# main class: a network of interacting transcription units
-class Network:
-    def __init__(
-        self,
+class Network(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+
+    lib: PartsLibrary
+    name: str = Field(alias="recipe_name")
+    custom_outputs: Optional[List] = None
+    metadata: Optional[Dict] = None
+
+    # Raw recipe data
+    raw_tu_in_sources: Optional[List[Tuple[str, str, int]]] = None
+    raw_aggregations: Optional[List[Tuple[int, str, float]]] = None
+
+    # Processed recipe data
+    tu_inputs: Optional[pd.DataFrame] = None
+    tu_in_sources: Optional[pd.DataFrame] = None
+    aggregations: Optional[pd.DataFrame] = None
+    transcription_units: Optional[Dict[str, TranscriptionUnit]] = None
+
+    # Graph data
+    central_dogma_graph: Optional[pd.DataFrame] = None
+    compute_graph: Optional[pd.DataFrame] = None
+
+    _n_inputs: Optional[int] = None
+    _n_outputs: Optional[int] = None
+    _output_proteins: Optional[List[str]] = None
+
+    def __init__(self, *args, **kwargs):
+        if args and isinstance(args[0], PartsLibrary):
+            # If called with positional arguments, assume it's the legacy style
+            if len(args) > 4:
+                raise ValueError("Too many positional arguments")
+
+            # Map positional arguments to their respective parameter names
+            params = ["lib", "recipe_name", "custom_outputs", "metadata"]
+            new_kwargs = {}
+
+            # Convert positional args to keyword args
+            for i, arg in enumerate(args):
+                new_kwargs[params[i]] = arg
+
+            # Add any additional keyword arguments
+            new_kwargs.update(kwargs)
+
+            # Call parent's init with keyword arguments
+            super().__init__(**new_kwargs)
+        else:
+            # Normal Pydantic initialization
+            super().__init__(*args, **kwargs)
+
+    @classmethod
+    def legacy_init(
+        cls,
         lib: PartsLibrary,
         recipe_name: str,
         custom_outputs: Optional[List] = None,
         metadata: Optional[Dict] = None,
-    ):
-        # general network information
-        self.lib = lib
-        self.name: str = recipe_name
-        self.custom_outputs = custom_outputs
-        self.metadata: Optional[Dict] = metadata
-
-        # raw recipe data, used to build the network and generate a unique signature
-        self.raw_tu_in_sources: Optional[List[Tuple[str, str, int]]] = None
-        self.raw_aggregations: Optional[List[Tuple[int, str, float]]] = None
-
-        # processed recipe data
-        self.tu_inputs: Optional[pd.DataFrame] = None
-        self.tu_in_sources: Optional[pd.DataFrame] = None
-        self.aggregations: Optional[pd.DataFrame] = None
-        self.transcription_units: Optional[Dict[str, TranscriptionUnit]] = None
-
-        # building the network produces these 2 graphs
-        self.central_dogma_graph: Optional[pd.DataFrame] = None
-        self.compute_graph: Optional[pd.DataFrame] = None
-
-        # helper "private" member variables
-        self.__n_inputs = None
-        self.__n_outputs = None
+    ) -> "Network":
+        instance = cls(
+            lib=lib, recipe_name=recipe_name, custom_outputs=custom_outputs, metadata=metadata
+        )
+        return instance
 
     def copy(self):
         from copy import deepcopy
@@ -509,7 +542,7 @@ class Network:
         n.tu_in_sources.sort_values(by="position", inplace=True)
 
         # aggregations = [[source1, source2, source3, ...], ...]
-        assert n.aggregations is None
+        assert n.aggregations is None, "Aggregations already set"
         n.aggregations = (
             pd.DataFrame(
                 [{"id": i, "source": s, "ratio": 1} for i, a in enumerate(aggregations) for s in a]
@@ -526,12 +559,12 @@ class Network:
     ##────────────────────────────────────────────────────────────────────────────}}}
 
     def get_compute_types(self):
-        assert isinstance(self.compute_graph, pd.DataFrame)
+        assert isinstance(self.compute_graph, pd.DataFrame), "Compute graph not built"
         node_dict = self.compute_graph.groupby("type").apply(lambda x: x.index.to_list()).to_dict()
         return node_dict
 
     def build(self):
-        assert self.transcription_units is not None
+        assert self.transcription_units is not None, "No transcription units in recipe"
         assert len(self.transcription_units) > 0, f"No transcription units in recipe {self.name}"
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
@@ -637,9 +670,9 @@ class Network:
     # {{{                 --     build central dogma graph     --
     # ···············································································
 
-    def __build_central_dogma_graph(self, custom_outputs=None):
+    def __build_central_dogma_graph(self, custom_outputs_parts=None):
         tu: List[dict] = []
-        assert self.transcription_units is not None
+        assert self.transcription_units is not None, "No transcription units in network"
 
         def make_hashable(x):
             return tuple(sorted((k, tuple(v)) for k, v in x.items()))
@@ -662,7 +695,7 @@ class Network:
                     "PRT_params_hashable": make_hashable(prt_params),
                 }
             )
-        assert tu is not None
+        assert tu is not None, "No transcription units in network"
         tudf = pd.DataFrame(tu)
 
         # transcription units are never grouped
@@ -773,9 +806,9 @@ class Network:
 
         # And finally add information about the output of the whole graph:
         # by default outputs are all parts whose category is fluo_marker
-        outputs = (custom_outputs if custom_outputs is not None else []) + self.lib.parts[
-            self.lib.parts["category"] == "fluo_marker"
-        ].index.tolist()
+        outputs = (
+            custom_outputs_parts if custom_outputs_parts is not None else []
+        ) + self.lib.parts[self.lib.parts["category"] == "fluo_marker"].index.tolist()
 
         containsOutput = lambda l, outputs: any([o in l for o in outputs])
         cdg["is_output"] = False
@@ -796,7 +829,7 @@ class Network:
     # but it's definitely not a priority right now
 
     def __mergeSources(self, cdf, uidGen):
-        assert self.central_dogma_graph is not None
+        assert self.central_dogma_graph is not None, "mergeSources: Central dogma graph not built"
         # in the compute graph,
         # merge TUs that are from a same source into a single source node (aka plasmid)
 
@@ -815,7 +848,7 @@ class Network:
         sources = {}  # plasmid name -> list of compute nodes ids
 
         # tu_in_sources contains the list of TUs in each source, sorted by position
-        assert self.tu_in_sources is not None
+        assert self.tu_in_sources is not None, "No TU in sources"
 
         for i, r in self.tu_in_sources.groupby("source").agg(list).iterrows():
             # but you can have sources in the db that are not in the recipe
@@ -850,7 +883,7 @@ class Network:
         return cdf
 
     def __addAggregations(self, cdf, uidGen):
-        assert self.aggregations is not None
+        assert self.aggregations is not None, "No aggregations in network"
         for i, r in self.aggregations.iterrows():
             if len(r.source) > 1:
                 nid = uidGen()
@@ -890,7 +923,7 @@ class Network:
         ut.logger.debug(f"Building compute graph for recipe {self.name}")
         ut.logger.debug(f"cdg: \n{cdg}\n")
         assert cdg is not None, "central dogma graph not built"
-        assert isinstance(cdg, pd.DataFrame)
+        assert isinstance(cdg, pd.DataFrame), f"cdg is not a DataFrame: {type(cdg)}"
         newnodes = []
 
         # we start building the compute graph by adding the output:
@@ -1092,18 +1125,24 @@ class Network:
     ## ─────────────────────────────────────────────────────────────────────────────
 
     def get_output_compute_node(self) -> pd.Series:
-        assert self.is_built() and isinstance(self.compute_graph, pd.DataFrame)
+        assert isinstance(self.compute_graph, pd.DataFrame), "Network not built"
         onode = self.compute_graph[self.compute_graph["type"] == "output"]
         assert len(onode) == 1, f"Invalid number of output nodes: {len(onode)}"
         return onode.iloc[0]
 
     def get_output_proteins(self) -> List[str]:
         """Returns the names of the proteins that are outputs of the network"""
-        onode = self.get_output_compute_node()
-        if "cdg_input" not in onode:
-            raise ValueError(f"Invalid output node: {onode}")
-        assert isinstance(self.central_dogma_graph, pd.DataFrame)
-        return [self.central_dogma_graph.loc[cdg_id]["content"][0] for cdg_id in onode["cdg_input"]]
+        if not hasattr(self, "_output_proteins") or self._output_proteins is None:
+            onode = self.get_output_compute_node()
+            if "cdg_input" not in onode:
+                raise ValueError(f"Invalid output node: {onode}")
+            assert isinstance(
+                self.central_dogma_graph, pd.DataFrame
+            ), "get_output_proteins: Central dogma graph not built"
+            self._output_proteins = [
+                self.central_dogma_graph.loc[cdg_id]["content"][0] for cdg_id in onode["cdg_input"]
+            ]
+        return self._output_proteins
 
     def get_nb_outputs(self) -> int:
         if self.__n_outputs is None:
@@ -1126,12 +1165,12 @@ class Network:
         """Returns the names of the proteins that are inputs of the inverted network, ordered"""
         mapping = self.get_inverted_input_positions(include_biases)
         output_proteins = self.get_output_proteins()
-        assert len(mapping) <= len(output_proteins)
+        assert len(mapping) <= len(output_proteins), f"Invalid mapping: {mapping}"
         return [output_proteins[mapping[i]] for i in range(len(mapping))]
 
     def get_inverted_input_positions(self, include_biases: bool = False) -> Dict[int, int]:
         """Returns a mapping from input position to output position"""
-        assert isinstance(self.compute_graph, pd.DataFrame)
+        assert isinstance(self.compute_graph, pd.DataFrame), "Compute graph not built"
         mapping = {}  # input number -> output position
         mask = self.compute_graph["type"] == "input"
         if include_biases:
@@ -1391,6 +1430,10 @@ DEFAULT_INVERSE_DICT = {
 
 
 def get_invertible_paths(network, start_node_id, inverse_dict):
+    print(
+        f"get_invertible_paths: {start_node_id}. Node type: {network.compute_graph.loc[start_node_id].type}"
+    )
+
     def _is_invertible(node):
         invertible = node.type in inverse_dict and len(node["input_from"]) <= 1
         return invertible
@@ -1403,6 +1446,7 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
     def _get_invertible_paths(network, node_id, path, visited, input_slot=None):
         nonlocal paths
         node = network.compute_graph.loc[node_id]
+        print(f"node: {node_id}, {node.type}. {_is_invertible(node)=}")
 
         if node.type == "output":
             # we reached an output node, we store the path and stop the search
@@ -1458,6 +1502,7 @@ def inverted_network(
     def _inverted_network():
         # we compute a list of invertible paths that link each start nodes to the output
         inv_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
+        print(f"inv_paths: {inv_paths}")
 
         # For each start_node, we might have more than one path.
         # In 'shortest' mode, we just pick the shortest one.
@@ -1548,6 +1593,7 @@ def inverted_network(
         return new_networks
 
     signature = f"{nodes}::{mode}::{inverse_dict}::{network.get_signature()}"
+    print(f"signature: {signature}")
 
     return ut.get_cache(lambda: _inverted_network(), signature, cache_location=use_cache)
 
