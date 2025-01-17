@@ -22,6 +22,7 @@ from typing import List, Tuple, Callable, Optional, NamedTuple
 from pydantic import Field
 import jax
 from jax.tree_util import Partial
+from biocomp.logging_config import get_logger
 import jax.numpy as jnp
 import optax
 
@@ -55,31 +56,6 @@ def check_XYZ_new(X, Y, Z, stack):
     assert (
         Y.shape[1] == nb_outputs
     ), "Y must have as many columns as the total number of outputs in the stack"
-
-
-def quantile_loss_with_grads(stack, huber_quantile_loss_delta, negative_grad_penalty):
-    import jax
-    import jax.numpy as jnp
-
-    batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
-
-    def loss_func(dynamic, static, X, Y, Z, key):
-        check_XYZ(X, Y, Z, stack)
-        params = ParameterTree.merge(dynamic, static)
-        keys = jax.random.split(key, X.shape[0])
-        yhat, grads = batch_apply(params, X, Z, keys)
-        assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
-        error = yhat - Y
-        quantile_loss = jnp.mean(tu.huber_quantile_loss(error, Z, delta=huber_quantile_loss_delta))
-
-        # grads is the concatenated and flattened jacobian of
-        # translate, transcript, and output nodes wrt their inputs
-        # they should be monotonically increasing so we add a loss term
-
-        negative_grads = jnp.mean(jnp.clip(-grads, 0, None))
-        return quantile_loss + negative_grad_penalty * negative_grads
-
-    return loss_func
 
 
 def as_schedule(value_or_callable):
@@ -201,6 +177,8 @@ def sorting_loss(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+logger = get_logger(__name__)
+
 ### {{{                  --     training config     --
 
 DEFAULT_OPTIMIZER = [
@@ -250,9 +228,7 @@ class TrainingConfig(ArbitraryModel):
     batches_per_step: int = 128
     batch_size: int = 32
     n_epochs: float = 3
-    n_batches: int = (
-        2048  # can't really have "real" epochs because each network has a different qtty of data points
-    )
+    n_batches: int = 2048  # can't really have "real" epochs because each network has a different qtty of data points
     n_replicates: int = 1
     keep_in_history: List[str] = ["loss"]
 
@@ -406,26 +382,29 @@ def start(
         )
         return jax.vmap(Partial(per_replicate_step, num_z=num_z))(params, opt_state, keys, xs, ys)
 
-    with ut.timer("Compiling the step function"):
-        xb = ut.get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
-        yb = ut.get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
-        num_z = static["global/number_of_quantile_variables"]
-        assert num_z.shape == (training_config.n_replicates,)
-        assert jnp.all(
-            num_z == num_z[0]
-        ), "All replicates must have the same number of quantile variables"
-        num_z = int(num_z[0])
+    xb = ut.get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
+    yb = ut.get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
 
-        # lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
-        # compiled_step = lowered.compile()
-        compiled_step_2 = jax.jit(Partial(step, num_z=num_z))
+    num_z = static["global/number_of_quantile_variables"]
+    assert num_z.shape == (training_config.n_replicates,)
+    assert jnp.all(
+        num_z == num_z[0]
+    ), "All replicates must have the same number of quantile variables"
+    num_z = int(num_z[0])
+
+    ut.logger.info("Compiling training step")
+    t0 = time.time()
+    lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
+    compiled_step = lowered.compile()
+    ut.logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
 
     # --- main training loop
     loggers = loggers or []
 
-    # call all loggers at the beginning of the training
-    for _, l in loggers:
-        l(step=0, training_config=training_config)
+    for t, l in loggers:
+        # call loggers at the beginning of the training if they have a period of 0
+        if t == 0:
+            l(step=0, training_config=training_config)
 
     ut.logger.info(f"Begin training for {total_steps} steps")
 
@@ -465,7 +444,7 @@ def start(
             axis=1,
         )
 
-        params, opt_state, step_history = compiled_step_2(params, opt_state, step_key, xb, yb)
+        params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
 
         step_history["step_time"] = time.time() - t0
         step_history["latest_params"] = params
@@ -478,7 +457,8 @@ def start(
 
         for t, l in loggers:
             if t is not None:
-                if (t == 0 or (i % t == 0 and t > 0)) or i == total_steps:
+                if t == 0 or (i % t == 0 and t > 0):
+                    ut.logger.debug(f"Calling logger {l} at step {i}")
                     l(
                         step=i,
                         training_config=training_config,
@@ -487,6 +467,7 @@ def start(
 
     for t, l in loggers:
         if t is None or t == -1:
+            ut.logger.debug(f"Calling logger {l} at the end of training")
             l(
                 step=total_steps,
                 training_config=training_config,
