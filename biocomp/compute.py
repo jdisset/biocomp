@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from queue import PriorityQueue
 
 from collections import deque
-from typing import Tuple, List, Dict, Callable, Optional, Union, Any, Iterable, NewType
+from typing import Tuple, List, Dict, Callable, Optional, Union, Any, Iterable, NewType, Sequence
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -98,7 +98,6 @@ class VirtualNode:
 
     @staticmethod
     def generate_type_signature(network: Network, compute_node_id: int) -> str:
-        assert network.is_built(), "Network not built"
         assert network.compute_graph is not None, "No compute graph"
         ntype = network.compute_graph.at[compute_node_id, "type"]
         n_inputs = len(network.compute_graph.at[compute_node_id, "input_from"])
@@ -213,16 +212,25 @@ class ComputeLayer:
             input_shapes = []
             for input_net_id, input_compute_node_id, input_slot_id in n_inp:
                 input_layer_id, _ = stack.node_map[(input_net_id, input_compute_node_id)]
+                print(f"{input_layer_id=}")
                 assert input_layer_id < self.layer_id, "Input node is in a later layer"
                 assert stack.layers[input_layer_id].is_built, "Input layer is not built"
                 input_layer_output_shapes = stack.layers[input_layer_id].f_out_shapes
+                print(f"{input_layer_output_shapes=}")
                 assert input_slot_id < len(
                     input_layer_output_shapes
                 ), f"Input slot {input_slot_id} is out of range"
-                input_shapes.append(input_layer_output_shapes[input_slot_id])
+                print(f"{input_layer_output_shapes[input_slot_id]=}")
+                shape = (
+                    tuple(input_layer_output_shapes[input_slot_id])
+                    if isinstance(input_layer_output_shapes[input_slot_id], list)
+                    else input_layer_output_shapes[input_slot_id]
+                )
+                input_shapes.append(shape)
             all_input_shapes.append(tuple(input_shapes))
         # they should all be the same
-        assert len(set(all_input_shapes)) == 1
+        print(f"{all_input_shapes=}")
+        assert len(set(all_input_shapes)) == 1, f"Input shapes are not the same: {all_input_shapes}"
         self.f_input_shapes = all_input_shapes[0]
 
         n_outputs = self.get_n_outputs()
@@ -255,7 +263,7 @@ class ComputeLayer:
         return hash(tuple(self.nodes))
 
     def check(self):
-        assert len(set(n.type_signature for n in self.nodes)) == 1
+        assert len(set(n.type_signature for n in self.nodes)) == 1, "Different types in layer"
 
     def commit(self, params: ParameterTree):
         if self.f_commit is not None:
@@ -341,9 +349,9 @@ class ComputeStack:
         """Returns the start index and shape of the output of the given network in
         the flattened array of all outputs of all nodes in the stack.
         """
-        assert self.node_map is not None
-        assert self.layers_start_index is not None
-        assert self.layers is not None
+        assert self.node_map is not None, "No node map"
+        assert self.layers_start_index is not None, "No layers start index"
+        assert self.layers is not None, "No layers"
         output_node = self.networks[
             network_id
         ].get_output_compute_node()  # a row from the compute df
@@ -353,26 +361,14 @@ class ComputeStack:
         start_index = self.layers_start_index[layer_id] + node_loc * np.sum(
             [np.prod(s) for s in out_shape]
         )
+        print(f"{start_index=}, {out_shape=}, {layer_id=}, {node_loc=}")
         return int(start_index), out_shape
-
-    def get_network_global_output_id(self, network_id: int, output_id: int = 0):
-        """
-        From the array of all the concatenated outputs of all networks (ordered by network id),
-        this method returns the id of the given output.
-        Useful to convert local quantile ids from a network to a global (stack-wide) quantile ids.
-        Indeed, we need to inform each node of a network which quantile it should compute,
-        and that's determined by knowing which output it is linked to. In a given network, that's what
-        I call the local quantile id. But in the stack, we need to have a global quantile id,
-        which we define as the position of the output in the array of all outputs of all networks.
-        """
-        assert network_id < len(self.networks)
-        return np.sum(n.get_nb_outputs() for n in self.networks[:network_id]) + output_id
 
     def get_node_from_net_and_compute_id(
         self, network_id: int, compute_node_id: int
     ) -> VirtualNode:
         """Returns the virtual node corresponding to the given network and compute node ids"""
-        assert self.node_map is not None
+        assert self.node_map is not None, "No node map"
         assert self.layers is not None, "Stack has no layers"
         assert (
             network_id,
@@ -436,7 +432,7 @@ class ComputeStack:
         return self
 
     def extend(self, substack):
-        assert self.networks == substack.networks
+        assert self.networks == substack.networks, "Networks don't match"
         if self.layers is None:
             self.layers = []
         self.layers.extend(substack.layers)
@@ -446,8 +442,10 @@ class ComputeStack:
         for l in self.layers:
             l.check()
             for n in l.nodes:
-                assert id(n.network) == id(self.networks[n.network_id])
-        assert self.layers[0].nodes[0].get_compute_node().type == "input"
+                assert id(n.network) == id(self.networks[n.network_id]), "Network mismatch"
+        assert (
+            self.layers[0].nodes[0].get_compute_node().type == "input"
+        ), f"First node is not input: {self.layers[0].nodes[0]}"
         for net_id in range(len(self.networks)):
             prev = -1
             for l in self.layers:
@@ -466,7 +464,7 @@ class ComputeStack:
     def get_node_input_start_index(self, node: VirtualNode, input_slot: int) -> int:
         """Returns the start index of the input #input_slot for the given node
         in the flattened full-stack output array"""
-        assert self.node_map is not None
+        assert self.node_map is not None, "No node map"
         if self.layers is None:
             raise ValueError("No layers")
 
@@ -487,7 +485,9 @@ class ComputeStack:
         this_input_shapes = this_layer.f_input_shapes
         input_layer_start = self.layers_start_index[input_layer_id]
 
-        assert this_input_shapes[input_slot] == input_layer.f_out_shapes[input_compute_node_outslot]
+        assert (
+            this_input_shapes[input_slot] == input_layer.f_out_shapes[input_compute_node_outslot]
+        ), f"Shapes don't match: {this_input_shapes[input_slot]} != {input_layer.f_out_shapes[input_compute_node_outslot]}"
 
         flat_out_size = int(np.sum([np.prod(s) for s in input_layer.f_out_shapes]))
         node_start = input_layer_start + input_node_layer_loc * flat_out_size
@@ -502,11 +502,11 @@ class ComputeStack:
     def get_node_output_start_index(self, node: VirtualNode, output_slot: int) -> int:
         """Returns the start index of the output #output_slot for the given node
         in the flattened full-stack output array"""
-        assert self.node_map is not None
+        assert self.node_map is not None, "No node map"
 
         this_node_layer_id, this_node_pos = self.node_map[(node.network_id, node.compute_node_id)]
         this_layer = self.layers[this_node_layer_id]
-        assert len(this_layer.f_out_shapes) > output_slot
+        assert len(this_layer.f_out_shapes) > output_slot, "Output slot out of range"
 
         this_layer_start = self.layers_start_index[this_node_layer_id]
         flat_out_size = int(np.sum([np.prod(s) for s in this_layer.f_out_shapes]))
@@ -563,7 +563,7 @@ class ComputeStack:
         current_batches = [MAXINT for _ in stack.networks]
         for nodes in type_dict.values():
             for n in nodes:
-                assert n.batch_order < MAXINT
+                assert n.batch_order < MAXINT, "Node has no batch order"
                 current_batches[n.network_id] = min(current_batches[n.network_id], n.batch_order)
         current_batches = [None if b == MAXINT else b for b in current_batches]
         return current_batches
@@ -809,7 +809,7 @@ class ComputeStack:
         ut.logger.debug(f"Final stack size: {len(minstack.layers) if minstack.layers else 0}")
         self.layers = minstack.layers
 
-    def _make_layer_input_getters(self, layer_id: int):
+    def make_layer_input_getters(self, layer_id: int):
         """Returns a list of input_getter functions that return the input values for each node in the given layer
         from the flattened output array"""
         assert self.layers is not None, "No layers"
@@ -945,7 +945,7 @@ class ComputeStack:
         assert self.layers_start_index is not None, "No layers start index"
         assert self.node_map is not None, "No node map"
 
-        input_getters_f = [self._make_layer_input_getters(l_id) for l_id in range(len(self.layers))]
+        input_getters_f = [self.make_layer_input_getters(l_id) for l_id in range(len(self.layers))]
 
         out_indices_and_shapes = [
             self.get_network_output_indices(n_id) for n_id in range(len(self.networks))
@@ -960,31 +960,47 @@ class ComputeStack:
         w_grads = [l.f_type in get_grads_for for l in self.layers]
 
         def apply_impl(
-            params: ParameterTree, inputs: NdArray, quantiles: NdArray, key: PRNGKey
+            params: ParameterTree,
+            inputs: NdArray,
+            quantiles: NdArray,
+            key: PRNGKey,
+            overwrite_values: Optional[NdArray] = None,
+            overwrite_at: Optional[NdArray] = None,
         ) -> Tuple[NdArray, NdArray]:
-            """The core of the apply method. Everything here should be jittable"""
+            """
+            The core of the apply method. Jittable. Applies the entire stack.
+            Overwrite stuff:
+                - added overwrite_* to allow injecting values at specific indices
+                - allows feeding whatever values we want to some specific nodes
+                - overwrite_with is a 1d array of values to inject
+                - overwrite_at is a 1d array of indices where to inject the values
+            """
 
             assert len(inputs) == self.total_nb_of_inputs, "Mismatched number of inputs"
             assert self.layers is not None, "No layers"
             assert self.layers_start_index is not None, "No layers start index"
             assert self.node_map is not None, "No node map"
 
-            out = inputs.reshape(-1)
+            running_output = inputs.reshape(-1)
             grads = jnp.array([])
 
             for lid in range(1, len(self.layers)):  # skip the input layer
-                assert out.shape[0] == self.layers_start_index[lid]
+                assert running_output.shape[0] == self.layers_start_index[lid]
 
                 n_nodes = len(self.layers[lid].nodes)
 
                 n_inputs = len(self.layers[lid].f_input_shapes)
 
+                if overwrite_values is not None and overwrite_at is not None:
+                    assert overwrite_values.ndim == 1 and overwrite_at.ndim == 1
+                    assert overwrite_values.shape[0] == overwrite_at.shape[0]
+                    running_output = running_output.at[overwrite_at].set(overwrite_values)
+
                 # fetch the inputs for each node in the layer from the output array
                 # (which was filled by the previous layers)
-                layer_inputs = [input_getters_f[lid][i](out) for i in range(n_inputs)]
+                layer_inputs = [input_getters_f[lid][i](running_output) for i in range(n_inputs)]
 
                 assert len(layer_inputs) == n_inputs
-                # assert len(layer_inputs[0]) == n_nodes
 
                 keys = jax.random.split(key, n_nodes)
 
@@ -1007,11 +1023,13 @@ class ComputeStack:
                     return vmap(node_apply)(jnp.arange(n_nodes), keys, *inputs)
 
                 layer_out, layer_grad = layer_apply(*layer_inputs)
+                flattened_layer_output = layer_out.reshape(-1)
+                assert self.layers[lid].flattened_output_shape() == len(flattened_layer_output)
 
-                out = jnp.concatenate([out, layer_out.reshape(-1)])
+                running_output = jnp.concatenate([running_output, flattened_layer_output])
                 grads = jnp.concatenate([grads, layer_grad.reshape(-1)])
 
-            return out, grads
+            return running_output, grads
 
         def apply(*args, **kwargs):
             # returns only the final outputs (of the last layer) + the gradients + the full trace
