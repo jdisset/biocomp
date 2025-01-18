@@ -3,11 +3,23 @@ import numpy as np
 import pandas as pd
 from . import utils as ut
 import sqlite3
-from typing import Callable, List, Dict, Tuple, Iterable, Optional, cast, Sequence, Literal
+from typing import (
+    Callable,
+    List,
+    Dict,
+    Tuple,
+    Iterable,
+    Optional,
+    cast,
+    Sequence,
+    Literal,
+    Annotated,
+)
 from itertools import product
 from pydantic.dataclasses import dataclass
-from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, Dict, List, Tuple
+from pydantic import BaseModel, Field, ConfigDict, BeforeValidator
+from functools import cached_property
+from .utils import load_lib
 
 
 part_type_to_parameter_name = {"promoter": "tc_rate", "uORF_group": "tl_rate"}
@@ -363,11 +375,47 @@ def transcription_unit_from_L1(l1id: str, lib: PartsLibrary) -> TranscriptionUni
     return TranscriptionUnit([Slot(lib, p) for p in parts])
 
 
+class Unit(BaseModel):
+    promoter: str = "hEF1a"
+    parts: List[str]
+    source: Optional[str] = None  # plasmid id for this unit
+
+
+class CoTransfection(BaseModel):
+    name: Optional[str] = None
+    units: List[Unit]
+    ratios: Optional[List[float]] = None
+
+    def model_post_init(self, *args, **kwargs):
+        if self.ratios is None:  # equal ratios by default
+            self.ratios = [1.0] * len(self.units)
+
+
+def process_cotx_list(cotx_list: List[CoTransfection]) -> List[CoTransfection]:
+    """Add names to unnamed cotx groups and sources"""
+
+    source_counter = 0
+
+    for i, cotx in enumerate(cotx_list):
+        if cotx.name is None:
+            cotx.name = f"cotx_{i + 1}"
+
+        for unit in cotx.units:
+            if unit.source is None:
+                source_counter += 1
+                unit.source = f"plsmd_{source_counter}"
+
+    return cotx_list
+
+
+CoTxList = Annotated[List[CoTransfection], BeforeValidator(process_cotx_list)]
+
+
 class Network(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
-    lib: PartsLibrary
-    name: str = Field(alias="recipe_name")
+    lib: PartsLibrary = Field(default_factory=load_lib, repr=False)
+    name: Optional[str] = None
     custom_outputs: Optional[List] = None
     metadata: Optional[Dict] = None
 
@@ -385,6 +433,10 @@ class Network(BaseModel):
     central_dogma_graph: Optional[pd.DataFrame] = None
     compute_graph: Optional[pd.DataFrame] = None
 
+    # Field for declarative constructor (more concise for manual network creation)
+    cotx: Optional[CoTxList] = None
+
+    # Private attributes
     _n_inputs: Optional[int] = None
     _n_outputs: Optional[int] = None
     _output_proteins: Optional[List[str]] = None
@@ -399,18 +451,50 @@ class Network(BaseModel):
             params = ["lib", "recipe_name", "custom_outputs", "metadata"]
             new_kwargs = {}
 
-            # Convert positional args to keyword args
             for i, arg in enumerate(args):
                 new_kwargs[params[i]] = arg
 
-            # Add any additional keyword arguments
             new_kwargs.update(kwargs)
 
-            # Call parent's init with keyword arguments
             super().__init__(**new_kwargs)
         else:
             # Normal Pydantic initialization
             super().__init__(*args, **kwargs)
+
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
+
+        if self.cotx is not None and self.transcription_units is None:
+            self._process_declarative()
+
+    def _process_declarative(self):
+        """Convert declarative cotx format to traditional format"""
+        tu_counter = 0
+
+        self.transcription_units = {}
+        sources_data = []
+        aggregations_data = {}
+
+        for group_idx, group in enumerate(self.cotx):
+            group_tus = []
+
+            for unit in group.units:
+                tu_counter += 1
+                tu_name = f"TU_{tu_counter}"
+
+                self.transcription_units[tu_name] = TranscriptionUnit(
+                    [Slot(self.lib, unit.promoter), *[Slot(self.lib, part) for part in unit.parts]]
+                )
+
+                sources_data.append({"source": unit.source, "TU": tu_name, "position": 0})
+
+                group_tus.append(unit.source)
+
+            # Store aggregations data with proper column names
+            aggregations_data[group_idx] = {"source": group_tus, "ratio": group.ratios}
+
+        self.tu_in_sources = pd.DataFrame(sources_data)
+        self.aggregations = pd.DataFrame(aggregations_data).T
 
     @classmethod
     def legacy_init(
@@ -1145,9 +1229,23 @@ class Network(BaseModel):
         return self._output_proteins
 
     def get_nb_outputs(self) -> int:
-        if self.__n_outputs is None:
-            self.__n_outputs = len(self.get_output_proteins())
-        return self.__n_outputs
+        if self._n_outputs is None:
+            self._n_outputs = len(self.get_output_proteins())
+        return self._n_outputs
+
+    def get_nb_inputs(self):
+        if self._n_inputs is None:
+            self._n_inputs = len(self.get_inverted_input_proteins())
+        return self._n_inputs
+
+    # TODO: proper cached, cleaner properties
+    @property
+    def nb_outputs(self) -> int:
+        return self.get_nb_outputs()
+
+    @property
+    def nb_inputs(self) -> int:
+        return self.get_nb_inputs()
 
     def get_input_from_output(self, output_arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
         """Given an array of output values, returns the columns that are inputs of the inverted network,
@@ -1263,11 +1361,6 @@ class Network(BaseModel):
             batches.append([i for i in independent if i in nodes])
         return [b for b in batches if len(b) > 0]
 
-    def get_nb_inputs(self):
-        if self.__n_inputs is None:
-            self.__n_inputs = len(self.get_inverted_input_proteins())
-        return self.__n_inputs
-
     def cleanup(self):
         if self.compute_graph is not None:
             self.compute_graph.source_id = self.compute_graph.source_id.apply(
@@ -1332,9 +1425,6 @@ class Network(BaseModel):
                 set(self.central_dogma_graph.index)
             ), "central dogma graph has duplicate ids"
 
-    def __repr__(self):
-        return f"Network(name={self.name}, metadata={self.metadata})"
-
     def get_signature(self):
         signature = f"{self.name}:{self.metadata}\n"
         for k in sorted(self.transcription_units.keys()):
@@ -1389,7 +1479,7 @@ class Network(BaseModel):
         output_node = cg[cg.type == "output"].iloc[0]
         # add the quantile variable to the output node
         output_node["extra"]["quantile_variable_id"] = list(range(len(output_node.input_from)))
-        self.__n_outputs = len(output_node.input_from)
+        self._n_outputs = len(output_node.input_from)
         for i, (nid, oid) in enumerate(output_node.input_from):
             propagate_upstream(cg.loc[nid], i, oid)
 
