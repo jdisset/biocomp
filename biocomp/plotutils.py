@@ -368,13 +368,19 @@ def extract_plot_data_from_network(
     assert x.shape[1] == len(input_order), f"X shape: {x.shape}, input_order: {input_order}"
     assert y.shape[0] == x.shape[0], f"y shape: {y.shape}, x shape: {x.shape}"
 
-    return PlotData(
+    d = PlotData(
         xval=x,
         yval=y,
         input_names=input_names,
         output_name=output_name,
         **kw,
     )
+
+    d.metadata["input_order"] = input_order
+    d.metadata["output_pos"] = output_pos
+    d.metadata["input_names"] = input_names
+    d.metadata["output_name"] = output_name
+    return d
 
 
 def extract_lazy_plot_data_from_network(
@@ -390,17 +396,28 @@ def extract_lazy_plot_data_from_network(
 
     def get_xy(pdata):
         X, Y = get_XY(pdata)
+        print(f"X shape: {X.shape}, Y shape: {Y.shape}")
+        print(f"X: {X}, Y: {Y}")
+        print(f"input_order: {input_order}, output_pos: {output_pos}")
         x = X[:, input_order]
         y = Y[:, output_pos].reshape(-1, 1)
+        print(f"x shape: {x.shape}, y shape: {y.shape}")
+        print(f"x: {x}, y: {y}")
         return x, y
 
-    pdata = LazyPlotData(
+    d = LazyPlotData(
         get_xy=get_xy,
         input_names=input_names,
         output_name=output_name,
         **kw,
     )
-    return pdata
+
+    d.metadata["input_order"] = input_order
+    d.metadata["output_pos"] = output_pos
+    d.metadata["input_names"] = input_names
+    d.metadata["output_name"] = output_name
+
+    return d
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

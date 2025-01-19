@@ -32,8 +32,8 @@ import optax
 
 
 def check_XYZ(X, Y, Z, stack):
-    nb_inputs = sum([n.get_nb_inputs() for n in stack.networks])
-    nb_outputs = sum([n.get_nb_outputs() for n in stack.networks])
+    nb_inputs = sum([n.nb_inputs for n in stack.networks])
+    nb_outputs = sum([n.nb_outputs for n in stack.networks])
     assert X.ndim == Y.ndim == Z.ndim == 2, "X, Y, and Z must have 2 dimensions"
     assert X.shape[0] == Y.shape[0] == Z.shape[0], "X, Y, and Z must have the same number of rows"
     assert (
@@ -45,8 +45,8 @@ def check_XYZ(X, Y, Z, stack):
 
 
 def check_XYZ_new(X, Y, Z, stack):
-    nb_inputs = sum([n.get_nb_inputs() for n in stack.networks])
-    nb_outputs = sum([n.get_nb_outputs() for n in stack.networks])
+    nb_inputs = sum([n.nb_inputs for n in stack.networks])
+    nb_outputs = sum([n.nb_outputs for n in stack.networks])
     nb_nodes = len(stack.node_map)
     assert X.ndim == Y.ndim == Z.ndim == 2, "X, Y, and Z must have 2 dimensions"
     assert X.shape[0] == Y.shape[0] == Z.shape[0], "X, Y, and Z must have the same number of rows"

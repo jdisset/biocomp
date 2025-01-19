@@ -30,7 +30,7 @@ import os
 
 import cProfile
 
-from biocomp.models import buildLibFromDatabase
+from biocomp.models import build_lib_from_database
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict
 
@@ -55,7 +55,6 @@ DictLike = Union[Dict, DictConfig]
 
 
 class ArbitraryModel(BaseModel):
-
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         extra="forbid",
@@ -590,7 +589,7 @@ if "BIOCOMP_PARTS_DB" in os.environ:
 
 
 def load_lib(lib_path=DEFAULT_LIB_PATH):
-    lib = buildLibFromDatabase(lib_path)
+    lib = build_lib_from_database(lib_path)
     return lib
 
 

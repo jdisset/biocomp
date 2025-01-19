@@ -107,7 +107,7 @@ class Sequestron(PartsDB, table=True):
     output_part: str
 
 
-def getAllPartsFromDatabase(db_url: str):
+def get_all_parts_from_database(db_url: str):
     engine = create_engine(db_url)
     SQLModel.metadata.create_all(engine)
 
@@ -131,28 +131,19 @@ def getAllPartsFromDatabase(db_url: str):
     }
 
 
-def buildLibFromDatabase(db_url: str) -> PartsLibrary:
-    parts = getAllPartsFromDatabase(db_url)
-    # first need to turn everything into pandas dataframes
+def build_lib_from_database(db_url: str) -> PartsLibrary:
+    parts = get_all_parts_from_database(db_url)
 
     if len(parts["parts"]) == 0:
         raise ValueError("No parts found in database")
 
     parts_dict = {}
     for key, value in parts.items():
-        # we also need to use the primary key as the index
+        # Convert to pandas DataFrame using primary key as index
         pk_field_name = value[0].__table__.primary_key.columns.keys()[0]
         as_dict = [x.model_dump(by_alias=True) for x in value]
         df = pd.DataFrame(as_dict)
         df.set_index(pk_field_name, inplace=True)
         parts_dict[key] = df
 
-    return PartsLibrary(
-        parts_dict["parts"],
-        parts_dict["L0s"],
-        parts_dict["L1s"],
-        parts_dict["L2s"],
-        parts_dict["categories"],
-        parts_dict["sequestrons"],
-        parts_dict["sequestron_types"],
-    )
+    return PartsLibrary(**parts_dict)

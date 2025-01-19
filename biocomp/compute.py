@@ -875,8 +875,8 @@ class ComputeStack:
         self.total_nb_of_inputs = 0
         self.max_nb_of_outputs_per_network = 0
         for n in self.networks:
-            nbout = int(n.get_nb_outputs())
-            self.total_nb_of_inputs += n.get_nb_inputs()
+            nbout = int(n.nb_outputs)
+            self.total_nb_of_inputs += n.nb_inputs
             self.total_nb_of_outputs += nbout
             self.max_nb_of_outputs_per_network = max(self.max_nb_of_outputs_per_network, nbout)
 

@@ -14,6 +14,8 @@ from typing import (
     Sequence,
     Literal,
     Annotated,
+    Union,
+    Any,
 )
 from itertools import product
 from pydantic.dataclasses import dataclass
@@ -213,40 +215,44 @@ class NetworkConstructionError(Exception):
     pass
 
 
-class Slot:
+class Slot(BaseModel):
     """Transcription Units are made of slots which contain either a part or a list of
     possible parts that map to a quantized parameter"""
 
-    def __init__(self, lib, part):
-        self.part = part
-        self.maps_to_parameter = None  # a slot can map to a parameter (tl_rate, tc_rate, etc...)
-        if self.part == [] or self.part == [None]:
-            self.part = None
-        if isinstance(self.part, list):
-            mapped = list(
-                set([self.__mapped_parameter(lib, p) for p in self.part if p is not None])
-            )
-            if len(mapped) != 1:
-                raise ValueError(f"{self.part} maps to {len(mapped)} parameters ({mapped})")
-            self.maps_to_parameter = mapped[0]
-        else:
-            self.maps_to_parameter = self.__mapped_parameter(lib, self.part)
-        if self.maps_to_parameter is not None and not isinstance(self.part, list):
-            # if the slot maps to a parameter, it must be a list (even if ther's ony one part)
-            self.part = [self.part]
+    lib: PartsLibrary = Field(default_factory=load_lib, repr=False)
+    part: Optional[Union[str, List[str]]] = None
 
-    def __mapped_parameter(self, lib, part_name):
+    # does this slot map to a parameter, like "tl_rate" or "tc_rate"?
+    maps_to_parameter: Optional[str] = None
+
+    def model_post_init(self, *args, **kwargs):
+        if isinstance(self.part, list):
+            if not self.part or self.part == [None]:
+                self.part = None
+            else:
+                mapped = list(set([self.__mapped_parameter(p) for p in self.part if p is not None]))
+                if len(mapped) != 1:
+                    raise ValueError(f"{self.part} maps to {len(mapped)} parameters ({mapped})")
+                self.maps_to_parameter = mapped[0]
+        else:
+            self.maps_to_parameter = self.__mapped_parameter(self.part)
+
+        if self.maps_to_parameter is not None and not isinstance(self.part, list):
+            # if the slot maps to a parameter, it must be a list (even if there's only one part)
+            self.part = [self.part]  # type: ignore
+
+    def __mapped_parameter(self, part_name: Optional[str]) -> Optional[str]:
         """Returns the name of the parameter a part maps to, or None if it doesn't map to any"""
         if part_name is not None:
-            if part_name in lib.pc.index:
-                category = lib.pc.loc[part_name, "category"]
+            if part_name in self.lib.pc.index:
+                category = self.lib.pc.loc[part_name, "category"]
                 if category in part_type_to_parameter_name:
                     return part_type_to_parameter_name[category]
             else:
                 raise ValueError(f"Unknown part: {part_name}")
         return None
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         if self.maps_to_parameter is None:
             if self.part is None:
                 return "<empty slot>"
@@ -255,12 +261,12 @@ class Slot:
         return f"<{self.part} -> {self.maps_to_parameter}>"
 
 
-# transcription unit: 1 per L1, multiple per L2
-class TranscriptionUnit:
-    def __init__(self, slots):
-        self.name = ""
-        self.slots = slots
-        self.params = {}
+class TranscriptionUnit(BaseModel):
+    name: str = ""
+    slots: List[Slot]
+    params: Dict = {}
+
+    def model_post_init(self, *args, **kwargs):
         self.__get_parameters()
 
     def __get_parameters(self):
@@ -279,10 +285,7 @@ class TranscriptionUnit:
                     msg = f"No default part for parameter {p}"
                     msg += f" (part_type_to_parameter_name: {part_type_to_parameter_name})"
                     msg += f" (parameter_to_default_part: {parameter_to_default_part})"
-                    raise ValueError(msg)
-
-    def __repr__(self):
-        return f"L1({self.slots})"
+                    raise
 
 
 class TranscriptionUnitGenerator:
@@ -307,7 +310,7 @@ class TranscriptionUnitGenerator:
                 g = self.part_generators[order[i]]
                 possile_parts = g(lib, slots, *args, **kwargs)
                 for p in possile_parts:
-                    yield from _next(slots + [Slot(lib, p)], i + 1)
+                    yield from _next(slots + [Slot(part=p, lib=lib)], i + 1)
 
         return _next([], 0)
 
@@ -372,7 +375,7 @@ def transcription_unit_from_L1(l1id: str, lib: PartsLibrary) -> TranscriptionUni
             msg += f"\nlib.L0s[{l}]: {lib.L0s.loc[l]}"
             msg += f"\nlib.L0s: {lib.L0s}"
             raise NetworkConstructionError(msg)
-    return TranscriptionUnit([Slot(lib, p) for p in parts])
+    return TranscriptionUnit([Slot(part=p, lib=lib) for p in parts])
 
 
 class Unit(BaseModel):
@@ -416,25 +419,27 @@ class Network(BaseModel):
 
     lib: PartsLibrary = Field(default_factory=load_lib, repr=False)
     name: Optional[str] = None
-    custom_outputs: Optional[List] = None
+    custom_outputs: Optional[List] = Field(default=None, repr=False)
     metadata: Optional[Dict] = None
 
     # Raw recipe data
-    raw_tu_in_sources: Optional[List[Tuple[str, str, int]]] = None
-    raw_aggregations: Optional[List[Tuple[int, str, float]]] = None
+    raw_tu_in_sources: Optional[List[Tuple[str, str, int]]] = Field(default=None, repr=False)
+    raw_aggregations: Optional[List[Tuple[int, str, float]]] = Field(default=None, repr=False)
 
     # Processed recipe data
-    tu_inputs: Optional[pd.DataFrame] = None
-    tu_in_sources: Optional[pd.DataFrame] = None
-    aggregations: Optional[pd.DataFrame] = None
+    tu_inputs: Optional[pd.DataFrame] = Field(default=None, repr=False)
+    tu_in_sources: Optional[pd.DataFrame] = Field(default=None, repr=False)
+    aggregations: Optional[pd.DataFrame] = Field(default=None, repr=False)
     transcription_units: Optional[Dict[str, TranscriptionUnit]] = None
 
     # Graph data
-    central_dogma_graph: Optional[pd.DataFrame] = None
-    compute_graph: Optional[pd.DataFrame] = None
+    central_dogma_graph: Optional[pd.DataFrame] = Field(default=None, repr=False)
+    compute_graph: Optional[pd.DataFrame] = Field(default=None, repr=False)
 
     # Field for declarative constructor (more concise for manual network creation)
-    cotx: Optional[CoTxList] = None
+    cotx: Optional[CoTxList] = Field(default=None)
+    build_on_init: Optional[bool] = Field(default=True, repr=False)
+    invert_on_build: bool = False
 
     # Private attributes
     _n_inputs: Optional[int] = None
@@ -467,6 +472,9 @@ class Network(BaseModel):
         if self.cotx is not None and self.transcription_units is None:
             self._process_declarative()
 
+        if self.build_on_init:
+            self.build()
+
     def _process_declarative(self):
         """Convert declarative cotx format to traditional format"""
         tu_counter = 0
@@ -483,14 +491,16 @@ class Network(BaseModel):
                 tu_name = f"TU_{tu_counter}"
 
                 self.transcription_units[tu_name] = TranscriptionUnit(
-                    [Slot(self.lib, unit.promoter), *[Slot(self.lib, part) for part in unit.parts]]
+                    slots=[
+                        Slot(part=unit.promoter, lib=self.lib),
+                        *[Slot(part=part, lib=self.lib) for part in unit.parts],
+                    ]
                 )
 
                 sources_data.append({"source": unit.source, "TU": tu_name, "position": 0})
 
                 group_tus.append(unit.source)
 
-            # Store aggregations data with proper column names
             aggregations_data[group_idx] = {"source": group_tus, "ratio": group.ratios}
 
         self.tu_in_sources = pd.DataFrame(sources_data)
@@ -503,9 +513,14 @@ class Network(BaseModel):
         recipe_name: str,
         custom_outputs: Optional[List] = None,
         metadata: Optional[Dict] = None,
+        build: bool = False,
     ) -> "Network":
         instance = cls(
-            lib=lib, recipe_name=recipe_name, custom_outputs=custom_outputs, metadata=metadata
+            lib=lib,
+            recipe_name=recipe_name,
+            custom_outputs=custom_outputs,
+            metadata=metadata,
+            build_on_init=build,
         )
         return instance
 
@@ -652,6 +667,14 @@ class Network(BaseModel):
         assert len(self.transcription_units) > 0, f"No transcription units in recipe {self.name}"
         self.__build_central_dogma_graph(self.custom_outputs)
         self.__build_compute_graph()
+        if self.invert_on_build:
+            inverted = inverted_network(self)[0]
+            self.compute_graph = inverted.compute_graph
+            self.central_dogma_graph = inverted.central_dogma_graph
+            self.transcription_units = inverted.transcription_units
+            self._n_inputs = inverted._n_inputs
+            self._n_outputs = inverted._n_outputs
+            self._output_proteins = inverted._output_proteins
 
     def is_built(self) -> bool:
         return (
@@ -1520,10 +1543,6 @@ DEFAULT_INVERSE_DICT = {
 
 
 def get_invertible_paths(network, start_node_id, inverse_dict):
-    print(
-        f"get_invertible_paths: {start_node_id}. Node type: {network.compute_graph.loc[start_node_id].type}"
-    )
-
     def _is_invertible(node):
         invertible = node.type in inverse_dict and len(node["input_from"]) <= 1
         return invertible
@@ -1536,7 +1555,6 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
     def _get_invertible_paths(network, node_id, path, visited, input_slot=None):
         nonlocal paths
         node = network.compute_graph.loc[node_id]
-        print(f"node: {node_id}, {node.type}. {_is_invertible(node)=}")
 
         if node.type == "output":
             # we reached an output node, we store the path and stop the search
@@ -1559,9 +1577,6 @@ def get_invertible_paths(network, start_node_id, inverse_dict):
     _get_invertible_paths(network, start_node_id, [], set())
 
     return paths
-
-
-from rich import print as rprint
 
 
 def inverted_network(
@@ -1592,7 +1607,6 @@ def inverted_network(
     def _inverted_network():
         # we compute a list of invertible paths that link each start nodes to the output
         inv_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
-        print(f"inv_paths: {inv_paths}")
 
         # For each start_node, we might have more than one path.
         # In 'shortest' mode, we just pick the shortest one.
@@ -1683,7 +1697,6 @@ def inverted_network(
         return new_networks
 
     signature = f"{nodes}::{mode}::{inverse_dict}::{network.get_signature()}"
-    print(f"signature: {signature}")
 
     return ut.get_cache(lambda: _inverted_network(), signature, cache_location=use_cache)
 
