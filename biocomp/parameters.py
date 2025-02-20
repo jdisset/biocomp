@@ -1,5 +1,5 @@
 from typing import Callable, Optional, Union, Tuple, Any, Dict, List, Sequence, Iterable, Self
-
+import traceback
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -13,6 +13,7 @@ from . import utils as ut
 
 import base64
 import re
+
 log = ut.get_logger(__name__)
 
 ### {{{                           --     utils     --
@@ -23,10 +24,14 @@ def isArrayRef(x):
 
 
 def is_equal(a, b):
-    if not type(a) == type(b):
+    if id(a) == id(b):
+        return True
+    if type(a) is not type(b):
         return False
     if isinstance(a, (np.ndarray, jnp.ndarray)):
         return np.all(a == b)
+    if isinstance(a, PTree):
+        return a.direct_compare(b)
     return a == b
 
 
@@ -164,7 +169,6 @@ def serialize_PTree(x):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-
 ### {{{                         --     ParamPath     --
 
 
@@ -296,6 +300,118 @@ class PTree:
     def is_leaf_at(self, path, count_empty_as_leaf=True):
         branch = self.get_at(path, get_leaf_value=False)
         return branch.is_leaf(count_empty_as_leaf)
+
+    def visualize_tree_structure(self, seen=None, depth=0, prefix=""):
+        if seen is None:
+            seen = {}
+
+        result = []
+        indent = "  " * depth
+        node_id = id(self)
+
+        # Check for loops
+        if node_id in seen:
+            return [f"{indent}↩ Loop back to #{node_id} (at {seen[node_id]})"]
+
+        seen[node_id] = prefix or "root"
+
+        if self.is_leaf():
+            val = self.value
+            if isinstance(val, PTree):
+                result.append(f"{indent}● #{node_id} [Leaf -> PTree]")
+                result.extend(
+                    val.visualize_tree_structure(seen, depth + 1, prefix=prefix + "/value")
+                )
+            elif isinstance(val, (np.ndarray, jnp.ndarray)):
+                result.append(f"{indent}● #{node_id} [Leaf Array shape={val.shape}]")
+            else:
+                result.append(f"{indent}● #{node_id} [Leaf {type(val).__name__}]")
+        else:
+            result.append(f"{indent}○ #{node_id} [Branch]")
+            if self.value:
+                for key in sorted(self.value.keys()):
+                    result.append(f"{indent}├─{key}")
+                    child_lines = self.value[key].visualize_tree_structure(
+                        seen, depth + 1, prefix=f"{prefix}/{key}"
+                    )
+                    for i, line in enumerate(child_lines):
+                        if i < len(child_lines) - 1:
+                            result.append(f"{indent}│ {line}")
+                        else:
+                            result.append(f"{indent}└ {line}")
+
+        return result
+
+    def print_structure(self):
+        """Print the tree structure"""
+        print("Tree Structure:")
+        print("Legend:")
+        print("  ○ Branch node")
+        print("  ● Leaf node")
+        print("  ↩ Loop reference")
+        print("  # Object ID")
+        print("-" * 50)
+        print("\n".join(self.visualize_tree_structure()))
+
+    def direct_compare(self, other, depth=0, seen=None, path=None):
+        """Direct value comparison without using is_equal to avoid recursion"""
+        if seen is None:
+            seen = {}  # Change to dict to store paths
+        if path is None:
+            path = []
+
+        pair_id = (id(self), id(other))
+        if pair_id in seen:
+            log.error(f"Loop detected when comparing PTree({id(self)}) with PTree({id(other)})")
+            log.error("Path to loop:")
+            prev_path = seen[pair_id]
+            full_path = prev_path + [f"-> loop back to PTree({id(self)})"]
+            for step in full_path:
+                log.error(f"  {step}")
+            log.error("Tree structure:")
+            log.error("\nSelf:")
+            log.error("\n".join(self.visualize_tree_structure()))
+            log.error("\nOther:")
+            log.error("\n".join(other.visualize_tree_structure()))
+            return False
+
+        seen[pair_id] = path[:]
+
+        if not isinstance(other, PTree):
+            return False
+
+        this_is_leaf, other_is_leaf = self.is_leaf(), other.is_leaf()
+        if this_is_leaf != other_is_leaf:
+            return False
+
+        if this_is_leaf:
+            if type(self.value) is not type(other.value):
+                return False
+
+            if isinstance(self.value, (np.ndarray, jnp.ndarray)):
+                return np.all(self.value == other.value)
+
+            if isinstance(self.value, PTree):
+                path.append(f"leaf value PTree({id(self.value)})")
+                return self.value.direct_compare(other.value, depth + 1, seen, path)
+
+            return self.value == other.value
+
+        # Branch comparison
+        k1, k2 = set(self.value.keys()), set(other.value.keys())
+
+        if k1 != k2:
+            return False
+
+        for k in k1:
+            a = self.get_at(k, get_leaf_value=False)
+            b = other.get_at(k, get_leaf_value=False)
+            path.append(f"branch '{k}' -> PTree({id(a)})")
+            if not a.direct_compare(b, depth + 1, seen, path):
+                return False
+            path.pop()
+
+        return True
 
     def get_at(self, path, get_leaf_value=True):
         if not isinstance(path, ParamPath):
@@ -451,16 +567,6 @@ class PTree:
                 return False
         return True
 
-    # def remove_empty_leaves(self):
-    # newvals = {}
-    # if PTree.is_leaf(self, count_empty_as_leaf=False):
-    # return self
-    # if self.value is not None:
-    # for k, v in self.value.items():
-    # if not v.all_leaves_are_none():
-    # newvals[k] = v.remove_empty_leaves()
-    # return PTree(value=newvals, read_only=self.read_only)
-
     def iter_leaves(self, path=ParamPath(), path_as_str=False, get_leaf_value=True):
         if self.is_empty():
             return
@@ -473,22 +579,7 @@ class PTree:
                 yield from v.iter_leaves(path / k, path_as_str, get_leaf_value)
 
     def __eq__(self, other):
-        if not isinstance(other, PTree):
-            return False
-        this_is_leaf, other_is_leaf = self.is_leaf(), other.is_leaf()
-        if this_is_leaf != other_is_leaf:
-            return False
-        if this_is_leaf:
-            return is_equal(self.value, other.value)
-        k1, k2 = set(self.value.keys()), set(other.value.keys())
-        if k1 != k2:
-            return False
-        for k in k1:
-            if not is_equal(
-                self.get_at(k, get_leaf_value=False), other.get_at(k, get_leaf_value=False)
-            ):
-                return False
-        return True
+        return is_equal(self, other)
 
     def diff(self, other):
         diffs = set()
@@ -712,6 +803,10 @@ class ParameterTree:
                 self.tag(path, tags, True)
             return self.data[path]
 
+    def visualize_tree_structure(self):
+        return "\n".join(self.data.visualize_tree_structure())
+
+
     def get_subtree(self, path):
         return ParameterTree(
             data=self.data[path],
@@ -719,6 +814,23 @@ class ParameterTree:
             tagnames=self.tagnames,
             read_only=self.read_only,
         )
+
+    def set_subtree_at(self, path: str, subtree: PTree, overwrite=True):
+        """Set all leaf values from subtree at the given path, preserving tree structure."""
+        if self.read_only:
+            raise RuntimeError("Cannot set value on read-only ParameterTree")
+
+        base_path = ParamPath(path)
+        if base_path in self.data:
+            del self.data[base_path]
+
+        for leaf_path, value in subtree.iter_leaves():
+            full_path = base_path / leaf_path
+            self.data[full_path] = value
+            # Preserve tags if they exist
+            if path in self.tags:
+                old_tags = self.tags[path]
+                self.tags[full_path] = old_tags
 
     def __repr__(self):
         def with_box(title, data_splitlines, lw):
