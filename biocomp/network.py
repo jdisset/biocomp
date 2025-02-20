@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field, ConfigDict, BeforeValidator
 from functools import cached_property
 from .utils import load_lib
 
+from biocomp.logging_config import get_logger
+logger = get_logger(__name__)
 
 part_type_to_parameter_name = {"promoter": "tc_rate", "uORF_group": "tl_rate"}
 parameter_to_default_part = {"tl_rate": "00_empty_tc", "tc_rate": "hEF1a"}
@@ -375,7 +377,7 @@ def transcription_unit_from_L1(l1id: str, lib: PartsLibrary) -> TranscriptionUni
             msg += f"\nlib.L0s[{l}]: {lib.L0s.loc[l]}"
             msg += f"\nlib.L0s: {lib.L0s}"
             raise NetworkConstructionError(msg)
-    return TranscriptionUnit([Slot(part=p, lib=lib) for p in parts])
+    return TranscriptionUnit(slots=[Slot(part=p, lib=lib) for p in parts])
 
 
 class Unit(BaseModel):
@@ -586,22 +588,61 @@ class Network(BaseModel):
             metadata=metadata,
         )
 
+    # @classmethod
+    # def from_raw(
+    #     cls,
+    #     lib: PartsLibrary,
+    #     name: str,
+    #     transcription_units: dict[str, TranscriptionUnit],  # dict of {TU_name: TU}
+    #     raw_tu_in_sources: List[Tuple[str, str, int]],  # list of (source_name, TU_name, position)
+    #     raw_aggregations: List[Tuple[int, str, float]],  # list of (agg_id, source_name, ratio)
+    #     build: bool = True,  # whether to build the network's graph
+    #     use_cache: Optional[str] = None,  # path to cache
+    #     **kwargs,
+    # ):
+    #     n = cls(lib, name, **kwargs)
+    #     n.raw_tu_in_sources = raw_tu_in_sources
+    #     n.raw_aggregations = raw_aggregations
+    #     n.transcription_units = transcription_units
+    #
+    #     def actually_build():
+    #         n.tu_in_sources = pd.DataFrame(
+    #             n.raw_tu_in_sources, columns=["source", "TU", "position"]
+    #         )
+    #         n.tu_in_sources.sort_values(by="position", inplace=True)
+    #         n.aggregations = (
+    #             pd.DataFrame(n.raw_aggregations, columns=["id", "source", "ratio"])
+    #             .groupby("id")
+    #             .agg(list)
+    #         )
+    #         if build:
+    #             n.build()
+    #         return n
+    #
+    #     n = ut.get_cache(lambda: actually_build(), n.get_signature(), use_cache)
+    #     return n
+
     @classmethod
     def from_raw(
         cls,
         lib: PartsLibrary,
         name: str,
-        transcription_units: dict[str, TranscriptionUnit],  # dict of {TU_name: TU}
-        raw_tu_in_sources: List[Tuple[str, str, int]],  # list of (source_name, TU_name, position)
-        raw_aggregations: List[Tuple[int, str, float]],  # list of (agg_id, source_name, ratio)
-        build: bool = True,  # whether to build the network's graph
-        use_cache: Optional[str] = None,  # path to cache
+        transcription_units: dict[str, TranscriptionUnit],
+        raw_tu_in_sources: List[Tuple[str, str, int]],
+        raw_aggregations: List[Tuple[int, str, float]],
+        build: bool = True,
+        use_cache: Optional[str] = None,
         **kwargs,
     ):
-        n = cls(lib, name, **kwargs)
-        n.raw_tu_in_sources = raw_tu_in_sources
-        n.raw_aggregations = raw_aggregations
-        n.transcription_units = transcription_units
+        n = cls(
+            name=name,
+            lib=lib,
+            transcription_units=transcription_units,
+            raw_tu_in_sources=raw_tu_in_sources,
+            raw_aggregations=raw_aggregations,
+            build_on_init=False,
+            **kwargs,
+        )
 
         def actually_build():
             n.tu_in_sources = pd.DataFrame(
@@ -613,12 +654,12 @@ class Network(BaseModel):
                 .groupby("id")
                 .agg(list)
             )
+
             if build:
                 n.build()
             return n
 
         n = ut.get_cache(lambda: actually_build(), n.get_signature(), use_cache)
-
         return n
 
     @classmethod
@@ -892,7 +933,7 @@ class Network(BaseModel):
                 for s in r.successor:
                     cdg.loc[s, "predecessor"].append(i)
         cdg.loc[~cdg.predecessor.astype(bool), "predecessor"] = None
-        ut.logger.debug(f"cdg: \n{cdg}\n")
+        logger.debug(f"cdg: \n{cdg}\n")
 
         # We explicitly describe the part content of each node:
         try:
@@ -1027,8 +1068,8 @@ class Network(BaseModel):
 
     def __buildRawGraph(self, uidGen: Callable[[], int]) -> List[GraphComputeNode]:
         cdg = self.central_dogma_graph
-        ut.logger.debug(f"Building compute graph for recipe {self.name}")
-        ut.logger.debug(f"cdg: \n{cdg}\n")
+        logger.debug(f"Building compute graph for recipe {self.name}")
+        logger.debug(f"cdg: \n{cdg}\n")
         assert cdg is not None, "central dogma graph not built"
         assert isinstance(cdg, pd.DataFrame), f"cdg is not a DataFrame: {type(cdg)}"
         newnodes = []
@@ -1090,8 +1131,8 @@ class Network(BaseModel):
 
         newnodes_str = pformat([n.toDict() for n in newnodes])
 
-        ut.logger.debug(f"tu_in_sequestron: {tu_in_sequestron}")
-        ut.logger.debug(f"newnodes: {newnodes_str}")
+        logger.debug(f"tu_in_sequestron: {tu_in_sequestron}")
+        logger.debug(f"newnodes: {newnodes_str}")
 
         # right now newnodes contains only the output node and the sequestron nodes
         # we're now going to go upstream from these nodes, adding the relevant translation/transcription
@@ -1118,7 +1159,7 @@ class Network(BaseModel):
         # We will merge sources later (for TUs that are on a same plasmid)
         while newnodes:
             n: GraphComputeNode = newnodes.pop()
-            ut.logger.debug(f"Processing node {n.id} of type {n.type}")
+            logger.debug(f"Processing node {n.id} of type {n.type}")
             if n.type != "source":
                 # for every cdg node that is an input of n
                 if n.cdg_input is None:
@@ -1152,7 +1193,7 @@ class Network(BaseModel):
                         newn.output_to = [(n.id, i)]
                         newnodes.append(newn)
                         n.input_from += [int(nid)]
-                        ut.logger.debug(
+                        logger.debug(
                             f"Added node {newn.id} of type {newn.type}: {pformat(newn.toDict())}"
                         )
             cg += [n]
@@ -1161,9 +1202,9 @@ class Network(BaseModel):
     def __addNumericNodes(self, cdf, uidGen):
         # we add 1 numeric node per source or aggregation that's "at the top",
         # i.e its input_from is empty.
-        ut.logger.debug(f"comp graph before adding numeric nodes: \n{cdf}")
+        logger.debug(f"comp graph before adding numeric nodes: \n{cdf}")
         topnodes = cdf[cdf.input_from.apply(len) == 0]
-        ut.logger.debug(f"Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}")
+        logger.debug(f"Adding numeric nodes for {len(topnodes)} top nodes: {topnodes}")
         for i, r in topnodes.iterrows():
             nid = uidGen()
             newnode = GraphComputeNode(nid, "numeric", None, 1)
@@ -1586,7 +1627,7 @@ def inverted_network(
     mode="shortest",
     use_cache=None,
 ):
-    ut.logger.debug(f"Inverting network {network.name}")
+    logger.debug(f"Inverting network {network.name}")
 
     # inverse_dict: node_type -> inverse_node_type
 

@@ -61,15 +61,6 @@ class ArbitraryModel(BaseModel):
         validate_default=True,
     )
 
-    def model_dump(self, **kwargs) -> dict[str, Any]:
-        return super().model_dump(serialize_as_any=True, **kwargs)
-
-    def model_dump_json(self, **kwargs) -> str:
-        return super().model_dump_json(serialize_as_any=True, **kwargs)
-
-    def __str__(self):
-        return self.__repr__()
-
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 # {{{                       --     logging utils     --
@@ -80,13 +71,13 @@ logger = get_logger(__name__)
 
 
 @contextmanager
-def timer(name=None, use_logger=True):
+def timer(name=None, logger=None):
     from time import perf_counter
 
-    if use_logger:
-        printf = logger.info
-    else:
-        printf = rich.print
+    if logger is None:
+        logger = logger
+
+    printf = logger.debug if logger is not None else print
 
     t = perf_counter()
     if name is not None:

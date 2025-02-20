@@ -1,39 +1,25 @@
 ### {{{                          --     imports     --
 import jax
-from typing import Tuple
-from datetime import datetime
+from typing import Tuple, Union
 import jax.numpy as jnp
 from jax import jit, vmap, grad, value_and_grad
-from pathlib import Path
 from jax.tree_util import Partial
 
-# original partial:
-from functools import partial
-import json
-import pandas as pd
 import optax
-import matplotlib.pyplot as plt
 import numpy as np
-import joblib
-from joblib import Parallel, delayed
 from . import datautils as du
-from . import plotutils as pu
 from . import utils as ut
 from . import nodes as nodes
 from . import compute as cmp
-from .utils import check, checkwrap
 from .parameters import ParameterTree
-
-import wandb as wb
-import os
-import time
-from tqdm import tqdm
-
-from typing import List, Tuple, Dict, Any, Callable, Collection, Optional, Union
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                       --     logging tools     --
+
+from biocomp.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 @Partial(jit, static_argnums=(1,))
@@ -61,9 +47,6 @@ def get_epoch_stats(epoch_data, smooth_win=1):
         for k, v in epoch_data["params"]["shared"].items():
             stats["params"][k] = compstats(v)
     return stats
-
-
-
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -100,7 +83,7 @@ def init_stack(
 ) -> Tuple[cmp.ComputeStack, ParameterTree]:
     stack = datamanager.build_compute_stack(compute_config)
     assert stack.init is not None
-    with ut.timer("Stack initialization"):
+    with ut.timer("Stack initialization", logger):
         params = vmap(stack.init)(jax.random.split(key, n_replicates))
     return stack, params
 
@@ -114,7 +97,7 @@ def generate_batches(
 ) -> Tuple[ndArray, ndArray]:
     total_n_batches = n_replicates * n_batches
 
-    with ut.timer("Generating batches"):
+    with ut.timer("Generating batches", logger):
         xbatches, ybatches = datamanager.get_batches(total_n_batches, batch_size, key)
     # current shape is (R*B,N,F), final shape should be (R,B,N,F)
     # R: replicates, B: batches, N: data, F: features

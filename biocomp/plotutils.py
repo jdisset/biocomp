@@ -3,7 +3,7 @@
 import jax.numpy as jnp
 import numpy as np
 from biocomp import utils as ut
-from biocomp.datautils import DataRescaler
+from biocomp.datautils import DataRescaler, IdentityRescaler
 import matplotlib.pyplot as plt
 from biocomp.network import Network
 from biocomp.utils import ArbitraryModel
@@ -37,13 +37,13 @@ from pathlib import Path
 from biocomp.plotting import plotting_core as pc
 from biocomp.logging_config import get_logger
 
-logger = get_logger(__name__)
 
 configurable = ut.configurable_decorator("biocomp.plotting")
 os.environ["PATH"] += os.pathsep + "/Library/TeX/texbin"
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+logger = get_logger(__name__)
 
 # ---- network/recipe plots
 
@@ -151,6 +151,23 @@ class LazyPlotData(PlotData):
 
     def __deepcopy__(self, memo):
         return self
+
+    def __repr__(self):
+        if self.xval is None:
+            return f"LazyPlotData[not loaded, get_xy={self.get_xy}]"
+        else:
+            import xxhash
+            import pickle
+            import base58
+
+            x_sig = base58.b58encode(xxhash.xxh32(pickle.dumps(self.xval)).digest()).decode("utf-8")
+            y_sig = base58.b58encode(xxhash.xxh32(pickle.dumps(self.yval)).digest()).decode("utf-8")
+            return (
+                f"LazyPlotData[loaded with {len(self.xval)} samples; x,y hashes: {x_sig},{y_sig}]"
+            )
+
+    def __str__(self):
+        return self.__repr__()
 
 
 def ax_to_list(ax) -> Sequence:
@@ -312,7 +329,8 @@ class FigureSpec(ArbitraryModel):
         return Path(self.output_dir) / self.output_file
 
     def make_figure(self) -> FigAx:
-        return self.layout.make_figure(**self.extra_args)
+        fax = self.layout.make_figure(**self.extra_args)
+        return fax
 
     def save_figure(self, figax: FigAx) -> None:
         assert self.output_file is not None
@@ -394,15 +412,11 @@ def extract_lazy_plot_data_from_network(
         network, input_order, protein_aliases
     )
 
-    def get_xy(pdata):
+    def get_xy(pdata: PlotData) -> Tuple[NdArray, NdArray]:
+        assert isinstance(pdata, PlotData), f"pdata must be a PlotData, got {type(pdata)}"
         X, Y = get_XY(pdata)
-        print(f"X shape: {X.shape}, Y shape: {Y.shape}")
-        print(f"X: {X}, Y: {Y}")
-        print(f"input_order: {input_order}, output_pos: {output_pos}")
         x = X[:, input_order]
         y = Y[:, output_pos].reshape(-1, 1)
-        print(f"x shape: {x.shape}, y shape: {y.shape}")
-        print(f"x: {x}, y: {y}")
         return x, y
 
     d = LazyPlotData(
@@ -479,10 +493,13 @@ def combine_dicts(*kwarg_lists):
 def histogram(
     plot_data: PlotData,
     ax,
-    rescaler: DataRescaler,
+    rescaler: Optional[DataRescaler] = None,
     grid_histogram_params={},
     **kw,
 ):
+    if rescaler is None:
+        rescaler = IdentityRescaler()
+
     dim = plot_data.dimensions
     x = rescaler.fwd(plot_data.x)
     y = rescaler.fwd(plot_data.y)

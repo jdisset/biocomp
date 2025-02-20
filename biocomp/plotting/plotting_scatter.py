@@ -207,6 +207,7 @@ def grid_histogram(
     draw_colorbar=True,
     use_log_density=True,
     cmap=None,
+    margins=0.01,
     noise_smooth=0.25,
     colorbar_params: dict = {},
 ):
@@ -224,6 +225,12 @@ def grid_histogram(
     xmax = xmax if xlims[1] is None else xlims[1]
     ymin = ymin if ylims[0] is None else ylims[0]
     ymax = ymax if ylims[1] is None else ylims[1]
+    xmargins = margins * (xmax - xmin)
+    ymargins = margins * (ymax - ymin)
+    xmin -= xmargins
+    xmax += xmargins
+    ymin -= ymargins
+    ymax += ymargins
 
     nbins_x = int(res * (xmax - xmin))
     nbins_y = int(res * (ymax - ymin))
@@ -241,6 +248,7 @@ def grid_histogram(
         range=[[xmin, xmax], [ymin, ymax]],
         density=False,
     )
+    h = np.ma.masked_where(h == 0, h)
 
     from biocomp.datautils import IdentityRescaler, LogPlusOneRescaler
 
@@ -249,6 +257,7 @@ def grid_histogram(
     h = density_rescaler.fwd(h)
 
     if cmap is None:
+        print("Using default cmap")
         cmap = DEFAULT_DENSITY_CMAP
 
     setup_transformed_axis(
@@ -258,6 +267,8 @@ def grid_histogram(
         rescaler=rescaler,
         margins=0.0,
     )
+
+    from matplotlib.colors import Normalize
 
     im = ax.imshow(
         h.T,
@@ -269,6 +280,7 @@ def grid_histogram(
         vmax=vlims[1],
         interpolation="nearest",
     )
+
     ax.set_clip_path(ax.patch)
 
     if draw_xlabel:

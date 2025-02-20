@@ -6,7 +6,8 @@ import numpy as np
 from . import utils as ut
 from .parameters import ParameterTree
 from jax import random as random
-
+from biocomp.logging_config import get_logger
+logger = get_logger(__name__)
 ### {{{                       --     actual quantization functions    --
 
 
@@ -121,7 +122,7 @@ def get_quantization_mask(qnames, pname, vnode, masks_per_node=1, **kwargs):
     network = vnode.network
     if network is None:
         # pure virtual node, no network, no masks!
-        ut.logger.warning(f'Node {vnode.node_id} has no network, no quantization mask generated')
+        logger.warning(f'Node {vnode.node_id} has no network, no quantization mask generated')
         mask = np.ones((1, len(qnames)), dtype=bool)
         return mask
 

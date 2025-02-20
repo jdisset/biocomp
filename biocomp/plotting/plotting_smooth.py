@@ -323,7 +323,18 @@ def colorbar(
 
     colorbar_ax = ax.inset_axes(position + size)
     cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation, aspect=20)
-    # cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation)
+
+    # Remove ticks on the opposite side
+    if orientation == "vertical":
+        if label_position == "right":
+            colorbar_ax.yaxis.set_ticks_position("right")
+        else:
+            colorbar_ax.yaxis.set_ticks_position("left")
+    else:
+        if label_position == "top":
+            colorbar_ax.xaxis.set_ticks_position("top")
+        else:
+            colorbar_ax.xaxis.set_ticks_position("bottom")
 
     DEFAULT_TICK_PROPS = {
         "axis": "both",
@@ -331,7 +342,6 @@ def colorbar(
         "direction": "out",
         "pad": 2,
         "labelsize": 8,
-        # thickness:
         "width": 0.7,
     }
     cbar.ax.tick_params(**DEFAULT_TICK_PROPS)
@@ -345,29 +355,36 @@ def colorbar(
     for spine in cbar.ax.spines.values():
         spine.set_linewidth(border_width)
 
-    setup_transformed_axis(
-        cbar.ax,
-        yaxis_lims=[c_vmin, c_vmax],
-        xaxis_lims=[c_vmin, c_vmax],
-        rescaler=rescaler,
-        **setup_transformed_axis_params,
-    )
-
-    if label is not None:
-        if orientation == "vertical":
-            if label_position not in ["left", "right"]:
-                raise ValueError("Vertical orientation: label_position must be left or righ")
-            cbar.ax.yaxis.set_label_position(label_position)  # type: ignore
+    if orientation == "vertical":
+        setup_transformed_axis(
+            cbar.ax,
+            yaxis_lims=[c_vmin, c_vmax],
+            xaxis_lims=None,
+            rescaler=rescaler,
+            **setup_transformed_axis_params,
+        )
+        if label_position not in ["left", "right"]:
+            raise ValueError("Vertical orientation: label_position must be left or right")
+        cbar.ax.yaxis.set_label_position(label_position)
+        if label is not None:
             cbar.ax.set_ylabel(label, **label_props)
-            cbar.ax.tick_params(axis="x", which="both", size=0)
-            cbar.ax.set_xticks([])
-        else:
-            if label_position not in ["bottom", "top"]:
-                raise ValueError("Horizontal orientation: label_position must be bottom or top")
-            cbar.ax.xaxis.set_label_position(label_position)  # type: ignore
+        cbar.ax.tick_params(axis="x", which="both", size=0)
+        cbar.ax.set_xticks([])
+    else:
+        setup_transformed_axis(
+            cbar.ax,
+            xaxis_lims=[c_vmin, c_vmax],
+            yaxis_lims=None,
+            rescaler=rescaler,
+            **setup_transformed_axis_params,
+        )
+        if label_position not in ["bottom", "top"]:
+            raise ValueError("Horizontal orientation: label_position must be bottom or top")
+        cbar.ax.xaxis.set_label_position(label_position)
+        if label is not None:
             cbar.ax.set_xlabel(label, **label_props)
-            cbar.ax.tick_params(axis="y", which="both", size=0)
-            cbar.ax.set_yticks([])
+        cbar.ax.tick_params(axis="y", which="both", size=0)
+        cbar.ax.set_yticks([])
 
     return cbar
 

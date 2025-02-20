@@ -14,6 +14,9 @@ import logging as log
 import traceback
 from typing import Union, Optional, Sequence, Iterable, Any, Callable, TypeVar
 
+from biocomp.logging_config import get_logger
+
+logger = get_logger(__name__)
 PathLike = Union[str, Path]
 
 
@@ -161,7 +164,7 @@ def recipes_to_sql(recipes: list, conn, lib, error_handler=None):
                     l1ids = [s for s in lib.L2s.loc[s["plasmid"]][slot_cols].tolist() if s]
                 if type is None:
                     err_msg = f'In recipe {obj["name"]}: unknown plasmid {s["plasmid"]}'
-                    ut.logger.error(err_msg)
+                    logger.error(err_msg)
                     error_in_recipe = True
                     error_handler(err_msg)
                     continue  # we still continue to get a list of all errors
@@ -186,7 +189,7 @@ def recipes_to_sql(recipes: list, conn, lib, error_handler=None):
                     ),
                 )
         if error_in_recipe:
-            ut.logger.error(f'Skipped recipe {obj["name"]} because of import errors')
+            logger.error(f'Skipped recipe {obj["name"]} because of import errors')
             c.execute("DELETE FROM recipes WHERE name = ?", (obj["name"],))
             conn.commit()
 
@@ -200,9 +203,9 @@ def xp_to_sql(xps: list, conn):
         c.execute("SELECT name FROM XPs WHERE name = ?", (obj["name"],))
         if c.fetchone():
             # already in db so we skip
-            ut.logger.debug(f'XP {obj["name"]} already in db, skipping')
+            logger.debug(f'XP {obj["name"]} already in db, skipping')
             return
-        ut.logger.info(f'Adding XP {obj["name"]} to sql db')
+        logger.info(f'Adding XP {obj["name"]} to sql db')
         c.execute(
             "INSERT INTO XPs VALUES (?, ?, ?, ?)",
             (
@@ -246,7 +249,7 @@ def import_recipes_to_sql(
 
     for f in tqdm(recipe_files, desc="Importing recipes", disable=not show_progress):
         recipe = ut.load_json5(f)
-        ut.logger.debug(f'Importing recipe {recipe["name"]}')
+        logger.debug(f'Importing recipe {recipe["name"]}')
         if not Path(f).name == f'{recipe["name"]}.recipe.json5':
             error_handler(f'File vs recipe name mismatch (recipe: {recipe["name"]}, file: {f})')
         recipe_objects.append(recipe)
@@ -275,7 +278,7 @@ def build_network(
         metadata = {"recipe_name": recipe_name}
 
     try:
-        ut.logger.debug(f"Building network for recipe {recipe_name}")
+        logger.debug(f"Building network for recipe {recipe_name}")
         fwd_network = Network.from_db(
             lib,
             recipe_name,
@@ -545,7 +548,7 @@ class XP:
     def data_error_handler(self, msg, ignore_errors=False):
         if ignore_errors:
             self.data_loading_errors += msg + "\n\n"
-            ut.logger.warning(msg)
+            logger.warning(msg)
             return None
         else:
             raise RuntimeError(msg)
@@ -553,7 +556,7 @@ class XP:
     def recipe_error_handler(self, msg, ignore_errors=False):
         if ignore_errors:
             self.recipe_loading_errors += msg + "\n\n"
-            ut.logger.warning(msg)
+            logger.warning(msg)
             return None
         else:
             raise RuntimeError(msg)
@@ -649,7 +652,7 @@ class XP:
     def network_error_handler(self, msg, ignore_errors=False):
         if ignore_errors:
             self.network_building_errors += msg + "\n\n"
-            ut.logger.warning(msg)
+            logger.warning(msg)
             return None
         else:
             raise RuntimeError(msg)

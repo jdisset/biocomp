@@ -1,7 +1,7 @@
 import logging
 from biocomp.logging_config import setup_logging, get_logger
 
-setup_logging(default_level=logging.DEBUG, rich_logging=True)
+# setup_logging(default_level=logging.DEBUG, rich_logging=True)
 from . import utils as ut
 from .library import PartsLibrary as PartsLibrary
 

@@ -119,13 +119,19 @@ def sorting_loss(
     kl_weight=0.1,
     sorting_mse_weight=0.1,
     percent=1,
+    use_same_key=False,
 ):
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
     def loss_func(dynamic, static, X, Y, Z, key, step):
         check_XYZ_new(X, Y, Z, stack)
         params = ParameterTree.merge(dynamic, static)
-        keys = jax.random.split(key, X.shape[0])
+
+        if use_same_key:
+            keys = jnp.array([key] * X.shape[0])
+        else:
+            keys = jax.random.split(key, X.shape[0])
+
         yhat, (grads_wrt_inputs, full_output) = batch_apply(params, X, Z, keys)
         assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
         aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
@@ -257,8 +263,8 @@ def start(
 ):
     import optax
 
-    ut.logger.debug(f"Training config: {training_config}")
-    ut.logger.debug(f"Compute config: {compute_config}")
+    logger.debug(f"Training config: {training_config}")
+    logger.debug(f"Compute config: {compute_config}")
 
     # --- init & batches generation
     assert training_config.seed is not None, "Seed must be set"
@@ -283,7 +289,7 @@ def start(
         training_config.n_epochs * training_config.n_batches / training_config.batches_per_step
     )
 
-    ut.logger.info(
+    logger.info(
         f"""Done initializing optimizer,
         n_replicates: {training_config.n_replicates}
         batches: {xbatches.shape[1]}
@@ -392,11 +398,11 @@ def start(
     ), "All replicates must have the same number of quantile variables"
     num_z = int(num_z[0])
 
-    ut.logger.info("Compiling training step")
+    logger.debug("Compiling training step")
     t0 = time.time()
     lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
     compiled_step = lowered.compile()
-    ut.logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
+    logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
 
     # --- main training loop
     loggers = loggers or []
@@ -406,7 +412,7 @@ def start(
         if t == 0:
             l(step=0, training_config=training_config)
 
-    ut.logger.info(f"Begin training for {total_steps} steps")
+    logger.info(f"Begin training for {total_steps} steps")
 
     step_history, loss_history = {}, []
 
@@ -427,7 +433,7 @@ def start(
     for i, step_key in enumerate(jax.random.split(key, total_steps), 1):
         if i % step_per_epoch == 0:
             epoch += 1
-            ut.logger.info(f"Starting epoch {epoch}")
+            logger.info(f"Starting epoch {epoch}")
             xbatches, ybatches = reshuffle_batches(xbatches, ybatches, step_key)
 
         t0 = time.time()
@@ -451,14 +457,15 @@ def start(
 
         if "loss" in step_history:
             loss_history.append(step_history["loss"])
+
         qvalues_dir = ParamPath("shared/quantization/values")
         qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
-        jax.debug.print("qvalues {}", qvalues)
+        # jax.debug.print("qvalues {}", qvalues)
 
         for t, l in loggers:
             if t is not None:
                 if t == 0 or (i % t == 0 and t > 0):
-                    ut.logger.debug(f"Calling logger {l} at step {i}")
+                    logger.debug(f"Calling logger {l} at step {i}")
                     l(
                         step=i,
                         training_config=training_config,
@@ -467,14 +474,14 @@ def start(
 
     for t, l in loggers:
         if t is None or t == -1:
-            ut.logger.debug(f"Calling logger {l} at the end of training")
+            logger.debug(f"Calling logger {l} at the end of training")
             l(
                 step=total_steps,
                 training_config=training_config,
                 step_history=step_history,
             )
 
-    ut.logger.info(f"End of training for {training_config.n_epochs} epochs")
+    logger.info(f"End of training for {training_config.n_epochs} epochs")
 
     return params, loss_history, step_history
 

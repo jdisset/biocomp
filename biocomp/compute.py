@@ -12,9 +12,7 @@ import numpy as np
 import pandas as pd
 from jax import vmap
 from jax.tree_util import Partial as partial
-import json
 
-from rich import print as pprint
 
 from . import nodes as nd
 from .network import Network
@@ -23,9 +21,10 @@ from biocomp.utils import ArbitraryModel, PartialFunction, EncodedPartialFunctio
 from .parameters import ParameterTree, ParamPath
 from . import nodes
 
-from pydantic import BaseModel, Field, BeforeValidator
+from biocomp.logging_config import get_logger
 
-from jax.typing import ArrayLike
+logger = get_logger(__name__)
+
 
 PRNGKey = Union[jnp.ndarray, np.ndarray, int]
 NdArray = Union[jnp.ndarray, np.ndarray]
@@ -212,15 +211,12 @@ class ComputeLayer:
             input_shapes = []
             for input_net_id, input_compute_node_id, input_slot_id in n_inp:
                 input_layer_id, _ = stack.node_map[(input_net_id, input_compute_node_id)]
-                print(f"{input_layer_id=}")
                 assert input_layer_id < self.layer_id, "Input node is in a later layer"
                 assert stack.layers[input_layer_id].is_built, "Input layer is not built"
                 input_layer_output_shapes = stack.layers[input_layer_id].f_out_shapes
-                print(f"{input_layer_output_shapes=}")
                 assert input_slot_id < len(
                     input_layer_output_shapes
                 ), f"Input slot {input_slot_id} is out of range"
-                print(f"{input_layer_output_shapes[input_slot_id]=}")
                 shape = (
                     tuple(input_layer_output_shapes[input_slot_id])
                     if isinstance(input_layer_output_shapes[input_slot_id], list)
@@ -229,7 +225,6 @@ class ComputeLayer:
                 input_shapes.append(shape)
             all_input_shapes.append(tuple(input_shapes))
         # they should all be the same
-        print(f"{all_input_shapes=}")
         assert len(set(all_input_shapes)) == 1, f"Input shapes are not the same: {all_input_shapes}"
         self.f_input_shapes = all_input_shapes[0]
 
@@ -255,8 +250,11 @@ class ComputeLayer:
     def flattened_output_shape(self):
         return int(len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes]))
 
+    def type_str(self):
+        return self.nodes[0].get_compute_node("type")
+
     def __repr__(self):
-        ftype = self.nodes[0].get_compute_node("type")
+        ftype = self.type_str()
         return f"Layer {self.layer_id} ({ftype}) with {len(self.nodes)} nodes"
 
     def __hash__(self):
@@ -307,7 +305,7 @@ class ComputeStack:
         of all nodes in each layers, as well as the correct mapping and chaining of
         their inputs and outputs.
         """
-        with ut.timer("Building compute stack"):
+        with ut.timer("Building compute stack", logger):
             self.config = config
             self._assemble_stack(**kwargs)
             self._refresh()
@@ -334,7 +332,7 @@ class ComputeStack:
             assert layer.is_built, "Layer not built"
             assert l_id == layer.layer_id, "Layer id mismatch"
             rng_key, _ = jax.random.split(rng_key)
-            ut.logger.debug(
+            logger.debug(
                 f"Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}"
             )
             if layer.f_prepare is not None:
@@ -361,7 +359,6 @@ class ComputeStack:
         start_index = self.layers_start_index[layer_id] + node_loc * np.sum(
             [np.prod(s) for s in out_shape]
         )
-        print(f"{start_index=}, {out_shape=}, {layer_id=}, {node_loc=}")
         return int(start_index), out_shape
 
     def get_node_from_net_and_compute_id(
@@ -806,7 +803,7 @@ class ComputeStack:
         minstack = ComputeStack.make_smallest_stack_dfs(
             ComputeStack(self.networks, []), type_dict, **kwargs
         )
-        ut.logger.debug(f"Final stack size: {len(minstack.layers) if minstack.layers else 0}")
+        logger.debug(f"Final stack size: {len(minstack.layers) if minstack.layers else 0}")
         self.layers = minstack.layers
 
     def make_layer_input_getters(self, layer_id: int):
@@ -972,7 +969,7 @@ class ComputeStack:
             Overwrite stuff:
                 - added overwrite_* to allow injecting values at specific indices
                 - allows feeding whatever values we want to some specific nodes
-                - overwrite_with is a 1d array of values to inject
+                - overwrite_values is a 1d array of values to inject
                 - overwrite_at is a 1d array of indices where to inject the values
             """
 
@@ -993,7 +990,9 @@ class ComputeStack:
 
                 if overwrite_values is not None and overwrite_at is not None:
                     assert overwrite_values.ndim == 1 and overwrite_at.ndim == 1
-                    assert overwrite_values.shape[0] == overwrite_at.shape[0]
+                    assert (
+                        overwrite_values.shape[0] == overwrite_at.shape[0]
+                    ), f"{overwrite_values.shape[0]=} != {overwrite_at.shape[0]=}"
                     running_output = running_output.at[overwrite_at].set(overwrite_values)
 
                 # fetch the inputs for each node in the layer from the output array

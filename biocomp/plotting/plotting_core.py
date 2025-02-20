@@ -124,7 +124,9 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
                     assert iname in range(len(input_names)), f"Invalid protein index: {iname}"
                     input_order.append(iname)
 
-        assert len(input_order) == len(input_names), f"Wrong number of inputs: {input_order}"
+        assert len(input_order) == len(
+            input_names
+        ), f"Wrong number of inputs: {input_order=}, {input_names=}"
 
         if "*" in input_order:
             missing = set(range(len(input_names))) - set(input_order)
@@ -333,6 +335,8 @@ def setup_transformed_axis_generic(
     minor_tick_width=None,
     label_fontsize=None,
     show_labels=True,
+    spine_position=None,
+    force_spine_only=False,
     **kw,
 ):
     # Get the appropriate axis object and methods based on axis parameter
@@ -342,6 +346,24 @@ def setup_transformed_axis_generic(
 
     # Get the appropriate rcParams prefix
     rc_prefix = f"{axis}tick"
+
+    # Determine spine position
+    if spine_position is None:
+        spine_position = "bottom" if axis == "x" else "left"
+
+    # Handle spine visibility
+    if force_spine_only:
+        # Special handling for colorbar-like cases
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.spines[spine_position].set_visible(True)
+
+        if axis == "x":
+            ax.xaxis.set_ticks_position(spine_position)
+            ax.xaxis.set_label_position(spine_position)
+        else:
+            ax.yaxis.set_ticks_position(spine_position)
+            ax.yaxis.set_label_position(spine_position)
 
     lims_tr = np.asarray(axis_lims)
     lims_inv = rescaler.inv(np.asarray(lims_tr))
@@ -358,16 +380,30 @@ def setup_transformed_axis_generic(
         if show_minor:
             axis_obj.set_minor_formatter(PowerFormatter(p10_minor, **kw))
 
-        # get the appropriate spine and tick params
-        spine_name = "bottom" if axis == "x" else "left"
-        tick_params_dict = {
-            spine_name: plt.rcParams[f"{rc_prefix}.{spine_name}"],
-            f"label{spine_name}": plt.rcParams[f"{rc_prefix}.label{spine_name}"],
-            "which": "both",
-        }
+        # Set up tick parameters
+        if force_spine_only:
+            # Special handling for colorbar-like cases
+            tick_params_dict = {
+                spine_position: True,
+                f"label{spine_position}": True,
+                "which": "both",
+            }
 
-        # reapply all tick and spine visibility settings
-        ax.tick_params(axis=axis, **tick_params_dict)
+            other_positions = {"top", "bottom", "left", "right"} - {spine_position}
+            for pos in other_positions:
+                tick_params_dict[pos] = False
+                tick_params_dict[f"label{pos}"] = False
+                ax.spines[pos].set_visible(True)
+
+            ax.tick_params(axis=axis, **tick_params_dict)
+        else:
+            spine_name = "bottom" if axis == "x" else "left"
+            tick_params_dict = {
+                spine_name: plt.rcParams[f"{rc_prefix}.{spine_name}"],
+                f"label{spine_name}": plt.rcParams[f"{rc_prefix}.label{spine_name}"],
+                "which": "both",
+            }
+            ax.tick_params(axis=axis, **tick_params_dict)
 
         # major tick properties
         if major_tick_length is not None or major_tick_width is not None:
@@ -404,11 +440,14 @@ def setup_transformed_axis_generic(
             else:
                 ax.set_yticklabels([])
 
-        # reapply spine visibility
-        ax.spines[spine_name].set_visible(plt.rcParams[f"{rc_prefix}.{spine_name}"])
+        if not force_spine_only:
+            # Original behavior for spine visibility
+            spine_name = "bottom" if axis == "x" else "left"
+            ax.spines[spine_name].set_visible(plt.rcParams[f"{rc_prefix}.{spine_name}"])
 
     except ValueError as e:
         logger.error(f"Error setting up {axis}-axis: {e}")
+
     return lims_inv
 
 
