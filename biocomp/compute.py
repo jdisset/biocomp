@@ -335,8 +335,18 @@ class ComputeStack:
             logger.debug(
                 f"Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}"
             )
+            logger.debug(f"Layer type: {layer.f_type}")
+            logger.debug(f"Layer input shapes: {layer.f_input_shapes}")
+            logger.debug(f"Layer output shapes: {layer.f_out_shapes}")
             if layer.f_prepare is not None:
-                layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
+                try:
+                    layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
+                except Exception as e:
+                    logger.error(f"Error in layer {l_id} preparation:")
+                    logger.error(f"Layer type: {layer.f_type}")
+                    logger.error(f"Layer input shapes: {layer.f_input_shapes}")
+                    logger.error(f"Layer output shapes: {layer.f_out_shapes}")
+                    raise e
         params.tag("local", "local")
         params.tag("shared", "shared")
         # pp_params = self.post_process(params)

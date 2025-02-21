@@ -23,6 +23,8 @@ from dataclasses import dataclass
 
 PRNGKey = ArrayLike
 
+logger = ut.get_logger(__name__)
+
 
 # =========================== Utils ===========================
 ### {{{                 --     misc    --
@@ -531,6 +533,11 @@ def transform_nn(
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
     **_,
 ):
+    logger.debug("Initializing transform_nn node:")
+    logger.debug(f"  transform_name: {transform_name}")
+    logger.debug(f"  input_shapes: {input_shapes}")
+    logger.debug(f"  n_outputs: {n_outputs}")
+    logger.debug(f"  is_inverse: {is_inverse}")
     assert n_outputs == 1, f"NN transform only supports 1 output, got {n_outputs}"
     if is_inverse and len(input_shapes) != 1:
         raise ValueError(f"Inverse {transform_name} should have 1 input, got {len(input_shapes)}")
@@ -564,6 +571,15 @@ def transform_nn(
         the rate embedding and the source value.
         All of these outputs will then be summed up and passed through a final layer.
         """
+        logger.debug(f"Inner function inputs:")
+        logger.debug(f"  value shape: {value.shape if hasattr(value, 'shape') else 'scalar'}")
+        logger.debug(
+            f"  rate_embedding shape: {rate_embedding.shape if hasattr(rate_embedding, 'shape') else 'scalar'}"
+        )
+        logger.debug(
+            f"  quantile shape: {quantile.shape if hasattr(quantile, 'shape') else 'scalar'}"
+        )
+
         if value.ndim == 0:
             value = value.reshape((1,))
         if rate_embedding.ndim == 0:
@@ -573,6 +589,7 @@ def transform_nn(
         assert rate_embedding.ndim == 1
 
         inputs = ut.flat_concat(value, rate_embedding, quantile)
+        logger.debug(f"  concatenated inputs shape: {inputs.shape}")
 
         out = inner_activation(
             dense_multilevel(
@@ -703,16 +720,40 @@ def transform_nn(
         node_id: ArrayLike,
         key: PRNGKey,
     ):
+        logger.debug(f"Apply function inputs:")
+        logger.debug(
+            f"  values shapes: {[v.shape if hasattr(v, 'shape') else 'scalar' for v in values]}"
+        )
+        logger.debug(
+            f"  quantiles shape: {quantiles.shape if hasattr(quantiles, 'shape') else 'scalar'}"
+        )
+        logger.debug(f"  node_id: {node_id}")
+
         k1, k2, k3 = jax.random.split(key, 3)
 
         qid = params[f"local/{layer_name}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
+        logger.debug(f"  quantile shape after indexing: {quantile.shape}")
 
         val = jnp.array(values)
+        logger.debug(f"  values array shape: {val.shape}")
+
         rates = params[f"local/{layer_name}/{rate_name}"][node_id]
-        assert val.shape == (len(input_shapes), *input_shapes[0])
-        assert rates.shape == (len(input_shapes), rate_dim)
-        assert quantile.shape == (len(input_shapes) + 1,)
+        logger.debug(f"  rates shape: {rates.shape}")
+
+        try:
+            assert val.shape == (len(input_shapes), *input_shapes[0])
+            assert rates.shape == (len(input_shapes), rate_dim)
+            assert quantile.shape == (len(input_shapes) + 1,)
+        except AssertionError as e:
+            logger.error(f"Shape assertion failed in transform_nn apply:")
+            logger.error(f"  val.shape: {val.shape}")
+            logger.error(f"  expected val.shape: {(len(input_shapes), *input_shapes[0])}")
+            logger.error(f"  rates.shape: {rates.shape}")
+            logger.error(f"  expected rates.shape: {(len(input_shapes), rate_dim)}")
+            logger.error(f"  quantile.shape: {quantile.shape}")
+            logger.error(f"  expected quantile.shape: {(len(input_shapes) + 1,)}")
+            raise e
         qrates = qz.get_variational_quantized(
             rates,
             params,
@@ -735,7 +776,9 @@ def transform_nn(
 
         # then we apply a final outer layer to the summed output:
         ans = outer(inner_out, params, k2)
-        return ans + val.reshape(ans.shape)
+        # return ans + val.reshape(ans.shape)
+        return jnp.broadcast_to(ans, val.shape) + val
+        return ans.reshape(-1, 1) + val
 
     def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for node_id, node in enumerate(nodelist):
