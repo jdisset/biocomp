@@ -237,11 +237,15 @@ class ComputeLayer:
             layer_id=self.layer_id,
         )
 
+
+
         self.f_prepare = impl.prepare
         self.f_apply = impl.apply
         self.f_out_shapes = impl.output_shapes
         self.f_commit = impl.commit
         self.is_built = True
+
+
 
     def get_n_outputs(self):
         output_to = self.nodes[0].get_compute_node("output_to")
@@ -1033,7 +1037,12 @@ class ComputeStack:
 
                 layer_out, layer_grad = layer_apply(*layer_inputs)
                 flattened_layer_output = layer_out.reshape(-1)
-                assert self.layers[lid].flattened_output_shape() == len(flattened_layer_output)
+
+                if self.layers[lid].flattened_output_shape() != len(flattened_layer_output):
+                    raise ValueError(
+                        f"Output shape mismatch: {self.layers[lid].flattened_output_shape()=} != "
+                        f"{len(flattened_layer_output)=}"
+                    )
 
                 running_output = jnp.concatenate([running_output, flattened_layer_output])
                 grads = jnp.concatenate([grads, layer_grad.reshape(-1)])

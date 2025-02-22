@@ -44,6 +44,14 @@ class LayerInstance:
     output_shapes: List[Tuple[int]]
     commit: Optional[Callable] = None
 
+    def __post_init__(self):
+        assert all(
+            isinstance(shape, tuple) for shape in self.output_shapes
+        ), f"Invalid output shapes: {self.output_shapes}"
+        assert all(
+            all(isinstance(dim, int) for dim in shape) for shape in self.output_shapes
+        ), f"Non-integer dimensions in output shapes: {self.output_shapes}"
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -776,9 +784,8 @@ def transform_nn(
 
         # then we apply a final outer layer to the summed output:
         ans = outer(inner_out, params, k2)
-        # return ans + val.reshape(ans.shape)
-        return jnp.broadcast_to(ans, val.shape) + val
-        return ans.reshape(-1, 1) + val
+
+        return jnp.sum(ans + val, axis=0)  # skip connection
 
     def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for node_id, node in enumerate(nodelist):
