@@ -12,6 +12,8 @@ data_plots/
 local_vars.py
 devtmp
 biocomp-static
+.repo*
+repo*
 
 *.py[cod]
 *$py.class
