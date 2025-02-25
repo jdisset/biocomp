@@ -312,6 +312,7 @@ def colorbar(
     size=(0.04, 0.52),
     orientation: Literal["horizontal", "vertical"] = "vertical",
     label_position: Literal["left", "right", "bottom", "top"] = "right",
+    tick_position: Optional[Literal["left", "right", "bottom", "top"]] = "left",
     label_props: Dict = {},
     tick_props: Optional[ListOrSingle[Dict]] = None,
     border_width=0.7,
@@ -320,24 +321,41 @@ def colorbar(
     imlims = im.get_clim()
     c_vmin = imlims[0] if vlims[0] is None else vlims[0]
     c_vmax = imlims[1] if vlims[1] is None else vlims[1]
+    print("c_vmin", c_vmin, "c_vmax", c_vmax)
+    print("position", position, "size", size)
 
-    colorbar_ax = ax.inset_axes(position + size)
+    colorbar_ax = ax.inset_axes(
+        [
+            position[0],  # x position
+            position[1],  # y position
+            size[0],  # width
+            size[1],  # height
+        ]
+    )
+
     cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation, aspect=20)
 
-    # Remove ticks on the opposite side
+    if tick_position is None:
+        tick_position = label_position
+
     if orientation == "vertical":
-        if label_position == "right":
+        if tick_position == "right":
             colorbar_ax.yaxis.set_ticks_position("right")
+            colorbar_ax.tick_params(left=False)
         else:
             colorbar_ax.yaxis.set_ticks_position("left")
+            colorbar_ax.tick_params(right=False)
     else:
-        if label_position == "top":
+        if tick_position == "top":
             colorbar_ax.xaxis.set_ticks_position("top")
+            colorbar_ax.tick_params(bottom=False)
         else:
             colorbar_ax.xaxis.set_ticks_position("bottom")
+            colorbar_ax.tick_params(top=False)
 
+    # Default tick properties
     DEFAULT_TICK_PROPS = {
-        "axis": "both",
+        "axis": "y" if orientation == "vertical" else "x",
         "which": "both",
         "direction": "out",
         "pad": 2,
@@ -355,19 +373,31 @@ def colorbar(
     for spine in cbar.ax.spines.values():
         spine.set_linewidth(border_width)
 
+    setup_transformed_axis_params_with_spine = {
+        "spine_position": tick_position,  # Use tick_position for the spine
+        "force_spine_only": True,
+        **setup_transformed_axis_params,
+    }
+
     if orientation == "vertical":
         setup_transformed_axis(
             cbar.ax,
             yaxis_lims=[c_vmin, c_vmax],
             xaxis_lims=None,
             rescaler=rescaler,
-            **setup_transformed_axis_params,
+            **setup_transformed_axis_params_with_spine,
         )
+
         if label_position not in ["left", "right"]:
             raise ValueError("Vertical orientation: label_position must be left or right")
+        if tick_position not in ["left", "right"]:
+            raise ValueError("Vertical orientation: tick_position must be left or right")
+
         cbar.ax.yaxis.set_label_position(label_position)
+
         if label is not None:
             cbar.ax.set_ylabel(label, **label_props)
+
         cbar.ax.tick_params(axis="x", which="both", size=0)
         cbar.ax.set_xticks([])
     else:
@@ -376,13 +406,19 @@ def colorbar(
             xaxis_lims=[c_vmin, c_vmax],
             yaxis_lims=None,
             rescaler=rescaler,
-            **setup_transformed_axis_params,
+            **setup_transformed_axis_params_with_spine,
         )
+
         if label_position not in ["bottom", "top"]:
             raise ValueError("Horizontal orientation: label_position must be bottom or top")
+        if tick_position not in ["bottom", "top"]:
+            raise ValueError("Horizontal orientation: tick_position must be bottom or top")
+
         cbar.ax.xaxis.set_label_position(label_position)
+
         if label is not None:
             cbar.ax.set_xlabel(label, **label_props)
+
         cbar.ax.tick_params(axis="y", which="both", size=0)
         cbar.ax.set_yticks([])
 

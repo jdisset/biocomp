@@ -440,10 +440,9 @@ def setup_transformed_axis_generic(
             else:
                 ax.set_yticklabels([])
 
-        if not force_spine_only:
-            # Original behavior for spine visibility
-            spine_name = "bottom" if axis == "x" else "left"
-            ax.spines[spine_name].set_visible(plt.rcParams[f"{rc_prefix}.{spine_name}"])
+        # if not force_spine_only:
+        #     spine_name = "bottom" if axis == "x" else "left"
+        #     ax.spines[spine_name].set_visible(plt.rcParams[f"{rc_prefix}.{spine_name}"])
 
     except ValueError as e:
         logger.error(f"Error setting up {axis}-axis: {e}")
