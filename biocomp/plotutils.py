@@ -355,7 +355,7 @@ def get_reordered_protein_names(
     network: Network,
     input_order: Optional[Sequence[int] | Sequence[str]] = None,
     protein_aliases: Optional[Dict[str, str]] = None,
-):
+) -> Tuple[list[int], int, list[str], str]:
     protein_aliases = protein_aliases or {}
     protein_order, protein_names = pc.get_reordered_protein_names(
         network,
