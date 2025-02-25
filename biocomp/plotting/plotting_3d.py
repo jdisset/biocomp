@@ -13,7 +13,8 @@ from . import plotting_core as pc
 from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable
 from matplotlib import pyplot as plt
 from functools import partial
-from mpl_toolkits.axes_grid1.inset_locator import InsetPosition
+
+# from mpl_toolkits.axes_grid1.inset_locator import InsetPosition
 import numpy as np
 from .plotting_core import NumLike
 from biocomp import utils as ut
@@ -386,21 +387,36 @@ def plot_3d_stack(
                 **props["labels"],
             )
 
+
     # plot the slices
     for i, (f, z) in enumerate(zip(slice_functions, slice_zpositions)):
-        axin = ax.inset_axes([0, 0, 1, 1], zorder=-z)
+        inset_coords_world = np.array(
+            [[0, 1], [0, 1]]
+        )  # placeholder, will be updated after f(axin)
+        inset_size_world = np.abs(inset_coords_world[:, 1] - inset_coords_world[:, 0])
+        inset_size_ax = inset_size_world / ax_size
+
+        # project the z value (using placeholder coordinates initially)
+        inset_coords_proj = project((inset_coords_world[0, 0], inset_coords_world[1, 0], z))
+        inset_coords_ax = to_ax_coords(inset_coords_proj, ax_lims, ax_size)
+
+        position = [inset_coords_ax[0], inset_coords_ax[1], inset_size_ax[0], inset_size_ax[1]]
+        axin = ax.inset_axes(position, zorder=-z)
+
         f(axin)
+
+        # update coordinates after f(axin) has potentially changed the limits
         inset_coords_world = np.array([axin.get_xlim(), axin.get_ylim()])
         inset_size_world = np.abs(inset_coords_world[:, 1] - inset_coords_world[:, 0])
         inset_size_ax = inset_size_world / ax_size
-        # project the z value
+
+        # recalculate the projected coordinates
         inset_coords_proj = project((inset_coords_world[0, 0], inset_coords_world[1, 0], z))
         inset_coords_ax = to_ax_coords(inset_coords_proj, ax_lims, ax_size)
-        # bit of a hack but it's to avoid inset_axes ignoring set_position after creation (mpl v3.8)
-        ip = InsetPosition(
-            ax, [inset_coords_ax[0], inset_coords_ax[1], inset_size_ax[0], inset_size_ax[1]]
-        )
-        axin.set_axes_locator(ip)
+
+        new_position = [inset_coords_ax[0], inset_coords_ax[1], inset_size_ax[0], inset_size_ax[1]]
+        if position != new_position:
+            axin.set_position(new_position)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -544,7 +560,6 @@ def smooth_3d(
     show_progress=True,
     **_,
 ):
-
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
 
     if isinstance(ax, Axes):
@@ -653,7 +668,9 @@ def smooth_3d(
     ztitle = ztitle if ztitle is not None else input_names[2]
 
     # for i, s in enumerate(zslices):
-    zgen = enumerate(zslices) if show_progress else ut.progress(enumerate(zslices), total=len(zslices))
+    zgen = (
+        enumerate(zslices) if show_progress else ut.progress(enumerate(zslices), total=len(zslices))
+    )
     for i, s in zgen:
         # now add a special tick for the slices
         slice_ax = ax[i]
