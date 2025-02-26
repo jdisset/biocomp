@@ -321,8 +321,6 @@ def colorbar(
     imlims = im.get_clim()
     c_vmin = imlims[0] if vlims[0] is None else vlims[0]
     c_vmax = imlims[1] if vlims[1] is None else vlims[1]
-    print("c_vmin", c_vmin, "c_vmax", c_vmax)
-    print("position", position, "size", size)
 
     colorbar_ax = ax.inset_axes(
         [
@@ -450,7 +448,19 @@ def smooth_2d(
     heatmap_params: Dict = {},
     setup_transformed_axis_params: Dict = {},
 ) -> Tuple:
-    ylims = xlims if ylims == (None, None) else ylims
+    # compute actual xlims:
+    data_xlims = [X[:, 0].min(), X[:, 0].max()]
+    data_ylims = [X[:, 1].min(), X[:, 1].max()]
+
+    xlims = [
+        data_xlims[0] if xlims[0] is None else xlims[0],
+        data_xlims[1] if xlims[1] is None else xlims[1],
+    ]
+    ylims = [
+        data_ylims[0] if ylims[0] is None else ylims[0],
+        data_ylims[1] if ylims[1] is None else ylims[1],
+    ]
+
 
     if isinstance(ax, (list, tuple)):
         ax = ax[0]
