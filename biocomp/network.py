@@ -24,6 +24,7 @@ from functools import cached_property
 from .utils import load_lib
 
 from biocomp.logging_config import get_logger
+
 logger = get_logger(__name__)
 
 part_type_to_parameter_name = {"promoter": "tc_rate", "uORF_group": "tl_rate"}
@@ -1744,4 +1745,3 @@ def inverted_network(
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
-
