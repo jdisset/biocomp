@@ -413,7 +413,7 @@ class ResamplingConfig(BaseModel):
 
 class DataConfig(BaseModel):
     valid_raw_value_range: ValueRange = Field(default_factory=lambda: ValueRange(min=500, max=1e8))
-    acceptable_out_of_range_fraction_in_raw_data: float = 0.05
+    acceptable_out_of_range_fraction_in_raw_data: float = 0.04
     perform_data_checks: bool = True
     resampling: ResamplingConfig = Field(default_factory=ResamplingConfig)
     rescaler: DataRescaler = Field(default_factory=CompressedSymLogRescaler)
@@ -526,6 +526,12 @@ class DataManager:
             invalid_at = np.isnan(self._raw_X[i]).any(axis=1)
             invalid_at = invalid_at | (np.isnan(self._raw_Y[i]).any(axis=1))
             invalid_at = invalid_at | (self._raw_X[i] < data_cfg.valid_raw_value_range.min).any(
+                axis=1
+            )
+            invalid_at = invalid_at | (self._raw_X[i] > data_cfg.valid_raw_value_range.max).any(
+                axis=1
+            )
+            invalid_at = invalid_at | (self._raw_Y[i] < data_cfg.valid_raw_value_range.min).any(
                 axis=1
             )
             invalid_at = invalid_at | (self._raw_Y[i] > data_cfg.valid_raw_value_range.max).any(
