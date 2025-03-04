@@ -264,22 +264,47 @@ class Slot(BaseModel):
         return f"<{self.part} -> {self.maps_to_parameter}>"
 
 
+# Validator for automatic Slot conversion
+def convert_to_slot(value, lib=None):
+    """Convert strings or lists of strings to Slot objects"""
+    if isinstance(value, Slot):
+        if lib is not None and value.lib is None:
+            value.lib = lib
+        return value
+    elif isinstance(value, (str, list)):
+        return Slot(part=value)
+    else:
+        raise ValueError(f"Cannot convert {type(value)} to Slot")
+
+
+SlotType = Annotated[Slot | str | list[str], BeforeValidator(convert_to_slot)]
+
+
 class TranscriptionUnit(BaseModel):
     name: str = ""
-    slots: List[Slot]
-    params: Dict = {}
+    slots: List[SlotType] = Field(default_factory=list)
+    params: Dict = Field(default_factory=dict)
+    source: Optional[str] = None
+    lib: PartsLibrary = Field(default_factory=load_lib, repr=False)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     def model_post_init(self, *args, **kwargs):
+        # Ensure all slots have a library
+        for slot in self.slots:
+            if slot.lib is None:
+                slot.lib = self.lib
+
         self.__get_parameters()
 
     def __get_parameters(self):
         for s in self.slots:
             if s.maps_to_parameter is not None:
-                assert (
-                    s.maps_to_parameter not in self.params
-                ), f"Parameter {s.maps_to_parameter} already in params"
+                if s.maps_to_parameter in self.params:
+                    raise ValueError(f"Parameter {s.maps_to_parameter} already in params")
                 self.params[s.maps_to_parameter] = s.part
-        # then for each param that is not in the slots, add it with default value
+
+        # Add default parameters
         for _, p in part_type_to_parameter_name.items():
             if p not in self.params:
                 try:
@@ -289,6 +314,17 @@ class TranscriptionUnit(BaseModel):
                     msg += f" (part_type_to_parameter_name: {part_type_to_parameter_name})"
                     msg += f" (parameter_to_default_part: {parameter_to_default_part})"
                     raise
+
+    def to_parts(self) -> List[Union[str, List[str]]]:
+        """Convert slots back to a parts representation"""
+        return [s.part if not isinstance(s.part, list) else s.part for s in self.slots]
+
+    def with_source(self, source: str) -> "TranscriptionUnit":
+        """Create a copy of this TranscriptionUnit with a different source"""
+        return TranscriptionUnit(name=self.name, slots=self.slots, source=source, lib=self.lib)
+
+
+Unit = TranscriptionUnit  # alias for declarative API
 
 
 class TranscriptionUnitGenerator:
@@ -381,12 +417,6 @@ def transcription_unit_from_L1(l1id: str, lib: PartsLibrary) -> TranscriptionUni
     return TranscriptionUnit(slots=[Slot(part=p, lib=lib) for p in parts])
 
 
-class Unit(BaseModel):
-    promoter: str = "hEF1a"
-    parts: List[str]
-    source: Optional[str] = None  # plasmid id for this unit
-
-
 class CoTransfection(BaseModel):
     name: Optional[str] = None
     units: List[Unit]
@@ -472,42 +502,99 @@ class Network(BaseModel):
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
 
+        decl = False
         if self.cotx is not None and self.transcription_units is None:
             self._process_declarative()
+            decl = True
 
         if self.build_on_init:
             self.build()
 
+    def to_declarative(self) -> "Network":
+        """Convert traditional network representation to declarative"""
+        if not self.is_built():
+            raise ValueError("Network must be built before converting to declarative")
+
+        source_to_tus = {}
+        for _, row in self.tu_in_sources.iterrows():
+            source = row["source"]
+            tu_name = row["TU"]
+            if source not in source_to_tus:
+                source_to_tus[source] = []
+            source_to_tus[source].append(tu_name)
+
+        agg_to_sources = {}
+        for agg_id, row in self.aggregations.iterrows():
+            sources = row["source"]
+            ratios = row["ratio"]
+            agg_to_sources[agg_id] = (sources, ratios)
+
+        cotx_list = []
+        for agg_id, (sources, ratios) in agg_to_sources.items():
+            units = []
+            for source in sources:
+                for tu_name in source_to_tus.get(source, []):
+                    tu = self.transcription_units[tu_name]
+                    units.append(tu.with_source(source))
+
+            cotx_list.append(CoTransfection(units=units, ratios=ratios))
+
+        # Create new network with declarative format
+        return Network(lib=self.lib, name=self.name, cotx=cotx_list, build_on_init=False)
+
     def _process_declarative(self):
-        """Convert declarative cotx format to traditional format"""
-        tu_counter = 0
+        """
+        Convert declarative cotx format to traditional format.
+        Handles unified TranscriptionUnit class, multiple TUs per source,
+        and maintains proper ordering of TUs within sources.
+        """
+        source_to_tus = {}  # source_name -> [(tu_name, position)]
 
         self.transcription_units = {}
         sources_data = []
         aggregations_data = {}
 
         for group_idx, group in enumerate(self.cotx):
-            group_tus = []
+            group_sources = []
 
-            for unit in group.units:
-                tu_counter += 1
-                tu_name = f"TU_{tu_counter}"
+            for unit_idx, unit in enumerate(group.units):
+                tu_name = unit.name or f"TU_{len(self.transcription_units) + 1}"
 
-                self.transcription_units[tu_name] = TranscriptionUnit(
-                    slots=[
-                        Slot(part=unit.promoter, lib=self.lib),
-                        *[Slot(part=part, lib=self.lib) for part in unit.parts],
-                    ]
-                )
+                self.transcription_units[tu_name] = unit
 
-                sources_data.append({"source": unit.source, "TU": tu_name, "position": 0})
+                source = unit.source or f"plsmd_{len(source_to_tus) + 1}"
 
-                group_tus.append(unit.source)
+                # Track in source_to_tus for position calculation
+                if source not in source_to_tus:
+                    source_to_tus[source] = []
+                position = len(source_to_tus[source])
+                source_to_tus[source].append((tu_name, position))
 
-            aggregations_data[group_idx] = {"source": group_tus, "ratio": group.ratios}
+                if source not in group_sources:
+                    group_sources.append(source)
+
+            # Store aggregation data for this group
+            aggregations_data[group_idx] = {
+                "source": group_sources,
+                "ratio": group.ratios if group.ratios else [1.0] * len(group.units),
+            }
+
+        # Create sources dataframe with correct positions
+        for source, tu_entries in source_to_tus.items():
+            for tu_name, position in tu_entries:
+                sources_data.append({"source": source, "TU": tu_name, "position": position})
 
         self.tu_in_sources = pd.DataFrame(sources_data)
         self.aggregations = pd.DataFrame(aggregations_data).T
+
+        self.raw_tu_in_sources = [
+            (row["source"], row["TU"], row["position"]) for _, row in self.tu_in_sources.iterrows()
+        ]
+
+        self.raw_aggregations = []
+        for agg_id, row in self.aggregations.iterrows():
+            for source, ratio in zip(row["source"], row["ratio"]):
+                self.raw_aggregations.append((agg_id, source, ratio))
 
     @classmethod
     def legacy_init(
