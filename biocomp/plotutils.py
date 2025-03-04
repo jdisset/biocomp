@@ -170,7 +170,11 @@ class LazyPlotData(PlotData):
         return self.__repr__()
 
 
-def ax_to_list(ax) -> Sequence:
+def ax_to_list(ax):
+    if ax is None:
+        return None
+    if isinstance(ax, list):
+        return ax
     if isinstance(ax, np.ndarray):
         return ax.tolist()
     return ut.as_list(ax)
@@ -181,7 +185,8 @@ SequenceND: TypeAlias = Sequence[T] | Sequence[Sequence[T]] | Sequence[Sequence[
 
 class FigAx(ArbitraryModel):
     figure: Figure
-    ax: Annotated[SequenceND[Axes], BeforeValidator(ax_to_list)]
+    ax: Annotated[Optional[SequenceND[Axes]], BeforeValidator(ax_to_list)] = None
+    subfigs: Any = None
 
     @property
     def flat_ax(self) -> List[Axes]:
@@ -193,7 +198,7 @@ class FigAx(ArbitraryModel):
 
 
 class FigureLayout(ArbitraryModel):
-    def make_figure(self) -> FigAx:
+    def make_figure(self):
         raise NotImplementedError()
 
     def finalize(self, figax: FigAx) -> None:
@@ -213,7 +218,7 @@ class SimpleLayout(FigureLayout):
     wspace: Optional[float] = None
     hspace: Optional[float] = None
 
-    def make_figure(self, **kw) -> FigAx:
+    def make_figure(self, **kw):
         if self.axes_size is None:
             self.axes_size = get_figsize_default()
 

@@ -257,7 +257,6 @@ def grid_histogram(
     h = density_rescaler.fwd(h)
 
     if cmap is None:
-        print("Using default cmap")
         cmap = DEFAULT_DENSITY_CMAP
 
     setup_transformed_axis(
