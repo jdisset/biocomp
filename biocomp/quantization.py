@@ -7,6 +7,7 @@ from . import utils as ut
 from .parameters import ParameterTree
 from jax import random as random
 from biocomp.logging_config import get_logger
+
 logger = get_logger(__name__)
 ### {{{                       --     actual quantization functions    --
 
@@ -54,7 +55,9 @@ def get_quantized(
     # but then will be masked to only use the ones available for this node
     masks = params[quantization_mask_path][node_id]
 
-    assert masks.shape == (values_to_quantize.shape[0], len(possible_values))
+    assert (
+        masks.shape[0] == values_to_quantize.shape[0]
+    ), f"Quantization mask shape {masks.shape} does not match values shape {values_to_quantize.shape}"
 
     # masks is a 2D array of shape (max_n_masks_per_node, n_qvalues) that tells us which
     # quantization values are allowed for this node.
@@ -100,10 +103,10 @@ def get_available_quantizations(param_name, cdg_node_id, cdg):
               get_possible_values('translation_rate', ...) -> [None, '1xuORF', '2xuORF', ...]
     params are stored in the params column of the cdg as a dict {param_name:[possiblevaluees]}
     """
-    available_params = cdg.at[cdg_node_id, 'params']
+    available_params = cdg.at[cdg_node_id, "params"]
     if param_name not in available_params:
         raise ValueError(
-            f'Param {param_name} not available for cdg node {cdg_node_id}. Available: {available_params}'
+            f"Param {param_name} not available for cdg node {cdg_node_id}. Available: {available_params}"
         )
     return available_params[param_name]
 
@@ -122,29 +125,29 @@ def get_quantization_mask(qnames, pname, vnode, masks_per_node=1, **kwargs):
     network = vnode.network
     if network is None:
         # pure virtual node, no network, no masks!
-        logger.warning(f'Node {vnode.node_id} has no network, no quantization mask generated')
+        logger.warning(f"Node {vnode.node_id} has no network, no quantization mask generated")
         mask = np.ones((1, len(qnames)), dtype=bool)
         return mask
 
     cdf = network.compute_graph
     cdg = network.central_dogma_graph
 
-    cdg_ids = cdf.at[compute_node_id, 'cdg_input']
-    assert cdg_ids is not None, f'Node {compute_node_id} has no input CDG node'
+    cdg_ids = cdf.at[compute_node_id, "cdg_input"]
+    assert cdg_ids is not None, f"Node {compute_node_id} has no input CDG node"
     cdg_ids = [cdg_ids] if not isinstance(cdg_ids, list) else cdg_ids
 
     this_node_qnames = [get_available_quantizations(pname, cid, cdg) for cid in cdg_ids]
     # we have one mask per CDG input, and we need the same mask shape for all nodes
     assert len(this_node_qnames) <= masks_per_node, (
-        f'Node {compute_node_id} has {len(this_node_qnames)} CDG inputs, '
-        f'but only a max of {masks_per_node} masks are available'
+        f"Node {compute_node_id} has {len(this_node_qnames)} CDG inputs, "
+        f"but only a max of {masks_per_node} masks are available"
     )
     # check that this_node_qnames is a subset of qnames
     should_be_in = [qq for q in this_node_qnames for qq in q if qq not in qnames]
     if len(should_be_in) > 0:
         raise ValueError(
-            f'Node {compute_node_id} has unknown quantization names {should_be_in} '
-            f'for parameter {pname} (available: {qnames})'
+            f"Node {compute_node_id} has unknown quantization names {should_be_in} "
+            f"for parameter {pname} (available: {qnames})"
         )
 
     # now create the mask array
@@ -171,13 +174,13 @@ def collapse_quantized_parameter(vnode, param_name, value):
     cdf = network.compute_graph
     cdg = network.central_dogma_graph
 
-    cdg_ids = cdf.at[compute_node_id, 'cdg_input']
-    assert cdg_ids is not None, f'Node {compute_node_id} has no input CDG node'
+    cdg_ids = cdf.at[compute_node_id, "cdg_input"]
+    assert cdg_ids is not None, f"Node {compute_node_id} has no input CDG node"
     cdg_ids = [cdg_ids] if not isinstance(cdg_ids, list) else cdg_ids
 
     assert len(value) == len(cdg_ids), (
-        f'Node {compute_node_id} has {len(cdg_ids)} CDG inputs, '
-        f'but only {len(value)} values were provided'
+        f"Node {compute_node_id} has {len(cdg_ids)} CDG inputs, "
+        f"but only {len(value)} values were provided"
     )
 
     for cid, val in zip(cdg_ids, value):
@@ -185,10 +188,10 @@ def collapse_quantized_parameter(vnode, param_name, value):
             assert len(val) == 1
         else:
             val = [val]
-        current_params = cdg.at[cid, 'params']
-        assert param_name in current_params, f'Param {param_name} not available for cdg node {cid}'
+        current_params = cdg.at[cid, "params"]
+        assert param_name in current_params, f"Param {param_name} not available for cdg node {cid}"
         current_params[param_name] = val
-        cdg.at[cid, 'params'] = current_params
+        cdg.at[cid, "params"] = current_params
 
 
 def get_variational_quantized(
