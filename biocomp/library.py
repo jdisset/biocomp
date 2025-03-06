@@ -33,7 +33,8 @@ class PartsLibrary(BaseModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
         """Initialize computed fields after validation"""
         # Filter out empty indices
         self.L0s = self.L0s.loc[self.L0s.index != ""]

@@ -63,7 +63,8 @@ class LogPolyLogRescaler(DataRescaler):
     poly_region_threshold: float = 300  # where we switch from log to poly
     poly_region_coef: float = 0.4  # how much we compress the poly part
 
-    def model_post_init(self, *_):
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
         self.__symlog = partial(
             ut.log_poly_log, threshold=self.poly_region_threshold, compression=self.poly_region_coef
         )
@@ -90,7 +91,8 @@ class LogisticLogRescaler(DataRescaler):
     k: float = 0.1  # steepness of the logistic function
     lshift: float = 1  # shift in the logarithmic part
 
-    def model_post_init(self, *_):
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
         self._A, self._B = self.calculate_log_constants()
 
     def calculate_log_constants(self):
@@ -150,7 +152,8 @@ class CompressedSymLogRescaler(DataRescaler):
     poly_region_threshold: float = 300  # where we switch from log to poly
     poly_region_coef: float = 0.4  # how much we compress the poly part
 
-    def model_post_init(self, *_):
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
         self.__symlog = partial(
             ut.log_poly_log, threshold=self.poly_region_threshold, compression=self.poly_region_coef
         )

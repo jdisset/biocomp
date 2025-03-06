@@ -238,7 +238,8 @@ class TrainingConfig(ArbitraryModel):
     n_replicates: int = 1
     keep_in_history: List[str] = ["loss"]
 
-    def model_post_init(self, *_, **__):
+    def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
         if self.seed is None:
             import random
 

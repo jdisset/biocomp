@@ -155,19 +155,31 @@ def get_ratios(net) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
     return all_ratios
 
 
-def get_default_input_order(net, cotx):
-    """
-    Get the default input order for a network:
-    priority to cotx that contain an ERN
-    then to cotx that contain a ERN_recog_site_5p
-    then to the rest
+def get_parts_categories(parts, lib):
+    res = {}
+    for part in parts:
+        assert part in lib.parts.index
+        res[part] = lib.parts.loc[part].category
+    return res
 
-    need to use net.get_input_proteins() which returns the name of the fluo marker
-    in each cotx.
-    We then use that original order to specify a new order based on the priority rules
-    TODO
 
-    """
+def get_tu_parts(tu, lib):
+    parts = set()
+    for slt in tu.slots:
+        if isinstance(slt.part, str):
+            parts.add(slt.part)
+        else:
+            assert isinstance(slt.part, list)
+            if len(slt.part) == 1:
+                parts.add(slt.part[0])
+    return get_parts_categories(parts, lib)
+
+
+def get_all_parts(net, lib):
+    parts = []
+    for t in net.transcription_units.values():
+        parts.append(get_tu_parts(t, lib))
+    return parts
 
 
 def cotx_ratios_str(cotx):
@@ -177,7 +189,7 @@ def cotx_ratios_str(cotx):
     return "\n".join(lines)
 
 
-def generate_network_info(net):
+def generate_network_info(net, lib=None):
     """Generate a dictionnary of information for a network"""
     # NOT the string version but the raw dict
     arch, seqtype = ut.get_network_family(net)
@@ -189,7 +201,8 @@ def generate_network_info(net):
     dependent_outputs = tuple(sorted(list(set(all_outputs) - set(markers))))
     ern_names = ut.get_all_ERNs_names(net)
     cotx = get_ratios(net)
-    default_input_order = get_default_input_order(net, cotx)
+    if not lib:
+        lib = load_lib()
     net_info = {
         "sequestron_type": seqtype,
         "architecture": arch,
@@ -203,6 +216,7 @@ def generate_network_info(net):
         "cotx": cotx,
         "cotx_str": cotx_ratios_str(cotx),
         "ern_names_str": ", ".join(ern_names),
+        "all_parts": get_all_parts(net, lib),
     }
     return net_info
 
@@ -229,6 +243,7 @@ class Slot(BaseModel):
     maps_to_parameter: Optional[str] = None
 
     def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
         if isinstance(self.part, list):
             if not self.part or self.part == [None]:
                 self.part = None
@@ -290,6 +305,7 @@ class TranscriptionUnit(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
         # Ensure all slots have a library
         for slot in self.slots:
             if slot.lib is None:
@@ -423,6 +439,7 @@ class CoTransfection(BaseModel):
     ratios: Optional[List[float]] = None
 
     def model_post_init(self, *args, **kwargs):
+        super().model_post_init(*args, **kwargs)
         if self.ratios is None:  # equal ratios by default
             self.ratios = [1.0] * len(self.units)
 
