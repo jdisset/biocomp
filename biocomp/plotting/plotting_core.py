@@ -237,67 +237,6 @@ class PowerFormatter(ticker.Formatter):
         return format_powers(v, None)
 
 
-# def setup_transformed_xaxis(
-#     ax,
-#     xaxis_lims,
-#     rescaler,
-#     margins=0.05,
-#     show_minor=False,
-#     **kw,
-# ):
-#     xlims_tr = np.asarray(xaxis_lims)
-#     xlims_inv = rescaler.inv(np.asarray(xlims_tr))
-#     p10 = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1])
-#     xlims_margin = xlims_tr + np.array([-1, 1]) * margins * np.diff(xlims_tr)
-#     try:
-#         ax.set_xlim(xlims_margin)
-#         ax.set_xticks(rescaler.fwd(p10))  # major ticks
-#         ax.xaxis.set_major_formatter(PowerFormatter(p10, **kw))
-#         p10_minor = powers_of_ten(xmin=xlims_inv[0], xmax=xlims_inv[1], resolution=10)
-#         ax.set_xticks(rescaler.fwd(p10_minor), minor=True)
-#         if show_minor:
-#             ax.xaxis.set_minor_formatter(PowerFormatter(p10_minor, **kw))
-#
-#         ax.tick_params(
-#             bottom=plt.rcParams["xtick.bottom"],
-#             labelbottom=plt.rcParams["xtick.labelbottom"],
-#             which="both",
-#         )
-#         ax.spines["bottom"].set_visible(plt.rcParams["xtick.bottom"])
-#
-#     except ValueError as e:
-#         logger.error(f"Error setting up x-axis: {e}")
-#
-#     return xlims_inv
-
-
-# def setup_transformed_yaxis(ax, yaxis_lims, rescaler, margins=0.05, show_minor=False, **kw):
-#     ylims_tr = np.asarray(yaxis_lims)
-#     ylims_inv = rescaler.inv(np.asarray(ylims_tr))
-#     p10 = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1])
-#     ylims_margin = ylims_tr + np.array([-1, 1]) * margins * np.diff(ylims_tr)
-#     try:
-#         ax.set_ylim(ylims_margin)
-#         ax.set_yticks(rescaler.fwd(p10))
-#         ax.yaxis.set_major_formatter(PowerFormatter(p10, **kw))
-#         p10_minor = powers_of_ten(xmin=ylims_inv[0], xmax=ylims_inv[1], resolution=10)
-#         ax.set_yticks(rescaler.fwd(p10_minor), minor=True)
-#         if show_minor:
-#             ax.yaxis.set_minor_formatter(PowerFormatter(p10_minor, **kw))
-#
-#         ax.tick_params(
-#             left=plt.rcParams["ytick.left"],
-#             labelleft=plt.rcParams["ytick.labelleft"],
-#             which="both",
-#         )
-#         ax.spines["left"].set_visible(plt.rcParams["ytick.left"])
-#
-#     except Exception as e:
-#         logger.error(f"Error setting up y-axis: {e}")
-#
-#     return ylims_inv
-
-
 TickDict = Dict[str, NdArray]
 LabelList = List[Tuple[NdArray, str]]
 
@@ -440,12 +379,9 @@ def setup_transformed_axis_generic(
             else:
                 ax.set_yticklabels([])
 
-        # if not force_spine_only:
-        #     spine_name = "bottom" if axis == "x" else "left"
-        #     ax.spines[spine_name].set_visible(plt.rcParams[f"{rc_prefix}.{spine_name}"])
-
     except ValueError as e:
-        logger.error(f"Error setting up {axis}-axis: {e}")
+        logger.error(f"Error setting up {axis}-axis")
+        logger.exception(e)
 
     return lims_inv
 
@@ -657,6 +593,9 @@ class SpatialQueryGrid:
 @partial(jax.jit, static_argnums=(1, 2))
 @partial(jax.vmap, in_axes=(None, 0, None, None))
 def bfquery(data, xquery, k, distance_upper_bound):
+    """
+    Brute-force query for k nearest neighbors within radius.
+    """
     distances = jnp.sum(jnp.square(data - xquery), axis=1)
     topk_dist, topk_ids = jax.lax.approx_max_k(-distances, k=k, recall_target=0.98)
     topk_dist = -topk_dist
@@ -746,12 +685,13 @@ def get_gaussian_weighted_knn_jax(
 
 
 def get_gaussian_weighted_knn(x, tree, **kw):
-    if jax.devices()[0].platform == "gpu" or jax.devices()[0].platform == "tpu":
-        return get_gaussian_weighted_knn_jax(x, tree.data, **kw)
-    elif len(jax.devices()) > 1:
-        return get_gaussian_weighted_knn_jax(x, tree.data, n_devices=len(jax.devices()), **kw)
-    else:
-        return get_gaussian_weighted_knn_nojax(x, tree, **kw)
+    return get_gaussian_weighted_knn_nojax(x, tree, **kw)
+    # if jax.devices()[0].platform == "gpu" or jax.devices()[0].platform == "tpu":
+    #     return get_gaussian_weighted_knn_jax(x, tree.data, **kw)
+    # elif len(jax.devices()) > 1:
+    #     return get_gaussian_weighted_knn_jax(x, tree.data, n_devices=len(jax.devices()), **kw)
+    # else:
+    #     return get_gaussian_weighted_knn_nojax(x, tree, **kw)
 
 
 def get_knn_mean(x, y, tree, **kw):
