@@ -118,7 +118,8 @@ def sorting_loss(
     negative_grad_penalty=1.0,
     kl_weight=0.1,
     sorting_mse_weight=0.1,
-    percent=1,
+    percent_batch_used=1.0,
+    qvalues_coeff=1000,
     use_same_key=False,
 ):
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
@@ -148,7 +149,9 @@ def sorting_loss(
             (qvalues_dir, logstd_dir, count_dir),
         )
         kl_loss = (
-            (counts * ((qvalues * 1000) ** 2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)).sum()
+            (
+                counts * ((qvalues * qvalues_coeff) ** 2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)
+            ).sum()
             / counts.sum()
             * klw
         )
@@ -158,7 +161,7 @@ def sorting_loss(
         ngp = as_schedule(negative_grad_penalty)(step)
         ng_loss = negative_grads * ngp
 
-        pct = as_schedule(percent)(step)
+        pct = as_schedule(percent_batch_used)(step)
         select = jnp.linspace(0, 1, X.shape[0]) > pct
         Y = jnp.where(
             select[:, None],
@@ -170,11 +173,12 @@ def sorting_loss(
             jnp.zeros(Y.shape),
             yhat,
         )
+
         # mse and sorted mse
         mse = ((yhat - Y) ** 2).mean()
         sorting_mse = ((yhat.sort(axis=0) - Y.sort(axis=0)) ** 2).mean() / pct
-        smp = as_schedule(sorting_mse_weight)(step)
-        sorting_loss = sorting_mse * smp + mse * (1 - smp)
+        smw = as_schedule(sorting_mse_weight)(step)
+        sorting_loss = sorting_mse * smw + mse * (1 - smw)
 
         return sorting_loss + kl_loss + ng_loss, aux
 
