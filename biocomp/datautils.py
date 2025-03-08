@@ -576,7 +576,7 @@ class DataManager:
                 network_data_check(x, y, n)
         logger.info(f"Initialized a DataManager with {len(self._networks)} networks")
 
-    def compute_densities(self, n_workers: int = 4):
+    def compute_densities(self, n_workers: int = 8):
         """
         Compute the densities at each data point in the dataset, for each sample,
         using parallel processing at the file level.
@@ -616,16 +616,15 @@ class DataManager:
 
         logger.debug(f"Done computing {len(self._densities)} densities")
 
-    def get_batches(self, n_batches, batch_size, rng_key, concat_along_feature_axis=True):
+    def get_batches(
+        self, n_batches, batch_size, rng_key, concat_along_feature_axis=True, parallel=True
+    ):
         """
         Generate batches of data from the dataset using optimized sampling.
         """
         if self._densities is None:
             self.compute_densities()
             assert self._densities is not None
-
-        # Create progress bar
-        pbar = tqdm(total=len(self._networks), desc="Generating batches")
 
         # Prepare args for parallel processing
         sample_args = [
@@ -651,11 +650,16 @@ class DataManager:
             )
         ]
 
-        with Pool(min(len(self._networks), 8)) as pool:
-            all_batches = list(pool.imap(fast_batch_sampling, sample_args))
-            pbar.update(len(self._networks))
-
-        pbar.close()
+        if parallel:
+            pbar = tqdm(total=len(self._networks), desc="Generating batches")
+            with Pool(min(len(self._networks), 8)) as pool:
+                all_batches = list(pool.imap(fast_batch_sampling, sample_args))
+                pbar.update(len(self._networks))
+            pbar.close()
+        else:
+            all_batches = [
+                fast_batch_sampling(args) for args in tqdm(sample_args, desc="Generating batches")
+            ]
 
         xbatches, ybatches = zip(*all_batches)
 
