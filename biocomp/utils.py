@@ -12,10 +12,7 @@ import sys
 from copy import deepcopy
 import xxhash
 import time
-from tqdm import tqdm
 import jax
-from omegaconf import DictConfig, ListConfig
-from jax.experimental import host_callback
 from jax import jit, lax
 from jax import tree_util as pytree
 import jax.numpy as jnp
@@ -51,7 +48,6 @@ from typing import (
 T = TypeVar("T")
 R = TypeVar("R")
 PathLike = Union[str, Path]
-DictLike = Union[Dict, DictConfig]
 
 
 class ArbitraryModel(BaseModel):
@@ -592,11 +588,9 @@ def load_lib(lib_path=DEFAULT_LIB_PATH):
 
 ## {{{                        --     list utils     --
 
-ListLike = Union[list, tuple, ListConfig]
-
 
 def list_like(obj) -> bool:
-    return isinstance(obj, (list, tuple, ListConfig))
+    return isinstance(obj, (list, tuple))
 
 
 def as_list(obj: Any) -> Union[list, tuple]:
