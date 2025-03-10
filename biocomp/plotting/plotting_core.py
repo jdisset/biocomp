@@ -267,7 +267,7 @@ def setup_transformed_axis_generic(
     rescaler,
     axis="x",  # 'x' or 'y'
     margins=0.0,
-    show_minor=False,
+    show_minor_labels=False,
     major_tick_length=None,
     major_tick_width=None,
     minor_tick_length=None,
@@ -316,7 +316,7 @@ def setup_transformed_axis_generic(
 
         p10_minor = powers_of_ten(xmin=lims_inv[0], xmax=lims_inv[1], resolution=10)
         set_ticks(rescaler.fwd(p10_minor), minor=True)
-        if show_minor:
+        if show_minor_labels:
             axis_obj.set_minor_formatter(PowerFormatter(p10_minor, **kw))
 
         # Set up tick parameters
@@ -886,8 +886,15 @@ def heatmap(
         )
 
         if clip_to_lowest_contour and clip_cntrs is not None:
-            # Use the invisible solid contours for clipping
-            all_paths = clip_cntrs.collections[0].get_paths()
+            # use the invisible solid contours for clipping
+
+            if hasattr(clip_cntrs, "collections"):
+                if len(clip_cntrs.collections) > 0:
+                    all_paths = clip_cntrs.collections[0].get_paths()
+            # for newer versions of matplotlib (>= 3.8)
+            else:
+                all_paths = clip_cntrs.get_paths()
+
             if len(all_paths) > 0:
                 lowest_contour_path = all_paths[0]
                 clip_path = mpl.patches.PathPatch(lowest_contour_path, transform=ax.transData)
