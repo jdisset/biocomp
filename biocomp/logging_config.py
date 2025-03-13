@@ -1,5 +1,4 @@
 import logging
-import matplotlib
 from rich.logging import RichHandler
 from typing import Optional, Dict
 from pathlib import Path

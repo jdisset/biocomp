@@ -3,6 +3,7 @@ import traceback
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+from jaxlib.xla_extension import ArrayImpl
 
 import numpy as np
 
@@ -76,7 +77,7 @@ def pretty_str(x):
 serializers = {}
 deserializers = {}
 
-jnparr = type(jnp.array([1, 2, 3]))
+jnparr = ArrayImpl
 
 
 def register_serializer(cls, func):
@@ -805,7 +806,6 @@ class ParameterTree:
 
     def visualize_tree_structure(self):
         return "\n".join(self.data.visualize_tree_structure())
-
 
     def get_subtree(self, path):
         return ParameterTree(

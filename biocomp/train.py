@@ -1,10 +1,6 @@
 ### {{{                          --     imports     --
-
-
-# original partial:
 from . import datautils as du
 from . import trainutils as tu
-from . import utils as ut
 from biocomp.utils import (
     EncodedPartialFunction,
     PartialFunction,
@@ -12,19 +8,13 @@ from biocomp.utils import (
     PartialFunctionResult,
 )
 from . import nodes as nodes
-from . import compute as cmp
 from .parameters import ParameterTree, ParamPath
 
 import time
 
-from jax_tqdm import scan_tqdm
 from typing import List, Tuple, Callable, Optional, NamedTuple
 from pydantic import Field
-import jax
-from jax.tree_util import Partial
 from biocomp.logging_config import get_logger
-import jax.numpy as jnp
-import optax
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -68,7 +58,10 @@ def as_schedule(value_or_callable):
     return f
 
 
-def l2_loss(stack: cmp.ComputeStack, training_config, negative_grad_penalty=1.0, kl_weight=1):
+def l2_loss(stack, training_config, negative_grad_penalty=1.0, kl_weight=1):
+    import jax
+    import jax.numpy as jnp
+
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
     def loss_func(dynamic, static, X, Y, Z, key, step):
@@ -113,7 +106,7 @@ def l2_loss(stack: cmp.ComputeStack, training_config, negative_grad_penalty=1.0,
 
 
 def sorting_loss(
-    stack: cmp.ComputeStack,
+    stack,
     training_config,
     negative_grad_penalty=1.0,
     kl_weight=0.1,
@@ -122,6 +115,9 @@ def sorting_loss(
     qvalues_coeff=1000,
     use_same_key=False,
 ):
+    import jax
+    import jax.numpy as jnp
+
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
     def loss_func(dynamic, static, X, Y, Z, key, step):
@@ -191,31 +187,11 @@ logger = get_logger(__name__)
 
 ### {{{                  --     training config     --
 
-DEFAULT_OPTIMIZER = [
-    PartialFunction(
-        func=optax.clip_by_global_norm,
-        kwargs={"max_norm": 1.0},
-    ),
-    PartialFunction(
-        func=optax.adamw,
-        kwargs={
-            "learning_rate": PartialFunctionResult(
-                func="optax.warmup_cosine_decay_schedule",
-                kwargs={
-                    "init_value": 1e-7,
-                    "peak_value": 1e-3,
-                    "warmup_steps": 15,
-                    "decay_steps": 130,
-                    "end_value": 1e-5,
-                },
-            )
-        },
-    ),
-]
 
-
-def create_counter() -> optax.GradientTransformation:
+def create_counter():
     """Creates a no-op gradient transformation that just counts steps."""
+    import jax.numpy as jnp
+    import optax
 
     class CounterState(NamedTuple):
         count: jnp.ndarray  # type: ignore
@@ -229,10 +205,35 @@ def create_counter() -> optax.GradientTransformation:
     return optax.GradientTransformation(init_fn, update_fn)
 
 
+DEFAULT_OPTIMIZER = [
+    # PartialFunction(
+    #     # func=optax.clip_by_global_norm,
+    #     func="optax.transforms._clipping.clip_by_global_norm",
+    #     kwargs={"max_norm": 1.0},
+    # ),
+    # PartialFunction(
+    #     # func=optax.adamw,
+    #     func="optax._src.alias.adamw",
+    #     kwargs={
+    #         "learning_rate": PartialFunctionResult(
+    #             func="optax.warmup_cosine_decay_schedule",
+    #             kwargs={
+    #                 "init_value": 1e-7,
+    #                 "peak_value": 1e-3,
+    #                 "warmup_steps": 15,
+    #                 "decay_steps": 130,
+    #                 "end_value": 1e-5,
+    #             },
+    #         )
+    #     },
+    # ),
+]
+
+
 class TrainingConfig(ArbitraryModel):
     # training parameters
-    loss_function: EncodedPartialFunction = Field(default=l2_loss)
     optimizer_stack: list[EncodedPartialFunction] = DEFAULT_OPTIMIZER
+    loss_function: EncodedPartialFunction = Field(default=l2_loss)
 
     seed: Optional[int] = None
     batches_per_step: int = 128
@@ -251,6 +252,8 @@ class TrainingConfig(ArbitraryModel):
 
     @property
     def optimizer(self):
+        import optax
+
         main_chain = [comp() for comp in self.optimizer_stack]
         return optax.chain(create_counter(), *main_chain)
 
@@ -263,10 +266,16 @@ class TrainingConfig(ArbitraryModel):
 def start(
     dman: du.DataManager,
     training_config: TrainingConfig,
-    compute_config: cmp.ComputeConfig,
+    compute_config,
     loggers: Optional[List[Tuple[int, Callable]]] = None,
 ):
     import optax
+    import jax
+    from jax_tqdm import scan_tqdm
+    import jax.numpy as jnp
+    from jax.tree_util import Partial
+    from jax import vmap, jit
+    from .jaxutils import get_looped_slice
 
     logger.debug(f"Training config: {training_config}")
     logger.debug(f"Compute config: {compute_config}")
@@ -274,6 +283,10 @@ def start(
     # --- init & batches generation
     assert training_config.seed is not None, "Seed must be set"
     key = jax.random.PRNGKey(training_config.seed)
+
+    total_steps = int(
+        training_config.n_epochs * training_config.n_batches / training_config.batches_per_step
+    )
 
     stack, params = tu.init_stack(compute_config, dman, training_config.n_replicates, key)
 
@@ -289,10 +302,6 @@ def start(
 
     optimizer = training_config.optimizer
     opt_state = jax.vmap(optimizer.init)(dynamic)
-
-    total_steps = int(
-        training_config.n_epochs * training_config.n_batches / training_config.batches_per_step
-    )
 
     logger.info(
         f"""Done initializing optimizer,
@@ -393,8 +402,8 @@ def start(
         )
         return jax.vmap(Partial(per_replicate_step, num_z=num_z))(params, opt_state, keys, xs, ys)
 
-    xb = ut.get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
-    yb = ut.get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
+    xb = get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
+    yb = get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
 
     num_z = static["global/number_of_quantile_variables"]
     assert num_z.shape == (training_config.n_replicates,)
@@ -403,7 +412,7 @@ def start(
     ), "All replicates must have the same number of quantile variables"
     num_z = int(num_z[0])
 
-    logger.debug("Compiling training step")
+    logger.info("Compiling training step...")
     t0 = time.time()
     lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
     compiled_step = lowered.compile()
@@ -442,13 +451,13 @@ def start(
             xbatches, ybatches = reshuffle_batches(xbatches, ybatches, step_key)
 
         t0 = time.time()
-        xb = ut.get_looped_slice(
+        xb = get_looped_slice(
             xbatches,
             i * training_config.batches_per_step,
             (i + 1) * training_config.batches_per_step,
             axis=1,
         )
-        yb = ut.get_looped_slice(
+        yb = get_looped_slice(
             ybatches,
             i * training_config.batches_per_step,
             (i + 1) * training_config.batches_per_step,
@@ -465,7 +474,6 @@ def start(
 
         qvalues_dir = ParamPath("shared/quantization/values")
         qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
-        # jax.debug.print("qvalues {}", qvalues)
 
         for t, l in loggers:
             if t is not None:

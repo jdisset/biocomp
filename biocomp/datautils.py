@@ -1,8 +1,5 @@
 # {{{                          --     imports     --
 # ···············································································
-import jax
-import jax.numpy as jnp
-from jax.tree_util import Partial as partial
 import numpy as np
 from . import utils as ut
 from .utils import ArbitraryModel
@@ -10,24 +7,23 @@ from pathlib import Path
 from .compute import ComputeStack
 from tqdm import tqdm
 from scipy.stats import gaussian_kde
-from multiprocessing import Value, Pool
-from ctypes import c_int
+from multiprocessing import Pool
 import itertools
 from .network import Network
-from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, Union, List, Tuple, Callable, Collection, Any
+from pydantic import BaseModel, Field
+from typing import Optional, Union, Tuple
+from functools import partial
 
 from biocomp.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-ndArray = Union[np.ndarray, jnp.ndarray]
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     data rescaler     --
 
-NumLike = Union[float, int, np.ndarray, jnp.ndarray]
-NdArray = Union[np.ndarray, jnp.ndarray]
+NumLike = Union[float, int, np.ndarray]
+NdArray = np.ndarray
 
 
 class DataRescaler(ArbitraryModel):
@@ -195,34 +191,7 @@ class CompressedSymLogRescaler(DataRescaler):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-# {{{                         --     batches     --
-# ···············································································
 
-
-def split_array_uniform(arr, n_batches, rng_key):
-    n = len(arr)
-    batch_size = n // n_batches
-    a = jax.random.permutation(rng_key, arr)
-    return [a[i * batch_size : (i + 1) * batch_size] for i in range(n_batches)]
-
-
-def split_array_to_len(arr, l, rng_key):
-    a = jax.random.permutation(rng_key, arr)
-    return [a[i * l : (i + 1) * l] for i in range(len(arr) // l)]
-
-
-def batch(X, Y, batch_size, n_batches=None):
-    """Yields batches of data from X and Y."""
-    n = X.shape[0]
-    if n_batches is None:
-        n_batches = n // batch_size
-    # using sampling with replacement
-    for i in range(n_batches):
-        idx = np.random.choice(n, size=batch_size, replace=True)
-        yield X[idx], Y[idx]
-
-
-#                                                                            }}}
 
 ## {{{                           --     utils     --
 
@@ -267,13 +236,13 @@ def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
     return selected
 
 
-def sample_batches_direct(
-    X: ndArray,
-    Y: ndArray,
+def sample_batches_w_coord_threshold(
+    X: NdArray,
+    Y: NdArray,
     batch_size: int,
     n_batches: int,
     kde,
-    densities: ndArray,  # densities at each point in X
+    densities: NdArray,  # densities at each point in X
     rng,
     density_threshold_quantile=0.05,  # Compute the density threshold using the quantile of the density distribution
     density_threshold_coords=0.3,  # Compute the density threshold using the value of the density at this coordinate
@@ -283,19 +252,16 @@ def sample_batches_direct(
     inversely proportional to the density at that point.
     This is done to avoid oversampling of high-density regions (usually untransfected cells),
     which can lead to overfitting.
-
     We use a threshold on the density distribution to decide which points to always include, and
     which to randomly sample:below this threshold density, points are always selected,
     above this density, points are selected with a probability inversely proportional
     to their density.
-
     2 ways of setting the threshold:
     - using a quantile of the density distribution (quantile_threshold)
         i.e. if quantile_threshold=0.05, any point that is in a neighborhood that's
         more dense than 95% of the data sees its probability of being selected reduced.
     - using the value of the density at a specific coordinate (density_coords)
     when both are set, the minimum of the two is used as the threshold.
-
     """
 
     assert X.shape[0] == Y.shape[0]
@@ -313,82 +279,61 @@ def sample_batches_direct(
         if density_at_midX > 0:
             threshold = np.minimum(threshold, density_at_midX)
 
-    # select batch_size * n_batches random points, weight by inverse of density
-    # with numpy:
-    seed = jax.random.randint(rng, (1,), minval=0, maxval=2**28)[0]
-    rng = np.random.RandomState(seed)
     selection_proba = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
+    selection_proba[np.isnan(selection_proba)] = 0.0
     selection_proba /= np.sum(selection_proba)
-    try:
-        indices = rng.choice(
-            X.shape[0], size=(batch_size * n_batches,), p=selection_proba, replace=True
-        )
-    except ValueError:
-        n_nans = np.sum(np.isnan(selection_proba))
-        logger.warning(
-            f"Sampling failed, {n_nans} / {len(selection_proba)} NaNs in selection_proba."
-        )
-        selection_proba[np.isnan(selection_proba)] = 0.0
-        selection_proba /= np.sum(selection_proba)
-        indices = rng.choice(
-            X.shape[0], size=(batch_size * n_batches,), p=selection_proba, replace=True
-        )
 
-    Xsub = X[indices]
-    Ysub = Y[indices]
+    total_indices = batch_size * n_batches
+    random_seed = np.random.randint(0, 2**28)
+    rng = np.random.RandomState(random_seed)
+
+    indices = rng.choice(len(selection_proba), size=total_indices, p=selection_proba, replace=True)
 
     # reshape to (n_batches, batch_size, n_features)
-    Xbatches = Xsub.reshape((n_batches, batch_size, Xsub.shape[1]))
-    Ybatches = Ysub.reshape((n_batches, batch_size, Ysub.shape[1]))
+    Xbatches = X[indices].reshape(n_batches, batch_size, X.shape[1])
+    Ybatches = Y[indices].reshape(n_batches, batch_size, Y.shape[1])
+
     return Xbatches, Ybatches
 
 
-def fast_batch_sampling(
+def sample_batches(
     args: tuple,
-) -> Tuple[ndArray, ndArray]:
+) -> Tuple[NdArray, NdArray]:
     """
-    Optimized version of sample_batches_direct that precomputes probabilities
-    and uses vectorized operations.
+    Sample batches from X and Y, with a probability of including a point
+    inversely proportional to the density at that point.
+    This is done to avoid oversampling of high-density regions (usually untransfected cells),
+    which can lead to overfitting.
+    We use a threshold on the density distribution to decide which points to always include, and
+    which to randomly sample:below this threshold density, points are always selected,
+    above this density, points are selected with a probability inversely proportional
+    to their density.
+    setting the threshold is done using a quantile of the density distribution (quantile_threshold)
+        i.e. if quantile_threshold=0.05, any point that is in a neighborhood that's
+        more dense than 95% of the data sees its probability of being selected reduced.
     """
+
     (
         X,
         Y,
         batch_size,
         n_batches,
         densities,
-        kde_points,
-        kde_bw,
-        rng_key,
         density_threshold_quantile,
-        density_threshold_coords,
+        key,
     ) = args
 
-    # Compute selection probabilities
     EPSILON = 1e-16
     HIGH_DENSITIES_PENALTY = 1.0
+    threshold = np.quantile(densities + EPSILON, density_threshold_quantile)
 
-    threshold = np.inf
-    if density_threshold_quantile is not None:
-        threshold = np.quantile(densities + EPSILON, density_threshold_quantile)
-    if density_threshold_coords is not None:
-        kde = gaussian_kde(kde_points, bw_method=kde_bw)
-        midX = np.ones((X.shape[1],)) * density_threshold_coords
-        density_at_midX = kde.evaluate(midX.T)
-        if density_at_midX > 0:
-            threshold = np.minimum(threshold, density_at_midX)
+    p_select = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
+    p_select[np.isnan(p_select)] = 0.0
+    p_select /= np.sum(p_select)
 
-    selection_proba = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
-    selection_proba[np.isnan(selection_proba)] = 0.0
-    selection_proba /= np.sum(selection_proba)
+    rng = np.random.RandomState(key)
+    indices = rng.choice(len(p_select), size=batch_size * n_batches, p=p_select, replace=True)
 
-    # Generate all indices at once
-    total_indices = batch_size * n_batches
-    seed = jax.random.randint(rng_key, (1,), minval=0, maxval=2**28)[0]
-    rng = np.random.RandomState(seed)
-
-    indices = rng.choice(len(selection_proba), size=total_indices, p=selection_proba, replace=True)
-
-    # Vectorized selection and reshaping
     Xbatches = X[indices].reshape(n_batches, batch_size, X.shape[1])
     Ybatches = Y[indices].reshape(n_batches, batch_size, Y.shape[1])
 
@@ -399,11 +344,6 @@ def fast_batch_sampling(
 
 # {{{                       --     data manager     --
 # ···············································································
-
-# in general, could use a custom instancer that's similar to
-# hydra's: can use the same syntax: a _target_ field will indicate
-# it needs to be instantiated as an obj of the specified type,
-# but a class can also pass a type that will be the default _target_
 
 
 class ResamplingConfig(BaseModel):
@@ -458,13 +398,13 @@ def compute_single_density(args):
 
 
 def compute_selection_probabilities(
-    X: ndArray,
-    densities: ndArray,
+    X: NdArray,
+    densities: NdArray,
     density_threshold_quantile: float,
     density_threshold_coords: float,
-    kde_points: ndArray,
+    kde_points: NdArray,
     kde_bw: float,
-) -> ndArray:
+) -> NdArray:
     """
     Precompute selection probabilities for batch sampling.
     Vectorized operations for better performance.
@@ -492,8 +432,8 @@ def compute_selection_probabilities(
 
 
 def generate_batch_indices(
-    n_samples: int, selection_proba: ndArray, rng: np.random.RandomState
-) -> ndArray:
+    n_samples: int, selection_proba: NdArray, rng: np.random.RandomState
+) -> NdArray:
     """
     Generate batch indices using vectorized operations.
     """
@@ -511,8 +451,8 @@ class DataManager:
 
     def __init__(
         self,
-        X: list[ndArray],
-        Y: list[ndArray],
+        X: list[NdArray],
+        Y: list[NdArray],
         networks: list[Network],
         data_cfg: DataConfig = DEFAULT_DATA_CONFIG,
         cache_location: Optional[Union[Path, str]] = DEFAULT_DATA_CACHE_DIR,
@@ -556,14 +496,13 @@ class DataManager:
         self._X = self.rescale(self._raw_X)
         self._Y = self.rescale(self._raw_Y)
 
-        # Generate KDE sample points upfront (replaces generate_kdes)
+        # generate KDE sample points upfront
         self._kde_points = []
         self._kde_bws = []
         for x in self._X:
             npoints = min(x.shape[0], int(self.data_cfg.resampling.kde_samples))
             xindices = np.random.choice(x.shape[0], size=npoints, replace=False)
             self._kde_points.append(x[xindices].T)
-            # We can compute the bandwidth factor directly
             kde = gaussian_kde(x[xindices].T, bw_method=self.data_cfg.resampling.kde_bw_method)
             self._kde_bws.append(kde.factor)
 
@@ -591,7 +530,6 @@ class DataManager:
             ksig = f"{kde_bw:.20f}_{kde_points.shape[0]}_{kde_points.shape[1]}"
             return f"{xsig}_{ksig}"
 
-        # Prepare arguments for each file
         compute_args = [
             (
                 kde_points,
@@ -604,7 +542,6 @@ class DataManager:
             for kde_points, kde_bw, x in zip(self._kde_points, self._kde_bws, self._X)
         ]
 
-        # Compute densities in parallel
         with Pool(n_workers) as pool:
             self._densities = list(
                 tqdm(
@@ -617,48 +554,45 @@ class DataManager:
         logger.debug(f"Done computing {len(self._densities)} densities")
 
     def get_batches(
-        self, n_batches, batch_size, rng_key, concat_along_feature_axis=True, parallel=True
+        self, n_batches, batch_size, rng_key=0, concat_along_feature_axis=True, parallel=True
     ):
         """
-        Generate batches of data from the dataset using optimized sampling.
+        Generate batches of data from the dataset.
         """
         if self._densities is None:
             self.compute_densities()
             assert self._densities is not None
 
-        # Prepare args for parallel processing
+        rng = np.random.RandomState(rng_key)
+        all_keys = rng.randint(0, 2**32, size=len(self._X))
+
         sample_args = [
             (
-                x,
-                y,
+                np.asarray(x),
+                np.asarray(y),
                 batch_size,
                 n_batches,
                 d,
-                kp,
-                kb,
-                rng,
                 self.data_cfg.resampling.density_threshold_quantile,
-                self.data_cfg.resampling.density_threshold_coords,
+                k,
             )
-            for x, y, d, kp, kb, rng in zip(
+            for x, y, d, k in zip(
                 self._X,
                 self._Y,
                 self._densities,
-                self._kde_points,
-                self._kde_bws,
-                jax.random.split(rng_key, len(self._networks)),
+                all_keys,
             )
         ]
 
         if parallel:
             pbar = tqdm(total=len(self._networks), desc="Generating batches")
             with Pool(min(len(self._networks), 8)) as pool:
-                all_batches = list(pool.imap(fast_batch_sampling, sample_args))
+                all_batches = list(pool.imap(sample_batches, sample_args))
                 pbar.update(len(self._networks))
             pbar.close()
         else:
             all_batches = [
-                fast_batch_sampling(args) for args in tqdm(sample_args, desc="Generating batches")
+                sample_batches(args) for args in tqdm(sample_args, desc="Generating batches")
             ]
 
         xbatches, ybatches = zip(*all_batches)
@@ -673,59 +607,6 @@ class DataManager:
             assert ybatches.shape == (n_batches, batch_size, expected_y_features)
             assert xbatches.shape[2] == sum(n.get_nb_inputs() for n in self._networks)
             assert ybatches.shape[2] == sum(n.get_nb_outputs() for n in self._networks)
-
-        return xbatches, ybatches
-
-    def _old_get_batches(self, n_batches, batch_size, rng_key, concat_along_feature_axis=True):
-        """
-        Generate batches of data from the dataset, using the KDEs to resample the data
-        and avoid over-representation of high-density regions.
-        """
-        if self._densities is None:
-            self.compute_densities()
-            assert self._densities is not None
-
-        # Create temporary KDEs for sampling (we need them for density_at_midX calculation)
-        kdes = [
-            gaussian_kde(points, bw_method=bw)
-            for points, bw in zip(self._kde_points, self._kde_bws)
-        ]
-
-        all_batches = [
-            sample_batches_direct(
-                x,
-                y,
-                batch_size,
-                n_batches,
-                kde,
-                d,
-                rng,
-                density_threshold_quantile=self.data_cfg.resampling.density_threshold_quantile,
-                density_threshold_coords=self.data_cfg.resampling.density_threshold_coords,
-            )
-            for x, y, kde, d, rng in tqdm(
-                list(
-                    zip(
-                        self.get_X(),
-                        self.get_Y(),
-                        kdes,
-                        self._densities,
-                        jax.random.split(rng_key, len(self._networks)),
-                    )
-                ),
-                desc="generating batches",
-            )
-        ]
-        xbatches, ybatches = zip(*all_batches)
-        if concat_along_feature_axis:
-            xbatches, ybatches = (
-                np.concatenate(tuple(xbatches), axis=2),
-                np.concatenate(tuple(ybatches), axis=2),
-            )
-            assert xbatches.shape == (n_batches, batch_size, sum([x.shape[1] for x in self._X]))
-            assert ybatches.shape == (n_batches, batch_size, sum([y.shape[1] for y in self._Y]))
-            assert xbatches.shape[2] == sum([n.get_nb_inputs() for n in self._networks])
-            assert ybatches.shape[2] == sum([n.get_nb_outputs() for n in self._networks])
 
         return xbatches, ybatches
 
@@ -792,9 +673,6 @@ class DataManager:
 
     def get_network(self, i):
         return self._networks[i]
-
-    def get_kdes(self):
-        return self._kdes
 
     def get_X(self):
         return self._X

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from queue import PriorityQueue
 
 from collections import deque
-from typing import Tuple, List, Dict, Callable, Optional, Union, Any, Iterable, NewType, Sequence
+from typing import Tuple, List, Dict, Callable, Optional, Union, Any
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -17,8 +17,8 @@ from jax.tree_util import Partial as partial
 from . import nodes as nd
 from .network import Network
 from . import utils as ut
-from biocomp.utils import ArbitraryModel, PartialFunction, EncodedPartialFunction
-from .parameters import ParameterTree, ParamPath
+from biocomp.utils import ArbitraryModel, EncodedPartialFunction
+from .parameters import ParameterTree
 from . import nodes
 
 from biocomp.logging_config import get_logger

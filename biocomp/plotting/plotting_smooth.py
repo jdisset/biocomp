@@ -1,7 +1,6 @@
 # {{{                          --     imports     --
 # ···············································································
 
-import jax.numpy as jnp
 from functools import partial
 import matplotlib as mpl
 
@@ -31,7 +30,6 @@ from .plotting_core import (
     setup_transformed_axis,
     get_reordered_protein_names,
     knn_avg,
-    get_knn_quantile,
     format_powers,
     heatmap,
 )
@@ -42,7 +40,7 @@ KDtree = partial(KDTree, leafsize=32)
 
 T = TypeVar("T")
 ListOrSingle: TypeAlias = Union[List[T], T]
-NdArray = Union[np.ndarray, jnp.ndarray]
+NdArray = np.ndarray
 configurable = pc.configurable
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -461,7 +459,6 @@ def smooth_2d(
         data_ylims[1] if ylims[1] is None else ylims[1],
     ]
 
-
     if isinstance(ax, (list, tuple)):
         ax = ax[0]
 
@@ -568,8 +565,8 @@ def smooth_line_plot(
             # use markevery to sample quantiles
             sample_quantiles_at = xquery[:, 0][::markevery]
 
-        zqlow, _ = get_knn_quantile(xquery, y, qu=with_quantiles[0], tree=tree)
-        zqhigh, _ = get_knn_quantile(xquery, y, qu=with_quantiles[1], tree=tree)
+        # zqlow, _ = get_knn_quantile(xquery, y, qu=with_quantiles[0], tree=tree)
+        # zqhigh, _ = get_knn_quantile(xquery, y, qu=with_quantiles[1], tree=tree)
 
         # ax.fill_between(
         # xquery[:, 0],
@@ -580,20 +577,20 @@ def smooth_line_plot(
         # lw=0,
         # )
 
-        ax.errorbar(
-            sample_quantiles_at,
-            zqlow[::markevery],
-            yerr=zqhigh[::markevery] - zqlow[::markevery],
-            fmt="none",
-            color=color,
-            alpha=0.3,
-            lw=2,
-            capsize=5,
-            capthick=2,
-            elinewidth=0.5,
-            marker=marker,
-            markevery=markevery,
-        )
+        # ax.errorbar(
+        #     sample_quantiles_at,
+        #     zqlow[::markevery],
+        #     yerr=zqhigh[::markevery] - zqlow[::markevery],
+        #     fmt="none",
+        #     color=color,
+        #     alpha=0.3,
+        #     lw=2,
+        #     capsize=5,
+        #     capthick=2,
+        #     elinewidth=0.5,
+        #     marker=marker,
+        #     markevery=markevery,
+        # )
 
     ax.set_xlabel(input_names[0])
     ax.set_ylabel(output_name)

@@ -1,6 +1,5 @@
 # {{{                          --     imports     --
 # ···············································································
-import jax
 from typing import Optional, Sequence
 from numpy.typing import NDArray as NdArray
 from matplotlib.colors import LinearSegmentedColormap
@@ -8,7 +7,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from . import plotting_core as pc
 from .plotting_core import (
-    DEFAULT_CMAP_NAME,
     setup_transformed_axis,
     get_reordered_protein_names,
     network_ticks_and_labels,
@@ -27,7 +25,6 @@ def scatter_3d_interactive(
     rescaler,
     xlims=(0, 1),
     title=None,
-    key=jax.random.PRNGKey(0),
     size=10,
     colorbar=True,
     lw=0.01,
@@ -40,7 +37,7 @@ def scatter_3d_interactive(
     input_order, output_pos = protein_order[:-1], protein_order[-1]
     input_names, output_name = protein_names[:-1], protein_names[-1]
 
-    random_order = jax.random.permutation(key, len(x))
+    random_order = np.random.permutation(len(x))
     y = y[random_order, output_pos]
     x = x[random_order][:, input_order]
 
@@ -119,9 +116,7 @@ def scatter_3d(
     xmin=0,
     xmax=1,
     title=None,
-    key=jax.random.PRNGKey(0),
     size=10,
-    colorbar=True,
     lw=0.1,
     **kw,
 ):
@@ -136,7 +131,7 @@ def scatter_3d(
     ) = network_ticks_and_labels(network, rescaler, xmax=xmax, **kw)
 
     cmap = plt.get_cmap("YlGnBu")
-    random_order = jax.random.permutation(key, len(x))
+    random_order = np.random.permutation(len(x))
     y = y[random_order, output_pos]
     x = x[random_order][:, input_order]
 

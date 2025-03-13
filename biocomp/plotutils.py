@@ -1,6 +1,5 @@
 # {{{                          --     imports     --
 # ···············································································
-import jax.numpy as jnp
 import numpy as np
 from biocomp import utils as ut
 from biocomp.datautils import DataRescaler, IdentityRescaler
@@ -52,8 +51,8 @@ logger = get_logger(__name__)
 T = TypeVar("T")
 Pair: TypeAlias = Tuple[T, T]
 ListOrSingle: TypeAlias = Union[List[T], T]
-NdArray: TypeAlias = Union[np.ndarray, jnp.ndarray]
-NumLike: TypeAlias = Union[np.ndarray, jnp.ndarray, float, int]
+NdArray: TypeAlias = np.ndarray
+NumLike: TypeAlias = Union[np.ndarray, float, int]
 
 
 class DataDimensions(BaseModel):
@@ -61,9 +60,15 @@ class DataDimensions(BaseModel):
     output: int = 0
 
 
+def asarray(x):
+    if x is not None:
+        return np.asarray(x)
+    return None
+
+
 class PlotData(ArbitraryModel):
-    xval: Optional[NdArray]
-    yval: Optional[NdArray]
+    xval: Annotated[Optional[NdArray], BeforeValidator(asarray)]
+    yval: Annotated[Optional[NdArray], BeforeValidator(asarray)]
 
     input_names: List[str] = []
     output_name: str = "output"
@@ -121,20 +126,20 @@ class PlotData(ArbitraryModel):
 class LazyPlotData(PlotData):
     get_xy: Callable[[PlotData], Tuple[NdArray, NdArray]]
 
-    xval: Optional[NdArray] = None
-    yval: Optional[NdArray] = None
+    xval: Annotated[Optional[NdArray], BeforeValidator(asarray)] = None
+    yval: Annotated[Optional[NdArray], BeforeValidator(asarray)] = None
 
     @property
     def x(self) -> NdArray:
         self.set_xy()
         assert self.xval is not None
-        return self.xval
+        return np.asarray(self.xval)
 
     @property
     def y(self) -> NdArray:
         self.set_xy()
         assert self.yval is not None
-        return self.yval
+        return np.asarray(self.yval)
 
     def set_xy(self):
         if self.xval is None:

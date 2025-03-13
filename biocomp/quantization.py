@@ -3,7 +3,6 @@ import jax
 from jax import vmap, jit
 import jax.numpy as jnp
 import numpy as np
-from . import utils as ut
 from .parameters import ParameterTree
 from jax import random as random
 from biocomp.logging_config import get_logger

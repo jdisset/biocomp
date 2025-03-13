@@ -6,13 +6,9 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import sqlite3
-import hashlib
 import json
-import json5
-from typing import Optional
 import logging as log
-import traceback
-from typing import Union, Optional, Sequence, Iterable, Any, Callable, TypeVar
+from typing import Union, Optional, Callable
 
 from biocomp.logging_config import get_logger
 
@@ -45,11 +41,6 @@ def escape(names):
         return {escape_name(name) for name in names}
     else:
         return names
-
-
-## ───────────────────────────────────── ▼ ─────────────────────────────────────
-# {{{                            --     sql     --
-# ···············································································
 
 
 def create_db(conn):
@@ -433,7 +424,3 @@ def get_network_XY(
     Y = get_network_data(network, data_file_path, color_aliases, **kwargs)
     X = network.get_input_from_output(Y)
     return X, Y
-
-
-#                                                                            }}}
-## ─────────────────────────────────────────────────────────────────────────────

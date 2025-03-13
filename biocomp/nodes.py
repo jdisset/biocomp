@@ -5,8 +5,10 @@ from jax import vmap
 from jax.tree_util import Partial as partial
 import jax.numpy as jnp
 import numpy as np
+import jax.nn
 
-from . import utils as ut
+from .utils import get_logger
+from .jaxutils import flat_concat
 from . import quantization as qz
 
 from .parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
@@ -18,12 +20,11 @@ if TYPE_CHECKING:
 
 from jax.typing import ArrayLike
 from typing import Callable, Tuple, List
-from typing import NewType
 from dataclasses import dataclass
 
 PRNGKey = ArrayLike
 
-logger = ut.get_logger(__name__)
+logger = get_logger(__name__)
 
 
 # =========================== Utils ===========================
@@ -95,7 +96,27 @@ def add_quantile_var_ids(params: ParameterTree, num_nodes: int, num_per_node, la
 ### {{{                    --     neural utils     --
 
 
-import jax.nn
+def continuous_initializer(rng, shape=(), minval=0, maxval=1):
+    def init():
+        return jax.random.uniform(
+            key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32
+        )
+
+    return init
+
+
+def glorot_initializer(rng, shape):
+    def init():
+        return jax.nn.initializers.glorot_normal()(rng, shape)
+
+    return init
+
+
+def he_initializer(rng, shape):
+    def init():
+        return jax.nn.initializers.he_uniform()(rng, shape)
+
+    return init
 
 
 def leaky_relu(x, alpha=0.2):
@@ -127,7 +148,7 @@ def dense_layer(
     assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
     input_size = 1 if input_values.shape == () else input_values.shape[0]
 
-    w = param_f(f"{name}/w", init_f=ut.he_initializer(key, (input_size, output_size)))
+    w = param_f(f"{name}/w", init_f=he_initializer(key, (input_size, output_size)))
     b = param_f(f"{name}/b", init_f=lambda: np.zeros((output_size,)))
 
     assert input_values.shape == (
@@ -291,7 +312,7 @@ def source_new(
         qid = params[f"{namespace}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
         ans = jax.vmap(
-            lambda position: MLP_head(ut.flat_concat(value, position, quantile), params, key)
+            lambda position: MLP_head(flat_concat(value, position, quantile), params, key)
         )(np.arange(max_L1s)[:n_outputs] / max_L1s)
         return ans + jnp.broadcast_to(value, ans.shape)
 
@@ -362,7 +383,7 @@ def inv_source_new(
         qid = params[f"{namespace}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
         ans = jax.vmap(
-            lambda position: MLP_head(ut.flat_concat(value, position, quantile), params, key)
+            lambda position: MLP_head(flat_concat(value, position, quantile), params, key)
         )(np.arange(max_L1s)[:n_outputs] / max_L1s)
         return ans + value.reshape(ans.shape)
 
@@ -596,7 +617,7 @@ def transform_nn(
         assert value.ndim == 1, f"In {transform_name}: {value.ndim} != 1: {value}"
         assert rate_embedding.ndim == 1
 
-        inputs = ut.flat_concat(value, rate_embedding, quantile)
+        inputs = flat_concat(value, rate_embedding, quantile)
         logger.debug(f"  concatenated inputs shape: {inputs.shape}")
 
         out = inner_activation(
@@ -778,7 +799,7 @@ def transform_nn(
             inner(params, value=v, quantile=quantile[i], rate_embedding=r, key=k)
             for i, (v, r, k) in enumerate(zip(val, qrates, inner_keys))
         )
-        inner_out = ut.flat_concat(inner_out, quantile[len(input_shapes)])
+        inner_out = flat_concat(inner_out, quantile[len(input_shapes)])
 
         assert inner_out.shape == (inner_outsize + 1,)
 
@@ -847,7 +868,7 @@ def sequestron_ERN(
         key: PRNGKey,
     ):
         res = dense_multilevel(
-            ut.flat_concat(neg, pos, affinity, quantile),
+            flat_concat(neg, pos, affinity, quantile),
             wsize,
             out_dim,
             depth,
@@ -865,7 +886,7 @@ def sequestron_ERN(
         init_if_needed(
             params,
             f"shared/{shared_layer_name}/affinities",
-            init_f=ut.continuous_initializer(key, (len(affinity_names), affinity_dim)),
+            init_f=continuous_initializer(key, (len(affinity_names), affinity_dim)),
         )
 
         # existing_names = params.at(
@@ -948,7 +969,7 @@ def grouped_output(
 
     def MLP_head(x, q, rng_key, params):
         return dense_multilevel(
-            ut.flat_concat(x, q),
+            flat_concat(x, q),
             wsize,
             1,
             depth,

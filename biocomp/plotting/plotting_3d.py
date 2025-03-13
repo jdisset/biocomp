@@ -14,19 +14,13 @@ from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable
 from matplotlib import pyplot as plt
 from functools import partial
 
-# from mpl_toolkits.axes_grid1.inset_locator import InsetPosition
-import numpy as np
-from .plotting_core import NumLike
 from biocomp import utils as ut
+from matplotlib.axes import Axes
 
-import jax.numpy as jnp
-
-NdArray = Union[np.ndarray, jnp.ndarray]
+NdArray = Union[np.ndarray]
+NumLike = Union[int, float, np.number]
 configurable = pc.configurable
 
-
-# to get the plt.Axes type:
-from matplotlib.axes import Axes
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -386,7 +380,6 @@ def plot_3d_stack(
                 axis_offset=axis_offset,
                 **props["labels"],
             )
-
 
     # plot the slices
     for i, (f, z) in enumerate(zip(slice_functions, slice_zpositions)):
