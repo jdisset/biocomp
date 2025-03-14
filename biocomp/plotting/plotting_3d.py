@@ -16,6 +16,7 @@ from functools import partial
 
 from biocomp import utils as ut
 from matplotlib.axes import Axes
+from matplotlib.transforms import Bbox
 
 NdArray = Union[np.ndarray]
 NumLike = Union[int, float, np.number]
@@ -30,6 +31,26 @@ configurable = pc.configurable
 
 CUBE_SPINE_PROPS = dict(linewidth=0.5, color="#000000", linestyle="-")
 CUBE_SPINE_PROPS_HIDDEN = ut.updated_dict(CUBE_SPINE_PROPS, dict(linestyle=":", alpha=0.5))
+
+
+class InsetPositionLocator:
+    # prior to matplotlib 3.10, there used to be an InsetPosition class
+    # that was removed, this is a simple replacement
+
+    def __init__(self, parent, rect):
+        self.parent = parent
+        self.rect = rect
+
+    def __call__(self, ax, renderer):
+        bbox_parent = self.parent.get_position(original=False)
+        x, y, w, h = self.rect
+
+        in_fig_x = bbox_parent.x0 + bbox_parent.width * x
+        in_fig_y = bbox_parent.y0 + bbox_parent.height * y
+        in_fig_w = bbox_parent.width * w
+        in_fig_h = bbox_parent.height * h
+
+        return Bbox.from_bounds(in_fig_x, in_fig_y, in_fig_w, in_fig_h)
 
 
 def plot_face(ax, visible_spines=("bottom", "left"), hidden_spines=("top", "right")):
@@ -381,35 +402,20 @@ def plot_3d_stack(
                 **props["labels"],
             )
 
-    # plot the slices
     for i, (f, z) in enumerate(zip(slice_functions, slice_zpositions)):
-        inset_coords_world = np.array(
-            [[0, 1], [0, 1]]
-        )  # placeholder, will be updated after f(axin)
-        inset_size_world = np.abs(inset_coords_world[:, 1] - inset_coords_world[:, 0])
-        inset_size_ax = inset_size_world / ax_size
-
-        # project the z value (using placeholder coordinates initially)
-        inset_coords_proj = project((inset_coords_world[0, 0], inset_coords_world[1, 0], z))
-        inset_coords_ax = to_ax_coords(inset_coords_proj, ax_lims, ax_size)
-
-        position = [inset_coords_ax[0], inset_coords_ax[1], inset_size_ax[0], inset_size_ax[1]]
-        axin = ax.inset_axes(position, zorder=-z)
-
+        axin = ax.inset_axes([0, 0, 1, 1], zorder=-z)
         f(axin)
-
-        # update coordinates after f(axin) has potentially changed the limits
         inset_coords_world = np.array([axin.get_xlim(), axin.get_ylim()])
         inset_size_world = np.abs(inset_coords_world[:, 1] - inset_coords_world[:, 0])
         inset_size_ax = inset_size_world / ax_size
-
-        # recalculate the projected coordinates
+        # project the z value
         inset_coords_proj = project((inset_coords_world[0, 0], inset_coords_world[1, 0], z))
         inset_coords_ax = to_ax_coords(inset_coords_proj, ax_lims, ax_size)
 
-        new_position = [inset_coords_ax[0], inset_coords_ax[1], inset_size_ax[0], inset_size_ax[1]]
-        if position != new_position:
-            axin.set_position(new_position)
+        ip = InsetPositionLocator(
+            ax, [inset_coords_ax[0], inset_coords_ax[1], inset_size_ax[0], inset_size_ax[1]]
+        )
+        axin.set_axes_locator(ip)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

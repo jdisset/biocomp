@@ -608,7 +608,7 @@ def heatmap(
         Z_contour[0, :] = 0
         Z_contour[-1, :] = 0
 
-        # Main visible contours (solid lines)
+        # main visible contours (solid lines)
         cntrs = ax.contour(
             Z_contour.T,
             levels=contours if isinstance(contours, (list, np.ndarray)) else contours,
@@ -623,12 +623,16 @@ def heatmap(
             # set nans to 0, so that contours are not broken
             Z_contour = np.nan_to_num(Z_contour)  # this allows to close contours that are open
 
-            # invisible contours for clipping
+            # get the lowest contour level
+            if hasattr(cntrs, "levels") and len(cntrs.levels) > 0:
+                lowest_level = cntrs.levels[0]
+            else:
+                lowest_level = cntrs.levels  # For single level case
+
+            # create a single-level contour specifically for clipping
             clip_cntrs = ax.contour(
                 Z_contour.T,
-                levels=cntrs.levels
-                if isinstance(cntrs.levels, (list, np.ndarray))
-                else [cntrs.levels],
+                levels=[lowest_level],  # Just the lowest level
                 extent=[*xlims, *ylims],
                 alpha=0,
                 colors="none",
@@ -653,6 +657,7 @@ def heatmap(
             ax.clabel(cntrs, inline=True, fontsize=8)
 
     im = None
+
     if show_image:
         if clip_to_lowest_contour and cntrs is not None:
             Z = np.nan_to_num(Z)
@@ -670,20 +675,10 @@ def heatmap(
         )
 
         if clip_to_lowest_contour and clip_cntrs is not None:
-            # use the invisible solid contours for clipping
-
-            if hasattr(clip_cntrs, "collections"):
-                if len(clip_cntrs.collections) > 0:
-                    all_paths = clip_cntrs.collections[0].get_paths()
-            # for newer versions of matplotlib (>= 3.8)
-            else:
-                all_paths = clip_cntrs.get_paths()
-
-            if len(all_paths) > 0:
-                lowest_contour_path = all_paths[0]
-                clip_path = mpl.patches.PathPatch(lowest_contour_path, transform=ax.transData)
-                im.set_clip_path(clip_path)
-            else:  # we "clip" everything out i.e. we delete the image
+            lowest_contour_path = clip_cntrs.get_paths()[0]
+            clip_path = mpl.patches.PathPatch(lowest_contour_path, transform=ax.transData)
+            im.set_clip_path(clip_path)
+            if len(lowest_contour_path.vertices) == 0:
                 im.remove()
 
     return im, cntrs
