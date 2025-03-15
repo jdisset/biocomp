@@ -230,11 +230,43 @@ class NetworkConstructionError(Exception):
     pass
 
 
+class LibraryContext:
+    _current_lib = None
+
+    @classmethod
+    def set_library(cls, lib):
+        cls._current_lib = lib
+
+    @classmethod
+    def get_library(cls):
+        if cls._current_lib is None:
+            return load_lib()
+        return cls._current_lib
+
+    @classmethod
+    def with_library(cls, lib):
+        """Context manager for temporarily setting a library"""
+
+        class LibraryContextManager:
+            def __init__(self, lib):
+                self.lib = lib
+                self.previous_lib = None
+
+            def __enter__(self):
+                self.previous_lib = LibraryContext._current_lib
+                LibraryContext.set_library(self.lib)
+                return self.lib
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                LibraryContext.set_library(self.previous_lib)
+
+        return LibraryContextManager(lib)
+
+
 class Slot(BaseModel):
     """Transcription Units are made of slots which contain either a part or a list of
     possible parts that map to a quantized parameter"""
 
-    lib: PartsLibrary = Field(default_factory=load_lib, repr=False)
     part: Optional[Union[str, List[str]]] = None
 
     # does this slot map to a parameter, like "tl_rate" or "tc_rate"?
@@ -242,6 +274,7 @@ class Slot(BaseModel):
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
+
         if isinstance(self.part, list):
             if not self.part or self.part == [None]:
                 self.part = None
@@ -254,14 +287,14 @@ class Slot(BaseModel):
             self.maps_to_parameter = self.__mapped_parameter(self.part)
 
         if self.maps_to_parameter is not None and not isinstance(self.part, list):
-            # if the slot maps to a parameter, it must be a list (even if there's only one part)
             self.part = [self.part]  # type: ignore
 
     def __mapped_parameter(self, part_name: Optional[str]) -> Optional[str]:
         """Returns the name of the parameter a part maps to, or None if it doesn't map to any"""
+        lib = LibraryContext.get_library()
         if part_name is not None:
-            if part_name in self.lib.pc.index:
-                category = self.lib.pc.loc[part_name, "category"]
+            if part_name in lib.pc.index:
+                category = lib.pc.loc[part_name, "category"]
                 if category in part_type_to_parameter_name:
                     return part_type_to_parameter_name[category]
             else:
@@ -277,12 +310,9 @@ class Slot(BaseModel):
         return f"<{self.part} -> {self.maps_to_parameter}>"
 
 
-# Validator for automatic Slot conversion
-def convert_to_slot(value, lib=None):
+def convert_to_slot(value):
     """Convert strings or lists of strings to Slot objects"""
     if isinstance(value, Slot):
-        if lib is not None and value.lib is None:
-            value.lib = lib
         return value
     elif isinstance(value, (str, list)):
         return Slot(part=value)
@@ -295,30 +325,25 @@ SlotType = Annotated[Slot | str | list[str], BeforeValidator(convert_to_slot)]
 
 class TranscriptionUnit(BaseModel):
     name: str = ""
-    slots: List[SlotType] = Field(default_factory=list)
-    params: Dict = Field(default_factory=dict)
+    slots: List[SlotType] = []
+    params: Dict = {}
     source: Optional[str] = None
-    lib: PartsLibrary = Field(default_factory=load_lib, repr=False)
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+    # model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
-        # Ensure all slots have a library
-        for slot in self.slots:
-            if slot.lib is None:
-                slot.lib = self.lib
-
         self.__get_parameters()
 
     def __get_parameters(self):
         for s in self.slots:
+            assert isinstance(s, Slot)
             if s.maps_to_parameter is not None:
                 if s.maps_to_parameter in self.params:
                     raise ValueError(f"Parameter {s.maps_to_parameter} already in params")
                 self.params[s.maps_to_parameter] = s.part
 
-        # Add default parameters
+        # add default parameters
         for _, p in part_type_to_parameter_name.items():
             if p not in self.params:
                 try:
@@ -331,11 +356,11 @@ class TranscriptionUnit(BaseModel):
 
     def to_parts(self) -> List[Union[str, List[str]]]:
         """Convert slots back to a parts representation"""
-        return [s.part if not isinstance(s.part, list) else s.part for s in self.slots]
+        return [s.part if not isinstance(s.part, list) else s.part for s in self.slots]  # type: ignore
 
     def with_source(self, source: str) -> "TranscriptionUnit":
         """Create a copy of this TranscriptionUnit with a different source"""
-        return TranscriptionUnit(name=self.name, slots=self.slots, source=source, lib=self.lib)
+        return TranscriptionUnit(name=self.name, slots=self.slots, source=source)
 
 
 Unit = TranscriptionUnit  # alias for declarative API
@@ -415,20 +440,21 @@ def transcription_unit_from_L1(l1id: str, lib: PartsLibrary) -> TranscriptionUni
     """Builds a transcription unit from an L1 id and a library
     The TU is built by concatenating all the parts from the L0s
     that are in the L1"""
-    l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
-    L0s = lib.L1s.loc[l1id][l0_cols].tolist()
-    part_cols = [f"part_{i}" for i in range(1, 7)]
-    parts: List[str] = []
-    for l in L0s:
-        try:
-            parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
-        except Exception as e:
-            msg = f"Error in L0 {l} of L1 {l1id}: {e}"
-            msg += f"\npart_cols: {part_cols}"
-            msg += f"\nlib.L0s[{l}]: {lib.L0s.loc[l]}"
-            msg += f"\nlib.L0s: {lib.L0s}"
-            raise NetworkConstructionError(msg)
-    return TranscriptionUnit(slots=[Slot(part=p, lib=lib) for p in parts])
+    with LibraryContext.with_library(lib):
+        l0_cols = ["insulator", "promoter", "5'UTR", "gene", "3'UTR", "terminator"]
+        L0s = lib.L1s.loc[l1id][l0_cols].tolist()
+        part_cols = [f"part_{i}" for i in range(1, 7)]
+        parts: List[str] = []
+        for l in L0s:
+            try:
+                parts += [p for p in lib.L0s.loc[l][part_cols].tolist() if p]
+            except Exception as e:
+                msg = f"Error in L0 {l} of L1 {l1id}: {e}"
+                msg += f"\npart_cols: {part_cols}"
+                msg += f"\nlib.L0s[{l}]: {lib.L0s.loc[l]}"
+                msg += f"\nlib.L0s: {lib.L0s}"
+                raise NetworkConstructionError(msg)
+        return TranscriptionUnit(slots=[Slot(part=p) for p in parts])
 
 
 class CoTransfection(BaseModel):
@@ -647,83 +673,50 @@ class Network(BaseModel):
         metadata: Optional[Dict] = None,
         use_cache: Optional[str] = None,
     ):
-        assert recipe_db is not None, "recipe_db cannot be None"
-        recipe_db.commit()
-        c = recipe_db.cursor()
-        # first let's check that there is a recipe with this name
-        c.execute("SELECT * FROM recipes WHERE name=?", (name,))
-        assert c.fetchone() is not None, f"No recipe named {name} in database {recipe_db}."
-        # Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
-        # get the transcription units
-        c.execute(
-            """SELECT TU, TU || '_' || aggregation as name FROM TU_in_source tis, source_in_aggregation sia, aggregations a
-           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?
-           ORDER BY name""",
-            (name,),
-        )
-        raw_transcription_units = list(c.fetchall())  # columns: TU_id, TU_name ("TUid_aggid")
-        # then get the sources
-        c.execute(
-            """SELECT tis.source || '_' || aggregation as source, TU || '_' || aggregation as TU, position
-            FROM TU_in_source tis, source_in_aggregation sia, aggregations a
-           WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ? ORDER BY source, position""",
-            (name,),
-        )
-        raw_tu_in_sources = list(c.fetchall())  # columns: source_name, TU_name, position
-        c.execute(
-            """SELECT a.id, sia.source || '_' || aggregation, sia.ratio FROM aggregations a, source_in_aggregation sia
-            WHERE a.id = sia.aggregation AND a.recipe = ? ORDER BY a.id""",
-            (name,),
-        )
-        raw_aggregations = list(c.fetchall())  # columns: agg_id, source_name, ratio
-        transcription_units = {
-            tu[1]: transcription_unit_from_L1(tu[0], lib) for tu in raw_transcription_units
-        }  # a dict of {TU_unique_name: TU}
-        return cls.from_raw(
-            lib,
-            name,
-            transcription_units,
-            raw_tu_in_sources,
-            raw_aggregations,
-            build=build,
-            use_cache=use_cache,
-            custom_outputs=custom_outputs,
-            metadata=metadata,
-        )
-
-    # @classmethod
-    # def from_raw(
-    #     cls,
-    #     lib: PartsLibrary,
-    #     name: str,
-    #     transcription_units: dict[str, TranscriptionUnit],  # dict of {TU_name: TU}
-    #     raw_tu_in_sources: List[Tuple[str, str, int]],  # list of (source_name, TU_name, position)
-    #     raw_aggregations: List[Tuple[int, str, float]],  # list of (agg_id, source_name, ratio)
-    #     build: bool = True,  # whether to build the network's graph
-    #     use_cache: Optional[str] = None,  # path to cache
-    #     **kwargs,
-    # ):
-    #     n = cls(lib, name, **kwargs)
-    #     n.raw_tu_in_sources = raw_tu_in_sources
-    #     n.raw_aggregations = raw_aggregations
-    #     n.transcription_units = transcription_units
-    #
-    #     def actually_build():
-    #         n.tu_in_sources = pd.DataFrame(
-    #             n.raw_tu_in_sources, columns=["source", "TU", "position"]
-    #         )
-    #         n.tu_in_sources.sort_values(by="position", inplace=True)
-    #         n.aggregations = (
-    #             pd.DataFrame(n.raw_aggregations, columns=["id", "source", "ratio"])
-    #             .groupby("id")
-    #             .agg(list)
-    #         )
-    #         if build:
-    #             n.build()
-    #         return n
-    #
-    #     n = ut.get_cache(lambda: actually_build(), n.get_signature(), use_cache)
-    #     return n
+        with LibraryContext.with_library(lib):
+            assert recipe_db is not None, "recipe_db cannot be None"
+            recipe_db.commit()
+            c = recipe_db.cursor()
+            # first let's check that there is a recipe with this name
+            c.execute("SELECT * FROM recipes WHERE name=?", (name,))
+            assert c.fetchone() is not None, f"No recipe named {name} in database {recipe_db}."
+            # Available recipes: {c.execute("SELECT name FROM recipes").fetchall()}'
+            # get the transcription units
+            c.execute(
+                """SELECT TU, TU || '_' || aggregation as name FROM TU_in_source tis, source_in_aggregation sia, aggregations a
+               WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ?
+               ORDER BY name""",
+                (name,),
+            )
+            raw_transcription_units = list(c.fetchall())  # columns: TU_id, TU_name ("TUid_aggid")
+            # then get the sources
+            c.execute(
+                """SELECT tis.source || '_' || aggregation as source, TU || '_' || aggregation as TU, position
+                FROM TU_in_source tis, source_in_aggregation sia, aggregations a
+               WHERE tis.source = sia.source AND sia.aggregation = a.id AND a.recipe = ? ORDER BY source, position""",
+                (name,),
+            )
+            raw_tu_in_sources = list(c.fetchall())  # columns: source_name, TU_name, position
+            c.execute(
+                """SELECT a.id, sia.source || '_' || aggregation, sia.ratio FROM aggregations a, source_in_aggregation sia
+                WHERE a.id = sia.aggregation AND a.recipe = ? ORDER BY a.id""",
+                (name,),
+            )
+            raw_aggregations = list(c.fetchall())  # columns: agg_id, source_name, ratio
+            transcription_units = {
+                tu[1]: transcription_unit_from_L1(tu[0], lib) for tu in raw_transcription_units
+            }  # a dict of {TU_unique_name: TU}
+            return cls.from_raw(
+                lib,
+                name,
+                transcription_units,
+                raw_tu_in_sources,
+                raw_aggregations,
+                build=build,
+                use_cache=use_cache,
+                custom_outputs=custom_outputs,
+                metadata=metadata,
+            )
 
     @classmethod
     def from_raw(
@@ -807,18 +800,21 @@ class Network(BaseModel):
         return node_dict
 
     def build(self):
-        assert self.transcription_units is not None, "No transcription units in recipe"
-        assert len(self.transcription_units) > 0, f"No transcription units in recipe {self.name}"
-        self.__build_central_dogma_graph(self.custom_outputs)
-        self.__build_compute_graph()
-        if self.invert_on_build:
-            inverted = inverted_network(self)[0]
-            self.compute_graph = inverted.compute_graph
-            self.central_dogma_graph = inverted.central_dogma_graph
-            self.transcription_units = inverted.transcription_units
-            self._n_inputs = inverted._n_inputs
-            self._n_outputs = inverted._n_outputs
-            self._output_proteins = inverted._output_proteins
+        with LibraryContext.with_library(self.lib):
+            assert self.transcription_units is not None, "No transcription units in recipe"
+            assert (
+                len(self.transcription_units) > 0
+            ), f"No transcription units in recipe {self.name}"
+            self.__build_central_dogma_graph(self.custom_outputs)
+            self.__build_compute_graph()
+            if self.invert_on_build:
+                inverted = inverted_network(self)[0]
+                self.compute_graph = inverted.compute_graph
+                self.central_dogma_graph = inverted.central_dogma_graph
+                self.transcription_units = inverted.transcription_units
+                self._n_inputs = inverted._n_inputs
+                self._n_outputs = inverted._n_outputs
+                self._output_proteins = inverted._output_proteins
 
     def is_built(self) -> bool:
         return (
@@ -831,6 +827,7 @@ class Network(BaseModel):
     # {{{                           --     utils     --
     # ···············································································
     def __getDna(self, tu: TranscriptionUnit) -> Tuple[List[str], Dict[str, List[str]]]:
+        lib = LibraryContext.get_library()
         content = []
         for s in tu.slots:
             if s.maps_to_parameter is None:
@@ -838,6 +835,7 @@ class Network(BaseModel):
         return content, tu.params
 
     def __getDownstream(self, tu: TranscriptionUnit, transform: str):
+        lib = LibraryContext.get_library()
         dna_content, dna_params = self.__getDna(tu)
         d = self.lib.pc.loc[dna_content]
         content = tuple(d[d[transform] == 1].index)
