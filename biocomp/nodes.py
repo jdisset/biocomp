@@ -38,6 +38,20 @@ def generate_layer_name(stack, layer_id, name):
         return f"{layer_id}/{name} ({n_nodes})"
 
 
+def quantization_mask_str(names, mask) -> str:
+    col_width = max(len(name) for name in names)
+    result = " " * 5
+    for i, name in enumerate(names):
+        result += f"{name:^{col_width}} "
+    result += "\n"
+    for i, row in enumerate(mask):
+        result += f"{i:<4}|"
+        for val in row[0]:
+            result += f"{'X' if val else ' ':^{col_width}}|"
+        result += "\n"
+    return result
+
+
 @dataclass
 class LayerInstance:
     prepare: Callable
@@ -588,7 +602,6 @@ def transform_nn(
     layer_name = make_layer_name(layer_id, is_inverse)
 
     quantization_values_path = f"shared/quantization/values/{rate_name}"
-    quantization_names_path = f"shared/quantization/names/{rate_name}"  # for sanity check
     mask_name = f"{rate_name}_quantization_mask"
     quantization_mask_path = f"local/{layer_name}/{mask_name}"
 
@@ -600,7 +613,7 @@ def transform_nn(
         the rate embedding and the source value.
         All of these outputs will then be summed up and passed through a final layer.
         """
-        logger.debug(f"Inner function inputs:")
+        logger.debug("Inner function inputs:")
         logger.debug(f"  value shape: {value.shape if hasattr(value, 'shape') else 'scalar'}")
         logger.debug(
             f"  rate_embedding shape: {rate_embedding.shape if hasattr(rate_embedding, 'shape') else 'scalar'}"
@@ -649,8 +662,6 @@ def transform_nn(
         except KeyError:
             qvalues = jax.random.normal(key0, (len(quantization_names), rate_dim)) / 1000
             params[quantization_values_path] = qvalues
-            # params[quantization_names_path] = tuple(quantization_names)
-            # params.tag(quantization_names_path, ['non_jit', 'non_grad'])
         # Now initialize logstdevs in the same way
         try:
             logstdevs = params[logstdevs_path]
@@ -658,12 +669,7 @@ def transform_nn(
             logstdevs = jnp.zeros((len(quantization_names), rate_dim)) - 4
             params[logstdevs_path] = logstdevs
 
-        # assert qvalues.shape == (len(quantization_names), rate_dim)
-        # if params[quantization_names_path] != tuple(quantization_names):
-        # raise ValueError(
-        # f"""Quantization names for {rate_name} do not match:
-        # {params[quantization_names_path]} != {tuple(quantization_names)}"""
-        # )
+        assert qvalues.shape == (len(quantization_names), rate_dim)
 
         if not is_inverse:  # forward node
             # We initialize quantization masks for these nodes.
@@ -675,6 +681,9 @@ def transform_nn(
                 for node in nodelist
             ]
             params.at(f"{quantization_mask_path}", np.array(qmasks), tags=["non_grad"])
+            logger.debug(
+                f"quantization mask for {layer_name}:\n{quantization_mask_str(quantization_names, qmasks)}"
+            )
             try:
                 params.at(
                     count_array_path,
@@ -714,8 +723,6 @@ def transform_nn(
             params.tag(f"local/{layer_name}/{mask_name}", ["non_grad"])
 
         # --------- quantile var
-        # quantile_var_ids = np.array([get_quantile_variable_ids(node, stack) for node in nodelist])
-        # assert quantile_var_ids.shape == (len(nodelist),), quantile_var_ids
         add_quantile_var_ids(params, len(nodelist), len(input_shapes) + 1, layer_name)
 
         fake_vals = [np.zeros(s) for s in input_shapes]
@@ -805,6 +812,8 @@ def transform_nn(
 
         # then we apply a final outer layer to the summed output:
         ans = outer(inner_out, params, k2)
+
+        # return ans + val.reshape(ans.shape)
 
         return jnp.sum(ans + val, axis=0)  # skip connection
 
