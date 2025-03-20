@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from queue import PriorityQueue
 
 from collections import deque
-from typing import Tuple, List, Dict, Callable, Optional, Union, Any
+from typing import Tuple, List, Dict, Callable, Optional, Union, Any, TypeAlias, Generic, TypeVar
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -28,6 +28,8 @@ logger = get_logger(__name__)
 
 PRNGKey = Union[jnp.ndarray, np.ndarray, int]
 NdArray = Union[jnp.ndarray, np.ndarray]
+
+T = TypeVar("T")
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -427,6 +429,49 @@ class ComputeStack:
             for callback in self.post_process_callbacks:
                 params = callback(params)
         return params
+
+    def split_stack_outputs_per_network(
+        self, yhat: T, max_samples: Optional[int] = None
+    ) -> list[T]:
+        """
+        split a stacked output into per-network outputs
+
+        returns:
+            list of per-network output arrays
+        """
+
+        network_outputs = []
+        output_start_id = 0
+
+        for i, _ in enumerate(self.networks):
+            # get output shapes for this network
+            _, output_shapes = self.get_network_output_indices(i)
+            assert isinstance(output_shapes, list)
+
+            # process each output
+            outputs = []
+            for output_shape in output_shapes:
+                nout = np.prod(output_shape)
+                output = yhat[:, output_start_id : output_start_id + nout].reshape(
+                    -1, *output_shape
+                )
+                outputs.append(output)
+                output_start_id += nout
+
+            if not all(output.shape == outputs[0].shape for output in outputs):
+                raise ValueError(
+                    f"Outputs have different shapes: {[output.shape for output in outputs]}"
+                )
+
+            if not len(outputs):
+                continue
+
+            network_output = (jnp if "jax" in type(outputs[0]).__module__ else np).concatenate(
+                outputs, axis=1
+            )
+            network_outputs.append(network_output)
+
+        return network_outputs
 
     ##────────────────────────────────────────────────────────────────────────────}}}
 
