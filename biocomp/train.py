@@ -88,21 +88,21 @@ def l2_loss(stack, training_config, negative_grad_penalty=1.0, kl_weight=1):
             counts * (qvalues**2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)
         ).sum() / counts.sum()
 
-        # jax.debug.print("yhat {}", yhat)
-        # jax.debug.print("Y {}", Y)
-
         mse = ((yhat - Y) ** 2).mean()
-        # jax.debug.print("mse {}", mse)
         negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
 
         ngp = as_schedule(negative_grad_penalty)(step)
 
         loss = mse + ngp * negative_grads + klw * kl_loss
-        # jax.debug.print("loss {}", loss)
 
         return loss, aux
 
     return loss_func
+
+
+def lerp(a, b, t):
+    # when t=0 return a, when t=1 return b
+    return a + t * (b - a)
 
 
 def sorting_loss(
@@ -112,7 +112,6 @@ def sorting_loss(
     kl_weight=0.1,
     sorting_mse_weight=0.1,
     percent_batch_used=1.0,
-    qvalues_coeff=1000,
     use_same_key=False,
 ):
     import jax
@@ -130,8 +129,13 @@ def sorting_loss(
             keys = jax.random.split(key, X.shape[0])
 
         yhat, (grads_wrt_inputs, full_output) = batch_apply(params, X, Z, keys)
-        assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
         aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
+
+        assert isinstance(yhat, jnp.ndarray)
+        assert isinstance(Y, jnp.ndarray)
+        assert (
+            yhat.shape == Y.shape
+        ), f"yhat and Y must have the same shape, got {yhat.shape} and {Y.shape}"
 
         # kl
         qvalues_dir = ParamPath("shared/quantization/values")
@@ -145,38 +149,39 @@ def sorting_loss(
             (qvalues_dir, logstd_dir, count_dir),
         )
         kl_loss = (
-            (
-                counts * ((qvalues * qvalues_coeff) ** 2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)
-            ).sum()
+            (counts * (qvalues**2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)).sum()
             / counts.sum()
             * klw
         )
 
-        # negative grads
+        # negative grads, used to penalize "inverted" functions
         negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
         ngp = as_schedule(negative_grad_penalty)(step)
         ng_loss = negative_grads * ngp
 
+        # only use a percentage of the batch (allows to vary batch size without recompiling)
         pct = as_schedule(percent_batch_used)(step)
-        select = jnp.linspace(0, 1, X.shape[0]) > pct
-        Y = jnp.where(
-            select[:, None],
-            jnp.zeros(Y.shape),
-            Y,
-        )
-        yhat = jnp.where(
-            select[:, None],
-            jnp.zeros(Y.shape),
-            yhat,
-        )
+        selected = (jnp.linspace(0, 1, X.shape[0]) <= pct)[:, None]
+        count = jnp.maximum(selected.sum(), 1)
 
-        # mse and sorted mse
-        mse = ((yhat - Y) ** 2).mean()
-        sorting_mse = ((yhat.sort(axis=0) - Y.sort(axis=0)) ** 2).mean() / pct
+        mse = ((yhat - Y) ** 2 * selected).sum() / count
+
+        # sorting loss with pushing masked out values to the end
+        MAXFLOAT = jnp.finfo(Y.dtype).max
+        sorting_mse = (
+            (
+                jnp.sort(jnp.where(selected, yhat, MAXFLOAT), axis=0)
+                - jnp.sort(jnp.where(selected, Y, MAXFLOAT), axis=0)
+            )
+            ** 2
+            * selected  # technically useless I think?
+        ).sum() / count
+
+        # mix the two losses
         smw = as_schedule(sorting_mse_weight)(step)
-        sorting_loss = sorting_mse * smw + mse * (1 - smw)
+        main_loss = lerp(mse, sorting_mse, smw)
 
-        return sorting_loss + kl_loss + ng_loss, aux
+        return main_loss + kl_loss + ng_loss, aux
 
     return loss_func
 
@@ -483,6 +488,9 @@ def start(
                         step=i,
                         training_config=training_config,
                         step_history=step_history,
+                        xbatches=xbatches,
+                        ybatches=ybatches,
+                        stack=stack,
                     )
 
     for t, l in loggers:
@@ -492,6 +500,9 @@ def start(
                 step=total_steps,
                 training_config=training_config,
                 step_history=step_history,
+                xbatches=xbatches,
+                ybatches=ybatches,
+                stack=stack,
             )
 
     logger.info(f"End of training for {training_config.n_epochs} epochs")
