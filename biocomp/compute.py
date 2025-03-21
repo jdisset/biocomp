@@ -1040,7 +1040,6 @@ class ComputeStack:
                 assert running_output.shape[0] == self.layers_start_index[lid]
 
                 n_nodes = len(self.layers[lid].nodes)
-
                 n_inputs = len(self.layers[lid].f_input_shapes)
 
                 if overwrite_values is not None and overwrite_at is not None:
@@ -1065,31 +1064,7 @@ class ComputeStack:
                         *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
                     )
                     if w_grads[lid]:
-                        # compute the gradient of the first output with respect to the first input
-
-                        # def first_output(
-                        #     first_input, *other_inputs, params, quantiles, node_id, key
-                        # ):
-                        #     return apply_f(
-                        #         first_input,
-                        #         *other_inputs,
-                        #         params=params,
-                        #         quantiles=quantiles,
-                        #         node_id=node_id,
-                        #         key=key,
-                        #     )[0][0]
-                        # grad = jax.grad(first_output)(
-                        #     inputs[0],
-                        #     *inputs[1:],
-                        #     params=params,
-                        #     quantiles=quantiles,
-                        #     node_id=node_id,
-                        #     key=key,
-                        # )
-                        # grad = jnp.concatenate([g.reshape(-1) for g in grad])
-
-                        # or using jax.jacfwd, we can just grab the first output wrt the first input
-
+                        # using jax.jacfwd, we can just grab the first output wrt the first input
                         grad = jax.jacfwd(apply_f, argnums=list(range(n_inputs)))(
                             *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
                         )

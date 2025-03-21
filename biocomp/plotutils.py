@@ -61,9 +61,7 @@ class DataDimensions(BaseModel):
 
 
 def asarray(x):
-    if x is not None:
-        return np.asarray(x)
-    return None
+    return np.asarray(x, dtype=np.float32) if x is not None else None
 
 
 class PlotData(ArbitraryModel):
@@ -133,13 +131,13 @@ class LazyPlotData(PlotData):
     def x(self) -> NdArray:
         self.set_xy()
         assert self.xval is not None
-        return np.asarray(self.xval)
+        return asarray(self.xval)  # type: ignore
 
     @property
     def y(self) -> NdArray:
         self.set_xy()
         assert self.yval is not None
-        return np.asarray(self.yval)
+        return asarray(self.yval)  # type: ignore
 
     def set_xy(self):
         if self.xval is None:
