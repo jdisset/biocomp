@@ -19,7 +19,7 @@ from typing import (
 from itertools import product
 from pydantic.dataclasses import dataclass
 from pydantic import BaseModel, Field, ConfigDict, BeforeValidator
-from .utils import load_lib
+from .utils import load_lib, flatten
 
 from biocomp.logging_config import get_logger
 
@@ -155,29 +155,32 @@ def get_ratios(net) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
 
 def get_parts_categories(parts, lib):
     res = {}
+    positions = []
     for part in parts:
         assert part in lib.parts.index
         res[part] = lib.parts.loc[part].category
+
     return res
 
 
-def get_tu_parts(tu, lib):
-    parts = set()
-    for slt in tu.slots:
-        if isinstance(slt.part, str):
-            parts.add(slt.part)
+def get_tu_parts(tu, lib=None):
+    if not lib:
+        lib = load_lib()
+    parts = []
+    for slot in tu.slots:
+        if isinstance(slot.part, str):
+            parts.append(slot.part)
         else:
-            assert isinstance(slt.part, list)
-            if len(slt.part) == 1:
-                parts.add(slt.part[0])
+            assert isinstance(slot.part, list)
+            if len(slot.part) == 1:
+                parts.append(slot.part[0])
     return get_parts_categories(parts, lib)
 
 
-def get_all_parts(net, lib):
-    parts = []
-    for t in net.transcription_units.values():
-        parts.append(get_tu_parts(t, lib))
-    return parts
+def get_all_parts(net, lib=None):
+    if not lib:
+        lib = load_lib()
+    return {tname: get_tu_parts(t, lib) for tname, t in net.transcription_units.items()}
 
 
 def cotx_ratios_str(cotx):
@@ -190,14 +193,14 @@ def cotx_ratios_str(cotx):
 def generate_network_info(net, lib=None):
     """Generate a dictionnary of information for a network"""
     # NOT the string version but the raw dict
-    arch, seqtype = ut.get_network_family(net)
-    uorf_vals, uorf_names = ut.get_all_uorf_values(net)
+    arch, seqtype = get_network_family(net)
+    uorf_vals, uorf_names = get_all_uorf_values(net)
     cdg = net.central_dogma_graph
-    genes = ut.flatten(cdg[cdg.type == "PRT"]["content"].tolist())
+    genes = flatten(cdg[cdg.type == "PRT"]["content"].tolist())
     markers = tuple(sorted(net.get_inverted_input_proteins()))
     all_outputs = tuple(sorted(net.get_output_proteins()))
     dependent_outputs = tuple(sorted(list(set(all_outputs) - set(markers))))
-    ern_names = ut.get_all_ERNs_names(net)
+    ern_names = get_all_ERNs_names(net)
     cotx = get_ratios(net)
     if not lib:
         lib = load_lib()
@@ -206,7 +209,7 @@ def generate_network_info(net, lib=None):
         "architecture": arch,
         "ern_names": ern_names,
         "uorf_values": uorf_vals,
-        "uorf_names": ut.flatten(uorf_names),
+        "uorf_names": flatten(uorf_names),
         "genes": genes,
         "markers": markers,
         "output_proteins": all_outputs,
@@ -221,6 +224,128 @@ def generate_network_info(net, lib=None):
 
 #                                                                            }}}
 ## ─────────────────────────────────────────────────────────────────────────────
+
+## {{{                      --     topology analysis helpers     --
+
+
+def get_uorf_value(param):
+    if "tl_rate" in param:
+        u = param["tl_rate"][0].split("_")[0]
+        try:
+            v = int(u[:-1]) * 10
+        except ValueError:
+            v = 0
+        if u[-1] == "w":
+            v = v - 5
+        return v
+    else:
+        return 0
+
+
+UORF_DICT = {
+    0: "No uORF",
+    5: "weak uORF",
+    10: "1x uORF",
+    20: "2x uORF",
+    30: "3x uORF",
+    40: "4x uORF",
+    50: "5x uORF",
+    60: "6x uORF",
+    70: "7x uORF",
+    80: "8x uORF",
+}
+
+
+def get_all_ERN_ids(network):
+    ERN_ids = network.compute_graph[network.compute_graph["type"] == "sequestron_ERN"].index.values
+    return flatten(network.topological_order(ERN_ids))
+
+
+def get_all_ERNs_names(network):
+    ERNs = network.compute_graph.loc[get_all_ERN_ids(network)]
+    ERN_extras = ERNs["extra"].values
+    ERN_names = [e["seq_name"].split("#")[0].split("::")[-1] for e in ERN_extras]
+    return ERN_names
+
+
+def get_uorf_names(uorf_values, ern_names):
+    uorf_names = []
+    for uorf, ern_name in zip(uorf_values, ern_names):
+        ERN_uorf, REC_uorf = uorf
+        ERN_uorf = UORF_DICT[ERN_uorf]
+        REC_uorf = UORF_DICT[REC_uorf]
+        uorf_names.append((f"{ern_name} ERN: {ERN_uorf}", f"{ern_name} REC: {REC_uorf}"))
+    return uorf_names
+
+
+def get_all_uorf_values(network):
+    cdg = network.central_dogma_graph
+    ERNs = network.compute_graph.loc[get_all_ERN_ids(network)]
+    ERN_names = get_all_ERNs_names(network)
+    ERN_inputs = ERNs["cdg_input"].values
+    values = []
+    for inp in ERN_inputs:
+        cdgin = cdg.loc[inp]
+        ern_side = cdg.loc[cdgin.iloc[0].predecessor[0]]
+        recog_side = cdgin.iloc[1]
+        uvals = (get_uorf_value(ern_side.params), get_uorf_value(recog_side.params))
+        values.append(uvals)
+    names = get_uorf_names(values, ERN_names)
+    return tuple(values), tuple(names)
+
+
+def get_ERN_ids(network):
+    return network.compute_graph[network.compute_graph["type"] == "sequestron_ERN"].index.values
+
+
+def get_RCB_ids(network):
+    return network.compute_graph[
+        network.compute_graph["type"].str.startswith("sequestron_R")
+    ].index.values
+
+
+def get_sequestron_ids(network):
+    return network.compute_graph[
+        network.compute_graph["type"].str.startswith("sequestron_")
+    ].index.values
+
+
+def get_network_family(network):
+    erns = get_ERN_ids(network)
+    rcbs = get_RCB_ids(network)
+    all_seqs = get_sequestron_ids(network)
+    layers = network.topological_order(all_seqs)
+
+    seqtype = "none"
+    family = "unknown"
+    match (len(erns) > 0, len(rcbs) > 0):
+        case (True, True):
+            seqtype = "hybrid"
+        case (True, False):
+            seqtype = "ERN"
+        case (False, True):
+            seqtype = "RCB"
+
+    # seq_counts = [len(s) for s in layers]
+
+    match (len(all_seqs), len(layers)):
+        case (0, 0):
+            family = ""
+        case (1, 1):
+            family = "single"
+        case (2, 2):
+            family = "cascade"
+        case (2, 1):
+            family = "dual region"
+        case (3, 1):
+            family = "triple region"
+        case (3, 2):
+            family = "bandpass"
+
+    return family, seqtype
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
@@ -815,6 +940,7 @@ class Network(BaseModel):
                 self._n_inputs = inverted._n_inputs
                 self._n_outputs = inverted._n_outputs
                 self._output_proteins = inverted._output_proteins
+            self.cleanup()
 
     def is_built(self) -> bool:
         return (
@@ -914,6 +1040,9 @@ class Network(BaseModel):
 
     #                                                                            }}}
     ## ─────────────────────────────────────────────────────────────────────────────
+
+    def generate_network_info(self):
+        return generate_network_info(self, self.lib)
 
     ## ───────────────────────────────────── ▼ ─────────────────────────────────────
     # {{{                 --     build central dogma graph     --
@@ -1478,53 +1607,69 @@ class Network(BaseModel):
         assert output_position not in new_mapping.values()
         assert len(self.get_inverted_input_proteins()) == len(new_mapping)
 
-    def compute_node_is_upstream_of(self, node_id: int, other_node_id: int) -> bool:
-        """Returns True if node_id is upstream of other_node_id"""
+    def compute_dependency_map(self) -> dict[int, set[int]]:
+        """Returns {node id -> set of upstream node ids}"""
         assert isinstance(self.compute_graph, pd.DataFrame)
-        if node_id == other_node_id:
+        dependency_map = {}
+        for i, row in self.compute_graph.iterrows():
+            if row["input_from"]:  # type: ignore
+                dependency_map[i] = set(x[0] for x in row["input_from"])
+            else:
+                dependency_map[i] = set()
+        return dependency_map
+
+    def node_is_upstream_of(self, node_a, node_b, dependency_map=None):
+        """Returns True if node_a is upstream of node_b"""
+        if node_a == node_b:
             return True
-        node = self.compute_graph.loc[node_id]
-        if node.type == "output":
-            return False
-        for downstream_id, _ in node["output_to"]:
-            if self.compute_node_is_upstream_of(downstream_id, other_node_id):
+        if dependency_map is None:
+            dependency_map = self.compute_dependency_map()
+        assert node_a in dependency_map, f"node {node_a} not in dependency map"
+        assert node_b in dependency_map, f"node {node_b} not in dependency map"
+        if node_a in dependency_map[node_b]:  # a is directly upstream of b
+            return True
+        for n in dependency_map[node_b]:
+            if self.node_is_upstream_of(node_a, n, dependency_map):
                 return True
         return False
 
-    def sort_nodes_by_upstream(self, nodes: Sequence[int]) -> List[int]:
-        from functools import cmp_to_key
-
-        def custom_cmp(a, b):
-            if self.compute_node_is_upstream_of(a, b):
-                return -1
-            elif self.compute_node_is_upstream_of(b, a):
-                return 1
-            else:
-                return 0
-
-        return sorted(nodes, key=cmp_to_key(custom_cmp))
-
-    def topological_order(self, nodes: Optional[Sequence[int]] = None) -> List[List[int]]:
+    def topological_order(self, nodes=None, dependency_map=None):
         """Returns a list of lists of compute nodes from the network,
         where each node of a sublist can be computed independently of the others,
         but each sublist must be computed in order."""
         assert isinstance(self.compute_graph, pd.DataFrame)
+
+        all_nodes = set(self.compute_graph.index)
+        nodes_set = set(nodes) if nodes is not None else all_nodes
+        dependency_map = dependency_map or self.compute_dependency_map()
+
         visited = set()
         batches = []
-        nodes = set(nodes) if nodes is not None else set(self.compute_graph.index)
-        while len(visited) < len(self.compute_graph):
-            independent = [
-                i
-                for i, row in self.compute_graph.iterrows()
-                if (not row["input_from"] or all([x[0] in visited for x in row["input_from"]]))
-                and i not in visited
-            ]
+        remaining = all_nodes.copy()
+
+        while remaining:
+            independent = [node for node in remaining if dependency_map[node].issubset(visited)]
             if not independent:
                 msg = f"No independent node. Remaining:{set(self.compute_graph.index) - visited}. Visited:{visited}"
                 raise ValueError(msg)
             visited.update(independent)
-            batches.append([i for i in independent if i in nodes])
-        return [b for b in batches if len(b) > 0]
+            remaining.difference_update(independent)
+            batch = [node for node in independent if node in nodes_set]
+            if batch:
+                batches.append(batch)
+
+        return batches
+
+    def add_sequestron_layer_annotation(self):
+        """Annotate the sequestron nodes with their layer ID and total layers in the network."""
+        assert isinstance(self.compute_graph, pd.DataFrame)
+        sequestron_ids = get_sequestron_ids(self)
+        topo = self.topological_order(sequestron_ids)
+        print(f"Sequestron topo: {topo}")
+        for layer, nodes in enumerate(topo):
+            for node in nodes:
+                self.compute_graph.at[node, "extra"]["layer_id"] = int(layer)
+                self.compute_graph.at[node, "extra"]["total_layers"] = len(topo)
 
     def cleanup(self):
         if self.compute_graph is not None:
@@ -1566,6 +1711,7 @@ class Network(BaseModel):
 
             # make sure the proper quantile variable is assigned to each node
             self._assign_quantile_variable()
+            self.add_sequestron_layer_annotation()
 
         self._sanity_check()
 

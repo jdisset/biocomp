@@ -840,6 +840,8 @@ def transform_nn(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ### {{{                         --     ERN node     --
+
+
 def sequestron_ERN(
     input_shapes: List[Tuple[int, ...]],
     n_outputs: int,
@@ -853,6 +855,8 @@ def sequestron_ERN(
     subtype: str = "5p",
     inner_activation_name: str = DEFAULT_ACTIVATION,
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
+    use_ern_layer_id: bool = False,
+    max_ern_layers: int = 4,  # for one-hot encoding size
     **_,
 ) -> LayerInstance:
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
@@ -875,9 +879,10 @@ def sequestron_ERN(
         quantile: ArrayLike,
         param_f: Callable,
         key: PRNGKey,
+        layer_id_onehot: ArrayLike,
     ):
         res = dense_multilevel(
-            flat_concat(neg, pos, affinity, quantile),
+            flat_concat(neg, pos, affinity, layer_id_onehot, quantile),
             wsize,
             out_dim,
             depth,
@@ -886,6 +891,7 @@ def sequestron_ERN(
             name=f"NN/ERN_{subtype}",
             activation=inner_activation,
         )
+
         return outer_activation(res)
 
     def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
@@ -898,25 +904,41 @@ def sequestron_ERN(
             init_f=continuous_initializer(key, (len(affinity_names), affinity_dim)),
         )
 
-        # existing_names = params.at(
-        # f'shared/{shared_layer_name}/affinities_names',
-        # tuple(affinity_names),
-        # tags=['non_jit', 'non_grad'],
-        # overwrite=False,
-        # )
-        # assert existing_names == tuple(
-        # affinity_names
-        # ), f'Affinity names mismatch: {existing_names} != {affinity_names}'
-
+        # store affinity references
         ref = ArrayRef(params.data)
+
+        # store node layer ids if enabled
+        seq_layer_ids = []
+
         for node in nodelist:
-            # we need to know which affinity value to use for this node
-            seq_name = node.get_compute_node("extra")["seq_name"]  # ex: 'CasE5p'
+            # handle affinity value for this node
+            extra = node.get_compute_node("extra")
+            seq_name = extra["seq_name"]  # ex: 'CasE5p'
             if seq_name not in affinity_names:
                 raise ValueError(f"Unknown affinity name {seq_name}. Available: {affinity_names}")
             affinity_id = affinity_names.index(seq_name)
             ref.push_back(f"shared/{shared_layer_name}/affinities", affinity_id)
+
+            # collect node layer ids if enabled
+            if use_ern_layer_id:
+                # get layer_id from node extra info, default to 0 if not present
+                node_layer_id = min(extra.get("layer_id", 0), max_ern_layers - 1)
+                seq_layer_ids.append(node_layer_id)
+                logger.debug(f"Node {node} layer ID: {node_layer_id}")
+
         params.at(f"local/{local_layer_name}/affinity", ref, overwrite=None)
+
+        # store node layer ids as a param array with non_grad tag if enabled
+        if use_ern_layer_id:
+            params.at(
+                f"local/{local_layer_name}/node_layer_ids",
+                jnp.array(seq_layer_ids),
+                tags=["non_grad"],
+            )
+
+        # initialize MLP with dummy inputs
+        # include dummy one-hot layer id if needed
+        layer_id_onehot = jnp.zeros(max_ern_layers) if use_ern_layer_id else np.empty((0,))
 
         MLP(
             *[np.zeros(shape) for shape in input_shapes],
@@ -924,6 +946,7 @@ def sequestron_ERN(
             quantile=0,
             param_f=partial(init_if_needed, params, base_path="shared"),
             key=key,
+            layer_id_onehot=layer_id_onehot,
         )
 
     def apply(
@@ -940,12 +963,20 @@ def sequestron_ERN(
 
         qid = params[f"local/{local_layer_name}/quantile_variable_id"][node_id]
 
+        # create one-hot encoded layer_id if enabled
+        layer_id_onehot = jnp.empty((0,))
+        if use_ern_layer_id:
+            node_layer_id = params[f"local/{local_layer_name}/node_layer_ids"][node_id]
+            layer_id_onehot = jnp.zeros(max_ern_layers)
+            layer_id_onehot = layer_id_onehot.at[node_layer_id].set(1.0)
+
         return MLP(
             *values,
             affinity=affinity,
             quantile=quantiles[qid],
             param_f=partial(get_param, params, base_path="shared"),
             key=key,
+            layer_id_onehot=layer_id_onehot,
         )
 
     output_shape = [(1,)]

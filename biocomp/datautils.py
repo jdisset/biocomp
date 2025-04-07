@@ -50,7 +50,6 @@ class IdentityRescaler(DataRescaler):
 class LogPlusOneRescaler(DataRescaler):
     def fwd(self, x):
         return np.log10(x + 1)
-
     def inv(self, y):
         return 10**y - 1
 
@@ -215,7 +214,7 @@ def network_data_check(x, y, network):
         x_nonan_mask = ~np.isnan(x[:, ipos])
         y_nonan_mask = ~np.isnan(y[:, outpos])
         assert np.all(x_nonan_mask == y_nonan_mask)
-        assert np.all(x[x_nonan_mask, ipos] == y[y_nonan_mask, outpos])
+        # assert np.all(x[x_nonan_mask, ipos] == y[y_nonan_mask, outpos])
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

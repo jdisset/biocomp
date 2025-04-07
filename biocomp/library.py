@@ -114,3 +114,18 @@ class PartsLibrary(BaseModel):
         ------------------------------------------
         L2s: \n{self.L2s}\n
         """
+
+    # def __deepcopy__(self, memo):
+    #     # only do shallow copy of the DataFrame
+    #     result = PartsLibrary(
+    #         parts=self.parts.copy(),
+    #         L0s=self.L0s.copy(),
+    #         L1s=self.L1s.copy(),
+    #         L2s=self.L2s.copy(),
+    #         categories=self.categories.copy(),
+    #         sequestrons=self.sequestrons.copy(),
+    #         sequestron_types=self.sequestron_types.copy(),
+    #         pc=self.pc.copy(),
+    #         seqs=self.seqs.copy(),
+    #     )
+    #     return result
