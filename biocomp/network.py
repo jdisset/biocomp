@@ -146,6 +146,7 @@ def get_ratio(
 
 
 def get_ratios(net) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
+    """returns a list of tuples (tu_infos, ratios) for each aggregation in the network"""
     cmp = net.compute_graph
     cdg = net.central_dogma_graph
     agg = cmp[cmp.type == "aggregation"]
@@ -154,6 +155,7 @@ def get_ratios(net) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
 
 
 def get_parts_categories(parts, lib):
+    """returns a dict of part name -> category for a list of parts"""
     res = {}
     positions = []
     for part in parts:
@@ -164,6 +166,7 @@ def get_parts_categories(parts, lib):
 
 
 def get_tu_parts(tu, lib=None):
+    """returns a dict of part name -> category for a transcription unit"""
     if not lib:
         lib = load_lib()
     parts = []
@@ -178,6 +181,7 @@ def get_tu_parts(tu, lib=None):
 
 
 def get_all_parts(net, lib=None):
+    """returns a dict(tu_name -> dict(part_name -> category)"""
     if not lib:
         lib = load_lib()
     return {tname: get_tu_parts(t, lib) for tname, t in net.transcription_units.items()}
@@ -192,7 +196,6 @@ def cotx_ratios_str(cotx):
 
 def generate_network_info(net, lib=None):
     """Generate a dictionnary of information for a network"""
-    # NOT the string version but the raw dict
     arch, seqtype = get_network_family(net)
     uorf_vals, uorf_names = get_all_uorf_values(net)
     cdg = net.central_dogma_graph
