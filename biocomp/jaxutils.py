@@ -1,7 +1,7 @@
 from jax.experimental import checkify
 import jax
 from jax import jit, lax
-from jax import tree_util as pytree
+from jax import tree_util as jtu
 import jax.numpy as jnp
 import numpy as np
 
@@ -126,20 +126,9 @@ def print_xla(fun, *args, static_argnums=(), **kwargs):
 
 def get_looped_slice(a, start, end, axis=0):
     """Get a slice of an array that loops around the end of the array if end > a.shape[axis]"""
-    offset = start // a.shape[axis]
-    start = start % a.shape[axis]
-    end = end - offset * a.shape[axis]
-    if end > a.shape[axis]:  # loop around
-        idx = [slice(None)] * a.ndim
-        idx[axis] = slice(start, None)
-        s1 = a[tuple(idx)]
-        idx[axis] = slice(0, end - a.shape[axis])
-        s2 = get_looped_slice(a, 0, end - a.shape[axis], axis)
-        return np.concatenate([s1, s2], axis=axis)
-    else:
-        idx = [slice(None)] * a.ndim
-        idx[axis] = slice(start, end)
-        return a[tuple(idx)]
+    ns = a.__array_namespace__()  # grab numpy/jax namespace
+    idx = ns.arange(start, end) % a.shape[axis]
+    return a.take(idx, axis=axis)
 
 
 def value_and_jacrev(f, x):
@@ -167,19 +156,19 @@ def freeze(struct):
 
 
 def tree_shape(t):
-    return pytree.tree_map(lambda x: x.shape, t)
+    return jtu.tree_map(lambda x: x.shape, t)
 
 
 @jit
 def tree_append(t, e):
-    fa, tt = pytree.tree_flatten(t)
-    fb, te = pytree.tree_flatten(e)
+    fa, tt = jtu.tree_flatten(t)
+    fb, te = jtu.tree_flatten(e)
     assert te == tt
-    return pytree.tree_unflatten(tt, [jnp.concatenate([a, jnp.array([b])]) for a, b in zip(fa, fb)])
+    return jtu.tree_unflatten(tt, [jnp.concatenate([a, jnp.array([b])]) for a, b in zip(fa, fb)])
 
 
 def tree_get(t, i):
-    return pytree.tree_map(lambda x: x[i], t)
+    return jtu.tree_map(lambda x: x[i], t)
 
 
 @jax.jit
@@ -208,7 +197,6 @@ def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | check
 
     global enable_checks
     if enable_checks:
-        logger.info(f"checkwrap enabled for {func}")
         return jit(checkify.checkify(func, errors=errors))
     else:
 
@@ -224,11 +212,11 @@ def flat_concat(*arrays):
 
 
 def tree_to_jax(params):
-    return jax.tree_map(lambda x: jnp.asarray(x), params)
+    return jtu.tree_map(lambda x: jnp.asarray(x), params)
 
 
 def tree_to_np(params):
-    return jax.tree_map(lambda x: np.asarray(x), params)
+    return jtu.tree_map(lambda x: np.asarray(x), params)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
