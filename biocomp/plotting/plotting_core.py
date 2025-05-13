@@ -117,9 +117,9 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
                     assert iname in range(len(input_names)), f"Invalid protein index: {iname}"
                     input_order.append(iname)
 
-        assert len(input_order) == len(
-            input_names
-        ), f"Wrong number of inputs: {input_order=}, {input_names=}"
+        assert len(input_order) == len(input_names), (
+            f"Wrong number of inputs: {input_order=}, {input_names=}"
+        )
 
         if "*" in input_order:
             missing = set(range(len(input_names))) - set(input_order)
@@ -460,7 +460,7 @@ def gausspdf(x, mu, sigma):
 
 def get_gaussian_weighted_knn_nojax(
     x,
-    tree,
+    tree=None,
     k: int = 500,  # number of neighbors to consider
     min_points: int = 20,  # minimum number of points to consider a neighborhood. fewer = nan
     radius: float = 0.1,
@@ -468,6 +468,11 @@ def get_gaussian_weighted_knn_nojax(
 ):
     """Get the k-nearest neighbors of x in the tree,
     and return their indices together with their weights (from a gaussian kernel)."""
+
+    if tree is None:
+        from scipy.spatial import KDTree
+
+        tree = KDTree(x)
 
     distances, indices = tree.query(x, k=k, distance_upper_bound=radius)
     empty_neighbor_mask = distances == np.inf
@@ -480,59 +485,78 @@ def get_gaussian_weighted_knn_nojax(
     return indices, weights
 
 
-def get_gaussian_weighted_knn(x, tree, **kw):
-    return get_gaussian_weighted_knn_nojax(x, tree, **kw)
+def get_gaussian_weighted_knn(x, **kw):
+    return get_gaussian_weighted_knn_nojax(x, **kw)
 
 
-def get_knn_mean(x, y, tree, **kw):
+def get_knn_mean(x, y, tree=None, iw=None, **kw):
     """Get the k-nearest neighbors of x in the tree,
     and return their weighted average value together with their density."""
 
-    indices, weights = get_gaussian_weighted_knn(x, tree, **kw)
+    if iw is not None:
+        indices, weights = iw
+    else:
+        assert tree is not None, "tree must be provided if iw is not provided"
+        indices, weights = get_gaussian_weighted_knn(x, tree=tree, **kw)
 
     assert indices.shape == weights.shape
-    normed_w = weights / weights.sum(axis=1)[:, None]
-    weighted_mean = (y[indices] * normed_w[:, :, None]).sum(axis=1)
+    normed_w = weights / np.nansum(weights, axis=1)[:, None]
+    all_nan_mask = np.all(np.isnan(weights), axis=1)
+    y_neighbors = y[indices]
+    weighted_mean = np.nansum(y_neighbors * normed_w[:, :, None], axis=1)
 
     density = np.nansum(weights, axis=1)
+    weighted_mean[all_nan_mask, ...] = np.nan
 
     return weighted_mean, density
 
 
-def get_knn_std(x, y, tree, **kw):
+def get_knn_std(x, y, tree=None, iw=None, **kw):
     """
     Get the k-nearest neighbors of x in the tree,
     and return their weighted standard deviation.
     """
 
-    indices, weights = get_gaussian_weighted_knn(x, tree, **kw)
-    assert indices.shape == weights.shape
-    normed_w = weights / weights.sum(axis=1)[:, None]
-    weighted_mean = (y[indices] * normed_w[:, :, None]).sum(axis=1)
+    if iw is not None:
+        indices, weights = iw
+    else:
+        assert tree is not None, "tree must be provided if iw is not provided"
+        indices, weights = get_gaussian_weighted_knn(x, tree=tree, **kw)
 
-    # Compute weighted variance (and then std)
+    assert indices.shape == weights.shape
+    normed_w = weights / np.nansum(weights, axis=1)[:, None]
+    all_nan_mask = np.all(np.isnan(weights), axis=1)
+    y_neighbors = y[indices]
+    weighted_mean = np.nansum(y_neighbors * normed_w[:, :, None], axis=1)
+
     squared_diff = (y[indices] - weighted_mean[:, None, :]) ** 2
     weighted_squared_diff = squared_diff * normed_w[:, :, None]
     variance = weighted_squared_diff.sum(axis=1)
 
-    return np.sqrt(variance)
+    squared_diff = (y_neighbors - weighted_mean[:, None, :]) ** 2
+    variance = np.nansum(squared_diff * normed_w[:, :, None], axis=1)
+
+    std = np.sqrt(variance)
+
+    weighted_mean[all_nan_mask, ...] = np.nan
+    std[all_nan_mask, ...] = np.nan
+
+    return std, weighted_mean
 
 
 @configurable
 def knn_avg(xquery, logY, tree, k=500, min_points=20, avg_method="mean", **kw):
     if avg_method == "mean":
-        Z, p = get_knn_mean(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
+        return get_knn_mean(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
     elif avg_method == "quantile":
-        assert "qu" in kw
+        assert "qu" in kw, "quantile method requires a quantile value"
         from .plotting_core_jax import get_knn_quantile
 
-        Z, p = get_knn_quantile(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
+        return get_knn_quantile(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
     elif avg_method == "std":
-        Z = get_knn_std(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
-        p = np.ones
-    else:
-        raise ValueError(f"Unknown method {avg_method}")
-    return Z, p
+        return get_knn_std(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
+
+    raise ValueError(f"Unknown method {avg_method}")
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
