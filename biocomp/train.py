@@ -26,12 +26,12 @@ def check_XYZ(X, Y, Z, stack):
     nb_outputs = sum([n.nb_outputs for n in stack.networks])
     assert X.ndim == Y.ndim == Z.ndim == 2, "X, Y, and Z must have 2 dimensions"
     assert X.shape[0] == Y.shape[0] == Z.shape[0], "X, Y, and Z must have the same number of rows"
-    assert (
-        X.shape[1] == nb_inputs
-    ), "X must have as many columns as the total number of inputs in the stack"
-    assert (
-        Y.shape[1] == Z.shape[1] == nb_outputs
-    ), "Y and Z must have as many columns as the total number of outputs in the stack"
+    assert X.shape[1] == nb_inputs, (
+        "X must have as many columns as the total number of inputs in the stack"
+    )
+    assert Y.shape[1] == Z.shape[1] == nb_outputs, (
+        "Y and Z must have as many columns as the total number of outputs in the stack"
+    )
 
 
 def check_XYZ_new(X, Y, Z, stack):
@@ -40,20 +40,22 @@ def check_XYZ_new(X, Y, Z, stack):
     nb_nodes = len(stack.node_map)
     assert X.ndim == Y.ndim == Z.ndim == 2, "X, Y, and Z must have 2 dimensions"
     assert X.shape[0] == Y.shape[0] == Z.shape[0], "X, Y, and Z must have the same number of rows"
-    assert (
-        X.shape[1] == nb_inputs
-    ), "X must have as many columns as the total number of inputs in the stack"
-    assert (
-        Y.shape[1] == nb_outputs
-    ), "Y must have as many columns as the total number of outputs in the stack"
+    assert X.shape[1] == nb_inputs, (
+        "X must have as many columns as the total number of inputs in the stack"
+    )
+    assert Y.shape[1] == nb_outputs, (
+        "Y must have as many columns as the total number of outputs in the stack"
+    )
 
 
 def as_schedule(value_or_callable):
+    import jax.numpy as jnp
+
     if callable(value_or_callable):
         return value_or_callable
 
     def f(step):
-        return value_or_callable
+        return jnp.asarray(value_or_callable)
 
     return f
 
@@ -133,9 +135,9 @@ def sorting_loss(
 
         assert isinstance(yhat, jnp.ndarray)
         assert isinstance(Y, jnp.ndarray)
-        assert (
-            yhat.shape == Y.shape
-        ), f"yhat and Y must have the same shape, got {yhat.shape} and {Y.shape}"
+        assert yhat.shape == Y.shape, (
+            f"yhat and Y must have the same shape, got {yhat.shape} and {Y.shape}"
+        )
 
         # kl
         qvalues_dir = ParamPath("shared/quantization/values")
@@ -168,14 +170,12 @@ def sorting_loss(
 
         # sorting loss with pushing masked out values to the end
         MAXFLOAT = jnp.finfo(Y.dtype).max
+
         sorting_mse = (
-            (
-                jnp.sort(jnp.where(selected, yhat, MAXFLOAT), axis=0)
-                - jnp.sort(jnp.where(selected, Y, MAXFLOAT), axis=0)
-            )
-            ** 2
-            * selected  # technically useless I think?
-        ).sum() / count
+            jnp.sort(jnp.where(selected, yhat, MAXFLOAT), axis=0)
+            - jnp.sort(jnp.where(selected, Y, MAXFLOAT), axis=0)
+        ) ** 2
+        sorting_mse = sorting_mse.sum() / count
 
         # mix the two losses
         smw = as_schedule(sorting_mse_weight)(step)
@@ -288,19 +288,20 @@ def start(
     # --- init & batches generation
     assert training_config.seed is not None, "Seed must be set"
     key = jax.random.PRNGKey(training_config.seed)
+    key, init_key, batch_key, loop_key = jax.random.split(key, 4)
 
     total_steps = int(
         training_config.n_epochs * training_config.n_batches / training_config.batches_per_step
     )
 
-    stack, params = tu.init_stack(compute_config, dman, training_config.n_replicates, key)
+    stack, params = tu.init_stack(compute_config, dman, training_config.n_replicates, init_key)
 
     xbatches, ybatches = tu.generate_batches(
         dman,
         training_config.n_replicates,
         training_config.n_batches,
         training_config.batch_size,
-        key,
+        batch_key,
     )
 
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
@@ -412,9 +413,9 @@ def start(
 
     num_z = static["global/number_of_quantile_variables"]
     assert num_z.shape == (training_config.n_replicates,)
-    assert jnp.all(
-        num_z == num_z[0]
-    ), "All replicates must have the same number of quantile variables"
+    assert jnp.all(num_z == num_z[0]), (
+        "All replicates must have the same number of quantile variables"
+    )
     num_z = int(num_z[0])
 
     logger.info("Compiling training step...")
@@ -449,7 +450,7 @@ def start(
             ybatches.shape
         )
 
-    for i, step_key in enumerate(jax.random.split(key, total_steps), 1):
+    for i, step_key in enumerate(jax.random.split(loop_key, total_steps), 1):
         if i % step_per_epoch == 0:
             epoch += 1
             logger.info(f"Starting epoch {epoch}")
