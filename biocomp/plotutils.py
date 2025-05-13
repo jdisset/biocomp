@@ -323,6 +323,9 @@ class GridLayout(FigureLayout):
             figax.figure.tight_layout()
 
 
+FIGURE_METADATA_KEY = "FigureMetadata"
+
+
 class FigureSpec(ArbitraryModel):
     title: Optional[str] = None
     title_kwargs: Dict[str, Any] = {}
@@ -330,6 +333,7 @@ class FigureSpec(ArbitraryModel):
     output_file: Optional[str] = "unnamed.png"
     extra_args: Dict[str, Any] = {}
     layout: FigureLayout = Field(default_factory=SimpleLayout)
+    metadata: Dict[str, Any] = {}
 
     @property
     def output_path(self) -> Path:
@@ -341,9 +345,44 @@ class FigureSpec(ArbitraryModel):
         return fax
 
     def save_figure(self, figax: FigAx) -> None:
+        import json
+        import io
+        from PIL import Image
+        from PIL.PngImagePlugin import PngInfo
+        from datetime import datetime
+
         assert self.output_file is not None
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        figax.figure.savefig(self.output_path, bbox_inches="tight")
+
+        metadata_json = json.dumps({FIGURE_METADATA_KEY: self.metadata}, indent=2)
+        timestamp = datetime.now().isoformat()
+
+        full_metadata = {
+            "Creator": "biocomp",
+            "Author": "biocomp",
+            "Subject": metadata_json,
+            "Title": self.title or "Biocomp Figure",
+            "CreationDate": timestamp,
+        }
+
+        if str(self.output_path).lower().endswith(".png"):
+            buf = io.BytesIO()
+            figax.figure.savefig(buf, format="png", bbox_inches="tight")
+            buf.seek(0)
+            with Image.open(buf) as img:
+                metadata = PngInfo()
+                for key, value in full_metadata.items():
+                    metadata.add_text(key, value)
+                img.save(self.output_path, pnginfo=metadata)
+        elif str(self.output_path).lower().endswith(".pdf"):
+            full_metadata["CreationDate"] = datetime.now()  # type: ignore
+            figax.figure.savefig(self.output_path, metadata=full_metadata, bbox_inches="tight")
+        else:
+            logger.warning(
+                f"Saving figure to {self.output_path} in {self.output_path.suffix} format. "
+                f"Only PNG and PDF formats have full metadata support."
+            )
+            figax.figure.savefig(self.output_path, metadata=full_metadata, bbox_inches="tight")
 
     def finalize(self, figax: FigAx) -> None:
         if self.title is not None:
@@ -444,6 +483,8 @@ def extract_lazy_plot_data_from_network(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                        --     misc utils     --
+
+
 def make_xy_grid(xmin, xmax, ymin=None, ymax=None, xres=100, yres=None):
     ymin = ymin if ymin is not None else xmin
     ymax = ymax if ymax is not None else xmax
