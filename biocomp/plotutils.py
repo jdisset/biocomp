@@ -6,11 +6,13 @@ from biocomp.datautils import DataRescaler, IdentityRescaler
 import matplotlib.pyplot as plt
 from biocomp.network import Network
 from biocomp.utils import ArbitraryModel
+from dracon.utils import dracontainer_aware_json
 import string
 import os
 from typing import (
     Union,
     Self,
+    Literal,
     Annotated,
     Sequence,
     List,
@@ -159,15 +161,7 @@ class LazyPlotData(PlotData):
         if self.xval is None:
             return f"LazyPlotData[not loaded, get_xy={self.get_xy}]"
         else:
-            import xxhash
-            import pickle
-            import base58
-
-            x_sig = base58.b58encode(xxhash.xxh32(pickle.dumps(self.xval)).digest()).decode("utf-8")
-            y_sig = base58.b58encode(xxhash.xxh32(pickle.dumps(self.yval)).digest()).decode("utf-8")
-            return (
-                f"LazyPlotData[loaded with {len(self.xval)} samples; x,y hashes: {x_sig},{y_sig}]"
-            )
+            return f"LazyPlotData[loaded with {len(self.xval)} samples]"
 
     def __str__(self):
         return self.__repr__()
@@ -354,7 +348,22 @@ class FigureSpec(ArbitraryModel):
         assert self.output_file is not None
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        metadata_json = json.dumps({FIGURE_METADATA_KEY: self.metadata}, indent=2)
+        try:
+            # metadata_json = json.dumps({FIGURE_METADATA_KEY: self.metadata}, indent=2)
+            # use a custom encoder to handle non-serializable objects
+            metadata_json = json.dumps(
+                {FIGURE_METADATA_KEY: self.metadata},
+                indent=2,
+                default=dracontainer_aware_json,
+            )
+        except TypeError as e:
+            logger.error(f"Error serializing metadata: {e}")
+            as_str = str(self.metadata)
+            logger.warning(
+                f"Metadata is not JSON serializable, using string representation: {as_str}"
+            )
+            metadata_json = json.dumps({FIGURE_METADATA_KEY: as_str}, indent=2)
+
         timestamp = datetime.now().isoformat()
 
         full_metadata = {
@@ -400,7 +409,7 @@ class FigureSpec(ArbitraryModel):
 
 def get_reordered_protein_names(
     network: Network,
-    input_order: Optional[Sequence[int] | Sequence[str]] = None,
+    input_order: Optional[Sequence[int] | Sequence[str] | Literal["inv"]] = None,
     protein_aliases: Optional[Dict[str, str]] = None,
 ) -> Tuple[list[int], int, list[str], str]:
     protein_aliases = protein_aliases or {}
@@ -451,7 +460,7 @@ def extract_plot_data_from_network(
 def extract_lazy_plot_data_from_network(
     network: Network,
     get_XY: Callable[[PlotData], Tuple[NdArray, NdArray]],
-    input_order: Optional[Sequence[int] | Sequence[str]] = None,
+    input_order: Optional[Sequence[int] | Sequence[str] | Literal["inv"]] = None,
     protein_aliases: Optional[Dict[str, str]] = None,
     **kw,
 ) -> LazyPlotData:
@@ -460,10 +469,12 @@ def extract_lazy_plot_data_from_network(
     )
 
     def get_xy(pdata: PlotData) -> Tuple[NdArray, NdArray]:
+        logger.debug("get_xy({pdata}) called")
         assert isinstance(pdata, PlotData), f"pdata must be a PlotData, got {type(pdata)}"
         X, Y = get_XY(pdata)
         x = X[:, input_order]
         y = Y[:, output_pos].reshape(-1, 1)
+        logger.debug(f"get_xy found x with shape {x.shape} and y with shape {y.shape}")
         return x, y
 
     d = LazyPlotData(
@@ -477,6 +488,8 @@ def extract_lazy_plot_data_from_network(
     d.metadata["output_pos"] = output_pos
     d.metadata["input_names"] = input_names
     d.metadata["output_name"] = output_name
+
+    logger.debug(f"Extracted lazy plot data from network {network}: {d}")
 
     return d
 

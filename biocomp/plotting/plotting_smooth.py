@@ -29,7 +29,8 @@ from .plotting_core import (
     DEFAULT_CMAP_NAME,
     setup_transformed_axis,
     get_reordered_protein_names,
-    knn_avg,
+    knn_stats,
+    build_tree,
     format_powers,
     heatmap,
 )
@@ -108,11 +109,11 @@ def smooth_1d(
     lineplot_props: Optional[List[Dict] | Dict] = None,
     errorbar_props: Optional[List[Dict] | Dict] = None,
     colors: Optional[List[Any]] = None,
-    knn_avg_params: Dict = {},
+    knn_stats_params: Dict = {},
 ):
-    knn_radius = knn_avg_params.get("radius", 0.075)
-    knn_avg_params["radius"] = knn_radius
-    knn_avg_params.pop("avg_method", None)
+    knn_radius = knn_stats_params.get("radius", 0.075)
+    knn_stats_params["radius"] = knn_radius
+    knn_stats_params.pop("avg_method", None)
 
     # remove nans
     nans = np.isnan(X).any(axis=1)
@@ -139,7 +140,7 @@ def smooth_1d(
         colors = plt.get_cmap(DEFAULT_CMAP_NAME)(np.linspace(0.25, 1, nslices))
     assert colors is not None
 
-    tree = KDTree(X)
+    tree = build_tree(X)
 
     xmin, xmax = xlims
     xmax = X[:, 0].max() if xmax is None else xmax
@@ -157,10 +158,16 @@ def smooth_1d(
             assert slices is not None and slices.shape[1] == n_input - 1
             query = np.hstack([query, np.tile(slices[i], (query.shape[0], 1))])
 
-        z, _ = knn_avg(query, Y, tree, avg_method="mean", **knn_avg_params)
+        knn_mean, knn_variance = knn_stats(
+            query,
+            Y,
+            tree=tree,
+            stats=["mean", "variance"],
+            **knn_stats_params,
+        )
 
-        minz = min(minz, z.min())
-        maxz = max(maxz, z.max())
+        minz = min(minz, knn_mean.min())
+        maxz = max(maxz, knn_mean.max())
 
         legend_label = ""
         for j in range(n_input - 1):
@@ -183,20 +190,19 @@ def smooth_1d(
         }
         lineplot_props[i] = {**DEFAULT_LINEPLOT_PROPS, **lineplot_props[i]}
 
-        ax.plot(xquery, z, **lineplot_props[i])
+        ax.plot(xquery, knn_mean, **lineplot_props[i])
 
         if show_std:
-            # std instead:
-            std, _ = knn_avg(query, Y, tree, avg_method="std", **knn_avg_params)
-            minz = min(minz, z.min() - std.max())
-            maxz = max(maxz, z.max() + std.max())
+            std = np.sqrt(knn_variance)
+            minz = min(minz, knn_mean.min() - std.max())
+            maxz = max(maxz, knn_mean.max() + std.max())
 
             if std_mode == "errorbar":
-                n = len(z) // n_errorbars
+                n = len(knn_mean) // n_errorbars
                 # shift proportional to i so that errorbars don't overlap
                 shift = i * n // nslices
                 qxquery = xquery[shift::n].squeeze()
-                qz = z[shift::n].squeeze()
+                qz = knn_mean[shift::n].squeeze()
                 yerr = std[shift::n].squeeze()
 
                 DEFAULT_ERRORBAR_PROPS = {
@@ -220,8 +226,8 @@ def smooth_1d(
                 assert std_mode == "fill", f"std_mode must be 'errorbar' or 'fill'. Got {std_mode}"
                 ax.fill_between(
                     xquery.squeeze(),
-                    (z - std).squeeze(),
-                    (z + std).squeeze(),
+                    (knn_mean - std).squeeze(),
+                    (knn_mean + std).squeeze(),
                     alpha=std_alpha,
                     color=colors[i],
                     lw=0,
@@ -269,7 +275,7 @@ def knn_grid(
     zslice=None,
     is_density_plot=False,
     grid_resolution=200,
-    knn_avg_params={},
+    knn_stats_params={},
 ):
     xmin, xmax = xlims
     ymin, ymax = ylims or xlims
@@ -282,8 +288,10 @@ def knn_grid(
     else:
         xquery = xy
 
-    tree = KDTree(x)
-    output_values, density = knn_avg(xquery, y, tree=tree, **knn_avg_params)
+    tree = build_tree(x)
+    output_values, density = knn_stats(
+        xquery, y, tree=tree, stats=["mean", "density"], **knn_stats_params
+    )
 
     output_values = output_values.squeeze()
 
@@ -310,7 +318,7 @@ def colorbar(
     size=(0.04, 0.52),
     orientation: Literal["horizontal", "vertical"] = "vertical",
     label_position: Literal["left", "right", "bottom", "top"] = "right",
-    tick_position: Optional[Literal["left", "right", "bottom", "top"]] = "left",
+    tick_position: Optional[Literal["left", "right", "bottom", "top"]] = "right",
     label_props: Dict = {},
     tick_props: Optional[ListOrSingle[Dict]] = None,
     border_width=0.7,
@@ -547,7 +555,7 @@ def smooth_line_plot(
 
     if tree is None:
         x = x[:, input_order]
-        tree = KDTree(x)
+        tree = build_tree(x)
 
     xquery = np.linspace(xmin, xmax, res).reshape(-1, 1)
     slice_at = np.array([]) if slice_at is None else np.array(slice_at)
@@ -557,17 +565,15 @@ def smooth_line_plot(
         assert slice_at.shape == (x.shape[1] - 1,)
         xquery = np.concatenate([xquery, np.tile(slice_at, (xquery.shape[0], 1))], axis=1)
 
-    z, _ = knn_avg(xquery, y, tree=tree, **kw)
+    z = knn_stats(xquery, y, tree=tree, stats="mean", **kw)
 
     ax.plot(xquery[:, 0], z, label=label, color=color, lw=lw, marker=marker, markevery=markevery)
     if with_quantiles is not None:
         if sample_quantiles_at is None:
-            # use markevery to sample quantiles
             sample_quantiles_at = xquery[:, 0][::markevery]
 
         # zqlow, _ = get_knn_quantile(xquery, y, qu=with_quantiles[0], tree=tree)
         # zqhigh, _ = get_knn_quantile(xquery, y, qu=with_quantiles[1], tree=tree)
-
         # ax.fill_between(
         # xquery[:, 0],
         # zqlow,
@@ -576,7 +582,6 @@ def smooth_line_plot(
         # color=color,
         # lw=0,
         # )
-
         # ax.errorbar(
         #     sample_quantiles_at,
         #     zqlow[::markevery],
@@ -629,7 +634,6 @@ def smooth_line_slices(
     input_names, output_name = protein_names[:-1], protein_names[-1]
 
     x = x[:, input_order]
-    tree = KDTree(x)
 
     xmin = xmin if xmin is not None else x[:, 0].min()
     xmax = xmax if xmax is not None else x[:, 0].max()
@@ -639,6 +643,8 @@ def smooth_line_slices(
         assert ax is not None
     else:
         assert len(axes) == len(outerslices), "Number of axes must match number of outer slices"
+
+    tree = build_tree(x)
 
     color = "k"
     # cmap = plt.cm.YlGnBu

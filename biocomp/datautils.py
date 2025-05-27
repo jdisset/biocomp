@@ -49,7 +49,8 @@ class IdentityRescaler(DataRescaler):
 
 class LogPlusOneRescaler(DataRescaler):
     def fwd(self, x):
-        return np.log10(x + 1)
+        return np.where(x > 0, np.log10(x + 1), 0)
+
     def inv(self, y):
         return 10**y - 1
 
@@ -482,11 +483,11 @@ class DataManager:
             invalid_fraction = invalid_at.sum() / len(invalid_at)
             if invalid_fraction > data_cfg.acceptable_out_of_range_fraction_in_raw_data:
                 raise ValueError(
-                    f"Too many invalid values in {networks[i].name} raw data ({100*invalid_fraction:.2f}%)"
+                    f"Too many invalid values in {networks[i].name} raw data ({100 * invalid_fraction:.2f}%)"
                 )
             if invalid_fraction > 0.0:
                 logger.debug(
-                    f"Removing {invalid_at.sum()} invalid points for net {i} ({100*invalid_fraction:.2f}%)"
+                    f"Removing {invalid_at.sum()} invalid points for net {i} ({100 * invalid_fraction:.2f}%)"
                 )
                 self._raw_X[i] = self._raw_X[i][~invalid_at]
                 self._raw_Y[i] = self._raw_Y[i][~invalid_at]

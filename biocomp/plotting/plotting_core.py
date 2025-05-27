@@ -4,6 +4,7 @@
 
 # TODO: CLEAN UP utils so that there's no jax in it (separate into utils and jax_utils)
 
+from os import getenv
 from functools import partial
 import numpy as np
 from biocomp import utils as ut
@@ -92,7 +93,7 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
         {k.lower(): v for k, v in protein_aliases.items()} if protein_aliases else {}
     )
 
-    if input_order is not None:
+    if input_order is not None and input_order != "inv":
         old_order = deepcopy(input_order)
 
         if any(isinstance(i, str) for i in old_order):
@@ -128,7 +129,8 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
         reordered_input_names = [input_names[i] for i in input_order]
         in_order = input_order
     else:
-        reordered_input_names = sorted(input_names)
+        reordered_input_names = sorted(input_names, reverse=input_order == "inv")
+
         in_order = [input_names.index(i) for i in reordered_input_names]
 
     if len(output_names) != (len(input_names) + 1):
@@ -452,111 +454,88 @@ def setup_symlog_axis(
 ### {{{              --     knn and spatial partitionning    --
 
 
-def gausspdf(x, mu, sigma):
-    from scipy.stats import norm
-
-    return norm.pdf(x, loc=mu, scale=sigma)
+USE_KNN_JAX = getenv("BC_KNN_USE_JAX", default=False)
 
 
-def get_gaussian_weighted_knn_nojax(
-    x,
-    tree=None,
-    k: int = 500,  # number of neighbors to consider
-    min_points: int = 20,  # minimum number of points to consider a neighborhood. fewer = nan
-    radius: float = 0.1,
-    sigma_in_radius: float = 3,  # sigma of the gaussian kernel in units of radius
-):
-    """Get the k-nearest neighbors of x in the tree,
-    and return their indices together with their weights (from a gaussian kernel)."""
+def build_tree(x, use_jax=USE_KNN_JAX):
+    if use_jax:
+        import jaxkd as jk
+        import jax
 
-    if tree is None:
+        tree = jax.jit(jk.build_tree)(x)
+    else:
         from scipy.spatial import KDTree
 
         tree = KDTree(x)
-
-    distances, indices = tree.query(x, k=k, distance_upper_bound=radius)
-    empty_neighbor_mask = distances == np.inf
-    nb_points = (~empty_neighbor_mask).sum(axis=1)
-    weights = gausspdf(distances, 0, radius / sigma_in_radius)
-    indices[empty_neighbor_mask] = 0
-    weights[empty_neighbor_mask] = 0
-    weights[nb_points < min_points, :] = np.nan
-
-    return indices, weights
-
-
-def get_gaussian_weighted_knn(x, **kw):
-    return get_gaussian_weighted_knn_nojax(x, **kw)
-
-
-def get_knn_mean(x, y, tree=None, iw=None, **kw):
-    """Get the k-nearest neighbors of x in the tree,
-    and return their weighted average value together with their density."""
-
-    if iw is not None:
-        indices, weights = iw
-    else:
-        assert tree is not None, "tree must be provided if iw is not provided"
-        indices, weights = get_gaussian_weighted_knn(x, tree=tree, **kw)
-
-    assert indices.shape == weights.shape
-    normed_w = weights / np.nansum(weights, axis=1)[:, None]
-    all_nan_mask = np.all(np.isnan(weights), axis=1)
-    y_neighbors = y[indices]
-    weighted_mean = np.nansum(y_neighbors * normed_w[:, :, None], axis=1)
-
-    density = np.nansum(weights, axis=1)
-    weighted_mean[all_nan_mask, ...] = np.nan
-
-    return weighted_mean, density
-
-
-def get_knn_std(x, y, tree=None, iw=None, **kw):
-    """
-    Get the k-nearest neighbors of x in the tree,
-    and return their weighted standard deviation.
-    """
-
-    if iw is not None:
-        indices, weights = iw
-    else:
-        assert tree is not None, "tree must be provided if iw is not provided"
-        indices, weights = get_gaussian_weighted_knn(x, tree=tree, **kw)
-
-    assert indices.shape == weights.shape
-    normed_w = weights / np.nansum(weights, axis=1)[:, None]
-    all_nan_mask = np.all(np.isnan(weights), axis=1)
-    y_neighbors = y[indices]
-    weighted_mean = np.nansum(y_neighbors * normed_w[:, :, None], axis=1)
-
-    squared_diff = (y[indices] - weighted_mean[:, None, :]) ** 2
-    weighted_squared_diff = squared_diff * normed_w[:, :, None]
-    variance = weighted_squared_diff.sum(axis=1)
-
-    squared_diff = (y_neighbors - weighted_mean[:, None, :]) ** 2
-    variance = np.nansum(squared_diff * normed_w[:, :, None], axis=1)
-
-    std = np.sqrt(variance)
-
-    weighted_mean[all_nan_mask, ...] = np.nan
-    std[all_nan_mask, ...] = np.nan
-
-    return std, weighted_mean
+    return tree
 
 
 @configurable
-def knn_avg(xquery, logY, tree, k=500, min_points=20, avg_method="mean", **kw):
-    if avg_method == "mean":
-        return get_knn_mean(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
-    elif avg_method == "quantile":
-        assert "qu" in kw, "quantile method requires a quantile value"
-        from .plotting_core_jax import get_knn_quantile
+def knn_stats(
+    xquery,
+    y=None,
+    tree=None,  # KDTree or jaxkd tree
+    iw=None,  # tuple of (indices, weights) of the k-nearest neighbors
+    k=500,
+    min_points=20,
+    stats: str | list[str] = "iw",
+    use_jax=USE_KNN_JAX,
+    **kw,
+):
+    if isinstance(stats, str):
+        stats = [stats]
+    if use_jax:
+        from .knn_utils_jax import get_gaussian_weighted_knn, get_knn_mean_and_variance
+        from jax import numpy as xnp
+    else:
+        from .knn_utils_np import get_gaussian_weighted_knn, get_knn_mean_and_variance
 
-        return get_knn_quantile(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
-    elif avg_method == "std":
-        return get_knn_std(xquery, logY, k=k, min_points=min_points, tree=tree, **kw)
+        xnp = np
 
-    raise ValueError(f"Unknown method {avg_method}")
+    if tree is None and iw is None:
+        tree = build_tree(xquery, use_jax=use_jax)
+
+    iw = iw or get_gaussian_weighted_knn(
+        xquery,
+        tree,
+        k=k,
+        min_points=min_points,
+        **kw,
+    )
+
+    assert iw[0].shape[1] == iw[1].shape[1] == k, (
+        f"Wrong shape for indices and weights: {iw[0].shape=}, {iw[1].shape=}, {k=}"
+    )
+    assert iw[0].shape[0] == xquery.shape[0], (
+        f"Wrong shape for indices and weights: {iw[0].shape=}, {iw[1].shape=}, {xquery.shape=}"
+    )
+
+    need_mv = {"mean", "variance", "std"} & set(stats)
+    mean, var = (  # type: ignore
+        get_knn_mean_and_variance(xquery, y, iw=iw, k=k, min_points=min_points, **kw)
+        if need_mv
+        else (None, None)
+    )
+
+    def calc(s):
+        if s == "iw":
+            return iw
+        if s == "density":
+            return xnp.nansum(iw[1], 1)
+        if s == "quantile":
+            from .knn_utils_jax import get_knn_quantile
+
+            return get_knn_quantile(xquery, y, iw=iw, k=k, min_points=min_points, **kw)
+        if s == "mean":
+            return mean
+        if s == "variance":
+            return var
+        if s == "std":
+            return xnp.sqrt(var)  # type: ignore
+        raise ValueError(f"Unknown stat: {s}")
+
+    res = tuple([calc(s) for s in stats])
+    return res[0] if len(res) == 1 else res
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

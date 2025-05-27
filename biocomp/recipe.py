@@ -114,10 +114,11 @@ def recipes_to_sql(recipes: list, conn, lib, error_handler=None):
         c.execute("SELECT name FROM recipes WHERE name = ?", (obj["name"],))
         if c.fetchone():
             # already in db so we skip
-            log.info(f'Recipe {obj["name"]} already in db, skipping')
+            log.info(f"Recipe {obj['name']} already in db, skipping")
 
         extra = {k: v for k, v in obj.items() if k not in ["name", "description", "notes"]}
         extra_json = json.dumps(extra)
+        logger.debug(f"Adding recipe {obj['name']} to temp sql db")
         c.execute(
             "INSERT INTO recipes VALUES (?, ?, ?, ?)",
             (
@@ -154,7 +155,7 @@ def recipes_to_sql(recipes: list, conn, lib, error_handler=None):
                     slot_cols = [f"slot_{i}" for i in range(1, 7)]
                     l1ids = [s for s in lib.L2s.loc[s["plasmid"]][slot_cols].tolist() if s]
                 if type is None:
-                    err_msg = f'In recipe {obj["name"]}: unknown plasmid {s["plasmid"]}'
+                    err_msg = f"In recipe {obj['name']}: unknown plasmid {s['plasmid']}"
                     logger.error(err_msg)
                     error_in_recipe = True
                     error_handler(err_msg)
@@ -180,7 +181,7 @@ def recipes_to_sql(recipes: list, conn, lib, error_handler=None):
                     ),
                 )
         if error_in_recipe:
-            logger.error(f'Skipped recipe {obj["name"]} because of import errors')
+            logger.error(f"Skipped recipe {obj['name']} because of import errors")
             c.execute("DELETE FROM recipes WHERE name = ?", (obj["name"],))
             conn.commit()
 
@@ -194,9 +195,9 @@ def xp_to_sql(xps: list, conn):
         c.execute("SELECT name FROM XPs WHERE name = ?", (obj["name"],))
         if c.fetchone():
             # already in db so we skip
-            logger.debug(f'XP {obj["name"]} already in db, skipping')
+            logger.debug(f"XP {obj['name']} already in db, skipping")
             return
-        logger.info(f'Adding XP {obj["name"]} to sql db')
+        logger.info(f"Adding XP {obj['name']} to sql db")
         c.execute(
             "INSERT INTO XPs VALUES (?, ?, ?, ?)",
             (
@@ -240,9 +241,9 @@ def import_recipes_to_sql(
 
     for f in tqdm(recipe_files, desc="Importing recipes", disable=not show_progress):
         recipe = ut.load_json5(f)
-        logger.debug(f'Importing recipe {recipe["name"]}')
-        if not Path(f).name == f'{recipe["name"]}.recipe.json5':
-            error_handler(f'File vs recipe name mismatch (recipe: {recipe["name"]}, file: {f})')
+        logger.debug(f"Importing recipe {recipe['name']}")
+        if not Path(f).name == f"{recipe['name']}.recipe.json5":
+            error_handler(f"File vs recipe name mismatch (recipe: {recipe['name']}, file: {f})")
         recipe_objects.append(recipe)
 
     recipes_to_sql(recipe_objects, conn, lib, error_handler=error_handler)
@@ -310,9 +311,9 @@ def network_from_recipe(
         recipe_paths: list[PathLike] = []
     else:
         recipe_objects = None
-        assert (
-            recipe_path is not None
-        ), "recipe_path should not be None if recipe_object is not provided"
+        assert recipe_path is not None, (
+            "recipe_path should not be None if recipe_object is not provided"
+        )
         recipe_paths = [recipe_path]
 
     recipe = import_recipes_to_sql(
@@ -368,9 +369,10 @@ def load_data_file(
 
     data = use_store[data_file_path]
 
+    res = None
     available_columns = set(data.columns)
     if proteins is None:
-        return data.to_numpy()
+        res = data.to_numpy()
     else:
         remainder = set(proteins) - available_columns
         if len(remainder) > 0:
@@ -380,7 +382,13 @@ Available: {available_columns}
 """
             )
 
-        return np.asarray(data[proteins])
+        res = np.asarray(data[proteins])
+
+    if res is None:
+        return error_handler(f"Data file {data_file_path} is empty")
+
+    logger.debug(f"Data file {data_file_path} loaded with shape {res.shape}")
+    return res
 
 
 def get_network_data(
