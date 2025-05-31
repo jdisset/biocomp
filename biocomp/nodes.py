@@ -60,12 +60,12 @@ class LayerInstance:
     commit: Optional[Callable] = None
 
     def __post_init__(self):
-        assert all(
-            isinstance(shape, tuple) for shape in self.output_shapes
-        ), f"Invalid output shapes: {self.output_shapes}"
-        assert all(
-            all(isinstance(dim, int) for dim in shape) for shape in self.output_shapes
-        ), f"Non-integer dimensions in output shapes: {self.output_shapes}"
+        assert all(isinstance(shape, tuple) for shape in self.output_shapes), (
+            f"Invalid output shapes: {self.output_shapes}"
+        )
+        assert all(all(isinstance(dim, int) for dim in shape) for shape in self.output_shapes), (
+            f"Non-integer dimensions in output shapes: {self.output_shapes}"
+        )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -165,9 +165,9 @@ def dense_layer(
     w = param_f(f"{name}/w", init_f=he_initializer(key, (input_size, output_size)))
     b = param_f(f"{name}/b", init_f=lambda: np.zeros((output_size,)))
 
-    assert input_values.shape == (
-        input_size,
-    ), f"In {name}: {input_values.shape} != {(input_size,)}"
+    assert input_values.shape == (input_size,), (
+        f"In {name}: {input_values.shape} != {(input_size,)}"
+    )
     assert w.shape == (
         input_size,
         output_size,
@@ -195,15 +195,15 @@ def dense_multilevel(
     activation: Callable[[ArrayLike], ArrayLike],
 ):
     assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
-    assert (
-        isinstance(depth, int) and depth >= 1
-    ), f"In {name}: depth should be an integer greater than or equal to 1."
-    assert (
-        isinstance(hidden_s, int) and hidden_s > 0
-    ), f"In {name}: hidden_s should be a positive integer."
-    assert (
-        isinstance(output_s, int) and output_s > 0
-    ), f"In {name}: output_s should be a positive integer."
+    assert isinstance(depth, int) and depth >= 1, (
+        f"In {name}: depth should be an integer greater than or equal to 1."
+    )
+    assert isinstance(hidden_s, int) and hidden_s > 0, (
+        f"In {name}: hidden_s should be a positive integer."
+    )
+    assert isinstance(output_s, int) and output_s > 0, (
+        f"In {name}: output_s should be a positive integer."
+    )
 
     res = input_values
     keys = jax.random.split(key, depth)
@@ -375,7 +375,7 @@ def inv_source_new(
             # params.at(f'{namespace}/{pname}', ref, overwrite=None)
         MLP_head(np.zeros((2 + len(input_shapes),)), params, key)
 
-    def MLP_head(vals, params, key, hidden_s=64, depth=3):
+    def MLP_head(vals, params, key, hidden_s=hidden_s, depth=depth):
         return dense_multilevel(
             vals,
             hidden_s,
@@ -527,7 +527,7 @@ def inv_aggregation(
                 fwd_layer, fwd_loc = fwd_node.get_layer_and_local_id(stack)
                 fwd_n_output = stack.layers[fwd_layer].get_n_outputs()
                 fwd_namespace = (
-                    f'local/{generate_layer_name(stack, fwd_layer, f"aggregation_{fwd_n_output}x")}'
+                    f"local/{generate_layer_name(stack, fwd_layer, f'aggregation_{fwd_n_output}x')}"
                 )
                 ref.push_back(f"{fwd_namespace}/ratios", (fwd_loc, original_slot))
 
@@ -864,9 +864,9 @@ def sequestron_ERN(
 
     # ERN have 2 inputs of same size
     assert len(input_shapes) == 2
-    assert (
-        input_shapes[0] == input_shapes[1]
-    ), f"ERN inputs must have same shape, got {input_shapes}"
+    assert input_shapes[0] == input_shapes[1], (
+        f"ERN inputs must have same shape, got {input_shapes}"
+    )
     assert n_outputs == 1, f"ERN only supports 1 output, got {n_outputs}"
 
     shared_layer_name = f"ERN_{subtype}"
