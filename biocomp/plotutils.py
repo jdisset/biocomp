@@ -71,9 +71,11 @@ class PlotData(ArbitraryModel):
     yval: Annotated[Optional[NdArray], BeforeValidator(asarray)]
 
     input_names: List[str] = []
-    output_name: str = "output"
+    output_name: str | List[str] = "output"
 
     metadata: Dict[str, Any] = {}
+
+    force_single_output: bool = True
 
     @property
     def x(self) -> NdArray:
@@ -89,6 +91,7 @@ class PlotData(ArbitraryModel):
 
     @property
     def dimensions(self) -> DataDimensions:
+        self.check_shapes()
         if not isinstance(self.input_names, list):
             logger.warning(f"Input names are not a list: {self.input_names}")
             return DataDimensions()
@@ -107,15 +110,27 @@ class PlotData(ArbitraryModel):
             self.yval = self.yval.reshape(-1, 1)
 
         if self.xval.shape[0] != self.yval.shape[0]:
-            raise ValueError("X and Y must have the same number of samples")
+            raise ValueError(
+                f"X and Y must have the same number of samples. Shapes are {self.xval.shape} and {self.yval.shape}"
+            )
 
         if self.yval.shape[1] != 1:
-            raise ValueError("Y must be a 1D array")
-
-        if self.xval.shape[1] != len(self.input_names):
-            raise ValueError(
-                f"X shape {self.xval.shape} does not match input names {self.input_names}"
+            assert len(self.output_name) == self.yval.shape[1], (
+                f"Output name {self.output_name} does not match the number of outputs {self.yval.shape[1]}"
             )
+            if self.force_single_output:
+                # we just put the extra outputs as inputs
+                print(f"Y has {self.yval.shape[1]} outputs!!!")
+                logger.warning(
+                    f"Y has {self.yval.shape[1]} outputs, but only 1 output is expected. "
+                    f"Using the first output as the main output."
+                )
+                newxval = np.concatenate([self.xval, self.yval[:, 1:]], axis=1)
+                self.xval = newxval
+                self.yval = self.yval[:, :1]
+                self.input_names.extend(self.output_name[1:])
+                self.output_name = self.output_name[0]
+                print(f"New xval shape: {self.xval.shape}, new yval shape: {self.yval.shape}")
 
         return self
 
@@ -144,9 +159,11 @@ class LazyPlotData(PlotData):
     def set_xy(self):
         if self.xval is None:
             self.xval, self.yval = self.get_xy.__call__(self)
+        self.check_shapes()
 
     @property
     def dimensions(self) -> DataDimensions:
+        self.set_xy()
         if not isinstance(self.input_names, list):
             logger.warning(f"Input names are not a list: {self.input_names}")
             return DataDimensions()
@@ -413,13 +430,17 @@ def get_reordered_protein_names(
     protein_aliases: Optional[Dict[str, str]] = None,
 ) -> Tuple[list[int], int, list[str], str]:
     protein_aliases = protein_aliases or {}
-    protein_order, protein_names = pc.get_reordered_protein_names(
+    protein_order, protein_names, noutputs = pc.get_reordered_protein_names(
         network,
         input_order,
         protein_aliases,
     )
-    input_order, output_pos = protein_order[:-1], protein_order[-1]
-    input_names, output_name = protein_names[:-1], protein_names[-1]
+    input_order, output_pos = protein_order[:-noutputs], protein_order[-noutputs:]
+    input_names, output_name = protein_names[:-noutputs], protein_names[-noutputs:]
+
+    if noutputs == 1:
+        output_pos = output_pos[0]
+        output_name = output_name[0]
 
     return input_order, output_pos, input_names, output_name
 
@@ -468,13 +489,20 @@ def extract_lazy_plot_data_from_network(
         network, input_order, protein_aliases
     )
 
+    print(
+        f"Extracting lazy plot data from network {network.name} with input order {input_order} and output position {output_pos}, input names {input_names} and output name {output_name}"
+    )
+
     def get_xy(pdata: PlotData) -> Tuple[NdArray, NdArray]:
         logger.debug("get_xy({pdata}) called")
         assert isinstance(pdata, PlotData), f"pdata must be a PlotData, got {type(pdata)}"
         X, Y = get_XY(pdata)
         x = X[:, input_order]
-        y = Y[:, output_pos].reshape(-1, 1)
-        logger.debug(f"get_xy found x with shape {x.shape} and y with shape {y.shape}")
+        y = Y[:, output_pos]
+        # make sure y is a column vector if 1d
+        if y.ndim == 1:
+            y = y.reshape(-1, 1)
+        print(f"get_xy got x with shape {x.shape} and y with shape {y.shape}")
         return x, y
 
     d = LazyPlotData(

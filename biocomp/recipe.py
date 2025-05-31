@@ -265,13 +265,13 @@ def build_network(
             logger.error(f"Error building network for recipe {recipe_name}: {msg}")
             raise RuntimeError(msg)
 
-        error_handler = _handler1
+        err_handler = _handler1
     else:
 
         def _handler2(msg):
             error_handler(f"Error building network for recipe {recipe_name}: {msg}")
 
-        error_handler = _handler2
+        err_handler = _handler2
 
     if metadata is None:
         metadata = {"recipe_name": recipe_name}
@@ -286,7 +286,8 @@ def build_network(
             use_cache=use_cache,
         )
     except Exception as e:
-        return error_handler(f"Can't build network: {e}")
+        err_handler(f"Can't build network: {e}")
+        return []
 
     if not inverse:
         return fwd_network
@@ -302,7 +303,7 @@ def network_from_recipe(
     error_handler=None,
     recipe_object: Optional[dict] = None,
     **kwargs,
-) -> Network | list[Network]:
+):
     dbconn = sqlite3.connect(db_path)
     if recipe_object is not None:
         # using a recipe object directly
@@ -430,5 +431,7 @@ def get_network_XY(
     **kwargs,
 ):
     Y = get_network_data(network, data_file_path, color_aliases, **kwargs)
+    print(f"Y shape: {Y.shape}")
     X = network.get_input_from_output(Y)
+    print(f"X shape: {X.shape}")
     return X, Y

@@ -930,9 +930,9 @@ class Network(BaseModel):
     def build(self):
         with LibraryContext.with_library(self.lib):
             assert self.transcription_units is not None, "No transcription units in recipe"
-            assert (
-                len(self.transcription_units) > 0
-            ), f"No transcription units in recipe {self.name}"
+            assert len(self.transcription_units) > 0, (
+                f"No transcription units in recipe {self.name}"
+            )
             self.__build_central_dogma_graph(self.custom_outputs)
             self.__build_compute_graph()
             if self.invert_on_build:
@@ -1143,9 +1143,9 @@ class Network(BaseModel):
         for i, r in dna_nodes.iterrows():
             successors = []
             for ii, rr in rna_nodes.iterrows():
-                assert (
-                    len(r.tu_id) == 1
-                ), "a DNA node should have only one value in its tu_id list (1 DNA node per Transcription Unit)"
+                assert len(r.tu_id) == 1, (
+                    "a DNA node should have only one value in its tu_id list (1 DNA node per Transcription Unit)"
+                )
 
                 if r.tu_id[0] in rr.tu_id:  # if we have an RNA that has the same TU as the DNA
                     successors.append(ii)
@@ -1517,9 +1517,9 @@ class Network(BaseModel):
             onode = self.get_output_compute_node()
             if "cdg_input" not in onode:
                 raise ValueError(f"Invalid output node: {onode}")
-            assert isinstance(
-                self.central_dogma_graph, pd.DataFrame
-            ), "get_output_proteins: Central dogma graph not built"
+            assert isinstance(self.central_dogma_graph, pd.DataFrame), (
+                "get_output_proteins: Central dogma graph not built"
+            )
             self._output_proteins = [
                 self.central_dogma_graph.loc[cdg_id]["content"][0] for cdg_id in onode["cdg_input"]
             ]
@@ -1589,9 +1589,9 @@ class Network(BaseModel):
         """Sets this input protein as a bias node (instead of an input one)"""
         original_mapping = self.get_inverted_input_positions()
         output_proteins = self.get_output_proteins()
-        assert (
-            input_protein_name in output_proteins
-        ), f"Invalid input protein name: {input_protein_name}"
+        assert input_protein_name in output_proteins, (
+            f"Invalid input protein name: {input_protein_name}"
+        )
         output_position = output_proteins.index(input_protein_name)
         assert output_position in original_mapping.values()
         assert isinstance(self.compute_graph, pd.DataFrame)
@@ -1668,7 +1668,6 @@ class Network(BaseModel):
         assert isinstance(self.compute_graph, pd.DataFrame)
         sequestron_ids = get_sequestron_ids(self)
         topo = self.topological_order(sequestron_ids)
-        print(f"Sequestron topo: {topo}")
         for layer, nodes in enumerate(topo):
             for node in nodes:
                 self.compute_graph.at[node, "extra"]["layer_id"] = int(layer)
@@ -1721,9 +1720,9 @@ class Network(BaseModel):
     def _sanity_check(self):
         # check that all nodes have a unique id
         if self.compute_graph is not None:
-            assert len(self.compute_graph.index) == len(
-                set(self.compute_graph.index)
-            ), "compute graph has duplicate ids"
+            assert len(self.compute_graph.index) == len(set(self.compute_graph.index)), (
+                "compute graph has duplicate ids"
+            )
 
             # every source node should have a source_id
             for i, r in self.compute_graph[self.compute_graph.type == "source"].iterrows():
@@ -1898,6 +1897,10 @@ def inverted_network(
     def _inverted_network():
         # we compute a list of invertible paths that link each start nodes to the output
         inv_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
+        print(f"Found {len(inv_paths)} start nodes with invertible paths")
+        for n, p in inv_paths.items():
+            print(f"Start node {n} has {len(p)} invertible paths")
+        # if no invertible paths were found, we return an empty list
 
         # For each start_node, we might have more than one path.
         # In 'shortest' mode, we just pick the shortest one.

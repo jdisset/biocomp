@@ -133,22 +133,18 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
 
         in_order = [input_names.index(i) for i in reordered_input_names]
 
-    if len(output_names) != (len(input_names) + 1):
-        raise ValueError(
-            f"""Wrong number of inputs/outputs:
-                         {len(input_names)} inputs: {input_names},
-                         {len(output_names)} outputs: {output_names}.
-                         Expecting networks to have one more output than inputs."""
-        )
+    output_name = list(set(output_names) - set(input_names))
+    if len(output_name) > 1:
+        print(f"Warning: multiple output proteins found: {output_name}")
+    output_pos = [output_names.index(n) for n in output_name]
 
-    output_name = list(set(output_names) - set(input_names))[0]
-    output_pos = output_names.index(output_name)
+    noutput = len(output_pos)
 
     if protein_aliases is not None:
         reordered_input_names = [protein_aliases.get(n, n) for n in reordered_input_names]
-        output_name = protein_aliases.get(output_name, output_name)
+        output_name = [protein_aliases.get(n, n) for n in output_name]
 
-    return list(in_order) + [output_pos], list(reordered_input_names) + [output_name]
+    return list(in_order) + output_pos, list(reordered_input_names) + output_name, noutput
 
 
 def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):
