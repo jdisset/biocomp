@@ -1,6 +1,5 @@
 import numpy as np
 from biocomp.logging_config import get_logger
-from scipy.spatial import KDTree
 from scipy.stats import norm
 
 logger = get_logger(__name__)
@@ -42,5 +41,10 @@ def get_knn_mean_and_variance(x, y, tree=None, iw=None, **kw):
     weighted_mean = np.nansum(y_neighbors * weights[:, :, None], axis=1)
     squared_diff = (y_neighbors - weighted_mean[:, None, :]) ** 2
     variance = np.nansum(squared_diff * weights[:, :, None], axis=1)
+
+    # set to nan where all weights are nan
+    all_weights_nan = np.all(np.isnan(weights), axis=1)
+    weighted_mean[all_weights_nan] = np.nan
+    variance[all_weights_nan] = np.nan
 
     return weighted_mean, variance
