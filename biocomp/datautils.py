@@ -586,7 +586,7 @@ class DataManager:
 
         if parallel:
             pbar = tqdm(total=len(self._networks), desc="Generating batches")
-            with Pool(min(len(self._networks), 8)) as pool:
+            with Pool(min(len(self._networks), 16)) as pool:
                 all_batches = list(pool.imap(sample_batches, sample_args))
                 pbar.update(len(self._networks))
             pbar.close()
@@ -685,6 +685,48 @@ class DataManager:
 
     def get_raw_Y(self):
         return self._raw_Y
+
+    def get_per_network_xy_samples(self, n_samples, only_dependent=True):
+        """
+        Get a fixed number of samples, split them by network
+        """
+        nets = self.get_networks()
+        xb, yb = self.get_batches(1, n_samples)
+        yb = yb[0]
+        xb = xb[0]
+
+        n_inputs = [n.get_nb_inputs() for n in nets]
+        n_outputs = [n.get_nb_outputs() for n in nets]
+
+        slice_at_x = np.cumsum(n_inputs)[:-1]
+        slice_at_y = np.cumsum(n_outputs)[:-1]
+
+        per_net_xb = np.split(xb, slice_at_x, axis=1)
+        per_net_yb = np.split(yb, slice_at_y, axis=1)
+
+        if only_dependent:
+            pnyb = filter_dependent_outputs(per_net_xb, per_net_yb, nets)
+        else:
+            pnyb = per_net_yb
+
+        assert len(per_net_xb) == len(nets) == len(pnyb)
+
+        return per_net_xb, pnyb, nets
+
+
+def filter_dependent_outputs(per_net_x, per_net_y, nets):
+    """
+    Only keep the output that is not in the input for each network.
+    """
+    only_dependent_y = []
+    for xi, yi, n in zip(per_net_x, per_net_y, nets):
+        close_mask = np.any(np.isclose(yi[..., None], xi[..., None, :], rtol=0, atol=1e-9), axis=-1)
+        equals = np.all(close_mask, axis=0)
+        dep_yi = yi[:, ~equals]
+        if dep_yi.shape[1] > 1:
+            logger.info(f"Network {n.name} has multiple outputs: {dep_yi.shape=}")
+        only_dependent_y.append(dep_yi)
+    return only_dependent_y
 
 
 #                                                                            }}}

@@ -216,9 +216,9 @@ class ComputeLayer:
                 assert input_layer_id < self.layer_id, "Input node is in a later layer"
                 assert stack.layers[input_layer_id].is_built, "Input layer is not built"
                 input_layer_output_shapes = stack.layers[input_layer_id].f_out_shapes
-                assert input_slot_id < len(
-                    input_layer_output_shapes
-                ), f"Input slot {input_slot_id} is out of range"
+                assert input_slot_id < len(input_layer_output_shapes), (
+                    f"Input slot {input_slot_id} is out of range"
+                )
                 shape = (
                     tuple(input_layer_output_shapes[input_slot_id])
                     if isinstance(input_layer_output_shapes[input_slot_id], list)
@@ -495,17 +495,17 @@ class ComputeStack:
             l.check()
             for n in l.nodes:
                 assert id(n.network) == id(self.networks[n.network_id]), "Network mismatch"
-        assert (
-            self.layers[0].nodes[0].get_compute_node().type == "input"
-        ), f"First node is not input: {self.layers[0].nodes[0]}"
+        assert self.layers[0].nodes[0].get_compute_node().type == "input", (
+            f"First node is not input: {self.layers[0].nodes[0]}"
+        )
         for net_id in range(len(self.networks)):
             prev = -1
             for l in self.layers:
                 for n in l.nodes:
                     if n.network_id == net_id:
-                        assert (
-                            n.batch_order >= prev
-                        ), f"wrong batch order ({n.batch_order} < {prev} for {n})"
+                        assert n.batch_order >= prev, (
+                            f"wrong batch order ({n.batch_order} < {prev} for {n})"
+                        )
                         prev = n.batch_order
 
     def get_all_nodes(self):
@@ -539,7 +539,9 @@ class ComputeStack:
 
         assert (
             this_input_shapes[input_slot] == input_layer.f_out_shapes[input_compute_node_outslot]
-        ), f"Shapes don't match: {this_input_shapes[input_slot]} != {input_layer.f_out_shapes[input_compute_node_outslot]}"
+        ), (
+            f"Shapes don't match: {this_input_shapes[input_slot]} != {input_layer.f_out_shapes[input_compute_node_outslot]}"
+        )
 
         flat_out_size = int(np.sum([np.prod(s) for s in input_layer.f_out_shapes]))
         node_start = input_layer_start + input_node_layer_loc * flat_out_size
@@ -1028,7 +1030,11 @@ class ComputeStack:
                 - overwrite_at is a 1d array of indices where to inject the values
             """
 
-            assert len(inputs) == self.total_nb_of_inputs, "Mismatched number of inputs"
+            if len(inputs) != self.total_nb_of_inputs:
+                raise ValueError(
+                    f"When applying the stack, received inputs of shape {inputs.shape} "
+                    f"but expected a total of {self.total_nb_of_inputs} inputs."
+                )
             assert self.layers is not None, "No layers"
             assert self.layers_start_index is not None, "No layers start index"
             assert self.node_map is not None, "No node map"
@@ -1044,9 +1050,9 @@ class ComputeStack:
 
                 if overwrite_values is not None and overwrite_at is not None:
                     assert overwrite_values.ndim == 1 and overwrite_at.ndim == 1
-                    assert (
-                        overwrite_values.shape[0] == overwrite_at.shape[0]
-                    ), f"{overwrite_values.shape[0]=} != {overwrite_at.shape[0]=}"
+                    assert overwrite_values.shape[0] == overwrite_at.shape[0], (
+                        f"{overwrite_values.shape[0]=} != {overwrite_at.shape[0]=}"
+                    )
                     running_output = running_output.at[overwrite_at].set(overwrite_values)
 
                 # fetch the inputs for each node in the layer from the output array
