@@ -110,7 +110,7 @@ def add_quantile_var_ids(params: ParameterTree, num_nodes: int, num_per_node, la
 ### {{{                    --     neural utils     --
 
 
-def continuous_initializer(rng, shape=(), minval=0, maxval=1):
+def uniform_initializer(rng, shape=(), minval=0, maxval=1):
     def init():
         return jax.random.uniform(
             key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32
@@ -119,14 +119,28 @@ def continuous_initializer(rng, shape=(), minval=0, maxval=1):
     return init
 
 
-def glorot_initializer(rng, shape):
+def glorot_normal(rng, shape):
     def init():
         return jax.nn.initializers.glorot_normal()(rng, shape)
 
     return init
 
 
-def he_initializer(rng, shape):
+def glorot_uniform(rng, shape):
+    def init():
+        return jax.nn.initializers.glorot_uniform()(rng, shape)
+
+    return init
+
+
+def he_normal(rng, shape):
+    def init():
+        return jax.nn.initializers.he_normal()(rng, shape)
+
+    return init
+
+
+def he_uniform(rng, shape):
     def init():
         return jax.nn.initializers.he_uniform()(rng, shape)
 
@@ -147,23 +161,39 @@ ACTIVATION_FUNCTIONS = {
     "elu": jax.nn.elu,
     "selu": jax.nn.selu,
     "tanh": jax.nn.tanh,
+    "gelu": jax.nn.gelu,
     "softplus": jax.nn.softplus,
     "sigmoid": sigmoid,
     "none": lambda x: x,
 }
 
+INITIALIZERS = {
+    "uniform": uniform_initializer,
+    "glorot_normal": glorot_normal,
+    "glorot_uniform": glorot_uniform,
+    "he_normal": he_normal,
+    "he_uniform": he_uniform,
+}
+
 DEFAULT_ACTIVATION = "leaky_relu"
 DEFAULT_OUT_ACTIVATION = "sigmoid"
+DEFAULT_INITIALIZER = "he"
 
 
 def dense_layer(
-    input_values: ArrayLike, output_size: ArrayLike, param_f: Callable, key: PRNGKey, name: str
+    input_values: ArrayLike,
+    output_size: ArrayLike,
+    param_f: Callable,
+    initializer: Callable,
+    bias_offset,
+    key: PRNGKey,
+    name: str,
 ):
     assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
     input_size = 1 if input_values.shape == () else input_values.shape[0]
 
-    w = param_f(f"{name}/w", init_f=he_initializer(key, (input_size, output_size)))
-    b = param_f(f"{name}/b", init_f=lambda: np.zeros((output_size,)))
+    w = param_f(f"{name}/w", init_f=initializer(key, (input_size, output_size)))
+    b = param_f(f"{name}/b", init_f=lambda: np.zeros((output_size,)) + bias_offset)
 
     assert input_values.shape == (input_size,), (
         f"In {name}: {input_values.shape} != {(input_size,)}"
@@ -190,6 +220,8 @@ def dense_multilevel(
     output_s: int,
     depth: int,
     param_f: Callable[[str, Callable], ArrayLike],
+    initializer: Callable,
+    bias_offset,
     key: PRNGKey,
     name: str,
     activation: Callable[[ArrayLike], ArrayLike],
@@ -208,10 +240,22 @@ def dense_multilevel(
     res = input_values
     keys = jax.random.split(key, depth)
     for i in range(depth - 1):
-        res = activation(dense_layer(res, hidden_s, param_f, keys[i], f"{name}/l{i}"))
+        res = activation(
+            dense_layer(
+                res,
+                hidden_s,
+                param_f,
+                initializer,
+                bias_offset,
+                keys[i],
+                f"{name}/l{i}",
+            )
+        )
         assert res.shape == (hidden_s,), f"In {name}: {res.shape} != {(hidden_s,)}"
 
-    res = dense_layer(res, output_s, param_f, keys[-1], f"{name}/l{depth - 1}")
+    res = dense_layer(
+        res, output_s, param_f, initializer, bias_offset, keys[-1], f"{name}/l{depth - 1}"
+    )
     assert res.shape == (output_s,), f"In {name}: {res.shape} != {(output_s,)}"
     return res
 
@@ -276,24 +320,25 @@ def inv_source(*args, **kwargs):
     return single_passthrough(*args, **kwargs)
 
 
-def source_new(
+def source_with_pos(
     input_shapes: List[Tuple[int]],
     n_outputs: int,
     layer_id: int,
-    stack: ComputeStack = None,
+    stack: ComputeStack,
     max_L1s: int = 5,
     hidden_s=64,
     depth=3,
+    inner_activation_name: str = DEFAULT_ACTIVATION,
+    outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
+    initializer_name: str = DEFAULT_INITIALIZER,
+    bias_offset=0.0,
     **_,
 ) -> LayerInstance:
     assert len(input_shapes) == 1, f"A source node should have 1 input, got {len(input_shapes)}"
 
-    # vmap dense multilayer on same value and input, adding also a second input
-    # which is the position
-    # you want everything to be in the range 0-1, so define a maximum amount of
-    # L1s (5) and normalise
-
-    # TODO: change max_L1s, hidden_s, depth to compute config
+    inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
+    outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
+    initializer = INITIALIZERS[initializer_name]
 
     local_layer_name = generate_layer_name(stack, layer_id, f"source{n_outputs}x")
     namespace = f"local/{local_layer_name}"
@@ -310,7 +355,9 @@ def source_new(
             hidden_s,
             1,
             depth=depth,
-            activation=ACTIVATION_FUNCTIONS[DEFAULT_ACTIVATION],
+            activation=inner_activation,
+            initializer=initializer,
+            bias_offset=bias_offset,
             key=key,
             param_f=partial(init_if_needed, params, base_path="shared"),
             name="NN/source",
@@ -328,14 +375,15 @@ def source_new(
         ans = jax.vmap(
             lambda position: MLP_head(flat_concat(value, position, quantile), params, key)
         )(np.arange(max_L1s)[:n_outputs] / max_L1s)
-        return ans + jnp.broadcast_to(value, ans.shape)
+        res = ans + jnp.broadcast_to(value, ans.shape)
+        return outer_activation(res)
 
     output_shapes = list(input_shapes) * n_outputs
 
     return LayerInstance(prepare, apply, output_shapes)
 
 
-def inv_source_new(
+def inv_source_with_pos(
     input_shapes: List[Tuple[int]],
     n_outputs: int,
     stack: ComputeStack,
@@ -343,16 +391,19 @@ def inv_source_new(
     max_L1s: int = 5,
     hidden_s=64,
     depth=3,
+    inner_activation_name: str = DEFAULT_ACTIVATION,
+    outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
+    initializer_name: str = DEFAULT_INITIALIZER,
+    bias_offset=0.0,
     **_,
 ) -> LayerInstance:
-    # need to pass which slot is being inverted
-    # look at how inv_aggregation is done
-    # instead of having a division you have an MLP head
-    # in param tree store index of position being inverted
-
     local_layer_name = generate_layer_name(stack, layer_id, "inverse_source")
     namespace = f"local/{local_layer_name}"
     pname = "shapes"
+
+    inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
+    outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
+    initializer = INITIALIZERS[initializer_name]
 
     def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
         add_quantile_var_ids(params, len(nodelist), len(input_shapes), local_layer_name)
@@ -381,7 +432,9 @@ def inv_source_new(
             hidden_s,
             1,
             depth=depth,
-            activation=ACTIVATION_FUNCTIONS[DEFAULT_ACTIVATION],
+            activation=inner_activation,
+            initializer=initializer,
+            bias_offset=bias_offset,
             key=key,
             param_f=partial(init_if_needed, params, base_path="shared"),
             name="NN/source",
@@ -399,7 +452,7 @@ def inv_source_new(
         ans = jax.vmap(
             lambda position: MLP_head(flat_concat(value, position, quantile), params, key)
         )(np.arange(max_L1s)[:n_outputs] / max_L1s)
-        return ans + value.reshape(ans.shape)
+        return outer_activation(ans + value.reshape(ans.shape))
 
     output_shapes = list(input_shapes) * n_outputs
 
@@ -574,6 +627,8 @@ def transform_nn(
     is_inverse: bool = False,
     inner_activation_name: str = DEFAULT_ACTIVATION,
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
+    initializer_name: str = DEFAULT_INITIALIZER,
+    bias_offset: float = 0.0,
     **_,
 ):
     logger.debug("Initializing transform_nn node:")
@@ -592,6 +647,7 @@ def transform_nn(
 
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
+    initializer = INITIALIZERS[initializer_name]
 
     def make_layer_name(l_id, is_inv):
         return generate_layer_name(stack, l_id, f"{'inverse_' if is_inv else ''}{transform_name}")
@@ -640,6 +696,8 @@ def transform_nn(
                 inner_outsize,
                 depth=inner_depth,
                 activation=inner_activation,
+                initializer=initializer,
+                bias_offset=bias_offset,
                 key=key,
                 param_f=partial(init_if_needed, params, base_path="shared"),
                 name=f"NN/{shared_layer_name}/inner",
@@ -743,6 +801,8 @@ def transform_nn(
                 1,
                 depth=outer_depth,
                 param_f=partial(init_if_needed, params, base_path="shared"),
+                initializer=initializer,
+                bias_offset=bias_offset,
                 key=key,
                 name=f"NN/{shared_layer_name}/outer",
                 activation=inner_activation,
@@ -855,12 +915,15 @@ def sequestron_ERN(
     subtype: str = "5p",
     inner_activation_name: str = DEFAULT_ACTIVATION,
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
+    initializer_name: str = DEFAULT_INITIALIZER,
+    bias_offset: float = 0.0,
     use_ern_layer_id: bool = False,
     max_ern_layers: int = 4,  # for one-hot encoding size
     **_,
 ) -> LayerInstance:
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
+    initializer = INITIALIZERS[initializer_name]
 
     # ERN have 2 inputs of same size
     assert len(input_shapes) == 2
@@ -887,6 +950,8 @@ def sequestron_ERN(
             out_dim,
             depth,
             param_f=param_f,
+            initializer=initializer,
+            bias_offset=bias_offset,
             key=key,
             name=f"NN/ERN_{subtype}",
             activation=inner_activation,
@@ -901,7 +966,7 @@ def sequestron_ERN(
         init_if_needed(
             params,
             f"shared/{shared_layer_name}/affinities",
-            init_f=continuous_initializer(key, (len(affinity_names), affinity_dim)),
+            init_f=uniform_initializer(key, (len(affinity_names), affinity_dim)),
         )
 
         # store affinity references
@@ -995,8 +1060,10 @@ def grouped_output(
     layer_id: int,
     wsize: int = 64,
     depth: int = 4,
+    bias_offset: float = 0.0,
     inner_activation_name: str = DEFAULT_ACTIVATION,
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
+    initializer_name: str = DEFAULT_INITIALIZER,
     **_,
 ):
     del n_outputs
@@ -1004,6 +1071,7 @@ def grouped_output(
     assert all(shape == input_shapes[0] for shape in input_shapes)
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
+    initializer = INITIALIZERS[initializer_name]
 
     layer_name = generate_layer_name(stack, layer_id, "grouped_output")
 
@@ -1014,6 +1082,8 @@ def grouped_output(
             1,
             depth,
             param_f=partial(init_if_needed, params, base_path="shared"),
+            initializer=initializer,
+            bias_offset=bias_offset,
             key=rng_key,
             name="NN/grouped_output",
             activation=inner_activation,
