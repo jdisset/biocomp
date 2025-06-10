@@ -147,6 +147,7 @@ class CompressedSymLogRescaler(DataRescaler):
     low_end_compression: float = 100  # compression coefficient for low values
     poly_region_threshold: float = 300  # where we switch from log to poly
     poly_region_coef: float = 0.4  # how much we compress the poly part
+    offset: float = 0.0  # final offset to apply to the rescaled values
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
@@ -164,10 +165,11 @@ class CompressedSymLogRescaler(DataRescaler):
     def fwd(self, x):
         xp = self.__symlog(1 + x / self.low_end_compression) - self.__log_start
         y = xp / (self.__log_end - self.__log_start)
+        y += self.offset  # apply final offset
         return y
 
     def inv(self, y):
-        yp = y * (self.__log_end - self.__log_start) + self.__log_start
+        yp = (y - self.offset) * (self.__log_end - self.__log_start) + self.__log_start
         ypinv = self.__invsymlog(yp)
         x = self.low_end_compression * (ypinv - 1)
         return x
