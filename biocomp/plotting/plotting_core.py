@@ -135,7 +135,7 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
 
     output_name = list(set(output_names) - set(input_names))
     if len(output_name) > 1:
-        print(f"Warning: multiple output proteins found: {output_name}")
+        logger.debug(f"multiple output proteins found: {output_name}")
     output_pos = [output_names.index(n) for n in output_name]
 
     noutput = len(output_pos)

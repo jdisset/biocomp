@@ -205,14 +205,19 @@ def lerp(a, b, t):
 def sorting_loss(
     stack,
     training_config,
-    negative_grad_penalty=1.0,
-    kl_weight=0.1,
+    negative_grad_penalty=1.0, # favor monotonicity
+    kl_weight=0.1, 
     sorting_mse_weight=0.1,
     percent_batch_used=1.0,
     use_same_key=False,
 ):
     import jax
     import jax.numpy as jnp
+
+    # sorting loss attempts to make the model learn the distribution rather than just the mean
+    # it tries to learn the quantile function - sort of...
+    # does so by feeding a random variable to each node, and compute the loss as the mse between
+    # the sorted model outputs and the sorted targets. Which, ultimately, sort of leads to learning the quantile function.
 
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
 
@@ -399,6 +404,14 @@ def start(
             training_config.n_batches,
             training_config.batch_size,
             batch_key,
+        )
+        assert xbatches.shape == (
+            training_config.n_replicates,
+            training_config.n_batches,
+            training_config.batch_size,
+            stack.nb_inputs,
+        ), (
+            f"xbatches shape mismatch: {xbatches.shape} != ({training_config.n_replicates}, {training_config.n_batches}, {training_config.batch_size}, {stack.nb_inputs})"
         )
 
     static, dynamic = params.filter_by_tag(["non_grad", "local"])

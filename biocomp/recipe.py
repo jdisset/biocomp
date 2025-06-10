@@ -431,7 +431,5 @@ def get_network_XY(
     **kwargs,
 ):
     Y = get_network_data(network, data_file_path, color_aliases, **kwargs)
-    print(f"Y shape: {Y.shape}")
     X = network.get_input_from_output(Y)
-    print(f"X shape: {X.shape}")
     return X, Y
