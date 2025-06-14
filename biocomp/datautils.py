@@ -342,6 +342,32 @@ def sample_batches(
     return Xbatches, Ybatches
 
 
+import jax
+import jax.numpy as jnp
+
+
+@partial(jax.jit, static_argnames=["batch_size", "n_batches", "density_threshold_quantile"])
+def sample_batches_jax(
+    X: NdArray,
+    Y: NdArray,
+    batch_size: int,
+    n_batches: int,
+    densities: NdArray,  # densities at each point in X
+    density_threshold_quantile,  # Compute the density threshold using the quantile of the density distributikey
+    key,
+):
+    EPSILON = 1e-16
+    HIGH_DENSITIES_PENALTY = 1.0
+    threshold = jnp.quantile(densities + EPSILON, density_threshold_quantile)
+    p_select = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
+    p_select = jnp.nan_to_num(p_select, nan=0.0)
+    p_select /= jnp.sum(p_select)
+    indices = jax.random.choice(key, len(p_select), shape=(batch_size * n_batches,), p=p_select)
+    Xbatches = X[indices].reshape(n_batches, batch_size, X.shape[1])
+    Ybatches = Y[indices].reshape(n_batches, batch_size, Y.shape[1])
+    return Xbatches, Ybatches
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 # {{{                       --     data manager     --
@@ -458,13 +484,17 @@ class DataManager:
         networks: list[Network],
         data_cfg: DataConfig = DEFAULT_DATA_CONFIG,
         cache_location: Optional[Union[Path, str]] = DEFAULT_DATA_CACHE_DIR,
+        n_workers: int = 1,
+        jax_sampling: bool = False,
     ):
         assert len(X) == len(Y) == len(networks)
 
         self.data_cfg = data_cfg
         self.cache_dir = cache_location
+        self.jax_sampling = jax_sampling
         self._raw_X = [np.array(x) for x in X]
         self._raw_Y = [np.array(y) for y in Y]
+        self.n_workers = n_workers
 
         # remove invalid values (NaNs, out of range)
         for i in range(len(self._raw_X)):
@@ -517,12 +547,12 @@ class DataManager:
                 network_data_check(x, y, n)
         logger.info(f"Initialized a DataManager with {len(self._networks)} networks")
 
-    def compute_densities(self, n_workers: int = 8):
+    def compute_densities(self):
         """
         Compute the densities at each data point in the dataset, for each sample,
         using parallel processing at the file level.
         """
-        logger.debug(f"Computing densities in parallel with {n_workers} workers")
+        logger.debug(f"Computing densities in parallel with {self.n_workers} workers")
         logger.debug(f"Using cache dir {self.cache_dir}")
 
         def get_signature(kde_points, kde_bw, x):
@@ -544,27 +574,126 @@ class DataManager:
             for kde_points, kde_bw, x in zip(self._kde_points, self._kde_bws, self._X)
         ]
 
-        with Pool(n_workers) as pool:
-            self._densities = list(
-                tqdm(
-                    pool.imap(compute_single_density, compute_args),
-                    total=len(self._X),
-                    desc="Computing densities",
+        if self.n_workers <= 1:
+            self._densities = [
+                compute_single_density(args)
+                for args in tqdm(compute_args, desc="Computing densities")
+            ]
+        else:
+            with Pool(self.n_workers) as pool:
+                self._densities = list(
+                    tqdm(
+                        pool.imap(compute_single_density, compute_args),
+                        total=len(self._X),
+                        desc="Computing densities",
+                    )
                 )
-            )
 
         logger.debug(f"Done computing {len(self._densities)} densities")
 
-    def get_batches(
-        self, n_batches, batch_size, rng_key=0, concat_along_feature_axis=True, parallel=True
-    ):
+    def get_batches(self, n_batches, batch_size, rng_key=0, concat_along_feature_axis=True):
         """
         Generate batches of data from the dataset.
+        Uses JAX sampling if jax_sampling=True for improved performance.
         """
         if self._densities is None:
             self.compute_densities()
             assert self._densities is not None
 
+        if self.jax_sampling:
+            return self._get_batches_jax(n_batches, batch_size, rng_key, concat_along_feature_axis)
+        else:
+            return self._get_batches_numpy(
+                n_batches, batch_size, rng_key, concat_along_feature_axis
+            )
+
+    def _get_batches_jax(self, n_batches, batch_size, rng_key, concat_along_feature_axis):
+        """JAX-optimized batch generation using vmap and jit compilation."""
+        import jax
+        import jax.numpy as jnp
+
+        # convert to JAX arrays if needed
+        X_jax = [jnp.asarray(x) for x in self._X]
+        Y_jax = [jnp.asarray(y) for y in self._Y]
+        densities_jax = [jnp.asarray(d) for d in self._densities]
+
+        # handle both integer seeds and existing JAX PRNG keys
+        if isinstance(rng_key, (int, np.integer)) or (
+            hasattr(rng_key, "shape") and rng_key.shape == ()
+        ):
+            main_key = jax.random.PRNGKey(rng_key)
+        else:
+            # assume it's already a JAX PRNG key
+            main_key = rng_key
+        keys = jax.random.split(main_key, len(self._X))
+
+        # pad arrays to same size for vmapping
+        max_samples = max(x.shape[0] for x in X_jax)
+        max_features_x = max(x.shape[1] for x in X_jax)
+        max_features_y = max(y.shape[1] for y in Y_jax)
+
+        # create padded arrays for vmapping
+        X_padded = jnp.zeros((len(X_jax), max_samples, max_features_x))
+        Y_padded = jnp.zeros((len(Y_jax), max_samples, max_features_y))
+        densities_padded = jnp.zeros((len(densities_jax), max_samples))
+        valid_lengths = jnp.array([x.shape[0] for x in X_jax])
+
+        for i, (x, y, d) in enumerate(zip(X_jax, Y_jax, densities_jax)):
+            n_samples = x.shape[0]
+            X_padded = X_padded.at[i, :n_samples, : x.shape[1]].set(x)
+            Y_padded = Y_padded.at[i, :n_samples, : y.shape[1]].set(y)
+            densities_padded = densities_padded.at[i, :n_samples].set(d)
+
+        # vmap the sampling function across datasets
+        @jax.vmap
+        def sample_dataset(x, y, densities, valid_length, key):
+            # mask out invalid samples
+            mask = jnp.arange(x.shape[0]) < valid_length
+            x_valid = jnp.where(mask[:, None], x, 0)
+            y_valid = jnp.where(mask[:, None], y, 0)
+            densities_valid = jnp.where(mask, densities, 1e-16)
+
+            # use the existing JAX sampling function
+            x_batch, y_batch = sample_batches_jax(
+                x_valid,
+                y_valid,
+                batch_size,
+                n_batches,
+                densities_valid,
+                self.data_cfg.resampling.density_threshold_quantile,
+                key,
+            )
+            return x_batch, y_batch
+
+        # apply vmapped function
+        xbatches, ybatches = sample_dataset(
+            X_padded, Y_padded, densities_padded, valid_lengths, keys
+        )
+
+        if concat_along_feature_axis:
+            # extract original feature sizes and concatenate
+            x_features = [x.shape[1] for x in self._X]
+            y_features = [y.shape[1] for y in self._Y]
+
+            # slice out the actual features and concatenate
+            x_slices = []
+            y_slices = []
+            for i, (xf, yf) in enumerate(zip(x_features, y_features)):
+                x_slices.append(xbatches[i, :, :, :xf])
+                y_slices.append(ybatches[i, :, :, :yf])
+
+            xbatches = jnp.concatenate(x_slices, axis=2)
+            ybatches = jnp.concatenate(y_slices, axis=2)
+
+            expected_x_features = sum(x_features)
+            expected_y_features = sum(y_features)
+            assert xbatches.shape == (n_batches, batch_size, expected_x_features)
+            assert ybatches.shape == (n_batches, batch_size, expected_y_features)
+
+        return xbatches, ybatches
+
+    def _get_batches_numpy(self, n_batches, batch_size, rng_key, concat_along_feature_axis):
+        """Original NumPy-based batch generation."""
         rng = np.random.RandomState(rng_key)
         all_keys = rng.randint(0, 2**32, size=len(self._X))
 
@@ -586,7 +715,7 @@ class DataManager:
             )
         ]
 
-        if parallel:
+        if self.n_workers > 1:
             pbar = tqdm(total=len(self._networks), desc="Generating batches")
             with Pool(min(len(self._networks), 16)) as pool:
                 all_batches = list(pool.imap(sample_batches, sample_args))
