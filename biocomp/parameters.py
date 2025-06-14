@@ -1,7 +1,21 @@
-from typing import Callable, Optional, Union, Tuple, Any, Dict, List, Sequence, Iterable, Self
+from typing import (
+    Callable,
+    Optional,
+    Union,
+    Tuple,
+    Any,
+    Dict,
+    List,
+    Sequence,
+    Iterable,
+    Self,
+    TypeVar,
+    Type,
+)
 import traceback
 import jax
 import jax.numpy as jnp
+import h5py
 import jax.tree_util as jtu
 from jaxlib.xla_extension import ArrayImpl
 
@@ -15,7 +29,7 @@ from . import utils as ut
 import base64
 import re
 
-log = ut.get_logger(__name__)
+logger = ut.get_logger(__name__)
 
 ### {{{                           --     utils     --
 
@@ -363,17 +377,17 @@ class PTree:
 
         pair_id = (id(self), id(other))
         if pair_id in seen:
-            log.error(f"Loop detected when comparing PTree({id(self)}) with PTree({id(other)})")
-            log.error("Path to loop:")
+            logger.error(f"Loop detected when comparing PTree({id(self)}) with PTree({id(other)})")
+            logger.error("Path to loop:")
             prev_path = seen[pair_id]
             full_path = prev_path + [f"-> loop back to PTree({id(self)})"]
             for step in full_path:
-                log.error(f"  {step}")
-            log.error("Tree structure:")
-            log.error("\nSelf:")
-            log.error("\n".join(self.visualize_tree_structure()))
-            log.error("\nOther:")
-            log.error("\n".join(other.visualize_tree_structure()))
+                logger.error(f"  {step}")
+            logger.error("Tree structure:")
+            logger.error("\nSelf:")
+            logger.error("\n".join(self.visualize_tree_structure()))
+            logger.error("\nOther:")
+            logger.error("\n".join(other.visualize_tree_structure()))
             return False
 
         seen[pair_id] = path[:]
@@ -533,7 +547,7 @@ class PTree:
             if self.is_leaf():
                 keylen = len(key) if key is not None else 0
                 valstr = pretty_str(self.value) if self.value is not None else "∅"
-                valstr = valstr.replace("\n", f'{lineheader}{" " * keylen}     ')
+                valstr = valstr.replace("\n", f"{lineheader}{' ' * keylen}     ")
                 s += f" ⟶ {valstr}"
             else:
                 nitems = len(self.value.items())
@@ -605,9 +619,9 @@ class PTree:
         for k, nd in self.iter_leaves(get_leaf_value=False):
             assert isinstance(nd, PTree), f"branch at {k} is {type(nd)}"
             if isArrayRef(nd.value):
-                assert (
-                    nd.value.tree is self
-                ), f"branch at {k} has wrong tree: {id(nd.value.tree)} != {id(self)}"
+                assert nd.value.tree is self, (
+                    f"branch at {k} has wrong tree: {id(nd.value.tree)} != {id(self)}"
+                )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -858,8 +872,10 @@ class ParameterTree:
             + [f"tags [{tags_str}]"]
             + tag_splitlines[1:]
         )
-        s = with_box(f"Parameter Tree ({'RO' if self.read_only else 'RW'})", content, lw)
-        return s
+        # s = with_box(
+        content_str = "\n".join(content)
+        inner_s = f"Parameter Tree ({'RO' if self.read_only else 'RW'})\n{content_str}\n"
+        return inner_s
 
     def create_tags_if_required(self, tags):
         if isinstance(tags, str):
@@ -938,7 +954,7 @@ class ParameterTree:
         for t in tags:
             if t not in self.tagnames:
                 # raise KeyError(f"Tag {t} not found in ParameterTree")
-                log.warning(f"Tag {t} not found in ParameterTree")
+                logger.warning(f"Tag {t} not found in ParameterTree")
                 return ParameterTree(), self
 
         tag_ids = [self.__tagdict[tag] for tag in tags]
@@ -1097,3 +1113,92 @@ def make_view(
         for from_path, from_id in zip(from_paths, from_ids):
             ref.push_back(f"{from_path}/{leaf}", from_id)
         params[leafpath] = ref
+
+
+def save_ptree_to_hdf5_group(ptree: PTree, h5_group: h5py.Group):
+    """Recursively saves a PTree to an HDF5 group."""
+    for path, leaf_value in ptree.iter_leaves(get_leaf_value=True):
+        current_group = h5_group
+        path_parts = path.path
+        for part in path_parts[:-1]:
+            current_group = current_group.require_group(part)
+
+        leaf_name = path_parts[-1]
+
+        if isArrayRef(leaf_value):
+            ref_group = current_group.require_group(leaf_name)
+            ref_group.attrs["__type__"] = "ArrayRef"
+            ref_group.attrs["paths"] = [str(p) for p in leaf_value.paths]
+            ref_group.attrs["indices"] = np.array(
+                leaf_value.indices, dtype=object if not leaf_value.indices else None
+            )
+
+        elif isinstance(leaf_value, (np.ndarray, jnp.ndarray)):
+            current_group.create_dataset(leaf_name, data=np.asarray(leaf_value))
+
+        elif leaf_value is None:
+            dset = current_group.create_dataset(leaf_name, data=h5py.Empty("f"))
+            dset.attrs["__type__"] = "None"
+
+        else:  # Handle other scalar types
+            dset = current_group.create_dataset(leaf_name, data=leaf_value)
+            dset.attrs["__type__"] = type(leaf_value).__name__
+
+
+def load_ptree_from_hdf5_group(h5_group: h5py.Group, target_ptree: PTree):
+    """Recursively loads an HDF5 group into a PTree, reconstructing ArrayRefs."""
+    refs_to_reconstruct = []
+
+    def visitor(name, obj):
+        if isinstance(obj, h5py.Dataset):
+            path = ParamPath(name)
+            if obj.attrs.get("__type__") == "None":
+                target_ptree[path] = None
+            else:
+                target_ptree[path] = obj[()]  # obj[()] reads the data
+        elif isinstance(obj, h5py.Group):
+            if obj.attrs.get("__type__") == "ArrayRef":
+                # ArrayRef. Defer creation.
+                path = ParamPath(name)
+                paths = [ParamPath(p) for p in obj.attrs["paths"]]
+                indices = tuple(map(tuple, obj.attrs["indices"]))
+                refs_to_reconstruct.append((path, paths, indices))
+
+    h5_group.visititems(visitor)
+
+    # now we can construct the references
+    for path, paths, indices in refs_to_reconstruct:
+        target_ptree[path] = ArrayRef(target_ptree, paths, indices)
+
+
+def save_parameter_tree(pt: ParameterTree, filename: str):
+    """Saves a ParameterTree to an HDF5 file."""
+    with h5py.File(filename, "w") as f:
+        f.attrs["tagnames"] = pt.tagnames
+        f.attrs["read_only"] = pt.read_only
+        data_group = f.create_group("data")
+        save_ptree_to_hdf5_group(pt.data, data_group)
+        tags_group = f.create_group("tags")
+        save_ptree_to_hdf5_group(pt.tags, tags_group)
+    logger.info(f"Saved ParameterTree to {filename}")
+
+
+def load_parameter_tree(filename: str) -> ParameterTree:
+    """Loads a ParameterTree from an HDF5 file."""
+    with h5py.File(filename, "r") as f:
+        tagnames = list(f.attrs.get("tagnames", []))
+        read_only = bool(f.attrs.get("read_only", False))
+
+        data_tree = PTree()
+        if "data" in f:
+            load_ptree_from_hdf5_group(f["data"], data_tree)
+
+        tags_tree = PTree()
+        if "tags" in f:
+            load_ptree_from_hdf5_group(f["tags"], tags_tree)
+
+        pt = ParameterTree(data=data_tree, tags=tags_tree, tagnames=tagnames)
+        pt.set_read_only(read_only)
+
+    logger.info(f"Loaded ParameterTree from {filename}")
+    return pt
