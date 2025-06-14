@@ -359,6 +359,8 @@ def source_with_pos(
     bias_offset=0.0,
     **_,
 ) -> LayerInstance:
+    """Source node with position encoding. Idea is that each Transcription Unit position in the plasmid might have different yields"""
+
     assert len(input_shapes) == 1, f"A source node should have 1 input, got {len(input_shapes)}"
 
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
@@ -404,7 +406,7 @@ def source_with_pos(
         )(np.arange(max_L1s)[:n_outputs] / max_L1s)
 
         # add skip connection and apply activation
-        res = ans + jnp.broadcast_to(value, ans.shape)
+        res = 0.5 * ans + 0.5 * jnp.broadcast_to(value, ans.shape)
         activated = outer_activation(res)
         assert activated.shape == (n_outputs, *input_shapes[0]), (
             f"In source_with_pos: {activated.shape} != {(n_outputs, *input_shapes[0])}"
@@ -528,7 +530,7 @@ def inv_source_with_pos(
 
         # add skip connection and apply activation
         mlp_out_reshaped = mlp_out.reshape(value.shape)
-        result = outer_activation(mlp_out_reshaped + value)
+        result = outer_activation(0.5 * mlp_out_reshaped + 0.5 * value)
 
         return result
 
@@ -936,7 +938,7 @@ def transform_nn(
             assert rates.shape == (len(input_shapes), rate_dim)
             assert quantile.shape == (len(input_shapes) + 1,)
         except AssertionError as e:
-            logger.error(f"Shape assertion failed in transform_nn apply:")
+            logger.error("Shape assertion failed in transform_nn apply:")
             logger.error(f"  val.shape: {val.shape}")
             logger.error(f"  expected val.shape: {(len(input_shapes), *input_shapes[0])}")
             logger.error(f"  rates.shape: {rates.shape}")
@@ -971,7 +973,7 @@ def transform_nn(
         input_mean = jnp.mean(val, axis=0)
         alpha = params[f"shared/{shared_layer_name}/residual_alpha"]
         beta = params[f"shared/{shared_layer_name}/residual_beta"]
-        # apply softmax normalization
+        # apply softmax normalization to alpha and beta
         alpha_norm = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
         beta_norm = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
         return alpha_norm * input_mean + beta_norm * ans
@@ -1063,9 +1065,10 @@ def sequestron_ERN(
         pos_mean = jnp.mean(pos)
         alpha = param_f(f"{shared_layer_name}/residual_alpha")
         beta = param_f(f"{shared_layer_name}/residual_beta")
+        # apply softmax normalization to alpha and beta
+        alpha = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
+        beta = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
         return alpha * (pos_mean - neg_mean) + beta * res
-
-        return outer_activation(res + pos_mean - neg_mean)
 
     def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
         # --------- quantile var
@@ -1220,18 +1223,17 @@ def grouped_output(
         node_id: ArrayLike,
         key,
     ):
-        inputs = jnp.asarray(inputs)
+        inputs_arr = jnp.array(inputs)
 
-        assert len(inputs) == len(input_shapes)
-        quantiles_per_node = len(input_shapes)
+        assert len(inputs_arr) == len(input_shapes)
 
         qid = params[f"local/{layer_name}/quantile_variable_id"][node_id]
         res = vmap(
             partial(MLP_head, rng_key=key, params=params),
-        )(inputs, quantiles[qid])
+        )(inputs_arr, quantiles[qid])
 
-        ans = outer_activation(res)
-        return ans + inputs
+        pre = 0.5 * res + 0.5 * inputs_arr
+        return outer_activation(pre)
 
     output_shape = [(1,)] * len(input_shapes)
 
