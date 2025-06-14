@@ -205,8 +205,8 @@ def lerp(a, b, t):
 def sorting_loss(
     stack,
     training_config,
-    negative_grad_penalty=1.0, # favor monotonicity
-    kl_weight=0.1, 
+    negative_grad_penalty=1.0,  # favor monotonicity
+    kl_weight=0.1,
     sorting_mse_weight=0.1,
     percent_batch_used=1.0,
     use_same_key=False,
@@ -395,15 +395,13 @@ def start(
 
     stack, params = init_stack(compute_config, dman, training_config.n_replicates, init_key)
 
-    if xy_batches is not None:
-        xbatches, ybatches = xy_batches
-    else:
+    def get_new_batches(rng_key=batch_key):
         xbatches, ybatches = generate_batches(
             dman,
             training_config.n_replicates,
             training_config.n_batches,
             training_config.batch_size,
-            batch_key,
+            rng_key,
         )
         assert xbatches.shape == (
             training_config.n_replicates,
@@ -413,6 +411,21 @@ def start(
         ), (
             f"xbatches shape mismatch: {xbatches.shape} != ({training_config.n_replicates}, {training_config.n_batches}, {training_config.batch_size}, {stack.nb_inputs})"
         )
+        assert ybatches.shape == (
+            training_config.n_replicates,
+            training_config.n_batches,
+            training_config.batch_size,
+            stack.nb_outputs,
+        ), (
+            f"ybatches shape mismatch: {ybatches.shape} != ({training_config.n_replicates}, {training_config.n_batches}, {training_config.batch_size}, {stack.nb_outputs})"
+        )
+
+        return jnp.asarray(xbatches), jnp.asarray(ybatches)
+
+    if xy_batches is not None:
+        xbatches, ybatches = xy_batches
+    else:
+        xbatches, ybatches = get_new_batches()
 
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
 
@@ -549,22 +562,12 @@ def start(
     epoch = -1
     step_per_epoch = training_config.n_batches // training_config.batches_per_step
 
-    def reshuffle_batches(xbatches, ybatches, key):
-        # shape is (n_replicates, n_batches, batch_size, n_inputs)
-        # so make it (nrepl, n_batches * batch_size, n_inputs)
-        # then shuffle, then reshape back
-        reshaped_x = xbatches.reshape(xbatches.shape[0], -1, xbatches.shape[-1])
-        reshaped_y = ybatches.reshape(ybatches.shape[0], -1, ybatches.shape[-1])
-        perm = jax.random.permutation(key, reshaped_x.shape[1])
-        return reshaped_x[:, perm, :].reshape(xbatches.shape), reshaped_y[:, perm, :].reshape(
-            ybatches.shape
-        )
-
     for i, step_key in enumerate(jax.random.split(loop_key, total_steps), 1):
         if i % (step_per_epoch) == 0:
             epoch += 1
             logger.info(f"Starting epoch {epoch}")
-            xbatches, ybatches = reshuffle_batches(xbatches, ybatches, step_key)
+            b_key = jax.random.fold_in(step_key, epoch)
+            xbatches, ybatches = get_new_batches(b_key)
 
         t0 = time.time()
         xb = get_looped_slice(
