@@ -1063,8 +1063,8 @@ def sequestron_ERN(
         # add residual connections
         neg_mean = jnp.mean(neg)
         pos_mean = jnp.mean(pos)
-        alpha = param_f(f"{shared_layer_name}/residual_alpha")
-        beta = param_f(f"{shared_layer_name}/residual_beta")
+        alpha = param_f(f"{shared_layer_name}/residual_alpha", init_f=lambda: jnp.array(alpha_init))
+        beta = param_f(f"{shared_layer_name}/residual_beta", init_f=lambda: jnp.array(beta_init))
         # apply softmax normalization to alpha and beta
         alpha = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
         beta = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
@@ -1078,15 +1078,6 @@ def sequestron_ERN(
             params,
             f"shared/{shared_layer_name}/affinities",
             init_f=uniform_initializer(key, (len(affinity_names), affinity_dim)),
-        )
-
-        init_if_needed(
-            params,
-            f"shared/{shared_layer_name}/residual_alpha",
-            init_f=lambda: jnp.array(alpha_init),
-        )
-        init_if_needed(
-            params, f"shared/{shared_layer_name}/residual_beta", init_f=lambda: jnp.array(beta_init)
         )
 
         # store affinity references
