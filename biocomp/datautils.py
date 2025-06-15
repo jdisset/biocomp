@@ -485,7 +485,7 @@ class DataManager:
         data_cfg: DataConfig = DEFAULT_DATA_CONFIG,
         cache_location: Optional[Union[Path, str]] = DEFAULT_DATA_CACHE_DIR,
         n_workers: int = 1,
-        jax_sampling: bool = False,
+        jax_sampling: bool = True,
     ):
         assert len(X) == len(Y) == len(networks)
 
