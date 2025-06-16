@@ -587,6 +587,7 @@ def start(
 
         step_history["step_time"] = time.time() - t0
         step_history["latest_params"] = params
+        step_history["opt_state"] = opt_state
 
         if "loss" in step_history:
             loss_history.append(step_history["loss"])
