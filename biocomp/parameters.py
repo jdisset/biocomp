@@ -699,6 +699,12 @@ class ArrayRef:
     def __hash__(self):
         return hash(self.get().tobytes())
 
+    def __getitem__(self, key):
+        if isinstance(key, (int, slice)):
+            return self.view()[key]
+        else:
+            raise TypeError(f"ArrayRef can only be indexed with int or slice, not {type(key)}")
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -1113,6 +1119,18 @@ def make_view(
         for from_path, from_id in zip(from_paths, from_ids):
             ref.push_back(f"{from_path}/{leaf}", from_id)
         params[leafpath] = ref
+
+
+def get_path_components(name_obj):
+    """
+    Extract the components of a path object, handling both ParamPath and ArrayRefPath.
+    """
+    if hasattr(name_obj, "actual_path"):  # ArrayRefPath
+        return name_obj.actual_path.path
+    elif hasattr(name_obj, "path"):  # ParamPath
+        return name_obj.path
+    else:  # tuple/list
+        return list(name_obj)
 
 
 def save_ptree_to_hdf5_group(ptree: PTree, h5_group: h5py.Group):
