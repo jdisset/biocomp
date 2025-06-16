@@ -39,6 +39,7 @@ dependencies = [
     "xxhash",
 	"dracon",
 	"jax-tqdm",
+	"pytest",
 ]
 
 [tool.hatch.build.targets.wheel]
