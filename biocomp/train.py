@@ -13,6 +13,8 @@ import time
 from typing import List, Tuple, Callable, Optional, NamedTuple
 from pydantic import Field
 from biocomp.logging_config import get_logger
+import asyncio
+from .async_logger import AsyncLoggerManager
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                     --     helper functions     --
@@ -468,7 +470,7 @@ class TrainingConfig(ArbitraryModel):
 ### {{{                       --     main training function     --
 
 
-def start(
+async def start(
     dman: du.DataManager,
     training_config: TrainingConfig,
     compute_config,
@@ -655,76 +657,91 @@ def start(
 
     # --- main training loop
     loggers = loggers or []
-
-    for t, l in loggers:
-        # call loggers at the beginning of the training if they have a period of 0
-        if t == 0:
-            l(step=0, training_config=training_config)
-
-    logger.info(f"Begin training for {total_steps} steps")
-
-    step_history, loss_history = {}, []
-
-    epoch = -1
-    step_per_epoch = training_config.n_batches // training_config.batches_per_step
-
-    for i, step_key in enumerate(jax.random.split(loop_key, total_steps), 1):
-        if i % (step_per_epoch) == 0:
-            epoch += 1
-            logger.info(f"Starting epoch {epoch}")
-            b_key = jax.random.fold_in(step_key, epoch)
-            xbatches, ybatches = get_new_batches(b_key)
-
-        t0 = time.time()
-        xb = get_looped_slice(
-            xbatches,
-            i * training_config.batches_per_step,
-            (i + 1) * training_config.batches_per_step,
-            axis=1,
+    
+    # initialize async logger manager
+    async with AsyncLoggerManager() as logger_manager:
+        # submit start-of-training loggers (period=0)
+        start_tasks = await logger_manager.submit_logger_batch(
+            step=0,
+            logger_callbacks=loggers,
+            training_config=training_config,
+            step_history={},
+            xbatches=None,
+            ybatches=None,
+            stack=stack
         )
-        yb = get_looped_slice(
-            ybatches,
-            i * training_config.batches_per_step,
-            (i + 1) * training_config.batches_per_step,
-            axis=1,
-        )
+        # wait for start loggers to complete before training begins
+        if start_tasks:
+            await asyncio.gather(*start_tasks, return_exceptions=True)
 
-        params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
+        logger.info(f"Begin training for {total_steps} steps")
 
-        step_history["step_time"] = time.time() - t0
-        step_history["latest_params"] = params
-        step_history["opt_state"] = opt_state
+        step_history, loss_history = {}, []
 
-        if "loss" in step_history:
-            loss_history.append(step_history["loss"])
+        epoch = -1
+        step_per_epoch = training_config.n_batches // training_config.batches_per_step
 
-        qvalues_dir = ParamPath("shared/quantization/values")
-        qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
+        for i, step_key in enumerate(jax.random.split(loop_key, total_steps), 1):
+            # wait for previous step's loggers to complete before starting new step
+            if i > 1:  # no previous loggers for first step
+                await logger_manager.wait_for_previous_loggers()
+            
+            if i % (step_per_epoch) == 0:
+                epoch += 1
+                logger.info(f"Starting epoch {epoch}")
+                b_key = jax.random.fold_in(step_key, epoch)
+                xbatches, ybatches = get_new_batches(b_key)
 
-        for t, l in loggers:
-            if t is not None:
-                if t == 0 or (i % t == 0 and t > 0):
-                    logger.debug(f"Calling logger {l} at step {i}")
-                    l(
-                        step=i,
-                        training_config=training_config,
-                        step_history=step_history,
-                        xbatches=xbatches,
-                        ybatches=ybatches,
-                        stack=stack,
-                    )
+            t0 = time.time()
+            xb = get_looped_slice(
+                xbatches,
+                i * training_config.batches_per_step,
+                (i + 1) * training_config.batches_per_step,
+                axis=1,
+            )
+            yb = get_looped_slice(
+                ybatches,
+                i * training_config.batches_per_step,
+                (i + 1) * training_config.batches_per_step,
+                axis=1,
+            )
 
-    for t, l in loggers:
-        if t is None or t == -1:
-            logger.debug(f"Calling logger {l} at the end of training")
-            l(
-                step=total_steps,
+            params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
+
+            step_history["step_time"] = time.time() - t0
+            step_history["latest_params"] = params
+            step_history["opt_state"] = opt_state
+
+            if "loss" in step_history:
+                loss_history.append(step_history["loss"])
+
+            qvalues_dir = ParamPath("shared/quantization/values")
+            qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
+
+            # submit loggers for current step asynchronously
+            logger_manager.pending_tasks = await logger_manager.submit_logger_batch(
+                step=i,
+                logger_callbacks=loggers,
                 training_config=training_config,
                 step_history=step_history,
                 xbatches=xbatches,
                 ybatches=ybatches,
-                stack=stack,
+                stack=stack
             )
+
+        # wait for final step's loggers to complete
+        await logger_manager.wait_for_previous_loggers()
+        
+        # handle end-of-training loggers
+        await logger_manager.submit_end_loggers(
+            step=total_steps,
+            logger_callbacks=loggers,
+            training_config=training_config,
+            step_history=step_history,
+            xbatches=xbatches,
+            ybatches=ybatches,
+            stack=stack
+        )
 
     logger.info(f"End of training for {training_config.n_epochs} epochs")
 
