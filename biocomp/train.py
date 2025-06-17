@@ -82,13 +82,13 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
 
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
         dynamic = optax.apply_updates(dynamic, updates)
-        
+
         # Handle empty static parameters properly
         if static.data:  # If static has data
             params = ParameterTree.merge(static, dynamic)
         else:  # If static is empty, just use dynamic
             params = dynamic
-        
+
         # Try to extract learning rate from optimizer state (best effort)
         learning_rate = None
         try:
@@ -96,30 +96,39 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
             # opt_state is typically a tuple of states from chained optimizers
             if isinstance(opt_state, tuple):
                 for state_component in opt_state:
-                    if hasattr(state_component, 'hyperparams') and 'learning_rate' in state_component.hyperparams:
-                        learning_rate = state_component.hyperparams['learning_rate']
+                    if (
+                        hasattr(state_component, "hyperparams")
+                        and "learning_rate" in state_component.hyperparams
+                    ):
+                        learning_rate = state_component.hyperparams["learning_rate"]
                         break
-            
+
             # Method 2: Check direct hyperparams access
-            if learning_rate is None and hasattr(opt_state, 'hyperparams') and 'learning_rate' in opt_state.hyperparams:
-                learning_rate = opt_state.hyperparams['learning_rate']
-            
+            if (
+                learning_rate is None
+                and hasattr(opt_state, "hyperparams")
+                and "learning_rate" in opt_state.hyperparams
+            ):
+                learning_rate = opt_state.hyperparams["learning_rate"]
+
             # Method 3: Try tree_get as fallback (might fail with multiple matches)
             if learning_rate is None:
                 try:
                     learning_rate = optax.tree_utils.tree_get(
-                        opt_state, 'learning_rate',
+                        opt_state,
+                        "learning_rate",
                         default=None,
-                        filtering=lambda path, value: isinstance(value, (float, int)) or (hasattr(value, 'shape') and hasattr(value, 'dtype'))
+                        filtering=lambda path, value: isinstance(value, (float, int))
+                        or (hasattr(value, "shape") and hasattr(value, "dtype")),
                     )
                 except (KeyError, ValueError):
                     # Multiple learning_rate entries or other tree_get issues
                     pass
-                    
+
         except Exception:
             # If all methods fail, learning_rate remains None
             pass
-        
+
         res = {
             "params": params,
             "loss": loss,
@@ -131,11 +140,11 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
             "key": key,
             **aux,
         }
-        
+
         # Add learning rate to result if available
         if learning_rate is not None:
             res["learning_rate"] = learning_rate
-            
+
         return res
 
     training_step = base_training_step
@@ -403,32 +412,33 @@ class TrainingConfig(ArbitraryModel):
 
         main_chain = [comp() for comp in self.optimizer_stack]
         return optax.chain(create_counter(), *main_chain)
-    
+
     def create_optimizer_with_lr_injection(self):
         """Create optimizer with learning rate injection for debugging purposes."""
         import optax
-        
+
         # Try to detect and inject learning rates for better tracking
         main_chain = []
-        
+
         for comp in self.optimizer_stack:
             # Check if this component has a learning_rate parameter
-            if hasattr(comp, 'kwargs') and 'learning_rate' in comp.kwargs:
+            if hasattr(comp, "kwargs") and "learning_rate" in comp.kwargs:
                 # Get the original function
-                if hasattr(comp, 'func'):
+                if hasattr(comp, "func"):
                     original_func = comp.func
-                elif hasattr(comp, '_func'):
+                elif hasattr(comp, "_func"):
                     original_func = comp._func
                 else:
                     # Fallback to regular instantiation
                     main_chain.append(comp())
                     continue
-                
+
                 # Handle string function references
                 if isinstance(original_func, str):
                     import importlib
+
                     try:
-                        module_name, func_name = original_func.rsplit('.', 1)
+                        module_name, func_name = original_func.rsplit(".", 1)
                         module = importlib.import_module(module_name)
                         func = getattr(module, func_name)
                     except (ValueError, ImportError, AttributeError):
@@ -437,22 +447,22 @@ class TrainingConfig(ArbitraryModel):
                         continue
                 else:
                     func = original_func
-                
+
                 try:
                     # For learning rate injection to work, we need to resolve PartialFunctionResult first
-                    lr_value = comp.kwargs['learning_rate']
-                    if hasattr(lr_value, 'get_impl'):
+                    lr_value = comp.kwargs["learning_rate"]
+                    if hasattr(lr_value, "get_impl"):
                         # This is a PartialFunctionResult, resolve it to get the actual schedule
                         lr_schedule = lr_value.get_impl()()  # Call the schedule function
                     else:
                         lr_schedule = lr_value
-                    
+
                     # Create wrapped version with inject_hyperparams
                     wrapped_func = optax.inject_hyperparams(func)
-                    
+
                     # Get all other kwargs (excluding learning_rate)
-                    other_kwargs = {k: v for k, v in comp.kwargs.items() if k != 'learning_rate'}
-                    
+                    other_kwargs = {k: v for k, v in comp.kwargs.items() if k != "learning_rate"}
+
                     # Create the optimizer instance with injected learning rate
                     optimizer_instance = wrapped_func(learning_rate=lr_schedule, **other_kwargs)
                     main_chain.append(optimizer_instance)
@@ -461,7 +471,7 @@ class TrainingConfig(ArbitraryModel):
                     main_chain.append(comp())
             else:
                 main_chain.append(comp())
-        
+
         return optax.chain(create_counter(), *main_chain)
 
 
@@ -476,6 +486,7 @@ async def start(
     compute_config,
     loggers: Optional[List[Tuple[int, Callable]]] = None,
     xy_batches: Optional[Tuple] = None,
+    sync_loggers: bool = False,
 ):
     import optax
     import jax
@@ -657,18 +668,16 @@ async def start(
 
     # --- main training loop
     loggers = loggers or []
-    
+
     # initialize async logger manager
-    async with AsyncLoggerManager() as logger_manager:
+    async with AsyncLoggerManager(sync_loggers=sync_loggers) as logger_manager:
         # submit start-of-training loggers (period=0)
         start_tasks = await logger_manager.submit_logger_batch(
             step=0,
             logger_callbacks=loggers,
             training_config=training_config,
             step_history={},
-            xbatches=None,
-            ybatches=None,
-            stack=stack
+            stack=stack,
         )
         # wait for start loggers to complete before training begins
         if start_tasks:
@@ -682,10 +691,6 @@ async def start(
         step_per_epoch = training_config.n_batches // training_config.batches_per_step
 
         for i, step_key in enumerate(jax.random.split(loop_key, total_steps), 1):
-            # wait for previous step's loggers to complete before starting new step
-            if i > 1:  # no previous loggers for first step
-                await logger_manager.wait_for_previous_loggers()
-            
             if i % (step_per_epoch) == 0:
                 epoch += 1
                 logger.info(f"Starting epoch {epoch}")
@@ -715,32 +720,31 @@ async def start(
             if "loss" in step_history:
                 loss_history.append(step_history["loss"])
 
-            qvalues_dir = ParamPath("shared/quantization/values")
-            qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
+            # qvalues_dir = ParamPath("shared/quantization/values")
+            # qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
 
-            # submit loggers for current step asynchronously
-            logger_manager.pending_tasks = await logger_manager.submit_logger_batch(
+            await logger_manager.wait_for_all_loggers()
+            logger_submit_start = time.time()
+            await logger_manager.submit_logger_batch(
                 step=i,
                 logger_callbacks=loggers,
                 training_config=training_config,
                 step_history=step_history,
-                xbatches=xbatches,
-                ybatches=ybatches,
-                stack=stack
+                stack=stack,
             )
+            logger_submit_time = time.time() - logger_submit_start
+            if logger_submit_time > 0.1:  # only log if significant time
+                logger.debug(
+                    f"Step {i}: Logger submission took {logger_submit_time:.2f}s (backpressure handling)"
+                )
 
-        # wait for final step's loggers to complete
-        await logger_manager.wait_for_previous_loggers()
-        
-        # handle end-of-training loggers
+        await logger_manager.wait_for_all_loggers()
         await logger_manager.submit_end_loggers(
             step=total_steps,
             logger_callbacks=loggers,
             training_config=training_config,
             step_history=step_history,
-            xbatches=xbatches,
-            ybatches=ybatches,
-            stack=stack
+            stack=stack,
         )
 
     logger.info(f"End of training for {training_config.n_epochs} epochs")
