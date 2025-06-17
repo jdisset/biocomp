@@ -80,7 +80,44 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
 
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
         dynamic = optax.apply_updates(dynamic, updates)
-        params = ParameterTree.merge(static, dynamic)
+        
+        # Handle empty static parameters properly
+        if static.data:  # If static has data
+            params = ParameterTree.merge(static, dynamic)
+        else:  # If static is empty, just use dynamic
+            params = dynamic
+        
+        # Try to extract learning rate from optimizer state (best effort)
+        learning_rate = None
+        try:
+            # Method 1: Check for hyperparams in individual state components
+            # opt_state is typically a tuple of states from chained optimizers
+            if isinstance(opt_state, tuple):
+                for state_component in opt_state:
+                    if hasattr(state_component, 'hyperparams') and 'learning_rate' in state_component.hyperparams:
+                        learning_rate = state_component.hyperparams['learning_rate']
+                        break
+            
+            # Method 2: Check direct hyperparams access
+            if learning_rate is None and hasattr(opt_state, 'hyperparams') and 'learning_rate' in opt_state.hyperparams:
+                learning_rate = opt_state.hyperparams['learning_rate']
+            
+            # Method 3: Try tree_get as fallback (might fail with multiple matches)
+            if learning_rate is None:
+                try:
+                    learning_rate = optax.tree_utils.tree_get(
+                        opt_state, 'learning_rate',
+                        default=None,
+                        filtering=lambda path, value: isinstance(value, (float, int)) or (hasattr(value, 'shape') and hasattr(value, 'dtype'))
+                    )
+                except (KeyError, ValueError):
+                    # Multiple learning_rate entries or other tree_get issues
+                    pass
+                    
+        except Exception:
+            # If all methods fail, learning_rate remains None
+            pass
+        
         res = {
             "params": params,
             "loss": loss,
@@ -92,6 +129,11 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
             "key": key,
             **aux,
         }
+        
+        # Add learning rate to result if available
+        if learning_rate is not None:
+            res["learning_rate"] = learning_rate
+            
         return res
 
     training_step = base_training_step
@@ -359,6 +401,66 @@ class TrainingConfig(ArbitraryModel):
 
         main_chain = [comp() for comp in self.optimizer_stack]
         return optax.chain(create_counter(), *main_chain)
+    
+    def create_optimizer_with_lr_injection(self):
+        """Create optimizer with learning rate injection for debugging purposes."""
+        import optax
+        
+        # Try to detect and inject learning rates for better tracking
+        main_chain = []
+        
+        for comp in self.optimizer_stack:
+            # Check if this component has a learning_rate parameter
+            if hasattr(comp, 'kwargs') and 'learning_rate' in comp.kwargs:
+                # Get the original function
+                if hasattr(comp, 'func'):
+                    original_func = comp.func
+                elif hasattr(comp, '_func'):
+                    original_func = comp._func
+                else:
+                    # Fallback to regular instantiation
+                    main_chain.append(comp())
+                    continue
+                
+                # Handle string function references
+                if isinstance(original_func, str):
+                    import importlib
+                    try:
+                        module_name, func_name = original_func.rsplit('.', 1)
+                        module = importlib.import_module(module_name)
+                        func = getattr(module, func_name)
+                    except (ValueError, ImportError, AttributeError):
+                        # Fallback if we can't resolve the string
+                        main_chain.append(comp())
+                        continue
+                else:
+                    func = original_func
+                
+                try:
+                    # For learning rate injection to work, we need to resolve PartialFunctionResult first
+                    lr_value = comp.kwargs['learning_rate']
+                    if hasattr(lr_value, 'get_impl'):
+                        # This is a PartialFunctionResult, resolve it to get the actual schedule
+                        lr_schedule = lr_value.get_impl()()  # Call the schedule function
+                    else:
+                        lr_schedule = lr_value
+                    
+                    # Create wrapped version with inject_hyperparams
+                    wrapped_func = optax.inject_hyperparams(func)
+                    
+                    # Get all other kwargs (excluding learning_rate)
+                    other_kwargs = {k: v for k, v in comp.kwargs.items() if k != 'learning_rate'}
+                    
+                    # Create the optimizer instance with injected learning rate
+                    optimizer_instance = wrapped_func(learning_rate=lr_schedule, **other_kwargs)
+                    main_chain.append(optimizer_instance)
+                except Exception:
+                    # Fallback to regular instantiation if injection fails
+                    main_chain.append(comp())
+            else:
+                main_chain.append(comp())
+        
+        return optax.chain(create_counter(), *main_chain)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -429,7 +531,11 @@ def start(
 
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
 
-    optimizer = training_config.optimizer
+    # Use learning rate injection if learning_rate is requested in history
+    if "learning_rate" in training_config.keep_in_history:
+        optimizer = training_config.create_optimizer_with_lr_injection()
+    else:
+        optimizer = training_config.optimizer
     opt_state = jax.vmap(optimizer.init)(dynamic)
 
     logger.info(
