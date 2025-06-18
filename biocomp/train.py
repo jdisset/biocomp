@@ -683,7 +683,7 @@ async def start(
         if start_tasks:
             await asyncio.gather(*start_tasks, return_exceptions=True)
 
-        logger.info(f"Begin training for {total_steps} steps")
+        logger.info(f"Running for {total_steps} iterations")
 
         step_history, loss_history = {}, []
 
@@ -691,52 +691,54 @@ async def start(
         step_per_epoch = training_config.n_batches // training_config.batches_per_step
 
         for i, step_key in enumerate(jax.random.split(loop_key, total_steps), 1):
-            if i % (step_per_epoch) == 0:
-                epoch += 1
-                logger.info(f"Starting epoch {epoch}")
-                b_key = jax.random.fold_in(step_key, epoch)
-                xbatches, ybatches = get_new_batches(b_key)
+            if i % max(1, total_steps // 20) == 0:  # Log every 5% progress
+                logger.info(f"Training progress: [{i}/{total_steps}] ({i/total_steps*100:.1f}%)")
+                if i % (step_per_epoch) == 0:
+                    epoch += 1
+                    logger.info(f"Starting epoch {epoch}")
+                    b_key = jax.random.fold_in(step_key, epoch)
+                    xbatches, ybatches = get_new_batches(b_key)
 
-            t0 = time.time()
-            xb = get_looped_slice(
-                xbatches,
-                i * training_config.batches_per_step,
-                (i + 1) * training_config.batches_per_step,
-                axis=1,
-            )
-            yb = get_looped_slice(
-                ybatches,
-                i * training_config.batches_per_step,
-                (i + 1) * training_config.batches_per_step,
-                axis=1,
-            )
-
-            params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
-
-            step_history["step_time"] = time.time() - t0
-            step_history["latest_params"] = params
-            step_history["opt_state"] = opt_state
-
-            if "loss" in step_history:
-                loss_history.append(step_history["loss"])
-
-            # qvalues_dir = ParamPath("shared/quantization/values")
-            # qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
-
-            await logger_manager.wait_for_all_loggers()
-            logger_submit_start = time.time()
-            await logger_manager.submit_logger_batch(
-                step=i,
-                logger_callbacks=loggers,
-                training_config=training_config,
-                step_history=step_history,
-                stack=stack,
-            )
-            logger_submit_time = time.time() - logger_submit_start
-            if logger_submit_time > 0.1:  # only log if significant time
-                logger.debug(
-                    f"Step {i}: Logger submission took {logger_submit_time:.2f}s (backpressure handling)"
+                t0 = time.time()
+                xb = get_looped_slice(
+                    xbatches,
+                    i * training_config.batches_per_step,
+                    (i + 1) * training_config.batches_per_step,
+                    axis=1,
                 )
+                yb = get_looped_slice(
+                    ybatches,
+                    i * training_config.batches_per_step,
+                    (i + 1) * training_config.batches_per_step,
+                    axis=1,
+                )
+
+                params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
+
+                step_history["step_time"] = time.time() - t0
+                step_history["latest_params"] = params
+                step_history["opt_state"] = opt_state
+
+                if "loss" in step_history:
+                    loss_history.append(step_history["loss"])
+
+                # qvalues_dir = ParamPath("shared/quantization/values")
+                # qvalues = tuple(map(lambda t: t[1], params[qvalues_dir].iter_leaves()))
+
+                await logger_manager.wait_for_all_loggers()
+                logger_submit_start = time.time()
+                await logger_manager.submit_logger_batch(
+                    step=i,
+                    logger_callbacks=loggers,
+                    training_config=training_config,
+                    step_history=step_history,
+                    stack=stack,
+                )
+                logger_submit_time = time.time() - logger_submit_start
+                if logger_submit_time > 0.1:  # only log if significant time
+                    logger.debug(
+                        f"Step {i}: Logger submission took {logger_submit_time:.2f}s (backpressure handling)"
+                    )
 
         await logger_manager.wait_for_all_loggers()
         await logger_manager.submit_end_loggers(

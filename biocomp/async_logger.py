@@ -45,7 +45,8 @@ class AsyncLoggerManager:
                 )
         except Exception as e:
             logger.error(f"Logger callback failed at step {step}: {e}")
-            logger.debug(f"Full traceback: {traceback.format_exc()}")
+            logger.exception(e)
+            return
 
     async def submit_logger_batch(
         self, step: int, logger_callbacks: List[Tuple[int, Callable]], **kwargs
@@ -96,7 +97,8 @@ class AsyncLoggerManager:
             try:
                 await asyncio.gather(*self.pending_tasks, return_exceptions=True)
             except Exception as e:
-                logger.error(f"Error waiting for logger tasks: {e}")
+                logger.error("Error waiting for logger tasks: %s", e)
+                logger.exception(e)
             finally:
                 self.pending_tasks.clear()
 
