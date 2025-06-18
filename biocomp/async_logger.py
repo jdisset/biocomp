@@ -31,8 +31,8 @@ class AsyncLoggerManager:
                 callback(
                     step,
                     kwargs.get("training_config"),
-                    kwargs.get("step_history"),
-                    kwargs.get("stack"),
+                    step_history=kwargs.get("step_history"),
+                    stack=kwargs.get("stack"),
                 )
             else:
                 loop = asyncio.get_event_loop()
@@ -42,7 +42,6 @@ class AsyncLoggerManager:
                     step,
                     kwargs.get("training_config"),
                     kwargs.get("step_history"),
-                    kwargs.get("stack"),
                 )
         except Exception as e:
             logger.error(f"Logger callback failed at step {step}: {e}")

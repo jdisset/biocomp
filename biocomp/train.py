@@ -522,17 +522,17 @@ async def start(
             training_config.n_replicates,
             training_config.n_batches,
             training_config.batch_size,
-            stack.nb_inputs,
+            stack.total_nb_of_inputs,
         ), (
-            f"xbatches shape mismatch: {xbatches.shape} != ({training_config.n_replicates}, {training_config.n_batches}, {training_config.batch_size}, {stack.nb_inputs})"
+            f"xbatches shape mismatch: {xbatches.shape} != ({training_config.n_replicates}, {training_config.n_batches}, {training_config.batch_size}, {stack.total_nb_of_inputs}"
         )
         assert ybatches.shape == (
             training_config.n_replicates,
             training_config.n_batches,
             training_config.batch_size,
-            stack.nb_outputs,
+            stack.total_nb_of_outputs,
         ), (
-            f"ybatches shape mismatch: {ybatches.shape} != ({training_config.n_replicates}, {training_config.n_batches}, {training_config.batch_size}, {stack.nb_outputs})"
+            f"ybatches shape mismatch: {ybatches.shape} != ({training_config.n_replicates}, {training_config.n_batches}, {training_config.batch_size}, {stack.total_nb_of_outputs})"
         )
 
         return jnp.asarray(xbatches), jnp.asarray(ybatches)

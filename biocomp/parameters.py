@@ -960,7 +960,7 @@ class ParameterTree:
         for t in tags:
             if t not in self.tagnames:
                 # raise KeyError(f"Tag {t} not found in ParameterTree")
-                logger.warning(f"Tag {t} not found in ParameterTree")
+                logger.debug(f"Tag {t} not found in ParameterTree")
                 return ParameterTree(), self
 
         tag_ids = [self.__tagdict[tag] for tag in tags]
