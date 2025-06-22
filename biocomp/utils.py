@@ -567,8 +567,10 @@ def generate_full_nested_config(
 
 BIOCOMP_ROOT_PATH = os.getenv("BIOCOMP_ROOT")
 if BIOCOMP_ROOT_PATH is None:
-    logger.warning("BIOCOMP_ROOT not defined. Using default paths.")
-    BIOCOMP_ROOT_PATH = "~/Dropbox (MIT)/Biocomp/"
+    raise RuntimeError(
+        "BIOCOMP_ROOT environment variable is not set. "
+        "Please set it to the root directory of the biocomp package."
+    )
 
 DEFAULT_LIB_PATH = Path(BIOCOMP_ROOT_PATH).expanduser() / "partsdb.sqlite"
 DEFAULT_LIB_PATH = f"sqlite:///{DEFAULT_LIB_PATH}"

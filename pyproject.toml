@@ -40,6 +40,7 @@ dependencies = [
 	"dracon",
 	"jax-tqdm",
 	"pytest",
+	"h5py",
 ]
 
 [tool.hatch.build.targets.wheel]
