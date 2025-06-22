@@ -528,6 +528,21 @@ class DataManager:
         self._X = self.rescale(self._raw_X)
         self._Y = self.rescale(self._raw_Y)
 
+        # check if any output or input has a size 0 dimension
+        for i, n in enumerate(networks):
+            if n.get_nb_inputs() == 0:
+                raise ValueError(f"Network {n.name} has no inputs, cannot use it in DataManager")
+            if n.get_nb_outputs() == 0:
+                raise ValueError(f"Network {n.name} has no outputs, cannot use it in DataManager")
+            if self._X[i].shape[1] != n.get_nb_inputs():
+                raise ValueError(
+                    f"Network {n.name} has {n.get_nb_inputs()} inputs, but data has {self._raw_X[i].shape[1]} features"
+                )
+            if self._Y[i].shape[1] != n.get_nb_outputs():
+                raise ValueError(
+                    f"Network {n.name} has {n.get_nb_outputs()} outputs, but data has {self._raw_Y[i].shape[1]} features"
+                )
+
         # generate KDE sample points upfront
         self._kde_points = []
         self._kde_bws = []
@@ -817,7 +832,7 @@ class DataManager:
     def get_raw_Y(self):
         return self._raw_Y
 
-    def get_per_network_xy_samples(self, n_samples, only_dependent=True):
+    def get_per_network_xy_samples(self, n_samples, only_dependent=False):
         """
         Get a fixed number of samples, split them by network
         """
