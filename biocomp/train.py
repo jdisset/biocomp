@@ -315,9 +315,9 @@ def sorting_loss(
         # only use a percentage of the batch (allows to vary batch size without recompiling)
         pct = as_schedule(percent_batch_used)(step)
         selected = (jnp.linspace(0, 1, X.shape[0]) <= pct)[:, None]
-        count = jnp.maximum(selected.sum(), 1)
+        effective_batch_size = jnp.maximum(selected.sum(), 1)
 
-        mse = ((yhat - Y) ** 2 * selected).sum() / count
+        mse = ((yhat - Y) ** 2 * selected).sum() / (effective_batch_size * Y.shape[1])
 
         # sorting loss with pushing masked out values to the end
         MAXFLOAT = jnp.finfo(Y.dtype).max
@@ -326,11 +326,23 @@ def sorting_loss(
             jnp.sort(jnp.where(selected, yhat, MAXFLOAT), axis=0)
             - jnp.sort(jnp.where(selected, Y, MAXFLOAT), axis=0)
         ) ** 2
-        sorting_mse = sorting_mse.sum() / count
+        sorting_mse = sorting_mse.sum() / (effective_batch_size * Y.shape[1])
 
         # mix the two losses
         smw = as_schedule(sorting_mse_weight)(step)
         main_loss = lerp(mse, sorting_mse, smw)
+
+        aux["sublosses"] = {
+            "mse": mse,
+            "full_mse": ((yhat - Y) ** 2).mean(),
+            "full_rmse": jnp.sqrt(((yhat - Y) ** 2).mean()),
+            "rmse": jnp.sqrt(mse),
+            "sorting_mse": sorting_mse,
+            "kl_loss": kl_loss,
+            "ng_loss": ng_loss,
+            "main_loss": main_loss,
+            "batch_size": effective_batch_size,
+        }
 
         return main_loss + kl_loss + ng_loss, aux
 
@@ -485,10 +497,13 @@ def start(
     loggers: Optional[List[Tuple[int, Callable]]] = None,
     xy_batches: Optional[Tuple] = None,
     async_handler=None,
+    enable_jax_tqdm: bool = False,
 ):
     import optax
     import jax
-    from jax_tqdm import scan_tqdm
+
+    if enable_jax_tqdm:
+        from jax_tqdm import scan_tqdm
     import jax.numpy as jnp
     from jax.tree_util import Partial
     from jax import vmap, jit
@@ -619,7 +634,10 @@ def start(
         )
 
         batch_keys = jax.random.split(key, training_config.batches_per_step)
-        sstep = scan_tqdm(training_config.batches_per_step)(scannable_step)
+        if enable_jax_tqdm:
+            sstep = scan_tqdm(training_config.batches_per_step)(scannable_step)  # type: ignore
+        else:
+            sstep = scannable_step
         carry = (start_params, start_opt_state)
         xs = (
             jnp.arange(training_config.batches_per_step),
@@ -658,11 +676,15 @@ def start(
     )
     num_z = int(num_z[0])
 
-    logger.info("Compiling training step...")
-    t0 = time.time()
+    # logger.info("Compiling training step...")
+    # t0 = time.time()
+
     lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
     compiled_step = lowered.compile()
-    logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
+    # without lowering, just compile directly:
+    # compiled_step = jax.jit(Partial(step, num_z=num_z))
+
+    # logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
 
     # --- main training loop
     loggers = loggers or []
@@ -688,7 +710,7 @@ def start(
 
     for i, step_key in enumerate(jax.random.split(loop_key, total_steps), 1):
         if i % max(1, total_steps // 20) == 0:  # Log every 5% progress
-            logger.info(f"Training progress: [{i}/{total_steps}] ({i/total_steps*100:.1f}%)")
+            logger.info(f"Training progress: [{i}/{total_steps}] ({i / total_steps * 100:.1f}%)")
         if i % (step_per_epoch) == 0:
             epoch += 1
             logger.info(f"Starting epoch {epoch}")
