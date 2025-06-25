@@ -339,9 +339,9 @@ def sorting_loss(
             "rmse": jnp.sqrt(mse),
             "sorting_mse": sorting_mse,
             "kl_loss": kl_loss,
-            "ng_loss": ng_loss,
             "main_loss": main_loss,
-            "batch_size": effective_batch_size,
+            # "ng_loss": ng_loss,
+            # "batch_size": effective_batch_size,
         }
 
         return main_loss + kl_loss + ng_loss, aux
