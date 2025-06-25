@@ -77,6 +77,8 @@ class PlotData(ArbitraryModel):
 
     force_single_output: bool = True
 
+    disable_check_shapes: bool = False
+
     @property
     def x(self) -> NdArray:
         assert self.xval is not None
@@ -100,6 +102,8 @@ class PlotData(ArbitraryModel):
         return DataDimensions(input=0, output=1)
 
     def check_shapes(self) -> Self:
+        if self.disable_check_shapes:
+            return self
         assert self.xval is not None
         assert self.yval is not None
 
@@ -114,7 +118,7 @@ class PlotData(ArbitraryModel):
                 f"X and Y must have the same number of samples. Shapes are {self.xval.shape} and {self.yval.shape}"
             )
 
-        if self.yval.shape[1] != 1:
+        if self.yval.shape[1] > 1:
             assert len(self.output_name) == self.yval.shape[1], (
                 f"Output name {self.output_name} does not match the number of outputs {self.yval.shape[1]}"
             )
