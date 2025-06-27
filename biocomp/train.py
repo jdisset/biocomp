@@ -70,6 +70,7 @@ def generate_batches(
 def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",), scannable=True):
     from jax import value_and_grad
     import optax
+    import jax.numpy as jnp
 
     def base_training_step(params, opt_state, x, y, z, key):
         static, dynamic = params.filter_by_tag(["non_grad", "local"])
