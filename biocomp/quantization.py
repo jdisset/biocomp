@@ -24,6 +24,13 @@ def quantize_masked_impl(x, qvalues, mask):
     """Quantize x to the nearest element in qvalues, but only if the corresponding
     element in mask is True. Passthrough for x gradient.
     """
+    assert mask.ndim == 1, (
+        f"Quantization mask must be 1D, got {mask.ndim}D array with shape {mask.shape}"
+    )
+    assert qvalues.shape[0] == mask.shape[0], (
+        f"Quantization values and mask must have the same length, got {qvalues.shape[0]} and {mask.shape[0]}"
+    )
+    x = jnp.squeeze(x)
     zero = x - jax.lax.stop_gradient(x)  # for straight-through gradient
     dist = jnp.where(mask, jnp.abs(qvalues - x), jnp.inf)
     amin = jnp.argmin(dist)
@@ -54,9 +61,9 @@ def get_quantized(
     # but then will be masked to only use the ones available for this node
     masks = params[quantization_mask_path][node_id]
 
-    assert (
-        masks.shape[0] == values_to_quantize.shape[0]
-    ), f"Quantization mask shape {masks.shape} does not match values shape {values_to_quantize.shape}"
+    assert masks.shape[0] == values_to_quantize.shape[0], (
+        f"Quantization mask shape {masks.shape} does not match values shape {values_to_quantize.shape}"
+    )
 
     # masks is a 2D array of shape (max_n_masks_per_node, n_qvalues) that tells us which
     # quantization values are allowed for this node.
@@ -209,14 +216,45 @@ def get_variational_quantized(
         quantization_mask_path,
         node_id,
     )
-    possible_values = jnp.atleast_1d(params[quantization_values_path].squeeze())
+
+    possible_values = jnp.atleast_1d(params[quantization_values_path])
+
     masks = params[quantization_mask_path][node_id]
-    logstdevs = params[logstdevs_path][node_id]
-    assert masks.shape == (values_to_quantize.shape[0], len(possible_values))
+
+    logstdevs = jnp.atleast_2d(params[logstdevs_path])
+
+    assert masks.shape == (values_to_quantize.shape[0], len(possible_values)), (
+        f"Quantization mask shape {masks.shape} does not match values to quantize shape {values_to_quantize.shape} "
+        f"and possible values shape {possible_values.shape}"
+    )
+
+    # expected = (len(possible_values),) + values_to_quantize.shape[1:]
+    # assert logstdevs.shape == expected, f"Log stds shape {logstdevs.shape} != expected {expected}"
+
     logstd = vmap(
         lambda value, mask: logstdevs[quantize_masked_impl(value, possible_values, mask)[1]],
     )(values_to_quantize, masks)
-    return values + jnp.exp(logstd.reshape(values.shape)) * random.normal(key, values.shape)
+    key, subkey = random.split(key)
+
+    logstd = jnp.clip(logstd, -10.0, 5.0)
+
+    sigma = jnp.exp(logstd)
+    if sigma.ndim < values.ndim:
+        sigma = sigma.reshape(sigma.shape + (1,) * (values.ndim - sigma.ndim))
+
+    eps = random.normal(subkey, values.shape, dtype=values.dtype)
+    z = values + sigma * eps
+
+    return z, {
+        "q_possible_values": possible_values,
+        "q_masks": masks,
+        "q_raw_logstdevs": logstdevs,
+        "q_logstd": logstd,
+        "q_raw_values": values,
+        "q_sigma": sigma,
+        "q_eps": eps,
+        "q_node_id": node_id,
+    }
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

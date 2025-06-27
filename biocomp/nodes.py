@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from .compute import ComputeNode, ComputeStack
 
 from jax.typing import ArrayLike
-from typing import Callable, Tuple, List
+from typing import Callable, Tuple, List, Dict
 from dataclasses import dataclass
 
 PRNGKey = ArrayLike
@@ -55,7 +55,7 @@ def quantization_mask_str(names, mask) -> str:
 @dataclass
 class LayerInstance:
     prepare: Callable
-    apply: Callable
+    apply: Callable  # Returns tuple of (result, aux_dict)
     output_shapes: List[Tuple[int]]
     commit: Optional[Callable] = None
 
@@ -314,8 +314,8 @@ def empty_prepare(*_, **__):
 def single_passthrough(input_shapes: List[Tuple[int]], *_, **__) -> LayerInstance:
     assert len(input_shapes) == 1, f"Passthrough expects 1 input, got {len(input_shapes)}"
 
-    def apply(value: ArrayLike, **___) -> ArrayLike:
-        return value
+    def apply(value: ArrayLike, **___) -> Tuple[ArrayLike, Dict]:
+        return value, {"input_shape": value.shape}
 
     output_shapes = input_shapes
 
@@ -332,8 +332,9 @@ def single_passthrough(input_shapes: List[Tuple[int]], *_, **__) -> LayerInstanc
 def source(input_shapes: List[Tuple[int]], n_outputs: int, **_) -> LayerInstance:
     assert len(input_shapes) == 1, f"A source node should have 1 input, got {len(input_shapes)}"
 
-    def apply(value: ArrayLike, *_, **__) -> ArrayLike:
-        return jnp.repeat(value, n_outputs, axis=0)
+    def apply(value: ArrayLike, *_, **__) -> Tuple[ArrayLike, Dict]:
+        result = jnp.repeat(value, n_outputs, axis=0)
+        return result, {"input_value": value, "n_outputs": n_outputs, "output_shape": result.shape}
 
     output_shapes = list(input_shapes) * n_outputs
 
@@ -396,14 +397,15 @@ def source_with_pos(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-    ) -> ArrayLike:
+    ) -> Tuple[ArrayLike, Dict]:
         qid = params[f"{namespace}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
 
         # process each output position
+        positions = np.arange(max_L1s)[:n_outputs] / max_L1s
         ans = jax.vmap(
             lambda position: MLP_head(flat_concat(value, position, quantile), params, key)
-        )(np.arange(max_L1s)[:n_outputs] / max_L1s)
+        )(positions)
 
         # add skip connection and apply activation
         res = 0.5 * ans + 0.5 * jnp.broadcast_to(value, ans.shape)
@@ -411,7 +413,13 @@ def source_with_pos(
         assert activated.shape == (n_outputs, *input_shapes[0]), (
             f"In source_with_pos: {activated.shape} != {(n_outputs, *input_shapes[0])}"
         )
-        return activated
+        return activated, {
+            "positions": positions,
+            "quantile": quantile,
+            "pre_activation": res,
+            "mlp_output": ans,
+            "n_outputs": n_outputs,
+        }
 
     output_shapes = list(input_shapes) * n_outputs
 
@@ -508,7 +516,7 @@ def inv_source_with_pos(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-    ) -> ArrayLike:
+    ) -> Tuple[ArrayLike, Dict]:
         assert value.shape == input_shapes[0], f"Invalid input shape {value.shape}"
 
         qid = params[f"{namespace}/quantile_variable_id"][node_id]
@@ -530,9 +538,17 @@ def inv_source_with_pos(
 
         # add skip connection and apply activation
         mlp_out_reshaped = mlp_out.reshape(value.shape)
-        result = outer_activation(0.5 * mlp_out_reshaped + 0.5 * value)
+        pre_activation = 0.5 * mlp_out_reshaped + 0.5 * value
+        result = outer_activation(pre_activation)
 
-        return result
+        return result, {
+            "original_position": original_position,
+            "normalized_position": normalized_position,
+            "quantile": quantile,
+            "mlp_input": mlp_input,
+            "mlp_output": mlp_out_reshaped,
+            "pre_activation": pre_activation,
+        }
 
     def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for i, node in enumerate(nodelist):
@@ -564,8 +580,9 @@ def bias(
     def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
         params[f"{namespace}/value"] = jax.random.uniform(key, (len(nodelist), *shape))
 
-    def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> ArrayLike:
-        return params[f"{namespace}/value"][node_id]
+    def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> Tuple[ArrayLike, Dict]:
+        bias_value = params[f"{namespace}/value"][node_id]
+        return bias_value, {"bias_value": bias_value}
 
     def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for i, n in enumerate(nodelist):
@@ -626,10 +643,12 @@ def aggregation(
         params: ParameterTree,
         node_id: ArrayLike,
         key: PRNGKey,
-    ) -> ArrayLike:
+    ) -> Tuple[ArrayLike, Dict]:
         assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
         ratios = params[f"{namespace}/{pname}"][node_id][:n_outputs]
-        return jnp.abs(jnp.array(ratios)) * input
+        abs_ratios = jnp.abs(jnp.array(ratios))
+        result = abs_ratios * input
+        return result, {"ratios": ratios, "abs_ratios": abs_ratios, "n_outputs": n_outputs}
 
     def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for i, n in enumerate(nodelist):
@@ -682,10 +701,12 @@ def inv_aggregation(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-    ) -> ArrayLike:
+    ) -> Tuple[ArrayLike, Dict]:
         ratio = jnp.abs(params[f"{namespace}/ratios"][node_id])
+        clamped_ratio = jnp.maximum(ratio, EPSILON)
+        result = input / clamped_ratio
 
-        return input / jnp.maximum(ratio, EPSILON)
+        return result, {"ratio": ratio, "clamped_ratio": clamped_ratio, "epsilon": EPSILON}
 
     output_shape = input_shapes
     return LayerInstance(prepare, apply, output_shape)
@@ -803,15 +824,15 @@ def transform_nn(
         # First, initializing quantization values for the rates (if not already done)
         # qnames is a list of names for the rate values available in this stack (1xuORf, ...)
         try:
-            qvalues = 1000 * params[quantization_values_path]
+            qvalues = params[quantization_values_path]
         except KeyError:
-            qvalues = jax.random.normal(key0, (len(quantization_names), rate_dim)) / 1000
+            qvalues = jax.random.normal(key0, (len(quantization_names), rate_dim))
             params[quantization_values_path] = qvalues
         # Now initialize logstdevs in the same way
         try:
             logstdevs = params[logstdevs_path]
         except KeyError:
-            logstdevs = jnp.zeros((len(quantization_names), rate_dim)) - 4
+            logstdevs = jnp.zeros((len(quantization_names), rate_dim)) - 3
             params[logstdevs_path] = logstdevs
 
         assert qvalues.shape == (len(quantization_names), rate_dim)
@@ -911,7 +932,7 @@ def transform_nn(
         params: ParameterTree,
         node_id: ArrayLike,
         key: PRNGKey,
-    ):
+    ) -> Tuple[ArrayLike, Dict]:
         logger.debug(f"Apply function inputs:")
         logger.debug(
             f"  values shapes: {[v.shape if hasattr(v, 'shape') else 'scalar' for v in values]}"
@@ -946,7 +967,8 @@ def transform_nn(
             logger.error(f"  quantile.shape: {quantile.shape}")
             logger.error(f"  expected quantile.shape: {(len(input_shapes) + 1,)}")
             raise e
-        qrates = qz.get_variational_quantized(
+
+        qrates, qaux = qz.get_variational_quantized(
             rates,
             params,
             quantization_values_path,
@@ -976,7 +998,21 @@ def transform_nn(
         # apply softmax normalization to alpha and beta
         alpha_norm = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
         beta_norm = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
-        return alpha_norm * input_mean + beta_norm * ans
+        final_output = alpha_norm * input_mean + beta_norm * ans
+
+        return final_output, {
+            "quantile": quantile,
+            "rates": rates,
+            "quantized_rates": qrates,
+            "inner_output": inner_out,
+            "outer_output": ans,
+            "input_mean": input_mean,
+            "alpha_norm": alpha_norm,
+            "beta_norm": beta_norm,
+            "is_inverse": is_inverse,
+            "n_inputs": len(input_shapes),
+            **qaux,
+        }
 
     def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for node_id, node in enumerate(nodelist):
@@ -1131,7 +1167,7 @@ def sequestron_ERN(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-    ):
+    ) -> Tuple[ArrayLike, Dict]:
         assert len(values) == len(input_shapes)
 
         affinity = params[f"local/{local_layer_name}/affinity"][node_id]
@@ -1146,7 +1182,7 @@ def sequestron_ERN(
             layer_id_onehot = jnp.zeros(max_ern_layers)
             layer_id_onehot = layer_id_onehot.at[node_layer_id].set(1.0)
 
-        return MLP(
+        result = MLP(
             *values,
             affinity=affinity,
             quantile=quantiles[qid],
@@ -1154,6 +1190,25 @@ def sequestron_ERN(
             key=key,
             layer_id_onehot=layer_id_onehot,
         )
+
+        # calculate input difference for debug
+        neg_val, pos_val = values
+        input_diff = jnp.mean(pos_val) - jnp.mean(neg_val)
+
+        aux_dict = {
+            "affinity": affinity,
+            "quantile": quantiles[qid],
+            "layer_id_onehot": layer_id_onehot,
+            "subtype": subtype,
+            "neg_input": neg_val,
+            "pos_input": pos_val,
+            "input_diff": input_diff,
+        }
+
+        if use_ern_layer_id:
+            aux_dict["node_layer_id"] = params[f"local/{local_layer_name}/node_layer_ids"][node_id]
+
+        return result, aux_dict
 
     output_shape = [(1,)]
 
@@ -1213,18 +1268,27 @@ def grouped_output(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-    ):
+    ) -> Tuple[ArrayLike, Dict]:
         inputs_arr = jnp.array(inputs)
 
         assert len(inputs_arr) == len(input_shapes)
 
         qid = params[f"local/{layer_name}/quantile_variable_id"][node_id]
+        quantiles_for_node = quantiles[qid]
         res = vmap(
             partial(MLP_head, rng_key=key, params=params),
-        )(inputs_arr, quantiles[qid])
+        )(inputs_arr, quantiles_for_node)
 
         pre = 0.5 * res + 0.5 * inputs_arr
-        return outer_activation(pre)
+        output = outer_activation(pre)
+
+        return output, {
+            "quantiles": quantiles_for_node,
+            "mlp_outputs": res,
+            "pre_activation": pre,
+            "n_inputs": len(inputs_arr),
+            "input_values": inputs_arr,
+        }
 
     output_shape = [(1,)] * len(input_shapes)
 

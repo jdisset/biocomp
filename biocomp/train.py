@@ -81,17 +81,14 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
         updates, opt_state = optimizer.update(grads, opt_state, dynamic)
         dynamic = optax.apply_updates(dynamic, updates)
 
-        # Handle empty static parameters properly
-        if static.data:  # If static has data
+        if static.data:
             params = ParameterTree.merge(static, dynamic)
-        else:  # If static is empty, just use dynamic
+        else:
             params = dynamic
 
-        # Try to extract learning rate from optimizer state (best effort)
         learning_rate = None
         try:
             # Method 1: Check for hyperparams in individual state components
-            # opt_state is typically a tuple of states from chained optimizers
             if isinstance(opt_state, tuple):
                 for state_component in opt_state:
                     if (
@@ -109,7 +106,7 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
             ):
                 learning_rate = opt_state.hyperparams["learning_rate"]
 
-            # Method 3: Try tree_get as fallback (might fail with multiple matches)
+            # Method 3: Try tree_get
             if learning_rate is None:
                 try:
                     learning_rate = optax.tree_utils.tree_get(
@@ -120,11 +117,9 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
                         or (hasattr(value, "shape") and hasattr(value, "dtype")),
                     )
                 except (KeyError, ValueError):
-                    # Multiple learning_rate entries or other tree_get issues
                     pass
 
         except Exception:
-            # If all methods fail, learning_rate remains None
             pass
 
         res = {
@@ -139,7 +134,6 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
             **aux,
         }
 
-        # Add learning rate to result if available
         if learning_rate is not None:
             res["learning_rate"] = learning_rate
 
@@ -206,51 +200,20 @@ def as_schedule(value_or_callable):
     return f
 
 
-def l2_loss(stack, training_config, negative_grad_penalty=1.0, kl_weight=1):
-    import jax
-    import jax.numpy as jnp
-
-    batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
-
-    def loss_func(dynamic, static, X, Y, Z, key, step):
-        check_XYZ_new(X, Y, Z, stack)
-        params = ParameterTree.merge(dynamic, static)
-        keys = jax.random.split(key, X.shape[0])
-        # jax.debug.print("X {}", X)
-        # jax.debug.print("Z {}", Z)
-        yhat, (grads_wrt_inputs, full_output) = batch_apply(params, X, Z, keys)
-        assert yhat.shape == Y.shape, "yhat and Y must have the same shape"
-        aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
-
-        qvalues_dir = ParamPath("shared/quantization/values")
-        logstd_dir = ParamPath("shared/quantization/logstdevs")
-        count_dir = ParamPath("shared/quantization/counts")
-        klw = as_schedule(kl_weight)(step)
-        qvalues, logstds, counts = map(
-            lambda path: jnp.concatenate(
-                tuple(map(lambda t: t[1], params[path].iter_leaves()))
-            ).flatten(),
-            (qvalues_dir, logstd_dir, count_dir),
-        )
-        kl_loss = (
-            counts * (qvalues**2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)
-        ).sum() / counts.sum()
-
-        mse = ((yhat - Y) ** 2).mean()
-        negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
-
-        ngp = as_schedule(negative_grad_penalty)(step)
-
-        loss = mse + ngp * negative_grads + klw * kl_loss
-
-        return loss, aux
-
-    return loss_func
-
-
 def lerp(a, b, t):
     # when t=0 return a, when t=1 return b
     return a + t * (b - a)
+
+
+def stable_sigma(logstd, *, min_std=1e-3):
+    """Forward σ ≡ exp(logσ); backward dσ/dlogσ ≡ sigmoid(logσ)."""
+    import jax.numpy as jnp
+    import jax
+
+    sigma_fwd = jnp.exp(logstd)  # keeps identical activations
+    sigma_grad = min_std + jax.nn.softplus(logstd)  # nice, ≥0.25 derivative
+    # swap in the softplus derivative, keep forward value
+    return sigma_fwd + jax.lax.stop_gradient(sigma_grad - sigma_fwd)
 
 
 def sorting_loss(
@@ -260,10 +223,14 @@ def sorting_loss(
     kl_weight=0.1,
     sorting_mse_weight=0.1,
     percent_batch_used=1.0,
+    out_vs_in_mse_weight=0.5,  # 1 = only dependent outputs count
+    out_vs_in_sortmse_weight=1,  # 1 = only dependent outputs count
     use_same_key=False,
 ):
     import jax
     import jax.numpy as jnp
+    from jax.tree_util import tree_leaves
+    from .jaxutils import flat_concat
 
     # sorting loss attempts to make the model learn the distribution rather than just the mean
     # it tries to learn the quantile function - sort of...
@@ -290,43 +257,63 @@ def sorting_loss(
             f"yhat and Y must have the same shape, got {yhat.shape} and {Y.shape}"
         )
 
-        # kl
-        qvalues_dir = ParamPath("shared/quantization/values")
-        logstd_dir = ParamPath("shared/quantization/logstdevs")
-        count_dir = ParamPath("shared/quantization/counts")
+        # kl divergence for smooth embeddings
         klw = as_schedule(kl_weight)(step)
-        qvalues, logstds, counts = map(
-            lambda path: jnp.concatenate(
-                tuple(map(lambda t: t[1], params[path].iter_leaves()))
-            ).flatten(),
-            (qvalues_dir, logstd_dir, count_dir),
+        qvalues = flat_concat(*tree_leaves(params["shared/quantization/values"]))
+        logstds = flat_concat(*tree_leaves(params["shared/quantization/logstdevs"]))
+        counts = flat_concat(*tree_leaves(params["shared/quantization/counts"]))
+
+        std = stable_sigma(logstds, min_std=1e-3)
+        # Check for division by zero in KL loss
+        counts_sum = counts.sum()
+        checkify.check(
+            counts_sum > 0, "counts.sum() is zero, would cause division by zero in KL loss"
         )
-        kl_loss = (
-            (counts * (qvalues**2 + jnp.exp(2 * logstds) / 2 - logstds - 0.5)).sum()
-            / counts.sum()
-            * klw
-        )
+        kl_loss = (counts * (qvalues**2 + std**2 - 1 - 2 * jnp.log(std))).sum() / counts_sum * klw
 
         # negative grads, used to penalize "inverted" functions
         negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
         ngp = as_schedule(negative_grad_penalty)(step)
         ng_loss = negative_grads * ngp
 
+        # weigh the dependent outputs more than the independent variables (aka inputs)
+        dep_mask = params["global/dependent_output_mask"]
+        indep_mask = ~dep_mask
+        assert dep_mask.shape == (stack.total_nb_of_outputs,) == (Y.shape[1],), (
+            f"dep_out must have the same shape as Y features, got {dep_mask.shape} and {Y.shape}"
+        )
+
         # only use a percentage of the batch (allows to vary batch size without recompiling)
         pct = as_schedule(percent_batch_used)(step)
         selected = (jnp.linspace(0, 1, X.shape[0]) <= pct)[:, None]
-        effective_batch_size = jnp.maximum(selected.sum(), 1)
+        eff_batch_size = jnp.maximum(selected.sum(), 1)
 
-        mse = ((yhat - Y) ** 2 * selected).sum() / (effective_batch_size * Y.shape[1])
+        # compute the mse loss
+        sqdiff = (yhat - Y) ** 2 * selected
+        # Check for division by zero in MSE dependent
+        dep_mask_sum = dep_mask.sum()
+        mse_dependent = (sqdiff * dep_mask[None, :]).sum() / (eff_batch_size * dep_mask_sum)
+        # Check for division by zero in MSE independent
+        indep_mask_sum = indep_mask.sum()
+        mse_independent = (sqdiff * indep_mask[None, :]).sum() / (eff_batch_size * indep_mask_sum)
+        out_v_in_mse = as_schedule(out_vs_in_mse_weight)(step)
+        mse = lerp(mse_independent, mse_dependent, out_v_in_mse)  # 0 = full indep, 1 = full dep
 
         # sorting loss with pushing masked out values to the end
-        MAXFLOAT = jnp.finfo(Y.dtype).max
 
-        sorting_mse = (
-            jnp.sort(jnp.where(selected, yhat, MAXFLOAT), axis=0)
-            - jnp.sort(jnp.where(selected, Y, MAXFLOAT), axis=0)
-        ) ** 2
-        sorting_mse = sorting_mse.sum() / (effective_batch_size * Y.shape[1])
+        MAXFLOAT = jnp.finfo(Y.dtype).max
+        sorted_yhat = jnp.sort(jnp.where(selected, yhat, MAXFLOAT), axis=0)
+        sorted_y = jnp.sort(jnp.where(selected, Y, MAXFLOAT), axis=0)
+        sort_sqdiff = (sorted_yhat - sorted_y) ** 2
+        # apply the same masks as above
+        out_v_in_sortmse = as_schedule(out_vs_in_sortmse_weight)(step)
+        sorting_mse_dependent = (sort_sqdiff * dep_mask[None, :]).sum() / (
+            eff_batch_size * dep_mask_sum
+        )
+        sorting_mse_independent = (sort_sqdiff * indep_mask[None, :]).sum() / (
+            eff_batch_size * indep_mask_sum
+        )
+        sorting_mse = lerp(sorting_mse_independent, sorting_mse_dependent, out_v_in_sortmse)
 
         # mix the two losses
         smw = as_schedule(sorting_mse_weight)(step)
@@ -334,14 +321,36 @@ def sorting_loss(
 
         aux["sublosses"] = {
             "mse": mse,
-            "full_mse": ((yhat - Y) ** 2).mean(),
-            "full_rmse": jnp.sqrt(((yhat - Y) ** 2).mean()),
-            "rmse": jnp.sqrt(mse),
             "sorting_mse": sorting_mse,
             "kl_loss": kl_loss,
             "main_loss": main_loss,
-            # "ng_loss": ng_loss,
-            # "batch_size": effective_batch_size,
+        }
+
+        aux["debug"] = {
+            "negative_grads": negative_grads,
+            "ng_loss": ng_loss,
+            "effective_batch_size": eff_batch_size,
+            "std": std,
+            "selected": selected,
+            "full_mse": ((yhat - Y) ** 2).mean(),
+            "full_rmse": jnp.sqrt(((yhat - Y) ** 2).mean()),
+            "sorted_yhat": sorted_yhat,
+            "sorted_y": sorted_y,
+            "pct": pct,
+            "kl_weight": klw,
+            "negative_grad_penalty": ngp,
+            "sqdiff": sqdiff,
+            "sort_sqdiff": sort_sqdiff,
+            "mse_dependent": mse_dependent,
+            "mse_independent": mse_independent,
+            "sorting_mse_dependent": sorting_mse_dependent,
+            "sorting_mse_independent": sorting_mse_independent,
+            "out_v_in_mse": out_v_in_mse,
+            "out_v_in_sortmse": out_v_in_sortmse,
+            "qvalues": qvalues,
+            "logstds": logstds,
+            "counts": counts,
+            "step": step,
         }
 
         return main_loss + kl_loss + ng_loss, aux
@@ -399,7 +408,7 @@ DEFAULT_OPTIMIZER = [
 class TrainingConfig(ArbitraryModel):
     # training parameters
     optimizer_stack: list[EncodedPartialFunction] = DEFAULT_OPTIMIZER
-    loss_function: EncodedPartialFunction = Field(default=l2_loss)
+    loss_function: EncodedPartialFunction = Field(default=sorting_loss)
 
     seed: Optional[int] = None
     batches_per_step: int = 128
@@ -548,7 +557,10 @@ def start(
             f"ybatches shape mismatch: {ybatches.shape} != ({training_config.n_replicates}, {training_config.n_batches}, {training_config.batch_size}, {stack.total_nb_of_outputs})"
         )
 
-        return jnp.asarray(xbatches), jnp.asarray(ybatches)
+        xbatches_arr = jnp.asarray(xbatches)
+        ybatches_arr = jnp.asarray(ybatches)
+
+        return xbatches_arr, ybatches_arr
 
     if xy_batches is not None:
         xbatches, ybatches = xy_batches

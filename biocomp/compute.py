@@ -321,7 +321,7 @@ class ComputeStack:
 
     def init(self, rng_key: PRNGKey) -> ParameterTree:
         """
-        Generates a randomly initilized dictionary of parameters for the stack
+        Generates a randomly initilized parameter tree for the stack
         """
         assert self.is_built, "Stack not built"
         params = ParameterTree()
@@ -348,12 +348,26 @@ class ComputeStack:
                     logger.error(f"Layer type: {layer.f_type}")
                     logger.error(f"Layer input shapes: {layer.f_input_shapes}")
                     logger.error(f"Layer output shapes: {layer.f_out_shapes}")
+                    logger.exception(e)
                     raise e
         params.tag("local", "local")
         params.tag("shared", "shared")
+
+        params.at(
+            "global/dependent_output_mask", self.get_dependent_output_mask(), tags=[nd.NON_GRAD_TAG]
+        )
+
         # pp_params = self.post_process(params)
         # assert pp_params == params, 'Post process changed params'
         return params
+
+    def get_dependent_output_mask(self):
+        """
+        Get a mask that indicates which outputs are dependent on the inputs.
+        """
+        m = np.concatenate([n.get_dependent_output_mask() for n in self.networks])
+        assert m.shape == (sum(n.get_nb_outputs() for n in self.networks),)
+        return m
 
     def get_network_output_indices(self, network_id: int):
         """Returns the start index and shape of the output of the given network in
@@ -1041,6 +1055,7 @@ class ComputeStack:
 
             running_output = inputs.reshape(-1)
             grads = jnp.array([])
+            stack_aux = {}
 
             for lid in range(1, len(self.layers)):  # skip the input layer
                 assert running_output.shape[0] == self.layers_start_index[lid]
@@ -1066,7 +1081,7 @@ class ComputeStack:
                 apply_f = self.layers[lid].f_apply
 
                 def node_apply(node_id: ArrayLike, key: PRNGKey, *inputs: ArrayLike):
-                    res = apply_f(
+                    res, node_aux = apply_f(
                         *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
                     )
                     if w_grads[lid]:
@@ -1079,13 +1094,26 @@ class ComputeStack:
 
                     else:
                         grad = jnp.array([])
-                    return res, grad
+
+                    node_aux["grad"] = grad  # store the gradient in the aux dict
+
+                    return res, node_aux
 
                 def layer_apply(*inputs):
                     return vmap(node_apply)(jnp.arange(n_nodes), keys, *inputs)
 
-                layer_out, layer_grad = layer_apply(*layer_inputs)
-                flattened_layer_output = layer_out.reshape(-1)
+                layer_out, layer_aux = layer_apply(*layer_inputs)
+
+                stack_aux[f"{lid}"] = {
+                    "layer_type": self.layers[lid].f_type,
+                    "layer_aux": layer_aux,
+                    "trace": {
+                        "inputs": layer_inputs,
+                        "outputs": layer_out,
+                    },
+                }
+
+                flattened_layer_output = layer_out.ravel()
 
                 if self.layers[lid].flattened_output_shape() != len(flattened_layer_output):
                     raise ValueError(
@@ -1094,7 +1122,6 @@ class ComputeStack:
                     )
 
                 running_output = jnp.concatenate([running_output, flattened_layer_output])
-                grads = jnp.concatenate([grads, layer_grad.reshape(-1)])
 
             return running_output, grads
 

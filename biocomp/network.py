@@ -1585,6 +1585,24 @@ class Network(BaseModel):
         input_proteins = self.get_inverted_input_proteins(include_biases=True)
         return [p for p in all_outputs if p not in input_proteins]
 
+    def get_dependent_output_positions(self) -> List[int]:
+        n_outputs = self.get_nb_outputs()
+        input_positions = self.get_inverted_input_positions(include_biases=True).values()
+        dependent_outputs = [i for i in range(n_outputs) if i not in input_positions]
+        assert len(dependent_outputs) == len(self.get_dependent_output_proteins()), (
+            f"Invalid number of dependent outputs: {len(dependent_outputs)} != "
+            f"{len(self.get_dependent_output_proteins())}"
+        )
+        return dependent_outputs
+
+    def get_dependent_output_mask(self) -> np.ndarray:
+        """Returns a boolean mask of the output proteins that are dependent on the inputs"""
+        n_outputs = self.get_nb_outputs()
+        dependent_outputs = self.get_dependent_output_positions()
+        mask = np.zeros(n_outputs, dtype=bool)
+        mask[dependent_outputs] = True
+        return mask
+
     def set_input_as_bias(self, input_protein_name: Sequence[str]) -> None:
         """Sets this input protein as a bias node (instead of an input one)"""
         original_mapping = self.get_inverted_input_positions()

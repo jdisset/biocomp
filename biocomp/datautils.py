@@ -346,26 +346,42 @@ import jax
 import jax.numpy as jnp
 
 
-@partial(jax.jit, static_argnames=["batch_size", "n_batches", "density_threshold_quantile"])
+@partial(
+    jax.jit,
+    static_argnames=("batch_size", "n_batches", "density_threshold_quantile"),
+)
 def sample_batches_jax(
-    X: NdArray,
-    Y: NdArray,
+    X: jnp.ndarray,  # [N, x_feats]  –  padded
+    Y: jnp.ndarray,  # [N, y_feats]  –  padded
+    densities: jnp.ndarray,  # [N]           –  padded
+    valid_mask: jnp.ndarray,  # [N] bool      –  True for real rows
     batch_size: int,
     n_batches: int,
-    densities: NdArray,  # densities at each point in X
-    density_threshold_quantile,  # Compute the density threshold using the quantile of the density distributikey
-    key,
-):
-    EPSILON = 1e-16
-    HIGH_DENSITIES_PENALTY = 1.0
-    threshold = jnp.quantile(densities + EPSILON, density_threshold_quantile)
-    p_select = jnp.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
-    p_select = jnp.nan_to_num(p_select, nan=0.0)
-    p_select /= jnp.sum(p_select)
-    indices = jax.random.choice(key, len(p_select), shape=(batch_size * n_batches,), p=p_select)
-    Xbatches = X[indices].reshape(n_batches, batch_size, X.shape[1])
-    Ybatches = Y[indices].reshape(n_batches, batch_size, Y.shape[1])
-    return Xbatches, Ybatches
+    density_threshold_quantile: float,
+    key: jax.random.PRNGKey,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Sample `n_batches`×`batch_size` points, never touching padded rows."""
+    EPS = 1e-16
+    penalty = 1.0
+
+    # --- threshold based only on *real* rows -------------------------
+    dens_masked = jnp.where(valid_mask, densities, jnp.nan)
+    thresh = jnp.nanquantile(dens_masked + EPS, density_threshold_quantile)
+
+    # --- selection probability (0 for padded rows) -------------------
+    raw_p = jnp.where(
+        valid_mask,
+        jnp.minimum(1.0, thresh / (densities * penalty + EPS)),
+        0.0,
+    )
+    raw_p = jnp.nan_to_num(raw_p, nan=0.0)
+    p = raw_p / jnp.maximum(jnp.sum(raw_p), EPS)  # normalise safely
+
+    # --- choose indices and reshape ---------------------------------
+    idx = jax.random.choice(key, X.shape[0], shape=(batch_size * n_batches,), p=p)
+    Xb = X[idx].reshape(n_batches, batch_size, X.shape[1])
+    Yb = Y[idx].reshape(n_batches, batch_size, Y.shape[1])
+    return Xb, Yb
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -622,88 +638,66 @@ class DataManager:
                 n_batches, batch_size, rng_key, concat_along_feature_axis
             )
 
-    def _get_batches_jax(self, n_batches, batch_size, rng_key, concat_along_feature_axis):
-        """JAX-optimized batch generation using vmap and jit compilation."""
-        import jax
-        import jax.numpy as jnp
+    def _get_batches_jax(
+        self,
+        n_batches: int,
+        batch_size: int,
+        rng_key: jax.random.PRNGKey,
+        concat_along_feature_axis: bool,
+    ):
+        q = float(self.data_cfg.resampling.density_threshold_quantile)
+        n_nets = len(self._X)
 
-        # convert to JAX arrays if needed
-        X_jax = [jnp.asarray(x) for x in self._X]
-        Y_jax = [jnp.asarray(y) for y in self._Y]
-        densities_jax = [jnp.asarray(d) for d in self._densities]
+        # -------- pad every array to the maximum number of points --------
+        max_pts = max(x.shape[0] for x in self._X)
 
-        # handle both integer seeds and existing JAX PRNG keys
-        if isinstance(rng_key, (int, np.integer)) or (
-            hasattr(rng_key, "shape") and rng_key.shape == ()
-        ):
-            main_key = jax.random.PRNGKey(rng_key)
-        else:
-            # assume it's already a JAX PRNG key
-            main_key = rng_key
-        keys = jax.random.split(main_key, len(self._X))
+        def _pad_2d(arr, pad_len):
+            return jnp.pad(arr, ((0, pad_len), (0, 0)))  # zeros
 
-        # pad arrays to same size for vmapping
-        max_samples = max(x.shape[0] for x in X_jax)
-        max_features_x = max(x.shape[1] for x in X_jax)
-        max_features_y = max(y.shape[1] for y in Y_jax)
+        def _pad_1d(arr, pad_len):
+            return jnp.pad(arr, (0, pad_len))  # zeros
 
-        # create padded arrays for vmapping
-        X_padded = jnp.zeros((len(X_jax), max_samples, max_features_x))
-        Y_padded = jnp.zeros((len(Y_jax), max_samples, max_features_y))
-        densities_padded = jnp.zeros((len(densities_jax), max_samples))
-        valid_lengths = jnp.array([x.shape[0] for x in X_jax])
-
-        for i, (x, y, d) in enumerate(zip(X_jax, Y_jax, densities_jax)):
-            n_samples = x.shape[0]
-            X_padded = X_padded.at[i, :n_samples, : x.shape[1]].set(x)
-            Y_padded = Y_padded.at[i, :n_samples, : y.shape[1]].set(y)
-            densities_padded = densities_padded.at[i, :n_samples].set(d)
-
-        # vmap the sampling function across datasets
-        @jax.vmap
-        def sample_dataset(x, y, densities, valid_length, key):
-            # mask out invalid samples
-            mask = jnp.arange(x.shape[0]) < valid_length
-            x_valid = jnp.where(mask[:, None], x, 0)
-            y_valid = jnp.where(mask[:, None], y, 0)
-            densities_valid = jnp.where(mask, densities, 1e-16)
-
-            # use the existing JAX sampling function
-            x_batch, y_batch = sample_batches_jax(
-                x_valid,
-                y_valid,
-                batch_size,
-                n_batches,
-                densities_valid,
-                self.data_cfg.resampling.density_threshold_quantile,
-                key,
+        X_pad, Y_pad, D_pad, M_pad = [], [], [], []
+        for x, y, d in zip(self._X, self._Y, self._densities):
+            pad_len = max_pts - x.shape[0]  # (x, y, d) share length
+            X_pad.append(_pad_2d(jnp.asarray(x), pad_len))
+            Y_pad.append(_pad_2d(jnp.asarray(y), pad_len))
+            D_pad.append(_pad_1d(jnp.asarray(d), pad_len))
+            M_pad.append(
+                jnp.concatenate([jnp.ones(x.shape[0], dtype=bool), jnp.zeros(pad_len, dtype=bool)])
             )
-            return x_batch, y_batch
 
-        # apply vmapped function
-        xbatches, ybatches = sample_dataset(
-            X_padded, Y_padded, densities_padded, valid_lengths, keys
+        keys = jax.random.split(rng_key, n_nets)
+
+        @jax.jit
+        def _sample_one(X, Y, D, M, k):
+            return sample_batches_jax(
+                X,
+                Y,
+                D,
+                M,
+                batch_size=batch_size,
+                n_batches=n_batches,
+                density_threshold_quantile=q,
+                key=k,
+            )
+
+        xb_list, yb_list = zip(
+            *[_sample_one(x, y, d, m, k) for x, y, d, m, k in zip(X_pad, Y_pad, D_pad, M_pad, keys)]
         )
 
         if concat_along_feature_axis:
-            # extract original feature sizes and concatenate
-            x_features = [x.shape[1] for x in self._X]
-            y_features = [y.shape[1] for y in self._Y]
+            xbatches = jnp.concatenate(xb_list, axis=2)
+            ybatches = jnp.concatenate(yb_list, axis=2)
 
-            # slice out the actual features and concatenate
-            x_slices = []
-            y_slices = []
-            for i, (xf, yf) in enumerate(zip(x_features, y_features)):
-                x_slices.append(xbatches[i, :, :, :xf])
-                y_slices.append(ybatches[i, :, :, :yf])
-
-            xbatches = jnp.concatenate(x_slices, axis=2)
-            ybatches = jnp.concatenate(y_slices, axis=2)
-
-            expected_x_features = sum(x_features)
-            expected_y_features = sum(y_features)
-            assert xbatches.shape == (n_batches, batch_size, expected_x_features)
-            assert ybatches.shape == (n_batches, batch_size, expected_y_features)
+            exp_x = sum(x.shape[1] for x in self._X)
+            exp_y = sum(y.shape[1] for y in self._Y)
+            assert xbatches.shape == (n_batches, batch_size, exp_x)
+            assert ybatches.shape == (n_batches, batch_size, exp_y)
+            assert xbatches.shape[2] == sum(n.get_nb_inputs() for n in self._networks)
+            assert ybatches.shape[2] == sum(n.get_nb_outputs() for n in self._networks)
+        else:
+            xbatches, ybatches = xb_list, yb_list  # tuple per network
 
         return xbatches, ybatches
 
@@ -858,6 +852,7 @@ class DataManager:
         assert len(per_net_xb) == len(nets) == len(pnyb)
 
         return per_net_xb, pnyb, nets
+
 
 
 def filter_dependent_outputs(per_net_x, per_net_y, nets):
