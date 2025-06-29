@@ -1054,8 +1054,8 @@ class ComputeStack:
             assert self.node_map is not None, "No node map"
 
             running_output = inputs.reshape(-1)
-            grads = jnp.array([])
             stack_aux = {}
+            stack_grad_wrt_inputs = jnp.array([])
 
             for lid in range(1, len(self.layers)):  # skip the input layer
                 assert running_output.shape[0] == self.layers_start_index[lid]
@@ -1095,7 +1095,7 @@ class ComputeStack:
                     else:
                         grad = jnp.array([])
 
-                    node_aux["grad"] = grad  # store the gradient in the aux dict
+                    node_aux["grads_wrt_inputs"] = grad  # store the gradient in the aux dict
 
                     return res, node_aux
 
@@ -1103,9 +1103,12 @@ class ComputeStack:
                     return vmap(node_apply)(jnp.arange(n_nodes), keys, *inputs)
 
                 layer_out, layer_aux = layer_apply(*layer_inputs)
+                layer_grad_wrt_inputs = layer_aux.get("grads_wrt_inputs", jnp.array([])).ravel()
+                stack_grad_wrt_inputs = jnp.concatenate(
+                    [stack_grad_wrt_inputs, layer_grad_wrt_inputs]
+                )
 
                 stack_aux[f"{lid}"] = {
-                    "layer_type": self.layers[lid].f_type,
                     "layer_aux": layer_aux,
                     "trace": {
                         "inputs": layer_inputs,
@@ -1123,12 +1126,14 @@ class ComputeStack:
 
                 running_output = jnp.concatenate([running_output, flattened_layer_output])
 
-            return running_output, grads
+            stack_aux["grads_wrt_inputs"] = stack_grad_wrt_inputs.ravel()
+
+            return running_output, stack_aux
 
         def apply(*args, **kwargs):
             # returns only the final outputs (of the last layer) + the gradients + the full trace
-            o, g = apply_impl(*args, **kwargs)
-            return o[output_indices], (g, o)
+            o, aux = apply_impl(*args, **kwargs)
+            return o[output_indices], (aux, o)
 
         self.apply = apply
         self.output_indices = output_indices

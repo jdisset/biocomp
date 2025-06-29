@@ -54,11 +54,12 @@ def get_quantized(
     # initialization of both keys and values is done upstream. We assume both are already initialized
     # i.e there is a param called param_name in params, which is a vector (n_qvalues, ...)
     # of all the possible quantization values for this parameter.
-    possible_values = jnp.atleast_1d(params[quantization_values_path].squeeze())
+    possible_values = jnp.atleast_1d(params[quantization_values_path])
 
-    # possible_values is a 1D array of shape (n_qvalues,) that contains all the possible
-    # quantization values for this parameter. Possible values for the whole stack,
-    # but then will be masked to only use the ones available for this node
+    # possible_values is an array of shape (nvalues, ndims) that contains all the possible
+    # quantization values (aka "code book embeddings") for this parameter.
+    # Possible values for the whole stack, but then will be masked to only use the ones available for this node
+
     masks = params[quantization_mask_path][node_id]
 
     assert masks.shape[0] == values_to_quantize.shape[0], (
@@ -209,6 +210,12 @@ def get_variational_quantized(
     node_id,
     key,
 ):
+    """
+    Quantize the given values using the quantization values ("code book" of embeddings) stored in params,
+    and add noise based on the log standard deviations stored in params.
+    This function is used for variational quantization, where we add noise to the quantized values.
+    """
+
     values = get_quantized(
         values_to_quantize,
         params,
@@ -218,18 +225,18 @@ def get_variational_quantized(
     )
 
     possible_values = jnp.atleast_1d(params[quantization_values_path])
-
     masks = params[quantization_mask_path][node_id]
-
     logstdevs = jnp.atleast_2d(params[logstdevs_path])
+
+    logger.debug(
+        f"Quantizing {values_to_quantize.shape} values with {possible_values.shape} possible values "
+        f"and {logstdevs.shape} log stds for node {node_id}. Masks shape: {masks.shape}. Quantized values shape: {values.shape}"
+    )
 
     assert masks.shape == (values_to_quantize.shape[0], len(possible_values)), (
         f"Quantization mask shape {masks.shape} does not match values to quantize shape {values_to_quantize.shape} "
         f"and possible values shape {possible_values.shape}"
     )
-
-    # expected = (len(possible_values),) + values_to_quantize.shape[1:]
-    # assert logstdevs.shape == expected, f"Log stds shape {logstdevs.shape} != expected {expected}"
 
     logstd = vmap(
         lambda value, mask: logstdevs[quantize_masked_impl(value, possible_values, mask)[1]],

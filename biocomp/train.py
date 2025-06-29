@@ -249,7 +249,9 @@ def sorting_loss(
         else:
             keys = jax.random.split(key, X.shape[0])
 
-        yhat, (grads_wrt_inputs, full_output) = batch_apply(params, X, Z, keys)
+        yhat, (apply_aux, full_output) = batch_apply(params, X, Z, keys)
+
+        grads_wrt_inputs = apply_aux["grads_wrt_inputs"]
         aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
 
         assert isinstance(yhat, jnp.ndarray)
@@ -267,9 +269,6 @@ def sorting_loss(
         std = stable_sigma(logstds, min_std=1e-3)
         # Check for division by zero in KL loss
         counts_sum = counts.sum()
-        checkify.check(
-            counts_sum > 0, "counts.sum() is zero, would cause division by zero in KL loss"
-        )
         kl_loss = (counts * (qvalues**2 + std**2 - 1 - 2 * jnp.log(std))).sum() / counts_sum * klw
 
         # negative grads, used to penalize "inverted" functions
@@ -518,6 +517,10 @@ def start(
     from jax.tree_util import Partial
     from jax import vmap, jit
     from .jaxutils import get_looped_slice
+    import os
+    from jax.experimental import checkify
+
+    BIOCOMP_CHECKIFY = True
 
     logger.debug(f"Training config: {training_config}")
     logger.debug(f"Compute config: {compute_config}")
@@ -689,15 +692,15 @@ def start(
     )
     num_z = int(num_z[0])
 
-    # logger.info("Compiling training step...")
-    # t0 = time.time()
-
-    lowered = jax.jit(Partial(step, num_z=num_z)).lower(params, opt_state, key, xb, yb)
-    compiled_step = lowered.compile()
-    # without lowering, just compile directly:
-    # compiled_step = jax.jit(Partial(step, num_z=num_z))
-
-    # logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
+    logger.info("Compiling training step...")
+    t0 = time.time()
+    jitstep_base = jax.jit(Partial(step, num_z=num_z))
+    if not BIOCOMP_CHECKIFY:
+        lowered = jitstep_base.lower(params, opt_state, key, xb, yb)
+        compiled_step = lowered.compile()
+        logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
+    else:
+        compiled_step = checkify.checkify(jitstep_base, errors=checkify.all_checks)
 
     # --- main training loop
     loggers = loggers or []

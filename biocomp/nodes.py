@@ -739,11 +739,6 @@ def transform_nn(
     beta_init: float = 0.5,
     **_,
 ):
-    logger.debug("Initializing transform_nn node:")
-    logger.debug(f"  transform_name: {transform_name}")
-    logger.debug(f"  input_shapes: {input_shapes}")
-    logger.debug(f"  n_outputs: {n_outputs}")
-    logger.debug(f"  is_inverse: {is_inverse}")
     assert n_outputs == 1, f"NN transform only supports 1 output, got {n_outputs}"
     if is_inverse and len(input_shapes) != 1:
         raise ValueError(f"Inverse {transform_name} should have 1 input, got {len(input_shapes)}")
@@ -777,14 +772,6 @@ def transform_nn(
         the rate embedding and the source value.
         All of these outputs will then be summed up and passed through a final layer.
         """
-        logger.debug("Inner function inputs:")
-        logger.debug(f"  value shape: {value.shape if hasattr(value, 'shape') else 'scalar'}")
-        logger.debug(
-            f"  rate_embedding shape: {rate_embedding.shape if hasattr(rate_embedding, 'shape') else 'scalar'}"
-        )
-        logger.debug(
-            f"  quantile shape: {quantile.shape if hasattr(quantile, 'shape') else 'scalar'}"
-        )
 
         if value.ndim == 0:
             value = value.reshape((1,))
@@ -795,7 +782,6 @@ def transform_nn(
         assert rate_embedding.ndim == 1
 
         inputs = flat_concat(value, rate_embedding, quantile)
-        logger.debug(f"  concatenated inputs shape: {inputs.shape}")
 
         out = inner_activation(
             dense_mlp(
@@ -933,26 +919,14 @@ def transform_nn(
         node_id: ArrayLike,
         key: PRNGKey,
     ) -> Tuple[ArrayLike, Dict]:
-        logger.debug(f"Apply function inputs:")
-        logger.debug(
-            f"  values shapes: {[v.shape if hasattr(v, 'shape') else 'scalar' for v in values]}"
-        )
-        logger.debug(
-            f"  quantiles shape: {quantiles.shape if hasattr(quantiles, 'shape') else 'scalar'}"
-        )
-        logger.debug(f"  node_id: {node_id}")
-
         k1, k2, k3 = jax.random.split(key, 3)
 
         qid = params[f"local/{layer_name}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
-        logger.debug(f"  quantile shape after indexing: {quantile.shape}")
 
         val = jnp.array(values)
-        logger.debug(f"  values array shape: {val.shape}")
 
         rates = params[f"local/{layer_name}/{rate_name}"][node_id]
-        logger.debug(f"  rates shape: {rates.shape}")
 
         try:
             assert val.shape == (len(input_shapes), *input_shapes[0])
@@ -1081,10 +1055,18 @@ def sequestron_ERN(
         quantile: ArrayLike,
         param_f: Callable,
         key: PRNGKey,
-        layer_id_onehot: ArrayLike,
+        layer_id_onehot: ArrayLike = np.empty((0,)),
     ):
+        if use_ern_layer_id:
+            input_values = flat_concat(neg, pos, affinity, layer_id_onehot, quantile)
+        else:
+            assert layer_id_onehot.shape == (max_ern_layers,), (
+                f"ERN layer_id_onehot should be of size {max_ern_layers}, got {len(layer_id_onehot)}"
+            )
+            input_values = flat_concat(neg, pos, affinity, quantile)
+
         res = dense_mlp(
-            flat_concat(neg, pos, affinity, layer_id_onehot, quantile),
+            input_values,
             wsize,
             out_dim,
             depth,
@@ -1136,17 +1118,21 @@ def sequestron_ERN(
                 # get layer_id from node extra info, default to 0 if not present
                 node_layer_id = min(extra.get("layer_id", 0), max_ern_layers - 1)
                 seq_layer_ids.append(node_layer_id)
-                logger.debug(f"Node {node} layer ID: {node_layer_id}")
 
         params.at(f"local/{local_layer_name}/affinity", ref, overwrite=None)
 
         # store node layer ids as a param array with non_grad tag if enabled
         if use_ern_layer_id:
+            seqlayerid_arr = jnp.array(seq_layer_ids)
+            assert seqlayerid_arr.shape == (len(nodelist),), (
+                f"ERN node layer IDs should have shape ({(len(nodelist),)}), got {seqlayerid_arr.shape}"
+            )
             params.at(
                 f"local/{local_layer_name}/node_layer_ids",
-                jnp.array(seq_layer_ids),
+                seqlayerid_arr,
                 tags=[NON_GRAD_TAG],
             )
+            logger.debug(f"Node layer IDs for {local_layer_name}:\n{seqlayerid_arr}")
 
         # initialize MLP with dummy inputs
         # include dummy one-hot layer id if needed
@@ -1176,11 +1162,10 @@ def sequestron_ERN(
         qid = params[f"local/{local_layer_name}/quantile_variable_id"][node_id]
 
         # create one-hot encoded layer_id if enabled
-        layer_id_onehot = jnp.empty((0,))
+        layer_id_onehot = jnp.empty((0,))  # default empty if not using layer_id
         if use_ern_layer_id:
             node_layer_id = params[f"local/{local_layer_name}/node_layer_ids"][node_id]
-            layer_id_onehot = jnp.zeros(max_ern_layers)
-            layer_id_onehot = layer_id_onehot.at[node_layer_id].set(1.0)
+            layer_id_onehot = jax.nn.one_hot(node_layer_id, max_ern_layers)
 
         result = MLP(
             *values,
@@ -1198,8 +1183,8 @@ def sequestron_ERN(
         aux_dict = {
             "affinity": affinity,
             "quantile": quantiles[qid],
+            "node_layer_id": node_layer_id if use_ern_layer_id else None,
             "layer_id_onehot": layer_id_onehot,
-            "subtype": subtype,
             "neg_input": neg_val,
             "pos_input": pos_val,
             "input_diff": input_diff,
@@ -1208,7 +1193,7 @@ def sequestron_ERN(
         if use_ern_layer_id:
             aux_dict["node_layer_id"] = params[f"local/{local_layer_name}/node_layer_ids"][node_id]
 
-        return result, aux_dict
+        return outer_activation(result), aux_dict
 
     output_shape = [(1,)]
 
