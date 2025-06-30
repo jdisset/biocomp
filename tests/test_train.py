@@ -11,7 +11,6 @@ import optax
 from biocomp.train import (
     TrainingConfig, 
     make_training_step, 
-    l2_loss, 
     sorting_loss,
     create_counter,
     as_schedule
