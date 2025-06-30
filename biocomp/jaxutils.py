@@ -155,6 +155,28 @@ def freeze(struct):
         return struct
 
 
+def robust_sort(x, axis=-1):
+    """
+    a sort operation that's more stable under JAX transformations like checkify.
+
+    """
+
+    def _sort_1d(arr):
+        perm = jnp.argsort(arr)
+        one_hot = jax.nn.one_hot(perm, num_classes=arr.shape[0])
+        return jnp.dot(one_hot, arr)
+
+    x_swapped = jnp.moveaxis(x, axis, -1)
+
+    sort_fn = _sort_1d
+    for _ in range(x.ndim - 1):
+        sort_fn = jax.vmap(sort_fn)
+
+    sorted_swapped = sort_fn(x_swapped)
+
+    return jnp.moveaxis(sorted_swapped, -1, axis)
+
+
 def tree_shape(t):
     return jtu.tree_map(lambda x: x.shape, t)
 

@@ -231,7 +231,7 @@ def sorting_loss(
     import jax
     import jax.numpy as jnp
     from jax.tree_util import tree_leaves
-    from .jaxutils import flat_concat
+    from .jaxutils import flat_concat, robust_sort
 
     # sorting loss attempts to make the model learn the distribution rather than just the mean
     # it tries to learn the quantile function - sort of...
@@ -302,8 +302,8 @@ def sorting_loss(
         # sorting loss with pushing masked out values to the end
 
         MAXFLOAT = jnp.finfo(Y.dtype).max
-        sorted_yhat = jnp.sort(jnp.where(selected, yhat, MAXFLOAT), axis=0)
-        sorted_y = jnp.sort(jnp.where(selected, Y, MAXFLOAT), axis=0)
+        sorted_yhat = robust_sort(jnp.where(selected, yhat, MAXFLOAT), axis=0)
+        sorted_y = robust_sort(jnp.where(selected, Y, MAXFLOAT), axis=0)
         sort_sqdiff = (sorted_yhat - sorted_y) ** 2
         # apply the same masks as above
         out_v_in_sortmse = as_schedule(out_vs_in_sortmse_weight)(step)
@@ -352,6 +352,7 @@ def sorting_loss(
             "counts": counts,
             "step": step,
         }
+        aux["apply_aux"] = apply_aux
 
         return main_loss + kl_loss + ng_loss, aux
 
@@ -520,14 +521,14 @@ def start(
     import os
     from jax.experimental import checkify
 
-    BIOCOMP_CHECKIFY = True
+    BIOCOMP_CHECKIFY = os.environ.get("BIOCOMP_CHECKIFY", "").lower() in ("true", "1", "yes", "on")
 
     logger.debug(f"Training config: {training_config}")
     logger.debug(f"Compute config: {compute_config}")
 
     # --- init & batches generation
     assert training_config.seed is not None, "Seed must be set"
-    key = jax.random.PRNGKey(training_config.seed)
+    key = jax.random.PRNGKey(training_config.seed)  # {{{}}}
     key, init_key, batch_key, loop_key = jax.random.split(key, 4)
 
     total_steps = int(
@@ -694,13 +695,20 @@ def start(
 
     logger.info("Compiling training step...")
     t0 = time.time()
-    jitstep_base = jax.jit(Partial(step, num_z=num_z))
+    jitable_base = Partial(step, num_z=num_z)
     if not BIOCOMP_CHECKIFY:
-        lowered = jitstep_base.lower(params, opt_state, key, xb, yb)
+        lowered = jax.jit(jitable_base).lower(params, opt_state, key, xb, yb)
         compiled_step = lowered.compile()
         logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
     else:
-        compiled_step = checkify.checkify(jitstep_base, errors=checkify.all_checks)
+        ckf = jax.jit(checkify.checkify(jitable_base, errors=checkify.all_checks))
+
+        def checkified_step(params, opt_state, step_key, xs, ys):
+            err, data = ckf(params, opt_state, step_key, xs, ys)
+            err.throw()
+            return data
+
+        compiled_step = checkified_step
 
     # --- main training loop
     loggers = loggers or []

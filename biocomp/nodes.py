@@ -812,7 +812,12 @@ def transform_nn(
         try:
             qvalues = params[quantization_values_path]
         except KeyError:
-            qvalues = jax.random.normal(key0, (len(quantization_names), rate_dim))
+            if rate_dim <= 1:
+                qvalues = jnp.linspace(-1, 1, len(quantization_names) * rate_dim).reshape(
+                    (len(quantization_names), rate_dim)
+                )
+            else:
+                qvalues = jax.random.normal(key0, (len(quantization_names), rate_dim))
             params[quantization_values_path] = qvalues
         # Now initialize logstdevs in the same way
         try:
@@ -1098,7 +1103,12 @@ def sequestron_ERN(
             init_f=uniform_initializer(key, (len(affinity_names), affinity_dim)),
         )
 
-        # store affinity references
+        # for now the ERN node does'nt use the more complex quantization,
+        # we just have one affinity value per ERN type (case, csy4, etc..)
+        # and store one reference to the affinity value per node.
+
+        # very important to use ArrayRef so that we don't copy the data which
+        # would be catastrophic as it would create one new affinity value per node
         ref = ArrayRef(params.data)
 
         # store node layer ids if enabled
