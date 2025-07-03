@@ -1915,9 +1915,9 @@ def inverted_network(
     def _inverted_network():
         # we compute a list of invertible paths that link each start nodes to the output
         inv_paths = {n: get_invertible_paths(network, n, inverse_dict) for n in start_nodes}
-        print(f"Found {len(inv_paths)} start nodes with invertible paths")
-        for n, p in inv_paths.items():
-            print(f"Start node {n} has {len(p)} invertible paths")
+        # print(f"Found {len(inv_paths)} start nodes with invertible paths")
+        # for n, p in inv_paths.items():
+        #     print(f"Start node {n} has {len(p)} invertible paths")
         # if no invertible paths were found, we return an empty list
 
         # For each start_node, we might have more than one path.
