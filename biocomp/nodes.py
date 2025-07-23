@@ -1064,10 +1064,10 @@ def sequestron_ERN(
     ):
         if use_ern_layer_id:
             input_values = flat_concat(neg, pos, affinity, layer_id_onehot, quantile)
-        else:
             assert layer_id_onehot.shape == (max_ern_layers,), (
                 f"ERN layer_id_onehot should be of size {max_ern_layers}, got {len(layer_id_onehot)}"
             )
+        else:
             input_values = flat_concat(neg, pos, affinity, quantile)
 
         res = dense_mlp(
