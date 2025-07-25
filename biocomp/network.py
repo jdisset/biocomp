@@ -400,6 +400,9 @@ class Slot(BaseModel):
     # does this slot map to a parameter, like "tl_rate" or "tc_rate"?
     maps_to_parameter: Optional[str] = None
 
+    # unique identifier for shared ("linked") parts across transcription units
+    ref_id: Optional[str] = None
+
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
 
@@ -456,6 +459,7 @@ class TranscriptionUnit(BaseModel):
     slots: List[SlotType] = []
     params: Dict = {}
     source: Optional[str] = None
+    param_ref_ids: Dict[str, Optional[str]] = {}
 
     # model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
@@ -470,12 +474,15 @@ class TranscriptionUnit(BaseModel):
                 if s.maps_to_parameter in self.params:
                     raise ValueError(f"Parameter {s.maps_to_parameter} already in params")
                 self.params[s.maps_to_parameter] = s.part
+                # track ref_id for this parameter
+                self.param_ref_ids[s.maps_to_parameter] = s.ref_id
 
         # add default parameters
         for _, p in part_type_to_parameter_name.items():
             if p not in self.params:
                 try:
                     self.params[p] = [parameter_to_default_part[p]]
+                    self.param_ref_ids[p] = None  # default parameters have no ref_id
                 except KeyError:
                     msg = f"No default part for parameter {p}"
                     msg += f" (part_type_to_parameter_name: {part_type_to_parameter_name})"
@@ -1055,8 +1062,22 @@ class Network(BaseModel):
         tu: List[dict] = []
         assert self.transcription_units is not None, "No transcription units in network"
 
-        def make_hashable(x):
-            return tuple(sorted((k, tuple(v)) for k, v in x.items()))
+        def make_hashable(params, tu_obj):
+            """Make params hashable, considering ref_id for identical part grouping."""
+            hashable_params = {}
+            for param_name, parts in params.items():
+                ref_id = tu_obj.param_ref_ids.get(param_name)
+
+                if ref_id is not None:
+                    # use ref_id as the hashable representation for non-null ref_ids
+                    hashable_params[param_name] = (f"ref:{ref_id}",)
+                else:
+                    # use the actual parts for null ref_ids
+                    hashable_params[param_name] = (
+                        tuple(parts) if isinstance(parts, list) else (parts,)
+                    )
+
+            return tuple(sorted((k, v) for k, v in hashable_params.items()))
 
         for tuid, t in self.transcription_units.items():
             dna, dna_params = self.__getDna(t)
@@ -1067,13 +1088,13 @@ class Network(BaseModel):
                     "name": tuid,
                     "DNA": dna,
                     "DNA_params": dna_params,
-                    "DNA_params_hashable": make_hashable(dna_params),
+                    "DNA_params_hashable": make_hashable(dna_params, t),
                     "RNA": rna,
                     "RNA_params": rna_params,
-                    "RNA_params_hashable": make_hashable(rna_params),
+                    "RNA_params_hashable": make_hashable(rna_params, t),
                     "PRT": prt,
                     "PRT_params": prt_params,
-                    "PRT_params_hashable": make_hashable(prt_params),
+                    "PRT_params_hashable": make_hashable(prt_params, t),
                 }
             )
         assert tu is not None, "No transcription units in network"
@@ -1085,48 +1106,51 @@ class Network(BaseModel):
         def only_one_value_per_param(params: Dict[str, List[str]]) -> bool:
             return all(len(parts) <= 1 for _, parts in params.items())
 
-        rna_tuids_noparams = list(
-            tudf[tudf["RNA_params"].map(len) == 0].groupby(by="RNA").agg(list).name  # type: ignore
-        )
+        def has_non_null_ref_id(row_name: str) -> bool:
+            tu = self.transcription_units[row_name]
+            return any(ref_id is not None for ref_id in tu.param_ref_ids.values())
 
-        try:
-            rna_tuids_oneparamvalue = (
-                tudf[tudf["RNA_params"].map(len) > 0]
-                .groupby(by="RNA")
-                .filter(lambda x: only_one_value_per_param(x["RNA_params"]))
-                .groupby(by=["RNA", "RNA_params_hashable"])
-                .agg(list)
+        def group_multi_param_tus(df: pd.DataFrame, node_type: str, params_col: str) -> List[List[str]]:
+            grouped_tuids = []
+            for _, row in df.iterrows():
+                if has_non_null_ref_id(row["name"]):
+                    group_key = (row[node_type], row[f"{node_type}_params_hashable"])
+                    for i, (key, names) in enumerate(grouped_tuids):
+                        if key == group_key:
+                            grouped_tuids[i] = (key, names + [row["name"]])
+                            break
+                    else:
+                        grouped_tuids.append((group_key, [row["name"]]))
+                else:
+                    grouped_tuids.append((None, [row["name"]]))
+            return [names for _, names in grouped_tuids]
+
+        def process_node_type(node_type: str, params_col: str) -> pd.DataFrame:
+            # no params
+            no_params = list(
+                tudf[tudf[params_col].map(len) == 0].groupby(by=node_type).agg(list).name
             )
-        except Exception as e:
-            msg = f"Error while grouping RNA that have one params: {e}\n"
-            msg += f"tudf: \n{tudf}"
-            raise NetworkConstructionError(msg)
+            
+            # single param value
+            try:
+                one_param = tudf[tudf[params_col].map(len) > 0].groupby(by=node_type).filter(
+                    lambda x: all(only_one_value_per_param(params) for params in x[params_col])
+                ).groupby(by=[node_type, f"{node_type}_params_hashable"]).agg(list)
+                one_param = [] if one_param.empty else list(one_param.name)
+            except Exception as e:
+                raise NetworkConstructionError(f"Error grouping {node_type} with one param: {e}\ntudf:\n{tudf}")
+            
+            # multi param values
+            has_many = tudf[params_col].apply(lambda params: any(len(v) > 1 for v in params.values()))
+            many_param = group_multi_param_tus(tudf[has_many], node_type, params_col) if has_many.any() else []
+            
+            tu_ids = no_params + one_param + many_param
+            return pd.DataFrame({"tu_id": tu_ids, "type": node_type})
 
-        rna_tuids_oneparamvalue = (
-            [] if rna_tuids_oneparamvalue.empty else list(rna_tuids_oneparamvalue.name)
-        )
-
-        rna_tuids_manyparamvalues = list(tudf[tudf["RNA_params"].map(len) > 1].name)
-        rna_tuids = rna_tuids_noparams + rna_tuids_oneparamvalue + rna_tuids_manyparamvalues
-        rna_df = pd.DataFrame({"tu_id": rna_tuids, "type": "RNA"})
-
-        prt_tuids_noparams = list(
-            tudf[tudf["PRT_params"].map(len) == 0].groupby(by="PRT").agg(list).name
-        )
-        # we group PRT with same content and same parameters if they have a single parameters
-        prt_tuids_oneparamvalue = (
-            tudf[tudf["PRT_params"].map(len) > 0]
-            .groupby(by="PRT")
-            .filter(lambda x: only_one_value_per_param(x["PRT_params"]))
-            .groupby(by=["PRT", "PRT_params_hashable"])
-            .agg(list)
-        )
-        prt_tuids_oneparamvalue = (
-            [] if prt_tuids_oneparamvalue.empty else list(prt_tuids_oneparamvalue.name)
-        )
-        prt_tuids_manyparamvalues = list(tudf[tudf["PRT_params"].map(len) > 1].name)
-        prt_tuids = prt_tuids_noparams + prt_tuids_oneparamvalue + prt_tuids_manyparamvalues
-        prt_df = pd.DataFrame({"tu_id": prt_tuids, "type": "PRT"})
+        # transcription units are never grouped
+        dna_df = pd.DataFrame({"tu_id": [[x] for x in cast(str, tudf["name"])], "type": "DNA"})
+        rna_df = process_node_type("RNA", "RNA_params")
+        prt_df = process_node_type("PRT", "PRT_params")
 
         tudf.set_index("name", inplace=True)
 
