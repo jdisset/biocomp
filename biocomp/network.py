@@ -1110,7 +1110,9 @@ class Network(BaseModel):
             tu = self.transcription_units[row_name]
             return any(ref_id is not None for ref_id in tu.param_ref_ids.values())
 
-        def group_multi_param_tus(df: pd.DataFrame, node_type: str, params_col: str) -> List[List[str]]:
+        def group_multi_param_tus(
+            df: pd.DataFrame, node_type: str, params_col: str
+        ) -> List[List[str]]:
             grouped_tuids = []
             for _, row in df.iterrows():
                 if has_non_null_ref_id(row["name"]):
@@ -1130,20 +1132,34 @@ class Network(BaseModel):
             no_params = list(
                 tudf[tudf[params_col].map(len) == 0].groupby(by=node_type).agg(list).name
             )
-            
+
             # single param value
             try:
-                one_param = tudf[tudf[params_col].map(len) > 0].groupby(by=node_type).filter(
-                    lambda x: all(only_one_value_per_param(params) for params in x[params_col])
-                ).groupby(by=[node_type, f"{node_type}_params_hashable"]).agg(list)
+                one_param = (
+                    tudf[tudf[params_col].map(len) > 0]
+                    .groupby(by=node_type)
+                    .filter(
+                        lambda x: all(only_one_value_per_param(params) for params in x[params_col])
+                    )
+                    .groupby(by=[node_type, f"{node_type}_params_hashable"])
+                    .agg(list)
+                )
                 one_param = [] if one_param.empty else list(one_param.name)
             except Exception as e:
-                raise NetworkConstructionError(f"Error grouping {node_type} with one param: {e}\ntudf:\n{tudf}")
-            
+                raise NetworkConstructionError(
+                    f"Error grouping {node_type} with one param: {e}\ntudf:\n{tudf}"
+                )
+
             # multi param values
-            has_many = tudf[params_col].apply(lambda params: any(len(v) > 1 for v in params.values()))
-            many_param = group_multi_param_tus(tudf[has_many], node_type, params_col) if has_many.any() else []
-            
+            has_many = tudf[params_col].apply(
+                lambda params: any(len(v) > 1 for v in params.values())
+            )
+            many_param = (
+                group_multi_param_tus(tudf[has_many], node_type, params_col)
+                if has_many.any()
+                else []
+            )
+
             tu_ids = no_params + one_param + many_param
             return pd.DataFrame({"tu_id": tu_ids, "type": node_type})
 
