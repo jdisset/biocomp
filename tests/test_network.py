@@ -432,3 +432,303 @@ class TestNetworkUtils:
         
         ern_ids = get_all_ERN_ids(mock_net)
         assert ern_ids == [0, 2]
+
+
+class TestRNAGrouping:
+    """Test cases for RNA node grouping logic."""
+    
+    @pytest.fixture
+    def real_lib(self):
+        """Use the real library for grouping tests."""
+        from biocomp.utils import load_lib
+        return load_lib()
+    
+    def test_multi_value_parameter_grouping(self, real_lib):
+        """Test that RNAs with multi-value parameters are NOT grouped without ref_id."""
+        # create network with multi-value uORF slots (no ref_id)
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(name="TU1", slots=["hEF1a", Slot(part=["1x_uORF", "2x_uORF"]), "eBFP2"]),
+                        Unit(name="TU2", slots=["hEF1a", Slot(part=["1x_uORF", "2x_uORF"]), "eBFP2"]),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        # check that RNAs are NOT grouped (each TU gets its own RNA node)
+        cdg = net.central_dogma_graph
+        rna_nodes = cdg[cdg.type == "RNA"]
+        
+        # find nodes containing TU1 and TU2
+        tu1_nodes = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU1" in x)]
+        tu2_nodes = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU2" in x)]
+        
+        # they should be in separate nodes (no ref_id means no grouping for multi-value)
+        assert len(tu1_nodes) == 1
+        assert len(tu2_nodes) == 1
+        assert tu1_nodes.index[0] != tu2_nodes.index[0]
+    
+    def test_single_value_parameter_grouping(self, real_lib):
+        """Test that RNAs with single-value parameters ARE grouped together."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(name="TU1", slots=["hEF1a", Slot(part=["1x_uORF"]), "eBFP2"]),
+                        Unit(name="TU2", slots=["hEF1a", Slot(part=["1x_uORF"]), "eBFP2"]),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        cdg = net.central_dogma_graph
+        rna_nodes = cdg[cdg.type == "RNA"]
+        
+        # both TUs should be in the same RNA node
+        grouped_node = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU1" in x and "TU2" in x)]
+        assert len(grouped_node) == 1
+        assert set(grouped_node.iloc[0]['tu_id']) == {"TU1", "TU2"}
+    
+    def test_different_single_value_parameters(self, real_lib):
+        """Test that RNAs with different single-value parameters are NOT grouped."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(name="TU1", slots=["hEF1a", Slot(part=["1x_uORF"]), "eBFP2"]),
+                        Unit(name="TU2", slots=["hEF1a", Slot(part=["2x_uORF"]), "eBFP2"]),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        cdg = net.central_dogma_graph
+        rna_nodes = cdg[cdg.type == "RNA"]
+        
+        # TUs should be in separate nodes
+        tu1_nodes = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU1" in x)]
+        tu2_nodes = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU2" in x)]
+        
+        assert len(tu1_nodes) == 1
+        assert len(tu2_nodes) == 1
+        assert tu1_nodes.index[0] != tu2_nodes.index[0]
+    
+    def test_no_parameter_grouping(self, real_lib):
+        """Test that RNAs with no parameters are grouped by content."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(name="TU1", slots=["hEF1a", "eBFP2"]),  # no uORF
+                        Unit(name="TU2", slots=["hEF1a", "eBFP2"]),  # no uORF
+                        Unit(name="TU3", slots=["hEF1a", "mKate"]),  # different content
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        cdg = net.central_dogma_graph
+        rna_nodes = cdg[cdg.type == "RNA"]
+        
+        # TU1 and TU2 should be grouped (same content, no params)
+        grouped_node = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU1" in x and "TU2" in x)]
+        assert len(grouped_node) == 1
+        
+        # TU3 should be separate (different content)
+        tu3_node = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU3" in x)]
+        assert len(tu3_node) == 1
+        assert tu3_node.index[0] != grouped_node.index[0]
+
+
+class TestRefIdGrouping:
+    """Test cases for ref_id based grouping."""
+    
+    @pytest.fixture
+    def real_lib(self):
+        """Use the real library for ref_id tests."""
+        from biocomp.utils import load_lib
+        return load_lib()
+    
+    def test_ref_id_parameter_tracking(self, real_lib):
+        """Test that ref_id is properly tracked in TranscriptionUnit."""
+        tu = TranscriptionUnit(
+            name="test_tu",
+            slots=[
+                Slot(part="hEF1a"),
+                Slot(part=["1x_uORF"], ref_id="shared_ref"),
+                Slot(part="mKate"),
+            ]
+        )
+        
+        assert hasattr(tu, 'param_ref_ids')
+        assert tu.param_ref_ids['tl_rate'] == "shared_ref"
+        assert tu.param_ref_ids['tc_rate'] is None  # no ref_id for promoter
+    
+    def test_ref_id_grouping_same_ref(self, real_lib):
+        """Test that RNAs with same ref_id are grouped even with different parts."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(
+                            name="TU1",
+                            slots=["hEF1a", Slot(part=["1x_uORF"], ref_id="shared_ref"), "eBFP2"]
+                        ),
+                        Unit(
+                            name="TU2",
+                            slots=["hEF1a", Slot(part=["2x_uORF"], ref_id="shared_ref"), "eBFP2"]
+                        ),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        cdg = net.central_dogma_graph
+        rna_nodes = cdg[cdg.type == "RNA"]
+        
+        # TUs should be grouped together due to same ref_id
+        grouped_node = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU1" in x and "TU2" in x)]
+        assert len(grouped_node) == 1
+        assert set(grouped_node.iloc[0]['tu_id']) == {"TU1", "TU2"}
+    
+    def test_ref_id_grouping_different_ref(self, real_lib):
+        """Test that RNAs with different ref_id are NOT grouped."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(
+                            name="TU1",
+                            slots=["hEF1a", Slot(part=["1x_uORF"], ref_id="ref_A"), "eBFP2"]
+                        ),
+                        Unit(
+                            name="TU2",
+                            slots=["hEF1a", Slot(part=["1x_uORF"], ref_id="ref_B"), "eBFP2"]
+                        ),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        cdg = net.central_dogma_graph
+        rna_nodes = cdg[cdg.type == "RNA"]
+        
+        # TUs should be in separate nodes due to different ref_ids
+        tu1_nodes = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU1" in x)]
+        tu2_nodes = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU2" in x)]
+        
+        assert len(tu1_nodes) == 1
+        assert len(tu2_nodes) == 1
+        assert tu1_nodes.index[0] != tu2_nodes.index[0]
+    
+    def test_ref_id_mixed_with_no_ref(self, real_lib):
+        """Test mixing ref_id and no ref_id parameters."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(
+                            name="TU1",
+                            slots=["hEF1a", Slot(part=["1x_uORF"], ref_id="shared"), "eBFP2"]
+                        ),
+                        Unit(
+                            name="TU2",
+                            slots=["hEF1a", Slot(part=["2x_uORF"], ref_id="shared"), "eBFP2"]
+                        ),
+                        Unit(
+                            name="TU3",
+                            slots=["hEF1a", Slot(part=["1x_uORF"]), "eBFP2"]  # no ref_id
+                        ),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        cdg = net.central_dogma_graph
+        rna_nodes = cdg[cdg.type == "RNA"]
+        
+        # TU1 and TU2 should be grouped (same ref_id)
+        grouped_node = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU1" in x and "TU2" in x)]
+        assert len(grouped_node) == 1
+        
+        # TU3 should be separate (no ref_id, different from ref_id group)
+        tu3_node = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU3" in x)]
+        assert len(tu3_node) == 1
+        assert tu3_node.index[0] != grouped_node.index[0]
+    
+    def test_ref_id_with_multi_value_parts(self, real_lib):
+        """Test that ref_id enables grouping of multi-value part lists."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(
+                            name="TU1",
+                            slots=["hEF1a", Slot(part=["1x_uORF", "2x_uORF"], ref_id="multi"), "eBFP2"]
+                        ),
+                        Unit(
+                            name="TU2",
+                            slots=["hEF1a", Slot(part=["3x_uORF", "4x_uORF"], ref_id="multi"), "eBFP2"]
+                        ),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        cdg = net.central_dogma_graph
+        rna_nodes = cdg[cdg.type == "RNA"]
+        
+        # With same ref_id, they SHOULD be grouped even with different multi-value parts
+        grouped_node = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU1" in x and "TU2" in x)]
+        assert len(grouped_node) == 1
+        assert set(grouped_node.iloc[0]['tu_id']) == {"TU1", "TU2"}
+    
+    def test_multi_value_no_grouping_without_ref_id(self, real_lib):
+        """Test that identical multi-value parameters are NOT grouped without ref_id."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(
+                            name="TU1",
+                            slots=["hEF1a", Slot(part=["1x_uORF", "2x_uORF"]), "eBFP2"]
+                        ),
+                        Unit(
+                            name="TU2",
+                            slots=["hEF1a", Slot(part=["1x_uORF", "2x_uORF"]), "eBFP2"]
+                        ),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        cdg = net.central_dogma_graph
+        rna_nodes = cdg[cdg.type == "RNA"]
+        
+        # Without ref_id, identical multi-value params should NOT be grouped
+        tu1_nodes = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU1" in x)]
+        tu2_nodes = rna_nodes[rna_nodes.tu_id.apply(lambda x: "TU2" in x)]
+        
+        assert len(tu1_nodes) == 1
+        assert len(tu2_nodes) == 1
+        assert tu1_nodes.index[0] != tu2_nodes.index[0]
