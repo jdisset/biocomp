@@ -395,7 +395,7 @@ class Slot(BaseModel):
     """Transcription Units are made of slots which contain either a part or a list of
     possible parts that map to a quantized parameter"""
 
-    part: Optional[Union[str, List[str]]] = None
+    part: Optional[Union[str, List[Optional[str]]]] = None
 
     # does this slot map to a parameter, like "tl_rate" or "tc_rate"?
     maps_to_parameter: Optional[str] = None
@@ -411,9 +411,13 @@ class Slot(BaseModel):
                 self.part = None
             else:
                 mapped = list(set([self.__mapped_parameter(p) for p in self.part if p is not None]))
-                if len(mapped) != 1:
-                    raise ValueError(f"{self.part} maps to {len(mapped)} parameters ({mapped})")
-                self.maps_to_parameter = mapped[0]
+                # filter out None values (parts that don't map to any parameter)
+                non_none_mapped = [m for m in mapped if m is not None]
+                if len(non_none_mapped) > 1:
+                    raise ValueError(
+                        f"{self.part} maps to {len(non_none_mapped)} different parameters ({non_none_mapped})"
+                    )
+                self.maps_to_parameter = non_none_mapped[0] if non_none_mapped else None
         else:
             self.maps_to_parameter = self.__mapped_parameter(self.part)
 
@@ -451,7 +455,7 @@ def convert_to_slot(value):
         raise ValueError(f"Cannot convert {type(value)} to Slot")
 
 
-SlotType = Annotated[Slot | str | list[str], BeforeValidator(convert_to_slot)]
+SlotType = Annotated[Union[Slot, str, List[Optional[str]]], BeforeValidator(convert_to_slot)]
 
 
 class TranscriptionUnit(BaseModel):
@@ -473,7 +477,12 @@ class TranscriptionUnit(BaseModel):
             if s.maps_to_parameter is not None:
                 if s.maps_to_parameter in self.params:
                     raise ValueError(f"Parameter {s.maps_to_parameter} already in params")
-                self.params[s.maps_to_parameter] = s.part
+                # replace None values with the default part for this parameter
+                if isinstance(s.part, list) and s.maps_to_parameter in parameter_to_default_part:
+                    default = parameter_to_default_part[s.maps_to_parameter]
+                    self.params[s.maps_to_parameter] = [default if p is None else p for p in s.part]
+                else:
+                    self.params[s.maps_to_parameter] = s.part
                 # track ref_id for this parameter
                 self.param_ref_ids[s.maps_to_parameter] = s.ref_id
 
@@ -966,7 +975,7 @@ class Network(BaseModel):
         lib = LibraryContext.get_library()
         content = []
         for s in tu.slots:
-            if s.maps_to_parameter is None:
+            if s.maps_to_parameter is None and s.part is not None:
                 content.append(s.part)
         return content, tu.params
 
@@ -977,10 +986,14 @@ class Network(BaseModel):
         content = tuple(d[d[transform] == 1].index)
         params = {}
         for param_name, parts in dna_params.items():
-            p = self.lib.pc.loc[parts]
-            if p[transform].sum() > 0:
-                assert p[transform].sum() == len(p)
-                params[param_name] = list(p.index)
+            # None values should have been replaced with defaults in __get_parameters
+            # but filter them just in case
+            non_none_parts = [p for p in parts if p is not None]
+            if non_none_parts:  # only process if we have non-None parts
+                p = self.lib.pc.loc[non_none_parts]
+                if p[transform].sum() > 0:
+                    assert p[transform].sum() == len(p)
+                    params[param_name] = list(p.index)
         return content, params
 
     def __getRna(self, tu: TranscriptionUnit):
