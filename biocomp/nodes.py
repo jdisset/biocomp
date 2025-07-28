@@ -370,11 +370,14 @@ def source_with_pos(
 
     local_layer_name = generate_layer_name(stack, layer_id, f"source{n_outputs}x")
     namespace = f"local/{local_layer_name}"
-    pname = "shapes"
 
     def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
         add_quantile_var_ids(params, len(nodelist), len(input_shapes), local_layer_name)
-        params[f"{namespace}/{pname}"] = input_shapes
+        params.at(
+            f"{namespace}/input_shapes",
+            jnp.array(input_shapes, dtype=jnp.int32),
+            tags=[NON_GRAD_TAG],
+        )
         MLP_head(np.zeros((2 + len(input_shapes),)), params, key)
 
     def MLP_head(vals, params, key):
@@ -455,14 +458,7 @@ def inv_source_with_pos(
         # add quantile variables - one per node
         add_quantile_var_ids(params, len(nodelist), 1, local_layer_name)
 
-        if stack is None:
-            logger.error(
-                "Inverse source with position is not supported without a stack. "
-                "This will not work as expected."
-            )
-            raise NotImplementedError(
-                "Inverse source with position is not supported without a stack."
-            )
+        assert stack is not None, "Stack must be provided for inverse source node."
 
         # store the original position for each inverse node
         positions = []
@@ -478,11 +474,12 @@ def inv_source_with_pos(
             )
 
             positions.append(original_slot)
+        positions = jnp.array(positions, dtype=jnp.int32)
 
         # store positions as a parameter (non-gradient)
         params.at(
             f"{namespace}/original_positions",
-            jnp.array(positions, dtype=jnp.int32),
+            positions,
             tags=[NON_GRAD_TAG],
             overwrite=None,
         )
@@ -500,7 +497,7 @@ def inv_source_with_pos(
         return dense_mlp(
             vals,
             hidden_s,
-            1,  # output dimension is 1
+            output_s=1,  # output dimension is 1
             depth=depth,
             activation=inner_activation,
             initializer=initializer,
@@ -519,11 +516,11 @@ def inv_source_with_pos(
     ) -> Tuple[ArrayLike, Dict]:
         assert value.shape == input_shapes[0], f"Invalid input shape {value.shape}"
 
-        qid = params[f"{namespace}/quantile_variable_id"][node_id]
+        qid = params.at(f"{namespace}/quantile_variable_id")[node_id]
         quantile = quantiles[qid][0]
 
         # get the original position this node is inverting
-        original_position = params[f"{namespace}/original_positions"][node_id]
+        original_position = params.at(f"{namespace}/original_positions")[node_id]
         normalized_position = original_position / max_L1s
 
         # flatten value if needed (ensure it's 1D for concatenation)
@@ -568,6 +565,7 @@ def bias(
     n_outputs: int,
     layer_id: int,
     stack,
+    valid_range: Tuple[float, float] = (0.0, 0.8),
     shape: Tuple[int] = (1,),
     **_,
 ) -> LayerInstance:
@@ -577,20 +575,39 @@ def bias(
     local_layer_name = generate_layer_name(stack, layer_id, "bias")
     namespace = f"local/{local_layer_name}"
 
+    def clamp_to_range(value: ArrayLike, scale: ArrayLike):
+        # scaled sigmoid function to clamp value to valid_range. smaller scale = sharper transition
+        s = jax.nn.sigmoid(scale) + 0.001
+        scaled_sigmoid = jax.nn.sigmoid(value / s)
+        return scaled_sigmoid * (valid_range[1] - valid_range[0]) + valid_range[0]
+
     def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
-        params[f"{namespace}/value"] = jax.random.uniform(key, (len(nodelist), *shape))
+        params[f"{namespace}/raw_value"] = jax.random.uniform(
+            key, (len(nodelist), *shape), minval=-1, maxval=1
+        )
+        params[f"{namespace}/scale"] = jnp.zeros((len(nodelist),))
 
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> Tuple[ArrayLike, Dict]:
-        bias_value = params[f"{namespace}/value"][node_id]
-        return bias_value, {"bias_value": bias_value}
+        raw_bias_value = params[f"{namespace}/raw_value"][node_id]
+        scale = params[f"{namespace}/scale"][node_id]
+        bias_value = clamp_to_range(raw_bias_value, scale)
+
+        return bias_value, {
+            "raw_bias_value": raw_bias_value,
+            "bias_value": bias_value,
+            "scale": scale,
+        }
 
     def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for i, n in enumerate(nodelist):
             extra = n.get_compute_node("extra") or {}
-            extra["bias_value"] = params[f"{namespace}/value"][i]
+            scale = params[f"{namespace}/scale"][i]
+            bias_value = clamp_to_range(params[f"{namespace}/raw_value"][i], scale)
+            extra["bias_value"] = bias_value
+            extra["scale"] = scale
             n.set_compute_node_column("extra", extra)
 
-    output_shapes = [shape]
+    output_shapes = [tuple(shape)]  # single output shape
 
     return LayerInstance(prepare, apply, output_shapes, commit=commit)
 
