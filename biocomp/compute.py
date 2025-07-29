@@ -265,9 +265,9 @@ class ComputeLayer:
     def check(self):
         assert len(set(n.type_signature for n in self.nodes)) == 1, "Different types in layer"
 
-    def commit(self, params: ParameterTree):
+    def commit(self, params: ParameterTree, **kwargs):
         if self.f_commit is not None:
-            self.f_commit(params, self.nodes)
+            self.f_commit(params, self.nodes, **kwargs)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -404,9 +404,9 @@ class ComputeStack:
         # we only deepcopy the layers, not the networks
         return ComputeStack(self.networks, deepcopy(self.layers))
 
-    def commit(self, params: ParameterTree):
+    def commit(self, params: ParameterTree, **kwargs):
         for layer in self.layers:
-            layer.commit(params)
+            layer.commit(params, **kwargs)
 
     def __repr__(self):
         # layers with line breaks

@@ -1817,6 +1817,157 @@ class Network(BaseModel):
         signature += f"{self.raw_aggregations}"
         return signature
 
+    def get_unique_plasmid_content(self) -> set[tuple[tuple[str]]]:
+        """
+        Get unique content of plasmids (sources) in the network
+        Returns a set of plasmids, where a plasmid is a tuple of TUs and a TU is a tuple of part names.
+        """
+        if self.tu_in_sources is None or self.transcription_units is None:
+            raise ValueError("Network not built")
+
+        def squeeze_part(p):
+            if isinstance(p, list):
+                return p[0] if len(p) == 1 else tuple(p)
+            return p
+
+        return {
+            tuple(
+                tuple(squeeze_part(p) for p in self.transcription_units[row["TU"]].to_parts())
+                for _, row in group.sort_values("position").iterrows()
+            )
+            for _, group in self.tu_in_sources.groupby("source")
+        }
+
+    def to_pretty_recipe(self) -> str:
+        """Generate a pretty ASCII art representation of the network recipe."""
+        if not self.is_built():
+            raise ValueError("Network must be built before converting to pretty recipe")
+
+        lines = []
+        decl = self.to_declarative()
+
+        # summary with icons
+        n_sources = len(
+            {unit.source or f"p{i}" for cotx in decl.cotx for i, unit in enumerate(cotx.units)}
+        )
+
+        # fancy header
+        title = f" 🧬 {self.name or 'Unnamed Network'} "
+        ndashes = max(0, (60 - len(title)) // 2)
+        lines.extend(["\n", "═" * ndashes + title + "═" * ndashes])
+        if self.metadata and self.metadata.get("description"):
+            desc = f" {self.metadata['description']}"
+            lines.append(f"║  {desc:<76}║")
+        lines.append(
+            f" {len(self.transcription_units)} TUs • {n_sources} sources • {len(decl.cotx)} cotx groups"
+        )
+
+        lines.append("═" * 60)
+
+        for i, cotx in enumerate(decl.cotx):
+            group_name = cotx.name or f"Co-transfection Group {i + 1}"
+            # group header with gradient effect
+            lines.extend(["-------- ⚭ BEGIN " + group_name.upper() + " ⚭ --------", ""])
+
+            # group by source and build index
+            source_groups = {}
+            unit_indices = {}
+            for j, unit in enumerate(cotx.units):
+                source = unit.source or f"plasmid_{j + 1}"
+                source_groups.setdefault(source, []).append(unit)
+                unit_indices[id(unit)] = j
+
+            # normalize ratios (smallest = 1)
+            ratios = cotx.ratios or [1.0] * len(cotx.units)
+            min_ratio = min(r for r in ratios if r > 0) if ratios else 1.0
+            norm_ratios = [r / min_ratio for r in ratios]
+
+            # display each source with pretty containers
+            for source_idx, (source, units) in enumerate(source_groups.items()):
+                ratio = norm_ratios[unit_indices[id(units[0])]]
+                ratio_str = f"⚭ {int(ratio)}×" if ratio == int(ratio) else f"{ratio:.1f}×"
+
+                icon = ""
+
+                lines.append(f"╭─ {icon}{source} [{ratio_str}]")
+
+                for unit_idx, unit in enumerate(units):
+                    is_last_unit = unit_idx == len(units) - 1
+                    if unit_idx < 7:
+                        unit_icon = ["⑴", "⑵", "⑶", "⑷", "⑸", "⑹", "⑺"][unit_idx]
+                    else:
+                        unit_icon = f"({unit_idx + 1})"
+                    # lines.append(f"│     │")
+                    lines.append(f'│     {unit_icon} "{unit.name or "unnamed"}"')
+
+                    for slot_idx, slot in enumerate(unit.slots):
+                        is_last_slot = slot_idx == len(unit.slots) - 1
+                        part_info = self._format_part_info(slot)
+
+                        # special formatting for last slot of last unit
+
+                        if is_last_unit and is_last_slot:
+                            lines.append(f"│     │╰► {part_info}")
+                            lines.append("╰" + "─" * 5 + "╯")
+                        else:
+                            lines.append(f"│     │├► {part_info}")
+
+                # space between sources
+                if source_idx < len(source_groups) - 1:
+                    lines.append("")
+
+            # fancy separator between co-transfection groups
+            lines.extend(["-------- ⚭ END " + group_name.upper() + " ⚭ --------", ""])
+
+        return "\n".join(lines)
+
+    def _format_part_info(self, slot: Slot) -> str:
+        """Format part information for pretty printing."""
+        if isinstance(slot.part, list):
+            valid_parts = [p for p in slot.part if p is not None]
+            if not valid_parts:
+                return "[None] (no parts available)"
+
+            parts_str = " | ".join("∅" if p is None else p for p in slot.part)
+            part_type = self._get_part_type(valid_parts[0])
+            suffix = " (variable)" if len(slot.part) > 1 else ""
+            return f"[{part_type}] {parts_str}{suffix}"
+
+        if slot.part is None:
+            return "[None] ∅"
+
+        part_type = self._get_part_type(slot.part)
+        suffix = (
+            " (tunable)" if hasattr(slot, "maps_to_parameter") and slot.maps_to_parameter else ""
+        )
+        return f"[{part_type}] {slot.part}{suffix}"
+
+    def _get_part_type(self, part_name: str) -> str:
+        """Get human-readable part type."""
+        if not hasattr(self, "lib") or self.lib is None:
+            return "part"
+
+        try:
+            category = self.lib.parts.loc[part_name, "category"]
+            # Make categories more readable
+            type_map = {
+                "promoter": "Promoter",
+                "uORF_group": "uORF",
+                "fluo_marker": "Reporter",
+                "CDS": "CDS",
+                "ERN": "ERN",
+                "ERN_recog_site_5p": "ERN site",
+                "ERN_recog_site_3p": "ERN site 3'",
+                "terminator": "Terminator",
+                "spacer": "Spacer",
+                "insulator": "Insulator",
+                "recombinase_fwd": "Recombinase",
+                "numeric": "Numeric",
+            }
+            return type_map.get(category, category)
+        except:
+            return "part"
+
     def _assign_quantile_variable(self):
         """
         Assigns the correct quantile variable to each node of the compute graph.
