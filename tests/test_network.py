@@ -732,3 +732,153 @@ class TestRefIdGrouping:
         assert len(tu1_nodes) == 1
         assert len(tu2_nodes) == 1
         assert tu1_nodes.index[0] != tu2_nodes.index[0]
+
+
+class TestGetUniquePlasmidContent:
+    """Test cases for get_unique_plasmid_content method."""
+    
+    @pytest.fixture
+    def real_lib(self):
+        """Use the real library for tests."""
+        from biocomp.utils import load_lib
+        return load_lib()
+    
+    def test_get_unique_plasmid_content_basic(self, real_lib):
+        """Test basic functionality of get_unique_plasmid_content."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(name="TU1", slots=["hEF1a", "1x_uORF", "eBFP2"], source="plasmid1"),
+                        Unit(name="TU2", slots=["hEF1a", "2x_uORF", "mKate"], source="plasmid1"),
+                        Unit(name="TU3", slots=["hEF1a", "1x_uORF", "eBFP2"], source="plasmid2"),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        unique_plasmids = net.get_unique_plasmid_content()
+        
+        # should have 2 unique plasmids
+        assert len(unique_plasmids) == 2
+        
+        # each plasmid is a tuple of TUs, each TU is a tuple of parts
+        for plasmid in unique_plasmids:
+            assert isinstance(plasmid, tuple)
+            for tu in plasmid:
+                assert isinstance(tu, tuple)
+    
+    def test_get_unique_plasmid_content_identical_plasmids(self, real_lib):
+        """Test that identical plasmids are deduplicated."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(name="TU1", slots=["hEF1a", "eBFP2"], source="plasmid1"),
+                        Unit(name="TU2", slots=["hEF1a", "eBFP2"], source="plasmid2"),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        unique_plasmids = net.get_unique_plasmid_content()
+        
+        # both plasmids have identical content, so should be deduplicated
+        assert len(unique_plasmids) == 1
+    
+    def test_get_unique_plasmid_content_order_matters(self, real_lib):
+        """Test that TU order within plasmids matters."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(name="TU1", slots=["hEF1a", "eBFP2"], source="plasmid1"),
+                        Unit(name="TU2", slots=["hEF1a", "mKate"], source="plasmid1"),
+                        Unit(name="TU3", slots=["hEF1a", "mKate"], source="plasmid2"),
+                        Unit(name="TU4", slots=["hEF1a", "eBFP2"], source="plasmid2"),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        unique_plasmids = net.get_unique_plasmid_content()
+        
+        # same TUs but in different order = different plasmids
+        assert len(unique_plasmids) == 2
+    
+    def test_get_unique_plasmid_content_not_built(self, real_lib):
+        """Test error when network is not built."""
+        net = Network(
+            lib=real_lib,
+            build_on_init=False
+        )
+        net.transcription_units = None  # ensure it's not built
+        
+        with pytest.raises(ValueError, match="Network not built"):
+            net.get_unique_plasmid_content()
+    
+    def test_get_unique_plasmid_content_with_multi_value_slots(self, real_lib):
+        """Test with multi-value slots."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        Unit(name="TU1", slots=["hEF1a", Slot(part=["1x_uORF", "2x_uORF"]), "eBFP2"], source="plasmid1"),
+                        Unit(name="TU2", slots=["hEF1a", Slot(part=["1x_uORF", "2x_uORF"]), "mKate"], source="plasmid2"),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        unique_plasmids = net.get_unique_plasmid_content()
+        
+        # should have 2 unique plasmids
+        assert len(unique_plasmids) == 2
+        
+        # verify multi-value slots are preserved as tuples in the tuple
+        for plasmid in unique_plasmids:
+            for tu in plasmid:
+                # multi-value slots should be represented as tuples within the tuple
+                assert any(isinstance(part, tuple) for part in tu)
+    
+    def test_get_unique_plasmid_content_squeeze_single_parts(self, real_lib):
+        """Test that single-element lists are squeezed to direct values."""
+        net = Network(
+            lib=real_lib,
+            cotx=[
+                CoTransfection(
+                    units=[
+                        # Mix of single and multi-value slots
+                        Unit(name="TU1", slots=["hEF1a", Slot(part=["1x_uORF"]), "eBFP2"], source="plasmid1"),
+                        Unit(name="TU2", slots=["hEF1a", Slot(part=["1x_uORF", "2x_uORF"]), "mKate"], source="plasmid2"),
+                    ]
+                )
+            ],
+            build_on_init=True
+        )
+        
+        unique_plasmids = net.get_unique_plasmid_content()
+        
+        # Find each plasmid content
+        plasmid_contents = list(unique_plasmids)
+        
+        # Check plasmid1: should have squeezed single-value slot
+        p1 = next(p for p in plasmid_contents if any('eBFP2' in tu for tu in p))
+        tu1 = p1[0]  # First TU in plasmid1
+        # The uORF slot had ["1x_uORF"] which should be squeezed to just "1x_uORF"
+        assert '1x_uORF' in tu1
+        assert not any(isinstance(part, tuple) for part in tu1)
+        
+        # Check plasmid2: should have tuple for multi-value slot
+        p2 = next(p for p in plasmid_contents if any('mKate' in tu for tu in p))
+        tu2 = p2[0]  # First TU in plasmid2
+        # The uORF slot had ["1x_uORF", "2x_uORF"] which should remain as tuple
+        assert ('1x_uORF', '2x_uORF') in tu2
