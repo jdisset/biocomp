@@ -8,6 +8,7 @@ from jax import random as random
 from biocomp.logging_config import get_logger
 
 logger = get_logger(__name__)
+
 ### {{{                       --     actual quantization functions    --
 
 
@@ -141,23 +142,24 @@ def get_variational_quantized(
     and add noise based on the log standard deviations stored in params.
     This function is used for variational quantization, where we add noise to the quantized values.
     """
-    from jax.experimental import checkify
 
-    masks = params[quantization_mask_path][node_id]
+    masks = jnp.asarray(params[quantization_mask_path])
+    mask_for_node = jnp.take(masks, node_id, axis=0)
+
     embedding_means = params[quantization_values_path]  # aka possible values
     embeddings_logstds = params[logstdevs_path]
     assert embedding_means.shape == embeddings_logstds.shape, (
         f"Embedding means shape {embedding_means.shape} does not match embeddings logstds shape {embeddings_logstds.shape}"
     )
-    check_multiple_quantization_shapes(values_to_quantize, embedding_means, masks)
+    check_multiple_quantization_shapes(values_to_quantize, embedding_means, mask_for_node)
 
-    assert masks.shape == (values_to_quantize.shape[0], embedding_means.shape[0]), (
-        f"Quantization mask shape {masks.shape} does not match values to quantize shape {values_to_quantize.shape} "
+    assert mask_for_node.shape == (values_to_quantize.shape[0], embedding_means.shape[0]), (
+        f"Quantization mask shape {mask_for_node.shape} does not match values to quantize shape {values_to_quantize.shape} "
         f"and embedding values shape {embedding_means.shape}"
     )
 
     closest_ids = vmap(get_nearest_masked_id, in_axes=(0, None, 0), out_axes=0)(
-        values_to_quantize, embedding_means, masks
+        values_to_quantize, embedding_means, mask_for_node
     )
 
     assert len(closest_ids) == values_to_quantize.shape[0]
@@ -183,7 +185,7 @@ def get_variational_quantized(
     )
 
     return vq, {
-        "q_masks": masks,
+        "q_masks": mask_for_node,
         "q_embedding_logstdevs": embeddings_logstds,
         "q_node_id": node_id,
         "q_logstdevs": values_logstds,

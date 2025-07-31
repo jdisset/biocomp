@@ -194,7 +194,7 @@ INITIALIZERS = {
 
 DEFAULT_ACTIVATION = "leaky_relu"
 DEFAULT_OUT_ACTIVATION = "sigmoid"
-DEFAULT_INITIALIZER = "he"
+DEFAULT_INITIALIZER = "he_normal"
 
 
 def dense_layer(
@@ -672,6 +672,7 @@ def aggregation(
             extra = n.get_compute_node("extra") or {}
             extra["ratios"] = params[f"{namespace}/{pname}"][i]
             n.set_compute_node_column("extra", extra)
+            # todo: should also modify the TU ratios. Need to make sure both extra and TU are in sync
 
     output_shape = input_shapes * n_outputs
 

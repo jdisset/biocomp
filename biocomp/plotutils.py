@@ -432,12 +432,14 @@ def get_reordered_protein_names(
     network: Network,
     input_order: Optional[Sequence[int] | Sequence[str] | Literal["inv"]] = None,
     protein_aliases: Optional[Dict[str, str]] = None,
+    only_dependent_outputs: bool = True,
 ) -> Tuple[list[int], int, list[str], str]:
     protein_aliases = protein_aliases or {}
     protein_order, protein_names, noutputs = pc.get_reordered_protein_names(
         network,
         input_order,
         protein_aliases,
+        only_dependent_outputs=only_dependent_outputs,
     )
     input_order, output_pos = protein_order[:-noutputs], protein_order[-noutputs:]
     input_names, output_name = protein_names[:-noutputs], protein_names[-noutputs:]
@@ -455,10 +457,11 @@ def extract_plot_data_from_network(
     Y: NdArray,
     input_order: Optional[Sequence[int] | Sequence[str]] = None,
     protein_aliases: Optional[Dict[str, str]] = None,
+    only_dependent_outputs: bool = True,
     **kw,
 ) -> PlotData:
     input_order, output_pos, input_names, output_name = get_reordered_protein_names(
-        network, input_order, protein_aliases
+        network, input_order, protein_aliases, only_dependent_outputs
     )
 
     assert X.shape[0] == Y.shape[0], f"X shape: {X.shape}, Y shape: {Y.shape}"
@@ -487,10 +490,11 @@ def extract_lazy_plot_data_from_network(
     get_XY: Callable[[PlotData], Tuple[NdArray, NdArray]],
     input_order: Optional[Sequence[int] | Sequence[str] | Literal["inv"]] = None,
     protein_aliases: Optional[Dict[str, str]] = None,
+    only_dependent_outputs: bool = True,
     **kw,
 ) -> LazyPlotData:
     input_order, output_pos, input_names, output_name = get_reordered_protein_names(
-        network, input_order, protein_aliases
+        network, input_order, protein_aliases, only_dependent_outputs
     )
 
     print(

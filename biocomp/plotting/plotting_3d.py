@@ -631,12 +631,13 @@ def smooth_3d(
             # pc.default_style(cbar.ax)
             cbar.ax.tick_params(axis="both", which="both", direction="out", pad=2, labelsize=8)
             cbar.ax.yaxis.tick_right()
-            cbar.ax.yaxis.set_label_position("left")
+            cbar.ax.yaxis.set_label_position("right")
 
             # add title to the right, vertical, along the colorbar
             # using the y axis for labels
 
-            cbar.ax.set_ylabel(output_name, rotation=90, fontsize=8, labelpad=5)
+            # cbar.ax.yaxis.set_label_position("right")
+            cbar.ax.set_ylabel(output_name, rotation=270, fontsize=8, labelpad=5)
 
             for spine in cbar.ax.spines.values():
                 spine.set_linewidth(0.2)

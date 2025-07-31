@@ -77,7 +77,7 @@ def get_bio_color(name, default="k"):
 ### {{{               --     get rescaled network ticks and labels     --
 
 
-def get_reordered_protein_names(network, input_order=None, protein_aliases=None, **_):
+def get_reordered_protein_names(network, input_order=None, protein_aliases=None, only_dependent_outputs=True, **_):
     """
     input_order can be a mix of protein names, protein aliases, integers, and '*'
     - protein names and aliases will be converted to lowercase to find matches
@@ -86,7 +86,7 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
     """
 
     input_names = network.get_inverted_input_proteins()
-    output_names = network.get_output_proteins()
+    output_names = network.get_output_proteins(only_dependent_outputs=only_dependent_outputs)
 
     lower_input_names = [n.lower() for n in input_names]
     lower_protein_aliases = (
@@ -133,10 +133,14 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
 
         in_order = [input_names.index(i) for i in reordered_input_names]
 
-    output_name = list(set(output_names) - set(input_names))
+    # output_names already respects only_dependent_outputs from get_output_proteins
+    output_name = list(output_names)  # Make a copy
+    
     if len(output_name) > 1:
         logger.debug(f"multiple output proteins found: {output_name}")
-    output_pos = [output_names.index(n) for n in output_name]
+    # Get positions of outputs in the full output list (before any filtering)
+    all_outputs = network.get_output_proteins(only_dependent_outputs=False)
+    output_pos = [all_outputs.index(n) for n in output_name]
 
     noutput = len(output_pos)
 

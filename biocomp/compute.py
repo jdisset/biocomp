@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from jax import vmap
 from jax.tree_util import Partial as partial
-
+from jax.typing import ArrayLike
 
 from . import nodes as nd
 from .network import Network
@@ -360,6 +360,24 @@ class ComputeStack:
         # pp_params = self.post_process(params)
         # assert pp_params == params, 'Post process changed params'
         return params
+
+    def get_nb_outputs(self) -> int:
+        """
+        Returns the total number of outputs in the stack.
+        This is the sum of the number of outputs of all networks.
+        """
+        if self.total_nb_of_outputs is None:
+            self.total_nb_of_outputs = sum(n.get_nb_outputs() for n in self.networks)
+        return self.total_nb_of_outputs
+
+    def get_nb_inputs(self) -> int:
+        """
+        Returns the total number of inputs in the stack.
+        This is the sum of the number of inputs of all networks.
+        """
+        if self.total_nb_of_inputs is None:
+            self.total_nb_of_inputs = sum(n.get_nb_inputs() for n in self.networks)
+        return self.total_nb_of_inputs
 
     def get_dependent_output_mask(self):
         """
@@ -1080,16 +1098,20 @@ class ComputeStack:
 
                 apply_f = self.layers[lid].f_apply
 
+                def single_out_apply(*node_args, **node_kwargs):
+                    out, _aux = apply_f(*node_args, **node_kwargs)
+                    return out  # drop the aux
+
                 def node_apply(node_id: ArrayLike, key: PRNGKey, *inputs: ArrayLike):
                     res, node_aux = apply_f(
                         *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
                     )
                     if w_grads[lid]:
                         # using jax.jacfwd, we can just grab the first output wrt the first input
-                        grad = jax.jacfwd(apply_f, argnums=list(range(n_inputs)))(
+                        grad = jax.jacfwd(single_out_apply, argnums=list(range(n_inputs)))(
                             *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
                         )
-                        first_output_grad = grad[0][0]
+                        first_output_grad = grad[0]
                         grad = first_output_grad.reshape(-1)
 
                     else:

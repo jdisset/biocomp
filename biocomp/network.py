@@ -1564,8 +1564,11 @@ class Network(BaseModel):
         assert len(onode) == 1, f"Invalid number of output nodes: {len(onode)}"
         return onode.iloc[0]
 
-    def get_output_proteins(self) -> List[str]:
+    def get_output_proteins(self, only_dependent_outputs: bool = False) -> List[str]:
         """Returns the names of the proteins that are outputs of the network"""
+        if only_dependent_outputs:
+            return self.get_dependent_output_proteins()
+        
         if not hasattr(self, "_output_proteins") or self._output_proteins is None:
             onode = self.get_output_compute_node()
             if "cdg_input" not in onode:
