@@ -13,6 +13,7 @@ import time
 from typing import List, Tuple, Callable, Optional, NamedTuple
 from pydantic import Field
 from biocomp.logging_config import get_logger
+from biocomp.optimutils import make_training_step, per_replicate_step, per_replicate_step_nonscan
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                     --     helper functions     --
@@ -65,96 +66,6 @@ def generate_batches(
     )
 
     return xbatches, ybatches
-
-
-def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",), scannable=True):
-    from jax import value_and_grad
-    import optax
-    import jax.numpy as jnp
-
-    def base_training_step(params, opt_state, x, y, z, key):
-        static, dynamic = params.filter_by_tag(["non_grad", "local"])
-
-        (loss, aux), grads = value_and_grad(loss_func, has_aux=True)(
-            dynamic, static, x, y, z, key, opt_state[0].count
-        )
-
-        updates, opt_state = optimizer.update(grads, opt_state, dynamic)
-        dynamic = optax.apply_updates(dynamic, updates)
-
-        if static.data:
-            params = ParameterTree.merge(static, dynamic)
-        else:
-            params = dynamic
-
-        learning_rate = None
-        try:
-            # Method 1: Check for hyperparams in individual state components
-            if isinstance(opt_state, tuple):
-                for state_component in opt_state:
-                    if (
-                        hasattr(state_component, "hyperparams")
-                        and "learning_rate" in state_component.hyperparams
-                    ):
-                        learning_rate = state_component.hyperparams["learning_rate"]
-                        break
-
-            # Method 2: Check direct hyperparams access
-            if (
-                learning_rate is None
-                and hasattr(opt_state, "hyperparams")
-                and "learning_rate" in opt_state.hyperparams
-            ):
-                learning_rate = opt_state.hyperparams["learning_rate"]
-
-            # Method 3: Try tree_get
-            if learning_rate is None:
-                try:
-                    learning_rate = optax.tree_utils.tree_get(
-                        opt_state,
-                        "learning_rate",
-                        default=None,
-                        filtering=lambda path, value: isinstance(value, (float, int))
-                        or (hasattr(value, "shape") and hasattr(value, "dtype")),
-                    )
-                except (KeyError, ValueError):
-                    pass
-
-        except Exception:
-            pass
-
-        res = {
-            "params": params,
-            "loss": loss,
-            "grad": grads,
-            "opt": opt_state,
-            "x": x,
-            "y": y,
-            "z": z,
-            "key": key,
-            **aux,
-        }
-
-        if learning_rate is not None:
-            res["learning_rate"] = learning_rate
-
-        return res
-
-    training_step = base_training_step
-
-    if scannable:
-
-        def scannable_training_step(carry, i_x_y_z_k):
-            params, opt_state = carry
-            i, x, y, z, k = i_x_y_z_k
-            updt = base_training_step(params, opt_state, x, y, z, k)
-            params, opt_state = updt["params"], updt["opt"]
-            history = {k: updt[k] for k in fields_to_keep_in_history}
-            return (params, opt_state), history
-
-        training_step = scannable_training_step
-
-    return training_step
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -228,6 +139,7 @@ def sorting_loss(
     out_vs_in_sortmse_weight=1,  # 1 = only dependent outputs count
     use_same_key=False,
 ):
+
     import jax
     import jax.numpy as jnp
     from jax.tree_util import tree_leaves
@@ -600,75 +512,13 @@ def start(
         fields_to_keep_in_history=training_config.keep_in_history,
         scannable=True,
     )
+
     non_scannable_step = make_training_step(
         loss_func,
         optimizer,
         fields_to_keep_in_history=training_config.keep_in_history,
         scannable=False,
     )
-
-    def per_replicate_step_nonscan(start_params, start_opt_state, key, xbatches, ybatches, num_z):
-        assert xbatches.shape[:-1] == (
-            training_config.batches_per_step,
-            training_config.batch_size,
-        )
-        assert ybatches.shape[:-1] == (
-            training_config.batches_per_step,
-            training_config.batch_size,
-        )
-
-        zbatches = jax.random.uniform(
-            key, (training_config.batches_per_step, training_config.batch_size, num_z)
-        )
-
-        batch_keys = jax.random.split(key, training_config.batches_per_step)
-        xs = (
-            jnp.arange(training_config.batches_per_step),
-            xbatches,
-            ybatches,
-            zbatches,
-            batch_keys,
-        )
-        history = {"loss": []}
-        params, opt_state = (start_params, start_opt_state)
-        for i, x, y, z, k in zip(*xs):
-            updt = non_scannable_step(params, opt_state, x, y, z, k)
-            params, opt_state = updt["params"], updt["opt"]
-            history["loss"].append(updt["loss"])
-        return params, opt_state, history
-
-    def per_replicate_step(start_params, start_opt_state, key, xbatches, ybatches, num_z):
-        assert xbatches.shape[:-1] == (
-            training_config.batches_per_step,
-            training_config.batch_size,
-        )
-        assert ybatches.shape[:-1] == (
-            training_config.batches_per_step,
-            training_config.batch_size,
-        )
-        zbatches = jax.random.uniform(
-            key, (training_config.batches_per_step, training_config.batch_size, num_z)
-        )
-
-        batch_keys = jax.random.split(key, training_config.batches_per_step)
-        if enable_jax_tqdm:
-            sstep = scan_tqdm(training_config.batches_per_step)(scannable_step)  # type: ignore
-        else:
-            sstep = scannable_step
-        carry = (start_params, start_opt_state)
-        xs = (
-            jnp.arange(training_config.batches_per_step),
-            xbatches,
-            ybatches,
-            zbatches,
-            batch_keys,
-        )
-        (final_params, final_opt_state), step_history = jax.lax.scan(
-            sstep,
-            carry,
-            xs,
-        )
-        return final_params, final_opt_state, step_history
 
     def step(params: ParameterTree, opt_state: optax.OptState, step_key, xs, ys, num_z):
         keys = jax.random.split(step_key, training_config.n_replicates)
@@ -681,7 +531,15 @@ def start(
                 training_config.batch_size,
             )
         )
-        return jax.vmap(Partial(per_replicate_step, num_z=num_z))(params, opt_state, keys, xs, ys)
+        return jax.vmap(
+            Partial(
+                per_replicate_step,
+                num_z=num_z,
+                training_config=training_config,
+                scannable_step=scannable_step,
+                enable_jax_tqdm=enable_jax_tqdm,
+            )
+        )(params, opt_state, keys, xs, ys)
 
     xb = get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
     yb = get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
@@ -728,8 +586,8 @@ def start(
     logger.info(f"Running for {total_steps} iterations")
 
     step_history, loss_history = {}, []
-
     epoch = -1
+
     step_per_epoch = training_config.n_batches // training_config.batches_per_step
 
     for i, step_key in enumerate(jax.random.split(loop_key, total_steps), 1):

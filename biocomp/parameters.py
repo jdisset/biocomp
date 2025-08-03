@@ -61,7 +61,13 @@ def pretty_str(x):
         else:
             with np.printoptions(precision=3, edgeitems=4, threshold=8):
                 typestr = "jax" if isinstance(x, jnp.ndarray) else "numpy"
-                msg = f"{x.shape} {x.dtype} {typestr} array:\n{np.asarray(x)}"
+                # avoid converting to numpy during tracing
+                try:
+                    array_str = str(np.asarray(x))
+                except Exception:
+                    # during tracing, just show shape/dtype
+                    array_str = f"<{typestr} tracer>"
+                msg = f"{x.shape} {x.dtype} {typestr} array:\n{array_str}"
 
     elif isinstance(x, (list, tuple)):
         chars = "()" if isinstance(x, tuple) else "[]"
@@ -659,7 +665,7 @@ class ArrayRef:
         self.indices += ((self._pathdict[array_path], *id),)
         self.make_map()
 
-    def view(self):
+    def view(self) -> jnp.ndarray:
         N = len(self.indices)
         if N == 0:
             return jnp.array([])
@@ -952,7 +958,15 @@ class ParameterTree:
             read_only=True,
         )
 
-    def filter_by_tag(self, tags, mode="any"):
+    def __iter__(self):
+        """Iterate over the paths of the leaves in the ParameterTree."""
+        for path, content in self.data.iter_leaves():
+            if isinstance(content, ArrayRef):
+                yield content.view()
+            else:
+                yield content
+
+    def filter_by_tag(self, tags, mode="any") -> tuple["ParameterTree", "ParameterTree"]:
         # modes: 'any', 'all', 'exact'
 
         if isinstance(tags, str):

@@ -361,6 +361,9 @@ class ComputeStack:
         # assert pp_params == params, 'Post process changed params'
         return params
 
+    def get_nb_networks(self) -> int:
+        return len(self.networks)
+
     def get_nb_outputs(self) -> int:
         """
         Returns the total number of outputs in the stack.
@@ -386,6 +389,9 @@ class ComputeStack:
         m = np.concatenate([n.get_dependent_output_mask() for n in self.networks])
         assert m.shape == (sum(n.get_nb_outputs() for n in self.networks),)
         return m
+
+    def get_nb_dependent_outputs(self) -> int:
+        return np.sum(self.get_dependent_output_mask())
 
     def get_network_output_indices(self, network_id: int):
         """Returns the start index and shape of the output of the given network in
@@ -1143,7 +1149,8 @@ class ComputeStack:
                 if self.layers[lid].flattened_output_shape() != len(flattened_layer_output):
                     raise ValueError(
                         f"Output shape mismatch: {self.layers[lid].flattened_output_shape()=} != "
-                        f"{len(flattened_layer_output)=}"
+                        f"{len(flattened_layer_output)=} for layer {lid} ({self.layers[lid].f_type})"
+                        f" with {n_nodes} nodes. {inputs.shape=}"
                     )
 
                 running_output = jnp.concatenate([running_output, flattened_layer_output])

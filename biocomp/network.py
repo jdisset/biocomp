@@ -18,7 +18,7 @@ from typing import (
 )
 from itertools import product
 from pydantic.dataclasses import dataclass
-from pydantic import BaseModel, Field, ConfigDict, BeforeValidator
+from pydantic import BaseModel, Field, ConfigDict, BeforeValidator, model_validator
 from .utils import load_lib, flatten
 
 from biocomp.logging_config import get_logger
@@ -403,6 +403,16 @@ class Slot(BaseModel):
     # unique identifier for shared ("linked") parts across transcription units
     ref_id: Optional[str] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _wrap_plain_part(cls, value):
+        # if Slot("foo") or Slot(["a","b"]), turn that into {"part": ...}
+        if not isinstance(value, dict):
+            if isinstance(value, str):
+                value = {"part": value}
+            return {"part": list(value)}
+        return value
+
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
 
@@ -433,7 +443,7 @@ class Slot(BaseModel):
                 if category in part_type_to_parameter_name:
                     return part_type_to_parameter_name[category]
             else:
-                raise ValueError(f"Unknown part: {part_name}")
+                raise ValueError(f"Unknown part: {part_name} (type: {type(part_name)}),library: {lib}")
         return None
 
     def __repr__(self) -> str:
@@ -1568,7 +1578,7 @@ class Network(BaseModel):
         """Returns the names of the proteins that are outputs of the network"""
         if only_dependent_outputs:
             return self.get_dependent_output_proteins()
-        
+
         if not hasattr(self, "_output_proteins") or self._output_proteins is None:
             onode = self.get_output_compute_node()
             if "cdg_input" not in onode:
