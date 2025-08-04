@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pkg_resources import get_distribution
 from functools import partial
 import subprocess
+from assertpy import add_extension
 import os
 
 
@@ -843,3 +844,20 @@ def uniqueIdGenerator(start=0):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}#                                                                            }}}
+
+
+# shape validation for arrays
+def has_shape(self, shape: tuple[int, ...]):
+    if self.val.shape != shape:
+        return self.error(f"Expected shape {shape}, got {self.val.shape}")
+    return self
+
+
+def has_same_shape(self, other):
+    if self.val.shape != other.shape:
+        return self.error(f"Expected shape {other.shape}, got {self.val.shape}")
+    return self
+
+
+add_extension(has_shape)
+add_extension(has_same_shape)

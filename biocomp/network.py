@@ -443,7 +443,9 @@ class Slot(BaseModel):
                 if category in part_type_to_parameter_name:
                     return part_type_to_parameter_name[category]
             else:
-                raise ValueError(f"Unknown part: {part_name} (type: {type(part_name)}),library: {lib}")
+                raise ValueError(
+                    f"Unknown part: {part_name} (type: {type(part_name)}),library: {lib}"
+                )
         return None
 
     def __repr__(self) -> str:
@@ -621,6 +623,9 @@ class CoTransfection(BaseModel):
         if self.ratios is None:  # equal ratios by default
             self.ratios = [1.0] * len(self.units)
 
+    def __hash__(self):
+        return hash(str(self.model_dump()))
+
 
 def process_cotx_list(cotx_list: List[CoTransfection]) -> List[CoTransfection]:
     """Add names to unnamed cotx groups and sources"""
@@ -790,6 +795,19 @@ class Network(BaseModel):
         for agg_id, row in self.aggregations.iterrows():
             for source, ratio in zip(row["source"], row["ratio"]):
                 self.raw_aggregations.append((agg_id, source, ratio))
+
+    def __hash__(self):
+        return hash(
+            (
+                self.name,
+                tuple(self.custom_outputs) if self.custom_outputs else None,
+                tuple(sorted(self.metadata.items())) if self.metadata else None,
+                tuple(self.raw_tu_in_sources) if self.raw_tu_in_sources else None,
+                tuple(self.raw_aggregations) if self.raw_aggregations else None,
+                tuple(self.transcription_units.keys()) if self.transcription_units else None,
+                tuple(self.cotx) if self.cotx else None,
+            )
+        )
 
     @classmethod
     def legacy_init(

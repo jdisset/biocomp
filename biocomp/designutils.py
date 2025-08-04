@@ -3,7 +3,6 @@ from matplotlib.path import Path as MPath
 from xml.etree import ElementTree as ET
 import re
 from matplotlib.colors import to_rgb
-from matplotlib.path import Path as MPath
 
 
 def sample_from_svg(
@@ -21,11 +20,112 @@ def sample_from_svg(
     """
     Sample (X, Y) pairs from coloured regions of an SVG,
     with Y as the greyscale intensity (0=black, 1=white).
-    Now supports background masks (rectangular).
+    Now supports background masks (rectangular) and transformations.
     """
     from pathlib import Path
 
     svg_path = Path(svg_path).expanduser().resolve()
+    
+    def _parse_transform(transform_str):
+        """Parse SVG transform attribute and return transformation matrix"""
+        if not transform_str:
+            return np.eye(3)
+        
+        # handle rotate(angle cx cy) - most common in our SVGs
+        rotate_match = re.match(r'rotate\(([-\d.]+)(?:\s+([-\d.]+)\s+([-\d.]+))?\)', transform_str)
+        if rotate_match:
+            angle = float(rotate_match.group(1)) * np.pi / 180
+            cx = float(rotate_match.group(2)) if rotate_match.group(2) else 0
+            cy = float(rotate_match.group(3)) if rotate_match.group(3) else 0
+            
+            # create rotation matrix around (cx, cy)
+            cos_a, sin_a = np.cos(angle), np.sin(angle)
+            # translate to origin, rotate, translate back
+            mat = np.array([
+                [cos_a, -sin_a, cx - cx * cos_a + cy * sin_a],
+                [sin_a, cos_a, cy - cx * sin_a - cy * cos_a],
+                [0, 0, 1]
+            ])
+            return mat
+        
+        # could add support for other transforms (translate, scale, etc.) if needed
+        return np.eye(3)
+    
+    def _apply_transform(pts, transform_matrix):
+        """Apply transformation matrix to points"""
+        if np.array_equal(transform_matrix, np.eye(3)):
+            return pts
+        
+        # convert to homogeneous coordinates
+        pts_h = np.column_stack([pts, np.ones(len(pts))])
+        # apply transformation
+        pts_transformed = pts_h @ transform_matrix.T
+        # convert back to 2D
+        return pts_transformed[:, :2]
+    
+    def _clip_polygon_to_rect(polygon_pts, rect_bounds):
+        """Clip polygon to rectangle using Sutherland-Hodgman algorithm"""
+        def inside_edge(pt, edge_pt1, edge_pt2):
+            # check if point is on the left side of the edge (inside)
+            return (edge_pt2[0] - edge_pt1[0]) * (pt[1] - edge_pt1[1]) >= \
+                   (edge_pt2[1] - edge_pt1[1]) * (pt[0] - edge_pt1[0])
+        
+        def line_intersection(p1, p2, p3, p4):
+            # find intersection of line p1-p2 with line p3-p4
+            x1, y1 = p1
+            x2, y2 = p2
+            x3, y3 = p3
+            x4, y4 = p4
+            
+            denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+            if abs(denom) < 1e-10:
+                return None
+            
+            t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+            return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+        
+        x_min, y_min, x_max, y_max = rect_bounds
+        rect_edges = [
+            [(x_min, y_min), (x_max, y_min)],  # bottom
+            [(x_max, y_min), (x_max, y_max)],  # right
+            [(x_max, y_max), (x_min, y_max)],  # top
+            [(x_min, y_max), (x_min, y_min)]   # left
+        ]
+        
+        output_pts = list(polygon_pts)
+        
+        for edge in rect_edges:
+            if len(output_pts) == 0:
+                break
+                
+            input_pts = output_pts
+            output_pts = []
+            
+            if len(input_pts) == 0:
+                continue
+                
+            prev_pt = input_pts[-1]
+            
+            for curr_pt in input_pts:
+                curr_inside = inside_edge(curr_pt, edge[0], edge[1])
+                prev_inside = inside_edge(prev_pt, edge[0], edge[1])
+                
+                if curr_inside:
+                    if not prev_inside:
+                        # entering the edge
+                        intersection = line_intersection(prev_pt, curr_pt, edge[0], edge[1])
+                        if intersection:
+                            output_pts.append(intersection)
+                    output_pts.append(curr_pt)
+                elif prev_inside:
+                    # leaving the edge
+                    intersection = line_intersection(prev_pt, curr_pt, edge[0], edge[1])
+                    if intersection:
+                        output_pts.append(intersection)
+                
+                prev_pt = curr_pt
+        
+        return np.array(output_pts) if output_pts else np.array([])
 
     def _coords(d):
         # Parse (x, y) from basic SVG path syntax (M L H)
@@ -69,37 +169,70 @@ def sample_from_svg(
     vx, vy, vw, vh = map(float, root.get("viewBox", "0 0 100 100").split())
     rng = np.random.default_rng(seed)
 
-    # masks and viewbox limits
-    mask_rect = None
-    for el in root.iter():
-        if el.tag.endswith("mask"):
-            for child in el:
-                if child.tag.endswith("rect"):
-                    x = float(child.get("x", 0))
-                    y = float(child.get("y", 0))
-                    w = float(child.get("width", vw))
-                    h = float(child.get("height", vh))
-                    mask_rect = (x, y, x + w, y + h)
+    # masks are handled by filtering elements in masked groups, not by rect override
 
-    # parse filled polygons and rects
+    # parse filled polygons and rects - only process elements inside masked groups
     paths, greys = [], []
-    for el in root.iter():
+    
+    # find masked group elements
+    masked_elements = []
+    for group in root.iter():
+        if group.tag.endswith("g") and group.get("mask"):
+            # this group has a mask, process its children
+            for el in group.iter():
+                if el != group:  # don't include the group itself
+                    masked_elements.append(el)
+    
+    # if no masked groups, process all elements (backwards compatibility)
+    elements_to_process = masked_elements if masked_elements else root.iter()
+    
+    for el in elements_to_process:
         fill = el.get("fill", "none")
-        if fill == "none":
+        if fill == "none" or fill == "white":  # skip white fill as it's background
             continue
         if el.tag.endswith("rect"):
             x = float(el.get("x", 0))
             y = float(el.get("y", 0))
             w = float(el.get("width", vw))
             h = float(el.get("height", vh))
-            pts = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]
-            paths.append(MPath(pts))
-            greys.append(greyscale(fill))
+            pts = np.array([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
+            
+            # apply transformation if present
+            transform = el.get("transform", "")
+            if transform:
+                transform_matrix = _parse_transform(transform)
+                pts = _apply_transform(pts, transform_matrix)
+                
+                # clip to viewbox if transformed
+                pts = _clip_polygon_to_rect(pts, (vx, vy, vx + vw, vy + vh))
+                
+                if len(pts) >= 3:  # need at least 3 points for a valid polygon
+                    # close the polygon
+                    if len(pts) > 0 and not np.array_equal(pts[0], pts[-1]):
+                        pts = np.vstack([pts, pts[0]])
+                    paths.append(MPath(pts))
+                    greys.append(greyscale(fill))
+            else:
+                # no transformation, add as-is
+                pts = np.vstack([pts, pts[0]])  # close the polygon
+                paths.append(MPath(pts))
+                greys.append(greyscale(fill))
         elif el.tag.endswith("path"):
             pts = _coords(el.get("d", ""))
             if len(pts) >= 3:
                 paths.append(MPath(pts + [pts[0]]))
                 greys.append(greyscale(fill))
+        elif el.tag.endswith("circle"):
+            # parse circle parameters
+            cx = float(el.get("cx", 0))
+            cy = float(el.get("cy", 0))
+            r = float(el.get("r", 0))
+            # create circle path using parametric equations
+            n_points = 32  # number of points to approximate the circle
+            angles = np.linspace(0, 2 * np.pi, n_points + 1)
+            pts = [(cx + r * np.cos(a), cy + r * np.sin(a)) for a in angles]
+            paths.append(MPath(pts))
+            greys.append(greyscale(fill))
 
     greys = np.asarray(greys)
 
@@ -120,16 +253,12 @@ def sample_from_svg(
         )
 
     # --- Assign greyscale values based on polygon ---
-    Y = np.full(n, 1.0)
+    # Initialize to white (0.0 when max_is_black=True, 1.0 when max_is_black=False)
+    default_background = 0.0 if max_is_black else 1.0
+    Y = np.full(n, default_background)
     pts = np.column_stack((sx, sy))
     for p, g in zip(paths, greys):
         Y[p.contains_points(pts)] = g
-
-    # --- Apply mask rect if present: points outside mask are background ---
-    if mask_rect:
-        x0, y0, x1, y1 = mask_rect
-        inside_mask = (sx >= x0) & (sx <= x1) & (sy >= y0) & (sy <= y1)
-        Y[~inside_mask] = 1.0  # or whatever background you want
 
     Y = Y * (outlim[1] - outlim[0]) + outlim[0]
 

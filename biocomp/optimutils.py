@@ -18,6 +18,7 @@ import time
 from typing import List, Tuple, Callable, Optional, NamedTuple
 from pydantic import Field
 from biocomp.logging_config import get_logger
+from biocomp.compute import ComputeStack
 
 
 import jax
@@ -56,13 +57,14 @@ DEFAULT_OPTIMIZER = [
 ]
 
 
+class CounterState(NamedTuple):
+    count: jnp.ndarray  # type: ignore
+
+
 def create_counter():
     """Creates a no-op gradient transformation that just counts steps."""
     import jax.numpy as jnp
     import optax
-
-    class CounterState(NamedTuple):
-        count: jnp.ndarray  # type: ignore
 
     def init_fn(params):
         return CounterState(count=jnp.zeros([], jnp.int32))
@@ -168,13 +170,65 @@ class OptimConfig(ArbitraryModel):
 ## {{{                  --     training step functions     --
 
 
-def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",), scannable=True, static_tags=None):
+def extract_learning_rate(opt_state):
+    """Extract learning rate from the optimizer state."""
+    learning_rate = None
+    try:
+        # check for hyperparams in individual state components
+        if isinstance(opt_state, tuple):
+            for state_component in opt_state:
+                if (
+                    hasattr(state_component, "hyperparams")
+                    and "learning_rate" in state_component.hyperparams
+                ):
+                    learning_rate = state_component.hyperparams["learning_rate"]
+                    break
+
+        # check direct hyperparams access
+        if (
+            learning_rate is None
+            and hasattr(opt_state, "hyperparams")
+            and "learning_rate" in opt_state.hyperparams
+        ):
+            learning_rate = opt_state.hyperparams["learning_rate"]
+
+        # try tree_get
+        if learning_rate is None:
+            try:
+                learning_rate = optax.tree_utils.tree_get(
+                    opt_state,
+                    "learning_rate",
+                    default=None,
+                    filtering=lambda path, value: isinstance(value, (float, int))
+                    or (hasattr(value, "shape") and hasattr(value, "dtype")),
+                )
+            except (KeyError, ValueError):
+                pass
+
+    except Exception:
+        pass
+
+    return learning_rate
+
+
+def make_training_step(
+    loss_func,
+    optimizer,
+    fields_to_keep_in_history=("loss",),
+    scannable=True,
+    updates_need_vmap=False,
+    static_tags=None,
+):
     from jax import value_and_grad
     import optax
     import jax.numpy as jnp
-    
+
     if static_tags is None:
         static_tags = ["non_grad", "local"]
+
+    opt_updt = optimizer.update
+    if updates_need_vmap:
+        opt_updt = vmap(optimizer.update)
 
     def base_training_step(params, opt_state, x, y, z, key):
         static, dynamic = params.filter_by_tag(static_tags)
@@ -183,49 +237,13 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
             dynamic, static, x, y, z, key, opt_state[0].count
         )
 
-        updates, opt_state = optimizer.update(grads, opt_state, dynamic)
+        updates, opt_state = opt_updt(grads, opt_state, dynamic)
         dynamic = optax.apply_updates(dynamic, updates)
 
         if static.data:
             params = ParameterTree.merge(static, dynamic)
         else:
             params = dynamic
-
-        learning_rate = None
-        try:
-            # Method 1: Check for hyperparams in individual state components
-            if isinstance(opt_state, tuple):
-                for state_component in opt_state:
-                    if (
-                        hasattr(state_component, "hyperparams")
-                        and "learning_rate" in state_component.hyperparams
-                    ):
-                        learning_rate = state_component.hyperparams["learning_rate"]
-                        break
-
-            # Method 2: Check direct hyperparams access
-            if (
-                learning_rate is None
-                and hasattr(opt_state, "hyperparams")
-                and "learning_rate" in opt_state.hyperparams
-            ):
-                learning_rate = opt_state.hyperparams["learning_rate"]
-
-            # Method 3: Try tree_get
-            if learning_rate is None:
-                try:
-                    learning_rate = optax.tree_utils.tree_get(
-                        opt_state,
-                        "learning_rate",
-                        default=None,
-                        filtering=lambda path, value: isinstance(value, (float, int))
-                        or (hasattr(value, "shape") and hasattr(value, "dtype")),
-                    )
-                except (KeyError, ValueError):
-                    pass
-
-        except Exception:
-            pass
 
         res = {
             "params": params,
@@ -236,11 +254,9 @@ def make_training_step(loss_func, optimizer, fields_to_keep_in_history=("loss",)
             "y": y,
             "z": z,
             "key": key,
+            "learning_rate": extract_learning_rate(opt_state),
             **aux,
         }
-
-        if learning_rate is not None:
-            res["learning_rate"] = learning_rate
 
         return res
 
@@ -453,12 +469,33 @@ def optimize(
     n_total_steps: int,
     steps_per_epoch: int,
     key: ArrayLike,
-    # for loggers:
-    stack,
+    stack: ComputeStack,
     loggers: Optional[List[Tuple[int, Callable]]] = None,
     async_handler=None,
+    verbose=False,
 ):
     loggers = loggers or []
+
+    assert_that(xbatches.shape[:4]).is_equal_to(
+        (
+            steps_per_epoch,
+            config.n_replicates,
+            config.batches_per_step,
+            config.batch_size,
+        )
+    )
+    assert_that(ybatches.shape[:4]).is_equal_to(
+        (
+            steps_per_epoch,
+            config.n_replicates,
+            config.batches_per_step,
+            config.batch_size,
+        )
+    )
+
+    def prnt(msg):
+        if verbose:
+            print(msg)
 
     BIOCOMP_CHECKIFY = os.environ.get("BIOCOMP_CHECKIFY", "").lower() in ("true", "1", "yes", "on")
 
@@ -466,9 +503,12 @@ def optimize(
     logger.info("Compiling training step...")
     if not BIOCOMP_CHECKIFY:
         t0 = time.time()
+        prnt("Compiling training step...")
         lowered = jax.jit(step).lower(params, opt_state, key, xb, yb)
         compiled_step = lowered.compile()
-        logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
+        msg = f"Compiled training step in {time.time() - t0:.2f} seconds"
+        logger.debug(msg)
+        prnt(msg)
     else:
         ckf = jax.jit(checkify.checkify(step, errors=checkify.all_checks))
 
@@ -496,6 +536,8 @@ def optimize(
     assert xbatches.shape[0] == steps_per_epoch
     assert ybatches.shape[0] == steps_per_epoch
 
+    prnt(f"Starting training for {config.n_epochs} epochs with {n_total_steps} total steps.")
+
     for i, step_key in enumerate(jax.random.split(key, n_total_steps), 1):
         if i % (steps_per_epoch) == 0:
             epoch += 1
@@ -505,6 +547,7 @@ def optimize(
                 xbatches, ybatches = reshuffle_batches_jax(xbatches, ybatches, b_key)
 
         t0 = time.time()
+        prnt(f"Sarting step {i}/{n_total_steps} (epoch {epoch + 1})")
 
         xb, yb = xbatches[i % steps_per_epoch], ybatches[i % steps_per_epoch]
         params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
@@ -512,6 +555,12 @@ def optimize(
         step_history["step_time"] = time.time() - t0
         step_history["latest_params"] = params
         step_history["opt_state"] = opt_state
+
+        prnt(f"Step {i} completed in {step_history['step_time']:.2f} seconds")
+        prnt(
+            f"Loss: {step_history.get('loss', 'N/A')} \n"
+            f"Learning Rate: {step_history.get('learning_rate', 'N/A')}"
+        )
 
         if "loss" in step_history:
             loss_history.append(step_history["loss"])
@@ -536,5 +585,6 @@ def optimize(
                     logger.exception(e)
 
     logger.info(f"End of training for {config.n_epochs} epochs")
+    prnt("Training completed.")
 
     return params, loss_history, step_history
