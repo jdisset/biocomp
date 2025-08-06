@@ -560,6 +560,56 @@ def inv_source_with_pos(
     return LayerInstance(prepare, apply, output_shapes, commit=commit)
 
 
+def hard_bias(
+    input_shapes: List[Tuple[int]],
+    n_outputs: int,
+    layer_id: int,
+    stack,
+    valid_range: Tuple[float, float] = (0.0, 0.8),
+    shape: Tuple[int] = (1,),
+    init_value: float = 0.5,
+    **_,
+) -> LayerInstance:
+    assert n_outputs == 1, f"Bias node should have 1 output, got {n_outputs}"
+    assert len(input_shapes) == 0
+
+    local_layer_name = generate_layer_name(stack, layer_id, "bias")
+    namespace = f"local/{local_layer_name}"
+
+    def clamp_to_range(value: ArrayLike):
+        # hard clamp to valid_range. scale is ignored
+        return jnp.clip(value, valid_range[0], valid_range[1])
+
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
+        if init_value is not None:
+            params[f"{namespace}/raw_value"] = jnp.full(
+                (len(nodelist), *shape), init_value, dtype=jnp.float32
+            )
+        else:
+            params[f"{namespace}/raw_value"] = jax.random.uniform(
+                key, (len(nodelist), *shape), minval=valid_range[0], maxval=valid_range[1]
+            )
+
+    def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> Tuple[ArrayLike, Dict]:
+        raw_bias_value = params[f"{namespace}/raw_value"][node_id]
+        bias_value = clamp_to_range(raw_bias_value)
+        return bias_value, {
+            "raw_bias_value": raw_bias_value,
+            "bias_value": bias_value,
+        }
+
+    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+        for i, n in enumerate(nodelist):
+            extra = n.get_compute_node("extra") or {}
+            bias_value = clamp_to_range(params[f"{namespace}/raw_value"][i])
+            extra["bias_value"] = bias_value
+            n.set_compute_node_column("extra", extra)
+
+    output_shapes = [tuple(shape)]  # single output shape
+
+    return LayerInstance(prepare, apply, output_shapes, commit=commit)
+
+
 def bias(
     input_shapes: List[Tuple[int]],
     n_outputs: int,

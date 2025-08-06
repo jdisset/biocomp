@@ -368,6 +368,7 @@ class LibraryContext:
     @classmethod
     def get_library(cls):
         if cls._current_lib is None:
+            print("No library set, loading default library")
             return load_lib()
         return cls._current_lib
 
@@ -444,7 +445,7 @@ class Slot(BaseModel):
                     return part_type_to_parameter_name[category]
             else:
                 raise ValueError(
-                    f"Unknown part: {part_name} (type: {type(part_name)}),library: {lib}"
+                    f"Unknown part: \"{part_name}\" (type: {type(part_name)}),library: {lib}"
                 )
         return None
 
@@ -2056,6 +2057,9 @@ class Network(BaseModel):
         for node_id in deadend_nodes:
             propagate_upstream(cg.loc[node_id], 0, 0)
 
+
+# TODO to_recipe
+# making sure the json recipe allows for that. You need a new dracon Program in biocomp-tools (network_to_recipe I guess). You then need to write a few tests that instantiate a declarative-mode network, load the default lib (load_lib()) and try to aggregate TranscriptionUnits as much as possible into existing L1s (and L2s if wanted). It should reject whenever a part is not collapsed to a single one (i.e. whenever it’s still variable). It should also try to simplify L1s into existing lib reference ones, but if a TranscriptionUnit doesn’t match anything it should output it as a list of parts instead. Basically the lowest level if you can’t match with the library is to output the raw part name, then if you can find this part in an L0 you give the L0 ref, then if you can match all L0s into an L1 you give that L1 ref. Rest should be straightforward. Need to write a few round-trip tests of course.
 
 ## ───────────────────────────────────── ▼ ─────────────────────────────────────
 # {{{                       --     the inverter     --

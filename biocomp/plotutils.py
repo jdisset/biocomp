@@ -365,6 +365,7 @@ class FigureSpec(ArbitraryModel):
         from PIL import Image
         from PIL.PngImagePlugin import PngInfo
         from datetime import datetime
+        import xml.etree.ElementTree as ET
 
         assert self.output_file is not None
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -407,12 +408,90 @@ class FigureSpec(ArbitraryModel):
         elif str(self.output_path).lower().endswith(".pdf"):
             full_metadata["CreationDate"] = datetime.now()  # type: ignore
             figax.figure.savefig(self.output_path, metadata=full_metadata, bbox_inches="tight")
+        elif str(self.output_path).lower().endswith(".svg"):
+            # Save as SVG
+            figax.figure.savefig(self.output_path, format="svg", bbox_inches="tight")
+
+            # Post-process SVG to add custom metadata
+            self._postprocess_svg(self.output_path, full_metadata)
         else:
             logger.warning(
                 f"Saving figure to {self.output_path} in {self.output_path.suffix} format. "
-                f"Only PNG and PDF formats have full metadata support."
+                f"Only PNG, PDF, and SVG formats have full metadata support."
             )
             figax.figure.savefig(self.output_path, metadata=full_metadata, bbox_inches="tight")
+
+    def _postprocess_svg(self, svg_path: Path, full_metadata: Dict[str, Any]) -> None:
+        """Post-process SVG file to add custom metadata and attributes"""
+        import re
+
+        # Read the original SVG content
+        with open(svg_path, "r", encoding="utf-8") as f:
+            svg_content = f.read()
+
+        # Find and update biocomp-tagged elements
+        def process_biocomp_element(match):
+            full_tag = match.group(0)
+            gid = match.group(1)
+
+            if gid.startswith("biocomp_"):
+                try:
+                    parts = gid.split("_", 2)
+                    if len(parts) >= 3:
+                        elem_type = parts[1]
+                        elem_data = parts[2]
+
+                        # Build data attributes
+                        attrs = f' data-biocomp-type="{elem_type}" data-biocomp-data="{elem_data}"'
+
+                        # For 3d slices, parse the z-value
+                        if elem_type == "3dslice":
+                            z_parts = elem_data.split("z")
+                            if len(z_parts) >= 2:
+                                attrs += f' data-z-value="{z_parts[1]}"'
+                                attrs += f' data-slice-index="{z_parts[0].rstrip("_")}"'
+                                # Only add class to group elements (not images)
+                                if not elem_data.endswith("_image"):
+                                    attrs += ' class="biocomp-3d-slice"'
+
+                        # Insert attributes before the closing > or />
+                        if full_tag.endswith("/>"):
+                            return full_tag[:-2] + attrs + "/>"
+                        else:
+                            return full_tag[:-1] + attrs + ">"
+                except Exception as e:
+                    logger.debug(f"Could not process biocomp element '{gid}': {e}")
+
+            return full_tag
+
+        # Apply processing to all elements with biocomp IDs (including self-closing tags)
+        svg_content = re.sub(
+            r'<[^>]+id="(biocomp_[^"]*)"[^>]*/?>', process_biocomp_element, svg_content
+        )
+
+        # Add biocomp metadata to existing metadata section or create new one
+        biocomp_metadata_xml = "  <!-- Biocomp Metadata -->\n"
+        for key, value in full_metadata.items():
+            # Escape XML special characters
+            escaped_value = (
+                str(value)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+            )
+            biocomp_metadata_xml += f'  <{key} type="biocomp-metadata">{escaped_value}</{key}>\n'
+
+        if "<metadata>" in svg_content:
+            # Insert before closing metadata tag
+            svg_content = svg_content.replace("</metadata>", biocomp_metadata_xml + "</metadata>")
+        else:
+            # Create new metadata section after opening svg tag
+            metadata_xml = f"<metadata>\n{biocomp_metadata_xml}</metadata>\n"
+            svg_content = re.sub(r"(<svg[^>]*>)", r"\1\n" + metadata_xml, svg_content)
+
+        with open(svg_path, "w", encoding="utf-8") as f:
+            f.write(svg_content)
 
     def finalize(self, figax: FigAx) -> None:
         if self.title is not None:
