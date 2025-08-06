@@ -77,7 +77,9 @@ def get_bio_color(name, default="k"):
 ### {{{               --     get rescaled network ticks and labels     --
 
 
-def get_reordered_protein_names(network, input_order=None, protein_aliases=None, only_dependent_outputs=True, **_):
+def get_reordered_protein_names(
+    network, input_order=None, protein_aliases=None, only_dependent_outputs=True, **_
+):
     """
     input_order can be a mix of protein names, protein aliases, integers, and '*'
     - protein names and aliases will be converted to lowercase to find matches
@@ -135,7 +137,7 @@ def get_reordered_protein_names(network, input_order=None, protein_aliases=None,
 
     # output_names already respects only_dependent_outputs from get_output_proteins
     output_name = list(output_names)  # Make a copy
-    
+
     if len(output_name) > 1:
         logger.debug(f"multiple output proteins found: {output_name}")
     # Get positions of outputs in the full output list (before any filtering)
@@ -470,6 +472,49 @@ def build_tree(x, use_jax=USE_KNN_JAX):
     return tree
 
 
+def _ball_volume(d: int) -> float:
+    # Volume of the unit d-ball
+    from scipy.special import gamma
+
+    return (np.pi ** (d / 2.0)) / gamma(d / 2.0 + 1.0)
+
+
+def per_point_knn_density(tree, X_ref=None, kdensity: int = 50):
+    """
+    kNN density for the points that define `tree` (points per unit d-volume).
+    Works in any dimension d = X_ref.shape[1].
+    """
+    if X_ref is None:
+        X_ref = getattr(tree, "data", None)
+        if X_ref is None:
+            raise ValueError(
+                "Cannot infer reference coordinates for density. "
+                "Pass X_ref or use a tree exposing `.data`."
+            )
+
+    dists, _ = tree.query(X_ref, k=kdensity + 1)
+    rk = dists[:, -1]
+
+    d = X_ref.shape[1]
+    Vd = _ball_volume(d)
+    rho = kdensity / (Vd * np.maximum(rk, 1e-12) ** d)  # points per unit volume
+    return rho
+
+
+def uniform_resampling(
+    X, npoints: int = 1000, kdensity=50, density_floor_q=0.01, density_cap_q=0.99
+):
+    tree = build_tree(X)
+    densities = per_point_knn_density(tree=tree, X_ref=X, kdensity=kdensity)
+    density_floor = float(np.quantile(densities, density_floor_q))
+    density_cap = float(np.quantile(densities, density_cap_q))
+    densities = np.clip(densities, density_floor, density_cap)
+    weights = 1.0 / densities
+    weights /= weights.sum()
+    indices = np.random.choice(np.arange(X.shape[0]), size=npoints, replace=True, p=weights)
+    return indices, weights[indices]
+
+
 @configurable
 def knn_stats(
     xquery,
@@ -480,8 +525,14 @@ def knn_stats(
     min_points=20,
     stats: str | list[str] = "iw",
     use_jax=USE_KNN_JAX,
+    weight_by_densities: bool = False,
+    kdensity: int = 50,  # k for density pilot if weights_by_densities
+    density_power: float = 0.0,  # alpha in dens^{-alpha}; 0 disables
+    density_floor_q: float | None = 0.01,
+    density_cap_q: float | None = 0.99,  # quantile-based floor/cap if densities are used
     **kw,
 ):
+    print(f"Using {k} nearest neighbors for knn_stats")
     if isinstance(stats, str):
         stats = [stats]
     if use_jax:
@@ -494,6 +545,17 @@ def knn_stats(
 
     if tree is None and iw is None:
         tree = build_tree(xquery, use_jax=use_jax)
+
+    if weight_by_densities:
+        X_ref = kw.get("X_ref", None)
+        densities = per_point_knn_density(tree=tree, X_ref=X_ref, kdensity=kdensity)
+        # floor/cap via quantiles (if provided in kw)
+        if density_floor_q is not None:
+            kw["density_floor"] = float(xnp.quantile(densities, density_floor_q))
+        if density_cap_q is not None:
+            kw["density_cap"] = float(xnp.quantile(densities, density_cap_q))
+        kw["densities"] = densities
+        kw["density_power"] = density_power
 
     iw = iw or get_gaussian_weighted_knn(
         xquery,
@@ -521,6 +583,7 @@ def knn_stats(
         if s == "iw":
             return iw
         if s == "density":
+            # (left as-is to minimize changes; note this is not a calibrated density)
             return xnp.nansum(iw[1], 1)
         if s == "quantile":
             from .knn_utils_jax import get_knn_quantile

@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Biocomp 3D Plot SVG Viewer</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .controls {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            margin-bottom: 15px;
+        }
+        
+        .control-group:last-child {
+            margin-bottom: 0;
+        }
+        
+        label {
+            font-weight: 500;
+            color: #333;
+            min-width: 120px;
+        }
+        
+        input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        
+        input[type="range"] {
+            flex: 1;
+            min-width: 300px;
+            cursor: pointer;
+        }
+        
+        .slider-value {
+            min-width: 120px;
+            padding: 5px 10px;
+            background-color: #e9ecef;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 14px;
+            text-align: center;
+        }
+        
+        .svg-container {
+            padding: 20px;
+            text-align: center;
+            min-height: 400px;
+            background-color: #fafafa;
+            position: relative;
+        }
+        
+        .svg-container svg {
+            max-width: 100%;
+            height: auto;
+            background-color: white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .drop-zone {
+            border: 3px dashed #ccc;
+            border-radius: 8px;
+            padding: 60px 20px;
+            text-align: center;
+            color: #666;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .drop-zone:hover,
+        .drop-zone.drag-over {
+            border-color: #007bff;
+            background-color: #f0f8ff;
+            color: #007bff;
+        }
+        
+        .file-input {
+            display: none;
+        }
+        
+        .metadata {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-top: 1px solid #e0e0e0;
+            font-size: 14px;
+        }
+        
+        .metadata h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        
+        .metadata pre {
+            background-color: #e9ecef;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+        
+        .slice-info {
+            background-color: #d4edda;
+            color: #155724;
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+        
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        
+        /* Hide slices by default when checkbox is unchecked */
+        .hide-slices .biocomp-3d-slice {
+            display: none !important;
+        }
+        
+        /* Show only the active slice and all its children */
+        .hide-slices .biocomp-3d-slice.active-slice,
+        .hide-slices .biocomp-3d-slice.active-slice * {
+            display: block !important;
+        }
+        
+        /* Ensure images are displayed correctly */
+        .hide-slices .biocomp-3d-slice.active-slice image {
+            display: inline !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <h2>Biocomp 3D Plot Viewer</h2>
+            
+            <div class="control-group">
+                <label for="file-input">Load SVG File:</label>
+                <div class="drop-zone" id="drop-zone">
+                    <p>Drop SVG file here or click to browse</p>
+                    <input type="file" id="file-input" class="file-input" accept=".svg">
+                </div>
+            </div>
+            
+            <div class="control-group" id="slice-controls" style="display: none;">
+                <label for="show-all">Show All Slices:</label>
+                <input type="checkbox" id="show-all" checked>
+            </div>
+            
+            <div class="control-group" id="slider-group" style="display: none;">
+                <label for="slice-slider">Select Slice:</label>
+                <input type="range" id="slice-slider" min="0" max="0" value="0" step="1">
+                <div class="slider-value" id="slider-value">-</div>
+            </div>
+            
+            <div class="slice-info" id="slice-info" style="display: none;"></div>
+        </div>
+        
+        <div class="svg-container" id="svg-container">
+            <p>No SVG loaded</p>
+        </div>
+        
+        <div class="metadata" id="metadata" style="display: none;">
+            <h3>Metadata</h3>
+            <pre id="metadata-content"></pre>
+        </div>
+    </div>
+
+    <script>
+        let slices = [];
+        let zLevels = [];  // Unique z-values
+        let slicesByZ = {};  // Group slices by z-value
+        let currentZIndex = 0;
+        let svgElement = null;
+
+        const fileInput = document.getElementById('file-input');
+        const dropZone = document.getElementById('drop-zone');
+        const svgContainer = document.getElementById('svg-container');
+        const showAllCheckbox = document.getElementById('show-all');
+        const sliceSlider = document.getElementById('slice-slider');
+        const sliderValue = document.getElementById('slider-value');
+        const sliceInfo = document.getElementById('slice-info');
+        const sliceControls = document.getElementById('slice-controls');
+        const sliderGroup = document.getElementById('slider-group');
+        const metadataDiv = document.getElementById('metadata');
+        const metadataContent = document.getElementById('metadata-content');
+
+        // File handling
+        dropZone.addEventListener('click', () => fileInput.click());
+        
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('drag-over');
+        });
+        
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('drag-over');
+        });
+        
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('drag-over');
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0 && files[0].name.endsWith('.svg')) {
+                loadSVG(files[0]);
+            }
+        });
+        
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                loadSVG(e.target.files[0]);
+            }
+        });
+
+        function loadSVG(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    processSVG(e.target.result);
+                } catch (error) {
+                    svgContainer.innerHTML = `<div class="error">Error loading SVG: ${error.message}</div>`;
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function processSVG(svgContent) {
+            // Parse SVG
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(svgContent, 'image/svg+xml');
+            
+            // Check for parsing errors
+            const parserError = doc.querySelector('parsererror');
+            if (parserError) {
+                throw new Error('Invalid SVG format: ' + parserError.textContent);
+            }
+            
+            svgElement = doc.documentElement;
+            
+            // Ensure we have a valid SVG element
+            if (!svgElement || svgElement.tagName.toLowerCase() !== 'svg') {
+                throw new Error('File does not contain a valid SVG element');
+            }
+            
+            // Clear container and add SVG
+            svgContainer.innerHTML = '';
+            svgContainer.appendChild(svgElement);
+            
+            // Find all biocomp 3D slices
+            slices = [];
+            slicesByZ = {};
+            zLevels = [];
+            
+            // Look for elements with biocomp slice IDs
+            const elements = svgElement.querySelectorAll('[id^="biocomp_3dslice_"]');
+            
+            // Also look for elements with data-biocomp-type="3dslice"
+            const dataElements = svgElement.querySelectorAll('[data-biocomp-type="3dslice"]');
+            
+            // Combine both sets
+            const allElements = new Set([...elements, ...dataElements]);
+            
+            allElements.forEach(elem => {
+                const id = elem.getAttribute('id');
+                let sliceIndex, zValue;
+                
+                // Try to parse from ID
+                if (id && id.startsWith('biocomp_3dslice_')) {
+                    const match = id.match(/biocomp_3dslice_(\d+)_z([\d.-]+)/);
+                    if (match) {
+                        sliceIndex = parseInt(match[1]);
+                        zValue = parseFloat(match[2]);
+                    }
+                }
+                
+                // Also check data attributes
+                if (elem.hasAttribute('data-slice-index')) {
+                    sliceIndex = parseInt(elem.getAttribute('data-slice-index'));
+                }
+                if (elem.hasAttribute('data-z-value')) {
+                    zValue = parseFloat(elem.getAttribute('data-z-value'));
+                }
+                
+                // Skip image elements (they're children of the main slice group)
+                if (elem.tagName.toLowerCase() === 'image' && elem.id && elem.id.includes('_image')) {
+                    return;
+                }
+                
+                if (sliceIndex !== undefined && zValue !== undefined) {
+                    // Add class for CSS targeting
+                    elem.classList.add('biocomp-3d-slice');
+                    
+                    const slice = {
+                        element: elem,
+                        index: sliceIndex,
+                        zValue: zValue,
+                        id: id || `slice_${sliceIndex}`
+                    };
+                    slices.push(slice);
+                    
+                    // Group by z-value with fixed precision for grouping
+                    const zKey = zValue.toFixed(4);
+                    if (!slicesByZ[zKey]) {
+                        slicesByZ[zKey] = [];
+                    }
+                    slicesByZ[zKey].push(slice);
+                }
+            });
+            
+            // Extract unique z-levels and sort them
+            zLevels = Object.keys(slicesByZ).map(z => parseFloat(z)).sort((a, b) => a - b);
+            
+            // Debug: log what we found
+            console.log(`Found ${slices.length} slices:`, slices);
+            slices.forEach(slice => {
+                console.log(`Slice ${slice.index}: z=${slice.zValue}, element:`, slice.element);
+                console.log(`  Children:`, slice.element.children.length);
+            });
+            
+            // Extract and display metadata
+            const metadataElems = svgElement.getElementsByTagName('metadata');
+            if (metadataElems.length > 0) {
+                const metadata = {};
+                for (let elem of metadataElems[0].children) {
+                    const key = elem.tagName;
+                    metadata[key] = elem.textContent;
+                }
+                metadataContent.textContent = JSON.stringify(metadata, null, 2);
+                metadataDiv.style.display = 'block';
+            }
+            
+            // Setup controls
+            if (zLevels.length > 0) {
+                sliceControls.style.display = 'flex';
+                sliceSlider.max = zLevels.length - 1;
+                sliceSlider.value = 0;
+                updateSliceDisplay();
+                
+                sliceInfo.style.display = 'block';
+                sliceInfo.textContent = `Found ${slices.length} slices at ${zLevels.length} z-levels`;
+                console.log(`Z-levels: ${zLevels.join(', ')}`);
+                console.log('Slices by Z:', slicesByZ);
+            } else {
+                sliceControls.style.display = 'none';
+                sliderGroup.style.display = 'none';
+                sliceInfo.style.display = 'block';
+                sliceInfo.textContent = 'No 3D slices found in this SVG';
+            }
+        }
+
+        function updateSliceDisplay() {
+            if (!svgElement || zLevels.length === 0) return;
+            
+            const showAll = showAllCheckbox.checked;
+            
+            if (showAll) {
+                svgContainer.classList.remove('hide-slices');
+                sliderGroup.style.display = 'none';
+                sliceInfo.textContent = `Showing all ${slices.length} slices at ${zLevels.length} z-levels`;
+            } else {
+                svgContainer.classList.add('hide-slices');
+                sliderGroup.style.display = 'flex';
+                
+                // Remove active class from all slices
+                slices.forEach(slice => {
+                    slice.element.classList.remove('active-slice');
+                });
+                
+                // Get current z-level and activate all slices at that level
+                currentZIndex = parseInt(sliceSlider.value);
+                if (currentZIndex >= 0 && currentZIndex < zLevels.length) {
+                    const currentZ = zLevels[currentZIndex];
+                    const zKey = currentZ.toFixed(4);
+                    const slicesAtZ = slicesByZ[zKey] || [];
+                    
+                    // Add active class to all slices at this z-level
+                    slicesAtZ.forEach(slice => {
+                        slice.element.classList.add('active-slice');
+                    });
+                    
+                    sliderValue.textContent = `z = ${currentZ.toFixed(4)}`;
+                    sliceInfo.textContent = `Showing ${slicesAtZ.length} slice(s) at z-level ${currentZIndex + 1} of ${zLevels.length} (z = ${currentZ.toFixed(4)})`;
+                }
+            }
+        }
+
+        // Event listeners
+        showAllCheckbox.addEventListener('change', updateSliceDisplay);
+        sliceSlider.addEventListener('input', updateSliceDisplay);
+    </script>
+</body>
+</html>

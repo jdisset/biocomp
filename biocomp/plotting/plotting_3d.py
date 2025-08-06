@@ -584,6 +584,7 @@ def smooth_3d(
         zslice: NdArray,
         colorbar_ax: Optional[Axes] = None,
         show_spines=show_inner_spines,
+        slice_index: Optional[int] = None,
     ):
         im, contour = smooth_2d(
             X,
@@ -610,6 +611,16 @@ def smooth_3d(
         # zorder of ticklabels:
         sl_ax.yaxis.label.set_zorder(2)
         sl_ax.xaxis.label.set_zorder(2)
+        
+        # Tag the slice with metadata for SVG export
+        if slice_index is not None and len(zslice) > 0:
+            z_value = zslice[0] if hasattr(zslice, '__len__') else zslice
+            # Encode slice metadata in GID for SVG post-processing
+            gid = f"biocomp_3dslice_{slice_index}_z{z_value:.4f}"
+            sl_ax.set_gid(gid)
+            # Also tag the main image if available
+            if im is not None:
+                im.set_gid(gid + "_image")
 
         if not show_spines:
             sl_ax.spines["top"].set_visible(False)
@@ -686,9 +697,9 @@ def smooth_3d(
         slice_ticks = []
         slice_labels = []
 
-        for pos in data_slices_positions:
+        for j, pos in enumerate(data_slices_positions):
             data_slices.append(
-                partial(plot_smooth_data_slice, zslice=np.atleast_1d(pos), colorbar_ax=cbar_ax)
+                partial(plot_smooth_data_slice, zslice=np.atleast_1d(pos), colorbar_ax=cbar_ax, slice_index=i*10+j)
             )
             if show_slice_ticks:
                 slice_ticks.append(pos)
