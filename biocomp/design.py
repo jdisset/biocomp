@@ -1,8 +1,12 @@
 ### {{{                          --     imports     --
 import random
+from functools import partial
 import numpy as np
 from . import datautils as du
+from biocomp.utils import encode_function
+from tqdm import tqdm
 from biocomp.compute import ComputeStack, ComputeConfig
+import biocomp.nodes as nd
 from biocomp.utils import (
     EncodedPartialFunction,
     PartialFunction,
@@ -49,160 +53,196 @@ logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
+## {{{                    --     fast ot on a grid:     --
+
+
+# When the cost is squared Euclidean and supports lie on a uniform grid, the entropic kernel is
+# K(p-q)=\exp\!\big(-\|p-q\|^2/\varepsilon\big),
+# which is a Gaussian. Sinkhorn then alternates
+# u \leftarrow a \oslash (K * v),\qquad
+# v \leftarrow b \oslash (K * u),
+# and each “matrix–vector” multiply (K\cdot) is just a Gaussian blur (separable 1D convs) or an FFT convolution. That drops the per-iteration cost from O(n^2) to ~O(n\,k) (finite support kernel) or O(n\log n) (FFT), with n=H\!\times\!W.
+# --- Gaussian blur (separable, reflect padding) ---
+def _gauss1d(sigma, truncate=3.0):
+    radius = int(jnp.ceil(truncate * sigma))
+    x = jnp.arange(-radius, radius + 1, dtype=jnp.float32)
+    k = jnp.exp(-(x**2) / (2 * sigma**2))
+    k = k / jnp.sum(k)
+    return k
+
+
+def _conv1d_reflect(x, k, axis):
+    pad = (k.shape[0] // 2, k.shape[0] // 2)
+    pads = [(0, 0)] * x.ndim
+    pads[axis] = pad
+    xpad = jnp.pad(x, pads, mode="reflect")
+    # lax.conv on 1D by reshaping to NCHW and using a 1D kernel
+    if axis == -1 or axis == x.ndim - 1:
+        w = k[None, None, :]
+        xNCHW = xpad[None, None, :, :]
+        y = lax.conv_general_dilated(
+            xNCHW,
+            w,
+            window_strides=(1, 1),
+            padding="VALID",
+            dimension_numbers=("NCHW", "OIHW", "NCHW"),
+        )
+        return y[0, 0]
+    else:
+        x = jnp.swapaxes(xpad, axis, -1)
+        w = k[None, None, :]
+        xNCHW = x[None, None, :, :]
+        y = lax.conv_general_dilated(
+            xNCHW,
+            w,
+            window_strides=(1, 1),
+            padding="VALID",
+            dimension_numbers=("NCHW", "OIHW", "NCHW"),
+        )[0, 0]
+        return jnp.swapaxes(y, -1, axis)
+
+
+def gauss_blur2d(x, sigma):
+    k = _gauss1d(sigma)
+    x = _conv1d_reflect(x, k, axis=-1)  # blur along W
+    x = _conv1d_reflect(x, k, axis=-2)  # blur along H
+    return x
+
+
+# --- Convolutional Sinkhorn (balanced) on grid masses a,b in R^{H×W} ---
+def sinkhorn_divergence_conv(a, b, eps, n_iters=80, tol=1e-6):
+    """a,b: nonnegative (H,W); eps>0; returns S_epsilon(a,b) >= 0."""
+    sigma = jnp.sqrt(eps / 2.0)
+    a = a.astype(jnp.float32) + 1e-12
+    b = b.astype(jnp.float32) + 1e-12
+
+    # Match total mass (balanced); prevents "turn everything to zero"
+    a = a * (b.sum() / a.sum())
+
+    u = jnp.ones_like(a)
+    v = jnp.ones_like(b)
+
+    def body(carry):
+        u, v = carry
+        Kv = gauss_blur2d(v, sigma)
+        u = a / (Kv + 1e-12)
+        Ku = gauss_blur2d(u, sigma)
+        v = b / (Ku + 1e-12)
+        return (u, v)
+
+    def cond(carry_prev, carry_next):
+        u0, v0 = carry_prev
+        u1, v1 = carry_next
+        du = jnp.max(jnp.abs(u1 - u0)) / (jnp.max(jnp.abs(u1)) + 1e-12)
+        dv = jnp.max(jnp.abs(v1 - v0)) / (jnp.max(jnp.abs(v1)) + 1e-12)
+        return jnp.maximum(du, dv) > tol
+
+    # Run fixed iters; you can add an early-stop check if desired
+    def loop(carry, _):
+        return body(carry), None
+
+    (u, v), _ = lax.scan(loop, (u, v), None, length=n_iters)
+
+    # Dual potentials (balanced): f=eps*log u, g=eps*log v
+    f = eps * jnp.log(u)
+    g = eps * jnp.log(v)
+
+    def ot_value(a_, b_):
+        # Regularized OT value: eps * ( <a_, log u_> + <b_, log v_> )
+        # (with u_, v_ the scalings computed for (a_, b_))
+        return jnp.sum(a_ * jnp.log(u)) * eps + jnp.sum(b_ * jnp.log(v)) * eps
+
+    # Compute S_eps(a,b) = OT(a,b) - 0.5(OT(a,a)+OT(b,b))
+    ot_ab = ot_value(a, b)
+
+    # Self terms: re-run quickly with (a,a) and (b,b). You can reuse u/v as warm starts.
+    def self_term(m):
+        u = jnp.ones_like(m)
+        v = jnp.ones_like(m)
+
+        def loop_uv(carry, _):
+            u, v = carry
+            Kv = gauss_blur2d(v, sigma)
+            u = m / (Kv + 1e-12)
+            Ku = gauss_blur2d(u, sigma)
+            v = m / (Ku + 1e-12)
+            return (u, v), None
+
+        (u, v), _ = lax.scan(loop_uv, (u, v), None, length=max(20, n_iters // 2))
+        return eps * (jnp.sum(m * jnp.log(u)) + jnp.sum(m * jnp.log(v)))
+
+    ot_aa = self_term(a)
+    ot_bb = self_term(b)
+
+    return jnp.maximum(0.0, ot_ab - 0.5 * (ot_aa + ot_bb))  # clamp tiny negatives from numerics
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
 ## {{{                      --     loss functions     --
 
 
-def bw_sliced_wasserstein_loss(
-    x: jnp.ndarray,
-    y: jnp.ndarray,
-    yhat: jnp.ndarray,
-    *,
-    n_proj: int = 128,
-    p: int = 2,
-    rng: "jax.Array | None" = None,  # e.g. jax.random.key(0) for reproducibility
-):
-    """
-    Sliced-Wasserstein distance between target and prediction on the same support x.
-    Faster, lower-variance gradients than full OT for many settings.
-    """
-    import jax.numpy as jnp
-    from ott.tools import sliced
-
-    # intensities -> non-negative weights, sum to 1 (pred vs target)
-    a = jnp.clip(yhat, 0.0)
-    a /= jnp.maximum(a.sum(), 1e-12)
-    b = jnp.clip(y, 0.0)
-    b /= jnp.maximum(b.sum(), 1e-12)
-
-    # Same coordinates for both measures; only weights differ
-    # Pass number of projections and optional rng via kwargs
-    loss, _ = sliced.sliced_wasserstein(
-        x=x,
-        y=x,
-        a=a,
-        b=b,
-        # kwargs go to the default projector: random directions on the sphere
-        n_proj=n_proj,
-        rng=rng,
-        p=p,
-    )
-    return loss
-
-
-def bw_unbalanced_sinkhorn_div_loss(
-    x: jnp.ndarray,
-    y: jnp.ndarray,
-    yhat: jnp.ndarray,
-    *,
-    epsilon: float = 1e-2,
-    tau: float = 0.995,  # 1.0 => balanced; <1.0 => unbalanced
-    **solver_kwargs,
-):
-    """
-    Debiased (Sinkhorn-divergence-style) loss with unbalanced marginals controlled by `tau`.
-    """
-
-    import jax.numpy as jnp
+def sinkhorn_divergence_balanced(x, y, yhat, epsilon=None, **solver_kwargs):
     from ott.geometry import pointcloud
     from ott.problems.linear import linear_problem
     from ott.solvers.linear import sinkhorn
 
-    # weights
-    a = jnp.clip(yhat, 0.0)
-    a /= jnp.maximum(a.sum(), 1e-12)
-    b = jnp.clip(y, 0.0)
-    b /= jnp.maximum(b.sum(), 1e-12)
+    # coords normalization
+    x_mu, x_sd = jnp.mean(x, 0, keepdims=True), jnp.std(x, 0, keepdims=True) + 1e-8
+    xn = (x - x_mu) / x_sd
+    if epsilon is None:
+        diffs = xn[:, None, :] - xn[None, :, :]
+        epsilon = 0.05 * jnp.mean(jnp.sum(diffs**2, -1))
 
-    # Single geometry since supports coincide
-    geom = pointcloud.PointCloud(x, x, epsilon=epsilon)
-    solver = sinkhorn.Sinkhorn(**solver_kwargs)
+    a = jax.nn.softplus(yhat) + 1e-8
+    b = jax.nn.softplus(y) + 1e-8
+    a = a * (b.sum() / (a.sum() + 1e-12))  # equal total mass
+    geom = pointcloud.PointCloud(xn, xn, epsilon=epsilon)
+    solver = sinkhorn.Sinkhorn(lse_mode=True, **solver_kwargs)
 
-    # cross term OT_ε(μ, ν; tau)
-    prob_xy = linear_problem.LinearProblem(geom, a=a, b=b, tau_a=tau, tau_b=tau)
-    ot_xy = solver(prob_xy).reg_ot_cost
+    def ot(u, v):
+        prob = linear_problem.LinearProblem(geom, a=u, b=v)  # tau=1 (balanced)
+        return solver(prob).reg_ot_cost
 
-    # self terms OT_ε(μ, μ; tau) and OT_ε(ν, ν; tau)
-    prob_aa = linear_problem.LinearProblem(geom, a=a, b=a, tau_a=tau, tau_b=tau)
-    prob_bb = linear_problem.LinearProblem(geom, a=b, b=b, tau_a=tau, tau_b=tau)
-    ot_aa = solver(prob_aa).reg_ot_cost
-    ot_bb = solver(prob_bb).reg_ot_cost
-
-    # debias (Sinkhorn divergence)
-    return ot_xy - 0.5 * (ot_aa + ot_bb)
+    return ot(a, b) - 0.5 * (ot(a, a) + ot(b, b))
 
 
-def bw_energy_distance(
-    x: jnp.ndarray,
-    y: jnp.ndarray,
-    yhat: jnp.ndarray,
-    **kwargs,
-):
-    """Weighted energy distance between target and prediction."""
-    # normalised non-negative weights
-    a = jnp.clip(y, 0.0)
-    b = jnp.clip(yhat, 0.0)
-    a /= jnp.maximum(a.sum(), 1e-12)
-    b /= jnp.maximum(b.sum(), 1e-12)
-
-    # pairwise distances
-    d_xy = jnp.linalg.norm(x[:, None, :] - x[None, :, :], axis=-1)
-
-    # cross term (target vs prediction)
-    cross = jnp.sum(a[:, None] * b[None, :] * d_xy)
-
-    # self terms
-    self_a = jnp.sum(a[:, None] * a[None, :] * d_xy)
-    self_b = jnp.sum(b[:, None] * b[None, :] * d_xy)
-
-    return 2 * cross - self_a - self_b
+def huber_loss(x, y, yhat, delta=0.01, **kw):
+    r = yhat - y
+    abs_r = jnp.abs(r)
+    quad = 0.5 * (r**2)
+    lin = delta * (abs_r - 0.5 * delta)
+    return jnp.mean(jnp.where(abs_r <= delta, quad, lin))
 
 
-def bw_mse_loss(
-    x: jnp.ndarray,
-    y: jnp.ndarray,
-    yhat: jnp.ndarray,
-    **kwargs,
-):
-    diff = yhat - y
-    return jnp.mean(diff**2)
+def zncc_loss(x, y, yhat, eps=1e-6, **kw):
+    y0 = y - jnp.mean(y)
+    yhat0 = yhat - jnp.mean(yhat)
+    num = jnp.mean(y0 * yhat0)
+
+    yyhat = jnp.mean(y0**2) * jnp.mean(yhat0**2)
+    yyhat = jnp.maximum(yyhat, eps)
+
+    den = jnp.sqrt(yyhat) + eps
+
+    return 1.0 - (num / den)
 
 
-def bw_sinkhorn_loss(
-    x: jnp.ndarray,  # (n, 2) sample coordinates
-    y: jnp.ndarray,  # (n,)   target intensities
-    yhat: jnp.ndarray,  # (n,)   predicted intensities
-    epsilon: float = 0.01,
-    **sink_kwargs,
-):
-    """
-    Debiased Sinkhorn divergence between a black-and-white target and prediction.
-    """
-
-    from ott.geometry import pointcloud
-    from ott.tools import sinkhorn_divergence as sd
-
-    assert_that(x).has_shape((y.shape[0], 2))
-    assert_that(y).has_same_shape(yhat)
-    assert_that(y.ndim).is_equal_to(1)
-
-    # intensities -> non-negative weights, sum to 1
-    a = jnp.clip(yhat, 0.0)
-    b = jnp.clip(y, 0.0)
-    a /= jnp.maximum(a.sum(), 1e-12)
-    b /= jnp.maximum(b.sum(), 1e-12)
-
-    # using same support (x). Only the weights change.
-    divergence, _ = sd.sinkhorn_divergence(
-        pointcloud.PointCloud,
-        x=x,
-        y=x,
-        a=a,  # input weights aka intensities
-        b=b,  # target weights
-        epsilon=epsilon,
-        **sink_kwargs,
+def huber_zncc_loss(x, y, yhat, delta=0.01, zncc_weight=0.5, **kw):
+    return zncc_weight * zncc_loss(x, y, yhat) + (1 - zncc_weight) * huber_loss(
+        x, y, yhat, delta=delta
     )
 
-    return divergence
+
+def spectral_loss(x, y, yhat, **kwargs):
+    Y = jnp.fft.fft2(y)
+    Yh = jnp.fft.fft2(yhat)
+    return jnp.mean((jnp.abs(Y) - jnp.abs(Yh)) ** 2)
+
+
+def mse_loss(x: jnp.ndarray, y: jnp.ndarray, yhat: jnp.ndarray, **kwargs):
+    diff = yhat - y
+    return jnp.mean(diff**2)
 
 
 @Partial(jax.jit, static_argnames=["lossfunc", "n_inputs_per_network"])
@@ -243,7 +283,16 @@ def per_replicate_apply(params, X, Z, keys, stack):
     return vmap(Partial(per_target_apply, stack=stack))(params, X, Z, keys)
 
 
-def distance_loss(stack, dconf, dmanager, num_z, epsilon=0.01, distance_func=bw_sinkhorn_loss):
+def distance_loss(
+    stack,
+    dconf,
+    dmanager,
+    num_z,
+    ratio_paths=None,
+    epsilon=0.01,
+    l1_lambda=0.0001,
+    distance_func=huber_zncc_loss,
+):
     from ott.geometry import pointcloud
     from ott.solvers import linear
 
@@ -271,6 +320,9 @@ def distance_loss(stack, dconf, dmanager, num_z, epsilon=0.01, distance_func=bw_
         assert_that(all_losses).has_shape((n_targets, n_networks))
         return all_losses
 
+    if ratio_paths is None:
+        ratio_paths = []
+
     def loss_func(dynamic, static, X, Y, Z, key, step):
         params = ParameterTree.merge(dynamic, static)
 
@@ -288,11 +340,19 @@ def distance_loss(stack, dconf, dmanager, num_z, epsilon=0.01, distance_func=bw_
         yhatdep = jnp.compress(dep_mask, yhat, axis=-1, size=nb_dep)
         assert_that(yhatdep.shape).is_equal_to(Y.shape)
 
+        l1_penalty = 0.0
+        l1l = as_schedule(l1_lambda)(step)
+        ratio_leaves = params.get_leaves_by_path(ratio_paths)
+        l1_norm = sum(jnp.sum(jnp.abs(p)) for p in ratio_leaves)
+        l1_penalty = l1_norm * l1l
+
         all_losses = all_losses_func(X, Y, yhatdep, as_schedule(epsilon)(step))
         avgloss = all_losses.mean()
         aux = {"apply_aux": apply_aux, "all_losses": all_losses}
 
-        return avgloss, aux
+        total_loss = avgloss + l1_penalty
+
+        return total_loss, aux
 
     return loss_func
 
@@ -366,9 +426,9 @@ def plot_prediction(
 
 ## {{{                          --     design manager   --
 DEFAULT_RESCALE_TARGET = {
-    "x": (0.0, 0.6),
-    "y": (0.0, 0.6),
-    "out": (0.0, 0.5),
+    "x": (0.0, 0.5),
+    "y": (0.0, 0.5),
+    "out": (0.09, 0.42),
 }
 
 
@@ -388,6 +448,13 @@ class DesignManager(BaseModel):
 
     targets: list[Target]
     networks: List[Network]
+
+    def model_post_init(self, *a, **kw):
+        super().model_post_init(*a, **kw)
+        for target in self.targets:
+            if target.transform_to_log_space:
+                target.xlim = (0.1, 1)
+                target.ylim = (0.1, 1)
 
     def get_samples(
         self,
@@ -436,8 +503,16 @@ class DesignManager(BaseModel):
 
         return xsamples, ysamples
 
-    def build_stack(self, model: BiocompModel):
+    def build_stack(self, model: BiocompModel, unlock_ratios=True):
         stack = ComputeStack(networks=self.networks)
+        if unlock_ratios:
+            assert model.compute_config is not None
+            assert model.compute_config.node_functions is not None
+
+            model.compute_config.node_functions["aggregation"] = encode_function(
+                partial(nd.aggregation, random_init=True)
+            )
+
         stack.build(model.compute_config)
         return stack
 
@@ -533,6 +608,7 @@ def evaluate_design(
     yraw: jax.Array,
     key: Optional[ArrayLike] = None,
     max_eval_size: int = 1000,
+    max_loss_size: int = 128,
 ) -> Tuple[jax.Array, jax.Array]:
     """Evaluate design performance on sampled data.
 
@@ -567,6 +643,11 @@ def evaluate_design(
     # get quantile variable size
     num_z = int(final_params["global/number_of_quantile_variables"].ravel()[0])
 
+    logger.info(
+        f"Evaluating design with {dconf.n_replicates} replicates, "
+        f"{n_eval_samples} samples, {dmanager.n_targets} targets, "
+        f"{n_networks} networks, {num_z} quantile variables."
+    )
     # build stack once
     stack = dmanager.build_stack(model)
     n_outputs = stack.get_nb_outputs()
@@ -581,7 +662,7 @@ def evaluate_design(
         # we'll accumulate predictions in chunks
         yhatdep_chunks = []
 
-        for chunk_idx in range(n_chunks):
+        for chunk_idx in tqdm(range(n_chunks), desc="Processing chunks"):
             start_idx = chunk_idx * chunk_size
             end_idx = min((chunk_idx + 1) * chunk_size, n_eval_samples)
             actual_chunk_size = end_idx - start_idx
@@ -629,15 +710,31 @@ def evaluate_design(
             (dconf.n_replicates, n_eval_samples, dmanager.n_targets, n_outputs)
         )
 
-        yhatdep = jnp.compress(dep_mask, YHAT, axis=-1, size=sum(dep_mask))
+        yhatdep = np.compress(dep_mask, YHAT, axis=-1)
         assert_that(yhatdep).has_shape(
             (dconf.n_replicates, n_eval_samples, dmanager.n_targets, n_networks)
         )
 
     # compute losses (this should be relatively lightweight)
-    loss_func = dconf.loss_function.kwargs.get("distance_func", bw_sinkhorn_loss)
-    losses = vmap(Partial(compute_all_losses, lossfunc=loss_func))(X, Y, yhatdep)
+    loss_func = dconf.loss_function.kwargs.get("distance_func", huber_zncc_loss)
+
+    # Handle PartialFunction objects
+    if hasattr(loss_func, "get_impl"):
+        loss_func = loss_func.get_impl()
+
+    all_losses_chunks = []
+    avg_over_n_losses = max(1, n_eval_samples // max_loss_size)
+    for i in tqdm(list(range(avg_over_n_losses)), desc="Computing losses"):
+        indices = jax.random.choice(key, n_eval_samples, shape=(max_loss_size,), replace=True)
+        lX = X[:, indices]
+        lY = Y[:, indices]
+        lyhatdep = yhatdep[:, indices]
+        losses = vmap(Partial(compute_all_losses, lossfunc=loss_func))(lX, lY, lyhatdep)
+        all_losses_chunks.append(np.asarray(losses))
+
+    losses = np.mean(np.stack(all_losses_chunks, axis=0), axis=0)
     assert_that(losses).has_shape((dconf.n_replicates, dmanager.n_targets, n_networks))
+    logger.debug(f"Computed losses shape: {losses.shape}")
 
     return yhatdep, losses
 
@@ -663,7 +760,7 @@ def get_topk_replicate_network_pairs(
     assert_that(n_replicates).is_equal_to(dconf.n_replicates)
     assert_that(n_targets).is_equal_to(dmanager.n_targets)
     assert_that(n_networks).is_equal_to(len(dmanager.networks))
-    assert_that(k).is_less_than_or_equal_to(n_replicates * n_networks)
+    k = min(k, n_replicates * n_networks)
 
     best_per_target = []
     for tid in range(n_targets):
@@ -687,11 +784,12 @@ def plot_design_results(
     dconf: DesignConfig,
     xraw: jax.Array,
     yraw: jax.Array,
-    yhatdep: jax.Array,
     topk: List[List[Tuple[int, int, float]]],
+    yhatdep: Optional[jax.Array] = None,
     n_eval_samples: Optional[int] = None,
     save_dir: Optional[Path] = None,
     show_difference: bool = False,
+    plot_top_k: Optional[int] = None,
 ) -> None:
     """Plot design results for each target showing best replicate/network combination.
 
@@ -704,6 +802,8 @@ def plot_design_results(
         topk: Top-k results from get_topk_replicate_network_pairs
         n_eval_samples: Maximum number of samples to plot (for performance)
         save_dir: Directory to save figures (if None, just display)
+        show_difference: Whether to show difference plots between prediction and target
+        plot_top_k: Number of top-k designs to plot per target (default: 1, i.e., just the best)
     """
     import matplotlib.pyplot as plt
     from biocomp.plotting.plotting_core import DEFAULT_CMAP_NAME
@@ -721,76 +821,113 @@ def plot_design_results(
     assert_that(yraw).has_shape(
         (n_networks, dconf.n_replicates, yraw.shape[2], dmanager.n_targets, 1)
     )
-    assert_that(yhatdep).has_shape(
-        (dconf.n_replicates, yhatdep.shape[1], dmanager.n_targets, n_networks)
-    )
+
+    # determine how many top-k results to plot
+    if plot_top_k is None:
+        plot_top_k = 1  # default to just the best result
 
     for tid, target in enumerate(dmanager.targets):
-        rep_id, net_id, loss_val = topk[tid][0]  # best for this target
+        # plot multiple top-k results for this target
+        n_to_plot = min(plot_top_k, len(topk[tid]))
 
-        # get data for this specific target/network/replicate combo
-        x_target = xraw[net_id, rep_id, :n_eval_samples, tid]  # shape: (n_samples, 2)
-        y_target = yraw[net_id, rep_id, :n_eval_samples, tid, 0]  # squeeze last dim
-        yhat_target = yhatdep[rep_id, :n_eval_samples, tid, net_id]  # shape: (n_samples,)
+        for rank in range(n_to_plot):
+            rep_id, net_id, loss_val = topk[tid][rank]
 
-        # assertions
-        assert_that(x_target).has_shape((n_eval_samples, 2))
-        assert_that(y_target).has_shape((n_eval_samples,))
-        assert_that(yhat_target).has_shape((n_eval_samples,))
+            # get data for this specific target/network/replicate combo
+            x_target = xraw[net_id, rep_id, :n_eval_samples, tid]  # shape: (n_samples, 2)
+            y_target = yraw[net_id, rep_id, :n_eval_samples, tid, 0]  # squeeze last dim
 
-        # create figure
-        nax = 3 if show_difference else 2
-        fig, axes = plt.subplots(1, nax, figsize=(nax * 5, 5), dpi=100)
+            # assertions
+            assert_that(x_target).has_shape((n_eval_samples, 2))
+            assert_that(y_target).has_shape((n_eval_samples,))
 
-        # ground truth
-        sc1 = axes[0].scatter(
-            x_target[:, 0], x_target[:, 1], c=y_target, cmap=DEFAULT_CMAP_NAME, s=5, alpha=0.7
-        )
-        axes[0].set_title("Target")
-        axes[0].set_aspect("equal")
-        plt.colorbar(sc1, ax=axes[0])
+            # create figure
+            nax = 3 if show_difference else 2
+            fig, axes = plt.subplots(1, nax, figsize=(nax * 5, 5), dpi=100)
 
-        # prediction
-        sc2 = axes[1].scatter(
-            x_target[:, 0], x_target[:, 1], c=yhat_target, cmap=DEFAULT_CMAP_NAME, s=5, alpha=0.7
-        )
-        axes[1].set_title(f"Prediction (loss={loss_val:.4f})")
-        axes[1].set_aspect("equal")
-        plt.colorbar(sc2, ax=axes[1])
-
-        # difference
-        if show_difference:
-            diff = yhat_target - y_target
-            assert_that(diff).has_shape((n_eval_samples,))
-            vmax = jnp.abs(diff).max()
-            sc3 = axes[2].scatter(
-                x_target[:, 0],
-                x_target[:, 1],
-                c=diff,
-                cmap="RdBu_r",
-                s=5,
-                alpha=0.7,
-                vmin=-vmax,
-                vmax=vmax,
+            # ground truth
+            sc1 = axes[0].scatter(
+                x_target[:, 0], x_target[:, 1], c=y_target, cmap=DEFAULT_CMAP_NAME, s=5, alpha=0.7
             )
-            axes[2].set_title(f"Difference (net: {dmanager.networks[net_id].name})")
-            axes[2].set_aspect("equal")
-            plt.colorbar(sc3, ax=axes[2])
+            axes[0].set_title("Target")
+            axes[0].set_aspect("equal")
+            plt.colorbar(sc1, ax=axes[0])
 
-        plt.suptitle(f"Target: {target.name} | Best: net {dmanager.networks[net_id].name})")
-        plt.tight_layout()
+            if yhatdep is not None:
+                # prediction
+                yhat_target = yhatdep[rep_id, :n_eval_samples, tid, net_id]  # shape: (n_samples,)
+                assert_that(yhat_target).has_shape((n_eval_samples,))
+                assert_that(yhatdep).has_shape(
+                    (dconf.n_replicates, yhatdep.shape[1], dmanager.n_targets, n_networks)
+                )
+                sc2 = axes[1].scatter(
+                    x_target[:, 0],
+                    x_target[:, 1],
+                    c=yhat_target,
+                    cmap=DEFAULT_CMAP_NAME,
+                    s=5,
+                    alpha=0.7,
+                )
+                axes[1].set_title(f"Prediction (rank {rank + 1}, loss={loss_val:.4f})")
+                axes[1].set_aspect("equal")
+                plt.colorbar(sc2, ax=axes[1])
 
-        if save_dir:
-            save_path = Path(save_dir) / f"design_result_{target.name}_rep{rep_id}_net{net_id}.png"
-            plt.savefig(save_path, dpi=150, bbox_inches="tight")
-            logger.info(f"Saved figure to {save_path}")
+                # difference
+                if show_difference:
+                    diff = yhat_target - y_target
+                    assert_that(diff).has_shape((n_eval_samples,))
+                    vmax = jnp.abs(diff).max()
+                    sc3 = axes[2].scatter(
+                        x_target[:, 0],
+                        x_target[:, 1],
+                        c=diff,
+                        cmap="RdBu_r",
+                        s=5,
+                        alpha=0.7,
+                        vmin=-vmax,
+                        vmax=vmax,
+                    )
+                    axes[2].set_title(f"Difference (net: {dmanager.networks[net_id].name})")
+                    axes[2].set_aspect("equal")
+                    plt.colorbar(sc3, ax=axes[2])
 
-        plt.show()
+            rank_str = f"_rank{rank + 1}" if n_to_plot > 1 else ""
+            plt.suptitle(
+                f"Target: {target.name} | Rank {rank + 1}: net {dmanager.networks[net_id].name})"
+            )
+            plt.tight_layout()
+
+            if save_dir:
+                save_path = (
+                    Path(save_dir)
+                    / f"design_result_{target.name}_rep{rep_id}_net{net_id}{rank_str}.png"
+                )
+                plt.savefig(save_path, dpi=150, bbox_inches="tight")
+                logger.info(f"Saved figure to {save_path}")
+
+            plt.show()
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                       --     main design function     --
+
+
+def normalize_ratios(current_ratios, min_val=0.003):
+    # shape of ratios is (n_aggregations, n_ratios)
+    abs_ratios = jnp.abs(current_ratios)
+    max_ratios = jnp.maximum(jnp.max(abs_ratios, axis=1), 1e-9)
+    normed_ratios = abs_ratios / max_ratios[:, None]
+    normed_ratios = jnp.where(normed_ratios < min_val, 0.0, normed_ratios)
+    return normed_ratios
+
+
+def get_ratio_paths(params):
+    ratio_paths = []
+    for path, value in params.data.iter_leaves():
+        if "ratio" in str(path) and "inverse" not in str(path):
+            ratio_paths.append(path)
+    return ratio_paths
 
 
 def start(
@@ -820,9 +957,11 @@ def start(
     steps_per_epoch = max(1, dconf.n_batches_per_epoch // dconf.batches_per_step)
     total_steps = int(dconf.n_epochs * steps_per_epoch)
 
-    print(
-        f"Total steps: {total_steps}, Steps per epoch: {steps_per_epoch}, Epochs: {dconf.n_epochs}"
+    logger.debug(
+        f"Total steps: {total_steps}, Steps per epoch: {steps_per_epoch}, \n"
+        f"Batch size: {dconf.batch_size}, Batches per step: {dconf.batches_per_step}"
     )
+    assert_that(total_steps).is_greater_than(0)
 
     n_networks = stack.get_nb_networks()
     xbatches, ybatches = dmanager.get_samples(
@@ -849,12 +988,21 @@ def start(
     )
 
     # -- step function --
-    loss_func = dconf.loss_function.get_impl()(stack, dconf, dmanager, num_z=num_z)
+    ratio_paths = get_ratio_paths(initial_params)
+
+    def norm_ratios_hook(params, *a, **kw):
+        print("Normalizing ratios...")
+        return params.update_leaves_by_path(ratio_paths, normalize_ratios)
+
+    loss_func = dconf.loss_function.get_impl()(
+        stack, dconf, dmanager, num_z=num_z, ratio_paths=ratio_paths
+    )
     step_fn = make_training_step(
         loss_func,
         dconf.optimizer,
         dconf.keep_in_history,
         scannable=True,
+        post_update_hook=norm_ratios_hook,
         updates_need_vmap=True,
         static_tags=["non_grad", "shared"],
     )

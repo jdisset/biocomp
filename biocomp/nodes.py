@@ -568,6 +568,7 @@ def hard_bias(
     valid_range: Tuple[float, float] = (0.0, 0.8),
     shape: Tuple[int] = (1,),
     init_value: float = 0.5,
+    random_init: bool = False,
     **_,
 ) -> LayerInstance:
     assert n_outputs == 1, f"Bias node should have 1 output, got {n_outputs}"
@@ -581,14 +582,41 @@ def hard_bias(
         return jnp.clip(value, valid_range[0], valid_range[1])
 
     def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
-        if init_value is not None:
-            params[f"{namespace}/raw_value"] = jnp.full(
-                (len(nodelist), *shape), init_value, dtype=jnp.float32
-            )
-        else:
-            params[f"{namespace}/raw_value"] = jax.random.uniform(
-                key, (len(nodelist), *shape), minval=valid_range[0], maxval=valid_range[1]
-            )
+        raw_values = []
+
+        for node in nodelist:
+            extra = node.get_compute_node("extra")
+            if extra and not random_init:
+                # try to use values from extra dict
+                if "raw_value" in extra:
+                    raw_values.append(
+                        jnp.array(extra["raw_value"], dtype=jnp.float32).reshape(shape)
+                    )
+                elif "bias_value" in extra:
+                    # use bias_value directly as raw_value (will be clamped in apply)
+                    raw_values.append(
+                        jnp.array(extra["bias_value"], dtype=jnp.float32).reshape(shape)
+                    )
+                else:
+                    # no valid values in extra, use init_value or random
+                    if init_value is not None:
+                        raw_values.append(jnp.full(shape, init_value, dtype=jnp.float32))
+                    else:
+                        raw_values.append(
+                            jax.random.uniform(
+                                key, shape, minval=valid_range[0], maxval=valid_range[1]
+                            )
+                        )
+            else:
+                # random init requested or no extra dict
+                if init_value is not None and not random_init:
+                    raw_values.append(jnp.full(shape, init_value, dtype=jnp.float32))
+                else:
+                    raw_values.append(
+                        jax.random.uniform(key, shape, minval=valid_range[0], maxval=valid_range[1])
+                    )
+
+        params[f"{namespace}/raw_value"] = jnp.stack(raw_values)
 
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> Tuple[ArrayLike, Dict]:
         raw_bias_value = params[f"{namespace}/raw_value"][node_id]
@@ -615,8 +643,9 @@ def bias(
     n_outputs: int,
     layer_id: int,
     stack,
-    valid_range: Tuple[float, float] = (0.0, 0.8),
+    valid_range: Tuple[float, float] = (0.0, 0.6),
     shape: Tuple[int] = (1,),
+    random_init: bool = False,
     **_,
 ) -> LayerInstance:
     assert n_outputs == 1, f"Bias node should have 1 output, got {n_outputs}"
@@ -631,11 +660,50 @@ def bias(
         scaled_sigmoid = jax.nn.sigmoid(value / s)
         return scaled_sigmoid * (valid_range[1] - valid_range[0]) + valid_range[0]
 
+    def inverse_clamp(value: ArrayLike, scale: ArrayLike):
+        # inverse of clamp_to_range, to get raw_value from bias_value and scale
+        s = jax.nn.sigmoid(scale) + 0.001
+        y = (value - valid_range[0]) / (valid_range[1] - valid_range[0])
+        y = jnp.clip(y, 1e-5, 1 - 1e-5)
+        return -s * jnp.log((1 / y) - 1)
+
     def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
-        params[f"{namespace}/raw_value"] = jax.random.uniform(
-            key, (len(nodelist), *shape), minval=-1, maxval=1
-        )
-        params[f"{namespace}/scale"] = jnp.zeros((len(nodelist),))
+        raw_values = []
+        scales = []
+
+        for node in nodelist:
+            extra = node.get_compute_node("extra")
+            if extra and not random_init:
+                # try to use values from extra dict
+                if "raw_value" in extra and "scale" in extra:
+                    raw_values.append(
+                        jnp.array(extra["raw_value"], dtype=jnp.float32).reshape(shape)
+                    )
+                    scales.append(jnp.array(extra["scale"], dtype=jnp.float32))
+                    bias_value = clamp_to_range(raw_values[-1], scales[-1])
+                    if "bias_value" in extra:
+                        assert jnp.allclose(
+                            bias_value,
+                            jnp.array(extra["bias_value"], dtype=jnp.float32).reshape(shape),
+                            atol=1e-4,
+                        ), "Inconsistent bias_value in extra dict"
+                elif "bias_value" in extra:
+                    scale = extra.get("scale", 0.0)
+                    scales.append(jnp.array(scale, dtype=jnp.float32))
+                    bias_v = jnp.array(extra["bias_value"], dtype=jnp.float32).reshape(shape)
+                    raw_v = inverse_clamp(bias_v, scales[-1])
+                    raw_values.append(raw_v)
+                else:
+                    # no valid values in extra, use random init for this node
+                    raw_values.append(jax.random.uniform(key, shape, minval=-1, maxval=1))
+                    scales.append(jnp.array(0.0, dtype=jnp.float32))
+            else:
+                # random init requested or no extra dict
+                raw_values.append(jax.random.uniform(key, shape, minval=-1, maxval=1))
+                scales.append(jnp.array(0.0, dtype=jnp.float32))
+
+        params[f"{namespace}/raw_value"] = jnp.stack(raw_values)
+        params[f"{namespace}/scale"] = jnp.stack(scales)
 
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> Tuple[ArrayLike, Dict]:
         raw_bias_value = params[f"{namespace}/raw_value"][node_id]
@@ -652,9 +720,11 @@ def bias(
         for i, n in enumerate(nodelist):
             extra = n.get_compute_node("extra") or {}
             scale = params[f"{namespace}/scale"][i]
-            bias_value = clamp_to_range(params[f"{namespace}/raw_value"][i], scale)
+            raw_value = params[f"{namespace}/raw_value"][i]
+            bias_value = clamp_to_range(raw_value, scale)
             extra["bias_value"] = bias_value
             extra["scale"] = scale
+            extra["raw_value"] = raw_value
             n.set_compute_node_column("extra", extra)
 
     output_shapes = [tuple(shape)]  # single output shape
@@ -671,6 +741,7 @@ def aggregation(
     n_outputs: int,
     layer_id: int,
     stack: ComputeStack = None,
+    random_init: bool = False,
     **_,
 ) -> LayerInstance:
     assert len(input_shapes) == 1, f"Aggregation expects 1 input, got {len(input_shapes)}"
@@ -679,28 +750,27 @@ def aggregation(
     namespace = f"local/{local_layer_name}"
     pname = "ratios"
 
+    def normalize_ratios_cb(params: ParameterTree, **__):
+        current_ratios = params[f"{namespace}/{pname}"]
+        max_ratios = jnp.maximum(jnp.max(current_ratios, axis=1), 1e-9)
+        normed_ratios = current_ratios / max_ratios[:, None]
+        return params.tree_set_at(f"{namespace}/{pname}", jnp.clip(normed_ratios, 0, 1))
+
     def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey, **_):
         ratios = []
         for i, node in enumerate(nodelist):
             extra = node.get_compute_node("extra")
-            if "ratios" in extra:
+            if "ratios" in extra and not random_init:
                 assert len(extra["ratios"]) == n_outputs
                 ratio_v = jnp.array(extra["ratios"], dtype=jnp.float32)
             else:
-                ratio_v = jax.random.uniform(key, (n_outputs,))
+                ratio_v = jax.random.uniform(key, (n_outputs,), minval=0.05, maxval=1.0)
             # pad to max_outputs if necessary
             ratios.append(ratio_v)
 
         ratios = jnp.stack(ratios)
         assert ratios.shape == (len(nodelist), n_outputs), f"Invalid ratio shape {ratios.shape}"
         params[f"{namespace}/{pname}"] = ratios
-
-        def normalize_ratios_cb(params: ParameterTree, **__):
-            current_ratios = params[f"{namespace}/{pname}"]
-            assert current_ratios.shape == (len(nodelist), n_outputs)
-            max_ratios = jnp.maximum(jnp.max(current_ratios, axis=1), 1e-9)
-            normed_ratios = current_ratios / max_ratios[:, None]
-            return params.tree_set_at(f"{namespace}/{pname}", jnp.clip(normed_ratios, 0, 1))
 
         stack.register_post_process(normalize_ratios_cb)
 
@@ -720,9 +790,35 @@ def aggregation(
     def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
         for i, n in enumerate(nodelist):
             extra = n.get_compute_node("extra") or {}
-            extra["ratios"] = params[f"{namespace}/{pname}"][i]
+            ratios = params[f"{namespace}/{pname}"][i]
+
+            # normalize absolute ratios so that the minimum is 1
+            ratios_array = jnp.abs(jnp.array(ratios))  # use absolute values like in apply
+            # find the minimum non-zero ratio
+            positive_ratios = ratios_array[ratios_array > 0]
+            min_ratio = jnp.min(positive_ratios) if len(positive_ratios) > 0 else 1.0
+            min_ratio = jnp.maximum(min_ratio, 1e-9)  # avoid division by zero
+            normalized_ratios = ratios_array / min_ratio
+
+            # update extra dict
+            extra["ratios"] = normalized_ratios.tolist()
             n.set_compute_node_column("extra", extra)
-            # todo: should also modify the TU ratios. Need to make sure both extra and TU are in sync
+
+            # update the network's aggregations dataframe to keep TU ratios in sync
+            if n.network is not None and n.network.aggregations is not None:
+                # find the aggregation id from the compute graph
+                compute_node = n.get_compute_node()
+                if (
+                    compute_node is not None
+                    and "extra" in compute_node
+                    and "id" in compute_node["extra"]
+                ):
+                    agg_id = compute_node["extra"]["id"]
+                    # update the aggregations dataframe
+                    if agg_id in n.network.aggregations.index:
+                        n.network.aggregations.at[agg_id, "ratio"] = normalized_ratios.tolist()[
+                            :n_outputs
+                        ]
 
     output_shape = input_shapes * n_outputs
 
@@ -1075,6 +1171,8 @@ def transform_nn(
             extra = node.get_compute_node("extra") or {}
             extra["resolved_parameter_names"] = resolved_parameter_names
             node.set_compute_node_column("extra", extra)
+            
+            # update CDG params and TranscriptionUnit slots
             qz.collapse_quantized_parameter(node, rate_name, resolved_parameter_names)
 
     output_shape = [(1,)]

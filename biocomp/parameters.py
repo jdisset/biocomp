@@ -833,6 +833,23 @@ class ParameterTree:
     def visualize_tree_structure(self):
         return "\n".join(self.data.visualize_tree_structure())
 
+    def get_leaves_by_path(self, paths_to_get: List[ParamPath]) -> List[Any]:
+        """
+        Efficiently retrieves the leaf values for a specific list of paths.
+        """
+        if not isinstance(paths_to_get, (list, tuple)):
+            paths_to_get = [paths_to_get]
+
+        # convert to a set for quick lookups
+        paths_set = {str(p) for p in paths_to_get}
+
+        leaves = []
+        for path, value in self.data.iter_leaves():
+            if str(path) in paths_set:
+                leaves.append(value)
+
+        return leaves
+
     def get_subtree(self, path):
         return ParameterTree(
             data=self.data[path],
@@ -956,6 +973,53 @@ class ParameterTree:
             tags=self.tags.get_read_only_copy(),
             tagnames=deepcopy(self.tagnames),
             read_only=True,
+        )
+
+    def update_leaves_by_path(
+        self, paths_to_update: List[ParamPath], update_func: Callable[[Any], Any]
+    ) -> "ParameterTree":
+        """
+        Applies a function to specific leaves of the data PTree and returns a new ParameterTree.
+        Args:
+            paths_to_update: A list of ParamPath objects for the leaves to update.
+            update_func: A function that takes a leaf value and returns the new value.
+        Returns:
+            A new ParameterTree instance with the updated leaves.
+        """
+        paths_set = {str(p) for p in paths_to_update}
+
+        flat_leaves, (keys, read_only) = flatten_PTree(self.data)
+
+        new_flat_leaves = list(flat_leaves)
+
+        for i, key_obj in enumerate(keys):
+            if isinstance(key_obj, ArrayRefPath):
+                path_str = str(key_obj.actual_path)
+            else:  # It's a ParamPath
+                path_str = str(key_obj)
+
+            if path_str in paths_set:
+                if isinstance(key_obj, ArrayRefPath):
+                    logger.warning(
+                        f"Skipping update for path '{path_str}' because it is an ArrayRef "
+                        "and cannot be updated with a direct value function."
+                    )
+                    continue
+
+                original_value = flat_leaves[i]
+                if original_value is None:
+                    new_flat_leaves[i] = None
+                else:
+                    updated_value = update_func(original_value)
+                    new_flat_leaves[i] = updated_value
+
+                if original_value is not None:
+                    updated_value = update_func(original_value)
+                    new_flat_leaves[i] = updated_value
+
+        new_data_tree = unflatten_PTree((keys, read_only), new_flat_leaves)
+        return ParameterTree(
+            data=new_data_tree, tags=self.tags, tagnames=self.tagnames, read_only=self.read_only
         )
 
     def __iter__(self):

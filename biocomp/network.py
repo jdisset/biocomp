@@ -1969,9 +1969,12 @@ class Network(BaseModel):
             return "[None] ∅"
 
         part_type = self._get_part_type(slot.part)
-        suffix = (
-            " (tunable)" if hasattr(slot, "maps_to_parameter") and slot.maps_to_parameter else ""
-        )
+        suffix = ""
+
+        # suffix = (
+        #     " (tunable)" if hasattr(slot, "maps_to_parameter") and slot.maps_to_parameter else ""
+        # )
+
         return f"[{part_type}] {slot.part}{suffix}"
 
     def _get_part_type(self, part_name: str) -> str:

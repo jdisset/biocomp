@@ -205,13 +205,24 @@ def get_quantized_rate_names(
     """
     Get closest part names for the given continuous values.
     """
-    possible_values = jnp.atleast_1d(params[quantization_values_path].squeeze())
+    possible_values = params[quantization_values_path]  # shape: (n_qvalues, rate_dim)
+    # ensure it's at least 2D for quantize_value_to_nearest_masked_embedding
+    if possible_values.ndim == 1:
+        possible_values = possible_values.reshape(-1, 1)
+
     masks = params[quantization_mask_path][node_id]
-    assert masks.shape == (values_to_quantize.shape[0], len(possible_values))
+    assert masks.shape == (values_to_quantize.shape[0], possible_values.shape[0]), (
+        f"Mask shape {masks.shape} doesn't match expected "
+        f"({values_to_quantize.shape[0]}, {possible_values.shape[0]})"
+    )
+
     names = []
     for v, m in zip(values_to_quantize, masks):
-        _, i = quantize_value_to_nearest_masked_embedding(v, possible_values, m)
-        names.append(qnames[i])
+        # v has shape (rate_dim,), needs to match possible_values dim
+        if v.ndim == 0:
+            v = v.reshape(1)
+        idx = get_nearest_masked_id(v, possible_values, m)
+        names.append(qnames[idx])
     return names
 
 
@@ -302,6 +313,7 @@ def collapse_quantized_parameter(vnode, param_name, value):
         f"but only {len(value)} values were provided"
     )
 
+    # Update CDG params
     for cid, val in zip(cdg_ids, value):
         if isinstance(val, (list, tuple)):
             assert len(val) == 1
@@ -311,6 +323,26 @@ def collapse_quantized_parameter(vnode, param_name, value):
         assert param_name in current_params, f"Param {param_name} not available for cdg node {cid}"
         current_params[param_name] = val
         cdg.at[cid, "params"] = current_params
+
+    # Also update the TranscriptionUnit slots to reflect the quantized values
+    if network.transcription_units is not None:
+        for cdg_id, resolved_name in zip(cdg_ids, value):
+            if cdg_id in cdg.index:
+                tu_ids = cdg.at[cdg_id, "tu_id"]
+                if tu_ids:
+                    tu_id = tu_ids[0] if isinstance(tu_ids, list) else tu_ids
+                    if tu_id in network.transcription_units:
+                        tu = network.transcription_units[tu_id]
+                        
+                        # Update the TU params to have the single quantized value
+                        if param_name in tu.params:
+                            tu.params[param_name] = [resolved_name]
+                        
+                        # Update the slots that map to this parameter
+                        for slot in tu.slots:
+                            if slot.maps_to_parameter == param_name:
+                                # Set the slot's part to the single quantized value
+                                slot.part = resolved_name
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

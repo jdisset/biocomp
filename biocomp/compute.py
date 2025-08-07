@@ -429,8 +429,28 @@ class ComputeStack:
         return ComputeStack(self.networks, deepcopy(self.layers))
 
     def commit(self, params: ParameterTree, **kwargs):
+        # create copies of all networks
+        network_copies = [deepcopy(net) for net in self.networks]
+        
+        # temporarily replace node network references with copies
+        original_network_refs = []
+        for layer in self.layers:
+            for node in layer.nodes:
+                # save original reference
+                original_network_refs.append((node, node.network))
+                # assign the copy
+                node.network = network_copies[node.network_id]
+        
+        # run commit on all layers (will modify the network copies)
         for layer in self.layers:
             layer.commit(params, **kwargs)
+        
+        # restore original network references
+        for node, original_network in original_network_refs:
+            node.network = original_network
+        
+        # return the modified network copies
+        return network_copies
 
     def __repr__(self):
         # layers with line breaks

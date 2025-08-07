@@ -20,6 +20,7 @@ readme = "README.md"
 description = "Automated design and predictions of neuromorphic synthetic biology circuits."
 requires-python = ">=3.11"
 dependencies = [
+	"assertpy",
     "numpy",
     "jax",
     "ml-dtypes",

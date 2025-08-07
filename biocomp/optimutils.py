@@ -218,6 +218,7 @@ def make_training_step(
     scannable=True,
     updates_need_vmap=False,
     static_tags=None,
+    post_update_hook: Optional[Callable] = None,
 ):
     from jax import value_and_grad
     import optax
@@ -244,6 +245,9 @@ def make_training_step(
             params = ParameterTree.merge(static, dynamic)
         else:
             params = dynamic
+
+        if post_update_hook:
+            params = post_update_hook(params)
 
         res = {
             "params": params,
