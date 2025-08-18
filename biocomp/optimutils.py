@@ -560,11 +560,11 @@ def optimize(
         step_history["latest_params"] = params
         step_history["opt_state"] = opt_state
 
-        prnt(f"Step {i} completed in {step_history['step_time']:.2f} seconds")
-        prnt(
-            f"Loss: {step_history.get('loss', 'N/A')} \n"
-            f"Learning Rate: {step_history.get('learning_rate', 'N/A')}"
-        )
+        # prnt(f"Step {i} completed in {step_history['step_time']:.2f} seconds")
+        # prnt(
+        #     f"Loss: {step_history.get('loss', 'N/A')} \n"
+        #     f"Learning Rate: {step_history.get('learning_rate', 'N/A')}"
+        # )
 
         if "loss" in step_history:
             loss_history.append(step_history["loss"])

@@ -342,7 +342,8 @@ def collapse_quantized_parameter(vnode, param_name, value):
                         for slot in tu.slots:
                             if slot.maps_to_parameter == param_name:
                                 # Set the slot's part to the single quantized value
-                                slot.part = resolved_name
+                                # Keep it as a list to maintain consistency
+                                slot.part = [resolved_name]
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

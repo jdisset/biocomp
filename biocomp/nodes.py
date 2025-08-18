@@ -750,11 +750,11 @@ def aggregation(
     namespace = f"local/{local_layer_name}"
     pname = "ratios"
 
-    def normalize_ratios_cb(params: ParameterTree, **__):
-        current_ratios = params[f"{namespace}/{pname}"]
-        max_ratios = jnp.maximum(jnp.max(current_ratios, axis=1), 1e-9)
-        normed_ratios = current_ratios / max_ratios[:, None]
-        return params.tree_set_at(f"{namespace}/{pname}", jnp.clip(normed_ratios, 0, 1))
+    # def normalize_ratios_cb(params: ParameterTree, **__):
+    #     current_ratios = params[f"{namespace}/{pname}"]
+    #     max_ratios = jnp.maximum(jnp.max(current_ratios, axis=1), 1e-9)
+    #     normed_ratios = current_ratios / max_ratios[:, None]
+    #     return params.tree_set_at(f"{namespace}/{pname}", jnp.clip(normed_ratios, 0, 1))
 
     def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey, **_):
         ratios = []
@@ -772,7 +772,7 @@ def aggregation(
         assert ratios.shape == (len(nodelist), n_outputs), f"Invalid ratio shape {ratios.shape}"
         params[f"{namespace}/{pname}"] = ratios
 
-        stack.register_post_process(normalize_ratios_cb)
+        # stack.register_post_process(normalize_ratios_cb)
 
     def apply(
         input: ArrayLike,
@@ -801,7 +801,7 @@ def aggregation(
             normalized_ratios = ratios_array / min_ratio
 
             # update extra dict
-            extra["ratios"] = normalized_ratios.tolist()
+            extra["ratios"] = normalized_ratios.tolist()[:n_outputs]
             n.set_compute_node_column("extra", extra)
 
             # update the network's aggregations dataframe to keep TU ratios in sync
@@ -819,6 +819,10 @@ def aggregation(
                         n.network.aggregations.at[agg_id, "ratio"] = normalized_ratios.tolist()[
                             :n_outputs
                         ]
+                else:
+                    logger.error(
+                        f"Compute node {n.id} does not have an 'id' in its 'extra' field, cannot update aggregations."
+                    )
 
     output_shape = input_shapes * n_outputs
 
@@ -1171,7 +1175,7 @@ def transform_nn(
             extra = node.get_compute_node("extra") or {}
             extra["resolved_parameter_names"] = resolved_parameter_names
             node.set_compute_node_column("extra", extra)
-            
+
             # update CDG params and TranscriptionUnit slots
             qz.collapse_quantized_parameter(node, rate_name, resolved_parameter_names)
 

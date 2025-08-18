@@ -28,7 +28,7 @@ import optax
 import jax
 import jax.numpy as jnp
 from jax.tree_util import Partial
-from jax import vmap, jit
+from jax import vmap, jit, lax
 from .jaxutils import get_looped_slice
 import os
 from jax.experimental import checkify
@@ -182,7 +182,63 @@ def sinkhorn_divergence_conv(a, b, eps, n_iters=80, tol=1e-6):
 ## {{{                      --     loss functions     --
 
 
-def sinkhorn_divergence_balanced(x, y, yhat, epsilon=None, **solver_kwargs):
+def proj_nonneg_ste(z, leak=1e-3, cap=None):
+    # forward: hard clip to [0, cap]; backward: small slope < 0 so negatives move
+    z_clip = jnp.clip(z, 0.0, cap) if cap is not None else jnp.maximum(z, 0.0)
+    z_leaky = jnp.where(z >= 0.0, z, leak * z)
+    return z_clip + jax.lax.stop_gradient(z_leaky - z_clip)
+
+
+def _epsilon_from_x_median(xn, eps=1e-12):
+    B = xn.shape[0]
+    d2 = jnp.sum((xn[:, None, :] - xn[None, :, :]) ** 2, axis=-1)
+    big = 1e9
+    nn_sq = jnp.min(d2 + jnp.eye(B) * big, axis=1)  # exclude self
+    med = jnp.median(nn_sq)
+    e = 0.5 * med  # ≈ exp(-1) at NN distance
+    return jax.lax.stop_gradient(jnp.maximum(e, eps))
+
+
+def sinkhorn_divergence_unbalanced(
+    x, y, yhat, epsilon=0.01, tau=0.9, cap=0.5, threshold=1e-3, max_iterations=300, **solver_kwargs
+):
+    from ott.geometry import pointcloud
+    from ott.problems.linear import linear_problem
+    from ott.solvers.linear import sinkhorn
+
+    # sanitize & normalize coords
+    x = jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    y = jnp.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    yh = jnp.nan_to_num(yhat, nan=0.0, posinf=0.0, neginf=0.0)
+
+    x_mu = jnp.mean(x, 0, keepdims=True)
+    x_sd = jnp.std(x, 0, keepdims=True) + 1e-8
+    xn = (x - x_mu) / x_sd
+
+    if epsilon is None:
+        epsilon = _epsilon_from_x_median(xn)
+
+    # forward masses are nonnegative; grads flow via STE
+    a = _proj_nonneg_ste(yh, cap=cap)
+    b = jnp.clip(y, 0.0, cap)  # target can be hard-clipped
+
+    geom = pointcloud.PointCloud(xn, xn, epsilon=epsilon)
+    solver = sinkhorn.Sinkhorn(
+        lse_mode=True, threshold=threshold, max_iterations=max_iterations, **solver_kwargs
+    )
+
+    def ot(u, v):
+        prob = linear_problem.LinearProblem(geom, a=u, b=v, tau_a=tau, tau_b=tau)
+        return solver(prob).reg_ot_cost
+
+    div = ot(a, b) - 0.5 * (ot(a, a) + ot(b, b))
+    # guard the odd tiny negative or NaN
+    return jnp.maximum(jnp.nan_to_num(div, nan=0.0, posinf=0.0, neginf=0.0), 0.0)
+
+
+def sinkhorn_divergence_balanced(
+    x, y, yhat, epsilon=0.01, cap=None, mass_floor=1e-8, lambda_neg=1e-4, **solver_kwargs
+):
     from ott.geometry import pointcloud
     from ott.problems.linear import linear_problem
     from ott.solvers.linear import sinkhorn
@@ -192,27 +248,34 @@ def sinkhorn_divergence_balanced(x, y, yhat, epsilon=None, **solver_kwargs):
     xn = (x - x_mu) / x_sd
     if epsilon is None:
         diffs = xn[:, None, :] - xn[None, :, :]
-        epsilon = 0.05 * jnp.mean(jnp.sum(diffs**2, -1))
+        epsilon = 0.03 * jnp.mean(jnp.sum(diffs**2, -1))
 
-    a = jax.nn.softplus(yhat) + 1e-8
-    b = jax.nn.softplus(y) + 1e-8
-    a = a * (b.sum() / (a.sum() + 1e-12))  # equal total mass
+    a = proj_nonneg_ste(yhat, cap=cap)
+    b = proj_nonneg_ste(y, cap=cap)
+
+    # --- tiny uniform floor to avoid zero-sum marginals ---
+    n = a.size
+    # scale the floor to total mass scale of b (or 1.0 if b is zero)
+    ref = jnp.maximum(jnp.sum(b), 1.0)
+    floor = (mass_floor * ref) / n
+    a = a + floor
+    b = b + floor
+
+    # balance total mass safely
+    sum_a = jnp.sum(a)
+    sum_b = jnp.sum(b)
+    a = a * (sum_b / (sum_a + 1e-8))
+
     geom = pointcloud.PointCloud(xn, xn, epsilon=epsilon)
     solver = sinkhorn.Sinkhorn(lse_mode=True, **solver_kwargs)
 
     def ot(u, v):
-        prob = linear_problem.LinearProblem(geom, a=u, b=v)  # tau=1 (balanced)
+        prob = linear_problem.LinearProblem(geom, a=u, b=v)  # tau=1
         return solver(prob).reg_ot_cost
 
-    return ot(a, b) - 0.5 * (ot(a, a) + ot(b, b))
-
-
-def huber_loss(x, y, yhat, delta=0.01, **kw):
-    r = yhat - y
-    abs_r = jnp.abs(r)
-    quad = 0.5 * (r**2)
-    lin = delta * (abs_r - 0.5 * delta)
-    return jnp.mean(jnp.where(abs_r <= delta, quad, lin))
+    div = ot(a, b) - 0.5 * (ot(a, a) + ot(b, b))
+    neg_pen = lambda_neg * jnp.mean(jax.nn.relu(-yhat))
+    return jnp.where(jnp.isfinite(div), div, 0.0) + neg_pen
 
 
 def zncc_loss(x, y, yhat, eps=1e-6, **kw):
@@ -228,7 +291,21 @@ def zncc_loss(x, y, yhat, eps=1e-6, **kw):
     return 1.0 - (num / den)
 
 
-def huber_zncc_loss(x, y, yhat, delta=0.01, zncc_weight=0.5, **kw):
+def wasserstein_zncc_loss(x, y, yhat, zncc_weight=0.4, **kw):
+    wloss = sinkhorn_divergence_balanced(x, y, yhat, **kw)
+    zloss = zncc_loss(x, y, yhat)
+    return zncc_weight * zloss + (1 - zncc_weight) * wloss
+
+
+def huber_loss(x, y, yhat, delta=0.01, **kw):
+    r = yhat - y
+    abs_r = jnp.abs(r)
+    quad = 0.5 * (r**2)
+    lin = delta * (abs_r - 0.5 * delta)
+    return jnp.mean(jnp.where(abs_r <= delta, quad, lin))
+
+
+def huber_zncc_loss(x, y, yhat, delta=0.01, zncc_weight=0.1, **kw):
     return zncc_weight * zncc_loss(x, y, yhat) + (1 - zncc_weight) * huber_loss(
         x, y, yhat, delta=delta
     )
@@ -283,6 +360,131 @@ def per_replicate_apply(params, X, Z, keys, stack):
     return vmap(Partial(per_target_apply, stack=stack))(params, X, Z, keys)
 
 
+def soft_count_over_one_penalty(W, rel_active=1e-3, width=2e-4):
+    """
+    W: (n_aggregations, n_ratios)
+    Treat entries >= rel_active * (row max) as 'active'.
+    width controls how sharp the step is around rel_active.
+    Penalty is zero for <=1 active per row, positive only for 2+.
+    """
+    A = jnp.abs(W)
+    m = jnp.max(A, axis=1, keepdims=True)
+    # scale-invariant normalization
+    norm = jnp.where(m > 0, A / (m + 1e-12), 0.0)
+
+    # soft indicator: ~0 below rel_active, ~1 above; sharpen with `width`
+    logits = (norm - rel_active) / (width + 1e-12)
+    soft_active = jax.nn.sigmoid(logits)
+    soft_count = jnp.sum(soft_active, axis=1)  # ≈ number of actives in each row
+
+    # penalize only the part above 1
+    row_pen = jnp.square(jax.nn.relu(soft_count - 1.0))
+    return jnp.sum(row_pen)
+
+
+def lncc_grid_loss(x, y, yhat, k=7, eps=1e-6, **kw):
+    # cheap boxfilter via cumulative sums (no extra deps)
+    def box2d(a, r):
+        a = jnp.pad(a, ((r + 1, r), (r + 1, r)), mode="edge")
+        s = jnp.cumsum(jnp.cumsum(a, axis=0), axis=1)
+        return (
+            s[: -2 * r - 1, : -2 * r - 1]
+            - s[: -2 * r - 1, 2 * r + 1 :]
+            - s[2 * r + 1 :, : -2 * r - 1]
+            + s[2 * r + 1 :, 2 * r + 1 :]
+        )
+
+    r = k // 2
+    N = k * k
+
+    y0, y1 = y, yhat
+    m0 = box2d(y0, r) / N
+    m1 = box2d(y1, r) / N
+
+    y0c = y0 - m0
+    y1c = y1 - m1
+
+    num = box2d(y0c * y1c, r)
+    den = jnp.sqrt(box2d(y0c * y0c, r) * box2d(y1c * y1c, r)) + eps
+    lncc = num / den
+    return 1.0 - jnp.mean(lncc)
+
+
+def simse_loss(x, y, yhat, eps=1e-8, **kw):
+    # center
+    y0 = jnp.nan_to_num(y - jnp.mean(y), nan=0.0, posinf=0.0, neginf=0.0)
+    yhat0 = jnp.nan_to_num(yhat - jnp.mean(yhat), nan=0.0, posinf=0.0, neginf=0.0)
+
+    # variances (squared norms)
+    vy = jnp.sum(y0**2)
+    vyhat = jnp.sum(yhat0**2)
+
+    # if prediction has ~zero variance, best α is 0 (avoid divide explosions)
+    alpha = jnp.where(vyhat > eps, jnp.sum(y0 * yhat0) / (vyhat + eps), 0.0)
+
+    # residual and normalized error
+    resid = y0 - alpha * yhat0
+    num = jnp.sum(resid**2)
+    den = jnp.maximum(vy, eps)
+
+    loss = num / den
+    return jnp.nan_to_num(loss, nan=1.0, posinf=1.0, neginf=1.0)
+
+
+def lncc_loss(
+    x,
+    y,
+    yhat,
+    target_neighbors=12,
+    eps=1e-6,
+    **kw,
+):
+    x = jnp.nan_to_num(jnp.asarray(x), nan=0.0, posinf=0.0, neginf=0.0)
+    y = jnp.nan_to_num(jnp.asarray(y).reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)
+    yhat = jnp.nan_to_num(jnp.asarray(yhat).reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)
+
+    B = x.shape[0]
+    if B <= 1:
+        return jnp.array(0.0, dtype=x.dtype)
+
+    diffs = x[:, None, :] - x[None, :, :]
+    d2 = jnp.sum(diffs**2, axis=-1)
+
+    # sigma from median NN distance
+    big = 1e9
+    nn_sq = jnp.min(d2 + jnp.eye(B) * big, axis=1)
+    median = jnp.sqrt(jnp.maximum(jnp.median(nn_sq), 0.0) + eps)
+    dim = x.shape[-1]
+    sigma_scale = 0.5 * (target_neighbors ** (1.0 / dim))  # for 2D ~ 0.5*sqrt(k)
+    sigma = jnp.maximum(sigma_scale * median, eps)
+
+    K = jnp.exp(-d2 / (2.0 * (sigma**2) + eps))
+    K = jnp.where(jnp.isfinite(K), K, 0.0)
+
+    rowsum = jnp.sum(K, axis=1, keepdims=True)
+    W = jnp.where(rowsum > 0.0, K / (rowsum + eps), 0.0)
+
+    Ey = W @ y
+    Eyhat = W @ yhat
+    Ey2 = W @ (y * y)
+    Eyhat2 = W @ (yhat * yhat)
+    Ey_yhat = W @ (y * yhat)
+
+    cov = Ey_yhat - Ey * Eyhat
+    vy = jnp.maximum(Ey2 - Ey**2, 0.0)
+    vyh = jnp.maximum(Eyhat2 - Eyhat**2, 0.0)
+
+    den = jnp.sqrt(vy * vyh) + eps
+    ncc = cov / den
+    ncc = jnp.where(jnp.isfinite(ncc), ncc, 0.0)
+
+    return 1.0 - jnp.mean(ncc)
+
+
+def simse_lncc_loss(x, y, yhat, simse_weight=0.3, **kw):
+    return simse_weight * simse_loss(x, y, yhat) + (1 - simse_weight) * lncc_loss(x, y, yhat)
+
+
 def distance_loss(
     stack,
     dconf,
@@ -290,7 +492,7 @@ def distance_loss(
     num_z,
     ratio_paths=None,
     epsilon=0.01,
-    l1_lambda=0.0001,
+    lambda_over1=0.001,
     distance_func=huber_zncc_loss,
 ):
     from ott.geometry import pointcloud
@@ -340,17 +542,17 @@ def distance_loss(
         yhatdep = jnp.compress(dep_mask, yhat, axis=-1, size=nb_dep)
         assert_that(yhatdep.shape).is_equal_to(Y.shape)
 
-        l1_penalty = 0.0
-        l1l = as_schedule(l1_lambda)(step)
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
-        l1_norm = sum(jnp.sum(jnp.abs(p)) for p in ratio_leaves)
-        l1_penalty = l1_norm * l1l
+        lo1 = as_schedule(lambda_over1)(step)
+        over1_penalty = lo1 * sum(
+            soft_count_over_one_penalty(p, rel_active=1e-3, width=2e-4) for p in ratio_leaves
+        )
 
         all_losses = all_losses_func(X, Y, yhatdep, as_schedule(epsilon)(step))
         avgloss = all_losses.mean()
-        aux = {"apply_aux": apply_aux, "all_losses": all_losses}
+        aux = {"apply_aux": apply_aux, "all_losses": all_losses, "yhatdep": yhatdep}
 
-        total_loss = avgloss + l1_penalty
+        total_loss = avgloss + over1_penalty
 
         return total_loss, aux
 
@@ -891,16 +1093,15 @@ def plot_design_results(
                     axes[2].set_aspect("equal")
                     plt.colorbar(sc3, ax=axes[2])
 
-            rank_str = f"_rank{rank + 1}" if n_to_plot > 1 else ""
             plt.suptitle(
                 f"Target: {target.name} | Rank {rank + 1}: net {dmanager.networks[net_id].name})"
             )
             plt.tight_layout()
 
             if save_dir:
+                # Use rank as prefix for consistency with recipe files
                 save_path = (
-                    Path(save_dir)
-                    / f"design_result_{target.name}_rep{rep_id}_net{net_id}{rank_str}.png"
+                    Path(save_dir) / f"rank{rank + 1:02d}_{target.name}_rep{rep_id}_net{net_id}.png"
                 )
                 plt.savefig(save_path, dpi=150, bbox_inches="tight")
                 logger.info(f"Saved figure to {save_path}")
@@ -913,13 +1114,12 @@ def plot_design_results(
 ### {{{                       --     main design function     --
 
 
-def normalize_ratios(current_ratios, min_val=0.003):
-    # shape of ratios is (n_aggregations, n_ratios)
-    abs_ratios = jnp.abs(current_ratios)
-    max_ratios = jnp.maximum(jnp.max(abs_ratios, axis=1), 1e-9)
-    normed_ratios = abs_ratios / max_ratios[:, None]
-    normed_ratios = jnp.where(normed_ratios < min_val, 0.0, normed_ratios)
-    return normed_ratios
+def normalize_ratios_prune(current_ratios, rel_off=1e-3, eps=1e-12):
+    A = jnp.abs(current_ratios)
+    m = jnp.maximum(jnp.max(A, axis=1, keepdims=True), eps)
+    norm = A / m
+    mask = norm >= rel_off
+    return jnp.where(mask, norm, 0.0)
 
 
 def get_ratio_paths(params):
@@ -992,7 +1192,7 @@ def start(
 
     def norm_ratios_hook(params, *a, **kw):
         print("Normalizing ratios...")
-        return params.update_leaves_by_path(ratio_paths, normalize_ratios)
+        return params.update_leaves_by_path(ratio_paths, normalize_ratios_prune)
 
     loss_func = dconf.loss_function.get_impl()(
         stack, dconf, dmanager, num_z=num_z, ratio_paths=ratio_paths
