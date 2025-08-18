@@ -559,6 +559,14 @@ def smooth_3d(
     show_progress=True,
     **_,
 ):
+    # log warning if data contains nan/inf values
+    import logging
+    logger = logging.getLogger(__name__)
+    if not np.all(np.isfinite(X)) or not np.all(np.isfinite(Y)):
+        n_invalid = np.sum(~np.all(np.isfinite(X), axis=1) | ~np.all(np.isfinite(Y), axis=1))
+        n_total = len(X)
+        logger.warning(f"Data contains {n_invalid}/{n_total} rows with NaN/inf values. These will be filtered out.")
+    
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
 
     if isinstance(ax, Axes):

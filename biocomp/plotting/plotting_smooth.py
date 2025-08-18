@@ -277,20 +277,35 @@ def knn_grid(
     grid_resolution=200,
     knn_stats_params={},
 ):
+    # filter out nan/inf values before processing
+    mask = np.all(np.isfinite(x), axis=1) if x.ndim > 1 else np.isfinite(x)
+    mask = mask & (np.all(np.isfinite(y), axis=1) if y.ndim > 1 else np.isfinite(y))
+    
+    x_clean = x[mask]
+    y_clean = y[mask]
+    
+    if len(x_clean) == 0:
+        # return empty grid if no valid data
+        xmin, xmax = xlims
+        ymin, ymax = ylims or xlims
+        xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
+        output_values = np.full(xy.shape[0], np.nan)
+        return xy, output_values
+    
     xmin, xmax = xlims
     ymin, ymax = ylims or xlims
     xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
-    if x.shape[1] > 2:
+    if x_clean.shape[1] > 2:
         assert zslice is not None
-        if zslice.shape != (x.shape[1] - 2,):
-            raise ValueError(f"zslice.shape = {zslice.shape} != {x.shape[1] - 2}")
+        if zslice.shape != (x_clean.shape[1] - 2,):
+            raise ValueError(f"zslice.shape = {zslice.shape} != {x_clean.shape[1] - 2}")
         xquery = np.hstack([xy, [zslice] * xy.shape[0]])
     else:
         xquery = xy
 
-    tree = build_tree(x)
+    tree = build_tree(x_clean)
     output_values, density = knn_stats(
-        xquery, y, tree=tree, stats=["mean", "density"], **knn_stats_params
+        xquery, y_clean, tree=tree, stats=["mean", "density"], **knn_stats_params
     )
 
     output_values = output_values.squeeze()
@@ -470,11 +485,11 @@ def smooth_2d(
     if isinstance(ax, (list, tuple)):
         ax = ax[0]
 
-    # count any row in x with nan values
-    nans = np.isnan(X).any(axis=1)
-    if nans.any():
-        X = X[~nans]
-        Y = Y[~nans]
+    # filter out rows with nan or inf values
+    finite_mask = np.all(np.isfinite(X), axis=1) & np.all(np.isfinite(Y), axis=1)
+    if not np.all(finite_mask):
+        X = X[finite_mask]
+        Y = Y[finite_mask]
 
     zslice = np.asarray(zslice) if zslice is not None else None
 

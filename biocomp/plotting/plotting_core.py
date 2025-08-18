@@ -460,6 +460,14 @@ USE_KNN_JAX = getenv("BC_KNN_USE_JAX", default=False)
 
 
 def build_tree(x, use_jax=USE_KNN_JAX):
+    # filter out nan/inf values before building tree
+    import numpy as np
+    if not use_jax:
+        mask = np.all(np.isfinite(x), axis=1) if x.ndim > 1 else np.isfinite(x)
+        x_clean = x[mask]
+        if len(x_clean) == 0:
+            raise ValueError("No finite data points available for building KD-tree")
+    
     if use_jax:
         import jaxkd as jk
         import jax
@@ -468,7 +476,10 @@ def build_tree(x, use_jax=USE_KNN_JAX):
     else:
         from scipy.spatial import KDTree
 
-        tree = KDTree(x)
+        tree = KDTree(x_clean)
+        # store the mask to use later for filtering other arrays
+        tree._finite_mask = mask
+        tree._original_x = x
     return tree
 
 
