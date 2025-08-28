@@ -882,3 +882,226 @@ class TestGetUniquePlasmidContent:
         tu2 = p2[0]  # First TU in plasmid2
         # The uORF slot had ["1x_uORF", "2x_uORF"] which should remain as tuple
         assert ('1x_uORF', '2x_uORF') in tu2
+
+
+class TestRemoveAggregation:
+    """Test cases for remove_aggregation method."""
+    
+    @pytest.fixture
+    def test_network(self):
+        """Load test network from biocomptools ALL_NETWORKS."""
+        from biocomptools.configs.designs.networks import ALL_NETWORKS
+        # Get network at index 6 as specified
+        network = ALL_NETWORKS[6]
+        return network
+    
+    def test_remove_aggregation_basic(self, test_network):
+        """Test removing an aggregation from the network."""
+        # make a copy to avoid modifying the original
+        net = test_network.copy()
+        
+        # verify initial state - should have more than 2 aggregations
+        initial_agg_count = len(net.aggregations)
+        assert initial_agg_count > 2, "Test network should have at least 3 aggregations"
+        
+        # get info about aggregation 2 before removal
+        agg_2_sources = net.aggregations.loc[2, "source"]
+        if not isinstance(agg_2_sources, list):
+            agg_2_sources = [agg_2_sources]
+        
+        # count TUs that will be removed
+        tus_to_remove = []
+        for source in agg_2_sources:
+            source_tus = net.tu_in_sources[net.tu_in_sources["source"] == source]["TU"].tolist()
+            tus_to_remove.extend(source_tus)
+        initial_tu_count = len(net.transcription_units)
+        
+        # remove aggregation id 2 (third aggregation)
+        net.remove_aggregation(2)
+        
+        # check that we now have exactly 2 aggregations left
+        assert len(net.aggregations) == 2, f"Should have 2 aggregations left, but have {len(net.aggregations)}"
+        
+        # verify aggregation 2 is not in the index
+        assert 2 not in net.aggregations.index, "Aggregation 2 should be removed"
+        
+        # verify the sources were removed
+        for source in agg_2_sources:
+            assert source not in net.tu_in_sources["source"].values, f"Source {source} should be removed"
+        
+        # verify the TUs were removed
+        for tu in tus_to_remove:
+            assert tu not in net.transcription_units, f"TU {tu} should be removed"
+        
+        # verify TU count decreased appropriately
+        assert len(net.transcription_units) == initial_tu_count - len(tus_to_remove)
+        
+        # verify raw data structures were updated
+        if net.raw_aggregations is not None:
+            for aid, _, _ in net.raw_aggregations:
+                assert aid != 2, "Aggregation 2 should not be in raw_aggregations"
+        
+        if net.raw_tu_in_sources is not None:
+            for source, _, _ in net.raw_tu_in_sources:
+                assert source not in agg_2_sources, f"Source {source} should not be in raw_tu_in_sources"
+    
+    def test_remove_aggregation_invalid_id(self, test_network):
+        """Test error when removing non-existent aggregation."""
+        net = test_network.copy()
+        
+        # try to remove an aggregation that doesn't exist
+        with pytest.raises(ValueError, match="Aggregation .* not found"):
+            net.remove_aggregation(999)
+    
+    def test_remove_aggregation_rebuild(self, test_network):
+        """Test that network is rebuilt after removing aggregation."""
+        net = test_network.copy()
+        
+        # build the network first
+        net.build()
+        assert net.is_built()
+        
+        # remove an aggregation
+        net.remove_aggregation(2)
+        
+        # if there are still TUs, network should be rebuilt
+        if len(net.transcription_units) > 0:
+            assert net.is_built(), "Network should be rebuilt after removing aggregation"
+    
+    def test_remove_all_aggregations(self, test_network):
+        """Test removing all aggregations leaves empty network."""
+        net = test_network.copy()
+        
+        # build first
+        net.build()
+        
+        # remove all aggregations one by one
+        agg_ids = list(net.aggregations.index)
+        for agg_id in agg_ids:
+            net.remove_aggregation(agg_id)
+        
+        # should have no aggregations left
+        assert len(net.aggregations) == 0
+        assert len(net.transcription_units) == 0
+        assert len(net.tu_in_sources) == 0
+        
+        # network should be cleaned but not built
+        assert not net.is_built()
+    
+    def test_clean_all_method(self, test_network):
+        """Test that clean_all properly resets network state."""
+        net = test_network.copy()
+        
+        # build the network
+        net.build()
+        assert net.is_built()
+        assert net.compute_graph is not None
+        assert net.central_dogma_graph is not None
+        
+        # clean all
+        net.clean_all()
+        
+        # verify graphs are cleared
+        assert net.compute_graph is None
+        assert net.central_dogma_graph is None
+        assert net._n_inputs is None
+        assert net._n_outputs is None
+        assert net._output_proteins is None
+        
+        # verify source data is preserved
+        assert net.transcription_units is not None
+        assert net.tu_in_sources is not None
+        assert net.aggregations is not None
+        assert net.name is not None
+
+
+class TestCommittedNetworkRemoveAggregation:
+    """Test cases for remove_aggregation on networks from stack.commit()."""
+    
+    @pytest.fixture
+    def test_params(self, request):
+        """Load test parameters from test_params.pickle."""
+        import pickle
+        from pathlib import Path
+        test_file_path = Path(request.fspath).parent / "test_params.pickle"
+        return pickle.load(open(test_file_path, "rb"))
+    
+    def test_committed_network_remove_aggregation(self, test_params):
+        """Test removing aggregation from a committed network."""
+        import pytest
+        from sqlmodel import Session
+        import biocomptools.toollib.models as md
+        from biocomptools.toollib.common import config
+        from biocomptools.configs.designs.networks import ALL_NETWORKS
+        from biocomptools.toollib.modelselector import ModelSelector
+        import biocomp.compute as cmp
+        import biocomp.jaxutils as bju
+        
+        # Use the test parameters from fixture
+        params = test_params
+        
+        # Load model
+        session = Session(md.get_biocompdb_sqlite_engine(config.db.sqlite.path))
+        mname = 'irritomit-osterogla-gonalesce'
+        model_results = ModelSelector(name=mname).get_models(session)
+        assert len(model_results) > 0, f"No models found with name {mname}"
+        model = model_results[0].load()
+        
+        # Set up parameters
+        (REP, T, N) = 14, 0, 6
+        bestp = bju.tree_get(params, (REP, T))
+        
+        # Get networks and create stack
+        NETWORKS = ALL_NETWORKS
+        orig_network = NETWORKS[N]
+        stack = cmp.ComputeStack(networks=NETWORKS)
+        stack.build(model.compute_config)
+        
+        # Commit the stack - this modifies the networks
+        final_networks = stack.commit(bestp)
+        final_network = final_networks[N]
+        
+        # Verify network is built
+        assert final_network.is_built()
+        
+        # Get initial state
+        initial_agg_count = len(final_network.aggregations)
+        assert initial_agg_count > 2, "Test network should have at least 3 aggregations"
+        
+        # Debug: Check the state before removal
+        print("Before removal:")
+        print(f"  Transcription units: {list(final_network.transcription_units.keys())}")
+        print(f"  TUs in sources: {set(final_network.tu_in_sources['TU'].unique())}")
+        
+        # Check which aggregations contain which sources
+        print("  Aggregations and their sources:")
+        for agg_id, row in final_network.aggregations.iterrows():
+            sources = row["source"]
+            if not isinstance(sources, list):
+                sources = [sources]
+            print(f"    Agg {agg_id}: {sources}")
+        
+        # Check for 'x1_a+'
+        if 'x1_a+' in final_network.transcription_units:
+            print("  'x1_a+' is in transcription_units")
+            x1_rows = final_network.tu_in_sources[final_network.tu_in_sources['TU'] == 'x1_a+']
+            if len(x1_rows) > 0:
+                print(f"  'x1_a+' is in sources: {x1_rows['source'].tolist()}")
+                # Which aggregations contain plsmd_2?
+                for agg_id, row in final_network.aggregations.iterrows():
+                    sources = row["source"]
+                    if not isinstance(sources, list):
+                        sources = [sources]
+                    if 'plsmd_2' in sources:
+                        print(f"  'plsmd_2' is in aggregation {agg_id}")
+            else:
+                print("  'x1_a+' is NOT in any sources")
+        
+        print(f"  Removing aggregation 2, which has sources: {final_network.aggregations.loc[2, 'source']}")
+        
+        # This should work without errors
+        final_network.remove_aggregation(2)
+        
+        # Verify aggregation was removed
+        assert len(final_network.aggregations) == initial_agg_count - 1
+        assert 2 not in final_network.aggregations.index

@@ -171,10 +171,14 @@ def get_tu_parts(tu, lib=None):
         lib = load_lib()
     parts = []
     for slot in tu.slots:
+        if slot.part is None:
+            continue
         if isinstance(slot.part, str):
             parts.append(slot.part)
         else:
-            assert isinstance(slot.part, list)
+            assert isinstance(slot.part, list), (
+                f"Slot part must be a str or a list, got {type(slot.part)}: {slot.part} in TU {tu.name} with content {tu.to_parts()}"
+            )
             if len(slot.part) == 1:
                 parts.append(slot.part[0])
     return get_parts_categories(parts, lib)
@@ -368,7 +372,6 @@ class LibraryContext:
     @classmethod
     def get_library(cls):
         if cls._current_lib is None:
-            print("No library set, loading default library")
             return load_lib()
         return cls._current_lib
 
@@ -445,7 +448,7 @@ class Slot(BaseModel):
                     return part_type_to_parameter_name[category]
             else:
                 raise ValueError(
-                    f"Unknown part: \"{part_name}\" (type: {type(part_name)}),library: {lib}"
+                    f'Unknown part: "{part_name}" (type: {type(part_name)}),library: {lib}'
                 )
         return None
 
@@ -972,7 +975,33 @@ class Network(BaseModel):
         node_dict = self.compute_graph.groupby("type").apply(lambda x: x.index.to_list()).to_dict()
         return node_dict
 
+    def clean_all(self):
+        """Reset all built/computed state of the network to a clean slate"""
+        # clear graph structures
+        self.compute_graph = None
+        self.central_dogma_graph = None
+        
+        # clear cached values
+        self._n_inputs = None
+        self._n_outputs = None
+        self._output_proteins = None
+        
+        # note: we do NOT clear these as they are the source data:
+        # - self.transcription_units
+        # - self.tu_in_sources
+        # - self.aggregations
+        # - self.raw_tu_in_sources
+        # - self.raw_aggregations
+        # - self.name
+        # - self.custom_outputs
+        # - self.metadata
+        # - self.lib
+        # - self.cotx
+    
     def build(self):
+        # clean up any previous build state
+        self.clean_all()
+        
         with LibraryContext.with_library(self.lib):
             assert self.transcription_units is not None, "No transcription units in recipe"
             assert len(self.transcription_units) > 0, (
@@ -1170,40 +1199,70 @@ class Network(BaseModel):
             return [names for _, names in grouped_tuids]
 
         def process_node_type(node_type: str, params_col: str) -> pd.DataFrame:
-            # no params
-            no_params = list(
-                tudf[tudf[params_col].map(len) == 0].groupby(by=node_type).agg(list).name
-            )
+            # Check if this network has been through commit/quantization by looking for specific signatures:
+            # 1. TUs with single quantized values that don't match expected defaults
+            # 2. Mixed single-value and multi-value parameters in the same network
+            def is_likely_quantized_tu(tu):
+                """Check if a TU has parameters that look like they were quantized from multi-value to single-value"""
+                for param_name, parts in tu.params.items():
+                    if param_name in ['tl_rate', 'tc_rate'] and isinstance(parts, list) and len(parts) == 1:
+                        # Single-value quantized parameter, but not a default empty value
+                        if param_name == 'tl_rate' and parts[0] != '00_empty_tc':
+                            return True
+                        if param_name == 'tc_rate' and parts[0] not in ['hEF1a']:  # common default promoters
+                            return True
+                return False
+            
+            quantized_tus = [tu_name for tu_name, tu in self.transcription_units.items() if is_likely_quantized_tu(tu)]
+            multi_value_tus = [
+                tu_name for tu_name, tu in self.transcription_units.items()
+                if any(isinstance(parts, list) and len(parts) > 1 and param_name in ['tl_rate', 'tc_rate']
+                       for param_name, parts in tu.params.items())
+            ]
+            # Only trigger committed mode if we have clear quantized TUs AND multi-value TUs mixed together
+            network_is_committed = len(quantized_tus) > 0 and len(multi_value_tus) > 0
+            
+            if network_is_committed:
+                # For committed networks, group primarily by content (node_type) rather than parameters
+                # This ensures TUs with collapsed parameters still get grouped with their original groups
+                tu_ids = list(tudf.groupby(by=node_type).agg(list).name)
+                return pd.DataFrame({"tu_id": tu_ids, "type": node_type})
+            else:
+                # Original behavior for non-committed networks
+                # no params
+                no_params = list(
+                    tudf[tudf[params_col].map(len) == 0].groupby(by=node_type).agg(list).name
+                )
 
-            # single param value
-            try:
-                one_param = (
-                    tudf[tudf[params_col].map(len) > 0]
-                    .groupby(by=node_type)
-                    .filter(
-                        lambda x: all(only_one_value_per_param(params) for params in x[params_col])
+                # single param value
+                try:
+                    one_param = (
+                        tudf[tudf[params_col].map(len) > 0]
+                        .groupby(by=node_type)
+                        .filter(
+                            lambda x: all(only_one_value_per_param(params) for params in x[params_col])
+                        )
+                        .groupby(by=[node_type, f"{node_type}_params_hashable"])
+                        .agg(list)
                     )
-                    .groupby(by=[node_type, f"{node_type}_params_hashable"])
-                    .agg(list)
+                    one_param = [] if one_param.empty else list(one_param.name)
+                except Exception as e:
+                    raise NetworkConstructionError(
+                        f"Error grouping {node_type} with one param: {e}\ntudf:\n{tudf}"
+                    )
+
+                # multi param values
+                has_many = tudf[params_col].apply(
+                    lambda params: any(len(v) > 1 for v in params.values())
                 )
-                one_param = [] if one_param.empty else list(one_param.name)
-            except Exception as e:
-                raise NetworkConstructionError(
-                    f"Error grouping {node_type} with one param: {e}\ntudf:\n{tudf}"
+                many_param = (
+                    group_multi_param_tus(tudf[has_many], node_type, params_col)
+                    if has_many.any()
+                    else []
                 )
 
-            # multi param values
-            has_many = tudf[params_col].apply(
-                lambda params: any(len(v) > 1 for v in params.values())
-            )
-            many_param = (
-                group_multi_param_tus(tudf[has_many], node_type, params_col)
-                if has_many.any()
-                else []
-            )
-
-            tu_ids = no_params + one_param + many_param
-            return pd.DataFrame({"tu_id": tu_ids, "type": node_type})
+                tu_ids = no_params + one_param + many_param
+                return pd.DataFrame({"tu_id": tu_ids, "type": node_type})
 
         # transcription units are never grouped
         dna_df = pd.DataFrame({"tu_id": [[x] for x in cast(str, tudf["name"])], "type": "DNA"})
@@ -1231,7 +1290,7 @@ class Network(BaseModel):
 
                 if r.tu_id[0] in rr.tu_id:  # if we have an RNA that has the same TU as the DNA
                     successors.append(ii)
-            cdg.loc[i, "successor"] = successors
+            cdg.at[i, "successor"] = successors
 
         # connect RNA to PRT through successor list
         for i_r, rna in rna_nodes.iterrows():  # for each RNA
@@ -1239,7 +1298,7 @@ class Network(BaseModel):
             for i_p, prt in cdg[cdg.type == "PRT"].iterrows():  # for each PRT
                 if set(rna.tu_id).issubset(set(prt.tu_id)):
                     successors.append(i_p)
-            cdg.loc[i_r, "successor"] = successors
+            cdg.at[i_r, "successor"] = successors
 
         # now deduce the predecessor lists
         cdg["predecessor"] = [list() for _ in range(len(cdg))]
@@ -1708,10 +1767,168 @@ class Network(BaseModel):
                 found = True
                 break
         assert found, f"Could not find input protein {input_protein_name} in compute graph"
+        
+        # renumber remaining inputs to be consecutive
+        self._renumber_input_positions()
+        
+        # clear cached values
+        self._n_inputs = None
+        
         new_mapping = self.get_inverted_input_positions()
         assert len(new_mapping) == len(original_mapping) - 1, f"Invalid mapping: {new_mapping}"
         assert output_position not in new_mapping.values()
         assert len(self.get_inverted_input_proteins()) == len(new_mapping)
+
+    def set_bias_as_input(self, bias_protein_name: Sequence[str]) -> None:
+        """Sets this bias protein back as an input node (instead of a bias one)"""
+        # get current input mapping before modification
+        original_mapping = self.get_inverted_input_positions()
+        output_proteins = self.get_output_proteins()
+        assert bias_protein_name in output_proteins, (
+            f"Invalid bias protein name: {bias_protein_name}"
+        )
+        output_position = output_proteins.index(bias_protein_name)
+        
+        # verify this is currently a bias (not already an input)
+        assert output_position not in original_mapping.values(), (
+            f"Protein {bias_protein_name} is already an input, not a bias"
+        )
+        
+        assert isinstance(self.compute_graph, pd.DataFrame)
+        biases = self.compute_graph[self.compute_graph["type"] == "bias"]
+        found = False
+        for i, row in biases.iterrows():
+            assert "input_from_output" in row.extra, f"input_from_output not in {row.extra}"
+            if row.extra["input_from_output"] == output_position:
+                # convert bias back to input
+                self.compute_graph.at[i, "type"] = "input"
+                # assign the next available input position if missing
+                if "input_position" not in row.extra:
+                    next_input_pos = len(original_mapping) if original_mapping else 0
+                    self.compute_graph.at[i, "extra"] = dict(row.extra)  # make a copy
+                    self.compute_graph.at[i, "extra"]["input_position"] = next_input_pos
+                found = True
+                break
+        assert found, f"Could not find bias protein {bias_protein_name} in compute graph"
+        
+        # renumber all inputs to be consecutive
+        self._renumber_input_positions()
+        
+        # clear cached values
+        self._n_inputs = None
+        
+        # verify the mapping is correct after modification
+        new_mapping = self.get_inverted_input_positions()
+        assert len(new_mapping) == len(original_mapping) + 1, f"Invalid mapping: {new_mapping}"
+        assert output_position in new_mapping.values()
+        assert len(self.get_inverted_input_proteins()) == len(new_mapping)
+    
+    def _renumber_input_positions(self) -> None:
+        """Renumbers input positions to be consecutive starting from 0"""
+        assert isinstance(self.compute_graph, pd.DataFrame)
+        inputs = self.compute_graph[self.compute_graph["type"] == "input"]
+        
+        # collect all inputs with their output positions
+        input_output_pairs = []
+        for i, row in inputs.iterrows():
+            assert "input_from_output" in row.extra, f"input_from_output not in {row.extra}"
+            input_output_pairs.append((i, row.extra["input_from_output"]))
+        
+        # sort by output position to maintain consistent ordering
+        input_output_pairs.sort(key=lambda x: x[1])
+        
+        # reassign consecutive input positions
+        for new_pos, (idx, _) in enumerate(input_output_pairs):
+            if "input_position" not in self.compute_graph.at[idx, "extra"]:
+                self.compute_graph.at[idx, "extra"] = dict(self.compute_graph.at[idx, "extra"])
+            self.compute_graph.at[idx, "extra"]["input_position"] = new_pos
+
+    def remove_aggregation(self, agg_id: int) -> None:
+        """Removes an aggregation and all its associated sources and transcription units"""
+        # first, clean all build state to ensure we're working with fresh data
+        was_built = self.is_built()
+        if was_built:
+            self.clean_all()
+        
+        assert self.aggregations is not None, "No aggregations in network"
+        assert self.tu_in_sources is not None, "No tu_in_sources in network"
+        assert self.transcription_units is not None, "No transcription units in network"
+        
+        # check that the aggregation exists
+        if agg_id not in self.aggregations.index:
+            raise ValueError(f"Aggregation {agg_id} not found in network")
+        
+        # get the sources associated with this aggregation
+        sources_to_remove = self.aggregations.loc[agg_id, "source"]
+        if not isinstance(sources_to_remove, list):
+            sources_to_remove = [sources_to_remove]
+        
+        # get all TUs in these sources
+        tus_in_removed_sources = set()
+        for source in sources_to_remove:
+            source_tus = self.tu_in_sources[self.tu_in_sources["source"] == source]["TU"].tolist()
+            tus_in_removed_sources.update(source_tus)
+        
+        # find TUs that are ONLY in the sources being removed (not used in other aggregations)
+        all_remaining_sources = set()
+        for other_agg_id, row in self.aggregations.iterrows():
+            if other_agg_id != agg_id:
+                other_sources = row["source"]
+                if not isinstance(other_sources, list):
+                    other_sources = [other_sources]
+                all_remaining_sources.update(other_sources)
+        
+        # get TUs in remaining sources
+        tus_in_remaining_sources = set()
+        for source in all_remaining_sources:
+            source_tus = self.tu_in_sources[self.tu_in_sources["source"] == source]["TU"].tolist()
+            tus_in_remaining_sources.update(source_tus)
+        
+        # only remove TUs that are not used in any remaining source
+        tus_to_remove = tus_in_removed_sources - tus_in_remaining_sources
+        
+        # remove the aggregation from the aggregations dataframe
+        self.aggregations = self.aggregations.drop(agg_id)
+        
+        # remove the sources and their TUs from tu_in_sources
+        self.tu_in_sources = self.tu_in_sources[~self.tu_in_sources["source"].isin(sources_to_remove)]
+        
+        # remove the TUs from transcription_units (only those not used elsewhere)
+        for tu in tus_to_remove:
+            if tu in self.transcription_units:
+                del self.transcription_units[tu]
+        
+        # also remove any TUs that are no longer referenced in tu_in_sources at all
+        referenced_tus = set(self.tu_in_sources["TU"].unique()) if len(self.tu_in_sources) > 0 else set()
+        orphaned_tus = set(self.transcription_units.keys()) - referenced_tus
+        for tu in orphaned_tus:
+            del self.transcription_units[tu]
+        
+        # update raw_aggregations
+        if self.raw_aggregations is not None:
+            self.raw_aggregations = [
+                (aid, source, ratio) 
+                for aid, source, ratio in self.raw_aggregations 
+                if aid != agg_id
+            ]
+        
+        # update raw_tu_in_sources
+        if self.raw_tu_in_sources is not None:
+            self.raw_tu_in_sources = [
+                (source, tu, pos) 
+                for source, tu, pos in self.raw_tu_in_sources 
+                if source not in sources_to_remove
+            ]
+        
+        # if the network was originally built and we still have content, rebuild
+        if was_built:
+            # only rebuild if there's still content
+            if self.transcription_units and len(self.transcription_units) > 0:
+                # Force a complete rebuild from the current (possibly committed) state
+                # The CDG building process now properly handles committed networks
+                self.clean_all()  # Clear all cached/derived state
+                self.build()
+            # if no TUs left, the clean_all was already done at the beginning
 
     def compute_dependency_map(self) -> dict[int, set[int]]:
         """Returns {node id -> set of upstream node ids}"""
@@ -1917,7 +2134,7 @@ class Network(BaseModel):
             # display each source with pretty containers
             for source_idx, (source, units) in enumerate(source_groups.items()):
                 ratio = norm_ratios[unit_indices[id(units[0])]]
-                ratio_str = f"⚭ {int(ratio)}×" if ratio == int(ratio) else f"{ratio:.1f}×"
+                ratio_str = f"⚭ {int(ratio)}×" if ratio == int(ratio) else f"{ratio:.3f}×"
 
                 icon = ""
 
@@ -2232,6 +2449,7 @@ def inverted_network(
                     # so that we can use it when converting aggregation nodes for example
                     # (where we convert a single input / multi output node to a single input / single output node
                     # but we need to know which path, i.e slot, to use)
+
                     new_n.is_inverse_of = node_id
                     new_n.extra = {
                         "original_output_slot": output_slot,
