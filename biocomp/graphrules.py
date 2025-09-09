@@ -52,6 +52,8 @@ class MatchQuery(BaseModel):
     def check_variable_consistency(self) -> "MatchQuery":
         """ensures all variables used in constraints are defined in `bind`."""
         bound_vars = set(self.bind.keys())
+        bound_vars.add("any")  # special case for "any" node matching
+        
         for edge in self.where_connected:
             if edge.source_var not in bound_vars:
                 raise ValueError(
@@ -60,6 +62,16 @@ class MatchQuery(BaseModel):
             if edge.target_var not in bound_vars:
                 raise ValueError(
                     f"Variable '{edge.target_var}' in `where_connected` is not defined in `bind`."
+                )
+
+        for edge in self.where_not_connected:
+            if edge.source_var not in bound_vars:
+                raise ValueError(
+                    f"Variable '{edge.source_var}' in `where_not_connected` is not defined in `bind`."
+                )
+            if edge.target_var not in bound_vars:
+                raise ValueError(
+                    f"Variable '{edge.target_var}' in `where_not_connected` is not defined in `bind`."
                 )
 
         return self
@@ -105,10 +117,22 @@ class DeleteEdge(ActionBase):
     target_var: str
 
 
+class RewireEdgesFrom(ActionBase):
+    action_type: Literal["rewire_edges_from"] = "rewire_edges_from"
+    old_source_var: str
+    new_source_var: str
+
+
+class RewireEdgesTo(ActionBase):
+    action_type: Literal["rewire_edges_to"] = "rewire_edges_to"
+    old_target_var: str
+    new_target_var: str
+
+
 # discriminated union of all possible action types.
 # allows Pydantic to automatically parse based on the `action_type` field.
 AnyAction = Annotated[
-    Union[AddNode, AddEdge, SetProperties, DeleteNode, DeleteEdge],
+    Union[AddNode, AddEdge, SetProperties, DeleteNode, DeleteEdge, RewireEdgesFrom, RewireEdgesTo],
     Field(discriminator="action_type"),
 ]
 
@@ -118,3 +142,4 @@ class GraphRewritingRule(BaseModel):
     query: MatchQuery
     actions: list[AnyAction]
     run_until_stable: bool = False
+    yield_strategy: Literal["batched", "per_match"] = "batched"
