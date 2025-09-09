@@ -11,7 +11,6 @@ from .plotting_smooth import (
 
 from . import plotting_core as pc
 from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable
-from matplotlib import pyplot as plt
 from functools import partial
 
 from biocomp import utils as ut
@@ -158,9 +157,6 @@ plot_front = partial(
     plot_face, visible_spines=["bottom", "left", "top", "right"], hidden_spines=None
 )
 plot_back = partial(plot_face, visible_spines=["top", "right"], hidden_spines=["bottom", "left"])
-
-from typing import List, Tuple, Dict, Any, Optional, Sequence, Union
-
 
 V3d = Union[Tuple[float, float, float], np.ndarray]
 V2d = Union[Tuple[float, float], np.ndarray]
@@ -545,6 +541,7 @@ def smooth_3d(
     projection_diag_coef: float = PROJ_D,
     colorbar_position=(1.1, 0.4),
     colorbar_size=(0.04, 0.52),
+    colorbar_params: Dict = {},
     show_inner_spines=True,
     show_slice_ticks=True,
     smooth_2d_params: Dict = {},
@@ -561,12 +558,15 @@ def smooth_3d(
 ):
     # log warning if data contains nan/inf values
     import logging
+
     logger = logging.getLogger(__name__)
     if not np.all(np.isfinite(X)) or not np.all(np.isfinite(Y)):
         n_invalid = np.sum(~np.all(np.isfinite(X), axis=1) | ~np.all(np.isfinite(Y), axis=1))
         n_total = len(X)
-        logger.warning(f"Data contains {n_invalid}/{n_total} rows with NaN/inf values. These will be filtered out.")
-    
+        logger.warning(
+            f"Data contains {n_invalid}/{n_total} rows with NaN/inf values. These will be filtered out."
+        )
+
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
 
     if isinstance(ax, Axes):
@@ -619,10 +619,10 @@ def smooth_3d(
         # zorder of ticklabels:
         sl_ax.yaxis.label.set_zorder(2)
         sl_ax.xaxis.label.set_zorder(2)
-        
+
         # Tag the slice with metadata for SVG export
         if slice_index is not None and len(zslice) > 0:
-            z_value = zslice[0] if hasattr(zslice, '__len__') else zslice
+            z_value = zslice[0] if hasattr(zslice, "__len__") else zslice
             # Encode slice metadata in GID for SVG post-processing
             gid = f"biocomp_3dslice_{slice_index}_z{z_value:.4f}"
             sl_ax.set_gid(gid)
@@ -645,28 +645,10 @@ def smooth_3d(
             label.set_bbox(dict(facecolor="white", edgecolor="None", alpha=1, pad=0.75, zorder=1.5))
 
         if colorbar_ax is not None:
-            cbar = plt.colorbar(im, cax=colorbar_ax)
-            cbar.ax.tick_params(labelsize=6)
-            # pc.default_style(cbar.ax)
-            cbar.ax.tick_params(axis="both", which="both", direction="out", pad=2, labelsize=8)
-            cbar.ax.yaxis.tick_right()
-            cbar.ax.yaxis.set_label_position("right")
+            from .plotting_smooth import colorbar
 
-            # add title to the right, vertical, along the colorbar
-            # using the y axis for labels
-
-            # cbar.ax.yaxis.set_label_position("right")
-            cbar.ax.set_ylabel(output_name, rotation=270, fontsize=8, labelpad=5)
-
-            for spine in cbar.ax.spines.values():
-                spine.set_linewidth(0.2)
-
-            vmin, vmax = im.get_clim()
-            setup_transformed_axis(
-                cbar.ax,
-                yaxis_lims=[vmin, vmax],
-                rescaler=rescaler,
-                margins=0.0,
+            colorbar(
+                sl_ax, im, rescaler, vlims, label=output_name, cax=colorbar_ax, **colorbar_params
             )
 
     zticks, zlabels = get_transformed_ticks_and_labels(
@@ -707,7 +689,12 @@ def smooth_3d(
 
         for j, pos in enumerate(data_slices_positions):
             data_slices.append(
-                partial(plot_smooth_data_slice, zslice=np.atleast_1d(pos), colorbar_ax=cbar_ax, slice_index=i*10+j)
+                partial(
+                    plot_smooth_data_slice,
+                    zslice=np.atleast_1d(pos),
+                    colorbar_ax=cbar_ax,
+                    slice_index=i * 10 + j,
+                )
             )
             if show_slice_ticks:
                 slice_ticks.append(pos)
