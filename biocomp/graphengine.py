@@ -1,23 +1,9 @@
-from typing import (
-    Optional,
-    Literal,
-    Union,
-    Dict,
-    List,
-)
+from typing import Optional, Literal, Union, Dict, List, Any
 from pydantic import BaseModel
 from copy import deepcopy
-from jinja2 import Environment, BaseLoader, meta
-from biocomp.graphrules import GraphRewritingRule, PropertyConstraint
-
-# comp_g
-# Index(['type', 'cdg_input', 'cdg_output', 'input_from', 'output_to',
-#        'is_inverse_of', 'extra', 'source_id'],
-#       dtype='object')
-# cdg
-# Index(['tu_id', 'type', 'predecessor', 'successor', 'content', 'content_type',
-#        'params', 'is_output', 'is_input'],
-#       dtype='object')
+from itertools import chain
+from jinja2 import Environment, BaseLoader
+from biocomp.graphrules import GraphRewritingRule, PropertyConstraint, EdgeConstraint
 
 
 NodeType = Union[
@@ -54,9 +40,6 @@ class GraphEdge(BaseModel):
 
 
 class InverseSpec(BaseModel):
-    # inverse nodes always have only one input and one output
-    # but we need to store the original output slot id so that we can use it
-    # when converting aggregation nodes for example
     node_id: int
     output_slot: int
     output_len: int
@@ -109,239 +92,508 @@ class GraphBuilder:
 
     def set_node_properties(self, node_id: int, properties: Dict):
         if node_id in self.nodes:
+            for key, value in properties.items():
+                if isinstance(value, str):
+                    try:
+                        evaluated = eval(value)
+                        if isinstance(evaluated, (list, dict)):
+                            properties[key] = evaluated
+                    except (SyntaxError, NameError):
+                        pass
             self.nodes[node_id].extra.update(properties)
 
-    def rewire_edges_from(self, old_source_id: int, new_source_id: int):
+    def rewire_edges(self, old_id: int, new_id: int, attr: str):
         for edge in self.edges:
-            if edge.source_id == old_source_id:
-                edge.source_id = new_source_id
+            if getattr(edge, attr) == old_id:
+                setattr(edge, attr, new_id)
+
+    def rewire_edges_from(self, old_source_id: int, new_source_id: int):
+        self.rewire_edges(old_source_id, new_source_id, "source_id")
 
     def rewire_edges_to(self, old_target_id: int, new_target_id: int):
-        for edge in self.edges:
-            if edge.target_id == old_target_id:
-                edge.target_id = new_target_id
+        self.rewire_edges(old_target_id, new_target_id, "target_id")
 
     def build(self) -> GraphState:
         return GraphState(nodes=list(self.nodes.values()), edges=self.edges)
 
 
-def match_properties(node: GraphNode, constraint: PropertyConstraint) -> bool:
-    for key, expected in constraint.properties.items():
-        if key == "type":
-            if node.node_type != expected:
+def match_properties_generic(
+    obj: Any,
+    properties: Dict[str, Any],
+    special_cases: Dict[str, str] = None,
+    fallback_dict: str = None,
+) -> bool:
+    for key, expected in properties.items():
+        if special_cases and key in special_cases:
+            if getattr(obj, special_cases[key]) != expected:
+                return False
+        elif key.startswith("content_has_") and hasattr(obj, "content"):
+            attr = key[12:]
+            if not any(getattr(part, attr, None) == expected for part in obj.content):
+                return False
+        elif hasattr(obj, key):
+            if getattr(obj, key) != expected:
+                return False
+        elif fallback_dict and hasattr(obj, fallback_dict):
+            fallback = getattr(obj, fallback_dict)
+            if fallback.get(key) != expected:
                 return False
         else:
-            if node.extra.get(key) != expected:
-                return False
+            return False
     return True
+
+
+def match_properties(node: GraphNode, constraint: PropertyConstraint) -> bool:
+    return match_properties_generic(node, constraint.properties, {"type": "node_type"}, "extra")
+
+
+def match_edge_properties(edge: GraphEdge, constraint: EdgeConstraint) -> bool:
+    return match_properties_generic(
+        edge, constraint.properties, fallback_dict="content_embedding_names"
+    )
+
+
+def _extract_node_ids(objects: List[Union[GraphNode, GraphEdge]]) -> set[int]:
+    return {obj.node_id for obj in objects if isinstance(obj, GraphNode)}
+
+
+def _connects_nodes(edge: GraphEdge, source_id: int, target_id: int) -> bool:
+    return edge.source_id == source_id and edge.target_id == target_id
+
+
+def find_edges_matching_constraint(
+    edges: List[GraphEdge], constraint: EdgeConstraint, node_assignment: Dict[str, GraphNode]
+) -> List[GraphEdge]:
+    source_node = node_assignment.get(constraint.source_var)
+    target_node = node_assignment.get(constraint.target_var)
+    if not source_node or not target_node:
+        return []
+    return [
+        edge
+        for edge in edges
+        if _connects_nodes(edge, source_node.node_id, target_node.node_id)
+        and match_edge_properties(edge, constraint)
+    ]
 
 
 def has_edge_in_graph(
     source_node: GraphNode, target_node: GraphNode, edges: List[GraphEdge]
 ) -> bool:
-    return any(
-        edge.source_id == source_node.node_id and edge.target_id == target_node.node_id
-        for edge in edges
-    )
+    return any(_connects_nodes(edge, source_node.node_id, target_node.node_id) for edge in edges)
 
 
-def find_matches(rule: GraphRewritingRule, target_graph: GraphState) -> List[Dict[str, GraphNode]]:
+def find_matches(
+    rule: GraphRewritingRule, target_graph: GraphState, debug: bool = False
+) -> List[Dict[str, any]]:
     node_vars = list(rule.query.bind.keys())
-    if not node_vars:
+    edge_vars = list(rule.query.bind_edges.keys())
+
+    if not node_vars and not edge_vars:
         return []
 
-    # query planning: pre-filter and sort by constraint
-    candidates = {}
+    node_candidates = {}
     for var_name, constraint in rule.query.bind.items():
-        candidates[var_name] = [
+        node_candidates[var_name] = [
             node for node in target_graph.nodes if match_properties(node, constraint)
         ]
-    sorted_vars = sorted(node_vars, key=lambda v: len(candidates[v]))
+
+    sorted_node_vars = sorted(node_vars, key=lambda v: len(node_candidates[v]))
     matches = []
 
     def check_constraints(assignment: Dict[str, GraphNode]) -> bool:
-        for edge_constraint in rule.query.where_connected:
-            if not has_edge_in_graph(
-                assignment[edge_constraint.source_var],
-                assignment[edge_constraint.target_var],
-                target_graph.edges,
-            ):
+        def check_edge_exists(constraint, should_exist=True):
+            source, target = constraint.source_var, constraint.target_var
+            if source == "any":
+                return (
+                    any(
+                        has_edge_in_graph(n, assignment[target], target_graph.edges)
+                        for n in target_graph.nodes
+                        if n != assignment[target]
+                    )
+                    == should_exist
+                )
+            elif target == "any":
+                return (
+                    any(
+                        has_edge_in_graph(assignment[source], n, target_graph.edges)
+                        for n in target_graph.nodes
+                        if n != assignment[source]
+                    )
+                    == should_exist
+                )
+            else:
+                return (
+                    has_edge_in_graph(assignment[source], assignment[target], target_graph.edges)
+                    == should_exist
+                )
+
+        if rule.query.where_filter_function:
+            context = {var: NodeProxy(node) for var, node in assignment.items()}
+            if not eval(rule.query.where_filter_function, {}, context):
                 return False
 
-        for edge_constraint in rule.query.where_not_connected:
-            if edge_constraint.source_var == "any":
-                if any(
-                    has_edge_in_graph(
-                        other_node, assignment[edge_constraint.target_var], target_graph.edges
-                    )
-                    for other_node in target_graph.nodes
-                    if other_node != assignment[edge_constraint.target_var]
-                ):
-                    return False
-            elif edge_constraint.target_var == "any":
-                if any(
-                    has_edge_in_graph(
-                        assignment[edge_constraint.source_var], other_node, target_graph.edges
-                    )
-                    for other_node in target_graph.nodes
-                    if other_node != assignment[edge_constraint.source_var]
-                ):
-                    return False
-            elif has_edge_in_graph(
-                assignment[edge_constraint.source_var],
-                assignment[edge_constraint.target_var],
-                target_graph.edges,
-            ):
-                return False
-        return True
+        return all(check_edge_exists(c, True) for c in rule.query.where_connected) and all(
+            check_edge_exists(c, False) for c in rule.query.where_not_connected
+        )
 
-    def backtrack(var_idx: int, assignment: Dict[str, GraphNode]):
-        if var_idx == len(sorted_vars):
+    def backtrack_nodes(var_idx: int, assignment: Dict[str, GraphNode]):
+        if var_idx == len(sorted_node_vars):
             if check_constraints(assignment):
-                matches.append(assignment.copy())
+                backtrack_edges(0, assignment, {})
             return
-
-        var_name = sorted_vars[var_idx]
-        for node in candidates[var_name]:
+        var_name = sorted_node_vars[var_idx]
+        for node in node_candidates[var_name]:
             if node in assignment.values():
                 continue
             assignment[var_name] = node
-            backtrack(var_idx + 1, assignment)
+            backtrack_nodes(var_idx + 1, assignment)
             del assignment[var_name]
 
-    backtrack(0, {})
+    def backtrack_edges(
+        edge_idx: int, node_assignment: Dict[str, GraphNode], edge_assignment: Dict[str, GraphEdge]
+    ):
+        if edge_idx == len(edge_vars):
+            full_assignment = {**node_assignment, **edge_assignment}
+            matches.append(full_assignment)
+            return
+        edge_var = edge_vars[edge_idx]
+        edge_constraint = rule.query.bind_edges[edge_var]
+        matching_edges = find_edges_matching_constraint(
+            target_graph.edges, edge_constraint, node_assignment
+        )
+        for edge in matching_edges:
+            if edge in edge_assignment.values():
+                continue
+            edge_assignment[edge_var] = edge
+            backtrack_edges(edge_idx + 1, node_assignment, edge_assignment)
+            del edge_assignment[edge_var]
+
+    if node_vars:
+        backtrack_nodes(0, {})
+    else:
+        backtrack_edges(0, {}, {})
+
+    if debug:
+        print(f"\n>>> find_matches for rule '{rule.name}' found {len(matches)} match(es).")
+        for i, match in enumerate(matches):
+            print(f"  - Match #{i}:")
+            for var_name, obj in match.items():
+                if isinstance(obj, GraphNode):
+                    print(
+                        f"    {var_name}: Node(id={obj.node_id}, type='{obj.node_type}', extra={obj.extra})"
+                    )
+                elif isinstance(obj, GraphEdge):
+                    print(f"    {var_name}: Edge(source={obj.source_id}, target={obj.target_id})")
+
     return matches
 
 
 _jinja_env = Environment(loader=BaseLoader())
 
 
-class NodeProxy:
-    """Proxy object to make GraphNode properties accessible to Jinja2 templates"""
-
-    def __init__(self, node: GraphNode):
-        self._node = node
-
-    @property
-    def type(self):
-        return str(self._node.node_type)
-
-    @property
-    def node_id(self):
-        return str(self._node.node_id)
+class TemplateProxy:
+    def __init__(self, obj: Any, attr_map: Dict[str, str] = None, fallback_dict: str = None):
+        self._obj, self._attr_map, self._fallback = obj, attr_map or {}, fallback_dict
 
     def __getattr__(self, name):
-        """Get properties from node.extra dict"""
-        return str(self._node.extra.get(name, ""))
+        if hasattr(self._obj, name):
+            return getattr(self._obj, name)
+        if name in self._attr_map and hasattr(self._obj, self._attr_map[name]):
+            return getattr(self._obj, self._attr_map[name])
+        if self._fallback and hasattr(self._obj, self._fallback):
+            fallback_data = getattr(self._obj, self._fallback)
+            if isinstance(fallback_data, dict) and name in fallback_data:
+                return fallback_data.get(name)
+        return None
 
 
-def expand_template(template: str, match: Dict[str, GraphNode]) -> str:
-    """Expand template string using Jinja2 with GraphNode properties"""
-    if not isinstance(template, str):
-        return str(template)
-    context = {var_name: NodeProxy(node) for var_name, node in match.items()}
-    jinja_template = _jinja_env.from_string(template)
-    return jinja_template.render(**context)
+class NodeProxy(TemplateProxy):
+    def __init__(self, node: GraphNode):
+        super().__init__(node, {"type": "node_type"}, "extra")
+
+
+class EdgeProxy(TemplateProxy):
+    def __init__(self, edge: GraphEdge):
+        super().__init__(edge, fallback_dict="content_embedding_names")
+
+    @property
+    def content(self):
+        return [part.name for part in self._obj.content]
+
+
+def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEdge]]) -> Any:
+    if not isinstance(template_str, str) or "{{" not in template_str:
+        return template_str
+
+    if "+" in template_str and all(
+        p.strip().split(".")[0] in match
+        for p in template_str.replace("{{", "").replace("}}", "").split("+")
+    ):
+        parts = [p.strip() for p in template_str.replace("{{", "").replace("}}", "").split("+")]
+        result = []
+        for part_str in parts:
+            var, attr = part_str.split(".")
+            proxy = (
+                NodeProxy(match[var])
+                if isinstance(match[var], GraphNode)
+                else EdgeProxy(match[var])
+            )
+            # First try to get raw value directly from the object
+            raw_value = getattr(proxy._obj, attr, None)
+            if raw_value is not None:
+                val = raw_value
+            else:
+                # Fall back to proxy (which might do string conversion)
+                val = getattr(proxy, attr)
+
+            # If the value is a string that looks like a list, try to parse it
+            if isinstance(val, str) and val.startswith("[") and val.endswith("]"):
+                try:
+                    parsed_val = eval(val)
+                    if isinstance(parsed_val, list):
+                        val = parsed_val
+                except:
+                    pass
+
+            if isinstance(val, list):
+                result.extend(val)
+            else:
+                result.append(val)
+        return result
+
+    # Check if template is a simple variable access like "{{var.attr}}"
+    # If so, return the value directly without string conversion
+    simple_var_pattern = template_str.strip()
+    if simple_var_pattern.startswith("{{") and simple_var_pattern.endswith("}}"):
+        var_expr = simple_var_pattern[2:-2].strip()
+        if "." in var_expr and var_expr.count(".") == 1:
+            var_name, attr_name = var_expr.split(".", 1)
+            if var_name in match:
+                proxy = (
+                    NodeProxy(match[var_name])
+                    if isinstance(match[var_name], GraphNode)
+                    else EdgeProxy(match[var_name])
+                )
+                raw_value = getattr(proxy._obj, attr_name, None)
+                if raw_value is not None:
+                    return raw_value
+
+    context = {
+        var_name: NodeProxy(obj) if isinstance(obj, GraphNode) else EdgeProxy(obj)
+        for var_name, obj in match.items()
+    }
+    jinja_template = _jinja_env.from_string(template_str)
+    rendered = jinja_template.render(**context)
+    return rendered
+
+
+def _process_match(
+    match: Dict[str, Union[GraphNode, GraphEdge]],
+    rule: GraphRewritingRule,
+    builder: GraphBuilder,
+    debug: bool = False,
+):
+    if debug:
+        print(f"\n--- Processing Match ---")
+        for var, obj in match.items():
+            if isinstance(obj, GraphNode):
+                print(f"  {var}: Node(id={obj.node_id})")
+
+    var_to_node_id = {var: obj.node_id for var, obj in match.items() if isinstance(obj, GraphNode)}
+    local_nodes = {}
+
+    def expand_props(props: Dict[str, Any]) -> Dict[str, Any]:
+        result = {}
+        for k, v in props.items():
+            expanded = expand_template(v, match)
+            if debug:
+                print(f"      Template '{v}' -> {expanded} (type: {type(expanded)})")
+            result[k] = expanded
+        return result
+
+    def get_node_id(var: str) -> Optional[int]:
+        return local_nodes.get(var) or var_to_node_id.get(var)
+
+    for action in rule.actions:
+        action_type = action.action_type
+        if debug:
+            print(f"  [Action] Executing '{action_type}'...")
+
+        if action_type == "add_node":
+            props = expand_props(action.properties)
+            node_id = builder.add_node(
+                props.pop("type", "unknown"), {k: v for k, v in props.items() if k != "type"}
+            )
+            local_nodes[action.local_name] = node_id
+            if debug:
+                print(
+                    f"    Added Node '{action.local_name}' with ID {node_id} and properties {props}"
+                )
+
+        elif action_type == "add_edge":
+            source_id, target_id = get_node_id(action.source), get_node_id(action.target)
+            if source_id is not None and target_id is not None:
+                props = expand_props(action.properties)
+                builder.add_edge(source_id, target_id, **props)
+                if debug:
+                    print(
+                        f"    Added Edge from '{action.source}' (ID: {source_id}) to '{action.target}' (ID: {target_id}) with properties {props}"
+                    )
+
+        elif action_type == "set_properties":
+            node_id = get_node_id(action.node_var)
+            if node_id is not None:
+                props = expand_props(action.properties)
+                if debug:
+                    print(f"    Setting properties on '{action.node_var}' (ID: {node_id}): {props}")
+                builder.set_node_properties(node_id, props)
+
+        elif action_type == "delete_node":
+            node_id = var_to_node_id[action.node_var]
+            if debug:
+                print(f"    Deleting Node '{action.node_var}' (ID: {node_id})")
+            builder.delete_node(node_id)
+
+        elif action_type == "delete_edge":
+            source_id, target_id = (
+                var_to_node_id[action.source_var],
+                var_to_node_id[action.target_var],
+            )
+            if debug:
+                print(
+                    f"    Deleting Edge from '{action.source_var}' (ID: {source_id}) to '{action.target_var}' (ID: {target_id})"
+                )
+            builder.delete_edge(source_id, target_id)
+
+        elif action_type == "rewire_edges_from":
+            old_id = var_to_node_id[action.old_source_var]
+            new_id = get_node_id(action.new_source_var)
+            if new_id is not None:
+                if debug:
+                    print(
+                        f"    Rewiring edges FROM '{action.old_source_var}' (ID: {old_id}) TO '{action.new_source_var}' (ID: {new_id})"
+                    )
+                builder.rewire_edges_from(old_id, new_id)
 
 
 def apply_actions(
-    rule: GraphRewritingRule, matches: List[Dict[str, GraphNode]], target_graph: GraphState
+    rule: GraphRewritingRule,
+    matches: List[Dict[str, Union[GraphNode, GraphEdge]]],
+    target_graph: GraphState,
+    debug: bool = False,
 ) -> GraphState:
     builder = GraphBuilder(target_graph)
     applied_nodes = set()
 
+    if debug and matches:
+        _print_graph_summary(target_graph, "Graph State Before Actions")
+
     for match in matches:
-        # check for overlapping matches (and skip if so)
-        match_nodes = set(node.node_id for node in match.values())
+        match_nodes = _extract_node_ids(list(match.values()))
         if match_nodes & applied_nodes:
+            if debug:
+                print(
+                    f"Skipping match involving already processed nodes: {match_nodes & applied_nodes}"
+                )
             continue
         applied_nodes.update(match_nodes)
+        _process_match(match, rule, builder, debug=debug)
 
-        var_to_node_id = {var: node.node_id for var, node in match.items()}
-        local_nodes = {}
+    final_graph = builder.build()
+    if debug and matches:
+        _print_graph_summary(final_graph, "Graph State After Actions")
 
-        for action in rule.actions:
-            if action.action_type == "add_node":
-                expanded_props = {}
-                node_type = "unknown"
-                for key, value in action.properties.items():
-                    expanded_value = (
-                        expand_template(str(value), match) if isinstance(value, str) else value
-                    )
-                    if key == "type":
-                        node_type = expanded_value
-                    else:
-                        expanded_props[key] = expanded_value
-                node_id = builder.add_node(node_type, expanded_props)
-                local_nodes[action.local_name] = node_id
-
-            elif action.action_type == "add_edge":
-                source_id = local_nodes.get(action.source, var_to_node_id.get(action.source))
-                target_id = local_nodes.get(action.target, var_to_node_id.get(action.target))
-                builder.add_edge(source_id, target_id)
-
-            elif action.action_type == "set_properties":
-                node_id = local_nodes.get(action.node_var, var_to_node_id.get(action.node_var))
-                expanded_props = {}
-                for key, value in action.properties.items():
-                    expanded_value = (
-                        expand_template(str(value), match) if isinstance(value, str) else value
-                    )
-                    expanded_props[key] = expanded_value
-                builder.set_node_properties(node_id, expanded_props)
-
-            elif action.action_type == "delete_node":
-                node_id = var_to_node_id[action.node_var]
-                builder.delete_node(node_id)
-
-            elif action.action_type == "delete_edge":
-                source_id = var_to_node_id[action.source_var]
-                target_id = var_to_node_id[action.target_var]
-                builder.delete_edge(source_id, target_id)
-
-            elif action.action_type == "rewire_edges_from":
-                old_source_id = var_to_node_id[action.old_source_var]
-                new_source_id = local_nodes.get(
-                    action.new_source_var, var_to_node_id.get(action.new_source_var)
-                )
-                builder.rewire_edges_from(old_source_id, new_source_id)
-
-            elif action.action_type == "rewire_edges_to":
-                old_target_id = var_to_node_id[action.old_target_var]
-                new_target_id = local_nodes.get(
-                    action.new_target_var, var_to_node_id.get(action.new_target_var)
-                )
-                builder.rewire_edges_to(old_target_id, new_target_id)
-
-    return builder.build()
+    return final_graph
 
 
-def apply_rule(rule: GraphRewritingRule, graph: GraphState, **kw) -> list[GraphState]:
+def _print_graph_summary(graph: GraphState, message: str):
+    print("\n" + "=" * 20 + f" {message} " + "=" * 20)
+    print(f"Nodes: {len(graph.nodes)}, Edges: {len(graph.edges)}")
+    source_nodes = [n for n in graph.nodes if n.node_type == "source"]
+    if source_nodes:
+        print(f"Source Nodes ({len(source_nodes)}):")
+        for node in source_nodes:
+            source_id = node.extra.get("source_id", "N/A")
+            tu_ids = node.extra.get("tu_id", "N/A")
+            print(f"  - Node ID: {node.node_id}, source_id: '{source_id}', tu_ids: {tu_ids}")
+    else:
+        print("No 'source' nodes found.")
+    print("=" * (42 + len(message)))
+
+
+def apply_rule(
+    rule: GraphRewritingRule, graph: GraphState, debug: bool = False, **kw
+) -> list[GraphState]:
+    if debug:
+        print(f"\n\n{'#' * 25} APPLYING RULE: {rule.name.upper()} {'#' * 25}")
+        if rule.run_until_stable:
+            print("Mode: run_until_stable")
+        _print_graph_summary(graph, "Initial Graph State")
+
     if rule.run_until_stable:
         current_graph = graph
+        iteration = 1
         while True:
-            matches = find_matches(rule, current_graph)
+            if debug:
+                print(f"\n--- Stable Iteration {iteration} ---")
+
+            matches = find_matches(rule, current_graph, debug=debug)
             if not matches:
+                if debug:
+                    print("No more matches found. Rule is stable.")
                 break
 
-            def get_match_key(match):
-                return tuple(sorted([node.node_id for node in match.values()]))
+            next_graph = apply_actions(rule, matches, current_graph, debug=debug)
 
-            sorted_matches = sorted(matches, key=get_match_key)
-            next_graph = apply_actions(rule, sorted_matches, current_graph)
             if len(next_graph.nodes) == len(current_graph.nodes) and len(next_graph.edges) == len(
                 current_graph.edges
             ):
+                if debug:
+                    print("Graph state is unchanged. Rule is stable.")
                 break
             current_graph = next_graph
-            # current_graph = apply_actions(rule, matches[:1], current_graph)
-        return [current_graph]
+            iteration += 1
 
-    matches = find_matches(rule, graph)
+        final_graph = current_graph
+        if debug:
+            _print_graph_summary(final_graph, "Final Graph State After Stability")
+        return [final_graph]
+
+    matches = find_matches(rule, graph, debug=debug)
     if not matches:
+        if debug:
+            print("No matches found for this rule.")
         return [graph]
 
     if rule.yield_strategy == "batched":
-        return [apply_actions(rule, matches, graph)]
+        final_graph = apply_actions(rule, matches, graph, debug=debug)
+        if debug:
+            _print_graph_summary(final_graph, "Final Graph State")
+        return [final_graph]
     else:  # per_match
-        return [apply_actions(rule, [match], graph) for match in matches]
+        results = []
+        for i, match in enumerate(matches):
+            if debug:
+                print(f"\n--- Applying rule per_match for Match #{i} ---")
+            results.append(apply_actions(rule, [match], graph, debug=debug))
+        return results
+
+
+def apply_rule_sequence(
+    rules: list[GraphRewritingRule],
+    graphs: Union[GraphState, list[GraphState]],
+    debug: bool = False,
+) -> list[GraphState]:
+    """Apply a sequence of rules to a list of graphs, returning all resulting graphs."""
+    if not isinstance(graphs, list):
+        graphs = [graphs]
+
+    current_graphs = graphs
+    for rule in rules:
+        # Apply the current rule to every graph produced by the previous step.
+        # The result is a flattened list of all new graphs.
+        current_graphs = list(
+            chain.from_iterable(apply_rule(rule, g, debug=debug) for g in current_graphs)
+        )
+
+    return current_graphs

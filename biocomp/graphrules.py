@@ -31,12 +31,15 @@ class EdgeConstraint(BaseModel):
 class MatchQuery(BaseModel):
     """
     Declarative query to find and bind variables to subgraphs.
-    Result is a list of "match dictionaries" that map variable names to node IDs.
-    e.g., to find ERN nodes -> [{"negative": 10, "positive": 5}, {"negative": 12, "positive": 7}, ...]
+    Result is a list of "match dictionaries" that map variable names to nodes/edges.
+    e.g., to find ERN nodes -> [{"negative": 10, "positive": 5}, {"rna_edge": edge_obj}, ...]
     """
 
     # bind variables to nodes that satisfy property constraints
     bind: dict[str, PropertyConstraint]
+    
+    # bind variables to edges that satisfy property constraints
+    bind_edges: dict[str, EdgeConstraint] = {}
 
     # the required topology of the matched subgraph
     where_connected: list[EdgeConstraint] = []
@@ -50,8 +53,9 @@ class MatchQuery(BaseModel):
 
     @model_validator(mode="after")
     def check_variable_consistency(self) -> "MatchQuery":
-        """ensures all variables used in constraints are defined in `bind`."""
+        """ensures all variables used in constraints are defined in `bind` or `bind_edges`."""
         bound_vars = set(self.bind.keys())
+        bound_edges = set(self.bind_edges.keys())
         bound_vars.add("any")  # special case for "any" node matching
         
         for edge in self.where_connected:
@@ -72,6 +76,17 @@ class MatchQuery(BaseModel):
             if edge.target_var not in bound_vars:
                 raise ValueError(
                     f"Variable '{edge.target_var}' in `where_not_connected` is not defined in `bind`."
+                )
+                
+        # Validate bind_edges - edge constraints need source_var and target_var to be in bind
+        for edge_var, edge_constraint in self.bind_edges.items():
+            if edge_constraint.source_var not in bound_vars:
+                raise ValueError(
+                    f"Edge '{edge_var}' source_var '{edge_constraint.source_var}' not defined in `bind`."
+                )
+            if edge_constraint.target_var not in bound_vars:
+                raise ValueError(
+                    f"Edge '{edge_var}' target_var '{edge_constraint.target_var}' not defined in `bind`."
                 )
 
         return self
