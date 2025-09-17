@@ -19,8 +19,6 @@ from assertpy import add_extension
 import os
 
 
-from biocomp.models import build_lib_from_database
-
 from pydantic import BaseModel, BeforeValidator, ConfigDict
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -573,19 +571,6 @@ if BIOCOMP_ROOT_PATH is None:
         "Please set it to the root directory of the biocomp package."
     )
 
-DEFAULT_LIB_PATH = Path(BIOCOMP_ROOT_PATH).expanduser() / "partsdb.sqlite"
-DEFAULT_LIB_PATH = f"sqlite:///{DEFAULT_LIB_PATH}"
-if "BIOCOMP_PARTS_DB" in os.environ:
-    DEFAULT_LIB_PATH = Path(os.environ["BIOCOMP_PARTS_DB"]).expanduser().resolve()
-
-
-def load_lib(lib_path=DEFAULT_LIB_PATH):
-    if "lib_path" not in load_lib.__dict__ or load_lib.lib_path != lib_path:
-        load_lib.lib = build_lib_from_database(lib_path)
-        load_lib.lib_path = lib_path
-    return load_lib.lib
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 # ╭─────────────────────────────────────────────╮
@@ -812,6 +797,25 @@ def inverse_log_poly_log(y, threshold: float = 100, base: int = 10, compression:
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                        --     misc utils     --
+
+
+def escape_name(name):
+    return name.replace("-", "_").replace(" ", "_").upper()
+
+
+def escape(names):
+    if isinstance(names, str):
+        return escape_name(names)
+    if isinstance(names, list):
+        return [escape_name(name) for name in names]
+    if isinstance(names, tuple):
+        return tuple([escape_name(name) for name in names])
+    if isinstance(names, dict):
+        return {escape_name(k): escape_name(v) for k, v in names.items()}
+    if isinstance(names, set):
+        return {escape_name(name) for name in names}
+    else:
+        return names
 
 
 def str_to_int_array(s):

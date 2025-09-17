@@ -2,7 +2,7 @@
 # ···············································································
 import numpy as np
 from . import utils as ut
-from .utils import ArbitraryModel
+from .utils import ArbitraryModel, escape
 from pathlib import Path
 from .compute import ComputeStack
 from tqdm import tqdm
@@ -11,12 +11,14 @@ from multiprocessing import Pool
 import itertools
 from .network import Network
 from pydantic import BaseModel, Field
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, Callable
 from functools import partial
 
 from biocomp.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+PathLike = Union[str, Path]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -194,6 +196,114 @@ class CompressedSymLogRescaler(DataRescaler):
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
+## {{{                       --     data loading     --
+
+
+def load_data_file(
+    data_file_path: PathLike,
+    proteins: Optional[list[str]] = None,
+    error_handler: Optional[Callable] = None,
+    use_store=None,
+    force_reload=False,
+):
+    import numpy as np
+
+    if error_handler is None:
+
+        def _handler(msg):
+            logger.error(f"Error loading data file {data_file_path}: {msg}")
+            raise RuntimeError(msg)
+
+        error_handler = _handler
+
+    if use_store is None:
+        use_store = {}
+
+    f = Path(data_file_path)
+    if not f.exists():
+        return error_handler(f"Data file {f} not found")
+
+    logger.debug(f"Loading data file {f}")
+
+    if data_file_path not in use_store or force_reload:
+        ext = f.suffix
+        if ext == ".csv":
+            content = pd.read_csv(f, engine="pyarrow")
+        elif ext == ".parquet":
+            content = pd.read_parquet(f)
+        else:
+            return error_handler(f"Unsupported data file format {ext}")
+        assert isinstance(content, pd.DataFrame)
+        use_store[data_file_path] = content
+
+    data = use_store[data_file_path]
+
+    res = None
+    available_columns = set(data.columns)
+    if proteins is None:
+        res = data.to_numpy()
+    else:
+        remainder = set(proteins) - available_columns
+        if len(remainder) > 0:
+            return error_handler(
+                f"""Proteins {remainder} was requested but not found in data. 
+Available: {available_columns}
+"""
+            )
+
+        res = np.asarray(data[proteins])
+
+    if res is None:
+        return error_handler(f"Data file {data_file_path} is empty")
+
+    logger.debug(f"Data file {data_file_path} loaded with shape {res.shape}")
+    return res
+
+
+def get_network_data(
+    network: Network,
+    data_file_path: PathLike,
+    color_aliases: Optional[dict[str, str]] = None,
+    error_handler: Optional[Callable] = None,
+    **kwargs,
+) -> Optional[np.ndarray]:
+    # we want to reorder data columns to match the network's output
+
+    out_proteins = escape(network.get_output_proteins())
+    if color_aliases is not None:
+        aliases = escape(color_aliases)
+        out_proteins = [aliases.get(p, p) for p in out_proteins]
+
+    if error_handler is None:
+
+        def _handler(msg):
+            logger.error(
+                f"Error getting data {data_file_path}\nfor network {network.name}\nwith proteins {out_proteins}:\n{msg}"
+            )
+            raise RuntimeError(msg)
+
+        error_handler = _handler
+
+    return load_data_file(
+        data_file_path,
+        proteins=out_proteins,
+        error_handler=error_handler,
+        **kwargs,
+    )
+
+
+def get_network_XY(
+    network: Network,
+    data_file_path: PathLike,
+    color_aliases: Optional[dict[str, str]] = None,
+    **kwargs,
+):
+    Y = get_network_data(network, data_file_path, color_aliases, **kwargs)
+    X = network.get_input_from_output(Y)
+    return X, Y
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                           --     utils     --
 
@@ -852,7 +962,6 @@ class DataManager:
         assert len(per_net_xb) == len(nets) == len(pnyb)
 
         return per_net_xb, pnyb, nets
-
 
 
 def filter_dependent_outputs(per_net_x, per_net_y, nets):

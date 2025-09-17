@@ -1,13 +1,6 @@
-from sqlmodel import Field, SQLModel, Relationship
-from sqlmodel import SQLModel, create_engine, Session, select
+from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy.orm import registry
-import sqlalchemy as sa
-from sqlmodel._compat import SQLModelConfig
-from typing import List, Optional, Annotated
-from sqlalchemy import Column, JSON
-from biocomp.library import PartsLibrary
-import pandas as pd
-from pydantic import BaseModel, BeforeValidator
+from typing import Optional
 
 
 class PartsDB(SQLModel, registry=registry()):
@@ -129,21 +122,3 @@ def get_all_parts_from_database(db_url: str):
         "sequestron_types": sequestron_types,
         "sequestrons": sequestrons,
     }
-
-
-def build_lib_from_database(db_url: str) -> PartsLibrary:
-    parts = get_all_parts_from_database(db_url)
-
-    if len(parts["parts"]) == 0:
-        raise ValueError("No parts found in database")
-
-    parts_dict = {}
-    for key, value in parts.items():
-        # Convert to pandas DataFrame using primary key as index
-        pk_field_name = value[0].__table__.primary_key.columns.keys()[0]
-        as_dict = [x.model_dump(by_alias=True) for x in value]
-        df = pd.DataFrame(as_dict)
-        df.set_index(pk_field_name, inplace=True)
-        parts_dict[key] = df
-
-    return PartsLibrary(**parts_dict)
