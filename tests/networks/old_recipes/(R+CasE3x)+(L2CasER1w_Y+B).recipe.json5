@@ -1,0 +1,26 @@
+{
+   "name": "(R+CasE3x)+(L2CasER1w_Y+B)",
+   "description": "ng DNA = 600.0",
+   "content": [
+      {
+         "sources": [
+            {
+               "ratio": 0.25,
+               "plasmid": "L1.mKate_ST2-3"
+            },
+            {
+               "ratio": 0.25,
+               "plasmid": "L1.3x_CasE_ST1-2"
+            }
+         ]
+      },
+      {
+         "sources": [
+            {
+               "ratio": 0.5,
+               "plasmid": "L2-CasER-1wuORF"
+            }
+         ]
+      }
+   ]
+}

@@ -1,0 +1,38 @@
+{
+   "name": "DRv2_T3",
+   "description": "ng DNA = 700.0",
+   "content": [
+      {
+         "sources": [
+            {
+               "ratio": 0.14285714285714285,
+               "plasmid": "L1.ST2-3_EBFP2"
+            },
+            {
+               "ratio": 0.14285714285714285,
+               "plasmid": "L1.0x_CasE_ST1-2"
+            },
+            {
+               "ratio": 0.14285714285714285,
+               "plasmid": "L1.ST2-3_PguR_mNG"
+            }
+         ]
+      },
+      {
+         "sources": [
+            {
+               "ratio": 0.14285714285714285,
+               "plasmid": "L1.ST2-3_mKO2"
+            },
+            {
+               "ratio": 0.2857142857142857,
+               "plasmid": "L1.ST1-2_0x_pguCas13"
+            },
+            {
+               "ratio": 0.14285714285714285,
+               "plasmid": "L1.ST2-3_CasER_mNG"
+            }
+         ]
+      }
+   ]
+}

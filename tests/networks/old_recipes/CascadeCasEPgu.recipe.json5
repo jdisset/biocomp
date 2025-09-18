@@ -1,0 +1,42 @@
+{
+   "name": "CascadeCasEPgu",
+   "description": "ng DNA = 600.0",
+   "content": [
+      {
+         "sources": [
+            {
+               "ratio": 0.16666666666666666,
+               "plasmid": "L1.ST2-3_EBFP2"
+            },
+            {
+               "ratio": 0.16666666666666666,
+               "plasmid": "L1.0x_CasE_ST1-2"
+            }
+         ]
+      },
+      {
+         "sources": [
+            {
+               "ratio": 0.16666666666666666,
+               "plasmid": "L1.ST2-3_mKO2"
+            },
+            {
+               "ratio": 0.16666666666666666,
+               "plasmid": "L1.ST1-2_CasER_pguCas13"
+            }
+         ]
+      },
+      {
+         "sources": [
+            {
+               "ratio": 0.16666666666666666,
+               "plasmid": "L1.ST1-2_1x_iRFP720"
+            },
+            {
+               "ratio": 0.16666666666666666,
+               "plasmid": "L1.ST2-3_PguR_mNG"
+            }
+         ]
+      }
+   ]
+}

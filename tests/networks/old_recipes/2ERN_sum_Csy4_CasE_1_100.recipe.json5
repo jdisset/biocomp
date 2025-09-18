@@ -1,0 +1,46 @@
+{
+   "name": "2ERN_sum_Csy4_CasE_1_100",
+   "description": "ng DNA = 601.0",
+   "content": [
+      {
+         "sources": [
+            {
+               "ratio": 0.16638935108153077,
+               "plasmid": "L1.ST2-3_EBFP2"
+            },
+            {
+               "ratio": 0.0016638935108153079,
+               "plasmid": "L1.0x_Csy4_ST1-2"
+            },
+            {
+               "ratio": 0.16638935108153077,
+               "plasmid": "L1.ST2-3_Csy4R_mNG"
+            }
+         ]
+      },
+      {
+         "sources": [
+            {
+               "ratio": 0.16638935108153077,
+               "plasmid": "L1.ST2-3_mKO2"
+            },
+            {
+               "ratio": 0.16638935108153077,
+               "plasmid": "L1.0x_CasE_ST1-2"
+            }
+         ]
+      },
+      {
+         "sources": [
+            {
+               "ratio": 0.16638935108153077,
+               "plasmid": "L1.ST1-2_mMaroon1"
+            },
+            {
+               "ratio": 0.16638935108153077,
+               "plasmid": "L1.ST2-3_CasER_mNG"
+            }
+         ]
+      }
+   ]
+}

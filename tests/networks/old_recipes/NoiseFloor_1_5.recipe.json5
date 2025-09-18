@@ -1,0 +1,18 @@
+{
+   "name": "NoiseFloor_1_5",
+   "description": "ng DNA = 360.0",
+   "content": [
+      {
+         "sources": [
+            {
+               "ratio": 0.8333333333333334,
+               "plasmid": "L1.ST2-3_EBFP2"
+            },
+            {
+               "ratio": 0.16666666666666666,
+               "plasmid": "L1.ST1-2_mMaroon1"
+            }
+         ]
+      }
+   ]
+}
