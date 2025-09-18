@@ -119,6 +119,7 @@ class TranscriptionUnit(BaseModel):
     slots: list[SlotType] = []
     params: dict = Field(default_factory=dict, exclude=True)  # param name -> value
     source: Optional[str] = None  # plasmid name, for example
+    position_in_source: int = 0
     param_ref_ids: dict[str, Optional[str]] = Field(
         default_factory=dict, exclude=True
     )  # param name -> ref_id
@@ -233,7 +234,13 @@ def expand_tu_from_lib(names, lib: PartsLibrary, **tu_args) -> list[Transcriptio
         tu_args["name"] = tu_args.get("name", name)
         return [TranscriptionUnit(slots=parts, **tu_args)]
     if tunames := get_l1_from_l2(name, lib):
-        return flatten([expand_tu_from_lib([name], lib, **tu_args) for name in tunames if name])
+        return flatten(
+            [
+                expand_tu_from_lib([name], lib, position_in_source=i, **tu_args)
+                for i, name in enumerate(tunames)
+                if name
+            ]
+        )
     return [TranscriptionUnit(slots=names, **tu_args)]
 
 

@@ -6,6 +6,7 @@ from typing import (
 )
 from pydantic import BaseModel
 import pandas as pd
+from collections import defaultdict
 
 from biocomp.recipe_new import Recipe, CoTransfection, TranscriptionUnit, CoTxList
 from biocomp.logging_config import get_logger
@@ -20,12 +21,10 @@ logger = get_logger(__name__)
 class Network(BaseModel):
     """Pure data container for network definitions"""
 
-    model_config = {"arbitrary_types_allowed": True, "extra": "allow"}
-
     cotx: CoTxList = []
     name: Optional[str] = None
-    invert_on_build: bool = False
-    compute_graph: Optional[GraphState] = None
+    # invert_on_build: bool = False
+    # compute_graph: Optional[GraphState] = None
 
     @property
     def central_dogma_graph(self) -> pd.DataFrame:
@@ -46,471 +45,6 @@ class NetworkConstructionError(Exception):
     """Exception for errors during network construction"""
 
     pass
-
-
-## {{{              --     central dogma graph expansions     --
-
-
-def build_central_dogma_graph(
-    network: Network, lib: PartsLibrary, custom_outputs_parts=None
-) -> pd.DataFrame:
-    """
-    Build a central dogma graph directly from a Network.
-    """
-    # Extract transcription units from cotx
-    transcription_units = {}
-    for group_idx, group in enumerate(network.cotx or []):
-        for unit_idx, unit in enumerate(group.units):
-            tu_name = unit.name or f"TU_{len(transcription_units) + 1}"
-            transcription_units[tu_name] = unit
-
-    source_to_cotx_map: dict[str | None, str] = {}
-    source_to_ratio_map: dict[str | None, float] = {}
-    for i, cotx in enumerate(network.cotx or []):
-        group_name = cotx.name or f"cotx_{i + 1}"
-        for unit, ratio in zip(cotx.units, cotx.ratios or []):
-            # map each source to its cotx group and ratio
-            source_to_cotx_map[unit.source] = group_name
-            source_to_ratio_map[unit.source] = float(ratio)
-
-    def make_hashable(params, tu_obj):
-        """Make params hashable, considering ref_id for identical part grouping."""
-        hashable_params = {}
-        for param_name, parts in params.items():
-            ref_id = tu_obj.param_ref_ids.get(param_name)
-            if ref_id is not None:
-                hashable_params[param_name] = (f"ref:{ref_id}",)
-            else:
-                hashable_params[param_name] = tuple(parts) if isinstance(parts, list) else (parts,)
-        return tuple(sorted((k, v) for k, v in hashable_params.items()))
-
-    def get_dna(tu: TranscriptionUnit) -> Tuple[list[str], dict[str, list[str]]]:
-        content = []
-        for s in tu.slots:
-            if s.maps_to_parameter is None and s.part is not None:
-                content.append(s.part)
-        return content, tu.params
-
-    def get_downstream(tu: TranscriptionUnit, transform: str):
-        dna_content, dna_params = get_dna(tu)
-        d = lib.pc.loc[dna_content]
-        content = tuple(d[d[transform] == 1].index)
-        params = {}
-        for param_name, parts in dna_params.items():
-            non_none_parts = [p for p in parts if p is not None]
-            if non_none_parts:
-                p = lib.pc.loc[non_none_parts]
-                if p[transform].sum() > 0:
-                    params[param_name] = list(p[p[transform] == 1].index)
-        return content, params
-
-    def get_rna(tu: TranscriptionUnit):
-        return get_downstream(tu, transform="transcripted")
-
-    def get_prt(tu: TranscriptionUnit):
-        return get_downstream(tu, transform="translated")
-
-    tu_data: list[dict] = []
-    assert transcription_units is not None, "No transcription units in network"
-
-    for tuid, t in transcription_units.items():
-        dna, dna_params = get_dna(t)
-        rna, rna_params = get_rna(t)
-        prt, prt_params = get_prt(t)
-
-        source_id = t.source
-        cotx_group = source_to_cotx_map.get(source_id)
-
-        tu_data.append(
-            {
-                "name": tuid,
-                "source_id": source_id,
-                "cotx_group": cotx_group,
-                "DNA": dna,
-                "DNA_params": dna_params,
-                "DNA_params_hashable": make_hashable(dna_params, t),
-                "RNA": rna,
-                "RNA_params": rna_params,
-                "RNA_params_hashable": make_hashable(rna_params, t),
-                "PRT": prt,
-                "PRT_params": prt_params,
-                "PRT_params_hashable": make_hashable(prt_params, t),
-            }
-        )
-
-    assert tu_data, "No transcription units in network"
-    tudf = pd.DataFrame(tu_data)
-
-    def only_one_value_per_param(params: dict[str, list[str]]) -> bool:
-        return all(len(parts) <= 1 for _, parts in params.items())
-
-    def has_non_null_ref_id(row_name: str) -> bool:
-        tu_obj = transcription_units[row_name]
-        return any(ref_id is not None for ref_id in tu_obj.param_ref_ids.values())
-
-    def group_multi_param_tus(df: pd.DataFrame, node_type: str, params_col: str) -> list[list[str]]:
-        grouped_tuids = []
-        for _, row in df.iterrows():
-            if has_non_null_ref_id(row["name"]):
-                group_key = (row[node_type], row[f"{node_type}_params_hashable"])
-                for i, (key, names) in enumerate(grouped_tuids):
-                    if key == group_key:
-                        grouped_tuids[i] = (key, names + [row["name"]])
-                        break
-                else:
-                    grouped_tuids.append((group_key, [row["name"]]))
-            else:
-                grouped_tuids.append((None, [row["name"]]))
-        return [names for _, names in grouped_tuids]
-
-    def process_node_type(node_type: str, params_col: str) -> pd.DataFrame:
-        def is_likely_quantized_tu(tu):
-            for param_name, parts in tu.params.items():
-                if (
-                    param_name in ["tl_rate", "tc_rate"]
-                    and isinstance(parts, list)
-                    and len(parts) == 1
-                ):
-                    if param_name == "tl_rate" and parts[0] != "00_empty_tc":
-                        return True
-                    if param_name == "tc_rate" and parts[0] not in ["hEF1a"]:
-                        return True
-            return False
-
-        quantized_tus = [
-            tu_name for tu_name, tu in transcription_units.items() if is_likely_quantized_tu(tu)
-        ]
-        multi_value_tus = [
-            tu_name
-            for tu_name, tu in transcription_units.items()
-            if any(
-                isinstance(parts, list) and len(parts) > 1 and param_name in ["tl_rate", "tc_rate"]
-                for param_name, parts in tu.params.items()
-            )
-        ]
-
-        network_is_committed = len(quantized_tus) > 0 and len(multi_value_tus) > 0
-
-        if network_is_committed:
-            tu_ids = list(tudf.groupby(by=node_type).agg(list).name)
-            return pd.DataFrame({"tu_id": tu_ids, "type": node_type})
-        else:
-            no_params = list(
-                tudf[tudf[params_col].map(len) == 0].groupby(by=node_type).agg(list).name
-            )
-            try:
-                one_param = (
-                    tudf[tudf[params_col].map(len) > 0]
-                    .groupby(by=node_type)
-                    .filter(
-                        lambda x: all(only_one_value_per_param(params) for params in x[params_col])
-                    )
-                    .groupby(by=[node_type, f"{node_type}_params_hashable"])
-                    .agg(list)
-                )
-                one_param = [] if one_param.empty else list(one_param.name)
-            except Exception as e:
-                raise NetworkConstructionError(
-                    f"Error grouping {node_type} with one param: {e}\ntudf:\n{tudf}"
-                )
-            has_many = tudf[params_col].apply(
-                lambda params: any(len(v) > 1 for v in params.values())
-            )
-            many_param = (
-                group_multi_param_tus(tudf[has_many], node_type, params_col)
-                if has_many.any()
-                else []
-            )
-            tu_ids = no_params + one_param + many_param
-            return pd.DataFrame({"tu_id": tu_ids, "type": node_type})
-
-    dna_df = pd.DataFrame({"tu_id": [[x] for x in cast(str, tudf["name"])], "type": "DNA"})
-    rna_df = process_node_type("RNA", "RNA_params")
-    prt_df = process_node_type("PRT", "PRT_params")
-    tudf.set_index("name", inplace=True)
-
-    cdg = pd.concat([dna_df, rna_df, prt_df], sort=False).reset_index(drop=True)
-    cdg["predecessor"] = None
-    cdg["successor"] = None
-
-    dna_nodes = cdg[cdg.type == "DNA"]
-    rna_nodes = cdg[cdg.type == "RNA"]
-    if len(rna_nodes) == 0:
-        raise NetworkConstructionError("No RNA nodes in central dogma graph")
-
-    for i, r in dna_nodes.iterrows():
-        successors = []
-        for ii, rr in rna_nodes.iterrows():
-            if r.tu_id[0] in rr.tu_id:
-                successors.append(ii)
-        cdg.at[i, "successor"] = successors
-
-    for i_r, rna in rna_nodes.iterrows():
-        successors = []
-        for i_p, prt in cdg[cdg.type == "PRT"].iterrows():
-            if set(rna.tu_id).issubset(set(prt.tu_id)):
-                successors.append(i_p)
-        cdg.at[i_r, "successor"] = successors
-
-    cdg["predecessor"] = [list() for _ in range(len(cdg))]
-    for i, r in cdg.iterrows():
-        if r.successor is not None:
-            for s in r.successor:
-                cdg.loc[s, "predecessor"].append(i)
-    cdg.loc[~cdg.predecessor.astype(bool), "predecessor"] = None
-
-    logger.debug(f"cdg: \n{cdg}\n")
-
-    try:
-        cdg["content"] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type], axis=1)
-        cdg["params"] = cdg.apply(lambda x: tudf.loc[x.tu_id[0]][x.type + "_params"], axis=1)
-        cdg["content_type"] = cdg.apply(
-            lambda x: tuple([lib.parts.loc[p].iloc[0] for p in x.content]), axis=1
-        )
-    except Exception as e:
-        msg = f"Error while building central dogma graph. Error: {e}"
-        msg += f"\ntudf: \n{tudf}"
-        msg += f"\n\ncdg: \n{cdg}"
-        raise NetworkConstructionError(msg)
-
-    cdg["source_id"] = None
-    cdg["cotx_group"] = None
-    cdg["cotx_ratio"] = None
-    dna_mask = cdg["type"] == "DNA"
-    cdg.loc[dna_mask, "source_id"] = cdg[dna_mask].apply(
-        lambda row: tudf.loc[row["tu_id"][0]]["source_id"], axis=1
-    )
-    cdg.loc[dna_mask, "cotx_group"] = cdg[dna_mask].apply(
-        lambda row: source_to_cotx_map.get(tudf.loc[row["tu_id"][0]]["source_id"]), axis=1
-    )
-    cdg.loc[dna_mask, "cotx_ratio"] = cdg[dna_mask].apply(
-        lambda row: source_to_ratio_map.get(tudf.loc[row["tu_id"][0]]["source_id"]), axis=1
-    )
-
-    outputs = (custom_outputs_parts if custom_outputs_parts is not None else []) + lib.parts[
-        lib.parts["category"] == "fluo_marker"
-    ].index.tolist()
-
-    containsOutput = lambda l, outputs: any([o in l for o in outputs])
-    cdg["is_output"] = False
-    cdg.loc[cdg.type == "PRT", "is_output"] = cdg.loc[cdg.type == "PRT"].tu_id.apply(
-        lambda x: containsOutput(tudf.loc[x].PRT.tolist()[0], outputs)
-    )
-    cdg["is_input"] = None
-
-    return cdg
-
-
-def build_central_dogma_graph_from_units(
-    transcription_units: dict[str, TranscriptionUnit], lib: PartsLibrary, custom_outputs_parts=None
-) -> pd.DataFrame:
-    """
-    Backward compatibility function - builds CDG from transcription units dict.
-    Creates a temporary Network and uses the main function.
-    """
-    # Create units from transcription units
-    units = []
-    for tu_name, tu in transcription_units.items():
-        units.append(tu)
-
-    # Create temporary network with single CoTransfection
-    temp_network = Network(cotx=[CoTransfection(units=units)])
-
-    # Use the main function
-    return build_central_dogma_graph(temp_network, lib, custom_outputs_parts)
-
-
-def _is_valid_property(value: Any) -> bool:
-    """
-    Checks if a property value is valid for inclusion in the 'extra' dict.
-    Excludes standalone None or NaN, but allows list-like containers.
-    """
-    if isinstance(value, (list, tuple, pd.Series)):
-        return True
-    return pd.notna(value)
-
-
-def cdg_df_to_graphstate(cdg_df: pd.DataFrame) -> GraphState:
-    """Converts a Central Dogma Graph DataFrame to a GraphState object."""
-    nodes: list[GraphNode] = []
-    property_columns = [
-        "tu_id",
-        "content",
-        "content_type",
-        "params",
-        "is_output",
-        "is_input",
-        "source_id",
-        "cotx_group",
-    ]
-
-    for idx, row in cdg_df.iterrows():
-        extra_properties = {
-            col: row[col] for col in property_columns if col in row and _is_valid_property(row[col])
-        }
-        node = GraphNode(node_id=int(idx), node_type=row["type"], extra=extra_properties)
-        nodes.append(node)
-
-    edges: list[GraphEdge] = []
-    for idx, row in cdg_df.iterrows():
-        successors = row.get("successor")
-        if isinstance(successors, list) and successors:
-            for target_idx in successors:
-                # At CDG stage, edges should be minimal - content is stored in nodes
-                # Content will be populated by transformation rules as needed
-                edge = GraphEdge(
-                    source_id=int(idx),
-                    target_id=int(target_idx),
-                    output_slot=0,
-                    input_slot=0,
-                    content=(),  # Start with empty content
-                    content_type=None,  # Will be set by transformation rules
-                )
-                edges.append(edge)
-
-    return GraphState(nodes=nodes, edges=edges)
-
-
-def cdg_df_to_dual_graphstate(cdg_df: pd.DataFrame) -> GraphState:
-    """
-    Converts a Central Dogma Graph DataFrame to its dual GraphState representation.
-
-    In the dual graph:
-    - Nodes represent transformations/interactions (Source, Transcription, Translation, output)
-    - Edges carry biological content (DNA, RNA, PRT parts) between transformations
-
-    This creates the base graph structure for each TU:
-    [Source] --{DNA edge with content}--> [Transcription] --{RNA edge w content}--> [Translation] --{PRT edge w content}--> [output]
-    """
-    # Empty → empty dual graph
-    if cdg_df is None or len(cdg_df) == 0:
-        return GraphState(nodes=[], edges=[])
-
-    # Helpers
-    def to_list(v):
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return []
-        if isinstance(v, (list, tuple)):
-            return list(v)
-        return [v]
-
-    def parts(row, kind: str) -> tuple[Part, ...]:
-        return tuple(
-            Part(name=str(p), category=kind) for p in map(str, to_list(row.get("content")))
-        )
-
-    def embeddings(row) -> dict[str, tuple[str, ...]]:
-        p = row.get("params") or {}
-        return {k: tuple(str(x) for x in to_list(v)) for k, v in p.items()}
-
-    # Split by biological type
-    dna_df = cdg_df[cdg_df["type"] == "DNA"] if "type" in cdg_df else pd.DataFrame()
-    rna_df = cdg_df[cdg_df["type"] == "RNA"] if "type" in cdg_df else pd.DataFrame()
-    prt_df = cdg_df[cdg_df["type"] == "PRT"] if "type" in cdg_df else pd.DataFrame()
-
-    nodes: list[GraphNode] = []
-    edges: list[GraphEdge] = []
-    next_id = 0
-
-    def nid() -> int:
-        nonlocal next_id
-        i = next_id
-        next_id += 1
-        return i
-
-    # Node registries (by CDG row index)
-    src_by_dna: dict[int, int] = {}
-    tx_by_rna: dict[int, int] = {}
-
-    # Build transcription per RNA row: merges DNA that produce same RNA
-    for rna_idx, rna_row in rna_df.iterrows():
-        # Transcription node (one per RNA group)
-        tx_id = nid()
-        tx_by_rna[rna_idx] = tx_id
-        nodes.append(GraphNode(node_id=tx_id, node_type="transcription", extra={}))
-
-        # Ensure a source per predecessor DNA row, wire DNA → transcription
-        for dna_idx in to_list(rna_row.get("predecessor")):
-            if dna_idx not in src_by_dna:
-                dna_row = dna_df.loc[dna_idx]
-                s_id = nid()
-                src_by_dna[dna_idx] = s_id
-                nodes.append(
-                    GraphNode(
-                        node_id=s_id,
-                        node_type="source",
-                        extra={
-                            "source_id": dna_row.get("source_id"),
-                            "cotx_group": dna_row.get("cotx_group"),
-                            "ratio": dna_row.get("cotx_ratio"),
-                        },
-                    )
-                )
-            # DNA edge content + metadata belong to the edge
-            dna_row = dna_df.loc[dna_idx]
-            edges.append(
-                GraphEdge(
-                    source_id=src_by_dna[dna_idx],
-                    target_id=tx_id,
-                    output_slot=0,
-                    input_slot=0,
-                    content=parts(dna_row, "DNA"),
-                    content_type="DNA",
-                    content_embedding_names=embeddings(dna_row),
-                    extra={
-                        "tu_id": [str(t) for t in to_list(dna_row.get("tu_id"))],
-                    },
-                )
-            )
-
-    # Single output node if any PRT is an output
-    output_id = None
-    if len(prt_df) and "is_output" in prt_df.columns and bool((prt_df["is_output"] == True).any()):
-        output_id = nid()
-        nodes.append(GraphNode(node_id=output_id, node_type="output", extra={}))
-
-    # Create translation per PRT row; wire RNA → translation using PRT predecessors
-    for prt_idx, prt_row in prt_df.iterrows():
-        # Translation node representing this protein
-        tl_id = nid()
-        nodes.append(GraphNode(node_id=tl_id, node_type="translation", extra={}))
-
-        # Wire all RNA predecessors (via their transcription) to this translation
-        for rna_idx in to_list(prt_row.get("predecessor")):
-            tx_id = tx_by_rna.get(rna_idx)
-            if tx_id is None:
-                continue
-            rna_row = rna_df.loc[rna_idx]
-            edges.append(
-                GraphEdge(
-                    source_id=tx_id,
-                    target_id=tl_id,
-                    output_slot=0,
-                    input_slot=0,
-                    content=parts(rna_row, "RNA"),
-                    content_type="RNA",
-                    content_embedding_names=embeddings(rna_row),
-                )
-            )
-
-        # PRT edge to output or dead_end
-        is_out = bool(prt_row.get("is_output", False))
-        target = output_id if (is_out and output_id is not None) else nid()
-        if target != output_id:
-            nodes.append(GraphNode(node_id=target, node_type="dead_end", extra={}))
-        edges.append(
-            GraphEdge(
-                source_id=tl_id,
-                target_id=target,
-                output_slot=0,
-                input_slot=0,
-                content=parts(prt_row, "PRT"),
-                content_type="PRT",
-                content_embedding_names=embeddings(prt_row),
-            )
-        )
-
-    return GraphState(nodes=nodes, edges=edges)
 
 
 def graphstate_to_cdg_df(graph: GraphState) -> pd.DataFrame:
@@ -537,6 +71,379 @@ def graphstate_to_cdg_df(graph: GraphState) -> pd.DataFrame:
             node_data[nid]["successor"] = None
 
     return pd.DataFrame.from_dict(node_data, orient="index")
+
+
+## {{{                            --     cdg     --
+
+
+def _get_dna(tu: TranscriptionUnit, lib: PartsLibrary) -> Tuple[list[str], dict[str, list[str]]]:
+    content = [s.part for s in tu.slots if s.maps_to_parameter is None and s.part is not None]
+    return content, tu.params
+
+
+def _get_downstream(tu: TranscriptionUnit, transform: str, lib: PartsLibrary):
+    dna_content, dna_params = _get_dna(tu, lib)
+    if not dna_content:
+        return (), {}
+
+    d = lib.pc.loc[dna_content]
+    content = tuple(d[d[transform] == 1].index)
+    params = {}
+    for param_name, parts in dna_params.items():
+        non_none_parts = [p for p in parts if p is not None]
+        if non_none_parts:
+            p = lib.pc.loc[non_none_parts]
+            if p[transform].sum() > 0:
+                params[param_name] = list(p[p[transform] == 1].index)
+    return content, params
+
+
+def _get_rna(tu: TranscriptionUnit, lib: PartsLibrary):
+    return _get_downstream(tu, "transcripted", lib)
+
+
+def _get_prt(tu: TranscriptionUnit, lib: PartsLibrary):
+    return _get_downstream(tu, "translated", lib)
+
+
+def _make_hashable(params, tu_obj):
+    hashable_params = {}
+    for param_name, parts in params.items():
+        ref_id = tu_obj.param_ref_ids.get(param_name)
+        if ref_id is not None:
+            hashable_params[param_name] = (f"ref:{ref_id}",)
+        else:
+            hashable_params[param_name] = tuple(parts) if isinstance(parts, list) else (parts,)
+    return tuple(sorted((k, v) for k, v in hashable_params.items()))
+
+
+def preprocess_network_tus(network: Network, lib: PartsLibrary) -> dict[str, Any]:
+    """
+    Parses the network recipe and returns a dictionary with all necessary
+    pre-calculated information for building either the primal or dual graph.
+    """
+    if not network.cotx:
+        return {}
+
+    tu_map = {
+        (unit.name or f"TU_{i}"): unit
+        for i, unit in enumerate(tu for group in network.cotx for tu in group.units)
+    }
+
+    tu_info = {}
+    for tuid, tu in tu_map.items():
+        dna_content, dna_params = _get_dna(tu, lib)
+        rna_content, rna_params = _get_rna(tu, lib)
+        prt_content, prt_params = _get_prt(tu, lib)
+        tu_info[tuid] = {
+            "tu": tu,
+            "DNA_content": dna_content,
+            "DNA_params": dna_params,
+            "RNA_content": rna_content,
+            "RNA_params": rna_params,
+            "PRT_content": prt_content,
+            "PRT_params": prt_params,
+            "RNA_params_hashable": _make_hashable(rna_params, tu),
+            "PRT_params_hashable": _make_hashable(prt_params, tu),
+        }
+
+    def has_multi_value_params(tu):
+        return any(isinstance(p, list) and len(p) > 1 for p in tu.params.values())
+
+    is_committed = any(has_multi_value_params(tu) for tu in tu_map.values()) and any(
+        not has_multi_value_params(tu) for tu in tu_map.values()
+    )
+
+    return {"network": network, "tu_map": tu_map, "tu_info": tu_info, "is_committed": is_committed}
+
+
+def _build_cdg_primal_from_preprocessed(
+    preprocessed_data: dict[str, Any], lib: PartsLibrary, custom_outputs_parts=None
+) -> GraphState:
+    """Builds the primal CDG where nodes are biological entities (DNA, RNA, PRT)."""
+    tu_info = preprocessed_data["tu_info"]
+    is_committed = preprocessed_data["is_committed"]
+
+    nodes, next_node_id = [], 0
+    group_to_node_id, tu_to_node_id = {}, {}
+
+    for tuid, info in tu_info.items():
+        # define keys for grouping
+        dna_group_key = ("DNA", tuid)
+        rna_group_key = (
+            "RNA",
+            info["RNA_content"]
+            if is_committed
+            else (info["RNA_content"], info["RNA_params_hashable"]),
+        )
+        prt_group_key = (
+            "PRT",
+            info["PRT_content"]
+            if is_committed
+            else (info["PRT_content"], info["PRT_params_hashable"]),
+        )
+
+        # create nodes if group is new
+        for key in [dna_group_key, rna_group_key, prt_group_key]:
+            if key not in group_to_node_id:
+                group_to_node_id[key] = next_node_id
+                next_node_id += 1
+            tu_to_node_id[(key[0], tuid)] = group_to_node_id[key]
+
+    node_id_to_info = {nid: {"type": key[0], "tu_ids": []} for key, nid in group_to_node_id.items()}
+    for (type, tuid), nid in tu_to_node_id.items():
+        node_id_to_info[nid]["tu_ids"].append(tuid)
+
+    outputs = (custom_outputs_parts or []) + lib.parts[
+        lib.parts.category == "fluo_marker"
+    ].index.tolist()
+
+    for nid, info in node_id_to_info.items():
+        rep_tuid = info["tu_ids"][0]
+        content = tu_info[rep_tuid][f"{info['type']}_content"]
+        params = tu_info[rep_tuid][f"{info['type']}_params"]
+        is_output = info["type"] == "PRT" and any(o in content for o in outputs)
+        extra = {
+            "tu_id": info["tu_ids"],
+            "content": content,
+            "params": params,
+            "is_output": is_output,
+            "is_input": None,
+            "content_type": tuple(lib.parts.loc[p].iloc[0] for p in content) if content else (),
+        }
+        nodes.append(GraphNode(node_id=nid, node_type=info["type"], extra=extra))
+
+    edges = []
+    # DNA -> RNA
+    for tuid in tu_info:
+        edges.append(
+            GraphEdge(
+                source_id=tu_to_node_id[("DNA", tuid)],
+                target_id=tu_to_node_id[("RNA", tuid)],
+                output_slot=0,
+                input_slot=0,
+                content=(),
+            )
+        )
+
+    # RNA -> PRT
+    rna_nodes = [n for n in nodes if n.node_type == "RNA"]
+    prt_nodes = [n for n in nodes if n.node_type == "PRT"]
+    for rna_node in rna_nodes:
+        rna_tu_set = set(rna_node.extra["tu_id"])
+        for prt_node in prt_nodes:
+            if rna_tu_set.issubset(set(prt_node.extra["tu_id"])):
+                edges.append(
+                    GraphEdge(
+                        source_id=rna_node.node_id,
+                        target_id=prt_node.node_id,
+                        output_slot=0,
+                        input_slot=0,
+                        content=(),
+                    )
+                )
+
+    # Remove duplicate edges
+    unique_edges = {(e.source_id, e.target_id): e for e in edges}.values()
+    return GraphState(nodes=sorted(nodes, key=lambda n: n.node_id), edges=list(unique_edges))
+
+
+def _build_cdg_dual_from_preprocessed(
+    preprocessed_data: dict[str, Any], lib: PartsLibrary, custom_outputs_parts=None
+) -> GraphState:
+    """Builds the dual CDG where nodes are transformations."""
+    network = preprocessed_data["network"]
+    tu_info = preprocessed_data["tu_info"]
+    is_committed = preprocessed_data["is_committed"]
+    outputs_list = (custom_outputs_parts or []) + lib.parts[
+        lib.parts.category == "fluo_marker"
+    ].index.tolist()
+
+    nodes, edges = [], []
+    next_node_id = 0
+
+    source_to_cotx_map: dict[str | None, str] = {}
+    source_to_ratio_map: dict[str | None, float] = {}
+    for i, cotx in enumerate(network.cotx or []):
+        group_name = cotx.name or f"cotx_{i + 1}"
+        for unit, ratio in zip(cotx.units, cotx.ratios or [1.0] * len(cotx.units)):
+            source_to_cotx_map[unit.source] = group_name
+            source_to_ratio_map[unit.source] = float(ratio)
+
+    source_nodes, tx_nodes, tl_nodes = {}, {}, {}
+    output_node, dead_end_nodes = None, {}
+
+    # create transformation nodes based on TU groupings
+    for tuid, info in tu_info.items():
+        tu = info["tu"]
+        # Source node (one per source_id)
+        if tu.source not in source_nodes:
+            source_nodes[tu.source] = next_node_id
+            next_node_id += 1
+
+            source_extra = {
+                "source_id": tu.source,
+                "cotx_group": source_to_cotx_map.get(tu.source),
+                "ratio": source_to_ratio_map.get(tu.source),
+            }
+            nodes.append(
+                GraphNode(node_id=source_nodes[tu.source], node_type="source", extra=source_extra)
+            )
+
+        # Transcription node (one per RNA group)
+        rna_key = (
+            info["RNA_content"]
+            if is_committed
+            else (info["RNA_content"], info["RNA_params_hashable"])
+        )
+        if rna_key not in tx_nodes:
+            tx_nodes[rna_key] = next_node_id
+            next_node_id += 1
+            nodes.append(GraphNode(node_id=tx_nodes[rna_key], node_type="transcription", extra={}))
+
+        # Translation node (one per PRT group)
+        prt_key = (
+            info["PRT_content"]
+            if is_committed
+            else (info["PRT_content"], info["PRT_params_hashable"])
+        )
+        if prt_key not in tl_nodes:
+            tl_nodes[prt_key] = next_node_id
+            next_node_id += 1
+            nodes.append(GraphNode(node_id=tl_nodes[prt_key], node_type="translation", extra={}))
+
+    # Create edges carrying biological content
+    output_slot_counter = 0
+    for tuid, info in tu_info.items():
+        tu = info["tu"]
+
+        # Edge: Source -> Transcription (carries DNA)
+        src_id = source_nodes[tu.source]
+        rna_key = (
+            info["RNA_content"]
+            if is_committed
+            else (info["RNA_content"], info["RNA_params_hashable"])
+        )
+        tx_id = tx_nodes[rna_key]
+
+        source_output_slot = getattr(tu, "position_in_source", 0) or 0
+
+        edges.append(
+            GraphEdge(
+                source_id=src_id,
+                target_id=tx_id,
+                output_slot=source_output_slot,
+                input_slot=0,
+                content_type="DNA",
+                content=tuple(Part(name=p, category="DNA") for p in info["DNA_content"]),
+                content_embedding_names={k: tuple(v) for k, v in info["DNA_params"].items()},
+                extra={"tu_id": [tuid]},
+            )
+        )
+
+        # Edge: Transcription -> Translation (carries RNA)
+        prt_key = (
+            info["PRT_content"]
+            if is_committed
+            else (info["PRT_content"], info["PRT_params_hashable"])
+        )
+        tl_id = tl_nodes[prt_key]
+        edges.append(
+            GraphEdge(
+                source_id=tx_id,
+                target_id=tl_id,
+                output_slot=0,
+                input_slot=0,
+                content_type="RNA",
+                content=tuple(Part(name=p, category="RNA") for p in info["RNA_content"]),
+                content_embedding_names={k: tuple(v) for k, v in info["RNA_params"].items()},
+            )
+        )
+
+        # Edge: Translation -> Output/DeadEnd (carries PRT)
+        is_output = any(o in info["PRT_content"] for o in outputs_list)
+        target_node_id = -1
+        input_slot = 0
+
+        if is_output:
+            if output_node is None:
+                output_node = next_node_id
+                next_node_id += 1
+                nodes.append(GraphNode(node_id=output_node, node_type="output", extra={}))
+            target_node_id = output_node
+            input_slot = output_slot_counter
+            output_slot_counter += 1
+        else:
+            prt_content_tuple = tuple(sorted(info["PRT_content"]))
+            if prt_content_tuple not in dead_end_nodes:
+                dead_end_nodes[prt_content_tuple] = next_node_id
+                next_node_id += 1
+                nodes.append(
+                    GraphNode(
+                        node_id=dead_end_nodes[prt_content_tuple], node_type="dead_end", extra={}
+                    )
+                )
+            target_node_id = dead_end_nodes[prt_content_tuple]
+
+        edges.append(
+            GraphEdge(
+                source_id=tl_id,
+                target_id=target_node_id,
+                output_slot=0,
+                input_slot=input_slot,
+                content_type="PRT",
+                content=tuple(Part(name=p, category="PRT") for p in info["PRT_content"]),
+                content_embedding_names={k: tuple(v) for k, v in info["PRT_params"].items()},
+            )
+        )
+
+    unique_edges_dict = {}
+    for e in edges:
+        if e.content_type == "DNA":
+            key = (e.source_id, e.output_slot)
+        else:
+            key = (e.source_id, e.target_id, e.content_type)
+        if key not in unique_edges_dict:
+            unique_edges_dict[key] = e
+
+    return GraphState(
+        nodes=sorted(nodes, key=lambda n: n.node_id), edges=list(unique_edges_dict.values())
+    )
+
+
+def build_central_dogma_graph_direct(
+    network: Network, lib: PartsLibrary, custom_outputs_parts=None, dual: bool = False
+) -> GraphState:
+    """
+    Builds a central dogma graph directly from a Network definition into a GraphState.
+    Args:
+        network: The Network object defining the recipe.
+        lib: The parts library.
+        custom_outputs_parts: Optional list of part names to be considered outputs.
+        dual: If False (default), builds the primal graph where nodes are biological
+              entities (DNA, RNA, PRT). If True, builds the dual graph where nodes
+              are transformations (Source, Transcription, Translation).
+
+    """
+    preprocessed_data = preprocess_network_tus(network, lib)
+    if not preprocessed_data:
+        return GraphState(nodes=[], edges=[])
+
+    if dual:
+        return _build_cdg_dual_from_preprocessed(preprocessed_data, lib, custom_outputs_parts)
+    else:
+        return _build_cdg_primal_from_preprocessed(preprocessed_data, lib, custom_outputs_parts)
+
+
+def build_central_dogma_graph(
+    network: Network, lib: PartsLibrary, custom_outputs_parts=None
+) -> pd.DataFrame:
+    """
+    Builds the primal central dogma graph and returns it as a pandas DataFrame
+    for backward compatibility with the old API.
+    """
+    graph_state = build_central_dogma_graph_direct(network, lib, custom_outputs_parts, dual=False)
+    return graphstate_to_cdg_df(graph_state)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -606,7 +513,7 @@ def compute_df_to_graphstate(compute_df: pd.DataFrame) -> GraphState:
                     target_id=int(target_id),
                     output_slot=int(output_slot),
                     input_slot=int(input_slot),
-                    content=(),  # Compute graph edges are abstract in this format
+                    content=(),
                 )
                 edges.append(edge)
 
@@ -614,3 +521,125 @@ def compute_df_to_graphstate(compute_df: pd.DataFrame) -> GraphState:
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{               --     old → GraphState compatibility     --
+
+
+def old_network_compg_to_graphstate(old_network) -> GraphState:
+    """
+    Convert an old-style network.compute_graph (DataFrame) into a GraphState.
+
+    - Nodes: reuse old compute_graph row index as node_id and row['type'] as node_type.
+      Store all other compute_graph columns under node.extra with 'cg_' prefix to preserve info.
+    - Edges: built from 'output_to' with slots. Biological edges (DNA/RNA/PRT) are enriched
+      with content and content_embedding_names looked up from central_dogma_graph via cdg_input/cdg_output.
+    """
+    cg = getattr(old_network, "compute_graph", None)
+    cdg = getattr(old_network, "central_dogma_graph", None)
+    if cg is None or len(cg) == 0:
+        return GraphState(nodes=[], edges=[])
+
+    def to_list(v):
+        if v is None:
+            return []
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        return [v]
+
+    def parts_from_cdg_row(row: pd.Series, kind: str) -> tuple[Part, ...]:
+        items = to_list(row.get("content"))
+        return tuple(Part(name=str(p), category=kind) for p in items)
+
+    def embeddings_from_cdg_row(row: pd.Series) -> dict[str, tuple[str, ...]]:
+        p = row.get("params") or {}
+        return {k: tuple(str(x) for x in to_list(v)) for k, v in p.items()}
+
+    # Build nodes
+    nodes: list[GraphNode] = []
+    for nid, row in cg.iterrows():
+        extra = {}
+        for col, val in row.items():
+            if col == "type":
+                continue
+            extra[f"cg_{col}"] = val
+        nodes.append(GraphNode(node_id=int(nid), node_type=str(row.get("type")), extra=extra))
+
+    # Edge helpers
+    def desired_content_type(src_type: str, dst_type: str) -> str | None:
+        if src_type == "source" and dst_type == "transcription":
+            return "DNA"
+        if src_type == "transcription" and dst_type in ("translation", "sequestron_ERN"):
+            return "RNA"
+        if src_type == "translation" and dst_type in ("output", "sequestron_ERN"):
+            return "PRT"
+        if src_type == "sequestron_ERN" and dst_type == "translation":
+            return "RNA"  # Sequestron ERN outputs RNA to translation
+        return None
+
+    def pick_cdg_row(
+        src_row: pd.Series, dst_row: pd.Series, ctype: str, out_slot: int = 0
+    ) -> pd.Series | None:
+        if cdg is None or len(cdg) == 0:
+            return None
+
+        # First try to use the output slot to select from source's cdg_output
+        src_outputs = to_list(src_row.get("cdg_output"))
+        if src_outputs and out_slot < len(src_outputs):
+            try:
+                cid = int(src_outputs[out_slot])
+                crow = cdg.loc[cid]
+                if str(crow.get("type")) == ctype:
+                    return crow
+            except Exception:
+                pass
+
+        # Fallback to original logic
+        candidate_ids: list[int] = []
+        for key, r in (("cdg_output", src_row), ("cdg_input", dst_row)):
+            for x in to_list(r.get(key)):
+                try:
+                    candidate_ids.append(int(x))
+                except Exception:
+                    pass
+        for cid in candidate_ids:
+            try:
+                crow = cdg.loc[cid]
+            except Exception:
+                continue
+            if str(crow.get("type")) == ctype:
+                return crow
+        return None
+
+    # Build edges from output_to
+    edges: list[GraphEdge] = []
+    for src_id, src_row in cg.iterrows():
+        outputs = src_row.get("output_to")
+        if not isinstance(outputs, list):
+            continue
+        for out_slot, pair in enumerate(outputs):
+            try:
+                dst_id, in_slot = pair
+            except Exception:
+                dst_id, in_slot = pair[0], 0
+            dst_row = cg.loc[dst_id]
+            ctype = desired_content_type(str(src_row.get("type")), str(dst_row.get("type")))
+
+            kwargs = dict(
+                source_id=int(src_id),
+                target_id=int(dst_id),
+                output_slot=int(out_slot),
+                input_slot=int(in_slot),
+                content=(),
+            )
+            if ctype is not None:
+                crow = pick_cdg_row(src_row, dst_row, ctype, out_slot)
+                if crow is not None:
+                    kwargs["content"] = parts_from_cdg_row(crow, ctype)
+                    kwargs["content_type"] = ctype
+                    kwargs["content_embedding_names"] = embeddings_from_cdg_row(crow)
+            edges.append(GraphEdge(**kwargs))
+
+    return GraphState(nodes=nodes, edges=edges)
+
+
+##────────────────────────────────────────────────────────────────────────────}}

@@ -36,7 +36,9 @@ class GraphEdge(BaseModel):
     input_slot: int
     content: tuple[Part, ...]
     content_type: Optional[Literal["DNA", "RNA", "PRT"]] = None
-    content_embedding_names: dict[str, tuple[str]] = {}  # 'tl_rate: ('0xUORF', '1xUORF')}
+    # Embedding choices carried by the edge; allow multiple possible values per key
+    content_embedding_names: dict[str, tuple[str, ...]] = {}
+    extra: dict = {}
 
 
 class InverseSpec(BaseModel):
@@ -75,14 +77,31 @@ class GraphBuilder:
         self.edges = [e for e in self.edges if e.source_id != node_id and e.target_id != node_id]
 
     def add_edge(self, source_id: int, target_id: int, **properties):
-        edge = GraphEdge(
-            source_id=source_id,
-            target_id=target_id,
-            output_slot=properties.get("output_slot", 0),
-            input_slot=properties.get("input_slot", 0),
-            content=properties.get("content", ()),
-            content_type=properties.get("content_type"),
-        )
+        edge_fields = {
+            "source_id": source_id,
+            "target_id": target_id,
+            "output_slot": properties.get("output_slot", 0),
+            "input_slot": properties.get("input_slot", 0),
+            "content": properties.get("content", ()),
+            "content_type": properties.get("content_type"),
+            "content_embedding_names": properties.get("content_embedding_names", {}),
+        }
+
+        extra_props = {
+            k: v
+            for k, v in properties.items()
+            if k
+            not in {
+                "output_slot",
+                "input_slot",
+                "content",
+                "content_type",
+                "content_embedding_names",
+            }
+        }
+        edge_fields["extra"] = extra_props
+
+        edge = GraphEdge(**edge_fields)
         self.edges.append(edge)
 
     def delete_edge(self, source_id: int, target_id: int):
@@ -148,9 +167,18 @@ def match_properties(node: GraphNode, constraint: PropertyConstraint) -> bool:
 
 
 def match_edge_properties(edge: GraphEdge, constraint: EdgeConstraint) -> bool:
-    return match_properties_generic(
+    if not match_properties_generic(
         edge, constraint.properties, fallback_dict="content_embedding_names"
-    )
+    ):
+        return False
+
+    if constraint.contains is not None:
+        edge_part_names = {part.name for part in edge.content}
+        required_parts = set(constraint.contains)
+        if not required_parts.issubset(edge_part_names):
+            return False
+
+    return True
 
 
 def _extract_node_ids(objects: List[Union[GraphNode, GraphEdge]]) -> set[int]:
@@ -164,14 +192,19 @@ def _connects_nodes(edge: GraphEdge, source_id: int, target_id: int) -> bool:
 def find_edges_matching_constraint(
     edges: List[GraphEdge], constraint: EdgeConstraint, node_assignment: Dict[str, GraphNode]
 ) -> List[GraphEdge]:
-    source_node = node_assignment.get(constraint.source_var)
-    target_node = node_assignment.get(constraint.target_var)
-    if not source_node or not target_node:
+    source_node = node_assignment.get(constraint.source_var) if constraint.source_var else None
+    target_node = node_assignment.get(constraint.target_var) if constraint.target_var else None
+
+    if constraint.source_var is not None and source_node is None:
         return []
+    if constraint.target_var is not None and target_node is None:
+        return []
+
     return [
         edge
         for edge in edges
-        if _connects_nodes(edge, source_node.node_id, target_node.node_id)
+        if (source_node is None or edge.source_id == source_node.node_id)
+        and (target_node is None or edge.target_id == target_node.node_id)
         and match_edge_properties(edge, constraint)
     ]
 
@@ -203,7 +236,36 @@ def find_matches(
     def check_constraints(assignment: Dict[str, GraphNode]) -> bool:
         def check_edge_exists(constraint, should_exist=True):
             source, target = constraint.source_var, constraint.target_var
-            if source == "any":
+
+            if source is None and target is None:
+                matching_edges = [
+                    edge for edge in target_graph.edges if match_edge_properties(edge, constraint)
+                ]
+                return (len(matching_edges) > 0) == should_exist
+            elif source is None:
+                if target == "any":
+                    # this case doesn't make much sense, but handle it gracefully
+                    return True == should_exist
+                return (
+                    any(
+                        edge.target_id == assignment[target].node_id
+                        and match_edge_properties(edge, constraint)
+                        for edge in target_graph.edges
+                    )
+                    == should_exist
+                )
+            elif target is None:
+                if source == "any":
+                    return True == should_exist
+                return (
+                    any(
+                        edge.source_id == assignment[source].node_id
+                        and match_edge_properties(edge, constraint)
+                        for edge in target_graph.edges
+                    )
+                    == should_exist
+                )
+            elif source == "any":
                 return (
                     any(
                         has_edge_in_graph(n, assignment[target], target_graph.edges)
@@ -254,6 +316,21 @@ def find_matches(
     ):
         if edge_idx == len(edge_vars):
             full_assignment = {**node_assignment, **edge_assignment}
+
+            # add automatic endpoint bindings for edges with bind_endpoints=True
+            for edge_var, edge in edge_assignment.items():
+                edge_constraint = rule.query.bind_edges[edge_var]
+                if edge_constraint.bind_endpoints:
+                    source_node = next(
+                        node for node in target_graph.nodes if node.node_id == edge.source_id
+                    )
+                    target_node = next(
+                        node for node in target_graph.nodes if node.node_id == edge.target_id
+                    )
+
+                    full_assignment[f"{edge_var}_source"] = source_node
+                    full_assignment[f"{edge_var}_target"] = target_node
+
             matches.append(full_assignment)
             return
         edge_var = edge_vars[edge_idx]
@@ -289,6 +366,7 @@ def find_matches(
 
 
 _jinja_env = Environment(loader=BaseLoader())
+_jinja_env.globals["len"] = len
 
 
 class TemplateProxy:
@@ -475,6 +553,129 @@ def _process_match(
                     )
                 builder.rewire_edges_from(old_id, new_id)
 
+        elif action_type == "rewire_edges_to":
+            old_id = var_to_node_id[action.old_target_var]
+            new_id = get_node_id(action.new_target_var)
+            if new_id is not None:
+                if debug:
+                    print(
+                        f"    Rewiring edges TO '{action.old_target_var}' (ID: {old_id}) TO '{action.new_target_var}' (ID: {new_id})"
+                    )
+                builder.rewire_edges_to(old_id, new_id)
+
+        elif action_type == "edit_edge":
+            # Get the bound edge from the match
+            if action.edge_var not in match:
+                raise ValueError(f"Edge variable '{action.edge_var}' not found in match")
+            edge = match[action.edge_var]
+            if isinstance(edge, GraphEdge):
+                new_source_id = edge.source_id
+                new_target_id = edge.target_id
+
+                if action.source_var is not None:
+                    source_id = get_node_id(action.source_var)
+                    if source_id is not None:
+                        new_source_id = source_id
+
+                if action.target_var is not None:
+                    target_id = get_node_id(action.target_var)
+                    if target_id is not None:
+                        new_target_id = target_id
+
+                # Prepare new extra properties (preserve existing ones)
+                new_extra = dict(edge.extra)
+                new_output_slot = edge.output_slot
+                new_input_slot = edge.input_slot
+                if action.properties is not None:
+                    expanded_props = expand_props(action.properties)
+                    if "output_slot" in expanded_props:
+                        new_output_slot = expanded_props.pop("output_slot")
+                    if "input_slot" in expanded_props:
+                        new_input_slot = expanded_props.pop("input_slot")
+                    new_extra.update(expanded_props)
+
+                new_content = edge.content
+                if action.content is not None:
+                    from biocomp.graphengine import Part
+
+                    new_content = tuple(
+                        Part(name=name, category="modified") for name in action.content
+                    )
+
+                if debug:
+                    print(
+                        f"    Editing Edge '{action.edge_var}': {edge.source_id}->{edge.target_id} to {new_source_id}->{new_target_id}"
+                    )
+
+                builder.delete_edge(edge.source_id, edge.target_id)
+
+                builder.add_edge(
+                    source_id=new_source_id,
+                    target_id=new_target_id,
+                    output_slot=new_output_slot,
+                    input_slot=new_input_slot,
+                    content=new_content,
+                    content_type=edge.content_type,
+                    content_embedding_names=edge.content_embedding_names,
+                    **new_extra,
+                )
+
+        elif action_type == "copy_edge":
+            if action.source_edge_var not in match:
+                raise ValueError(
+                    f"Source edge variable '{action.source_edge_var}' not found in match"
+                )
+            source_edge = match[action.source_edge_var]
+            if isinstance(source_edge, GraphEdge):
+                new_source_id = get_node_id(action.source_var)
+                new_target_id = get_node_id(action.target_var)
+
+                if new_source_id is None:
+                    raise ValueError(
+                        f"Source node variable '{action.source_var}' not found in match"
+                    )
+                if new_target_id is None:
+                    raise ValueError(
+                        f"Target node variable '{action.target_var}' not found in match"
+                    )
+
+                copied_extra = dict(source_edge.extra)
+
+                # Add/override with new properties if specified
+                if action.properties is not None:
+                    expanded_props = expand_props(action.properties)
+                    copied_extra.update(expanded_props)
+
+                # Use copied content or override with new content
+                new_content = source_edge.content
+                if action.content is not None:
+                    from biocomp.graphengine import Part
+
+                    new_content = tuple(
+                        Part(name=name, category="copied") for name in action.content
+                    )
+
+                # use copied content_type or override with new content_type
+                new_content_type = source_edge.content_type
+                if action.content_type is not None:
+                    new_content_type = action.content_type
+
+                if debug:
+                    print(
+                        f"    Copying Edge '{action.source_edge_var}': {source_edge.source_id}->{source_edge.target_id} to {new_source_id}->{new_target_id}"
+                    )
+
+                builder.add_edge(
+                    source_id=new_source_id,
+                    target_id=new_target_id,
+                    output_slot=source_edge.output_slot,
+                    input_slot=source_edge.input_slot,
+                    content=new_content,
+                    content_type=new_content_type,
+                    content_embedding_names=source_edge.content_embedding_names,
+                    **copied_extra,
+                )
+
 
 def apply_actions(
     rule: GraphRewritingRule,
@@ -597,3 +798,89 @@ def apply_rule_sequence(
         )
 
     return current_graphs
+
+
+## {{{                 --     graph isomorphism     --
+
+
+def graphs_are_isomorphic(
+    graph1,
+    graph2,
+    compare_extra: bool = False,  # whether to compare node.extra and edge.extra fields (default: False)
+    compare_content_embedding_names: bool = False,  # whether to compare edge.content_embedding_names (default: False)
+) -> bool:
+    """
+    Graph isomorphism check using iterative canonical hashing (Weisfeiler-Lehman).
+    """
+    if len(graph1.nodes) != len(graph2.nodes) or len(graph1.edges) != len(graph2.edges):
+        return False
+
+    return _get_graph_canonical_hash(
+        graph1, compare_extra, compare_content_embedding_names
+    ) == _get_graph_canonical_hash(graph2, compare_extra, compare_content_embedding_names)
+
+
+def _get_graph_canonical_hash(graph, compare_extra, compare_content_embedding_names, iterations=5):
+    from collections import defaultdict
+
+    out_edges = defaultdict(list)
+    in_edges = defaultdict(list)
+    for edge in graph.edges:
+        out_edges[edge.source_id].append(edge)
+        in_edges[edge.target_id].append(edge)
+
+    node_hashes = {}
+    for node in graph.nodes:
+        parts = [node.node_type, node.is_inverse_of]
+        if compare_extra and node.extra:
+            parts.append(tuple(sorted(node.extra.items())))
+        node_hashes[node.node_id] = hash(tuple(parts))
+
+    for _ in range(iterations):
+        new_hashes = {}
+        for node_id, current_hash in node_hashes.items():
+            in_signatures = []
+            for edge in in_edges[node_id]:
+                edge_tuple = _get_canonical_edge_tuple(
+                    edge, compare_extra, compare_content_embedding_names
+                )
+                in_signatures.append((node_hashes[edge.source_id], edge_tuple))
+
+            out_signatures = []
+            for edge in out_edges[node_id]:
+                edge_tuple = _get_canonical_edge_tuple(
+                    edge, compare_extra, compare_content_embedding_names
+                )
+                out_signatures.append((node_hashes[edge.target_id], edge_tuple))
+
+            in_signatures.sort()
+            out_signatures.sort()
+
+            combined_signature = (current_hash, tuple(in_signatures), tuple(out_signatures))
+            new_hashes[node_id] = hash(combined_signature)
+
+        node_hashes = new_hashes
+
+    final_graph_hash = hash(tuple(sorted(node_hashes.values())))
+    return final_graph_hash
+
+
+def _get_canonical_edge_tuple(edge, compare_extra, compare_content_embedding_names):
+    content_sig = tuple(sorted((p.name, p.category) for p in edge.content)) if edge.content else ()
+
+    parts = [
+        edge.content_type,
+        content_sig,
+        edge.output_slot,
+        edge.input_slot,
+    ]
+
+    if compare_content_embedding_names and edge.content_embedding_names:
+        parts.append(tuple(sorted(edge.content_embedding_names.items())))
+    if compare_extra and edge.extra:
+        parts.append(tuple(sorted(edge.extra.items())))
+
+    return tuple(parts)
+
+
+##────────────────────────────────────────────────────────────────────────────}}

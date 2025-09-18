@@ -21,11 +21,22 @@ class EdgeConstraint(BaseModel):
     """
     Defines a required (or forbidden) edge between two node variables.
     Example: source_var="rna", target_var="protein"
+
+    Either source_var or target_var (or both) can be None to match edges
+    based only on properties or one endpoint.
+
+    The contains property can specify a list of part names that must be present
+    in the edge's content (as a subset check).
+
+    When used in bind_edges with bind_endpoints=True (default), automatically creates
+    node bindings for the edge endpoints as "{edge_name}_source" and "{edge_name}_target".
     """
 
-    source_var: str
-    target_var: str
-    properties: dict[str, Any] = {}  # optional constraints on edge properties
+    source_var: Optional[str] = None
+    target_var: Optional[str] = None
+    properties: dict[str, Any] = {}
+    contains: Optional[list[str]] = None  # list of part names that must be in edge content
+    bind_endpoints: bool = True  # automatically bind source and target nodes
 
 
 class MatchQuery(BaseModel):
@@ -36,8 +47,8 @@ class MatchQuery(BaseModel):
     """
 
     # bind variables to nodes that satisfy property constraints
-    bind: dict[str, PropertyConstraint]
-    
+    bind: dict[str, PropertyConstraint] = {}
+
     # bind variables to edges that satisfy property constraints
     bind_edges: dict[str, EdgeConstraint] = {}
 
@@ -47,8 +58,7 @@ class MatchQuery(BaseModel):
     where_not_connected: list[EdgeConstraint] = []
 
     # For complex, non-structural logic.
-    # will call a registered Python function with the match dictionary.
-    # e.g., "are_params_compatible(protein, rna)"
+    # eval'd with the context of each match dict.
     where_filter_function: Optional[str] = None
 
     @model_validator(mode="after")
@@ -57,37 +67,59 @@ class MatchQuery(BaseModel):
         bound_vars = set(self.bind.keys())
         bound_edges = set(self.bind_edges.keys())
         bound_vars.add("any")  # special case for "any" node matching
-        
+
         for edge in self.where_connected:
-            if edge.source_var not in bound_vars:
+            if edge.source_var is not None and edge.source_var not in bound_vars:
                 raise ValueError(
                     f"Variable '{edge.source_var}' in `where_connected` is not defined in `bind`."
                 )
-            if edge.target_var not in bound_vars:
+            if edge.target_var is not None and edge.target_var not in bound_vars:
                 raise ValueError(
                     f"Variable '{edge.target_var}' in `where_connected` is not defined in `bind`."
                 )
 
         for edge in self.where_not_connected:
-            if edge.source_var not in bound_vars:
+            if edge.source_var is not None and edge.source_var not in bound_vars:
                 raise ValueError(
                     f"Variable '{edge.source_var}' in `where_not_connected` is not defined in `bind`."
                 )
-            if edge.target_var not in bound_vars:
+            if edge.target_var is not None and edge.target_var not in bound_vars:
                 raise ValueError(
                     f"Variable '{edge.target_var}' in `where_not_connected` is not defined in `bind`."
                 )
-                
+
         # Validate bind_edges - edge constraints need source_var and target_var to be in bind
         for edge_var, edge_constraint in self.bind_edges.items():
-            if edge_constraint.source_var not in bound_vars:
+            if (
+                edge_constraint.source_var is not None
+                and edge_constraint.source_var not in bound_vars
+            ):
                 raise ValueError(
                     f"Edge '{edge_var}' source_var '{edge_constraint.source_var}' not defined in `bind`."
                 )
-            if edge_constraint.target_var not in bound_vars:
+            if (
+                edge_constraint.target_var is not None
+                and edge_constraint.target_var not in bound_vars
+            ):
                 raise ValueError(
                     f"Edge '{edge_var}' target_var '{edge_constraint.target_var}' not defined in `bind`."
                 )
+
+        # Check for conflicts between auto-generated endpoint names and manually bound nodes
+        for edge_var, edge_constraint in self.bind_edges.items():
+            if edge_constraint.bind_endpoints:
+                auto_source_name = f"{edge_var}_source"
+                auto_target_name = f"{edge_var}_target"
+                if auto_source_name in bound_vars:
+                    raise ValueError(
+                        f"Auto-generated node binding '{auto_source_name}' conflicts with manually bound node. "
+                        f"Either rename your node binding or set bind_endpoints=False for edge '{edge_var}'."
+                    )
+                if auto_target_name in bound_vars:
+                    raise ValueError(
+                        f"Auto-generated node binding '{auto_target_name}' conflicts with manually bound node. "
+                        f"Either rename your node binding or set bind_endpoints=False for edge '{edge_var}'."
+                    )
 
         return self
 
@@ -144,10 +176,29 @@ class RewireEdgesTo(ActionBase):
     new_target_var: str
 
 
+class EditEdge(ActionBase):
+    action_type: Literal["edit_edge"] = "edit_edge"
+    edge_var: str  # Name of the bound edge variable to modify
+    source_var: Optional[str] = None  # New source node (if changing)
+    target_var: Optional[str] = None  # New target node (if changing)
+    properties: Optional[dict[str, Any]] = None  # New properties to set
+    content: Optional[list[str]] = None  # New part names for content
+
+
+class CopyEdge(ActionBase):
+    action_type: Literal["copy_edge"] = "copy_edge"
+    source_edge_var: str  # Name of the bound edge variable to copy from
+    source_var: str  # New source node variable name
+    target_var: str  # New target node variable name
+    properties: Optional[dict[str, Any]] = None  # Additional/override properties
+    content: Optional[list[str]] = None  # Override content (if None, copies original content)
+    content_type: Optional[str] = None  # Override content_type (if None, copies original)
+
+
 # discriminated union of all possible action types.
 # allows Pydantic to automatically parse based on the `action_type` field.
 AnyAction = Annotated[
-    Union[AddNode, AddEdge, SetProperties, DeleteNode, DeleteEdge, RewireEdgesFrom, RewireEdgesTo],
+    Union[AddNode, AddEdge, SetProperties, DeleteNode, DeleteEdge, RewireEdgesFrom, RewireEdgesTo, EditEdge, CopyEdge],
     Field(discriminator="action_type"),
 ]
 

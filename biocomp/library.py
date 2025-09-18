@@ -22,7 +22,14 @@ def decode_json(df, cols):
     return df
 
 
-L1_SLOT_KEYS = ["promoter", "5'UTR", "gene", "insulator", "3'UTR", "terminator"]
+L1_SLOT_KEYS = [
+    "insulator",
+    "promoter",
+    "5'UTR",
+    "gene",
+    "3'UTR",
+    "terminator",
+]
 
 
 class PartsLibrary(BaseModel):
