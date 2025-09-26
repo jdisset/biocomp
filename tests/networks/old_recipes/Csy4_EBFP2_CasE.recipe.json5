@@ -1,0 +1,26 @@
+{
+   "name": "Csy4_EBFP2_CasE",
+   "description": "ng DNA = 600.0",
+   "content": [
+      {
+         "sources": [
+            {
+               "ratio": 0.25,
+               "plasmid": "L1.ST2-3_EBFP2"
+            },
+            {
+               "ratio": 0.25,
+               "plasmid": "L1.ST2-3_mNeonGreen"
+            },
+            {
+               "ratio": 0.25,
+               "plasmid": "L1.ST1-2_mMaroon1"
+            },
+            {
+               "ratio": 0.25,
+               "plasmid": "L1.0x_CasE_ST1-2"
+            }
+         ]
+      }
+   ]
+}

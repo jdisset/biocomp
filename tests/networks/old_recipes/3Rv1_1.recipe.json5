@@ -1,0 +1,66 @@
+{
+   "name": "3Rv1_1",
+   "description": "ng DNA = 720.0",
+   "content": [
+      {
+         "sources": [
+            {
+               "ratio": 0.06944444444444445,
+               "plasmid": "L1.ST2-3_EBFP2"
+            },
+            {
+               "ratio": 0.06944444444444445,
+               "plasmid": "L1.0x_CasE_ST1-2"
+            },
+            {
+               "ratio": 0.20833333333333334,
+               "plasmid": "L1.ST1-2_0x_pguCas13"
+            },
+            {
+               "ratio": 0.06944444444444445,
+               "plasmid": "L1.ST2-3_Csy4R_mNG"
+            }
+         ]
+      },
+      {
+         "sources": [
+            {
+               "ratio": 0.06944444444444445,
+               "plasmid": "L1.ST2-3_mKO2"
+            },
+            {
+               "ratio": 0.013888888888888888,
+               "plasmid": "L1.0x_Csy4_ST1-2"
+            },
+            {
+               "ratio": 0.20833333333333334,
+               "plasmid": "L1.ST1-2_0x_pguCas13"
+            },
+            {
+               "ratio": 0.06944444444444445,
+               "plasmid": "L1.ST2-3_CasER_mNG"
+            }
+         ]
+      },
+      {
+         "sources": [
+            {
+               "ratio": 0.06944444444444445,
+               "plasmid": "L1.ST1-2_mMaroon1"
+            },
+            {
+               "ratio": 0.013888888888888888,
+               "plasmid": "L1.0x_Csy4_ST1-2"
+            },
+            {
+               "ratio": 0.06944444444444445,
+               "plasmid": "L1.0x_CasE_ST1-2"
+            },
+            {
+               "ratio": 0.06944444444444445,
+               "plasmid": "L1.ST2-3_PguR_mNG"
+            }
+         ]
+      }
+   ]
+}

@@ -1,0 +1,58 @@
+{
+   "name": "BPBLTRv1_12",
+   "description": "ng DNA = 1000.0",
+   "content": [
+      {
+         "sources": [
+            {
+               "ratio": 0.05,
+               "plasmid": "L1.ST2-3_EBFP2"
+            },
+            {
+               "ratio": 0.05,
+               "plasmid": "L1.ST1-2_8xPguR_Csy4"
+            },
+            {
+               "ratio": 0.05,
+               "plasmid": "L1.0x_CasE_ST1-2"
+            }
+         ]
+      },
+      {
+         "sources": [
+            {
+               "ratio": 0.05,
+               "plasmid": "L1.ST2-3_mKO2"
+            },
+            {
+               "ratio": 0.05,
+               "plasmid": "L1.ST1-2_8xPguR_Csy4"
+            },
+            {
+               "ratio": 0.05,
+               "plasmid": "L1.0x_CasE_ST1-2"
+            }
+         ]
+      },
+      {
+         "sources": [
+            {
+               "ratio": 0.05,
+               "plasmid": "L1.ST1-2_mMaroon1"
+            },
+            {
+               "ratio": 0.05,
+               "plasmid": "L1.ST1-2_8xCasER_Csy4"
+            },
+            {
+               "ratio": 0.4,
+               "plasmid": "L1.ST1-2_1xPgu"
+            },
+            {
+               "ratio": 0.2,
+               "plasmid": "L1.ST2-3_Csy4R_mNG"
+            }
+         ]
+      }
+   ]
+}
