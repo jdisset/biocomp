@@ -18,8 +18,8 @@ from biocomp.network import (
     get_network_family,
     get_all_ERN_ids,
     inverted_network,
-    part_type_to_parameter_name,
-    parameter_to_default_part,
+    PART_TYPE_TO_EMBEDDING_NAME,
+    EMBEDDING_TO_DEFAULT_PART,
 )
 from biocomp.library import PartsLibrary
 
