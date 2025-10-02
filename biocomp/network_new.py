@@ -640,6 +640,17 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
                     kwargs["content"] = parts_from_cdg_row(crow, ctype)
                     kwargs["content_type"] = ctype
                     kwargs["content_embedding_names"] = embeddings_from_cdg_row(crow)
+            elif str(src_row.get("type")) != "numeric":
+                # When ctype is None and source is NOT numeric, try to find content
+                # This handles edges to dead-end nodes (like output nodes)
+                # Numeric edges should never have content (they're control flow edges)
+                for possible_ctype in ("DNA", "RNA", "PRT"):
+                    crow = pick_cdg_row(src_row, dst_row, possible_ctype, out_slot)
+                    if crow is not None:
+                        kwargs["content"] = parts_from_cdg_row(crow, possible_ctype)
+                        kwargs["content_type"] = possible_ctype
+                        kwargs["content_embedding_names"] = embeddings_from_cdg_row(crow)
+                        break
             edges.append(GraphEdge(**kwargs))
 
     nodes_dict = {n.node_id: n for n in nodes}
