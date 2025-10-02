@@ -65,7 +65,6 @@ class MatchQuery(BaseModel):
     def check_variable_consistency(self) -> "MatchQuery":
         """ensures all variables used in constraints are defined in `bind` or `bind_edges`."""
         bound_vars = set(self.bind.keys())
-        bound_edges = set(self.bind_edges.keys())
         bound_vars.add("any")  # special case for "any" node matching
 
         for edge in self.where_connected:
@@ -153,7 +152,6 @@ class SetProperties(ActionBase):
 
 
 class DeleteNode(ActionBase):
-    # also delete the edges connected to this node
     action_type: Literal["delete_node"] = "delete_node"
     node_var: str  # the variable name of the node to delete from the match.
 
@@ -195,10 +193,18 @@ class CopyEdge(ActionBase):
     content_type: Optional[str] = None  # Override content_type (if None, copies original)
 
 
-# discriminated union of all possible action types.
-# allows Pydantic to automatically parse based on the `action_type` field.
 AnyAction = Annotated[
-    Union[AddNode, AddEdge, SetProperties, DeleteNode, DeleteEdge, RewireEdgesFrom, RewireEdgesTo, EditEdge, CopyEdge],
+    Union[
+        AddNode,
+        AddEdge,
+        SetProperties,
+        DeleteNode,
+        DeleteEdge,
+        RewireEdgesFrom,
+        RewireEdgesTo,
+        EditEdge,
+        CopyEdge,
+    ],
     Field(discriminator="action_type"),
 ]
 
@@ -208,4 +214,6 @@ class GraphRewritingRule(BaseModel):
     query: MatchQuery
     actions: list[AnyAction]
     run_until_stable: bool = False
-    yield_strategy: Literal["batched", "per_match"] = "batched"
+    yield_strategy: Literal["batched", "per_match", "cartesian_product_by_key"] = "batched"
+    # For cartesian_product_by_key: which variable to group by (e.g., "numeric")
+    cartesian_product_key: Optional[str] = None

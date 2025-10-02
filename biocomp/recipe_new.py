@@ -362,11 +362,11 @@ def dict_to_recipe(raw_recipe_object):
             raw_recipe_object["metadata"].update(desc_dict)
         raw_recipe_object["description"] = desc
 
+    metadata = raw_recipe_object.get("metadata", {})
     for k, v in raw_recipe_object.items():
         if k not in ["name", "description", "metadata", "content"]:
-            if "metadata" not in raw_recipe_object:
-                raw_recipe_object["metadata"] = {}
-            raw_recipe_object["metadata"][k] = v
+            print(f"Adding extra field '{k}' to recipe metadata")
+            metadata[k] = v
 
     recipe = Recipe(
         name=raw_recipe_object.get("name", f"recipe{len(raw_recipe_object)}"),

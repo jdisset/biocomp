@@ -1,9 +1,10 @@
-from typing import Optional, Literal, Union, Dict, List, Any
+from typing import Optional, Literal, Union, Dict, List, Any, Set, Tuple
 from pydantic import BaseModel
 from copy import deepcopy
 from itertools import chain
 from jinja2 import Environment, BaseLoader
 from biocomp.graphrules import GraphRewritingRule, PropertyConstraint, EdgeConstraint
+from collections import defaultdict, Counter
 
 
 NodeType = Union[
@@ -55,33 +56,63 @@ class GraphNode(BaseModel):
 
 
 class GraphState(BaseModel):
-    nodes: list[GraphNode]
-    edges: list[GraphEdge]
+    nodes: dict[int, GraphNode]
+    edges: dict[
+        tuple[int, int, int, int], GraphEdge
+    ]  # key: (source_id, target_id, output_slot, input_slot)
+
+    def get_node(self, node_id: int) -> Optional[GraphNode]:
+        return self.nodes.get(node_id)
+
+    def get_edge(
+        self, source_id: int, target_id: int, output_slot: int = 0, input_slot: int = 0
+    ) -> Optional[GraphEdge]:
+        return self.edges.get((source_id, target_id, output_slot, input_slot))
+
+    def get_outgoing_edges(self, node_id: int) -> list[GraphEdge]:
+        return [e for e in self.edges.values() if e.source_id == node_id]
+
+    def get_incoming_edges(self, node_id: int) -> list[GraphEdge]:
+        return [e for e in self.edges.values() if e.target_id == node_id]
 
 
 class GraphBuilder:
     def __init__(self, graph: GraphState):
-        self.nodes: Dict[int, GraphNode] = {node.node_id: deepcopy(node) for node in graph.nodes}
-        self.edges: List[GraphEdge] = [deepcopy(edge) for edge in graph.edges]
+        self.nodes: Dict[int, GraphNode] = {
+            node_id: deepcopy(node) for node_id, node in graph.nodes.items()
+        }
+        self.edges: Dict[tuple[int, int, int, int], GraphEdge] = {
+            (e.source_id, e.target_id, e.output_slot, e.input_slot): deepcopy(e)
+            for e in graph.edges.values()
+        }
         self.next_id = max(self.nodes.keys(), default=-1) + 1
 
-    def add_node(self, node_type: str, extra: Dict = None) -> int:
+    def add_node(
+        self, node_type: str, extra: Dict = None, is_inverse_of: Optional[InverseSpec] = None
+    ) -> int:
         node_id = self.next_id
         self.next_id += 1
-        self.nodes[node_id] = GraphNode(node_id=node_id, node_type=node_type, extra=extra or {})
+        self.nodes[node_id] = GraphNode(
+            node_id=node_id, node_type=node_type, extra=extra or {}, is_inverse_of=is_inverse_of
+        )
         return node_id
 
     def delete_node(self, node_id: int):
         if node_id in self.nodes:
             del self.nodes[node_id]
-        self.edges = [e for e in self.edges if e.source_id != node_id and e.target_id != node_id]
+        self.edges = {
+            k: e for k, e in self.edges.items() if e.source_id != node_id and e.target_id != node_id
+        }
 
     def add_edge(self, source_id: int, target_id: int, **properties):
+        output_slot = properties.get("output_slot", 0)
+        input_slot = properties.get("input_slot", 0)
+
         edge_fields = {
             "source_id": source_id,
             "target_id": target_id,
-            "output_slot": properties.get("output_slot", 0),
-            "input_slot": properties.get("input_slot", 0),
+            "output_slot": output_slot,
+            "input_slot": input_slot,
             "content": properties.get("content", ()),
             "content_type": properties.get("content_type"),
             "content_embedding_names": properties.get("content_embedding_names", {}),
@@ -102,12 +133,15 @@ class GraphBuilder:
         edge_fields["extra"] = extra_props
 
         edge = GraphEdge(**edge_fields)
-        self.edges.append(edge)
+        edge_key = (source_id, target_id, output_slot, input_slot)
+        self.edges[edge_key] = edge
 
     def delete_edge(self, source_id: int, target_id: int):
-        self.edges = [
-            e for e in self.edges if not (e.source_id == source_id and e.target_id == target_id)
-        ]
+        self.edges = {
+            k: e
+            for k, e in self.edges.items()
+            if not (e.source_id == source_id and e.target_id == target_id)
+        }
 
     def set_node_properties(self, node_id: int, properties: Dict):
         if node_id in self.nodes:
@@ -121,19 +155,44 @@ class GraphBuilder:
                         pass
             self.nodes[node_id].extra.update(properties)
 
-    def rewire_edges(self, old_id: int, new_id: int, attr: str):
-        for edge in self.edges:
-            if getattr(edge, attr) == old_id:
-                setattr(edge, attr, new_id)
-
     def rewire_edges_from(self, old_source_id: int, new_source_id: int):
-        self.rewire_edges(old_source_id, new_source_id, "source_id")
+        to_rewire = [(k, e) for k, e in self.edges.items() if e.source_id == old_source_id]
+
+        for old_key, edge in to_rewire:
+            del self.edges[old_key]
+            new_edge = GraphEdge(
+                source_id=new_source_id,
+                target_id=edge.target_id,
+                output_slot=edge.output_slot,
+                input_slot=edge.input_slot,
+                content=edge.content,
+                content_type=edge.content_type,
+                content_embedding_names=edge.content_embedding_names,
+                extra=edge.extra,
+            )
+            new_key = (new_source_id, edge.target_id, edge.output_slot, edge.input_slot)
+            self.edges[new_key] = new_edge
 
     def rewire_edges_to(self, old_target_id: int, new_target_id: int):
-        self.rewire_edges(old_target_id, new_target_id, "target_id")
+        to_rewire = [(k, e) for k, e in self.edges.items() if e.target_id == old_target_id]
+
+        for old_key, edge in to_rewire:
+            del self.edges[old_key]
+            new_edge = GraphEdge(
+                source_id=edge.source_id,
+                target_id=new_target_id,
+                output_slot=edge.output_slot,
+                input_slot=edge.input_slot,
+                content=edge.content,
+                content_type=edge.content_type,
+                content_embedding_names=edge.content_embedding_names,
+                extra=edge.extra,
+            )
+            new_key = (edge.source_id, new_target_id, edge.output_slot, edge.input_slot)
+            self.edges[new_key] = new_edge
 
     def build(self) -> GraphState:
-        return GraphState(nodes=list(self.nodes.values()), edges=self.edges)
+        return GraphState(nodes=self.nodes, edges=self.edges)
 
 
 def match_properties_generic(
@@ -227,7 +286,7 @@ def find_matches(
     node_candidates = {}
     for var_name, constraint in rule.query.bind.items():
         node_candidates[var_name] = [
-            node for node in target_graph.nodes if match_properties(node, constraint)
+            node for node in target_graph.nodes.values() if match_properties(node, constraint)
         ]
 
     sorted_node_vars = sorted(node_vars, key=lambda v: len(node_candidates[v]))
@@ -239,37 +298,39 @@ def find_matches(
 
             if source is None and target is None:
                 matching_edges = [
-                    edge for edge in target_graph.edges if match_edge_properties(edge, constraint)
+                    edge
+                    for edge in target_graph.edges.values()
+                    if match_edge_properties(edge, constraint)
                 ]
                 return (len(matching_edges) > 0) == should_exist
             elif source is None:
                 if target == "any":
                     # this case doesn't make much sense, but handle it gracefully
-                    return True == should_exist
+                    return should_exist
                 return (
                     any(
                         edge.target_id == assignment[target].node_id
                         and match_edge_properties(edge, constraint)
-                        for edge in target_graph.edges
+                        for edge in target_graph.edges.values()
                     )
                     == should_exist
                 )
             elif target is None:
                 if source == "any":
-                    return True == should_exist
+                    return should_exist
                 return (
                     any(
                         edge.source_id == assignment[source].node_id
                         and match_edge_properties(edge, constraint)
-                        for edge in target_graph.edges
+                        for edge in target_graph.edges.values()
                     )
                     == should_exist
                 )
             elif source == "any":
                 return (
                     any(
-                        has_edge_in_graph(n, assignment[target], target_graph.edges)
-                        for n in target_graph.nodes
+                        has_edge_in_graph(n, assignment[target], list(target_graph.edges.values()))
+                        for n in target_graph.nodes.values()
                         if n != assignment[target]
                     )
                     == should_exist
@@ -277,15 +338,17 @@ def find_matches(
             elif target == "any":
                 return (
                     any(
-                        has_edge_in_graph(assignment[source], n, target_graph.edges)
-                        for n in target_graph.nodes
+                        has_edge_in_graph(assignment[source], n, list(target_graph.edges.values()))
+                        for n in target_graph.nodes.values()
                         if n != assignment[source]
                     )
                     == should_exist
                 )
             else:
                 return (
-                    has_edge_in_graph(assignment[source], assignment[target], target_graph.edges)
+                    has_edge_in_graph(
+                        assignment[source], assignment[target], list(target_graph.edges.values())
+                    )
                     == should_exist
                 )
 
@@ -317,16 +380,11 @@ def find_matches(
         if edge_idx == len(edge_vars):
             full_assignment = {**node_assignment, **edge_assignment}
 
-            # add automatic endpoint bindings for edges with bind_endpoints=True
             for edge_var, edge in edge_assignment.items():
                 edge_constraint = rule.query.bind_edges[edge_var]
                 if edge_constraint.bind_endpoints:
-                    source_node = next(
-                        node for node in target_graph.nodes if node.node_id == edge.source_id
-                    )
-                    target_node = next(
-                        node for node in target_graph.nodes if node.node_id == edge.target_id
-                    )
+                    source_node = target_graph.get_node(edge.source_id)
+                    target_node = target_graph.get_node(edge.target_id)
 
                     full_assignment[f"{edge_var}_source"] = source_node
                     full_assignment[f"{edge_var}_target"] = target_node
@@ -336,7 +394,7 @@ def find_matches(
         edge_var = edge_vars[edge_idx]
         edge_constraint = rule.query.bind_edges[edge_var]
         matching_edges = find_edges_matching_constraint(
-            target_graph.edges, edge_constraint, node_assignment
+            list(target_graph.edges.values()), edge_constraint, node_assignment
         )
         for edge in matching_edges:
             if edge in edge_assignment.values():
@@ -365,8 +423,30 @@ def find_matches(
     return matches
 
 
+def sorted_with_indices(items):
+    """Sort items and return the sorted list along with original indices."""
+    indexed_items = list(enumerate(items))
+    indexed_items.sort(key=lambda x: x[1])  # Sort by item value
+    return [item for index, item in indexed_items], [index for index, item in indexed_items]
+
+
+def reorder_list(source_list, indices):
+    """Reorder source_list according to the given indices."""
+    return [source_list[i] for i in indices]
+
+
+def find_index(lst, item):
+    """Find the index of item in list."""
+    return lst.index(item)
+
+
 _jinja_env = Environment(loader=BaseLoader())
 _jinja_env.globals["len"] = len
+_jinja_env.globals["sorted"] = sorted
+_jinja_env.globals["sorted_with_indices"] = sorted_with_indices
+_jinja_env.globals["reorder_list"] = reorder_list
+_jinja_env.globals["find_index"] = find_index
+_jinja_env.globals["list"] = list  # For list() constructor if needed
 
 
 class TemplateProxy:
@@ -430,7 +510,7 @@ def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEd
                     parsed_val = eval(val)
                     if isinstance(parsed_val, list):
                         val = parsed_val
-                except:
+                except (SyntaxError, NameError, ValueError):
                     pass
 
             if isinstance(val, list):
@@ -469,10 +549,11 @@ def _process_match(
     match: Dict[str, Union[GraphNode, GraphEdge]],
     rule: GraphRewritingRule,
     builder: GraphBuilder,
+    match_index: int = 0,
     debug: bool = False,
 ):
     if debug:
-        print(f"\n--- Processing Match ---")
+        print("\n--- Processing Match ---")
         for var, obj in match.items():
             if isinstance(obj, GraphNode):
                 print(f"  {var}: Node(id={obj.node_id})")
@@ -480,10 +561,26 @@ def _process_match(
     var_to_node_id = {var: obj.node_id for var, obj in match.items() if isinstance(obj, GraphNode)}
     local_nodes = {}
 
+    # Add __match_index__ to the match context for templates
+    match_with_index = dict(match)
+
+    # Create a simple object to hold the index
+    class IndexHolder:
+        def __init__(self, idx):
+            self.value = idx
+
+        def __str__(self):
+            return str(self.value)
+
+    match_with_index["__match_index__"] = IndexHolder(match_index)
+
     def expand_props(props: Dict[str, Any]) -> Dict[str, Any]:
         result = {}
         for k, v in props.items():
-            expanded = expand_template(v, match)
+            if isinstance(v, dict):
+                expanded = expand_props(v)
+            else:
+                expanded = expand_template(v, match_with_index)
             if debug:
                 print(f"      Template '{v}' -> {expanded} (type: {type(expanded)})")
             result[k] = expanded
@@ -499,8 +596,16 @@ def _process_match(
 
         if action_type == "add_node":
             props = expand_props(action.properties)
+            node_type = props.pop("type", "unknown")
+            is_inverse_of_dict = props.pop("is_inverse_of", None)
+            is_inverse_of = None
+            if is_inverse_of_dict is not None:
+                if isinstance(is_inverse_of_dict, dict):
+                    is_inverse_of = InverseSpec(**is_inverse_of_dict)
+                else:
+                    is_inverse_of = is_inverse_of_dict
             node_id = builder.add_node(
-                props.pop("type", "unknown"), {k: v for k, v in props.items() if k != "type"}
+                node_type, {k: v for k, v in props.items()}, is_inverse_of=is_inverse_of
             )
             local_nodes[action.local_name] = node_id
             if debug:
@@ -582,7 +687,6 @@ def _process_match(
                     if target_id is not None:
                         new_target_id = target_id
 
-                # Prepare new extra properties (preserve existing ones)
                 new_extra = dict(edge.extra)
                 new_output_slot = edge.output_slot
                 new_input_slot = edge.input_slot
@@ -641,12 +745,10 @@ def _process_match(
 
                 copied_extra = dict(source_edge.extra)
 
-                # Add/override with new properties if specified
                 if action.properties is not None:
                     expanded_props = expand_props(action.properties)
                     copied_extra.update(expanded_props)
 
-                # Use copied content or override with new content
                 new_content = source_edge.content
                 if action.content is not None:
                     from biocomp.graphengine import Part
@@ -655,7 +757,6 @@ def _process_match(
                         Part(name=name, category="copied") for name in action.content
                     )
 
-                # use copied content_type or override with new content_type
                 new_content_type = source_edge.content_type
                 if action.content_type is not None:
                     new_content_type = action.content_type
@@ -689,7 +790,7 @@ def apply_actions(
     if debug and matches:
         _print_graph_summary(target_graph, "Graph State Before Actions")
 
-    for match in matches:
+    for match_idx, match in enumerate(matches):
         match_nodes = _extract_node_ids(list(match.values()))
         if match_nodes & applied_nodes:
             if debug:
@@ -698,7 +799,7 @@ def apply_actions(
                 )
             continue
         applied_nodes.update(match_nodes)
-        _process_match(match, rule, builder, debug=debug)
+        _process_match(match, rule, builder, match_index=match_idx, debug=debug)
 
     final_graph = builder.build()
     if debug and matches:
@@ -710,7 +811,7 @@ def apply_actions(
 def _print_graph_summary(graph: GraphState, message: str):
     print("\n" + "=" * 20 + f" {message} " + "=" * 20)
     print(f"Nodes: {len(graph.nodes)}, Edges: {len(graph.edges)}")
-    source_nodes = [n for n in graph.nodes if n.node_type == "source"]
+    source_nodes = [n for n in graph.nodes.values() if n.node_type == "source"]
     if source_nodes:
         print(f"Source Nodes ({len(source_nodes)}):")
         for node in source_nodes:
@@ -771,13 +872,56 @@ def apply_rule(
         if debug:
             _print_graph_summary(final_graph, "Final Graph State")
         return [final_graph]
-    else:  # per_match
+    elif rule.yield_strategy == "per_match":
         results = []
         for i, match in enumerate(matches):
             if debug:
                 print(f"\n--- Applying rule per_match for Match #{i} ---")
             results.append(apply_actions(rule, [match], graph, debug=debug))
         return results
+    elif rule.yield_strategy == "cartesian_product_by_key":
+        if rule.cartesian_product_key is None:
+            raise ValueError("cartesian_product_by_key requires cartesian_product_key to be set")
+
+        from itertools import product
+        from collections import defaultdict
+
+        groups = defaultdict(list)
+        for match in matches:
+            key_obj = match.get(rule.cartesian_product_key)
+            if key_obj is None:
+                continue
+            if isinstance(key_obj, GraphNode):
+                key = key_obj.node_id
+            else:
+                key = str(key_obj)
+            groups[key].append(match)
+
+        if debug:
+            print(
+                f"\nGrouped {len(matches)} matches into {len(groups)} groups by key '{rule.cartesian_product_key}'"
+            )
+            for key, group_matches in groups.items():
+                print(f"  Group {key}: {len(group_matches)} match(es)")
+
+        if not groups:
+            return [graph]
+
+        group_keys = sorted(groups.keys())
+        match_combinations = list(product(*[groups[k] for k in group_keys]))
+
+        if debug:
+            print(f"\nCartesian product produced {len(match_combinations)} combination(s)")
+
+        results = []
+        for i, combo in enumerate(match_combinations):
+            if debug:
+                print(f"\n--- Applying combination #{i + 1} with {len(combo)} matches ---")
+            results.append(apply_actions(rule, list(combo), graph, debug=debug))
+
+        return results
+    else:
+        raise ValueError(f"Unknown yield_strategy: {rule.yield_strategy}")
 
 
 def apply_rule_sequence(
@@ -791,8 +935,6 @@ def apply_rule_sequence(
 
     current_graphs = graphs
     for rule in rules:
-        # Apply the current rule to every graph produced by the previous step.
-        # The result is a flattened list of all new graphs.
         current_graphs = list(
             chain.from_iterable(apply_rule(rule, g, debug=debug) for g in current_graphs)
         )
@@ -800,87 +942,241 @@ def apply_rule_sequence(
     return current_graphs
 
 
-## {{{                 --     graph isomorphism     --
+def _make_hashable(obj):
+    if isinstance(obj, list):
+        return tuple(_make_hashable(item) for item in obj)
+    elif isinstance(obj, dict):
+        return tuple(sorted((k, _make_hashable(v)) for k, v in obj.items()))
+    else:
+        return obj
 
 
 def graphs_are_isomorphic(
     graph1,
     graph2,
-    compare_extra: bool = False,  # whether to compare node.extra and edge.extra fields (default: False)
-    compare_content_embedding_names: bool = False,  # whether to compare edge.content_embedding_names (default: False)
+    compare_extra: bool = False,
+    compare_content_embedding_names: bool = False,
+    unordered_outgoing_types: set[str] | None = None,
+    unordered_incoming_types: set[str] | None = None,
 ) -> bool:
-    """
-    Graph isomorphism check using iterative canonical hashing (Weisfeiler-Lehman).
-    """
     if len(graph1.nodes) != len(graph2.nodes) or len(graph1.edges) != len(graph2.edges):
         return False
+    hash1 = _get_graph_canonical_hash(
+        graph1,
+        compare_extra,
+        compare_content_embedding_names,
+        unordered_outgoing_types,
+        unordered_incoming_types,
+    )
+    hash2 = _get_graph_canonical_hash(
+        graph2,
+        compare_extra,
+        compare_content_embedding_names,
+        unordered_outgoing_types,
+        unordered_incoming_types,
+    )
+    return hash1 == hash2
 
-    return _get_graph_canonical_hash(
-        graph1, compare_extra, compare_content_embedding_names
-    ) == _get_graph_canonical_hash(graph2, compare_extra, compare_content_embedding_names)
+
+def _get_graph_canonical_hash(
+    graph,
+    compare_extra,
+    compare_content_embedding_names,
+    unordered_outgoing_types: set[str] | None = None,
+    unordered_incoming_types: set[str] | None = None,
+    iterations=5,
+):
+    node_hashes, _ = _get_canonical_invariants_for_diffing(
+        graph,
+        compare_extra,
+        compare_content_embedding_names,
+        unordered_outgoing_types,
+        unordered_incoming_types,
+        iterations,
+    )
+    return hash(tuple(sorted(node_hashes.values())))
 
 
-def _get_graph_canonical_hash(graph, compare_extra, compare_content_embedding_names, iterations=5):
-    from collections import defaultdict
+def _get_canonical_edge_tuple(
+    edge,
+    compare_extra,
+    compare_content_embedding_names,
+    ignore_input_slot=False,
+    ignore_output_slot=False,
+):
+    content_sig = tuple(sorted((p.name, p.category) for p in edge.content)) if edge.content else ()
+    parts = [
+        edge.content_type,
+        content_sig,
+    ]
+    if not ignore_output_slot:
+        parts.append(edge.output_slot)
+    if not ignore_input_slot:
+        parts.append(edge.input_slot)
+    if compare_content_embedding_names and edge.content_embedding_names:
+        hashable_names = tuple(
+            sorted((k, _make_hashable(v)) for k, v in edge.content_embedding_names.items())
+        )
+        parts.append(hashable_names)
+    if compare_extra and edge.extra:
+        hashable_extra = tuple(sorted((k, _make_hashable(v)) for k, v in edge.extra.items()))
+        parts.append(hashable_extra)
+    return tuple(parts)
+
+
+def get_isomorphism_diff(
+    graph1,
+    graph2,
+    compare_extra: bool = False,
+    compare_content_embedding_names: bool = False,
+    unordered_outgoing_types: set[str] | None = None,
+    unordered_incoming_types: set[str] | None = None,
+) -> Optional[str]:
+    if len(graph1.nodes) != len(graph2.nodes):
+        return (
+            f"Graphs have a different number of nodes ({len(graph1.nodes)} vs {len(graph2.nodes)})."
+        )
+    if len(graph1.edges) != len(graph2.edges):
+        return (
+            f"Graphs have a different number of edges ({len(graph1.edges)} vs {len(graph2.edges)})."
+        )
+    if not graph1.nodes and not graph2.nodes:
+        return None
+
+    node_hashes1, descriptions1 = _get_canonical_invariants_for_diffing(
+        graph1,
+        compare_extra,
+        compare_content_embedding_names,
+        unordered_outgoing_types,
+        unordered_incoming_types,
+    )
+    node_hashes2, descriptions2 = _get_canonical_invariants_for_diffing(
+        graph2,
+        compare_extra,
+        compare_content_embedding_names,
+        unordered_outgoing_types,
+        unordered_incoming_types,
+    )
+
+    counts1 = Counter(node_hashes1.values())
+    counts2 = Counter(node_hashes2.values())
+
+    if counts1 == counts2:
+        return None
+
+    diff_lines = ["Graphs are not isomorphic. Differences in structural roles found:"]
+
+    g1_minus_g2 = counts1 - counts2
+    for h, count in sorted(g1_minus_g2.items(), key=lambda item: str(item[1])):
+        desc = descriptions1.get(h, "Unknown Hash")
+        plural = "s" if count > 1 else ""
+        diff_lines.append(f"- Graph 1 has {count} extra instance{plural} of: {desc}")
+
+    g2_minus_g1 = counts2 - counts1
+    for h, count in sorted(g2_minus_g1.items(), key=lambda item: str(item[1])):
+        desc = descriptions2.get(h, "Unknown Hash")
+        plural = "s" if count > 1 else ""
+        diff_lines.append(f"+ Graph 2 has {count} extra instance{plural} of: {desc}")
+
+    return "\n".join(diff_lines)
+
+
+def _get_canonical_invariants_for_diffing(
+    graph,
+    compare_extra: bool,
+    compare_content_embedding_names: bool,
+    unordered_outgoing_types: Optional[Set[str]] = None,
+    unordered_incoming_types: Optional[Set[str]] = None,
+    iterations=5,
+) -> Tuple[Dict[Any, int], Dict[int, str]]:
+    unordered_out = unordered_outgoing_types or set()
+    unordered_in = unordered_incoming_types or set()
 
     out_edges = defaultdict(list)
     in_edges = defaultdict(list)
-    for edge in graph.edges:
+    for edge in graph.edges.values():
         out_edges[edge.source_id].append(edge)
         in_edges[edge.target_id].append(edge)
 
+    nodes_by_id = graph.nodes
     node_hashes = {}
-    for node in graph.nodes:
+
+    for node in graph.nodes.values():
         parts = [node.node_type, node.is_inverse_of]
         if compare_extra and node.extra:
-            parts.append(tuple(sorted(node.extra.items())))
+            hashable_extra = tuple(sorted((k, _make_hashable(v)) for k, v in node.extra.items()))
+            parts.append(hashable_extra)
         node_hashes[node.node_id] = hash(tuple(parts))
 
     for _ in range(iterations):
         new_hashes = {}
         for node_id, current_hash in node_hashes.items():
+            node = nodes_by_id[node_id]
+            ignore_output_slots = node.node_type in unordered_out
+            ignore_input_slots = node.node_type in unordered_in
+
             in_signatures = []
-            for edge in in_edges[node_id]:
+            for edge in in_edges.get(node_id, []):
+                source_node = nodes_by_id[edge.source_id]
+                should_ignore_output = source_node.node_type in unordered_out
                 edge_tuple = _get_canonical_edge_tuple(
-                    edge, compare_extra, compare_content_embedding_names
+                    edge,
+                    compare_extra,
+                    compare_content_embedding_names,
+                    ignore_input_slot=ignore_input_slots,
+                    ignore_output_slot=should_ignore_output,
                 )
                 in_signatures.append((node_hashes[edge.source_id], edge_tuple))
 
             out_signatures = []
-            for edge in out_edges[node_id]:
+            for edge in out_edges.get(node_id, []):
+                target_node = nodes_by_id[edge.target_id]
+                should_ignore_input = target_node.node_type in unordered_in
                 edge_tuple = _get_canonical_edge_tuple(
-                    edge, compare_extra, compare_content_embedding_names
+                    edge,
+                    compare_extra,
+                    compare_content_embedding_names,
+                    ignore_input_slot=should_ignore_input,
+                    ignore_output_slot=ignore_output_slots,
                 )
                 out_signatures.append((node_hashes[edge.target_id], edge_tuple))
 
             in_signatures.sort()
             out_signatures.sort()
-
             combined_signature = (current_hash, tuple(in_signatures), tuple(out_signatures))
             new_hashes[node_id] = hash(combined_signature)
 
+        if node_hashes == new_hashes:
+            break
         node_hashes = new_hashes
 
-    final_graph_hash = hash(tuple(sorted(node_hashes.values())))
-    return final_graph_hash
+    hash_to_description = {}
+    hash_to_node_id = {h: node_id for node_id, h in node_hashes.items()}
+
+    for h, node_id in hash_to_node_id.items():
+        node = nodes_by_id[node_id]
+
+        in_neighbor_types = sorted(
+            [nodes_by_id[edge.source_id].node_type for edge in in_edges.get(node_id, [])]
+        )
+        out_neighbor_types = sorted(
+            [nodes_by_id[edge.target_id].node_type for edge in out_edges.get(node_id, [])]
+        )
+
+        in_counts = Counter(in_neighbor_types)
+        out_counts = Counter(out_neighbor_types)
+
+        in_desc = f"from {dict(in_counts)}" if in_counts else "from nowhere"
+        out_desc = f"to {dict(out_counts)}" if out_counts else "to nowhere"
+
+        desc = f"Node(type='{node.node_type}', receives {in_desc}, sends {out_desc})"
+        hash_to_description[h] = desc
+
+    return node_hashes, hash_to_description
 
 
-def _get_canonical_edge_tuple(edge, compare_extra, compare_content_embedding_names):
-    content_sig = tuple(sorted((p.name, p.category) for p in edge.content)) if edge.content else ()
-
-    parts = [
-        edge.content_type,
-        content_sig,
-        edge.output_slot,
-        edge.input_slot,
-    ]
-
-    if compare_content_embedding_names and edge.content_embedding_names:
-        parts.append(tuple(sorted(edge.content_embedding_names.items())))
-    if compare_extra and edge.extra:
-        parts.append(tuple(sorted(edge.extra.items())))
-
-    return tuple(parts)
+# Alias for backward compatibility with tests
+compute_graphs_are_equivalent = graphs_are_isomorphic
 
 
-##────────────────────────────────────────────────────────────────────────────}}
+##────────────────────────────────────────────────────────────────────────────}}}

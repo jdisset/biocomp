@@ -2,13 +2,11 @@ from typing import (
     Any,
     Optional,
     Tuple,
-    cast,
 )
 from pydantic import BaseModel
 import pandas as pd
-from collections import defaultdict
 
-from biocomp.recipe_new import Recipe, CoTransfection, TranscriptionUnit, CoTxList
+from biocomp.recipe_new import Recipe, TranscriptionUnit, CoTxList
 from biocomp.logging_config import get_logger
 from biocomp.library import PartsLibrary, LibraryContext
 from biocomp.graphengine import GraphState, GraphNode, GraphEdge, Part, InverseSpec
@@ -23,8 +21,6 @@ class Network(BaseModel):
 
     cotx: CoTxList = []
     name: Optional[str] = None
-    # invert_on_build: bool = False
-    # compute_graph: Optional[GraphState] = None
 
     @property
     def central_dogma_graph(self) -> pd.DataFrame:
@@ -36,9 +32,7 @@ def recipe_to_network(
 ) -> list[Network]: ...
 
 
-def network_to_recipe(network: Network) -> Recipe:
-    ...
-    # should round-trip perfectly!!
+def network_to_recipe(network: Network) -> Recipe: ...
 
 
 class NetworkConstructionError(Exception):
@@ -56,10 +50,10 @@ def graphstate_to_cdg_df(graph: GraphState) -> pd.DataFrame:
             "predecessor": [],
             "successor": [],
         }
-        for node in graph.nodes
+        for node in graph.nodes.values()
     }
 
-    for edge in graph.edges:
+    for edge in graph.edges.values():
         if edge.source_id in node_data and edge.target_id in node_data:
             node_data[edge.source_id]["successor"].append(edge.target_id)
             node_data[edge.target_id]["predecessor"].append(edge.source_id)
@@ -71,9 +65,6 @@ def graphstate_to_cdg_df(graph: GraphState) -> pd.DataFrame:
             node_data[nid]["successor"] = None
 
     return pd.DataFrame.from_dict(node_data, orient="index")
-
-
-## {{{                            --     cdg     --
 
 
 def _get_dna(tu: TranscriptionUnit, lib: PartsLibrary) -> Tuple[list[str], dict[str, list[str]]]:
@@ -125,10 +116,19 @@ def preprocess_network_tus(network: Network, lib: PartsLibrary) -> dict[str, Any
     if not network.cotx:
         return {}
 
-    tu_map = {
-        (unit.name or f"TU_{i}"): unit
-        for i, unit in enumerate(tu for group in network.cotx for tu in group.units)
-    }
+    tu_map = {}
+    tu_to_cotx_map = {}
+    global_tu_index = 0
+
+    for cotx_index, cotx_group in enumerate(network.cotx):
+        group_name = cotx_group.name or f"cotx_{cotx_index + 1}"
+        for unit_index, unit in enumerate(cotx_group.units):
+            # Create unique TUID that includes cotx group info for duplicate plasmids
+            base_name = unit.name or f"TU_{global_tu_index}"
+            tuid = f"{base_name}_{group_name}"
+            tu_map[tuid] = unit
+            tu_to_cotx_map[tuid] = group_name
+            global_tu_index += 1
 
     tu_info = {}
     for tuid, tu in tu_map.items():
@@ -137,6 +137,7 @@ def preprocess_network_tus(network: Network, lib: PartsLibrary) -> dict[str, Any
         prt_content, prt_params = _get_prt(tu, lib)
         tu_info[tuid] = {
             "tu": tu,
+            "cotx_group": tu_to_cotx_map[tuid],
             "DNA_content": dna_content,
             "DNA_params": dna_params,
             "RNA_content": rna_content,
@@ -168,7 +169,6 @@ def _build_cdg_primal_from_preprocessed(
     group_to_node_id, tu_to_node_id = {}, {}
 
     for tuid, info in tu_info.items():
-        # define keys for grouping
         dna_group_key = ("DNA", tuid)
         rna_group_key = (
             "RNA",
@@ -183,7 +183,6 @@ def _build_cdg_primal_from_preprocessed(
             else (info["PRT_content"], info["PRT_params_hashable"]),
         )
 
-        # create nodes if group is new
         for key in [dna_group_key, rna_group_key, prt_group_key]:
             if key not in group_to_node_id:
                 group_to_node_id[key] = next_node_id
@@ -214,7 +213,6 @@ def _build_cdg_primal_from_preprocessed(
         nodes.append(GraphNode(node_id=nid, node_type=info["type"], extra=extra))
 
     edges = []
-    # DNA -> RNA
     for tuid in tu_info:
         edges.append(
             GraphEdge(
@@ -226,7 +224,6 @@ def _build_cdg_primal_from_preprocessed(
             )
         )
 
-    # RNA -> PRT
     rna_nodes = [n for n in nodes if n.node_type == "RNA"]
     prt_nodes = [n for n in nodes if n.node_type == "PRT"]
     for rna_node in rna_nodes:
@@ -243,9 +240,10 @@ def _build_cdg_primal_from_preprocessed(
                     )
                 )
 
-    # Remove duplicate edges
     unique_edges = {(e.source_id, e.target_id): e for e in edges}.values()
-    return GraphState(nodes=sorted(nodes, key=lambda n: n.node_id), edges=list(unique_edges))
+    nodes_dict = {n.node_id: n for n in nodes}
+    edges_dict = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in unique_edges}
+    return GraphState(nodes=nodes_dict, edges=edges_dict)
 
 
 def _build_cdg_dual_from_preprocessed(
@@ -262,35 +260,43 @@ def _build_cdg_dual_from_preprocessed(
     nodes, edges = [], []
     next_node_id = 0
 
-    source_to_cotx_map: dict[str | None, str] = {}
-    source_to_ratio_map: dict[str | None, float] = {}
+    # Create a mapping from (source_id, cotx_group) to normalized ratio
+    source_cotx_to_ratio_map: dict[tuple[str | None, str], float] = {}
     for i, cotx in enumerate(network.cotx or []):
         group_name = cotx.name or f"cotx_{i + 1}"
-        for unit, ratio in zip(cotx.units, cotx.ratios or [1.0] * len(cotx.units)):
-            source_to_cotx_map[unit.source] = group_name
-            source_to_ratio_map[unit.source] = float(ratio)
+        raw_ratios = cotx.ratios or [1.0] * len(cotx.units)
+        ratio_sum = sum(raw_ratios)
+        # Normalize ratios within each cotx group to sum to 1.0
+        normalized_ratios = (
+            [r / ratio_sum for r in raw_ratios]
+            if ratio_sum > 0
+            else [1.0 / len(cotx.units)] * len(cotx.units)
+        )
+
+        for unit, ratio in zip(cotx.units, normalized_ratios):
+            source_cotx_to_ratio_map[(unit.source, group_name)] = float(ratio)
 
     source_nodes, tx_nodes, tl_nodes = {}, {}, {}
     output_node, dead_end_nodes = None, {}
 
-    # create transformation nodes based on TU groupings
-    for tuid, info in tu_info.items():
-        tu = info["tu"]
-        # Source node (one per source_id)
-        if tu.source not in source_nodes:
-            source_nodes[tu.source] = next_node_id
+    for (source_id, cotx_group), ratio in source_cotx_to_ratio_map.items():
+        source_key = (source_id, cotx_group)
+        if source_key not in source_nodes:
+            source_nodes[source_key] = next_node_id
             next_node_id += 1
 
             source_extra = {
-                "source_id": tu.source,
-                "cotx_group": source_to_cotx_map.get(tu.source),
-                "ratio": source_to_ratio_map.get(tu.source),
+                "source_id": source_id,
+                "cotx_group": cotx_group,
+                "ratio": ratio,
             }
             nodes.append(
-                GraphNode(node_id=source_nodes[tu.source], node_type="source", extra=source_extra)
+                GraphNode(node_id=source_nodes[source_key], node_type="source", extra=source_extra)
             )
 
-        # Transcription node (one per RNA group)
+    for tuid, info in tu_info.items():
+        tu = info["tu"]
+
         rna_key = (
             info["RNA_content"]
             if is_committed
@@ -301,7 +307,6 @@ def _build_cdg_dual_from_preprocessed(
             next_node_id += 1
             nodes.append(GraphNode(node_id=tx_nodes[rna_key], node_type="transcription", extra={}))
 
-        # Translation node (one per PRT group)
         prt_key = (
             info["PRT_content"]
             if is_committed
@@ -312,13 +317,13 @@ def _build_cdg_dual_from_preprocessed(
             next_node_id += 1
             nodes.append(GraphNode(node_id=tl_nodes[prt_key], node_type="translation", extra={}))
 
-    # Create edges carrying biological content
     output_slot_counter = 0
     for tuid, info in tu_info.items():
         tu = info["tu"]
 
-        # Edge: Source -> Transcription (carries DNA)
-        src_id = source_nodes[tu.source]
+        cotx_group = info["cotx_group"]
+        source_key = (tu.source, cotx_group)
+        src_id = source_nodes[source_key]
         rna_key = (
             info["RNA_content"]
             if is_committed
@@ -341,7 +346,6 @@ def _build_cdg_dual_from_preprocessed(
             )
         )
 
-        # Edge: Transcription -> Translation (carries RNA)
         prt_key = (
             info["PRT_content"]
             if is_committed
@@ -360,7 +364,6 @@ def _build_cdg_dual_from_preprocessed(
             )
         )
 
-        # Edge: Translation -> Output/DeadEnd (carries PRT)
         is_output = any(o in info["PRT_content"] for o in outputs_list)
         target_node_id = -1
         input_slot = 0
@@ -380,7 +383,7 @@ def _build_cdg_dual_from_preprocessed(
                 next_node_id += 1
                 nodes.append(
                     GraphNode(
-                        node_id=dead_end_nodes[prt_content_tuple], node_type="dead_end", extra={}
+                        node_id=dead_end_nodes[prt_content_tuple], node_type="deadend", extra={}
                     )
                 )
             target_node_id = dead_end_nodes[prt_content_tuple]
@@ -406,13 +409,16 @@ def _build_cdg_dual_from_preprocessed(
         if key not in unique_edges_dict:
             unique_edges_dict[key] = e
 
-    return GraphState(
-        nodes=sorted(nodes, key=lambda n: n.node_id), edges=list(unique_edges_dict.values())
-    )
+    nodes_dict = {n.node_id: n for n in nodes}
+    edges_dict = {
+        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        for e in unique_edges_dict.values()
+    }
+    return GraphState(nodes=nodes_dict, edges=edges_dict)
 
 
 def build_central_dogma_graph_direct(
-    network: Network, lib: PartsLibrary, custom_outputs_parts=None, dual: bool = False
+    network: Network, lib: PartsLibrary, custom_outputs_parts=None, dual: bool = True
 ) -> GraphState:
     """
     Builds a central dogma graph directly from a Network definition into a GraphState.
@@ -427,7 +433,7 @@ def build_central_dogma_graph_direct(
     """
     preprocessed_data = preprocess_network_tus(network, lib)
     if not preprocessed_data:
-        return GraphState(nodes=[], edges=[])
+        return GraphState(nodes={}, edges={})
 
     if dual:
         return _build_cdg_dual_from_preprocessed(preprocessed_data, lib, custom_outputs_parts)
@@ -448,8 +454,6 @@ def build_central_dogma_graph(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-## {{{                       --     compute graph     --
-
 
 def graphstate_to_compute_df(graph: GraphState) -> pd.DataFrame:
     """Converts a GraphState object to a Compute Graph DataFrame."""
@@ -461,12 +465,12 @@ def graphstate_to_compute_df(graph: GraphState) -> pd.DataFrame:
             "input_from": [],
             "output_to": [],
         }
-        for node in graph.nodes
+        for node in graph.nodes.values()
     }
 
     edges_by_source = {nid: [] for nid in node_data}
     edges_by_target = {nid: [] for nid in node_data}
-    for edge in graph.edges:
+    for edge in graph.edges.values():
         if edge.source_id in edges_by_source:
             edges_by_source[edge.source_id].append(edge)
         if edge.target_id in edges_by_target:
@@ -517,12 +521,12 @@ def compute_df_to_graphstate(compute_df: pd.DataFrame) -> GraphState:
                 )
                 edges.append(edge)
 
-    return GraphState(nodes=nodes, edges=edges)
+    nodes_dict = {n.node_id: n for n in nodes}
+    edges_dict = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    return GraphState(nodes=nodes_dict, edges=edges_dict)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
-## {{{               --     old → GraphState compatibility     --
 
 
 def old_network_compg_to_graphstate(old_network) -> GraphState:
@@ -537,7 +541,7 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
     cg = getattr(old_network, "compute_graph", None)
     cdg = getattr(old_network, "central_dogma_graph", None)
     if cg is None or len(cg) == 0:
-        return GraphState(nodes=[], edges=[])
+        return GraphState(nodes={}, edges={})
 
     def to_list(v):
         if v is None:
@@ -554,7 +558,6 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
         p = row.get("params") or {}
         return {k: tuple(str(x) for x in to_list(v)) for k, v in p.items()}
 
-    # Build nodes
     nodes: list[GraphNode] = []
     for nid, row in cg.iterrows():
         extra = {}
@@ -562,9 +565,10 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
             if col == "type":
                 continue
             extra[f"cg_{col}"] = val
-        nodes.append(GraphNode(node_id=int(nid), node_type=str(row.get("type")), extra=extra))
 
-    # Edge helpers
+        node_type = str(row.get("type"))
+        nodes.append(GraphNode(node_id=int(nid), node_type=node_type, extra=extra))
+
     def desired_content_type(src_type: str, dst_type: str) -> str | None:
         if src_type == "source" and dst_type == "transcription":
             return "DNA"
@@ -610,7 +614,6 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
                 return crow
         return None
 
-    # Build edges from output_to
     edges: list[GraphEdge] = []
     for src_id, src_row in cg.iterrows():
         outputs = src_row.get("output_to")
@@ -639,7 +642,9 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
                     kwargs["content_embedding_names"] = embeddings_from_cdg_row(crow)
             edges.append(GraphEdge(**kwargs))
 
-    return GraphState(nodes=nodes, edges=edges)
+    nodes_dict = {n.node_id: n for n in nodes}
+    edges_dict = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    return GraphState(nodes=nodes_dict, edges=edges_dict)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}

@@ -74,17 +74,17 @@ def _compute_horizontal_positions(graph: GraphState) -> dict:
         return {}
 
     # Build adjacency list for forward edges (outgoing)
-    adjacency = {node.node_id: [] for node in graph.nodes}
-    in_degree = {node.node_id: 0 for node in graph.nodes}
+    adjacency = {node.node_id: [] for node in graph.nodes.values()}
+    in_degree = {node.node_id: 0 for node in graph.nodes.values()}
 
-    for edge in graph.edges:
+    for edge in graph.edges.values():
         adjacency[edge.source_id].append(edge.target_id)
         in_degree[edge.target_id] += 1
 
     # Find root nodes (no incoming edges)
     roots = [node_id for node_id, degree in in_degree.items() if degree == 0]
     if not roots:
-        roots = [graph.nodes[0].node_id]  # fallback to first node
+        roots = [next(iter(graph.nodes.keys()))]  # fallback to first node
 
     # BFS to assign levels (x-coordinates)
     levels = {}
@@ -129,7 +129,7 @@ def _create_elements(graph: GraphState, use_horizontal=False) -> list:
     horizontal_positions = _compute_horizontal_positions(graph) if use_horizontal else {}
 
     # Add nodes
-    for node in graph.nodes:
+    for node in graph.nodes.values():
         element = {
             "data": {
                 "id": str(node.node_id),
@@ -146,7 +146,7 @@ def _create_elements(graph: GraphState, use_horizontal=False) -> list:
         elements.append(element)
 
     # Add edges
-    for edge in graph.edges:
+    for edge in graph.edges.values():
         elements.append(
             {
                 "data": {

@@ -203,7 +203,7 @@ class ComputeLayer:
         # get the shapes of the inputs. We'll collect all the inputs for each node
         # to make sure they are all the same
         node_inputs: List[List[NodeInput]] = []
-        for n in self.nodes:
+        for n in self.nodes.values():
             ninp = n.get_compute_node("input_from")
             node_inputs.append([(n.network_id, *i) for i in ninp])
 
@@ -263,7 +263,7 @@ class ComputeLayer:
         return hash(tuple(self.nodes))
 
     def check(self):
-        assert len(set(n.type_signature for n in self.nodes)) == 1, "Different types in layer"
+        assert len(set(n.type_signature for n in self.nodes.values())) == 1, "Different types in layer"
 
     def commit(self, params: ParameterTree, **kwargs):
         if self.f_commit is not None:
@@ -435,7 +435,7 @@ class ComputeStack:
         # temporarily replace node network references with copies
         original_network_refs = []
         for layer in self.layers:
-            for node in layer.nodes:
+            for node in layer.nodes.values():
                 # save original reference
                 original_network_refs.append((node, node.network))
                 # assign the copy
@@ -473,7 +473,7 @@ class ComputeStack:
     def each_node(self):
         assert self.layers is not None, "Stack has no layers"
         for layer in self.layers:
-            for node in layer.nodes:
+            for node in layer.nodes.values():
                 yield node
 
     def register_post_process(self, callback: Callable):
@@ -551,7 +551,7 @@ class ComputeStack:
     def check(self):
         for l in self.layers:
             l.check()
-            for n in l.nodes:
+            for n in l.nodes.values():
                 assert id(n.network) == id(self.networks[n.network_id]), "Network mismatch"
         assert self.layers[0].nodes[0].get_compute_node().type == "input", (
             f"First node is not input: {self.layers[0].nodes[0]}"
@@ -559,7 +559,7 @@ class ComputeStack:
         for net_id in range(len(self.networks)):
             prev = -1
             for l in self.layers:
-                for n in l.nodes:
+                for n in l.nodes.values():
                     if n.network_id == net_id:
                         assert n.batch_order >= prev, (
                             f"wrong batch order ({n.batch_order} < {prev} for {n})"
@@ -569,7 +569,7 @@ class ComputeStack:
     def get_all_nodes(self):
         if self.layers is None:
             return []
-        return [n for l in self.layers for n in l.nodes]
+        return [n for l in self.layers for n in l.nodes.values()]
 
     def get_node_input_start_index(self, node: VirtualNode, input_slot: int) -> int:
         """Returns the start index of the input #input_slot for the given node
@@ -938,11 +938,11 @@ class ComputeStack:
             assert layer_id == 0  # input layer is the first layer
             assert input_shapes == layer.f_out_shapes
             # input indices of the input layer are just the indices of the nodes
-            input_start_indices = np.array([[n.node_id * input_lengths[0] for n in layer.nodes]])
+            input_start_indices = np.array([[n.node_id * input_lengths[0] for n in layer.nodes.values()]])
         else:
             input_start_indices = np.array(
                 [
-                    [self.get_node_input_start_index(n, i) for n in layer.nodes]
+                    [self.get_node_input_start_index(n, i) for n in layer.nodes.values()]
                     for i in range(len(input_shapes))
                 ]
             )
@@ -998,7 +998,7 @@ class ComputeStack:
         for l_id, l in enumerate(self.layers):
             l.layer_id = l_id
             if l.is_built:
-                for n_id, n in enumerate(l.nodes):
+                for n_id, n in enumerate(l.nodes.values()):
                     self.node_map[(n.network_id, n.compute_node_id)] = (l_id, n_id)
                     n.node_id = node_id
                     node_id += 1
