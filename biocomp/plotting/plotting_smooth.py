@@ -250,8 +250,8 @@ def smooth_1d(
     ylabel = output_name if ytitle is None else ytitle
 
     if nslices > 1 and show_legend:
-        # black line around
-        ax.legend(loc="upper right", frameon=True, edgecolor="black")
+        # ax.legend(loc="upper right", frameon=True, edgecolor="black")
+        ax.legend()
 
     if draw_xlabel and xlabel:
         ax.set_xlabel(xlabel)
@@ -280,18 +280,20 @@ def knn_grid(
     # filter out nan/inf values before processing
     mask = np.all(np.isfinite(x), axis=1) if x.ndim > 1 else np.isfinite(x)
     mask = mask & (np.all(np.isfinite(y), axis=1) if y.ndim > 1 else np.isfinite(y))
-    
+
     x_clean = x[mask]
     y_clean = y[mask]
-    
+
     if len(x_clean) == 0:
         # return empty grid if no valid data
         xmin, xmax = xlims
         ymin, ymax = ylims or xlims
-        xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
+        xy = make_xy_grid(
+            xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution
+        )
         output_values = np.full(xy.shape[0], np.nan)
         return xy, output_values
-    
+
     xmin, xmax = xlims
     ymin, ymax = ylims or xlims
     xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
@@ -338,21 +340,45 @@ def colorbar(
     tick_props: Optional[ListOrSingle[Dict]] = None,
     border_width=0.7,
     setup_transformed_axis_params: Dict = {},
+    threshold_below=None,
+    threshold_above=None,
+    alpha_opacity=1.0,
+    cax=None,
 ):
     imlims = im.get_clim()
     c_vmin = imlims[0] if vlims[0] is None else vlims[0]
     c_vmax = imlims[1] if vlims[1] is None else vlims[1]
 
-    colorbar_ax = ax.inset_axes(
-        [
-            position[0],  # x position
-            position[1],  # y position
-            size[0],  # width
-            size[1],  # height
-        ]
+    colorbar_ax = (
+        cax if cax is not None else ax.inset_axes([position[0], position[1], size[0], size[1]])
     )
 
-    cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation, aspect=20)
+    if threshold_below is not None or threshold_above is not None:
+        from matplotlib.colors import ListedColormap
+
+        cmap = im.get_cmap()
+        colors = np.array(cmap(np.linspace(0, 1, 256)))
+        values = np.linspace(c_vmin, c_vmax, len(colors))
+
+        alpha_mask = np.ones(len(colors)) * alpha_opacity
+        if threshold_below is not None:
+            alpha_mask = np.where(values < threshold_below, 0, alpha_mask)
+        if threshold_above is not None:
+            alpha_mask = np.where(values > threshold_above, 0, alpha_mask)
+
+        colors = np.column_stack([colors[:, :3], alpha_mask])
+        threshold_cmap = ListedColormap(colors)
+
+        cbar = plt.colorbar(
+            mpl.cm.ScalarMappable(
+                norm=mpl.colors.Normalize(vmin=c_vmin, vmax=c_vmax), cmap=threshold_cmap
+            ),
+            cax=colorbar_ax,
+            orientation=orientation,
+            aspect=20,
+        )
+    else:
+        cbar = plt.colorbar(im, cax=colorbar_ax, orientation=orientation, aspect=20)
 
     if tick_position is None:
         tick_position = label_position
