@@ -250,8 +250,8 @@ def smooth_1d(
     ylabel = output_name if ytitle is None else ytitle
 
     if nslices > 1 and show_legend:
-        # black line around
-        ax.legend(loc="upper right", frameon=True, edgecolor="black")
+        # ax.legend(loc="upper right", frameon=True, edgecolor="black")
+        ax.legend()
 
     if draw_xlabel and xlabel:
         ax.set_xlabel(xlabel)
