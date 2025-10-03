@@ -34,6 +34,8 @@ def lib():
 def recipe_paths():
     """Get all test recipe paths"""
     test_recipe_path = Path("biocomp/tests/networks/old_recipes")
+    if not test_recipe_path.exists():
+        test_recipe_path = Path("tests/networks/old_recipes")
     paths = sorted(test_recipe_path.glob("*.json5"))
     return paths
 
@@ -82,7 +84,7 @@ def build_old_network(recipe_path, lib):
 
 def build_new_network_cdg(recipe, lib):
     """Build CDG using new declarative system"""
-    new_net = netn.Network(cotx=recipe.content)
+    new_net = netn.Network(recipe=recipe.content)
     cdg = netn.build_central_dogma_graph_direct(new_net, lib, dual=True)
     return cdg
 
@@ -91,6 +93,7 @@ def build_new_network_compg(recipe, lib):
     """Build compute graph using new declarative system with rules"""
     cdg = build_new_network_cdg(recipe, lib)
     compg = apply_rule_sequence(br.ALL_RULES, cdg)[0]
+    compg = br.sort_output_edges(compg)
     return compg
 
 
@@ -415,3 +418,165 @@ def test_first_few_recipes_detailed(recipes_data, lib, recipe_idx):
             print(f"  Old: {dict(old_types)}")
 
         assert iso, f"Graphs are not isomorphic for {path.name}"
+
+
+# ============================================================================
+# Network Helper Methods Equivalence Tests
+# ============================================================================
+
+def test_get_output_compute_node_equivalence(recipes_data, lib):
+    """Test that get_output_compute_node returns equivalent output node"""
+    with LibraryContext.with_library(lib):
+        for path, recipe_dict, recipe in recipes_data:
+            old_net = build_old_network(path, lib)
+            new_compg = build_new_network_compg(recipe, lib)
+            new_net = netn.Network(name="test", compute_graph=new_compg)
+
+            old_output_node = old_net.get_output_compute_node()
+            new_output_node = new_net.get_output_compute_node()
+
+            assert old_output_node["type"] == new_output_node.node_type == "output"
+
+
+def test_nb_outputs_equivalence(recipes_data, lib):
+    """Test that nb_outputs returns same value"""
+    with LibraryContext.with_library(lib):
+        for path, recipe_dict, recipe in recipes_data:
+            old_net = build_old_network(path, lib)
+            new_compg = build_new_network_compg(recipe, lib)
+            new_net = netn.Network(name="test", compute_graph=new_compg)
+
+            assert old_net.nb_outputs == new_net.nb_outputs, (
+                f"{path.name}: old={old_net.nb_outputs}, new={new_net.nb_outputs}"
+            )
+
+
+def test_nb_inputs_equivalence(recipes_data, lib):
+    """Test that nb_inputs returns same value"""
+    with LibraryContext.with_library(lib):
+        for path, recipe_dict, recipe in recipes_data:
+            old_net = build_old_network(path, lib)
+            new_compg = build_new_network_compg(recipe, lib)
+            new_net = netn.Network(name="test", compute_graph=new_compg)
+
+            # nb_inputs only makes sense for inverted networks
+            if old_net.nb_inputs > 0:
+                assert old_net.nb_inputs == new_net.nb_inputs, (
+                    f"{path.name}: old={old_net.nb_inputs}, new={new_net.nb_inputs}"
+                )
+
+
+def test_get_output_proteins_equivalence(recipes_data, lib):
+    """Test that get_output_proteins returns proteins in alphabetical order"""
+    with LibraryContext.with_library(lib):
+        for path, recipe_dict, recipe in recipes_data:
+            old_net = build_old_network(path, lib)
+            new_compg = build_new_network_compg(recipe, lib)
+            new_net = netn.Network(name="test", compute_graph=new_compg)
+
+            old_proteins = old_net.get_output_proteins()
+            new_proteins = new_net.get_output_proteins()
+
+            # Same proteins, and new system should be in alphabetical order
+            assert set(old_proteins) == set(new_proteins), (
+                f"{path.name}: old={old_proteins}, new={new_proteins}"
+            )
+            assert len(old_proteins) == len(new_proteins), (
+                f"{path.name}: old has {len(old_proteins)} proteins, new has {len(new_proteins)}"
+            )
+            # New system should be alphabetically sorted
+            assert new_proteins == sorted(new_proteins), (
+                f"{path.name}: new proteins not alphabetically sorted: {new_proteins}"
+            )
+
+
+def test_get_inverted_input_positions_equivalence(recipes_data, lib):
+    """Test that get_inverted_input_positions returns same mapping"""
+    with LibraryContext.with_library(lib):
+        for path, recipe_dict, recipe in recipes_data:
+            old_net = build_old_network(path, lib)
+            new_compg = build_new_network_compg(recipe, lib)
+            new_net = netn.Network(name="test", compute_graph=new_compg)
+
+            if old_net.nb_inputs > 0:
+                old_mapping = old_net.get_inverted_input_positions()
+                new_mapping = new_net.get_inverted_input_positions()
+
+                assert old_mapping == new_mapping, (
+                    f"{path.name}: old={old_mapping}, new={new_mapping}"
+                )
+
+
+def test_get_inverted_input_proteins_equivalence(recipes_data, lib):
+    """Test that get_inverted_input_proteins returns same proteins"""
+    with LibraryContext.with_library(lib):
+        for path, recipe_dict, recipe in recipes_data:
+            old_net = build_old_network(path, lib)
+            new_compg = build_new_network_compg(recipe, lib)
+            new_net = netn.Network(name="test", compute_graph=new_compg)
+
+            if old_net.nb_inputs > 0:
+                old_proteins = old_net.get_inverted_input_proteins()
+                new_proteins = new_net.get_inverted_input_proteins()
+
+                assert old_proteins == new_proteins, (
+                    f"{path.name}: old={old_proteins}, new={new_proteins}"
+                )
+
+
+def test_get_dependent_output_proteins_equivalence(recipes_data, lib):
+    """Test that get_dependent_output_proteins returns same proteins"""
+    with LibraryContext.with_library(lib):
+        for path, recipe_dict, recipe in recipes_data:
+            old_net = build_old_network(path, lib)
+            new_compg = build_new_network_compg(recipe, lib)
+            new_net = netn.Network(name="test", compute_graph=new_compg)
+
+            if old_net.nb_inputs > 0:
+                old_proteins = old_net.get_dependent_output_proteins()
+                new_proteins = new_net.get_dependent_output_proteins()
+
+                assert old_proteins == new_proteins, (
+                    f"{path.name}: old={old_proteins}, new={new_proteins}"
+                )
+
+
+def test_get_dependent_output_mask_equivalence(recipes_data, lib):
+    """Test that get_dependent_output_mask returns same mask"""
+    with LibraryContext.with_library(lib):
+        for path, recipe_dict, recipe in recipes_data:
+            old_net = build_old_network(path, lib)
+            new_compg = build_new_network_compg(recipe, lib)
+            new_net = netn.Network(name="test", compute_graph=new_compg)
+
+            if old_net.nb_inputs > 0:
+                old_mask = old_net.get_dependent_output_mask()
+                new_mask = new_net.get_dependent_output_mask()
+
+                assert (old_mask == new_mask).all(), (
+                    f"{path.name}: masks differ"
+                )
+
+
+def test_topological_order_equivalence(recipes_data, lib):
+    """Test that topological_order returns compatible ordering"""
+    with LibraryContext.with_library(lib):
+        for path, recipe_dict, recipe in recipes_data:
+            old_net = build_old_network(path, lib)
+            new_compg = build_new_network_compg(recipe, lib)
+            new_net = netn.Network(name="test", compute_graph=new_compg)
+
+            old_topo = old_net.topological_order()
+            new_topo = new_net.topological_order()
+
+            # Same number of layers
+            assert len(old_topo) == len(new_topo), (
+                f"{path.name}: old={len(old_topo)} layers, new={len(new_topo)} layers"
+            )
+
+            # Same total nodes
+            old_total = sum(len(batch) for batch in old_topo)
+            new_total = sum(len(batch) for batch in new_topo)
+            assert old_total == new_total, (
+                f"{path.name}: old={old_total} nodes, new={new_total} nodes"
+            )

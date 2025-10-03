@@ -2,16 +2,23 @@ from typing import (
     Any,
     Optional,
     Tuple,
+    Sequence,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import pandas as pd
+import numpy as np
 
 from biocomp.recipe_new import Recipe, TranscriptionUnit, CoTxList
 from biocomp.logging_config import get_logger
 from biocomp.library import PartsLibrary, LibraryContext
 from biocomp.graphengine import GraphState, GraphNode, GraphEdge, Part, InverseSpec
 from biocomp.graphrules import GraphRewritingRule
+from functools import cached_property, cache
 
+# TODO:
+# - [ ] bring back all the interfaces from old network (nb_outputs, etc)
+# - [ ] the network stat tools
+# - [ ] layer annotations for ERN
 
 logger = get_logger(__name__)
 
@@ -19,20 +26,252 @@ logger = get_logger(__name__)
 class Network(BaseModel):
     """Pure data container for network definitions"""
 
-    cotx: CoTxList = []
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     name: Optional[str] = None
+    recipe: Optional[CoTxList] = None
+    compute_graph: Optional[GraphState] = None
+
+    def get_output_compute_node(self) -> GraphNode:
+        output_nodes = [n for n in self.compute_graph.nodes.values() if n.node_type == "output"]
+        assert len(output_nodes) == 1, f"Invalid number of output nodes: {len(output_nodes)}"
+        return output_nodes[0]
 
     @property
-    def central_dogma_graph(self) -> pd.DataFrame:
-        return build_central_dogma_graph(self, LibraryContext.get_library())
+    def nb_outputs(self) -> int:
+        return len(self.get_output_proteins())
+
+    @property
+    def nb_inputs(self):
+        return len(self.get_inverted_input_proteins())
+
+    def get_input_from_output(self, output_arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """Given an array of output values, returns the columns that are inputs of the inverted network,
+        properly ordered by input number"""
+        if output_arr is None:
+            return None
+        mapping = self.get_inverted_input_positions()
+        return output_arr[:, [mapping[i] for i in range(len(mapping))]]
+
+    def get_inverted_input_proteins(self, include_biases: bool = False) -> list[str]:
+        mapping = self.get_inverted_input_positions(include_biases)
+        output_proteins = self.get_output_proteins()
+        assert len(mapping) <= len(output_proteins), f"Invalid mapping: {mapping}"
+        return [output_proteins[mapping[i]] for i in range(len(mapping))]
+
+    def get_inverted_input_positions(self, include_biases: bool = False) -> dict[int, int]:
+        """Returns a mapping from input position to output position"""
+        mapping = {}
+        mask_types = ["input"]
+        if include_biases:
+            mask_types.append("bias")
+
+        inputs = [n for n in self.compute_graph.nodes.values() if n.node_type in mask_types]
+        for node in inputs:
+            assert "input_position" in node.extra, f"input_position not in {node.extra}"
+            assert "input_from_output" in node.extra, f"input_from_output not in {node.extra}"
+            assert node.extra["input_position"] not in mapping
+            mapping[node.extra["input_position"]] = node.extra["input_from_output"]
+
+        assert set(mapping.keys()) == set(range(len(mapping.keys()))), f"Invalid mapping: {mapping}"
+        assert len(mapping.keys()) == len(set(mapping.values())), f"Invalid mapping: {mapping}"
+        return mapping
+
+    def get_output_proteins(self, only_dependent_outputs: bool = False) -> list[str]:
+        """Returns the names of all proteins that are outputs of the network"""
+        if only_dependent_outputs:
+            return self.get_dependent_output_proteins()
+
+        onode = self.get_output_compute_node()
+
+        # Try to use cg_cdg_input if available (from old network conversion)
+        if "cg_cdg_input" in onode.extra:
+            # For backward compatibility - use the order from cdg_input
+            # This is the order the proteins were stored in the central dogma graph
+            incoming_edges = self.compute_graph.get_incoming_edges(onode.node_id)
+            # Create a map from input_slot to protein name
+            slot_to_protein = {}
+            for edge in incoming_edges:
+                if edge.content and edge.content_type == "PRT":
+                    slot_to_protein[edge.input_slot] = edge.content[0].name
+            # Return in order of input slots
+            return [slot_to_protein[i] for i in sorted(slot_to_protein.keys())]
+
+        # For new networks, use input_slot ordering
+        incoming_edges = self.compute_graph.get_incoming_edges(onode.node_id)
+        output_proteins = []
+        for edge in sorted(incoming_edges, key=lambda e: e.input_slot):
+            if edge.content and edge.content_type == "PRT":
+                output_proteins.append(edge.content[0].name)
+
+        return output_proteins
+
+    def get_dependent_output_proteins(self) -> list[str]:
+        """Returns the names of the proteins that are outputs of the network and are not inverted inputs"""
+        all_outputs = self.get_output_proteins()
+        input_proteins = self.get_inverted_input_proteins(include_biases=True)
+        return [p for p in all_outputs if p not in input_proteins]
+
+    def get_dependent_output_mask(self) -> np.ndarray:
+        """Returns a boolean mask of the output proteins that are dependent on the inputs"""
+        n_outputs = self.nb_outputs
+        input_positions = self.get_inverted_input_positions(include_biases=True).values()
+        dependent_outputs = [i for i in range(n_outputs) if i not in input_positions]
+        mask = np.zeros(n_outputs, dtype=bool)
+        mask[dependent_outputs] = True
+        return mask
+
+    def set_input_as_bias(self, input_protein_name: Sequence[str]) -> None:
+        """Sets this input protein as a bias node (instead of an input one)"""
+        original_mapping = self.get_inverted_input_positions()
+        output_proteins = self.get_output_proteins()
+        assert input_protein_name in output_proteins, f"Invalid input protein name: {input_protein_name}"
+        output_position = output_proteins.index(input_protein_name)
+        assert output_position in original_mapping.values()
+
+        inputs = [n for n in self.compute_graph.nodes.values() if n.node_type == "input"]
+        found = False
+        for node in inputs:
+            assert "input_position" in node.extra, f"input_position not in {node.extra}"
+            assert "input_from_output" in node.extra, f"input_from_output not in {node.extra}"
+            if node.extra["input_from_output"] == output_position:
+                # Modify node type to bias
+                self.compute_graph.nodes[node.node_id] = GraphNode(
+                    node_id=node.node_id,
+                    node_type="bias",
+                    is_inverse_of=node.is_inverse_of,
+                    extra=node.extra
+                )
+                found = True
+                break
+        assert found, f"Could not find input protein {input_protein_name} in compute graph"
+
+        self._renumber_input_positions()
+
+        new_mapping = self.get_inverted_input_positions()
+        assert len(new_mapping) == len(original_mapping) - 1, f"Invalid mapping: {new_mapping}"
+        assert output_position not in new_mapping.values()
+        assert len(self.get_inverted_input_proteins()) == len(new_mapping)
+
+    def set_bias_as_input(self, bias_protein_name: Sequence[str]) -> None:
+        """Sets this bias protein back as an input node (instead of a bias one)"""
+        original_mapping = self.get_inverted_input_positions()
+        output_proteins = self.get_output_proteins()
+        assert bias_protein_name in output_proteins, f"Invalid bias protein name: {bias_protein_name}"
+        output_position = output_proteins.index(bias_protein_name)
+
+        assert output_position not in original_mapping.values(), (
+            f"Protein {bias_protein_name} is already an input, not a bias"
+        )
+
+        biases = [n for n in self.compute_graph.nodes.values() if n.node_type == "bias"]
+        found = False
+        for node in biases:
+            assert "input_from_output" in node.extra, f"input_from_output not in {node.extra}"
+            if node.extra["input_from_output"] == output_position:
+                new_extra = dict(node.extra)
+                if "input_position" not in new_extra:
+                    next_input_pos = len(original_mapping) if original_mapping else 0
+                    new_extra["input_position"] = next_input_pos
+
+                self.compute_graph.nodes[node.node_id] = GraphNode(
+                    node_id=node.node_id,
+                    node_type="input",
+                    is_inverse_of=node.is_inverse_of,
+                    extra=new_extra
+                )
+                found = True
+                break
+        assert found, f"Could not find bias protein {bias_protein_name} in compute graph"
+
+        self._renumber_input_positions()
+
+        new_mapping = self.get_inverted_input_positions()
+        assert len(new_mapping) == len(original_mapping) + 1, f"Invalid mapping: {new_mapping}"
+        assert output_position in new_mapping.values()
+        assert len(self.get_inverted_input_proteins()) == len(new_mapping)
+
+    def _renumber_input_positions(self) -> None:
+        """Renumbers input positions to be consecutive starting from 0"""
+        inputs = [n for n in self.compute_graph.nodes.values() if n.node_type == "input"]
+
+        input_output_pairs = []
+        for node in inputs:
+            assert "input_from_output" in node.extra, f"input_from_output not in {node.extra}"
+            input_output_pairs.append((node.node_id, node.extra["input_from_output"]))
+
+        input_output_pairs.sort(key=lambda x: x[1])
+
+        for new_pos, (node_id, _) in enumerate(input_output_pairs):
+            node = self.compute_graph.nodes[node_id]
+            new_extra = dict(node.extra)
+            new_extra["input_position"] = new_pos
+            self.compute_graph.nodes[node_id] = GraphNode(
+                node_id=node.node_id,
+                node_type=node.node_type,
+                is_inverse_of=node.is_inverse_of,
+                extra=new_extra
+            )
+
+    def to_recipe(self) -> Recipe:
+        """Converts the network back to a Recipe object"""
+        raise NotImplementedError("to_recipe not yet implemented for new Network")
+
+    def compute_dependency_map(self) -> dict[int, set[int]]:
+        """Returns {node id -> set of upstream node ids}"""
+        dependency_map = {}
+        for node_id, node in self.compute_graph.nodes.items():
+            incoming = self.compute_graph.get_incoming_edges(node_id)
+            if incoming:
+                dependency_map[node_id] = set(e.source_id for e in incoming)
+            else:
+                dependency_map[node_id] = set()
+        return dependency_map
+
+    def topological_order(self, nodes=None, dependency_map=None):
+        """Returns a list of lists of compute nodes from the network,
+        where each node of a sublist can be computed independently of the others,
+        but each sublist must be computed in order."""
+        all_nodes = set(self.compute_graph.nodes.keys())
+        nodes_set = set(nodes) if nodes is not None else all_nodes
+        dependency_map = dependency_map or self.compute_dependency_map()
+
+        visited = set()
+        batches = []
+        remaining = all_nodes.copy()
+
+        while remaining:
+            independent = [node for node in remaining if dependency_map[node].issubset(visited)]
+            if not independent:
+                msg = f"No independent node. Remaining:{set(self.compute_graph.nodes.keys()) - visited}. Visited:{visited}"
+                raise ValueError(msg)
+            visited.update(independent)
+            remaining.difference_update(independent)
+            batch = [node for node in independent if node in nodes_set]
+            if batch:
+                batches.append(batch)
+
+        return batches
 
 
-def recipe_to_network(
-    recipe, rules: list[GraphRewritingRule], lib: PartsLibrary, **kwargs
-) -> list[Network]: ...
+def recipe_to_networks(
+    recipe, rules: list[GraphRewritingRule], lib: PartsLibrary, invert=True, **kwargs
+) -> list[Network]:
+    from biocomp.inversion import invert_all_paths
 
-
-def network_to_recipe(network: Network) -> Recipe: ...
+    cdg = build_central_dogma_graph_direct(recipe, lib)
+    compg = apply_rule_sequence(br.ALL_RULES, cdg)
+    assert len(compg) == 1
+    compg = compg[0]
+    compg = br.sort_output_edges(compg)
+    networks = invert_all_paths(compg) if invert else [compg]
+    names = []
+    for i, net in enumerate(networks):
+        if len(networks) == 1:
+            net_name = recipe.name or "network_1"
+        else:
+            net_name = f"{recipe.name or 'network'}_{i + 1}"
+        names.append(net_name)
 
 
 class NetworkConstructionError(Exception):
@@ -113,14 +352,14 @@ def preprocess_network_tus(network: Network, lib: PartsLibrary) -> dict[str, Any
     Parses the network recipe and returns a dictionary with all necessary
     pre-calculated information for building either the primal or dual graph.
     """
-    if not network.cotx:
+    if not network.recipe:
         return {}
 
     tu_map = {}
     tu_to_cotx_map = {}
     global_tu_index = 0
 
-    for cotx_index, cotx_group in enumerate(network.cotx):
+    for cotx_index, cotx_group in enumerate(network.recipe):
         group_name = cotx_group.name or f"cotx_{cotx_index + 1}"
         for unit_index, unit in enumerate(cotx_group.units):
             # Create unique TUID that includes cotx group info for duplicate plasmids
@@ -262,7 +501,7 @@ def _build_cdg_dual_from_preprocessed(
 
     # Create a mapping from (source_id, cotx_group) to normalized ratio
     source_cotx_to_ratio_map: dict[tuple[str | None, str], float] = {}
-    for i, cotx in enumerate(network.cotx or []):
+    for i, cotx in enumerate(network.recipe or []):
         group_name = cotx.name or f"cotx_{i + 1}"
         raw_ratios = cotx.ratios or [1.0] * len(cotx.units)
         ratio_sum = sum(raw_ratios)

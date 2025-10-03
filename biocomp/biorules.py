@@ -556,6 +556,48 @@ INVERSION_RULES = [
 ]
 
 
+def sort_output_edges(graph):
+    """Sort incoming edges to output nodes alphabetically by protein name for deterministic ordering"""
+    from biocomp.graphengine import GraphState, GraphEdge
+
+    output_nodes = [n for n in graph.nodes.values() if n.node_type == "output"]
+
+    if not output_nodes:
+        return graph
+
+    for output_node in output_nodes:
+        incoming_edges = graph.get_incoming_edges(output_node.node_id)
+
+        # Sort edges by protein name (first part in content)
+        sorted_edges = sorted(
+            incoming_edges,
+            key=lambda e: e.content[0].name if e.content else ""
+        )
+
+        # Reassign input_slots to match sorted order
+        for new_slot, edge in enumerate(sorted_edges):
+            # Remove old edge
+            old_key = (edge.source_id, edge.target_id, edge.output_slot, edge.input_slot)
+            if old_key in graph.edges:
+                del graph.edges[old_key]
+
+            # Add edge with new input_slot
+            new_edge = GraphEdge(
+                source_id=edge.source_id,
+                target_id=edge.target_id,
+                output_slot=edge.output_slot,
+                input_slot=new_slot,
+                content=edge.content,
+                content_type=edge.content_type,
+                content_embedding_names=edge.content_embedding_names,
+                extra=edge.extra
+            )
+            new_key = (new_edge.source_id, new_edge.target_id, new_edge.output_slot, new_edge.input_slot)
+            graph.edges[new_key] = new_edge
+
+    return graph
+
+
 ALL_RULES = [
     merge_sources_by_id,
     create_aggregation_nodes,
