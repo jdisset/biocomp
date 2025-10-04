@@ -6,8 +6,8 @@ complete control and understanding of the network structure.
 """
 
 import pytest
-from biocomp.network_new import Network
-from biocomp.recipe_new import CoTransfection, TranscriptionUnit, Slot, Recipe
+from biocomp.network import Network
+from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot, Recipe
 from biocomp.library import load_lib, LibraryContext
 
 
@@ -607,7 +607,7 @@ def test_uorf_ern_network(uorf_ern_network):
 
 
 def test_simple_aggregation_compg(lib, simple_aggregation):
-    from biocomp.network_new import recipe_to_networks
+    from biocomp.network import recipe_to_networks
     import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
@@ -632,7 +632,7 @@ def test_simple_aggregation_compg(lib, simple_aggregation):
 
 
 def test_multi_cotx_aggregation_compg(lib, multi_cotx_aggregation):
-    from biocomp.network_new import recipe_to_networks
+    from biocomp.network import recipe_to_networks
     import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
@@ -652,7 +652,7 @@ def test_multi_cotx_aggregation_compg(lib, multi_cotx_aggregation):
 
 
 def test_complex_ern_compg(lib, complex_ern_network):
-    from biocomp.network_new import recipe_to_networks
+    from biocomp.network import recipe_to_networks
     import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
@@ -689,7 +689,7 @@ def test_complex_ern_compg(lib, complex_ern_network):
 
 
 def test_uorf_ern_compg(lib, uorf_ern_network):
-    from biocomp.network_new import recipe_to_networks
+    from biocomp.network import recipe_to_networks
     import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
@@ -711,7 +711,7 @@ def test_uorf_ern_compg(lib, uorf_ern_network):
 
 
 def test_simple_single_ern_compg_detailed(lib, simple_single_ern):
-    from biocomp.network_new import recipe_to_networks
+    from biocomp.network import recipe_to_networks
     import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
@@ -736,7 +736,7 @@ def test_simple_single_ern_compg_detailed(lib, simple_single_ern):
 
 
 def test_variable_uorf_compg_params(lib, variable_uorf_network):
-    from biocomp.network_new import recipe_to_networks
+    from biocomp.network import recipe_to_networks
     import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
@@ -759,7 +759,7 @@ def test_variable_uorf_compg_params(lib, variable_uorf_network):
 
 
 def test_multi_aggregation_ern_compg_structure(lib, multi_aggregation_ern):
-    from biocomp.network_new import recipe_to_networks
+    from biocomp.network import recipe_to_networks
     import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):

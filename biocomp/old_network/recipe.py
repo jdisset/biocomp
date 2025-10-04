@@ -1,6 +1,6 @@
-from .library import PartsLibrary as PartsLibrary
-from . import utils as ut
-from .network import Network, inverted_network
+from biocomp.library import PartsLibrary as PartsLibrary
+from biocomp import utils as ut
+from biocomp.old_network.network import Network, inverted_network
 from pathlib import Path
 import numpy as np
 import pandas as pd

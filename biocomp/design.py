@@ -13,7 +13,7 @@ from biocomp.utils import (
     ArbitraryModel,
     PartialFunctionResult,
 )
-from biocomp.network import Network, CoTransfection, Unit, Slot
+from biocomp.old_network.network import Network, CoTransfection, Unit, Slot
 from biocomp.train import create_counter
 import biocomp.utils
 from assertpy import assert_that

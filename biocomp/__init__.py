@@ -2,9 +2,12 @@ from .library import PartsLibrary as PartsLibrary
 
 from .network import (
     Network as Network,
-    Slot as Slot,
+    recipe_to_networks as recipe_to_networks,
+)
+
+from .recipe import (
+    Recipe as Recipe,
+    CoTransfection as CoTransfection,
     TranscriptionUnit as TranscriptionUnit,
-    TranscriptionUnitGenerator as TranscriptionUnitGenerator,
-    transcription_unit_from_L1 as transcription_unit_from_L1,
-    inverted_network as inverted_network,
+    Slot as Slot,
 )

@@ -12,9 +12,9 @@ import json5
 from pathlib import Path
 from collections import Counter
 
-import biocomp.recipe_old as reco
-import biocomp.recipe_new as recn
-import biocomp.network_new as netn
+import biocomp.old_network.recipe as reco
+import biocomp.recipe as recn
+import biocomp.network as netn
 import biocomp.biorules as br
 from biocomp.graphengine import apply_rule_sequence, graphs_are_isomorphic
 from biocomp.library import load_lib, LibraryContext

@@ -1,6 +1,6 @@
 from biocomp.library import LibraryContext
-from biocomp.recipe_new import Recipe, CoTransfection, TranscriptionUnit, Slot
-from biocomp.network_new import recipe_to_networks
+from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot
+from biocomp.network import recipe_to_networks
 import biocomp.biorules as br
 import pytest
 
@@ -215,7 +215,7 @@ def test_variable_uorf_options_preserved(lib):
 
 def test_l1_plasmid_roundtrip(lib):
     """Test roundtrip with L1 plasmids that expand from library"""
-    from biocomp.recipe_new import dict_to_recipe
+    from biocomp.recipe import dict_to_recipe
 
     old_format = {
         "name": "l1_test",

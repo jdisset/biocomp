@@ -7,13 +7,13 @@ This test suite validates:
 """
 
 import pytest
-from biocomp.network_new import build_central_dogma_graph_direct, old_network_compg_to_graphstate, Network
+from biocomp.network import build_central_dogma_graph_direct, old_network_compg_to_graphstate, Network
 from biocomp.library import LibraryContext
 import biocomp.biorules as br
 from biocomp.graphengine import apply_rule_sequence, apply_rule, graphs_are_isomorphic
 from biocomp.inversion import invert_all_paths
-import biocomp.recipe_old as reco
-import biocomp.recipe_new as recn
+import biocomp.old_network.recipe as reco
+import biocomp.recipe as recn
 from pathlib import Path
 import os
 import json5

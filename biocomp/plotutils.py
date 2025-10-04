@@ -4,7 +4,7 @@ import numpy as np
 from biocomp import utils as ut
 from biocomp.datautils import DataRescaler, IdentityRescaler
 import matplotlib.pyplot as plt
-from biocomp.network import Network
+from biocomp.old_network.network import Network
 from biocomp.utils import ArbitraryModel
 from dracon.utils import dracontainer_aware_json
 import string
