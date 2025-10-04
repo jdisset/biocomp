@@ -84,8 +84,7 @@ def build_old_network(recipe_path, lib):
 
 def build_new_network_cdg(recipe, lib):
     """Build CDG using new declarative system"""
-    new_net = netn.Network(recipe=recipe.content)
-    cdg = netn.build_central_dogma_graph_direct(new_net, lib, dual=True)
+    cdg = netn.build_central_dogma_graph_direct(recipe.content, lib, dual=True)
     return cdg
 
 

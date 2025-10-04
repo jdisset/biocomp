@@ -8,15 +8,21 @@ from pydantic import BaseModel, ConfigDict
 import pandas as pd
 import numpy as np
 
-from biocomp.recipe_new import Recipe, TranscriptionUnit, CoTxList
+from biocomp.library import LibraryContext, PartsLibrary
+from biocomp.recipe_new import Recipe, TranscriptionUnit, CoTxList, Slot, CoTransfection
 from biocomp.logging_config import get_logger
-from biocomp.library import PartsLibrary, LibraryContext
-from biocomp.graphengine import GraphState, GraphNode, GraphEdge, Part, InverseSpec
+from biocomp.graphengine import (
+    GraphState,
+    GraphNode,
+    GraphEdge,
+    Part,
+    InverseSpec,
+    apply_rule_sequence,
+)
 from biocomp.graphrules import GraphRewritingRule
-from functools import cached_property, cache
+import biocomp.biorules as br
 
 # TODO:
-# - [ ] bring back all the interfaces from old network (nb_outputs, etc)
 # - [ ] the network stat tools
 # - [ ] layer annotations for ERN
 
@@ -29,10 +35,11 @@ class Network(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: Optional[str] = None
-    recipe: Optional[CoTxList] = None
+    metadata: dict[str, Any] = {}
     compute_graph: Optional[GraphState] = None
 
     def get_output_compute_node(self) -> GraphNode:
+        assert self.compute_graph is not None
         output_nodes = [n for n in self.compute_graph.nodes.values() if n.node_type == "output"]
         assert len(output_nodes) == 1, f"Invalid number of output nodes: {len(output_nodes)}"
         return output_nodes[0]
@@ -48,12 +55,14 @@ class Network(BaseModel):
     def get_input_from_output(self, output_arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
         """Given an array of output values, returns the columns that are inputs of the inverted network,
         properly ordered by input number"""
+        assert self.compute_graph is not None
         if output_arr is None:
             return None
         mapping = self.get_inverted_input_positions()
         return output_arr[:, [mapping[i] for i in range(len(mapping))]]
 
     def get_inverted_input_proteins(self, include_biases: bool = False) -> list[str]:
+        assert self.compute_graph is not None
         mapping = self.get_inverted_input_positions(include_biases)
         output_proteins = self.get_output_proteins()
         assert len(mapping) <= len(output_proteins), f"Invalid mapping: {mapping}"
@@ -61,6 +70,7 @@ class Network(BaseModel):
 
     def get_inverted_input_positions(self, include_biases: bool = False) -> dict[int, int]:
         """Returns a mapping from input position to output position"""
+        assert self.compute_graph is not None
         mapping = {}
         mask_types = ["input"]
         if include_biases:
@@ -79,25 +89,12 @@ class Network(BaseModel):
 
     def get_output_proteins(self, only_dependent_outputs: bool = False) -> list[str]:
         """Returns the names of all proteins that are outputs of the network"""
+        assert self.compute_graph is not None
         if only_dependent_outputs:
             return self.get_dependent_output_proteins()
 
         onode = self.get_output_compute_node()
 
-        # Try to use cg_cdg_input if available (from old network conversion)
-        if "cg_cdg_input" in onode.extra:
-            # For backward compatibility - use the order from cdg_input
-            # This is the order the proteins were stored in the central dogma graph
-            incoming_edges = self.compute_graph.get_incoming_edges(onode.node_id)
-            # Create a map from input_slot to protein name
-            slot_to_protein = {}
-            for edge in incoming_edges:
-                if edge.content and edge.content_type == "PRT":
-                    slot_to_protein[edge.input_slot] = edge.content[0].name
-            # Return in order of input slots
-            return [slot_to_protein[i] for i in sorted(slot_to_protein.keys())]
-
-        # For new networks, use input_slot ordering
         incoming_edges = self.compute_graph.get_incoming_edges(onode.node_id)
         output_proteins = []
         for edge in sorted(incoming_edges, key=lambda e: e.input_slot):
@@ -108,12 +105,14 @@ class Network(BaseModel):
 
     def get_dependent_output_proteins(self) -> list[str]:
         """Returns the names of the proteins that are outputs of the network and are not inverted inputs"""
+        assert self.compute_graph is not None
         all_outputs = self.get_output_proteins()
         input_proteins = self.get_inverted_input_proteins(include_biases=True)
         return [p for p in all_outputs if p not in input_proteins]
 
     def get_dependent_output_mask(self) -> np.ndarray:
         """Returns a boolean mask of the output proteins that are dependent on the inputs"""
+        assert self.compute_graph is not None
         n_outputs = self.nb_outputs
         input_positions = self.get_inverted_input_positions(include_biases=True).values()
         dependent_outputs = [i for i in range(n_outputs) if i not in input_positions]
@@ -125,7 +124,9 @@ class Network(BaseModel):
         """Sets this input protein as a bias node (instead of an input one)"""
         original_mapping = self.get_inverted_input_positions()
         output_proteins = self.get_output_proteins()
-        assert input_protein_name in output_proteins, f"Invalid input protein name: {input_protein_name}"
+        assert input_protein_name in output_proteins, (
+            f"Invalid input protein name: {input_protein_name}"
+        )
         output_position = output_proteins.index(input_protein_name)
         assert output_position in original_mapping.values()
 
@@ -140,7 +141,7 @@ class Network(BaseModel):
                     node_id=node.node_id,
                     node_type="bias",
                     is_inverse_of=node.is_inverse_of,
-                    extra=node.extra
+                    extra=node.extra,
                 )
                 found = True
                 break
@@ -157,7 +158,9 @@ class Network(BaseModel):
         """Sets this bias protein back as an input node (instead of a bias one)"""
         original_mapping = self.get_inverted_input_positions()
         output_proteins = self.get_output_proteins()
-        assert bias_protein_name in output_proteins, f"Invalid bias protein name: {bias_protein_name}"
+        assert bias_protein_name in output_proteins, (
+            f"Invalid bias protein name: {bias_protein_name}"
+        )
         output_position = output_proteins.index(bias_protein_name)
 
         assert output_position not in original_mapping.values(), (
@@ -178,7 +181,7 @@ class Network(BaseModel):
                     node_id=node.node_id,
                     node_type="input",
                     is_inverse_of=node.is_inverse_of,
-                    extra=new_extra
+                    extra=new_extra,
                 )
                 found = True
                 break
@@ -210,15 +213,128 @@ class Network(BaseModel):
                 node_id=node.node_id,
                 node_type=node.node_type,
                 is_inverse_of=node.is_inverse_of,
-                extra=new_extra
+                extra=new_extra,
             )
 
     def to_recipe(self) -> Recipe:
         """Converts the network back to a Recipe object"""
-        raise NotImplementedError("to_recipe not yet implemented for new Network")
+        cotx_groups = self._extract_cotx_groups()
+        tus_by_cotx = self._build_transcription_units(cotx_groups)
+
+        content = []
+        for group_id in sorted(cotx_groups.keys()):
+            info = cotx_groups[group_id]
+            content.append(
+                CoTransfection(
+                    name=group_id if group_id != "cotx_1" or len(cotx_groups) > 1 else None,
+                    units=tus_by_cotx[group_id],
+                    ratios=info["ratios"] if len(info["ratios"]) > 1 else None,
+                )
+            )
+
+        metadata_dict = {k: v for k, v in self.metadata.items() if k not in ["name", "description"]}
+
+        return Recipe(
+            name=self.name or self.metadata.get("name"),
+            description=self.metadata.get("description"),
+            metadata=metadata_dict if metadata_dict else None,
+            content=content,
+        )
+
+    def _extract_cotx_groups(self) -> dict[str, dict]:
+        cotx_groups = {}
+        assert self.compute_graph is not None
+
+        for node in self.compute_graph.nodes.values():
+            if node.node_type == "aggregation":
+                group_id = node.extra["cotx_group"]
+                cotx_groups[group_id] = {
+                    "ratios": node.extra["ratios"],
+                    "source_ids": node.extra["members"],
+                }
+
+        for node in self.compute_graph.nodes.values():
+            if node.node_type == "source":
+                group_id = node.extra.get("cotx_group")
+                source_id = node.extra.get("source_id")
+                if group_id not in cotx_groups:
+                    cotx_groups[group_id] = {
+                        "ratios": [node.extra.get("ratio", 1.0)],
+                        "source_ids": [source_id],
+                    }
+
+        return cotx_groups
+
+    def _build_transcription_units(self, cotx_groups: dict) -> dict[str, list[TranscriptionUnit]]:
+        tus_by_cotx = {}
+        for group_id, info in cotx_groups.items():
+            tus = []
+            for source_id in info["source_ids"]:
+                source_node = self._find_source_node(source_id, group_id)
+                if source_node:
+                    slots = self._extract_slots_from_source(source_node)
+                    tus.append(
+                        TranscriptionUnit(
+                            name=source_node.extra.get("name", ""),
+                            slots=slots,
+                            source=source_id,
+                        )
+                    )
+            tus_by_cotx[group_id] = tus
+        return tus_by_cotx
+
+    def _find_source_node(self, source_id: str, cotx_group: str):
+        assert self.compute_graph is not None
+        for node in self.compute_graph.nodes.values():
+            if (
+                node.node_type == "source"
+                and node.extra.get("source_id") == source_id
+                and node.extra.get("cotx_group") == cotx_group
+            ):
+                return node
+        return None
+
+    def _extract_slots_from_source(self, source_node) -> list[Slot]:
+        assert self.compute_graph is not None
+        outgoing = self.compute_graph.get_outgoing_edges(source_node.node_id)
+        dna_edges = [e for e in outgoing if e.content_type == "DNA"]
+
+        if not dna_edges:
+            return []
+
+        dna_edge = dna_edges[0]
+        slots = []
+
+        dna_parts = [p.name for p in dna_edge.content]
+        embeddings = dna_edge.content_embedding_names or {}
+
+        if dna_parts:
+            slots.append(Slot(part=dna_parts[0]))
+
+        if "tc_rate" in embeddings:
+            tc_parts = embeddings["tc_rate"]
+            slots.append(Slot(part=list(tc_parts) if len(tc_parts) > 1 else tc_parts[0]))
+
+        if "tl_rate" in embeddings:
+            tl_parts = embeddings["tl_rate"]
+            if tl_parts and tl_parts != ("00_empty_tc",):
+                tl_parts_cleaned = [p if p != "00_empty_tc" else None for p in tl_parts]
+                slots.append(
+                    Slot(
+                        part=list(tl_parts_cleaned)
+                        if len(tl_parts_cleaned) > 1
+                        else tl_parts_cleaned[0]
+                    )
+                )
+
+        for part_name in dna_parts[1:]:
+            slots.append(Slot(part=part_name))
+
+        return slots
 
     def compute_dependency_map(self) -> dict[int, set[int]]:
         """Returns {node id -> set of upstream node ids}"""
+        assert self.compute_graph is not None
         dependency_map = {}
         for node_id, node in self.compute_graph.nodes.items():
             incoming = self.compute_graph.get_incoming_edges(node_id)
@@ -255,23 +371,34 @@ class Network(BaseModel):
 
 
 def recipe_to_networks(
-    recipe, rules: list[GraphRewritingRule], lib: PartsLibrary, invert=True, **kwargs
+    recipe: Recipe,
+    rules: Optional[list[GraphRewritingRule]] = None,
+    invert=True,
+    lib: Optional[PartsLibrary] = None,
 ) -> list[Network]:
     from biocomp.inversion import invert_all_paths
 
-    cdg = build_central_dogma_graph_direct(recipe, lib)
-    compg = apply_rule_sequence(br.ALL_RULES, cdg)
-    assert len(compg) == 1
+    rules = rules or br.ALL_RULES
+    lib = lib or LibraryContext.get_library()
+    assert lib is not None, "PartsLibrary must be provided or set in LibraryContext"
+
+    cdg = build_central_dogma_graph_direct(recipe.content, lib)
+    compg = apply_rule_sequence(rules, cdg)
+    assert len(compg) == 1, "Multiple computation graphs generated before inversion"
     compg = compg[0]
     compg = br.sort_output_edges(compg)
-    networks = invert_all_paths(compg) if invert else [compg]
-    names = []
-    for i, net in enumerate(networks):
-        if len(networks) == 1:
-            net_name = recipe.name or "network_1"
-        else:
-            net_name = f"{recipe.name or 'network'}_{i + 1}"
-        names.append(net_name)
+    graphs = invert_all_paths(compg) if invert else [compg]
+
+    result = []
+
+    for graph in graphs:
+        net = Network(compute_graph=graph)
+        dependent_outputs_names = "_".join(net.get_dependent_output_proteins())
+        base_name = recipe.name or "network"
+        net.name = f"{base_name}_{dependent_outputs_names}"
+        result.append(net)
+
+    return result
 
 
 class NetworkConstructionError(Exception):
@@ -347,19 +474,19 @@ def _make_hashable(params, tu_obj):
     return tuple(sorted((k, v) for k, v in hashable_params.items()))
 
 
-def preprocess_network_tus(network: Network, lib: PartsLibrary) -> dict[str, Any]:
+def preprocess_network_tus(recipe: CoTxList, lib: PartsLibrary) -> dict[str, Any]:
     """
-    Parses the network recipe and returns a dictionary with all necessary
+    Parses the recipe and returns a dictionary with all necessary
     pre-calculated information for building either the primal or dual graph.
     """
-    if not network.recipe:
+    if not recipe:
         return {}
 
     tu_map = {}
     tu_to_cotx_map = {}
     global_tu_index = 0
 
-    for cotx_index, cotx_group in enumerate(network.recipe):
+    for cotx_index, cotx_group in enumerate(recipe):
         group_name = cotx_group.name or f"cotx_{cotx_index + 1}"
         for unit_index, unit in enumerate(cotx_group.units):
             # Create unique TUID that includes cotx group info for duplicate plasmids
@@ -394,7 +521,7 @@ def preprocess_network_tus(network: Network, lib: PartsLibrary) -> dict[str, Any
         not has_multi_value_params(tu) for tu in tu_map.values()
     )
 
-    return {"network": network, "tu_map": tu_map, "tu_info": tu_info, "is_committed": is_committed}
+    return {"recipe": recipe, "tu_map": tu_map, "tu_info": tu_info, "is_committed": is_committed}
 
 
 def _build_cdg_primal_from_preprocessed(
@@ -489,7 +616,7 @@ def _build_cdg_dual_from_preprocessed(
     preprocessed_data: dict[str, Any], lib: PartsLibrary, custom_outputs_parts=None
 ) -> GraphState:
     """Builds the dual CDG where nodes are transformations."""
-    network = preprocessed_data["network"]
+    recipe = preprocessed_data["recipe"]
     tu_info = preprocessed_data["tu_info"]
     is_committed = preprocessed_data["is_committed"]
     outputs_list = (custom_outputs_parts or []) + lib.parts[
@@ -501,7 +628,7 @@ def _build_cdg_dual_from_preprocessed(
 
     # Create a mapping from (source_id, cotx_group) to normalized ratio
     source_cotx_to_ratio_map: dict[tuple[str | None, str], float] = {}
-    for i, cotx in enumerate(network.recipe or []):
+    for i, cotx in enumerate(recipe or []):
         group_name = cotx.name or f"cotx_{i + 1}"
         raw_ratios = cotx.ratios or [1.0] * len(cotx.units)
         ratio_sum = sum(raw_ratios)
@@ -657,12 +784,12 @@ def _build_cdg_dual_from_preprocessed(
 
 
 def build_central_dogma_graph_direct(
-    network: Network, lib: PartsLibrary, custom_outputs_parts=None, dual: bool = True
+    recipe: CoTxList, lib: PartsLibrary, custom_outputs_parts=None, dual: bool = True
 ) -> GraphState:
     """
-    Builds a central dogma graph directly from a Network definition into a GraphState.
+    Builds a central dogma graph directly from a recipe into a GraphState.
     Args:
-        network: The Network object defining the recipe.
+        recipe: The CoTxList defining the recipe.
         lib: The parts library.
         custom_outputs_parts: Optional list of part names to be considered outputs.
         dual: If False (default), builds the primal graph where nodes are biological
@@ -670,7 +797,7 @@ def build_central_dogma_graph_direct(
               are transformations (Source, Transcription, Translation).
 
     """
-    preprocessed_data = preprocess_network_tus(network, lib)
+    preprocessed_data = preprocess_network_tus(recipe, lib)
     if not preprocessed_data:
         return GraphState(nodes={}, edges={})
 
