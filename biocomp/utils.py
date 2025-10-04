@@ -12,7 +12,7 @@ import time
 import json5
 import numpy as np
 from contextlib import contextmanager
-from pkg_resources import get_distribution
+from importlib.metadata import version
 from functools import partial
 import subprocess
 from assertpy import add_extension
@@ -833,7 +833,7 @@ def get_git_commit_hash():
 
 
 def get_biocomp_version():
-    return get_distribution("biocomp").version
+    return version("biocomp")
 
 
 def uniqueIdGenerator(start=0):

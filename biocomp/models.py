@@ -1,6 +1,7 @@
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy.orm import registry
 from typing import Optional
+from pydantic import ConfigDict
 
 
 class PartsDB(SQLModel, registry=registry()):
@@ -25,12 +26,12 @@ def int_or_none(s: str) -> Optional[int]:
 
 
 class Part(PartsDB, table=True):
+    model_config = ConfigDict(
+        alias_generator=lambda field_name: ALIASES.get(field_name, field_name)
+    )
+
     name: str = Field(primary_key=True)
     category: str = Field(foreign_key="category.name")
-
-    class Config:
-        # SUPER HACKY but waiting for sqlmodel to fix serialization_alias support...
-        alias_generator = lambda field_name: ALIASES.get(field_name, field_name)
 
 
 class L0(PartsDB, table=True):
@@ -47,6 +48,10 @@ class L0(PartsDB, table=True):
 
 
 class L1(PartsDB, table=True):
+    model_config = ConfigDict(
+        alias_generator=lambda field_name: ALIASES.get(field_name, field_name)
+    )
+
     id: str = Field(primary_key=True)
     notes: Optional[str] = None
     constructed: bool
@@ -61,10 +66,6 @@ class L1(PartsDB, table=True):
         default=None, foreign_key="l0.id", sa_column_kwargs={"name": "3'UTR"}, alias="3'UTR"
     )
     terminator: Optional[str] = Field(default=None, foreign_key="l0.id")
-
-    class Config:
-        # SUPER HACKY but waiting for sqlmodel to fix serialization_alias support...
-        alias_generator = lambda field_name: ALIASES.get(field_name, field_name)
 
 
 class L2(PartsDB, table=True):
