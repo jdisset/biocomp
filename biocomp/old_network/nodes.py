@@ -16,7 +16,7 @@ from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, make_vie
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from biocomp.old_network.compute import ComputeNode, ComputeStack
+    from .compute import ComputeNode, ComputeStack
 
 from jax.typing import ArrayLike
 from typing import Callable, Tuple, List, Dict

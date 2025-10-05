@@ -2,14 +2,10 @@
 from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
-from queue import PriorityQueue
-
-from collections import deque
-from typing import Tuple, List, Dict, Callable, Optional, Union, Any, TypeAlias, Generic, TypeVar
+from typing import Callable, Optional, Union, Any, TypeVar
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pandas as pd
 from jax import vmap
 from jax.tree_util import Partial as partial
 from jax.typing import ArrayLike
@@ -20,6 +16,7 @@ from . import utils as ut
 from biocomp.utils import ArbitraryModel, EncodedPartialFunction
 from .parameters import ParameterTree
 from . import nodes
+from .graphengine import GraphState
 
 from biocomp.logging_config import get_logger
 
@@ -30,6 +27,23 @@ PRNGKey = Union[jnp.ndarray, np.ndarray, int]
 NdArray = Union[jnp.ndarray, np.ndarray]
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class NodeKey:
+    """Lightweight, immutable reference to a specific node within a specific network in the stack."""
+
+    network_id: int
+    node_id: int
+
+    @staticmethod
+    def generate_type_signature(graph: GraphState, node_id: int) -> str:
+        """Generate a type signature for a node based on its type and number of inputs/outputs"""
+        node = graph.nodes[node_id]
+        n_inputs = len(graph.get_incoming_edges(node_id))
+        n_outputs = len(graph.get_outgoing_edges(node_id))
+        return f"{node.node_type}_{n_inputs}_{n_outputs}"
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -44,8 +58,8 @@ class ComputeConfig(ArbitraryModel):
     used by the implementations to store and share information across nodes.
     """
 
-    node_functions: Optional[Dict[str, EncodedPartialFunction]] = None
-    extra: Optional[Dict[str, Any]] = None
+    node_functions: Optional[dict[str, EncodedPartialFunction]] = None
+    extra: Optional[dict[str, Any]] = None
 
     def get_node_implementation(self, node_name: str, module_name: str = nd.__name__):
         if self.node_functions is None:
@@ -79,109 +93,22 @@ DEFAULT_COMPUTE_CONFIG = ComputeConfig.model_validate(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-## {{{                       --     Virtual Node     --
-
-
-@dataclass
-class VirtualNode:
-    """A virtual node does match with a compute node in the network, but it is
-    used to represent a node in the stack, with a unique id, and a type signature
-    that depends on the topology of the network. It also has a batch_order, which
-    is used to sort the nodes in the stack, so that the nodes that need to be computed
-    first are at the top of the stack."""
-
-    network: Optional[Network] = None
-    network_id: Optional[int] = None
-    type_signature: Optional[str] = None  # type of node, and number of inputs and outputs
-    compute_node_id: Optional[int] = None  # id of the compute node in the network
-    node_id: Optional[int] = None  # unique id for the node in the stack
-    batch_order: Optional[int] = 0  # only used for sorting and debugging
-
-    @staticmethod
-    def generate_type_signature(network: Network, compute_node_id: int) -> str:
-        assert network.compute_graph is not None, "No compute graph"
-        ntype = network.compute_graph.at[compute_node_id, "type"]
-        n_inputs = len(network.compute_graph.at[compute_node_id, "input_from"])
-        n_outputs = len(network.compute_graph.at[compute_node_id, "output_to"])
-        return f"{ntype}_{n_inputs}_{n_outputs}"
-
-    @classmethod
-    def from_node(
-        cls, network_id: int, network: Network, compute_node_id: int, batch_order: int = 0
-    ) -> VirtualNode:
-        type_signature = VirtualNode.generate_type_signature(network, compute_node_id)
-        return cls(
-            network_id=network_id,
-            network=network,
-            compute_node_id=compute_node_id,
-            type_signature=type_signature,
-            batch_order=batch_order,
-        )
-
-    def set_compute_node_column(self, column_name: str, value: Any):
-        assert self.network is not None, "No network"
-        assert self.compute_node_id is not None, "No compute node id"
-        assert self.network.compute_graph is not None, "No compute graph"
-        self.network.compute_graph.at[self.compute_node_id, column_name] = value
-
-    def get_compute_node(self, column_name: Optional[str] = None) -> Optional[Any]:
-        if self.network is None:
-            return None
-        assert self.compute_node_id is not None, "No compute node id"
-        assert self.network.compute_graph is not None, "No compute graph"
-        if column_name is None:
-            return self.network.compute_graph.loc[self.compute_node_id]
-        else:
-            return self.network.compute_graph.at[self.compute_node_id, column_name]
-
-    def get_inverse_node(self, stack: ComputeStack) -> VirtualNode:
-        is_inverse_of = self.get_compute_node("is_inverse_of")
-        assert isinstance(is_inverse_of, int), "Node is not an inverse"
-        assert is_inverse_of is not None, "Node is not an inverse"
-        assert self.network_id is not None, "No network id"
-        inv = stack.get_node_from_net_and_compute_id(self.network_id, is_inverse_of)
-        assert inv is not None, "Inverse not found"
-        return inv
-
-    def get_layer_and_local_id(self, stack):
-        if stack is None:
-            return None, None
-        return stack.node_map[(self.network_id, self.compute_node_id)]
-
-    def __repr__(self):
-        out = f"{self.network_id}/{self.compute_node_id}/{self.node_id if self.node_id is not None else self.batch_order}-{self.type_signature}"
-        return f"{out}"
-
-    def __hash__(self):
-        return hash((self.network_id, self.node_id, self.type_signature, self.batch_order))
-
-    def __deepcopy__(self, memo):
-        # copy everything except the network (just a reference)
-        new_obj = self.__class__.__new__(self.__class__)
-        memo[id(self)] = new_obj
-        for k, v in self.__dict__.items():
-            if k == "network":
-                setattr(new_obj, k, v)
-            else:
-                setattr(new_obj, k, deepcopy(v, memo))
-        return new_obj
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     Compute Layer     --
-NodeInput = Tuple[int, int, int]  #  (net_id, compute_node_id, slot_id)
+NodeInput = tuple[int, int, int]  #  (net_id, compute_node_id, slot_id)
 
 
 @dataclass
 class ComputeLayer:
-    nodes: List[VirtualNode]
+    node_keys: list[NodeKey]
+    stack: Optional["ComputeStack"] = None
     layer_id: Optional[int] = None
 
     # information about the function to apply
     f_type: Optional[str] = None
-    f_out_shapes: Optional[List[Tuple[int]]] = None
-    f_input_shapes: Optional[List[Tuple[int]]] = None
+    f_out_shapes: Optional[list[tuple[int]]] = None
+    f_input_shapes: Optional[list[tuple[int]]] = None
 
     f_prepare: Optional[Callable] = None
     f_apply: Optional[Callable] = None
@@ -192,7 +119,9 @@ class ComputeLayer:
     def setup(self, config: ComputeConfig, stack: ComputeStack):
         self.check()
 
-        self.f_type = self.nodes[0].get_compute_node("type")
+        first_key = self.node_keys[0]
+        first_graph = stack.networks[first_key.network_id].compute_graph
+        self.f_type = first_graph.nodes[first_key.node_id].node_type
 
         if self.f_type == "input":
             self.f_out_shapes = [(1,)]
@@ -202,10 +131,14 @@ class ComputeLayer:
 
         # get the shapes of the inputs. We'll collect all the inputs for each node
         # to make sure they are all the same
-        node_inputs: List[List[NodeInput]] = []
-        for n in self.nodes.values():
-            ninp = n.get_compute_node("input_from")
-            node_inputs.append([(n.network_id, *i) for i in ninp])
+        node_inputs: list[list[NodeInput]] = []
+        for key in self.node_keys:
+            graph = stack.networks[key.network_id].compute_graph
+            incoming_edges = graph.get_incoming_edges(key.node_id)
+            # sort by input_slot to match old behavior
+            incoming_edges_sorted = sorted(incoming_edges, key=lambda e: e.input_slot)
+            ninp = [(edge.source_id, edge.output_slot) for edge in incoming_edges_sorted]
+            node_inputs.append([(key.network_id, *i) for i in ninp])
 
         # get the shapes of the inputs
         all_input_shapes = []  # list of list of shapes
@@ -245,29 +178,43 @@ class ComputeLayer:
         self.f_commit = impl.commit
         self.is_built = True
 
-    def get_n_outputs(self):
-        output_to = self.nodes[0].get_compute_node("output_to")
-        return len(output_to)
+    def get_n_outputs(self) -> int:
+        """Get the number of outputs for nodes in this layer (all nodes in a layer have the same type signature)"""
+        first_key = self.node_keys[0]
+        graph = self.stack.networks[first_key.network_id].compute_graph
+        return len(graph.get_outgoing_edges(first_key.node_id))
 
-    def flattened_output_shape(self):
-        return int(len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes]))
+    def flattened_output_shape(self) -> int:
+        return int(len(self.node_keys) * np.sum([np.prod(s) for s in self.f_out_shapes]))
 
-    def type_str(self):
-        return self.nodes[0].get_compute_node("type")
+    def type_str(self) -> str:
+        first_key = self.node_keys[0]
+        return (
+            self.stack.networks[first_key.network_id]
+            .compute_graph.nodes[first_key.node_id]
+            .node_type
+        )
 
     def __repr__(self):
         ftype = self.type_str()
-        return f"Layer {self.layer_id} ({ftype}) with {len(self.nodes)} nodes"
+        return f"Layer {self.layer_id} ({ftype}) with {len(self.node_keys)} nodes"
 
     def __hash__(self):
-        return hash(tuple(self.nodes))
+        return hash(tuple(self.node_keys))
 
     def check(self):
-        assert len(set(n.type_signature for n in self.nodes.values())) == 1, "Different types in layer"
+        """Ensure all nodes in the layer have the same type signature"""
+        type_sigs = {
+            NodeKey.generate_type_signature(
+                self.stack.networks[key.network_id].compute_graph, key.node_id
+            )
+            for key in self.node_keys
+        }
+        assert len(type_sigs) == 1, f"Different types in layer: {type_sigs}"
 
-    def commit(self, params: ParameterTree, **kwargs):
+    def commit(self, params: ParameterTree, stack: "ComputeStack", **kwargs):
         if self.f_commit is not None:
-            self.f_commit(params, self.nodes, **kwargs)
+            self.f_commit(params, self.node_keys, stack, **kwargs)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -275,14 +222,14 @@ class ComputeLayer:
 
 @dataclass
 class ComputeStack:
-    networks: List[Network]
-    layers: Optional[List[ComputeLayer]] = None
+    networks: list[Network]
+    layers: Optional[list[ComputeLayer]] = None
 
-    layers_start_index: Optional[List[int]] = None
-    output_shape: Optional[Tuple[int]] = None
+    layers_start_index: Optional[list[int]] = None
+    output_shape: Optional[tuple[int]] = None
 
     # node_map is (network_id, compute_node_id) -> (layer_id, node_loc)
-    node_map: Optional[Dict[Tuple[int, int], Tuple[int, int]]] = None
+    node_map: Optional[dict[tuple[int, int], tuple[int, int]]] = None
 
     total_nb_of_outputs: Optional[int] = None
     total_nb_of_inputs: Optional[int] = None
@@ -294,7 +241,7 @@ class ComputeStack:
 
     apply: Optional[Callable] = None
 
-    post_process_callbacks: Optional[List[Callable]] = None
+    post_process_callbacks: Optional[list[Callable]] = None
 
     ### {{{                     --     public interface     --
 
@@ -335,14 +282,14 @@ class ComputeStack:
             assert l_id == layer.layer_id, "Layer id mismatch"
             rng_key, _ = jax.random.split(rng_key)
             logger.debug(
-                f"Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}"
+                f"Initializing {len(layer.node_keys)} nodes in layer {l_id}/{len(self.layers)}"
             )
             logger.debug(f"Layer type: {layer.f_type}")
             logger.debug(f"Layer input shapes: {layer.f_input_shapes}")
             logger.debug(f"Layer output shapes: {layer.f_out_shapes}")
             if layer.f_prepare is not None:
                 try:
-                    layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
+                    layer.f_prepare(params, nodelist_keys=layer.node_keys, stack=self, key=rng_key)
                 except Exception as e:
                     logger.error(f"Error in layer {l_id} preparation:")
                     logger.error(f"Layer type: {layer.f_type}")
@@ -400,10 +347,8 @@ class ComputeStack:
         assert self.node_map is not None, "No node map"
         assert self.layers_start_index is not None, "No layers start index"
         assert self.layers is not None, "No layers"
-        output_node = self.networks[
-            network_id
-        ].get_output_compute_node()  # a row from the compute df
-        node_id = output_node.name
+        output_node = self.networks[network_id].get_output_compute_node()
+        node_id = output_node.node_id
         layer_id, node_loc = self.node_map[(network_id, node_id)]
         out_shape = self.layers[layer_id].f_out_shapes
         start_index = self.layers_start_index[layer_id] + node_loc * np.sum(
@@ -411,10 +356,10 @@ class ComputeStack:
         )
         return int(start_index), out_shape
 
-    def get_node_from_net_and_compute_id(
+    def get_node_key_from_net_and_compute_id(
         self, network_id: int, compute_node_id: int
-    ) -> VirtualNode:
-        """Returns the virtual node corresponding to the given network and compute node ids"""
+    ) -> NodeKey:
+        """Returns the NodeKey corresponding to the given network and compute node ids"""
         assert self.node_map is not None, "No node map"
         assert self.layers is not None, "Stack has no layers"
         assert (
@@ -422,7 +367,7 @@ class ComputeStack:
             compute_node_id,
         ) in self.node_map, f"Node not found: {network_id}/{compute_node_id}"
         layer_id, node_loc = self.node_map[(network_id, compute_node_id)]
-        return self.layers[layer_id].nodes[node_loc]
+        return self.layers[layer_id].node_keys[node_loc]
 
     def copy(self):
         # we only deepcopy the layers, not the networks
@@ -431,24 +376,15 @@ class ComputeStack:
     def commit(self, params: ParameterTree, **kwargs):
         # create copies of all networks
         network_copies = [deepcopy(net) for net in self.networks]
-        
-        # temporarily replace node network references with copies
-        original_network_refs = []
-        for layer in self.layers:
-            for node in layer.nodes.values():
-                # save original reference
-                original_network_refs.append((node, node.network))
-                # assign the copy
-                node.network = network_copies[node.network_id]
-        
+
+        # create a temporary stack with network copies for commit operations
+        temp_stack = ComputeStack(network_copies, self.layers)
+        temp_stack.node_map = self.node_map
+
         # run commit on all layers (will modify the network copies)
         for layer in self.layers:
-            layer.commit(params, **kwargs)
-        
-        # restore original network references
-        for node, original_network in original_network_refs:
-            node.network = original_network
-        
+            layer.commit(params, stack=temp_stack, **kwargs)
+
         # return the modified network copies
         return network_copies
 
@@ -549,43 +485,47 @@ class ComputeStack:
         return self
 
     def check(self):
+        """Validate the stack structure"""
         for l in self.layers:
             l.check()
-            for n in l.nodes.values():
-                assert id(n.network) == id(self.networks[n.network_id]), "Network mismatch"
-        assert self.layers[0].nodes[0].get_compute_node().type == "input", (
-            f"First node is not input: {self.layers[0].nodes[0]}"
-        )
-        for net_id in range(len(self.networks)):
-            prev = -1
-            for l in self.layers:
-                for n in l.nodes.values():
-                    if n.network_id == net_id:
-                        assert n.batch_order >= prev, (
-                            f"wrong batch order ({n.batch_order} < {prev} for {n})"
-                        )
-                        prev = n.batch_order
+            # verify all node keys reference valid networks and nodes
+            for key in l.node_keys:
+                assert key.network_id < len(self.networks), f"Invalid network_id: {key.network_id}"
+                assert key.node_id in self.networks[key.network_id].compute_graph.nodes, (
+                    f"Invalid node_id {key.node_id} in network {key.network_id}"
+                )
+        # verify first layer is input
+        first_key = self.layers[0].node_keys[0]
+        first_node = self.networks[first_key.network_id].compute_graph.nodes[first_key.node_id]
+        assert first_node.node_type == "input", f"First node is not input: {first_node.node_type}"
 
-    def get_all_nodes(self):
+    def get_all_node_keys(self) -> list[NodeKey]:
+        """Get all NodeKeys from all layers"""
         if self.layers is None:
             return []
-        return [n for l in self.layers for n in l.nodes.values()]
+        return [key for layer in self.layers for key in layer.node_keys]
 
-    def get_node_input_start_index(self, node: VirtualNode, input_slot: int) -> int:
+    def get_node_input_start_index(self, node_key: NodeKey, input_slot: int) -> int:
         """Returns the start index of the input #input_slot for the given node
         in the flattened full-stack output array"""
         assert self.node_map is not None, "No node map"
         if self.layers is None:
             raise ValueError("No layers")
 
-        input_compute_node_id, input_compute_node_outslot = node.get_compute_node("input_from")[
-            input_slot
-        ]
+        # get incoming edges for this node
+        graph = self.networks[node_key.network_id].compute_graph
+        incoming_edges = sorted(
+            graph.get_incoming_edges(node_key.node_id), key=lambda e: e.input_slot
+        )
+
+        input_edge = incoming_edges[input_slot]
+        input_compute_node_id = input_edge.source_id
+        input_compute_node_outslot = input_edge.output_slot
 
         input_layer_id, input_node_layer_loc = self.node_map[
-            (node.network_id, input_compute_node_id)
+            (node_key.network_id, input_compute_node_id)
         ]
-        this_node_layer_id, _ = self.node_map[(node.network_id, node.compute_node_id)]
+        this_node_layer_id, _ = self.node_map[(node_key.network_id, node_key.node_id)]
 
         assert input_layer_id < this_node_layer_id, "input layer must be before this layer"
 
@@ -611,12 +551,12 @@ class ComputeStack:
 
         return int(outslot_start)
 
-    def get_node_output_start_index(self, node: VirtualNode, output_slot: int) -> int:
+    def get_node_output_start_index(self, node_key: NodeKey, output_slot: int) -> int:
         """Returns the start index of the output #output_slot for the given node
         in the flattened full-stack output array"""
         assert self.node_map is not None, "No node map"
 
-        this_node_layer_id, this_node_pos = self.node_map[(node.network_id, node.compute_node_id)]
+        this_node_layer_id, this_node_pos = self.node_map[(node_key.network_id, node_key.node_id)]
         this_layer = self.layers[this_node_layer_id]
         assert len(this_layer.f_out_shapes) > output_slot, "Output slot out of range"
 
@@ -628,298 +568,15 @@ class ComputeStack:
 
         return int(node_start + out_shape_till_output)
 
-    @staticmethod
-    def topological_order(graph: pd.DataFrame):
-        """Returns a list of lists of compute nodes from the network,
-        where each node of a sublist can be computed independently of the others,
-        but each sublist must be computed in order."""
-        visited = set()
-        batches = []
-        while len(visited) < len(graph):
-            independent = [
-                i
-                for i, row in graph.iterrows()
-                if (not row["input_from"] or all([x[0] in visited for x in row["input_from"]]))
-                and i not in visited
-            ]
-            if not independent:
-                msg = f"No independent node. Remaining:{set(graph.index) - visited}. Visited:{visited}"
-                raise ValueError(msg)
-            visited.update(independent)
-            batches.append(independent)
-        return batches
-
-    @staticmethod
-    def make_all_topo_nodes(networks: List[Network]):
-        """Topological_order for all networks"""
-        return [
-            [
-                [VirtualNode.from_node(net_id, net, node_id, b_id) for node_id in node_batch]
-                for b_id, node_batch in enumerate(ComputeStack.topological_order(net.compute_graph))
-            ]
-            for net_id, net in enumerate(networks)
-        ]
-
-    @staticmethod
-    def get_networks_current_batch_number(
-        stack: ComputeStack, type_dict: dict[str, list[VirtualNode]]
-    ):
-        """Determines the current (minimum) batch number for each network in the stack.
-        The batch number is the order in which a node should be computed (topological order of a network).
-        type_dict maps node types to the list of all VirtualNode of that type, for all the nodes not yet in the stack.
-
-        Returns a list of the current batch number for each network. If a network has no current batch,
-        it means it has no nodes left to be computed and its batch number value will be None.
-        """
-        MAXINT = 2**60
-        current_batches = [MAXINT for _ in stack.networks]
-        for nodes in type_dict.values():
-            for n in nodes:
-                assert n.batch_order < MAXINT, "Node has no batch order"
-                current_batches[n.network_id] = min(current_batches[n.network_id], n.batch_order)
-        current_batches = [None if b == MAXINT else b for b in current_batches]
-        return current_batches
-
     ##────────────────────────────────────────────────────────────────────────────}}}
 
     ### {{{                         --     building     --{{{
 
-    @staticmethod
-    def make_smallest_stack(
-        stack: ComputeStack, type_dict: Dict[str, List[VirtualNode]], max_t: int = 1
-    ):
-        # Initialize the BFS queue with the initial state
-        bfs_queue = deque([(stack, type_dict, [], 0)])
-        iteration = 0
-
-        while bfs_queue:
-            iteration += 1
-
-            current_stack, current_type_dict, path, depth = bfs_queue.popleft()
-
-            # current_batches is a list of the current batch number for each network in the stack.
-            current_batches = ComputeStack.get_networks_current_batch_number(
-                current_stack, current_type_dict
-            )
-
-            if all(b is None for b in current_batches):  # no nodes left to compute
-                return current_stack
-
-            # possible_next_types is a list of types that are candidates for the next layer,
-            # i.e they contain nodes that that have a batch_order == current_batches[network_id]
-            # for at least one network
-            possible_next_types = []
-            for t, nodes in current_type_dict.items():
-                for n in nodes:
-                    can_be_computed = [
-                        n for n in nodes if n.batch_order == current_batches[n.network_id]
-                    ]
-                    if can_be_computed:
-                        possible_next_types.append((t, len(can_be_computed)))
-                        break
-
-            if max_t is not None:
-                # sort by decreasing number of nodes
-                possible_next_types = sorted(possible_next_types, key=lambda x: x[1], reverse=True)
-                possible_next_types = possible_next_types[:max_t]
-
-            assert possible_next_types, "No possible next type"
-
-            # we try every possible type for the next layer
-            for t, n in possible_next_types:
-                l, new_type_dict = ComputeStack.make_layer_from_current_batches(
-                    current_batches, current_type_dict, t
-                )
-                # l is a ComputeLayer, new_type_dict is a dict[str, list[VirtualNode]]
-                # without the nodes that were used in the layer
-                node_diff = len(current_type_dict[t]) - len(new_type_dict[t])
-                substack = ComputeStack(current_stack.networks, [l])
-                path_entry = (
-                    f"{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types"
-                )
-
-                assert n == node_diff, f"{n} != {node_diff}"
-
-                bfs_queue.append((substack, new_type_dict, path + [path_entry], depth + 1))
-
-        # If we reach here, we didn't find a solution
-        raise RuntimeError("No solution found")
-
-    @staticmethod
-    def make_smallest_stack_dfs(
-        stack: ComputeStack,
-        type_dict: Dict[str, List[VirtualNode]],
-        path=None,
-        depth=0,
-        max_depth=70,
-        max_t=1,
-    ):
-        if path == None:
-            path = []
-
-        # current_batches is a list of the current batch number for each network in the stack.
-        current_batches = ComputeStack.get_networks_current_batch_number(stack, type_dict)
-
-        if all(b is None for b in current_batches):  # no nodes left to compute
-            return stack
-
-        # possible_next_types is a list of types that are candidates for the next layer, i.e they contain
-        # nodes that that have a batch_order == current_batches[network_id] for at least one network
-        possible_next_types = []
-        for t, nodes in type_dict.items():
-            for n in nodes:
-                can_be_computed = [
-                    n for n in nodes if n.batch_order == current_batches[n.network_id]
-                ]
-                if can_be_computed:
-                    possible_next_types.append((t, len(can_be_computed)))
-                    break
-
-        if max_t is not None:
-            # we're basically doing beam search here, by only keeping the max_t types with the most nodes
-            possible_next_types = sorted(possible_next_types, key=lambda x: x[1], reverse=True)
-            possible_next_types = possible_next_types[:max_t]
-
-        assert possible_next_types, "No possible next type"
-        candidate_stacks = []
-        # we try every possible type for the next layer
-        for t, _ in possible_next_types:
-            l, new_type_dict = ComputeStack.make_layer_from_current_batches(
-                current_batches, type_dict, t
-            )
-            # l is a ComputeLayer, new_type_dict is a dict[str, list[VirtualNode]]
-            # without the nodes that were used in the layer
-            node_diff = len(type_dict[t]) - len(new_type_dict[t])
-            substack = ComputeStack(stack.networks, [l])
-            path_entry = f"{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types"
-            candidate_stacks.append(
-                ComputeStack.make_smallest_stack_dfs(
-                    substack, new_type_dict, path + [path_entry], depth + 1, max_depth, max_t
-                )
-            )
-
-        assert candidate_stacks, "No candidate stack"
-
-        if depth >= max_depth:
-            # raise a detailed error
-            msg = f"Max depth reached: {max_depth}\n"
-            msg += f"Current stack:\n{stack}\n"
-            msg += f"Current type_dict:\n{type_dict}\n"
-            msg += f"Current batches:\n{current_batches}\n"
-            msg += f"Possible next types:\n{possible_next_types}\n"
-            msg += f"Candidate stacks:\n{candidate_stacks}\n"
-            raise RuntimeError(msg)
-
-        # and we only keep the smallest stack
-        minstack = min(candidate_stacks, key=lambda s: len(s.layers))
-
-        return stack.extend(minstack)
-
-    @staticmethod
-    def heuristic(type_dict):
-        total_nodes_left = sum(len(nodes) for nodes in type_dict.values())
-        if not total_nodes_left:
-            return 0
-
-        min_nodes_left = float("inf")
-        for t, nodes in type_dict.items():
-            nodes_left = sum(1 for n in nodes if n.batch_order is not None)
-            min_nodes_left = min(min_nodes_left, nodes_left)
-
-        return min_nodes_left
-
-    @staticmethod
-    def make_smallest_stack_astar(
-        stack, type_dict: dict[str, list[VirtualNode]], path=None, max_t=2
-    ):
-        if path == None:
-            path = []
-
-        # Initial state
-        start_node = (0, (stack, type_dict, path))
-
-        # Priority queue for A* search
-        queue = PriorityQueue()
-        queue.put(start_node)
-
-        while not queue.empty():
-            _, (current_stack, current_type_dict, current_path) = queue.get()
-
-            current_batches = ComputeStack.get_networks_current_batch_number(
-                current_stack, current_type_dict
-            )
-
-            if all(b is None for b in current_batches):  # no nodes left to compute
-                return current_stack
-
-            possible_next_types = []
-            for t, nodes in current_type_dict.items():
-                for n in nodes:
-                    can_be_computed = [
-                        n for n in nodes if n.batch_order == current_batches[n.network_id]
-                    ]
-                    if can_be_computed:
-                        possible_next_types.append((t, len(can_be_computed)))
-                        break
-
-            if max_t is not None:
-                possible_next_types = sorted(possible_next_types, key=lambda x: x[1], reverse=True)
-                possible_next_types = possible_next_types[:max_t]
-
-            assert possible_next_types, "No possible next type"
-
-            # we try every possible type for the next layer
-            for t, _ in possible_next_types:
-                l, new_type_dict = ComputeStack.make_layer_from_current_batches(
-                    current_batches, current_type_dict, t
-                )
-                node_diff = len(current_type_dict[t]) - len(new_type_dict[t])
-                substack = ComputeStack(current_stack.networks, [l])
-                new_path = current_path + [
-                    f"{t}: picked {node_diff} nodes, {len(possible_next_types)} possible types"
-                ]
-
-                # Calculate the priority for A* search
-                cost_so_far = len(substack.layers) if substack.layers else 0
-                estimated_cost = ComputeStack.heuristic(new_type_dict)
-                priority = cost_so_far + estimated_cost
-
-                queue.put((priority, (substack, new_type_dict, new_path)))
-
-        raise ValueError("No solution found")
-
-    @staticmethod
-    def make_layer_from_current_batches(
-        current_batches, type_dict: dict[str, list[VirtualNode]], t: str
-    ):
-        """
-        Creates a ComputeLayer from the nodes of type t that have a batch_order <= current_batches[network_id]
-        Returns a ComputeLayer and a new type_dict
-        without the nodes that were used in the layer"""
-        layer_nodes = []
-        new_type_dict = deepcopy(type_dict)
-        new_type_dict[t] = []
-        used = 0
-        for n in type_dict[t]:
-            if n.batch_order <= current_batches[n.network_id]:
-                layer_nodes.append(deepcopy(n))
-                used += 1
-            else:
-                new_type_dict[t].append(deepcopy(n))
-
-        assert used > 0, f"used {used} nodes of type {t} to make layer"
-        return ComputeLayer(layer_nodes), new_type_dict
-
     def _assemble_stack(self, **kwargs):
-        n_list = ut.flatten(ComputeStack.make_all_topo_nodes(self.networks))
-        type_dict = {}
-        for n in n_list:
-            type_dict.setdefault(n.type_signature, []).append(n)
-        minstack = ComputeStack.make_smallest_stack_dfs(
-            ComputeStack(self.networks, []), type_dict, **kwargs
-        )
-        logger.debug(f"Final stack size: {len(minstack.layers) if minstack.layers else 0}")
-        self.layers = minstack.layers
+        from . import stack_builder
+
+        self.layers = stack_builder.build_layers(self.networks, self, **kwargs)
+        logger.debug(f"Final stack size: {len(self.layers) if self.layers else 0}")
 
     def make_layer_input_getters(self, layer_id: int):
         """Returns a list of input_getter functions that return the input values for each node in the given layer
@@ -938,11 +595,20 @@ class ComputeStack:
             assert layer_id == 0  # input layer is the first layer
             assert input_shapes == layer.f_out_shapes
             # input indices of the input layer are just the indices of the nodes
-            input_start_indices = np.array([[n.node_id * input_lengths[0] for n in layer.nodes.values()]])
+            # we need to get the node_id from the node_map
+            input_start_indices = np.array(
+                [
+                    [
+                        self.node_map[(key.network_id, key.node_id)][0]
+                        * input_lengths[0]  # layer_id * length
+                        for key in layer.node_keys
+                    ]
+                ]
+            )
         else:
             input_start_indices = np.array(
                 [
-                    [self.get_node_input_start_index(n, i) for n in layer.nodes.values()]
+                    [self.get_node_input_start_index(key, i) for key in layer.node_keys]
                     for i in range(len(input_shapes))
                 ]
             )
@@ -998,9 +664,8 @@ class ComputeStack:
         for l_id, l in enumerate(self.layers):
             l.layer_id = l_id
             if l.is_built:
-                for n_id, n in enumerate(l.nodes.values()):
-                    self.node_map[(n.network_id, n.compute_node_id)] = (l_id, n_id)
-                    n.node_id = node_id
+                for n_id, key in enumerate(l.node_keys):
+                    self.node_map[(key.network_id, key.node_id)] = (l_id, n_id)
                     node_id += 1
             else:
                 allbuilt = False
@@ -1023,13 +688,13 @@ class ComputeStack:
 
     def _generate_apply_method(
         self,
-        get_grads_for: List[str] = (
+        get_grads_for: list[str] = [
             "translation",
             "transcription",
             "output",
             "source_new",
             "source",
-        ),
+        ],
     ):
         """
         Generates the apply method, which will call the apply of all layers of the stack
@@ -1078,7 +743,7 @@ class ComputeStack:
             key: PRNGKey,
             overwrite_values: Optional[NdArray] = None,
             overwrite_at: Optional[NdArray] = None,
-        ) -> Tuple[NdArray, NdArray]:
+        ) -> tuple[NdArray, NdArray]:
             """
             The core of the apply method. Jittable. Applies the entire stack.
             Overwrite stuff:
