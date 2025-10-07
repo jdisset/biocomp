@@ -12,7 +12,6 @@ from biocomp.quantization import (
     get_quantized,
 )
 from biocomp.parameters import ParameterTree, ArrayRef
-from biocomp.compute import VirtualNode
 
 
 @pytest.mark.parametrize(

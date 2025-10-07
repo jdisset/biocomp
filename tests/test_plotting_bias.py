@@ -1,7 +1,7 @@
 """Test for get_reordered_protein_names behavior with bias inputs"""
 
 import pytest
-from biocomp.network import Network, CoTransfection, Unit
+from biocomp.old_network.network import Network, CoTransfection, Unit
 from biocomp.plotutils import get_reordered_protein_names
 
 
