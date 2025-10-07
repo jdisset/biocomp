@@ -36,7 +36,8 @@ def topological_order(graph: GraphState) -> list[list[int]]:
             msg = f"No independent node. Remaining:{remaining}. Visited:{visited}"
             raise ValueError(msg)
         visited.update(independent)
-        batches.append(independent)
+        # sort for deterministic ordering when nodes are topologically equivalent
+        batches.append(sorted(independent))
     return batches
 
 
