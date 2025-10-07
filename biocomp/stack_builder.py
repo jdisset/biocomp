@@ -14,7 +14,7 @@ from biocomp.graphengine import GraphState
 from biocomp import utils as ut
 
 if TYPE_CHECKING:
-    from .compute import ComputeStack, ComputeLayer
+    from .compute import ComputeStack, StackLayer
     from .network import Network
 
 
@@ -43,15 +43,15 @@ def topological_order(graph: GraphState) -> list[list[int]]:
 
 def make_all_topo_nodes(networks: list[Network]) -> list[list[list[tuple]]]:
     """Returns topological ordering for all networks as (NodeKey, batch_order, type_signature) tuples"""
-    from .compute import NodeKey
+    from .compute import StackNode
 
     return [
         [
             [
                 (
-                    NodeKey(net_id, node_id),
+                    StackNode(net_id, node_id),
                     b_id,
-                    NodeKey.generate_type_signature(net.compute_graph, node_id),
+                    StackNode.generate_type_signature(net.compute_graph, node_id),
                 )
                 for node_id in node_batch
             ]
@@ -83,12 +83,12 @@ def get_networks_current_batch_number(
 
 def make_layer_from_current_batches(
     current_batches: list[Optional[int]], type_dict: dict[str, list[tuple]], t: str
-) -> tuple[ComputeLayer, dict[str, list[tuple]]]:
+) -> tuple[StackLayer, dict[str, list[tuple]]]:
     """
     Creates a ComputeLayer from the nodes of type t that have a batch_order <= current_batches[network_id]
     Returns a ComputeLayer and a new type_dict without the nodes that were used in the layer
     """
-    from .compute import ComputeLayer
+    from .compute import StackLayer
 
     layer_keys = []
     new_type_dict = deepcopy(type_dict)
@@ -103,15 +103,15 @@ def make_layer_from_current_batches(
             new_type_dict[t].append((key, batch_order))
 
     assert used > 0, f"used {used} nodes of type {t} to make layer"
-    return ComputeLayer(node_keys=layer_keys), new_type_dict
+    return StackLayer(nodes=layer_keys), new_type_dict
 
 
 def make_smallest_stack_bfs(
     networks: list[Network],
-    initial_layers: list[ComputeLayer],
+    initial_layers: list[StackLayer],
     type_dict: dict[str, list[tuple]],
     max_t: int = 1,
-) -> list[ComputeLayer]:
+) -> list[StackLayer]:
     """Build stack using breadth-first search"""
     from .compute import ComputeStack
 
@@ -169,13 +169,13 @@ def make_smallest_stack_bfs(
 
 def make_smallest_stack_dfs(
     networks: list[Network],
-    initial_layers: list[ComputeLayer],
+    initial_layers: list[StackLayer],
     type_dict: dict[str, list[tuple]],
     path=None,
     depth=0,
     max_depth=70,
     max_t=1,
-) -> list[ComputeLayer]:
+) -> list[StackLayer]:
     """Build stack using depth-first search"""
     from .compute import ComputeStack
 
@@ -263,11 +263,11 @@ def heuristic(type_dict: dict[str, list[tuple]]) -> float:
 
 def make_smallest_stack_astar(
     networks: list[Network],
-    initial_layers: list[ComputeLayer],
+    initial_layers: list[StackLayer],
     type_dict: dict[str, list[tuple]],
     path=None,
     max_t=2,
-) -> list[ComputeLayer]:
+) -> list[StackLayer]:
     """Build stack using A* search"""
     from .compute import ComputeStack
 
@@ -326,7 +326,7 @@ def make_smallest_stack_astar(
     raise ValueError("No solution found")
 
 
-def build_layers(networks: list[Network], stack: ComputeStack, **kwargs) -> list[ComputeLayer]:
+def build_layers(networks: list[Network], stack: ComputeStack, **kwargs) -> list[StackLayer]:
     """Main entry point for building layers from networks.
 
     Args:

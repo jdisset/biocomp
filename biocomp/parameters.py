@@ -813,7 +813,7 @@ class ParameterTree:
     def __getitem__(self, path):
         return self.data[path]
 
-    def at(self, path, value=None, tags=None, overwrite=False):
+    def at(self, path, value=None, tags=None, overwrite: Optional[bool] = False):
         """
         overwrite = True -> overwrite existing value
         overwrite = False -> return existing value
