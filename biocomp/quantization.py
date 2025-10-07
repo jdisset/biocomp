@@ -6,6 +6,7 @@ import numpy as np
 from .parameters import ParameterTree
 from jax import random as random
 from biocomp.logging_config import get_logger
+from biocomp.compute import StackNode
 
 logger = get_logger(__name__)
 
@@ -196,10 +197,10 @@ def get_variational_quantized(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
-### {{{               --     quantized parameters helpers     --
+### {{{               --     quantized parameters (parts embeddings) helpers     --
 
 
-def get_quantized_rate_names(
+def get_quantized_part_names(
     values_to_quantize, params, qnames, quantization_values_path, quantization_mask_path, node_id
 ):
     """
@@ -226,124 +227,21 @@ def get_quantized_rate_names(
     return names
 
 
-def get_available_quantizations(param_name, cdg_node_id, cdg):
+def get_quantization_mask(all_qnames, pname, node: StackNode, stack):
     """
-    returns the name of possible parts for a given cdg node, slot and param name
-    example: get_possible_values('transcription_rate', ...) -> ['hEF1a', 'hEF1b', 'hEF1c']
-              get_possible_values('translation_rate', ...) -> [None, '1xuORF', '2xuORF', ...]
-    params are stored in the params column of the cdg as a dict {param_name:[possiblevaluees]}
-    """
-    available_params = cdg.at[cdg_node_id, "params"]
-    if param_name not in available_params:
-        raise ValueError(
-            f"Param {param_name} not available for cdg node {cdg_node_id}. Available: {available_params}"
-        )
-    return available_params[param_name]
-
-
-def get_quantization_mask(qnames, pname, vnode, masks_per_node=1, **kwargs):
-    """
-    generate the quantization masks for a given vnode and parameter. One mask per input.
-    - qnames: the list of quantization names for this parameter (e.g. ['hEF1a', ...])
-    - params: the parameters dictionnary, where only arrays can be used (because it'll be jitted)
+    generate the quantization masks for a given node and parameter. One mask per input edge.
+    - qnames: the list of quantization names, aka embedding names for this parameter (e.g. ['hEF1a', ...])
     - pname: the name of the parameter we want to quantize (e.g. 'tl_rate')
     - vnode: the node we want to quantize
     - masks_per_node: basically the max number of inputs a node can have (extras will be ignored)
     """
-    # example: generate_quantization_masks(['hEF1a', 'hEF1b', 'hEF1c'], params, 'tc_rate', vnode)
-    compute_node_id = vnode.compute_node_id
-    network = vnode.network
-    if network is None:
-        # pure virtual node, no network, no masks!
-        logger.warning(f"Node {vnode.node_id} has no network, no quantization mask generated")
-        mask = np.ones((1, len(qnames)), dtype=bool)
-        return mask
+    # example: generate_quantization_masks(['hEF1a', 'hEF1b', 'hEF1c'], 'tc_rate', node)
+    node_qnames = [e.content_embedding_names[pname] for e in node.get_incoming_edges(stack)]
+    mask = np.zeros((len(node_qnames), len(all_qnames)), dtype=bool)
+    for i in range(len(node_qnames)):
+        mask[i, [all_qnames.index(q) for q in node_qnames[i]]] = True
 
-    cdf = network.compute_graph
-    cdg = network.central_dogma_graph
-
-    cdg_ids = cdf.at[compute_node_id, "cdg_input"]
-    assert cdg_ids is not None, f"Node {compute_node_id} has no input CDG node"
-    cdg_ids = [cdg_ids] if not isinstance(cdg_ids, list) else cdg_ids
-
-    this_node_qnames = [get_available_quantizations(pname, cid, cdg) for cid in cdg_ids]
-    # we have one mask per CDG input, and we need the same mask shape for all nodes
-    assert len(this_node_qnames) <= masks_per_node, (
-        f"Node {compute_node_id} has {len(this_node_qnames)} CDG inputs, "
-        f"but only a max of {masks_per_node} masks are available"
-    )
-    # check that this_node_qnames is a subset of qnames
-    should_be_in = [qq for q in this_node_qnames for qq in q if qq not in qnames]
-    if len(should_be_in) > 0:
-        raise ValueError(
-            f"Node {compute_node_id} has unknown quantization names {should_be_in} "
-            f"for parameter {pname} (available: {qnames})"
-        )
-
-    # now create the mask array
-    mask = np.zeros((masks_per_node, len(qnames)), dtype=bool)
-    for i in range(len(this_node_qnames)):
-        mask[i, [qnames.index(q) for q in this_node_qnames[i]]] = True
-
-    # now we store the mask in the params dict, under the mask namespace,
     return mask
-
-
-def collapse_quantized_parameter(vnode, param_name, value):
-    """
-    collapse a quantized parameter into a single value
-    - vnode: the node we want to quantize
-    - param_name: the name of the parameter we want to quantize (e.g. 'tl_rate')
-    - value: the value of the parameter as a list of names (1 per input)
-    """
-
-    compute_node_id = vnode.compute_node_id
-    network = vnode.network
-    if network is None:
-        return
-    cdf = network.compute_graph
-    cdg = network.central_dogma_graph
-
-    cdg_ids = cdf.at[compute_node_id, "cdg_input"]
-    assert cdg_ids is not None, f"Node {compute_node_id} has no input CDG node"
-    cdg_ids = [cdg_ids] if not isinstance(cdg_ids, list) else cdg_ids
-
-    assert len(value) == len(cdg_ids), (
-        f"Node {compute_node_id} has {len(cdg_ids)} CDG inputs, "
-        f"but only {len(value)} values were provided"
-    )
-
-    # Update CDG params
-    for cid, val in zip(cdg_ids, value):
-        if isinstance(val, (list, tuple)):
-            assert len(val) == 1
-        else:
-            val = [val]
-        current_params = cdg.at[cid, "params"]
-        assert param_name in current_params, f"Param {param_name} not available for cdg node {cid}"
-        current_params[param_name] = val
-        cdg.at[cid, "params"] = current_params
-
-    # Also update the TranscriptionUnit slots to reflect the quantized values
-    if network.transcription_units is not None:
-        for cdg_id, resolved_name in zip(cdg_ids, value):
-            if cdg_id in cdg.index:
-                tu_ids = cdg.at[cdg_id, "tu_id"]
-                if tu_ids:
-                    tu_id = tu_ids[0] if isinstance(tu_ids, list) else tu_ids
-                    if tu_id in network.transcription_units:
-                        tu = network.transcription_units[tu_id]
-                        
-                        # Update the TU params to have the single quantized value
-                        if param_name in tu.params:
-                            tu.params[param_name] = [resolved_name]
-                        
-                        # Update the slots that map to this parameter
-                        for slot in tu.slots:
-                            if slot.maps_to_parameter == param_name:
-                                # Set the slot's part to the single quantized value
-                                # Keep it as a list to maintain consistency
-                                slot.part = [resolved_name]
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

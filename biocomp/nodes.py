@@ -309,17 +309,13 @@ def inv_source_with_pos(
         # store the original position for each inverse node
         positions = []
         for node in nodelist:
-            extra = node.get_compute_node("extra")
-            # this tells us which output position from the forward node we're inverting
-            original_slot = extra["original_output_slot"]
-            original_output_len = extra["original_output_len"]
-
-            # validate the slot is within bounds
-            assert original_slot < original_output_len, (
-                f"Original slot {original_slot} out of bounds for output length {original_output_len}"
+            original = node.get(stack).is_inverse_of
+            assert original is not None, "Inverse node must have a forward node."
+            assert original.output_slot < original.output_len, (
+                f"Original slot {original.output_slot} out of bounds for output length {original.output_len}"
             )
 
-            positions.append(original_slot)
+            positions.append(original.output_slot)
         positions = jnp.array(positions, dtype=jnp.int32)
 
         # store positions as a parameter (non-gradient)
@@ -393,17 +389,9 @@ def inv_source_with_pos(
             "pre_activation": pre_activation,
         }
 
-    def commit(params: ParameterTree, nodelist: List[StackNode], **_):
-        for i, node in enumerate(nodelist):
-            extra = node.get_compute_node("extra") or {}
-            position = params[f"{namespace}/original_positions"][i].item()
-            extra["inverted_position"] = position
-            extra["normalized_position"] = position / max_L1s
-            node.set_compute_node_column("extra", extra)
-
     output_shapes = input_shapes  # 1 input shape -> 1 output shape
 
-    return LayerInstance(prepare, apply, output_shapes, commit=commit)
+    return LayerInstance(prepare, apply, output_shapes)
 
 
 def hard_bias(
@@ -413,7 +401,7 @@ def hard_bias(
     stack,
     valid_range: Tuple[float, float] = (0.0, 0.8),
     shape: Tuple[int] = (1,),
-    init_value: float = 0.5,
+    init_value: Optional[float] = 0.5,
     random_init: bool = False,
     **_,
 ) -> LayerInstance:
@@ -431,7 +419,7 @@ def hard_bias(
         raw_values = []
 
         for node in nodelist:
-            extra = node.get_compute_node("extra")
+            extra = node.get(stack).extra
             if extra and not random_init:
                 # try to use values from extra dict
                 if "raw_value" in extra:
@@ -474,10 +462,10 @@ def hard_bias(
 
     def commit(params: ParameterTree, nodelist: List[StackNode], **_):
         for i, n in enumerate(nodelist):
-            extra = n.get_compute_node("extra") or {}
+            newextra = {}
             bias_value = clamp_to_range(params[f"{namespace}/raw_value"][i])
-            extra["bias_value"] = bias_value
-            n.set_compute_node_column("extra", extra)
+            newextra["bias_value"] = bias_value
+            n.get(stack).extra.update(newextra)
 
     output_shapes = [tuple(shape)]  # single output shape
 
@@ -586,7 +574,7 @@ def aggregation(
     input_shapes: List[Tuple[int]],
     n_outputs: int,
     layer_id: int,
-    stack: ComputeStack = None,
+    stack: ComputeStack,
     random_init: bool = False,
     **_,
 ) -> LayerInstance:
@@ -596,29 +584,20 @@ def aggregation(
     namespace = f"local/{local_layer_name}"
     pname = "ratios"
 
-    # def normalize_ratios_cb(params: ParameterTree, **__):
-    #     current_ratios = params[f"{namespace}/{pname}"]
-    #     max_ratios = jnp.maximum(jnp.max(current_ratios, axis=1), 1e-9)
-    #     normed_ratios = current_ratios / max_ratios[:, None]
-    #     return params.tree_set_at(f"{namespace}/{pname}", jnp.clip(normed_ratios, 0, 1))
-
     def prepare(params: ParameterTree, nodelist: List[StackNode], key: PRNGKey, **_):
         ratios = []
         for i, node in enumerate(nodelist):
-            extra = node.get_compute_node("extra")
+            extra = node.get(stack).extra
             if "ratios" in extra and not random_init:
                 assert len(extra["ratios"]) == n_outputs
                 ratio_v = jnp.array(extra["ratios"], dtype=jnp.float32)
             else:
                 ratio_v = jax.random.uniform(key, (n_outputs,), minval=0.05, maxval=1.0)
-            # pad to max_outputs if necessary
             ratios.append(ratio_v)
 
         ratios = jnp.stack(ratios)
         assert ratios.shape == (len(nodelist), n_outputs), f"Invalid ratio shape {ratios.shape}"
         params[f"{namespace}/{pname}"] = ratios
-
-        # stack.register_post_process(normalize_ratios_cb)
 
     def apply(
         input: ArrayLike,
@@ -635,7 +614,7 @@ def aggregation(
 
     def commit(params: ParameterTree, nodelist: List[StackNode], **_):
         for i, n in enumerate(nodelist):
-            extra = n.get_compute_node("extra") or {}
+            updt = {}
             ratios = params[f"{namespace}/{pname}"][i]
 
             # normalize absolute ratios so that the minimum is 1
@@ -647,28 +626,8 @@ def aggregation(
             normalized_ratios = ratios_array / min_ratio
 
             # update extra dict
-            extra["ratios"] = normalized_ratios.tolist()[:n_outputs]
-            n.set_compute_node_column("extra", extra)
-
-            # update the network's aggregations dataframe to keep TU ratios in sync
-            if n.network is not None and n.network.aggregations is not None:
-                # find the aggregation id from the compute graph
-                compute_node = n.get_compute_node()
-                if (
-                    compute_node is not None
-                    and "extra" in compute_node
-                    and "id" in compute_node["extra"]
-                ):
-                    agg_id = compute_node["extra"]["id"]
-                    # update the aggregations dataframe
-                    if agg_id in n.network.aggregations.index:
-                        n.network.aggregations.at[agg_id, "ratio"] = normalized_ratios.tolist()[
-                            :n_outputs
-                        ]
-                else:
-                    logger.error(
-                        f"Compute node {n.id} does not have an 'id' in its 'extra' field, cannot update aggregations."
-                    )
+            updt["ratios"] = normalized_ratios.tolist()[:n_outputs]
+            n.get(stack).extra.update(updt)
 
     output_shape = input_shapes * n_outputs
 
@@ -693,17 +652,16 @@ def inv_aggregation(
         if stack is not None:
             ref = ArrayRef(params.data)
             for node in nodelist:
-                extra = node.get_compute_node("extra")
+                extra = node.get(stack).extra
                 assert extra["original_output_slot"] < extra["original_output_len"]
                 original_slot = extra["original_output_slot"]
 
-                fwd_node = node.get_inverse_node(stack)
-                fwd_layer, fwd_loc = fwd_node.get_layer_and_local_id(stack)
-                fwd_n_output = stack.layers[fwd_layer].get_n_outputs()
-                fwd_namespace = (
-                    f"local/{generate_layer_name(stack, fwd_layer, f'aggregation_{fwd_n_output}x')}"
+                fwd_node = node.get_forward_stacknode(stack)
+                fwd_n_output = fwd_node.get_nb_outputs(stack)
+                fwd_namespace = f"local/{generate_layer_name(stack, fwd_node.layer_number, f'aggregation_{fwd_n_output}x')}"
+                ref.push_back(
+                    f"{fwd_namespace}/ratios", (fwd_node.node_position_in_layer, original_slot)
                 )
-                ref.push_back(f"{fwd_namespace}/ratios", (fwd_loc, original_slot))
 
             params.at(f"{namespace}/ratios", ref, overwrite=None)
 
@@ -753,6 +711,8 @@ def transform_nn(
     beta_init: float = 0.5,
     **_,
 ):
+    # TODO: make sure incoming edges order is deterministic
+
     assert n_outputs == 1, f"NN transform only supports 1 output, got {n_outputs}"
     if is_inverse and len(input_shapes) != 1:
         raise ValueError(f"Inverse {transform_name} should have 1 input, got {len(input_shapes)}")
@@ -855,11 +815,14 @@ def transform_nn(
             # We initialize quantization masks for these nodes.
             # Quantization masks are used to select which qvalues are accessible to each node.
             qmasks = [
-                qz.get_quantization_mask(
-                    quantization_names, rate_name, node, masks_per_node=len(input_shapes)
-                )
+                qz.get_quantization_mask(quantization_names, rate_name, node, stack)
                 for node in nodelist
             ]
+            for m in qmasks:
+                assert m.shape == (len(input_shapes), len(quantization_names)), (
+                    f"Invalid quantization mask shape {m.shape} for node in layer {layer_name}, expected {(len(input_shapes), len(quantization_names))}"
+                )
+
             params.at(f"{quantization_mask_path}", np.array(qmasks), tags=[NON_GRAD_TAG])
             logger.debug(
                 f"quantization mask for {layer_name}:\n{quantization_mask_str(quantization_names, qmasks)}"
@@ -888,10 +851,9 @@ def transform_nn(
             # of both the quantized rates and the quantization masks of the corresponding forward nodes,
             # since they should be shared between the forward and inverse nodes.
             def get_fwd(node):
-                fwd_node = node.get_inverse_node(stack)
-                fwd_layer_id, fwd_loc = fwd_node.get_layer_and_local_id(stack)
-                fwd_layer_name = make_layer_name(fwd_layer_id, is_inv=False)
-                return f"local/{fwd_layer_name}", fwd_loc
+                fwd_node = node.get_forward_stacknode(stack)
+                fwd_layer_name = make_layer_name(fwd_node.layer_number, is_inv=False)
+                return f"local/{fwd_layer_name}", fwd_node.node_position_in_layer
 
             fwd_paths, fwd_loc = zip(*[get_fwd(node) for node in nodelist])
 
@@ -1010,7 +972,7 @@ def transform_nn(
     def commit(params: ParameterTree, nodelist: List[StackNode], **_):
         for node_id, node in enumerate(nodelist):
             rates = params[f"local/{layer_name}/{rate_name}"][node_id]
-            resolved_parameter_names = qz.get_quantized_rate_names(
+            resolved_parameter_names = qz.get_quantized_part_names(
                 rates,
                 params,
                 quantization_names,
@@ -1018,12 +980,13 @@ def transform_nn(
                 quantization_mask_path,
                 node_id,
             )
-            extra = node.get_compute_node("extra") or {}
-            extra["resolved_parameter_names"] = resolved_parameter_names
-            node.set_compute_node_column("extra", extra)
-
-            # update CDG params and TranscriptionUnit slots
-            qz.collapse_quantized_parameter(node, rate_name, resolved_parameter_names)
+            i_edges = node.get_incoming_edges(stack)
+            assert len(i_edges) == len(resolved_parameter_names), (
+                f"Number of incoming edges {len(i_edges)} does not match number of resolved rate names {len(resolved_parameter_names)}"
+                f" for node {node} in layer {layer_name}"
+            )
+            for e, pname in zip(i_edges, resolved_parameter_names):
+                e.content_embedding_names[rate_name] = (pname,)
 
     output_shape = [(1,)]
 
