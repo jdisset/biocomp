@@ -16,10 +16,10 @@ from .parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from .compute import ComputeStack, NodeKey
+    from .compute import ComputeNode, ComputeStack
 
 from jax.typing import ArrayLike
-from typing import Callable
+from typing import Callable, Tuple, List, Dict
 from dataclasses import dataclass
 
 PRNGKey = ArrayLike
@@ -33,7 +33,8 @@ def generate_layer_name(stack, layer_id, name):
     if stack is None:
         return f"{layer_id}/{name}"
     else:
-        n_nodes = len(stack.layers[layer_id].node_keys)
+        n_nodes = len(stack.layers[layer_id].nodes)
+        n_layers = len(stack.layers)
         return f"{layer_id}/{name} ({n_nodes})"
 
 
@@ -55,7 +56,7 @@ def quantization_mask_str(names, mask) -> str:
 class LayerInstance:
     prepare: Callable
     apply: Callable  # Returns tuple of (result, aux_dict)
-    output_shapes: list[tuple[int]]
+    output_shapes: List[Tuple[int]]
     commit: Optional[Callable] = None
 
     def __post_init__(self):
@@ -309,11 +310,11 @@ def empty_prepare(*_, **__):
     pass
 
 
-def single_passthrough(input_shapes: list[tuple[int]], *_, **__) -> LayerInstance:
-    """Simple passthrough node that returns its input unchanged"""
+# input_shapes is a list of shape tuples, one for each input
+def single_passthrough(input_shapes: List[Tuple[int]], *_, **__) -> LayerInstance:
     assert len(input_shapes) == 1, f"Passthrough expects 1 input, got {len(input_shapes)}"
 
-    def apply(value: ArrayLike, **___) -> tuple[ArrayLike, dict]:
+    def apply(value: ArrayLike, **___) -> Tuple[ArrayLike, Dict]:
         return value, {"input_shape": value.shape}
 
     output_shapes = input_shapes
@@ -327,11 +328,11 @@ def single_passthrough(input_shapes: list[tuple[int]], *_, **__) -> LayerInstanc
 # or skip the node altogether (for a future version with an optimizer)
 
 
-def source(input_shapes: list[tuple[int]], n_outputs: int, **_) -> LayerInstance:
-    """Source node duplicates input to multiple outputs (L2 plasmid with 1:1 ratio)"""
+# For now, input_shapes will always be [(1,)]
+def source(input_shapes: List[Tuple[int]], n_outputs: int, **_) -> LayerInstance:
     assert len(input_shapes) == 1, f"A source node should have 1 input, got {len(input_shapes)}"
 
-    def apply(value: ArrayLike, *_, **__) -> tuple[ArrayLike, dict]:
+    def apply(value: ArrayLike, *_, **__) -> Tuple[ArrayLike, Dict]:
         result = jnp.repeat(value, n_outputs, axis=0)
         return result, {"input_value": value, "n_outputs": n_outputs, "output_shape": result.shape}
 
@@ -346,10 +347,10 @@ def inv_source(*args, **kwargs):
 
 
 def source_with_pos(
-    input_shapes: list[tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     layer_id: int,
-    stack: "ComputeStack",
+    stack: ComputeStack,
     max_L1s: int = 5,
     hidden_s=64,
     depth=3,
@@ -359,7 +360,7 @@ def source_with_pos(
     bias_offset=0.0,
     **_,
 ) -> LayerInstance:
-    """Source node with position encoding. Each TU position in the plasmid might have different yields"""
+    """Source node with position encoding. Idea is that each Transcription Unit position in the plasmid might have different yields"""
 
     assert len(input_shapes) == 1, f"A source node should have 1 input, got {len(input_shapes)}"
 
@@ -370,10 +371,8 @@ def source_with_pos(
     local_layer_name = generate_layer_name(stack, layer_id, f"source{n_outputs}x")
     namespace = f"local/{local_layer_name}"
 
-    def prepare(
-        params: ParameterTree, nodelist_keys: list["NodeKey"], stack: "ComputeStack", key, **_
-    ):
-        add_quantile_var_ids(params, len(nodelist_keys), len(input_shapes), local_layer_name)
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
+        add_quantile_var_ids(params, len(nodelist), len(input_shapes), local_layer_name)
         params.at(
             f"{namespace}/input_shapes",
             jnp.array(input_shapes, dtype=jnp.int32),
@@ -401,7 +400,7 @@ def source_with_pos(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-    ) -> tuple[ArrayLike, dict]:
+    ) -> Tuple[ArrayLike, Dict]:
         qid = params[f"{namespace}/quantile_variable_id"][node_id]
         quantile = quantiles[qid]
 
@@ -431,9 +430,9 @@ def source_with_pos(
 
 
 def inv_source_with_pos(
-    input_shapes: list[tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
-    stack: "ComputeStack",
+    stack: ComputeStack,
     layer_id: int,
     max_L1s: int = 5,
     hidden_s=64,
@@ -455,18 +454,16 @@ def inv_source_with_pos(
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
     initializer = INITIALIZERS[initializer_name]
 
-    def prepare(
-        params: ParameterTree, nodelist_keys: list["NodeKey"], stack: "ComputeStack", key, **_
-    ):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
         # add quantile variables - one per node
-        add_quantile_var_ids(params, len(nodelist_keys), 1, local_layer_name)
+        add_quantile_var_ids(params, len(nodelist), 1, local_layer_name)
+
+        assert stack is not None, "Stack must be provided for inverse source node."
 
         # store the original position for each inverse node
         positions = []
-        for node_key in nodelist_keys:
-            graph = stack.networks[node_key.network_id].compute_graph
-            node = graph.nodes[node_key.node_id]
-            extra = node.extra
+        for node in nodelist:
+            extra = node.get_compute_node("extra")
             # this tells us which output position from the forward node we're inverting
             original_slot = extra["original_output_slot"]
             original_output_len = extra["original_output_len"]
@@ -516,7 +513,7 @@ def inv_source_with_pos(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-    ) -> tuple[ArrayLike, dict]:
+    ) -> Tuple[ArrayLike, Dict]:
         assert value.shape == input_shapes[0], f"Invalid input shape {value.shape}"
 
         qid = params.at(f"{namespace}/quantile_variable_id")[node_id]
@@ -550,23 +547,13 @@ def inv_source_with_pos(
             "pre_activation": pre_activation,
         }
 
-    def commit(params: ParameterTree, nodelist_keys: list["NodeKey"], stack: "ComputeStack", **_):
-        for i, node_key in enumerate(nodelist_keys):
-            graph = stack.networks[node_key.network_id].compute_graph
-            node = graph.nodes[node_key.node_id]
-            extra = node.extra.copy() if node.extra else {}
+    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+        for i, node in enumerate(nodelist):
+            extra = node.get_compute_node("extra") or {}
             position = params[f"{namespace}/original_positions"][i].item()
             extra["inverted_position"] = position
             extra["normalized_position"] = position / max_L1s
-            # update the node in the graph
-            from .graphengine import GraphNode
-
-            graph.nodes[node_key.node_id] = GraphNode(
-                node_id=node.node_id,
-                node_type=node.node_type,
-                is_inverse_of=node.is_inverse_of,
-                extra=extra,
-            )
+            node.set_compute_node_column("extra", extra)
 
     output_shapes = input_shapes  # 1 input shape -> 1 output shape
 
@@ -574,12 +561,12 @@ def inv_source_with_pos(
 
 
 def hard_bias(
-    input_shapes: list[tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     layer_id: int,
-    stack: "ComputeStack",
-    valid_range: tuple[float, float] = (0.0, 0.8),
-    shape: tuple[int] = (1,),
+    stack,
+    valid_range: Tuple[float, float] = (0.0, 0.8),
+    shape: Tuple[int] = (1,),
     init_value: float = 0.5,
     random_init: bool = False,
     **_,
@@ -591,18 +578,14 @@ def hard_bias(
     namespace = f"local/{local_layer_name}"
 
     def clamp_to_range(value: ArrayLike):
-        # hard clamp to valid_range
+        # hard clamp to valid_range. scale is ignored
         return jnp.clip(value, valid_range[0], valid_range[1])
 
-    def prepare(
-        params: ParameterTree, nodelist_keys: list["NodeKey"], stack: "ComputeStack", key, **_
-    ):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
         raw_values = []
 
-        for node_key in nodelist_keys:
-            graph = stack.networks[node_key.network_id].compute_graph
-            node = graph.nodes[node_key.node_id]
-            extra = node.extra
+        for node in nodelist:
+            extra = node.get_compute_node("extra")
             if extra and not random_init:
                 # try to use values from extra dict
                 if "raw_value" in extra:
@@ -635,7 +618,7 @@ def hard_bias(
 
         params[f"{namespace}/raw_value"] = jnp.stack(raw_values)
 
-    def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> tuple[ArrayLike, dict]:
+    def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> Tuple[ArrayLike, Dict]:
         raw_bias_value = params[f"{namespace}/raw_value"][node_id]
         bias_value = clamp_to_range(raw_bias_value)
         return bias_value, {
@@ -643,21 +626,12 @@ def hard_bias(
             "bias_value": bias_value,
         }
 
-    def commit(params: ParameterTree, nodelist_keys: list["NodeKey"], stack: "ComputeStack", **_):
-        from .graphengine import GraphNode
-
-        for i, node_key in enumerate(nodelist_keys):
-            graph = stack.networks[node_key.network_id].compute_graph
-            node = graph.nodes[node_key.node_id]
-            extra = node.extra.copy() if node.extra else {}
+    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+        for i, n in enumerate(nodelist):
+            extra = n.get_compute_node("extra") or {}
             bias_value = clamp_to_range(params[f"{namespace}/raw_value"][i])
             extra["bias_value"] = bias_value
-            graph.nodes[node_key.node_id] = GraphNode(
-                node_id=node.node_id,
-                node_type=node.node_type,
-                is_inverse_of=node.is_inverse_of,
-                extra=extra,
-            )
+            n.set_compute_node_column("extra", extra)
 
     output_shapes = [tuple(shape)]  # single output shape
 
@@ -665,12 +639,12 @@ def hard_bias(
 
 
 def bias(
-    input_shapes: list[tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     layer_id: int,
-    stack: "ComputeStack",
-    valid_range: tuple[float, float] = (0.0, 0.6),
-    shape: tuple[int] = (1,),
+    stack,
+    valid_range: Tuple[float, float] = (0.0, 0.6),
+    shape: Tuple[int] = (1,),
     random_init: bool = False,
     **_,
 ) -> LayerInstance:
@@ -693,16 +667,12 @@ def bias(
         y = jnp.clip(y, 1e-5, 1 - 1e-5)
         return -s * jnp.log((1 / y) - 1)
 
-    def prepare(
-        params: ParameterTree, nodelist_keys: list["NodeKey"], stack: "ComputeStack", key, **_
-    ):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
         raw_values = []
         scales = []
 
-        for node_key in nodelist_keys:
-            graph = stack.networks[node_key.network_id].compute_graph
-            node = graph.nodes[node_key.node_id]
-            extra = node.extra
+        for node in nodelist:
+            extra = node.get_compute_node("extra")
             if extra and not random_init:
                 # try to use values from extra dict
                 if "raw_value" in extra and "scale" in extra:
@@ -735,7 +705,7 @@ def bias(
         params[f"{namespace}/raw_value"] = jnp.stack(raw_values)
         params[f"{namespace}/scale"] = jnp.stack(scales)
 
-    def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> tuple[ArrayLike, dict]:
+    def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> Tuple[ArrayLike, Dict]:
         raw_bias_value = params[f"{namespace}/raw_value"][node_id]
         scale = params[f"{namespace}/scale"][node_id]
         bias_value = clamp_to_range(raw_bias_value, scale)
@@ -746,25 +716,16 @@ def bias(
             "scale": scale,
         }
 
-    def commit(params: ParameterTree, nodelist_keys: list["NodeKey"], stack: "ComputeStack", **_):
-        from .graphengine import GraphNode
-
-        for i, node_key in enumerate(nodelist_keys):
-            graph = stack.networks[node_key.network_id].compute_graph
-            node = graph.nodes[node_key.node_id]
-            extra = node.extra.copy() if node.extra else {}
+    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+        for i, n in enumerate(nodelist):
+            extra = n.get_compute_node("extra") or {}
             scale = params[f"{namespace}/scale"][i]
             raw_value = params[f"{namespace}/raw_value"][i]
             bias_value = clamp_to_range(raw_value, scale)
             extra["bias_value"] = bias_value
             extra["scale"] = scale
             extra["raw_value"] = raw_value
-            graph.nodes[node_key.node_id] = GraphNode(
-                node_id=node.node_id,
-                node_type=node.node_type,
-                is_inverse_of=node.is_inverse_of,
-                extra=extra,
-            )
+            n.set_compute_node_column("extra", extra)
 
     output_shapes = [tuple(shape)]  # single output shape
 
@@ -776,7 +737,7 @@ def bias(
 
 
 def aggregation(
-    input_shapes: list[tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     layer_id: int,
     stack: ComputeStack = None,
@@ -795,14 +756,10 @@ def aggregation(
     #     normed_ratios = current_ratios / max_ratios[:, None]
     #     return params.tree_set_at(f"{namespace}/{pname}", jnp.clip(normed_ratios, 0, 1))
 
-    def prepare(
-        params: ParameterTree, nodelist_keys: list[NodeKey], stack: ComputeStack, key: PRNGKey, **_
-    ):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey, **_):
         ratios = []
-        for i, node_key in enumerate(nodelist_keys):
-            graph = stack.networks[node_key.network_id].compute_graph
-            node = graph.nodes[node_key.node_id]
-            extra = node.extra or {}
+        for i, node in enumerate(nodelist):
+            extra = node.get_compute_node("extra")
             if "ratios" in extra and not random_init:
                 assert len(extra["ratios"]) == n_outputs
                 ratio_v = jnp.array(extra["ratios"], dtype=jnp.float32)
@@ -812,9 +769,7 @@ def aggregation(
             ratios.append(ratio_v)
 
         ratios = jnp.stack(ratios)
-        assert ratios.shape == (len(nodelist_keys), n_outputs), (
-            f"Invalid ratio shape {ratios.shape}"
-        )
+        assert ratios.shape == (len(nodelist), n_outputs), f"Invalid ratio shape {ratios.shape}"
         params[f"{namespace}/{pname}"] = ratios
 
         # stack.register_post_process(normalize_ratios_cb)
@@ -825,20 +780,16 @@ def aggregation(
         params: ParameterTree,
         node_id: ArrayLike,
         key: PRNGKey,
-    ) -> tuple[ArrayLike, dict]:
+    ) -> Tuple[ArrayLike, Dict]:
         assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
         ratios = params[f"{namespace}/{pname}"][node_id][:n_outputs]
         abs_ratios = jnp.abs(jnp.array(ratios))
         result = abs_ratios * input
         return result, {"ratios": ratios, "abs_ratios": abs_ratios, "n_outputs": n_outputs}
 
-    def commit(params: ParameterTree, nodelist_keys: list[NodeKey], stack: ComputeStack, **_):
-        for i, node_key in enumerate(nodelist_keys):
-            graph = stack.networks[node_key.network_id].compute_graph
-            node = graph.nodes[node_key.node_id]
-            network = stack.networks[node_key.network_id]
-
-            extra = node.extra or {}
+    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+        for i, n in enumerate(nodelist):
+            extra = n.get_compute_node("extra") or {}
             ratios = params[f"{namespace}/{pname}"][i]
 
             # normalize absolute ratios so that the minimum is 1
@@ -851,21 +802,26 @@ def aggregation(
 
             # update extra dict
             extra["ratios"] = normalized_ratios.tolist()[:n_outputs]
-            node.extra = extra
+            n.set_compute_node_column("extra", extra)
 
             # update the network's aggregations dataframe to keep TU ratios in sync
-            if network is not None and network.aggregations is not None:
-                # find the aggregation id from the extra field
-                if extra is not None and "id" in extra:
-                    agg_id = extra["id"]
+            if n.network is not None and n.network.aggregations is not None:
+                # find the aggregation id from the compute graph
+                compute_node = n.get_compute_node()
+                if (
+                    compute_node is not None
+                    and "extra" in compute_node
+                    and "id" in compute_node["extra"]
+                ):
+                    agg_id = compute_node["extra"]["id"]
                     # update the aggregations dataframe
-                    if agg_id in network.aggregations.index:
-                        network.aggregations.at[agg_id, "ratio"] = normalized_ratios.tolist()[
+                    if agg_id in n.network.aggregations.index:
+                        n.network.aggregations.at[agg_id, "ratio"] = normalized_ratios.tolist()[
                             :n_outputs
                         ]
                 else:
                     logger.error(
-                        f"Compute node {node_key.node_id} does not have an 'id' in its 'extra' field, cannot update aggregations."
+                        f"Compute node {n.id} does not have an 'id' in its 'extra' field, cannot update aggregations."
                     )
 
     output_shape = input_shapes * n_outputs
@@ -874,7 +830,7 @@ def aggregation(
 
 
 def inv_aggregation(
-    input_shapes: list[tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     stack: ComputeStack,
     layer_id: int,
@@ -884,30 +840,23 @@ def inv_aggregation(
     assert len(input_shapes) == 1, f"inverse_Aggregation expects 1 input, got {len(input_shapes)}"
     assert n_outputs == 1, f"inverse_Aggregation expects 1 output, got {n_outputs}"
 
-    local_layer_name = generate_layer_name(stack, layer_id, "inverse_aggregation")
+    local_layer_name = generate_layer_name(stack, layer_id, f"inverse_aggregation")
     namespace = f"local/{local_layer_name}"
 
-    def prepare(params: ParameterTree, nodelist_keys: list[NodeKey], stack: ComputeStack, **_):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], **_):
         if stack is not None:
             ref = ArrayRef(params.data)
-            for node_key in nodelist_keys:
-                graph = stack.networks[node_key.network_id].compute_graph
-                node = graph.nodes[node_key.node_id]
-                extra = node.extra or {}
+            for node in nodelist:
+                extra = node.get_compute_node("extra")
                 assert extra["original_output_slot"] < extra["original_output_len"]
                 original_slot = extra["original_output_slot"]
 
-                # get the forward node from the inverse edge
-                inv_edges = graph.get_incoming_edges(node_key.node_id)
-                assert len(inv_edges) == 1, (
-                    f"Inverse aggregation should have 1 input, got {len(inv_edges)}"
+                fwd_node = node.get_inverse_node(stack)
+                fwd_layer, fwd_loc = fwd_node.get_layer_and_local_id(stack)
+                fwd_n_output = stack.layers[fwd_layer].get_n_outputs()
+                fwd_namespace = (
+                    f"local/{generate_layer_name(stack, fwd_layer, f'aggregation_{fwd_n_output}x')}"
                 )
-                fwd_node_id = inv_edges[0].source_id
-
-                # find the layer and location of the forward node
-                fwd_layer_id, fwd_loc = stack.node_map[(node_key.network_id, fwd_node_id)]
-                fwd_n_output = stack.layers[fwd_layer_id].get_n_outputs()
-                fwd_namespace = f"local/{generate_layer_name(stack, fwd_layer_id, f'aggregation_{fwd_n_output}x')}"
                 ref.push_back(f"{fwd_namespace}/ratios", (fwd_loc, original_slot))
 
             params.at(f"{namespace}/ratios", ref, overwrite=None)
@@ -920,7 +869,7 @@ def inv_aggregation(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-    ) -> tuple[ArrayLike, dict]:
+    ) -> Tuple[ArrayLike, Dict]:
         ratio = jnp.abs(params[f"{namespace}/ratios"][node_id])
         clamped_ratio = jnp.maximum(ratio, EPSILON)
         result = input / clamped_ratio
@@ -937,12 +886,12 @@ def inv_aggregation(
 # =========================== Neural Nodes ===========================
 ### {{{                   --     transform node (tc, tl)     --
 def transform_nn(
-    input_shapes: list[tuple[int]],
+    input_shapes: List[Tuple[int]],
     n_outputs: int,
     stack: ComputeStack,
     layer_id: int,
     transform_name: str,
-    quantization_names: list[str],  # ordered list. ex: ['1xuorf', '2xuorf', ...]
+    quantization_names: List[str],  # ordered list. ex: ['1xuorf', '2xuorf', ...]
     outer_wsize: int = 64,
     outer_depth: int = 4,
     inner_wsize: int = 64,
@@ -1021,11 +970,9 @@ def transform_nn(
 
         return out
 
-    def prepare(
-        params: ParameterTree, nodelist_keys: list[NodeKey], stack: ComputeStack, key: PRNGKey
-    ):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
         key0, key1 = jax.random.split(key, 2)
-        n_nodes = len(nodelist_keys)
+        n_nodes = len(nodelist)
 
         # --------- quantization
         # First, initializing quantization values for the rates (if not already done)
@@ -1063,9 +1010,9 @@ def transform_nn(
             # Quantization masks are used to select which qvalues are accessible to each node.
             qmasks = [
                 qz.get_quantization_mask(
-                    quantization_names, rate_name, node_key, stack, masks_per_node=len(input_shapes)
+                    quantization_names, rate_name, node, masks_per_node=len(input_shapes)
                 )
-                for node_key in nodelist_keys
+                for node in nodelist
             ]
             params.at(f"{quantization_mask_path}", np.array(qmasks), tags=[NON_GRAD_TAG])
             logger.debug(
@@ -1094,17 +1041,13 @@ def transform_nn(
             # For inverse nodes, we will use a view (a subtree of ArrayRef that mirrors the original subtree)
             # of both the quantized rates and the quantization masks of the corresponding forward nodes,
             # since they should be shared between the forward and inverse nodes.
-            def get_fwd(node_key):
-                graph = stack.networks[node_key.network_id].compute_graph
-                # get forward node from inverse edge
-                inv_edges = graph.get_incoming_edges(node_key.node_id)
-                assert len(inv_edges) == 1
-                fwd_node_id = inv_edges[0].source_id
-                fwd_layer_id, fwd_loc = stack.node_map[(node_key.network_id, fwd_node_id)]
+            def get_fwd(node):
+                fwd_node = node.get_inverse_node(stack)
+                fwd_layer_id, fwd_loc = fwd_node.get_layer_and_local_id(stack)
                 fwd_layer_name = make_layer_name(fwd_layer_id, is_inv=False)
                 return f"local/{fwd_layer_name}", fwd_loc
 
-            fwd_paths, fwd_loc = zip(*[get_fwd(node_key) for node_key in nodelist_keys])
+            fwd_paths, fwd_loc = zip(*[get_fwd(node) for node in nodelist])
 
             # make view will create 2 subtrees of ArrayRef, one for the rates and one for the masks
             # that point to the same underlying data as the forward nodes
@@ -1114,7 +1057,7 @@ def transform_nn(
             params.tag(f"local/{layer_name}/{mask_name}", [NON_GRAD_TAG])
 
         # --------- quantile var
-        add_quantile_var_ids(params, len(nodelist_keys), len(input_shapes) + 1, layer_name)
+        add_quantile_var_ids(params, len(nodelist), len(input_shapes) + 1, layer_name)
 
         fake_vals = [np.zeros(s) for s in input_shapes]
 
@@ -1148,7 +1091,7 @@ def transform_nn(
         params: ParameterTree,
         node_id: ArrayLike,
         key: PRNGKey,
-    ) -> tuple[ArrayLike, dict]:
+    ) -> Tuple[ArrayLike, Dict]:
         k1, k2, k3 = jax.random.split(key, 3)
 
         qid = params[f"local/{layer_name}/quantile_variable_id"][node_id]
@@ -1218,11 +1161,8 @@ def transform_nn(
             **qaux,
         }
 
-    def commit(params: ParameterTree, nodelist_keys: list[NodeKey], stack: ComputeStack, **_):
-        for node_id, node_key in enumerate(nodelist_keys):
-            graph = stack.networks[node_key.network_id].compute_graph
-            node = graph.nodes[node_key.node_id]
-
+    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+        for node_id, node in enumerate(nodelist):
             rates = params[f"local/{layer_name}/{rate_name}"][node_id]
             resolved_parameter_names = qz.get_quantized_rate_names(
                 rates,
@@ -1232,14 +1172,12 @@ def transform_nn(
                 quantization_mask_path,
                 node_id,
             )
-            extra = node.extra or {}
+            extra = node.get_compute_node("extra") or {}
             extra["resolved_parameter_names"] = resolved_parameter_names
-            node.extra = extra
+            node.set_compute_node_column("extra", extra)
 
             # update CDG params and TranscriptionUnit slots
-            qz.collapse_quantized_parameter_nodekey(
-                node_key, stack, rate_name, resolved_parameter_names
-            )
+            qz.collapse_quantized_parameter(node, rate_name, resolved_parameter_names)
 
     output_shape = [(1,)]
 
@@ -1251,11 +1189,11 @@ def transform_nn(
 
 
 def sequestron_ERN(
-    input_shapes: list[tuple[int, ...]],
+    input_shapes: List[Tuple[int, ...]],
     n_outputs: int,
     stack: ComputeStack,
     layer_id: int,
-    affinity_names: list[str],
+    affinity_names: List[str],
     affinity_dim: int = 1,
     wsize: int = 128,
     depth: int = 4,
@@ -1325,11 +1263,9 @@ def sequestron_ERN(
         beta = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
         return alpha * (pos_mean - neg_mean) + beta * res
 
-    def prepare(
-        params: ParameterTree, nodelist_keys: list[NodeKey], stack: ComputeStack, key: PRNGKey
-    ):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
         # --------- quantile var
-        add_quantile_var_ids(params, len(nodelist_keys), 1, local_layer_name)
+        add_quantile_var_ids(params, len(nodelist), 1, local_layer_name)
 
         init_if_needed(
             params,
@@ -1348,11 +1284,9 @@ def sequestron_ERN(
         # store node layer ids if enabled
         seq_layer_ids = []
 
-        for node_key in nodelist_keys:
+        for node in nodelist:
             # handle affinity value for this node
-            graph = stack.networks[node_key.network_id].compute_graph
-            node = graph.nodes[node_key.node_id]
-            extra = node.extra or {}
+            extra = node.get_compute_node("extra")
             seq_name = extra["seq_name"]  # ex: 'CasE5p'
             if seq_name not in affinity_names:
                 raise ValueError(f"Unknown affinity name {seq_name}. Available: {affinity_names}")
@@ -1370,8 +1304,8 @@ def sequestron_ERN(
         # store node layer ids as a param array with non_grad tag if enabled
         if use_ern_layer_id:
             seqlayerid_arr = jnp.array(seq_layer_ids)
-            assert seqlayerid_arr.shape == (len(nodelist_keys),), (
-                f"ERN node layer IDs should have shape ({(len(nodelist_keys),)}), got {seqlayerid_arr.shape}"
+            assert seqlayerid_arr.shape == (len(nodelist),), (
+                f"ERN node layer IDs should have shape ({(len(nodelist),)}), got {seqlayerid_arr.shape}"
             )
             params.at(
                 f"local/{local_layer_name}/node_layer_ids",
@@ -1399,7 +1333,7 @@ def sequestron_ERN(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-    ) -> tuple[ArrayLike, dict]:
+    ) -> Tuple[ArrayLike, Dict]:
         assert len(values) == len(input_shapes)
 
         affinity = params[f"local/{local_layer_name}/affinity"][node_id]
@@ -1451,7 +1385,7 @@ def sequestron_ERN(
 
 ### {{{                    --     output (fluorescence) node     --
 def grouped_output(
-    input_shapes: list[tuple[int, ...]],
+    input_shapes: List[Tuple[int, ...]],
     n_outputs: int,  # unused
     stack: ComputeStack,
     layer_id: int,
@@ -1486,11 +1420,9 @@ def grouped_output(
             activation=inner_activation,
         )
 
-    def prepare(
-        params: ParameterTree, nodelist_keys: list[NodeKey], stack: ComputeStack, key: PRNGKey
-    ):
+    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
         # --------- quantile var
-        add_quantile_var_ids(params, len(nodelist_keys), len(input_shapes), layer_name)
+        add_quantile_var_ids(params, len(nodelist), len(input_shapes), layer_name)
 
         # --------- shared MLP layers
         MLP_head(x=np.zeros(input_shapes[0]), q=np.zeros((1,)), rng_key=key, params=params)
@@ -1501,7 +1433,7 @@ def grouped_output(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-    ) -> tuple[ArrayLike, dict]:
+    ) -> Tuple[ArrayLike, Dict]:
         inputs_arr = jnp.array(inputs)
 
         assert len(inputs_arr) == len(input_shapes)

@@ -675,10 +675,7 @@ class ArrayRef:
         a0, _, i0 = self.map[0]
         shape = arrays[a0][i0][0].shape
 
-        dtype = arrays[0].dtype
-        if dtype == jnp.int64:
-            dtype = jnp.int32
-        conc = jnp.zeros((N, *shape), dtype=dtype)
+        conc = jnp.zeros((N, *shape), dtype=arrays[0].dtype)
 
         for a, p, i in self.map:
             # a is the array number
