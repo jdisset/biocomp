@@ -30,11 +30,12 @@ T = TypeVar("T")
 
 
 @dataclass(frozen=True)
-class NodeKey:
+class StackNode:
     """Lightweight, immutable reference to a specific node within a specific network in the stack."""
 
-    network_id: int
-    node_id: int
+    network_id: int  # id of the network in the stack
+    node_id: int  # id of the node in the network's compute graph
+    layer_id: Optional[int] = None  # filled in when the stack is built
 
     @staticmethod
     def generate_type_signature(graph: GraphState, node_id: int) -> str:
@@ -100,8 +101,8 @@ NodeInput = tuple[int, int, int]  #  (net_id, compute_node_id, slot_id)
 
 
 @dataclass
-class ComputeLayer:
-    node_keys: list[NodeKey]
+class StackLayer:
+    nodes: list[StackNode]
     stack: Optional["ComputeStack"] = None
     layer_id: Optional[int] = None
 
@@ -119,7 +120,7 @@ class ComputeLayer:
     def setup(self, config: ComputeConfig, stack: ComputeStack):
         self.check()
 
-        first_key = self.node_keys[0]
+        first_key = self.nodes[0]
         first_graph = stack.networks[first_key.network_id].compute_graph
         self.f_type = first_graph.nodes[first_key.node_id].node_type
 
@@ -132,7 +133,7 @@ class ComputeLayer:
         # get the shapes of the inputs. We'll collect all the inputs for each node
         # to make sure they are all the same
         node_inputs: list[list[NodeInput]] = []
-        for key in self.node_keys:
+        for key in self.nodes:
             graph = stack.networks[key.network_id].compute_graph
             incoming_edges = graph.get_incoming_edges(key.node_id)
             # sort by input_slot to match old behavior
@@ -180,15 +181,15 @@ class ComputeLayer:
 
     def get_n_outputs(self) -> int:
         """Get the number of outputs for nodes in this layer (all nodes in a layer have the same type signature)"""
-        first_key = self.node_keys[0]
+        first_key = self.nodes[0]
         graph = self.stack.networks[first_key.network_id].compute_graph
         return len(graph.get_outgoing_edges(first_key.node_id))
 
     def flattened_output_shape(self) -> int:
-        return int(len(self.node_keys) * np.sum([np.prod(s) for s in self.f_out_shapes]))
+        return int(len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes]))
 
     def type_str(self) -> str:
-        first_key = self.node_keys[0]
+        first_key = self.nodes[0]
         return (
             self.stack.networks[first_key.network_id]
             .compute_graph.nodes[first_key.node_id]
@@ -197,24 +198,24 @@ class ComputeLayer:
 
     def __repr__(self):
         ftype = self.type_str()
-        return f"Layer {self.layer_id} ({ftype}) with {len(self.node_keys)} nodes"
+        return f"Layer {self.layer_id} ({ftype}) with {len(self.nodes)} nodes"
 
     def __hash__(self):
-        return hash(tuple(self.node_keys))
+        return hash(tuple(self.nodes))
 
     def check(self):
         """Ensure all nodes in the layer have the same type signature"""
         type_sigs = {
-            NodeKey.generate_type_signature(
+            StackNode.generate_type_signature(
                 self.stack.networks[key.network_id].compute_graph, key.node_id
             )
-            for key in self.node_keys
+            for key in self.nodes
         }
         assert len(type_sigs) == 1, f"Different types in layer: {type_sigs}"
 
     def commit(self, params: ParameterTree, stack: "ComputeStack", **kwargs):
         if self.f_commit is not None:
-            self.f_commit(params, self.node_keys, stack, **kwargs)
+            self.f_commit(params, self.nodes, stack, **kwargs)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -223,7 +224,7 @@ class ComputeLayer:
 @dataclass
 class ComputeStack:
     networks: list[Network]
-    layers: Optional[list[ComputeLayer]] = None
+    layers: Optional[list[StackLayer]] = None
 
     layers_start_index: Optional[list[int]] = None
     output_shape: Optional[tuple[int]] = None
@@ -282,14 +283,14 @@ class ComputeStack:
             assert l_id == layer.layer_id, "Layer id mismatch"
             rng_key, _ = jax.random.split(rng_key)
             logger.debug(
-                f"Initializing {len(layer.node_keys)} nodes in layer {l_id}/{len(self.layers)}"
+                f"Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}"
             )
             logger.debug(f"Layer type: {layer.f_type}")
             logger.debug(f"Layer input shapes: {layer.f_input_shapes}")
             logger.debug(f"Layer output shapes: {layer.f_out_shapes}")
             if layer.f_prepare is not None:
                 try:
-                    layer.f_prepare(params, nodelist_keys=layer.node_keys, stack=self, key=rng_key)
+                    layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
                 except Exception as e:
                     logger.error(f"Error in layer {l_id} preparation:")
                     logger.error(f"Layer type: {layer.f_type}")
@@ -317,7 +318,7 @@ class ComputeStack:
         This is the sum of the number of outputs of all networks.
         """
         if self.total_nb_of_outputs is None:
-            self.total_nb_of_outputs = sum(n.get_nb_outputs() for n in self.networks)
+            self.total_nb_of_outputs = sum(n.nb_outputs for n in self.networks)
         return self.total_nb_of_outputs
 
     def get_nb_inputs(self) -> int:
@@ -326,7 +327,7 @@ class ComputeStack:
         This is the sum of the number of inputs of all networks.
         """
         if self.total_nb_of_inputs is None:
-            self.total_nb_of_inputs = sum(n.get_nb_inputs() for n in self.networks)
+            self.total_nb_of_inputs = sum(n.nb_inputs for n in self.networks)
         return self.total_nb_of_inputs
 
     def get_dependent_output_mask(self):
@@ -334,7 +335,7 @@ class ComputeStack:
         Get a mask that indicates which outputs are dependent on the inputs.
         """
         m = np.concatenate([n.get_dependent_output_mask() for n in self.networks])
-        assert m.shape == (sum(n.get_nb_outputs() for n in self.networks),)
+        assert m.shape == (sum(n.nb_outputs for n in self.networks),)
         return m
 
     def get_nb_dependent_outputs(self) -> int:
@@ -358,7 +359,7 @@ class ComputeStack:
 
     def get_node_key_from_net_and_compute_id(
         self, network_id: int, compute_node_id: int
-    ) -> NodeKey:
+    ) -> StackNode:
         """Returns the NodeKey corresponding to the given network and compute node ids"""
         assert self.node_map is not None, "No node map"
         assert self.layers is not None, "Stack has no layers"
@@ -367,7 +368,7 @@ class ComputeStack:
             compute_node_id,
         ) in self.node_map, f"Node not found: {network_id}/{compute_node_id}"
         layer_id, node_loc = self.node_map[(network_id, compute_node_id)]
-        return self.layers[layer_id].node_keys[node_loc]
+        return self.layers[layer_id].nodes[node_loc]
 
     def copy(self):
         # we only deepcopy the layers, not the networks
@@ -409,7 +410,7 @@ class ComputeStack:
     def each_node(self):
         assert self.layers is not None, "Stack has no layers"
         for layer in self.layers:
-            for node in layer.nodes.values():
+            for node in layer.nodes:
                 yield node
 
     def register_post_process(self, callback: Callable):
@@ -471,7 +472,7 @@ class ComputeStack:
 
     ### {{{                       --    internal utils     --
 
-    def add_layer(self, layer: ComputeLayer):
+    def add_layer(self, layer: StackLayer):
         if self.layers is None:
             self.layers = []
         self.layers.append(layer)
@@ -489,23 +490,23 @@ class ComputeStack:
         for l in self.layers:
             l.check()
             # verify all node keys reference valid networks and nodes
-            for key in l.node_keys:
+            for key in l.nodes:
                 assert key.network_id < len(self.networks), f"Invalid network_id: {key.network_id}"
                 assert key.node_id in self.networks[key.network_id].compute_graph.nodes, (
                     f"Invalid node_id {key.node_id} in network {key.network_id}"
                 )
         # verify first layer is input
-        first_key = self.layers[0].node_keys[0]
+        first_key = self.layers[0].nodes[0]
         first_node = self.networks[first_key.network_id].compute_graph.nodes[first_key.node_id]
         assert first_node.node_type == "input", f"First node is not input: {first_node.node_type}"
 
-    def get_all_node_keys(self) -> list[NodeKey]:
+    def get_all_node_keys(self) -> list[StackNode]:
         """Get all NodeKeys from all layers"""
         if self.layers is None:
             return []
-        return [key for layer in self.layers for key in layer.node_keys]
+        return [key for layer in self.layers for key in layer.nodes]
 
-    def get_node_input_start_index(self, node_key: NodeKey, input_slot: int) -> int:
+    def get_node_input_start_index(self, node_key: StackNode, input_slot: int) -> int:
         """Returns the start index of the input #input_slot for the given node
         in the flattened full-stack output array"""
         assert self.node_map is not None, "No node map"
@@ -551,7 +552,7 @@ class ComputeStack:
 
         return int(outslot_start)
 
-    def get_node_output_start_index(self, node_key: NodeKey, output_slot: int) -> int:
+    def get_node_output_start_index(self, node_key: StackNode, output_slot: int) -> int:
         """Returns the start index of the output #output_slot for the given node
         in the flattened full-stack output array"""
         assert self.node_map is not None, "No node map"
@@ -601,14 +602,14 @@ class ComputeStack:
                     [
                         self.node_map[(key.network_id, key.node_id)][0]
                         * input_lengths[0]  # layer_id * length
-                        for key in layer.node_keys
+                        for key in layer.nodes
                     ]
                 ]
             )
         else:
             input_start_indices = np.array(
                 [
-                    [self.get_node_input_start_index(key, i) for key in layer.node_keys]
+                    [self.get_node_input_start_index(key, i) for key in layer.nodes]
                     for i in range(len(input_shapes))
                 ]
             )
@@ -664,9 +665,17 @@ class ComputeStack:
         for l_id, l in enumerate(self.layers):
             l.layer_id = l_id
             if l.is_built:
-                for n_id, key in enumerate(l.node_keys):
+                # update StackNode objects with layer_id
+                updated_nodes = []
+                for n_id, key in enumerate(l.nodes):
+                    # create new StackNode with layer_id filled in
+                    updated_key = StackNode(
+                        network_id=key.network_id, node_id=key.node_id, layer_id=l_id
+                    )
+                    updated_nodes.append(updated_key)
                     self.node_map[(key.network_id, key.node_id)] = (l_id, n_id)
                     node_id += 1
+                l.nodes = updated_nodes
             else:
                 allbuilt = False
                 break
