@@ -35,7 +35,8 @@ class StackNode:
 
     network_id: int  # id of the network in the stack
     node_id: int  # id of the node in the network's compute graph
-    layer_id: Optional[int] = None  # filled in when the stack is built
+    layer_number: Optional[int] = None  # what layer in the stack this node is in
+    node_position_in_layer: Optional[int] = None  # what position in the layer this node is in
 
     @staticmethod
     def generate_type_signature(graph: GraphState, node_id: int) -> str:
@@ -44,6 +45,48 @@ class StackNode:
         n_inputs = len(graph.get_incoming_edges(node_id))
         n_outputs = len(graph.get_outgoing_edges(node_id))
         return f"{node.node_type}_{n_inputs}_{n_outputs}"
+
+    def get(self, stack: "ComputeStack") -> nd.ComputeNode:
+        """Get the actual ComputeNode object from the stack"""
+        assert stack.networks is not None, "Stack has no networks"
+        assert self.network_id < len(stack.networks)
+        cg = stack.networks[self.network_id].compute_graph
+        assert cg is not None
+        return cg.get_node(self.node_id)
+
+    def get_forward_stacknode(self, stack: "ComputeStack") -> nd.StackNode:
+        """Get the stack node that this node is an inverse of"""
+        node = self.get(stack)
+        assert node.is_inverse_of is not None, "Node has no inverse"
+        assert stack.networks is not None, "Stack has no networks"
+        assert self.network_id < len(stack.networks)
+        return stack.get_node_from_net_and_compute_id(self.network_id, node.is_inverse_of.node_id)
+
+    def get_outgoing_edges(self, stack: "ComputeStack") -> list[nd.ComputeEdge]:
+        """Get the outgoing edges of the node from the stack"""
+        assert stack.networks is not None, "Stack has no networks"
+        assert self.network_id < len(stack.networks)
+        cg = stack.networks[self.network_id].compute_graph
+        assert cg is not None
+        return cg.get_outgoing_edges(self.node_id)
+
+    def get_incoming_edges(self, stack: "ComputeStack") -> list[nd.ComputeEdge]:
+        """Get the incoming edges of the node from the stack"""
+        assert stack.networks is not None, "Stack has no networks"
+        assert self.network_id < len(stack.networks)
+        cg = stack.networks[self.network_id].compute_graph
+        assert cg is not None
+        return cg.get_incoming_edges(self.node_id)
+
+    def get_nb_outputs(self, stack: "ComputeStack") -> int:
+        assert stack.networks is not None, "Stack has no networks"
+        assert self.network_id < len(stack.networks)
+        cg = stack.networks[self.network_id].compute_graph
+        assert cg is not None
+        nbe = cg.get_nb_outgoing_edges(self.node_id)
+        nbs = cg.get_nb_outgoing_slots(self.node_id)
+        assert nbe == nbs, "Number of edges and slots do not match"
+        return nbe
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -357,9 +400,7 @@ class ComputeStack:
         )
         return int(start_index), out_shape
 
-    def get_node_key_from_net_and_compute_id(
-        self, network_id: int, compute_node_id: int
-    ) -> StackNode:
+    def get_node_from_net_and_compute_id(self, network_id: int, compute_node_id: int) -> StackNode:
         """Returns the NodeKey corresponding to the given network and compute node ids"""
         assert self.node_map is not None, "No node map"
         assert self.layers is not None, "Stack has no layers"
@@ -670,7 +711,10 @@ class ComputeStack:
                 for n_id, key in enumerate(l.nodes):
                     # create new StackNode with layer_id filled in
                     updated_key = StackNode(
-                        network_id=key.network_id, node_id=key.node_id, layer_id=l_id
+                        network_id=key.network_id,
+                        node_id=key.node_id,
+                        layer_number=l_id,
+                        node_position_in_layer=n_id,
                     )
                     updated_nodes.append(updated_key)
                     self.node_map[(key.network_id, key.node_id)] = (l_id, n_id)

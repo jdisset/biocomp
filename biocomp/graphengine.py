@@ -70,10 +70,30 @@ class GraphState(BaseModel):
         return self.edges.get((source_id, target_id, output_slot, input_slot))
 
     def get_outgoing_edges(self, node_id: int) -> list[GraphEdge]:
-        return [e for e in self.edges.values() if e.source_id == node_id]
+        """Returns the *sorted* list of outgoing edges from the given node."""
+        o_edges = [e for e in self.edges.values() if e.source_id == node_id]
+        o_edges.sort(key=lambda e: (e.target_id, e.output_slot, e.input_slot))
+        return o_edges
 
     def get_incoming_edges(self, node_id: int) -> list[GraphEdge]:
-        return [e for e in self.edges.values() if e.target_id == node_id]
+        """Returns the *sorted* list of incoming edges to the given node."""
+        i_edges = [e for e in self.edges.values() if e.target_id == node_id]
+        i_edges.sort(key=lambda e: (e.source_id, e.output_slot, e.input_slot))
+        return i_edges
+
+    def get_nb_outgoing_edges(self, node_id: int) -> int:
+        return len(self.get_outgoing_edges(node_id))
+
+    def get_nb_outgoing_slots(self, node_id: int) -> int:
+        edges = self.get_outgoing_edges(node_id)
+        return len(set(e.output_slot for e in edges))
+
+    def get_nb_incoming_edges(self, node_id: int) -> int:
+        return len(self.get_incoming_edges(node_id))
+
+    def get_nb_incoming_slots(self, node_id: int) -> int:
+        edges = self.get_incoming_edges(node_id)
+        return len(set(e.input_slot for e in edges))
 
 
 class GraphBuilder:
