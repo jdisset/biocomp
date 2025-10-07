@@ -5,18 +5,26 @@ from jax import vmap
 from jax.tree_util import Partial as partial
 import jax.numpy as jnp
 import numpy as np
-import jax.nn
 
 from .utils import get_logger
 from .jaxutils import flat_concat
 from . import quantization as qz
 
 from .parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
+from .neuralutils import (
+    ACTIVATION_FUNCTIONS,
+    INITIALIZERS,
+    DEFAULT_ACTIVATION,
+    DEFAULT_OUT_ACTIVATION,
+    DEFAULT_INITIALIZER,
+    dense_mlp,
+    uniform_initializer,
+)
 
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from .compute import ComputeNode, ComputeStack
+    from .compute import StackNode, ComputeStack
 
 from jax.typing import ArrayLike
 from typing import Callable, Tuple, List, Dict
@@ -28,30 +36,6 @@ logger = get_logger(__name__)
 
 
 # =========================== Utils ===========================
-### {{{                 --     misc    --
-def generate_layer_name(stack, layer_id, name):
-    if stack is None:
-        return f"{layer_id}/{name}"
-    else:
-        n_nodes = len(stack.layers[layer_id].nodes)
-        n_layers = len(stack.layers)
-        return f"{layer_id}/{name} ({n_nodes})"
-
-
-def quantization_mask_str(names, mask) -> str:
-    col_width = max(len(name) for name in names)
-    result = " " * 5
-    for i, name in enumerate(names):
-        result += f"{name:^{col_width}} "
-    result += "\n"
-    for i, row in enumerate(mask):
-        result += f"{i:<4}|"
-        for val in row[0]:
-            result += f"{'X' if val else ' ':^{col_width}}|"
-        result += "\n"
-    return result
-
-
 @dataclass
 class LayerInstance:
     prepare: Callable
@@ -68,7 +52,31 @@ class LayerInstance:
         )
 
 
+### {{{                 --     misc    --
 NON_GRAD_TAG = "non_grad"
+
+
+def generate_layer_name(stack, layer_id, name):
+    if stack is None:
+        return f"{layer_id}/{name}"
+    else:
+        n_nodes = len(stack.layers[layer_id].nodes)
+        return f"{layer_id}/{name} ({n_nodes})"
+
+
+def quantization_mask_str(names, mask) -> str:
+    col_width = max(len(name) for name in names)
+    result = " " * 5
+    for i, name in enumerate(names):
+        result += f"{name:^{col_width}} "
+    result += "\n"
+    for i, row in enumerate(mask):
+        result += f"{i:<4}|"
+        for val in row[0]:
+            result += f"{'X' if val else ' ':^{col_width}}|"
+        result += "\n"
+    return result
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -121,168 +129,6 @@ def add_quantile_var_ids(params: ParameterTree, num_nodes: int, num_per_node, la
         tags=[NON_GRAD_TAG],
         overwrite=True,
     )
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-### {{{                    --     neural utils     --
-
-
-def uniform_initializer(rng, shape=(), minval=0, maxval=1):
-    def init():
-        return jax.random.uniform(
-            key=rng, shape=shape, minval=minval, maxval=maxval, dtype=jnp.float32
-        )
-
-    return init
-
-
-def glorot_normal(rng, shape):
-    def init():
-        return jax.nn.initializers.glorot_normal()(rng, shape)
-
-    return init
-
-
-def glorot_uniform(rng, shape):
-    def init():
-        return jax.nn.initializers.glorot_uniform()(rng, shape)
-
-    return init
-
-
-def he_normal(rng, shape):
-    def init():
-        return jax.nn.initializers.he_normal()(rng, shape)
-
-    return init
-
-
-def he_uniform(rng, shape):
-    def init():
-        return jax.nn.initializers.he_uniform()(rng, shape)
-
-    return init
-
-
-def leaky_relu(x, alpha=0.2):
-    return jax.nn.leaky_relu(x, negative_slope=alpha)
-
-
-def sigmoid(x):
-    return jax.nn.sigmoid(x)
-
-
-ACTIVATION_FUNCTIONS = {
-    "leaky_relu": leaky_relu,
-    "relu": jax.nn.relu,
-    "elu": jax.nn.elu,
-    "selu": jax.nn.selu,
-    "tanh": jax.nn.tanh,
-    "gelu": jax.nn.gelu,
-    "softplus": jax.nn.softplus,
-    "sigmoid": sigmoid,
-    "none": lambda x: x,
-}
-
-INITIALIZERS = {
-    "uniform": uniform_initializer,
-    "glorot_normal": glorot_normal,
-    "glorot_uniform": glorot_uniform,
-    "he_normal": he_normal,
-    "he_uniform": he_uniform,
-}
-
-DEFAULT_ACTIVATION = "leaky_relu"
-DEFAULT_OUT_ACTIVATION = "sigmoid"
-DEFAULT_INITIALIZER = "he_normal"
-
-
-def dense_layer(
-    input_values: ArrayLike,
-    output_size: ArrayLike,
-    param_f: Callable,
-    initializer: Callable,
-    bias_offset,
-    key: PRNGKey,
-    name: str,
-):
-    assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
-    input_size = 1 if input_values.shape == () else input_values.shape[0]
-
-    w = param_f(f"{name}/w", init_f=initializer(key, (input_size, output_size)))
-    b = param_f(f"{name}/b", init_f=lambda: np.zeros((output_size,)) + bias_offset)
-
-    assert input_values.shape == (input_size,), (
-        f"In {name}: {input_values.shape} != {(input_size,)}"
-    )
-    assert w.shape == (
-        input_size,
-        output_size,
-    ), f"In {name}: {w.shape} != {(input_size, output_size)}"
-    assert b.shape == (output_size,), f"In {name}: {b.shape} != {(output_size,)}"
-
-    assert w.shape == (
-        input_size,
-        output_size,
-    ), f"In {name}: {w.shape} != {(input_size, output_size)}"
-
-    res = jnp.dot(input_values, w) + b
-    assert res.shape == (output_size,), f"In {name}: {res.shape} != {(output_size,)}"
-    return res
-
-
-def layer_norm(x, param_f: Callable, name: str, axis=-1, epsilon=1e-5, gamma_init=0.1):
-    """
-    Layer normalization for a given input `x` along the specified `axis`.
-    """
-    mean = jnp.mean(x, axis=axis, keepdims=True)
-    var = jnp.mean((x - mean) ** 2, axis=axis, keepdims=True)
-    xhat = (x - mean) / jnp.sqrt(var + epsilon)
-    gamma = param_f(f"{name}/gamma", init_f=lambda: jnp.ones(x.shape[axis]) * gamma_init)
-    beta = param_f(f"{name}/beta", init_f=lambda: jnp.zeros(x.shape[axis]))
-
-    return gamma * xhat + beta
-
-
-def dense_mlp(
-    input_values: ArrayLike,
-    hidden_s: int,
-    output_s: int,
-    depth: int,
-    param_f: Callable[[str, Callable], ArrayLike],
-    initializer: Callable,
-    bias_offset,
-    key: PRNGKey,
-    name: str,
-    activation: Callable[[ArrayLike], ArrayLike],
-):
-    """
-    A dense multi-layer perceptron (MLP) with `depth` hidden layers of same size `hidden_s`.
-    """
-    assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
-    assert isinstance(depth, int) and depth >= 1, (
-        f"In {name}: depth should be an integer greater than or equal to 1."
-    )
-    assert isinstance(hidden_s, int) and hidden_s > 0, (
-        f"In {name}: hidden_s should be a positive integer."
-    )
-    assert isinstance(output_s, int) and output_s > 0, (
-        f"In {name}: output_s should be a positive integer."
-    )
-
-    res = input_values
-    keys = jax.random.split(key, depth)
-    for i in range(depth - 1):
-        pre = dense_layer(res, hidden_s, param_f, initializer, bias_offset, keys[i], f"{name}/l{i}")
-        normed = layer_norm(pre, param_f, f"{name}/l{i}/norm")
-        res = activation(normed)
-        assert res.shape == (hidden_s,), f"In {name}: {res.shape} != {(hidden_s,)}"
-
-    res = dense_layer(
-        res, output_s, param_f, initializer, bias_offset, keys[-1], f"{name}/l{depth - 1}"
-    )
-    assert res.shape == (output_s,), f"In {name}: {res.shape} != {(output_s,)}"
-    return res
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -371,7 +217,7 @@ def source_with_pos(
     local_layer_name = generate_layer_name(stack, layer_id, f"source{n_outputs}x")
     namespace = f"local/{local_layer_name}"
 
-    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
+    def prepare(params: ParameterTree, nodelist: List[StackNode], key, **_):
         add_quantile_var_ids(params, len(nodelist), len(input_shapes), local_layer_name)
         params.at(
             f"{namespace}/input_shapes",
@@ -454,7 +300,7 @@ def inv_source_with_pos(
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
     initializer = INITIALIZERS[initializer_name]
 
-    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
+    def prepare(params: ParameterTree, nodelist: List[StackNode], key, **_):
         # add quantile variables - one per node
         add_quantile_var_ids(params, len(nodelist), 1, local_layer_name)
 
@@ -547,7 +393,7 @@ def inv_source_with_pos(
             "pre_activation": pre_activation,
         }
 
-    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+    def commit(params: ParameterTree, nodelist: List[StackNode], **_):
         for i, node in enumerate(nodelist):
             extra = node.get_compute_node("extra") or {}
             position = params[f"{namespace}/original_positions"][i].item()
@@ -581,7 +427,7 @@ def hard_bias(
         # hard clamp to valid_range. scale is ignored
         return jnp.clip(value, valid_range[0], valid_range[1])
 
-    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
+    def prepare(params: ParameterTree, nodelist: List[StackNode], key, **_):
         raw_values = []
 
         for node in nodelist:
@@ -626,7 +472,7 @@ def hard_bias(
             "bias_value": bias_value,
         }
 
-    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+    def commit(params: ParameterTree, nodelist: List[StackNode], **_):
         for i, n in enumerate(nodelist):
             extra = n.get_compute_node("extra") or {}
             bias_value = clamp_to_range(params[f"{namespace}/raw_value"][i])
@@ -667,7 +513,7 @@ def bias(
         y = jnp.clip(y, 1e-5, 1 - 1e-5)
         return -s * jnp.log((1 / y) - 1)
 
-    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key, **_):
+    def prepare(params: ParameterTree, nodelist: List[StackNode], key, **_):
         raw_values = []
         scales = []
 
@@ -716,7 +562,7 @@ def bias(
             "scale": scale,
         }
 
-    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+    def commit(params: ParameterTree, nodelist: List[StackNode], **_):
         for i, n in enumerate(nodelist):
             extra = n.get_compute_node("extra") or {}
             scale = params[f"{namespace}/scale"][i]
@@ -756,7 +602,7 @@ def aggregation(
     #     normed_ratios = current_ratios / max_ratios[:, None]
     #     return params.tree_set_at(f"{namespace}/{pname}", jnp.clip(normed_ratios, 0, 1))
 
-    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey, **_):
+    def prepare(params: ParameterTree, nodelist: List[StackNode], key: PRNGKey, **_):
         ratios = []
         for i, node in enumerate(nodelist):
             extra = node.get_compute_node("extra")
@@ -787,7 +633,7 @@ def aggregation(
         result = abs_ratios * input
         return result, {"ratios": ratios, "abs_ratios": abs_ratios, "n_outputs": n_outputs}
 
-    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+    def commit(params: ParameterTree, nodelist: List[StackNode], **_):
         for i, n in enumerate(nodelist):
             extra = n.get_compute_node("extra") or {}
             ratios = params[f"{namespace}/{pname}"][i]
@@ -840,10 +686,10 @@ def inv_aggregation(
     assert len(input_shapes) == 1, f"inverse_Aggregation expects 1 input, got {len(input_shapes)}"
     assert n_outputs == 1, f"inverse_Aggregation expects 1 output, got {n_outputs}"
 
-    local_layer_name = generate_layer_name(stack, layer_id, f"inverse_aggregation")
+    local_layer_name = generate_layer_name(stack, layer_id, "inverse_aggregation")
     namespace = f"local/{local_layer_name}"
 
-    def prepare(params: ParameterTree, nodelist: List[ComputeNode], **_):
+    def prepare(params: ParameterTree, nodelist: List[StackNode], **_):
         if stack is not None:
             ref = ArrayRef(params.data)
             for node in nodelist:
@@ -970,7 +816,7 @@ def transform_nn(
 
         return out
 
-    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
+    def prepare(params: ParameterTree, nodelist: List[StackNode], key: PRNGKey):
         key0, key1 = jax.random.split(key, 2)
         n_nodes = len(nodelist)
 
@@ -1161,7 +1007,7 @@ def transform_nn(
             **qaux,
         }
 
-    def commit(params: ParameterTree, nodelist: List[ComputeNode], **_):
+    def commit(params: ParameterTree, nodelist: List[StackNode], **_):
         for node_id, node in enumerate(nodelist):
             rates = params[f"local/{layer_name}/{rate_name}"][node_id]
             resolved_parameter_names = qz.get_quantized_rate_names(
@@ -1263,7 +1109,7 @@ def sequestron_ERN(
         beta = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
         return alpha * (pos_mean - neg_mean) + beta * res
 
-    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
+    def prepare(params: ParameterTree, nodelist: List[StackNode], key: PRNGKey):
         # --------- quantile var
         add_quantile_var_ids(params, len(nodelist), 1, local_layer_name)
 
@@ -1420,7 +1266,7 @@ def grouped_output(
             activation=inner_activation,
         )
 
-    def prepare(params: ParameterTree, nodelist: List[ComputeNode], key: PRNGKey):
+    def prepare(params: ParameterTree, nodelist: List[StackNode], key: PRNGKey):
         # --------- quantile var
         add_quantile_var_ids(params, len(nodelist), len(input_shapes), layer_name)
 
