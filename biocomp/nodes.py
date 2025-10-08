@@ -482,6 +482,7 @@ def bias(
     random_init: bool = False,
     **_,
 ) -> LayerInstance:
+    """A bias node that outputs a learnable (softer) bias value within a specified valid range."""
     assert n_outputs == 1, f"Bias node should have 1 output, got {n_outputs}"
     assert len(input_shapes) == 0
 
@@ -506,7 +507,7 @@ def bias(
         scales = []
 
         for node in nodelist:
-            extra = node.get_compute_node("extra")
+            extra = node.get(stack).extra
             if extra and not random_init:
                 # try to use values from extra dict
                 if "raw_value" in extra and "scale" in extra:
@@ -552,14 +553,12 @@ def bias(
 
     def commit(params: ParameterTree, nodelist: List[StackNode], **_):
         for i, n in enumerate(nodelist):
-            extra = n.get_compute_node("extra") or {}
-            scale = params[f"{namespace}/scale"][i]
-            raw_value = params[f"{namespace}/raw_value"][i]
-            bias_value = clamp_to_range(raw_value, scale)
-            extra["bias_value"] = bias_value
-            extra["scale"] = scale
-            extra["raw_value"] = raw_value
-            n.set_compute_node_column("extra", extra)
+            updt = {
+                "scale": params[f"{namespace}/scale"][i],
+                "raw_value": params[f"{namespace}/raw_value"][i],
+            }
+            updt["bias_value"] = clamp_to_range(updt["raw_value"], updt["scale"])
+            n.get(stack).extra.update(updt)
 
     output_shapes = [tuple(shape)]  # single output shape
 
@@ -586,7 +585,7 @@ def aggregation(
 
     def prepare(params: ParameterTree, nodelist: List[StackNode], key: PRNGKey, **_):
         ratios = []
-        for i, node in enumerate(nodelist):
+        for node in nodelist:
             extra = node.get(stack).extra
             if "ratios" in extra and not random_init:
                 assert len(extra["ratios"]) == n_outputs
@@ -1002,7 +1001,7 @@ def sequestron_ERN(
     n_outputs: int,
     stack: ComputeStack,
     layer_id: int,
-    affinity_names: List[str],
+    affinity_names: List[str],  # ordered list of available affinity names (case, csy4, etc..)
     affinity_dim: int = 1,
     wsize: int = 128,
     depth: int = 4,
@@ -1095,8 +1094,8 @@ def sequestron_ERN(
 
         for node in nodelist:
             # handle affinity value for this node
-            extra = node.get_compute_node("extra")
-            seq_name = extra["seq_name"]  # ex: 'CasE5p'
+            comp_node = node.get(stack)
+            seq_name = comp_node.extra["seq_name"]
             if seq_name not in affinity_names:
                 raise ValueError(f"Unknown affinity name {seq_name}. Available: {affinity_names}")
             affinity_id = affinity_names.index(seq_name)
@@ -1104,8 +1103,13 @@ def sequestron_ERN(
 
             # collect node layer ids if enabled
             if use_ern_layer_id:
-                # get layer_id from node extra info, default to 0 if not present
-                node_layer_id = min(extra.get("layer_id", 0), max_ern_layers - 1)
+                assert "layer_id" in comp_node.extra, (
+                    f"ERN layer_id enabled but no layer_id found in extra dict of node {node}"
+                )
+                node_layer_id = comp_node.extra["layer_id"]
+                assert 0 <= node_layer_id < max_ern_layers, (
+                    f"Invalid ERN layer_id {node_layer_id} for node {node}, should be in [0, {max_ern_layers})"
+                )
                 seq_layer_ids.append(node_layer_id)
 
         params.at(f"local/{local_layer_name}/affinity", ref, overwrite=None)
