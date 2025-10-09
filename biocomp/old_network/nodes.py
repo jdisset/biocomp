@@ -9,7 +9,7 @@ import jax.nn
 
 from biocomp.utils import get_logger
 from biocomp.jaxutils import flat_concat
-from biocomp import quantization as qz
+from . import quantization as qz
 
 from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
 

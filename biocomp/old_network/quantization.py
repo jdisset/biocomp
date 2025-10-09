@@ -1,9 +1,9 @@
-from .library import PartsLibrary as PartsLibrary
+from biocomp.library import PartsLibrary as PartsLibrary
 import jax
 from jax import vmap, jit
 import jax.numpy as jnp
 import numpy as np
-from .parameters import ParameterTree
+from biocomp.parameters import ParameterTree
 from jax import random as random
 from biocomp.logging_config import get_logger
 
