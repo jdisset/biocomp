@@ -64,10 +64,11 @@ def invert_all_paths(graph: GraphState, mode: str = "shortest") -> list[GraphSta
                     builder.add_edge(inp_id, prev_id, output_slot=0, input_slot=0)
                     break
 
+                output_len = len([e for e in graph.edges.values() if e.source_id == node_id])
                 inv_id = builder.add_node(
                     f"inv_{node.node_type}",
-                    extra={},
-                    is_inverse_of=InverseSpec(node_id=node_id, output_slot=slot, output_len=len([e for e in graph.edges.values() if e.source_id == node_id]))
+                    extra={"original_output_slot": slot, "original_output_len": output_len},
+                    is_inverse_of=InverseSpec(node_id=node_id, output_slot=slot, output_len=output_len)
                 )
                 builder.add_edge(inv_id, prev_id, output_slot=0, input_slot=0)
                 prev_id = inv_id

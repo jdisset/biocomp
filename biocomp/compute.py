@@ -43,7 +43,7 @@ class StackNode:
         """Generate a type signature for a node based on its type and number of inputs/outputs"""
         node = graph.nodes[node_id]
         n_inputs = len(graph.get_incoming_edges(node_id))
-        n_outputs = len(graph.get_outgoing_edges(node_id))
+        n_outputs = graph.get_nb_outgoing_slots(node_id)
         return f"{node.node_type}_{n_inputs}_{n_outputs}"
 
     def get(self, stack: "ComputeStack") -> nd.ComputeNode:
@@ -83,10 +83,8 @@ class StackNode:
         assert self.network_id < len(stack.networks)
         cg = stack.networks[self.network_id].compute_graph
         assert cg is not None
-        nbe = cg.get_nb_outgoing_edges(self.node_id)
-        nbs = cg.get_nb_outgoing_slots(self.node_id)
-        assert nbe == nbs, "Number of edges and slots do not match"
-        return nbe
+        # return number of unique output slots (not edges, as one slot can have multiple edges)
+        return cg.get_nb_outgoing_slots(self.node_id)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
