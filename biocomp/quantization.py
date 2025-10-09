@@ -6,7 +6,10 @@ import numpy as np
 from .parameters import ParameterTree
 from jax import random as random
 from biocomp.logging_config import get_logger
-from biocomp.compute import StackNode
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from biocomp.compute import StackNode
 
 logger = get_logger(__name__)
 
@@ -227,15 +230,14 @@ def get_quantized_part_names(
     return names
 
 
-def get_quantization_mask(all_qnames, pname, node: StackNode, stack):
+def get_quantization_mask(all_qnames, pname, node: "StackNode", stack):
     """
     generate the quantization masks for a given node and parameter. One mask per input edge.
-    - qnames: the list of quantization names, aka embedding names for this parameter (e.g. ['hEF1a', ...])
+    - all_qnames: the list of quantization names, aka embedding names for this parameter (e.g. ['hEF1a', ...])
     - pname: the name of the parameter we want to quantize (e.g. 'tl_rate')
-    - vnode: the node we want to quantize
-    - masks_per_node: basically the max number of inputs a node can have (extras will be ignored)
+    - node: the StackNode we want to quantize
+    - stack: the compute stack
     """
-    # example: generate_quantization_masks(['hEF1a', 'hEF1b', 'hEF1c'], 'tc_rate', node)
     node_qnames = [e.content_embedding_names[pname] for e in node.get_incoming_edges(stack)]
     mask = np.zeros((len(node_qnames), len(all_qnames)), dtype=bool)
     for i in range(len(node_qnames)):

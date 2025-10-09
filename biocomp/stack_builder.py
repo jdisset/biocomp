@@ -139,7 +139,6 @@ def make_smallest_stack_bfs(
             ]
             if can_be_computed:
                 possible_next_types.append((t, len(can_be_computed)))
-                break
 
         if max_t is not None:
             # sort by decreasing number of nodes
@@ -199,7 +198,6 @@ def make_smallest_stack_dfs(
         ]
         if can_be_computed:
             possible_next_types.append((t, len(can_be_computed)))
-            break
 
     if max_t is not None:
         # we're basically doing beam search here, by only keeping the max_t types with the most nodes
