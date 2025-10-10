@@ -1186,10 +1186,10 @@ def get_param(params, path, base_path="", **_):
 
 def make_view(
     params: ParameterTree,
-    at_path: ParamPath,
+    at_path: ParamPath | str,
     from_paths: Sequence[ParamPath],
     from_ids: Sequence[int],
-    leaves: Sequence[ParamPath],
+    leaves: Sequence[ParamPath | str],
 ):
     for leaf in leaves:
         leafpath = ParamPath(at_path) / leaf
