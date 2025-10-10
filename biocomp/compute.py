@@ -141,6 +141,18 @@ DEFAULT_COMPUTE_CONFIG = ComputeConfig.model_validate(
 NodeInput = tuple[int, int, int]  #  (net_id, compute_node_id, slot_id)
 
 
+def _compute_layer_namespace(layer_id: int, node_type: str, n_outputs: int) -> str:
+    """Computes the canonical parameter namespace for a layer based on its properties."""
+    type_suffix = ""
+    if node_type in ["aggregation", "source"]:
+        type_suffix = f"{n_outputs}x"
+    elif node_type.startswith("inv_"):
+        type_suffix = ""
+
+    layer_name = f"{node_type}{type_suffix}"
+    return f"local/{layer_id}/{layer_name}"
+
+
 @dataclass
 class StackLayer:
     nodes: list[StackNode]
@@ -156,6 +168,9 @@ class StackLayer:
     f_apply: Optional[Callable] = None
     f_commit: Optional[Callable] = None
 
+    # parameter namespace for this layer (e.g., "local/5/aggregation_2x")
+    namespace: Optional[str] = None
+
     is_built: bool = False
 
     def setup(self, config: ComputeConfig, stack: ComputeStack):
@@ -168,6 +183,7 @@ class StackLayer:
         if self.f_type == "input":
             self.f_out_shapes = [(1,)]
             self.f_input_shapes = [(1,)]
+            self.namespace = f"local/{self.layer_id}/input"  # input layer namespace
             self.is_built = True
             return
 
@@ -207,11 +223,15 @@ class StackLayer:
 
         n_outputs = self.get_n_outputs()
 
+        # Compute namespace for this layer
+        self.namespace = _compute_layer_namespace(self.layer_id, self.f_type, n_outputs)
+
         impl = config.get_node_implementation(self.f_type)(
             input_shapes=self.f_input_shapes,
             n_outputs=n_outputs,
             stack=stack,
             layer_id=self.layer_id,
+            namespace=self.namespace,  # pass namespace to node implementation
         )
 
         self.f_prepare = impl.prepare
@@ -381,6 +401,17 @@ class ComputeStack:
 
     def get_nb_dependent_outputs(self) -> int:
         return np.sum(self.get_dependent_output_mask())
+
+    def get_layer_namespace(self, layer_id: int) -> str:
+        """
+        Returns the canonical parameter namespace for a given layer.
+        This is the single source of truth for local parameter paths.
+        """
+        assert self.layers is not None, "Stack layers are not built"
+        assert 0 <= layer_id < len(self.layers), f"Invalid layer_id: {layer_id}"
+        layer = self.layers[layer_id]
+        assert layer.namespace is not None, f"Layer {layer_id} has no namespace"
+        return layer.namespace
 
     def get_network_output_indices(self, network_id: int):
         """Returns the start index and shape of the output of the given network in
