@@ -230,8 +230,7 @@ class StackLayer:
             input_shapes=self.f_input_shapes,
             n_outputs=n_outputs,
             stack=stack,
-            layer_id=self.layer_id,
-            namespace=self.namespace,  # pass namespace to node implementation
+            namespace=self.namespace,
         )
 
         self.f_prepare = impl.prepare
@@ -821,7 +820,7 @@ class ComputeStack:
         def apply_impl(
             params: ParameterTree,
             inputs: NdArray,
-            quantiles: NdArray,
+            random_vars: NdArray,
             key: PRNGKey,
             overwrite_values: Optional[NdArray] = None,
             overwrite_at: Optional[NdArray] = None,
@@ -877,12 +876,16 @@ class ComputeStack:
 
                 def node_apply(node_id: ArrayLike, key: PRNGKey, *inputs: ArrayLike):
                     res, node_aux = apply_f(
-                        *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
+                        *inputs, params=params, random_vars=random_vars, node_id=node_id, key=key
                     )
                     if w_grads[lid]:
                         # using jax.jacfwd, we can just grab the first output wrt the first input
                         grad = jax.jacfwd(single_out_apply, argnums=list(range(n_inputs)))(
-                            *inputs, params=params, quantiles=quantiles, node_id=node_id, key=key
+                            *inputs,
+                            params=params,
+                            random_vars=random_vars,
+                            node_id=node_id,
+                            key=key,
                         )
                         first_output_grad = grad[0]
                         grad = first_output_grad.reshape(-1)

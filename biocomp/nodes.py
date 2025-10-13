@@ -54,60 +54,64 @@ class LayerInstance:
         )
 
 
+### {{{                 --     random variable helpers     --
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{                 --     quantile variable helpers     --
-
-# TODO: "quantile variable" is a bit confusing, and my tired brain often confuses it with quantization stuff when reading a bit too fast.
-# Maybe should be renamed to "{random/sample/latent} variable" or something like that, or just Z?
-
-GLOBAL_PATH_NUMBER_OF_QUANTILE_VARIABLES = "global/number_of_quantile_variables"
+GLOBAL_PATH_NUMBER_OF_RANDOM_VARIABLES = "global/number_of_random_variables"
 
 
-def get_prev_num_quantile_vars(params: ParameterTree):
+def get_prev_num_random_vars(params: ParameterTree):
     try:
-        return params[GLOBAL_PATH_NUMBER_OF_QUANTILE_VARIABLES]
+        return params[GLOBAL_PATH_NUMBER_OF_RANDOM_VARIABLES]
     except KeyError:
         return 0
 
 
-def add_quantile_var_ids(params: ParameterTree, num_nodes: int, num_per_node, namespace: str):
+def add_random_var_ids(params: ParameterTree, num_nodes: int, num_per_node, namespace: str):
     """
-    Adds quantile variable IDs to the parameters. The quantile variable is just a random variable
+    Adds random_var variable IDs to the parameters. The random_var variable is just a random variable
     used for generation (ideally the node learns a quantile function,
-    and this is the quantile variable fed to that function).
+    and this is the random variable fed to that function).
     It updates (or creates) the following parameters:
-        - global/number_of_quantile_variables -> int, total number of quantile variables (across all neural functions aka nodes)
-        - local/{layer_name}/quantile_variable_id -> id array of shape (num_nodes, num_per_node)
-    Then a node can access its quantile variable IDs by simply indexing the vector of quantile variables (Z) with these ids
+        - global/number_of_random_variables -> int, total number of random_var variables (across all neural functions aka nodes)
+        - local/{layer_name}/random_variable_id -> id array of shape (num_nodes, num_per_node)
+    Then a node can access its random_var variable IDs by simply indexing the vector of random_var variables (Z) with these ids
 
     :param params: The parameters tree to update.
-    :param num_nodes: The number of nodes for which to add quantile variable IDs.
-    :param num_per_node: The number of quantile variables per node.
-    :param layer_name: The name (possibly subpath) of the layer to which these quantile variables belong.
+    :param num_nodes: The number of nodes for which to add random_var variable IDs.
+    :param num_per_node: The number of random_var variables per node.
+    :param layer_name: The name (possibly subpath) of the layer to which these random_var variables belong.
 
     """
 
-    prev_num_quantile_vars = get_prev_num_quantile_vars(params)
-    new_num_quantile_vars = prev_num_quantile_vars + num_nodes * num_per_node
-    quantile_var_ids = jnp.arange(prev_num_quantile_vars, new_num_quantile_vars).reshape(
+    prev_num_random_vars = get_prev_num_random_vars(params)
+    new_num_random_vars = prev_num_random_vars + num_nodes * num_per_node
+    random_var_ids = jnp.arange(prev_num_random_vars, new_num_random_vars).reshape(
         (num_nodes, num_per_node)
     )
     params.at(
-        f"{namespace}/quantile_variable_id",  # NO "local/" prefix needed
-        quantile_var_ids,
+        f"{namespace}/random_variable_id",
+        random_var_ids,
         tags=[NON_GRAD_TAG],
-        overwrite=False,
+        overwrite=None,
     )
 
     params.at(
-        GLOBAL_PATH_NUMBER_OF_QUANTILE_VARIABLES,
-        new_num_quantile_vars,
+        GLOBAL_PATH_NUMBER_OF_RANDOM_VARIABLES,
+        new_num_random_vars,
         tags=[NON_GRAD_TAG],
         overwrite=True,
     )
+
+
+def reference_forward_random_var_ids(stack, params, nodelist, inv_namespace):
+    ref = ArrayRef(params.data)
+    for node in nodelist:
+        fwd_node = node.get_forward_stacknode(stack)
+        fwd_namespace = stack.get_layer_namespace(fwd_node.layer_number)
+        ref.push_back(f"{fwd_namespace}/random_variable_id", fwd_node.node_position_in_layer)
+
+    params.at(f"{inv_namespace}/random_variable_id", ref, overwrite=None)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -128,7 +132,7 @@ def add_quantile_var_ids(params: ParameterTree, num_nodes: int, num_per_node, na
 
 # Signatures:
 # prepare (params, node, key)
-# apply (*values:ArrayLike, quantiles:ArrayLike, params:ParameterTree, node_id:ArrayLike, key)
+# apply (*values:ArrayLike, random_vars:ArrayLike, params:ParameterTree, node_id:ArrayLike, key)
 
 
 def empty_prepare(*_, **__):
@@ -174,7 +178,6 @@ def inv_source(*args, **kwargs):
 def source_with_pos(
     input_shapes: List[Tuple[int]],
     n_outputs: int,
-    layer_id: int,
     stack: ComputeStack,
     namespace: str,
     max_L1s: int = 5,
@@ -195,12 +198,7 @@ def source_with_pos(
     initializer = INITIALIZERS[initializer_name]
 
     def prepare(params: ParameterTree, nodelist: List[StackNode], key, **_):
-        add_quantile_var_ids(params, len(nodelist), len(input_shapes), namespace)
-        params.at(
-            f"{namespace}/input_shapes",
-            jnp.array(input_shapes, dtype=jnp.int32),
-            tags=[NON_GRAD_TAG],
-        )
+        add_random_var_ids(params, len(nodelist), len(input_shapes), namespace)
         MLP_head(np.zeros((2 + len(input_shapes),)), params, key)
 
     def MLP_head(vals, params, key):
@@ -219,18 +217,18 @@ def source_with_pos(
 
     def apply(
         value: ArrayLike,
-        quantiles: ArrayLike,
+        random_vars: ArrayLike,
         params: ParameterTree,
         node_id: ArrayLike,
         key,
     ) -> Tuple[ArrayLike, Dict]:
-        qid = params[f"{namespace}/quantile_variable_id"][node_id]
-        quantile = quantiles[qid]
+        qid = params[f"{namespace}/random_variable_id"][node_id]
+        random_var = random_vars[qid]
 
         # process each output position
         positions = np.arange(max_L1s)[:n_outputs] / max_L1s
         ans = jax.vmap(
-            lambda position: MLP_head(flat_concat(value, position, quantile), params, key)
+            lambda position: MLP_head(flat_concat(value, position, random_var), params, key)
         )(positions)
 
         # add skip connection and apply activation
@@ -241,7 +239,7 @@ def source_with_pos(
         )
         return activated, {
             "positions": positions,
-            "quantile": quantile,
+            "random_var": random_var,
             "pre_activation": res,
             "mlp_output": ans,
             "n_outputs": n_outputs,
@@ -256,7 +254,6 @@ def inv_source_with_pos(
     input_shapes: List[Tuple[int]],
     n_outputs: int,
     stack: ComputeStack,
-    layer_id: int,
     namespace: str,
     max_L1s: int = 5,
     hidden_s=64,
@@ -276,22 +273,12 @@ def inv_source_with_pos(
     initializer = INITIALIZERS[initializer_name]
 
     def prepare(params: ParameterTree, nodelist: List[StackNode], key, **_):
-        # add quantile variables - one per node
-        add_quantile_var_ids(params, len(nodelist), 1, namespace)
-
-        assert stack is not None, "Stack must be provided for inverse source node."
+        reference_forward_random_var_ids(stack, params, nodelist, namespace)
 
         # store the original position for each inverse node
-        positions = []
-        for node in nodelist:
-            original = node.get(stack).is_inverse_of
-            assert original is not None, "Inverse node must have a forward node."
-            assert original.output_slot < original.output_len, (
-                f"Original slot {original.output_slot} out of bounds for output length {original.output_len}"
-            )
-
-            positions.append(original.output_slot)
-        positions = jnp.array(positions, dtype=jnp.int32)
+        positions = jnp.array(
+            [n.get(stack).is_inverse_of.output_slot for n in nodelist], dtype=jnp.int32
+        )
 
         # store positions as a parameter (non-gradient)
         params.at(
@@ -301,10 +288,8 @@ def inv_source_with_pos(
             overwrite=None,
         )
 
-        # initialize the inverse MLP with dummy inputs
-        # inputs are: value (1) + position (1) + quantile (1) = 3 total
-        dummy_input = np.zeros((3,))
-        MLP_head(dummy_input, params, key)
+        # inputs are: value (1) + position (1) + random_var (1) = 3 total
+        MLP_head(np.zeros((3,)), params, key)
 
     def MLP_head(vals, params, key):
         """
@@ -326,15 +311,15 @@ def inv_source_with_pos(
 
     def apply(
         value: ArrayLike,
-        quantiles: ArrayLike,
+        random_vars: ArrayLike,
         params: ParameterTree,
         node_id: ArrayLike,
         key,
     ) -> Tuple[ArrayLike, Dict]:
         assert value.shape == input_shapes[0], f"Invalid input shape {value.shape}"
 
-        qid = params.at(f"{namespace}/quantile_variable_id")[node_id]
-        quantile = quantiles[qid][0]
+        qid = params.at(f"{namespace}/random_variable_id")[node_id]
+        random_var = random_vars[qid][0]
 
         # get the original position this node is inverting
         original_position = params.at(f"{namespace}/original_positions")[node_id]
@@ -347,7 +332,7 @@ def inv_source_with_pos(
             value_flat = value.flatten()
 
         # apply inverse transformation for this specific position
-        mlp_input = flat_concat(value_flat, normalized_position, quantile)
+        mlp_input = flat_concat(value_flat, normalized_position, random_var)
         mlp_out = MLP_head(mlp_input, params, key)
 
         # add skip connection and apply activation
@@ -358,7 +343,7 @@ def inv_source_with_pos(
         return result, {
             "original_position": original_position,
             "normalized_position": normalized_position,
-            "quantile": quantile,
+            "random_var": random_var,
             "mlp_input": mlp_input,
             "mlp_output": mlp_out_reshaped,
             "pre_activation": pre_activation,
@@ -372,7 +357,6 @@ def inv_source_with_pos(
 def hard_bias(
     input_shapes: List[Tuple[int]],
     n_outputs: int,
-    layer_id: int,
     stack,
     namespace: str,
     valid_range: Tuple[float, float] = (0.0, 0.8),
@@ -448,7 +432,6 @@ def hard_bias(
 def bias(
     input_shapes: List[Tuple[int]],
     n_outputs: int,
-    layer_id: int,
     stack,
     namespace: str,
     valid_range: Tuple[float, float] = (0.0, 0.6),
@@ -543,7 +526,6 @@ def bias(
 def aggregation(
     input_shapes: List[Tuple[int]],
     n_outputs: int,
-    layer_id: int,
     stack: ComputeStack,
     namespace: str,
     random_init: bool = False,
@@ -569,7 +551,7 @@ def aggregation(
 
     def apply(
         input: ArrayLike,
-        quantiles: ArrayLike,
+        random_vars: ArrayLike,
         params: ParameterTree,
         node_id: ArrayLike,
         key: PRNGKey,
@@ -606,7 +588,6 @@ def inv_aggregation(
     input_shapes: List[Tuple[int]],
     n_outputs: int,
     stack: ComputeStack,
-    layer_id: int,
     namespace: str,
     **_,
 ) -> LayerInstance:
@@ -615,26 +596,25 @@ def inv_aggregation(
     assert n_outputs == 1, f"inverse_Aggregation expects 1 output, got {n_outputs}"
 
     def prepare(params: ParameterTree, nodelist: List[StackNode], **_):
-        if stack is not None:
-            ref = ArrayRef(params.data)
-            for node in nodelist:
-                extra = node.get(stack).extra
-                assert extra["original_output_slot"] < extra["original_output_len"]
-                original_slot = extra["original_output_slot"]
+        ref = ArrayRef(params.data)
+        for node in nodelist:
+            extra = node.get(stack).extra
+            assert extra["original_output_slot"] < extra["original_output_len"]
+            original_slot = extra["original_output_slot"]
 
-                fwd_node = node.get_forward_stacknode(stack)
-                fwd_namespace = stack.get_layer_namespace(fwd_node.layer_number)
-                ref.push_back(
-                    f"{fwd_namespace}/ratios", (fwd_node.node_position_in_layer, original_slot)
-                )
+            fwd_node = node.get_forward_stacknode(stack)
+            fwd_namespace = stack.get_layer_namespace(fwd_node.layer_number)
+            ref.push_back(
+                f"{fwd_namespace}/ratios", (fwd_node.node_position_in_layer, original_slot)
+            )
 
-            params.at(f"{namespace}/ratios", ref, overwrite=None)
+        params.at(f"{namespace}/ratios", ref, overwrite=None)
 
     EPSILON = 1e-9
 
     def apply(
         input: ArrayLike,
-        quantiles: ArrayLike,
+        random_vars: ArrayLike,
         params: ParameterTree,
         node_id: ArrayLike,
         key,
@@ -658,7 +638,6 @@ def transform_nn(
     input_shapes: List[Tuple[int]],
     n_outputs: int,
     stack: ComputeStack,
-    layer_id: int,
     namespace: str,
     transform_name: str,
     quantization_names: List[str],  # ordered list. ex: ['1xuorf', '2xuorf', ...]
@@ -705,7 +684,7 @@ def transform_nn(
     logstdevs_path = f"shared/quantization/logstdevs/{rate_name}"
     count_array_path = f"shared/quantization/counts/{rate_name}"
 
-    def inner(params, value: ArrayLike, quantile, rate_embedding: ArrayLike, key: PRNGKey):
+    def inner(params, value: ArrayLike, random_var, rate_embedding: ArrayLike, key: PRNGKey):
         """For a single source, computes a latent output from the concatenation of
         the rate embedding and the source value.
         All of these outputs will then be summed up and passed through a final layer.
@@ -719,7 +698,7 @@ def transform_nn(
         assert value.ndim == 1, f"In {transform_name}: {value.ndim} != 1: {value}"
         assert rate_embedding.ndim == 1
 
-        inputs = flat_concat(value, rate_embedding, quantile)
+        inputs = flat_concat(value, rate_embedding, random_var)
 
         out = inner_activation(
             dense_mlp(
@@ -789,7 +768,7 @@ def transform_nn(
 
             params.at(f"{quantization_mask_path}", np.array(qmasks), tags=[NON_GRAD_TAG])
             logger.debug(
-                f"quantization mask for {layer_name}:\n{quantization_mask_str(quantization_names, qmasks)}"
+                f"quantization mask for {layer_name}:\n{qz.quantization_mask_str(quantization_names, qmasks)}"
             )
             try:
                 params.at(
@@ -824,14 +803,17 @@ def transform_nn(
             make_view(params, namespace, fwd_paths, fwd_loc, leaves=[rate_name, mask_name])
             params.tag(f"{namespace}/{mask_name}", [NON_GRAD_TAG])
 
-        # --------- quantile var
-        add_quantile_var_ids(params, len(nodelist), len(input_shapes) + 1, namespace)
+        # --------- random_var var
+        if is_inverse:
+            reference_forward_random_var_ids(stack, params, nodelist, namespace)
+        else:
+            add_random_var_ids(params, len(nodelist), len(input_shapes) + 1, namespace)
 
         fake_vals = [np.zeros(s) for s in input_shapes]
 
         apply(
             *fake_vals,
-            quantiles=np.zeros(get_prev_num_quantile_vars(params) + 1),
+            random_vars=np.zeros(get_prev_num_random_vars(params) + 1),
             params=params,
             node_id=0,
             key=key1,
@@ -855,15 +837,15 @@ def transform_nn(
 
     def apply(
         *values: ArrayLike,
-        quantiles: ArrayLike,
+        random_vars: ArrayLike,
         params: ParameterTree,
         node_id: ArrayLike,
         key: PRNGKey,
     ) -> Tuple[ArrayLike, Dict]:
         k1, k2, k3 = jax.random.split(key, 3)
 
-        qid = params[f"{namespace}/quantile_variable_id"][node_id]
-        quantile = quantiles[qid]
+        qid = params[f"{namespace}/random_variable_id"][node_id]
+        random_var = random_vars[qid]
 
         val = jnp.array(values)
 
@@ -872,15 +854,15 @@ def transform_nn(
         try:
             assert val.shape == (len(input_shapes), *input_shapes[0])
             assert rates.shape == (len(input_shapes), rate_dim)
-            assert quantile.shape == (len(input_shapes) + 1,)
+            assert random_var.shape == (len(input_shapes) + 1,)
         except AssertionError as e:
             logger.error("Shape assertion failed in transform_nn apply:")
             logger.error(f"  val.shape: {val.shape}")
             logger.error(f"  expected val.shape: {(len(input_shapes), *input_shapes[0])}")
             logger.error(f"  rates.shape: {rates.shape}")
             logger.error(f"  expected rates.shape: {(len(input_shapes), rate_dim)}")
-            logger.error(f"  quantile.shape: {quantile.shape}")
-            logger.error(f"  expected quantile.shape: {(len(input_shapes) + 1,)}")
+            logger.error(f"  random_var.shape: {random_var.shape}")
+            logger.error(f"  expected random_var.shape: {(len(input_shapes) + 1,)}")
             raise e
 
         qrates, qaux = qz.get_variational_quantized(
@@ -896,10 +878,10 @@ def transform_nn(
         # first we apply the inner head to all inputs and sum them:
         inner_keys = jax.random.split(k1, val.shape[0])
         inner_out = sum(
-            inner(params, value=v, quantile=quantile[i], rate_embedding=r, key=k)
+            inner(params, value=v, random_var=random_var[i], rate_embedding=r, key=k)
             for i, (v, r, k) in enumerate(zip(val, qrates, inner_keys))
         )
-        inner_out = flat_concat(inner_out, quantile[len(input_shapes)])
+        inner_out = flat_concat(inner_out, random_var[len(input_shapes)])
 
         assert inner_out.shape == (inner_outsize + 1,)
 
@@ -916,7 +898,7 @@ def transform_nn(
         final_output = alpha_norm * input_mean + beta_norm * ans
 
         return final_output, {
-            "quantile": quantile,
+            "random_var": random_var,
             "rates": rates,
             "quantized_rates": qrates,
             "inner_output": inner_out,
@@ -961,7 +943,6 @@ def sequestron_ERN(
     input_shapes: List[Tuple[int, ...]],
     n_outputs: int,
     stack: ComputeStack,
-    layer_id: int,
     namespace: str,
     affinity_names: List[str],  # ordered list of available affinity names (case, csy4, etc..)
     affinity_dim: int = 1,
@@ -997,18 +978,18 @@ def sequestron_ERN(
         neg: ArrayLike,
         pos: ArrayLike,
         affinity: ArrayLike,
-        quantile: ArrayLike,
+        random_var: ArrayLike,
         param_f: Callable,
         key: PRNGKey,
         layer_id_onehot: ArrayLike = np.empty((0,)),
     ):
         if use_ern_layer_id:
-            input_values = flat_concat(neg, pos, affinity, layer_id_onehot, quantile)
+            input_values = flat_concat(neg, pos, affinity, layer_id_onehot, random_var)
             assert layer_id_onehot.shape == (max_ern_layers,), (
                 f"ERN layer_id_onehot should be of size {max_ern_layers}, got {len(layer_id_onehot)}"
             )
         else:
-            input_values = flat_concat(neg, pos, affinity, quantile)
+            input_values = flat_concat(neg, pos, affinity, random_var)
 
         res = dense_mlp(
             input_values,
@@ -1034,8 +1015,8 @@ def sequestron_ERN(
         return alpha * (pos_mean - neg_mean) + beta * res
 
     def prepare(params: ParameterTree, nodelist: List[StackNode], key: PRNGKey):
-        # --------- quantile var
-        add_quantile_var_ids(params, len(nodelist), 1, local_layer_name)
+        # --------- random_var var
+        add_random_var_ids(params, len(nodelist), 1, local_layer_name)
 
         init_if_needed(
             params,
@@ -1096,7 +1077,7 @@ def sequestron_ERN(
         MLP(
             *[np.zeros(shape) for shape in input_shapes],
             affinity=np.zeros((affinity_dim,)),
-            quantile=0,
+            random_var=0,
             param_f=partial(init_if_needed, params, base_path="shared"),
             key=key,
             layer_id_onehot=layer_id_onehot,
@@ -1104,7 +1085,7 @@ def sequestron_ERN(
 
     def apply(
         *values: ArrayLike,
-        quantiles: ArrayLike,
+        random_vars: ArrayLike,
         params: ParameterTree,
         node_id: ArrayLike,
         key,
@@ -1114,7 +1095,7 @@ def sequestron_ERN(
         affinity = params[f"{namespace}/affinity"][node_id]
         assert affinity.shape == (affinity_dim,)
 
-        qid = params[f"{namespace}/quantile_variable_id"][node_id]
+        qid = params[f"{namespace}/random_variable_id"][node_id]
 
         # create one-hot encoded layer_id if enabled
         layer_id_onehot = jnp.empty((0,))  # default empty if not using layer_id
@@ -1125,7 +1106,7 @@ def sequestron_ERN(
         result = MLP(
             *values,
             affinity=affinity,
-            quantile=quantiles[qid],
+            random_var=random_vars[qid],
             param_f=partial(get_param, params, base_path="shared"),
             key=key,
             layer_id_onehot=layer_id_onehot,
@@ -1137,7 +1118,7 @@ def sequestron_ERN(
 
         aux_dict = {
             "affinity": affinity,
-            "quantile": quantiles[qid],
+            "random_var": random_vars[qid],
             "node_layer_id": node_layer_id if use_ern_layer_id else None,
             "layer_id_onehot": layer_id_onehot,
             "neg_input": neg_val,
@@ -1163,7 +1144,6 @@ def grouped_output(
     input_shapes: List[Tuple[int, ...]],
     n_outputs: int,  # unused
     stack: ComputeStack,
-    layer_id: int,
     namespace: str,
     wsize: int = 64,
     depth: int = 4,
@@ -1197,15 +1177,15 @@ def grouped_output(
         )
 
     def prepare(params: ParameterTree, nodelist: List[StackNode], key: PRNGKey):
-        # --------- quantile var
-        add_quantile_var_ids(params, len(nodelist), len(input_shapes), layer_name)
+        # --------- random_var var
+        add_random_var_ids(params, len(nodelist), len(input_shapes), layer_name)
 
         # --------- shared MLP layers
         MLP_head(x=np.zeros(input_shapes[0]), q=np.zeros((1,)), rng_key=key, params=params)
 
     def apply(
         *inputs: ArrayLike,
-        quantiles: ArrayLike,
+        random_vars: ArrayLike,
         params: ParameterTree,
         node_id: ArrayLike,
         key,
@@ -1214,17 +1194,17 @@ def grouped_output(
 
         assert len(inputs_arr) == len(input_shapes)
 
-        qid = params[f"{namespace}/quantile_variable_id"][node_id]
-        quantiles_for_node = quantiles[qid]
+        qid = params[f"{namespace}/random_variable_id"][node_id]
+        random_vars_for_node = random_vars[qid]
         res = vmap(
             partial(MLP_head, rng_key=key, params=params),
-        )(inputs_arr, quantiles_for_node)
+        )(inputs_arr, random_vars_for_node)
 
         pre = 0.5 * res + 0.5 * inputs_arr
         output = outer_activation(pre)
 
         return output, {
-            "quantiles": quantiles_for_node,
+            "random_vars": random_vars_for_node,
             "mlp_outputs": res,
             "pre_activation": pre,
             "n_inputs": len(inputs_arr),
