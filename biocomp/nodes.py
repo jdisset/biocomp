@@ -34,6 +34,8 @@ PRNGKey = ArrayLike
 
 logger = get_logger(__name__)
 
+NON_GRAD_TAG = "non_grad"
+
 
 # =========================== Utils ===========================
 @dataclass
@@ -52,22 +54,6 @@ class LayerInstance:
         )
 
 
-### {{{                 --     misc    --
-NON_GRAD_TAG = "non_grad"
-
-
-def quantization_mask_str(names, mask) -> str:
-    col_width = max(len(name) for name in names)
-    result = " " * 5
-    for i, name in enumerate(names):
-        result += f"{name:^{col_width}} "
-    result += "\n"
-    for i, row in enumerate(mask):
-        result += f"{i:<4}|"
-        for val in row[0]:
-            result += f"{'X' if val else ' ':^{col_width}}|"
-        result += "\n"
-    return result
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
