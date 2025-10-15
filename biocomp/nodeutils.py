@@ -1,0 +1,106 @@
+from .library import PartsLibrary as PartsLibrary
+from dataclasses import dataclass
+from typing import Callable, Optional
+import jax.numpy as jnp
+import numpy as np
+from jax.typing import ArrayLike
+from biocomp.parameters import ArrayRef, ParameterTree
+from biocomp.compute import StackNode
+
+PRNGKey = ArrayLike
+NDArray = np.ndarray | jnp.ndarray
+
+
+ResultAndAux = tuple[NDArray, dict]
+NodeID = int
+
+
+@dataclass
+class LayerInstance:
+    prepare: Callable[[ParameterTree, list[StackNode], PRNGKey], None]
+    apply: Callable[[NDArray, NDArray, ParameterTree, NodeID, NDArray], ResultAndAux]
+    output_shapes: list[tuple[int]]
+    commit: Optional[Callable] = None
+
+    def __post_init__(self):
+        assert all(isinstance(shape, tuple) for shape in self.output_shapes), (
+            f"Invalid output shapes: {self.output_shapes}"
+        )
+        assert all(all(isinstance(dim, int) for dim in shape) for shape in self.output_shapes), (
+            f"Non-integer dimensions in output shapes: {self.output_shapes}"
+        )
+
+
+NON_GRAD_TAG = "non_grad"
+
+GLOBAL_PATH_NUMBER_OF_RANDOM_VARIABLES = "global/number_of_random_variables"
+
+
+def get_prev_num_random_vars(params: ParameterTree):
+    try:
+        return params[GLOBAL_PATH_NUMBER_OF_RANDOM_VARIABLES]
+    except KeyError:
+        return 0
+
+
+def add_random_var_ids(params: ParameterTree, num_nodes: int, num_per_node, namespace: str):
+    """
+    Adds random_var variable IDs to the parameters. The random_var variable is just a random variable
+    used for generation (ideally the node learns a quantile function,
+    and this is the random variable fed to that function).
+    It updates (or creates) the following parameters:
+        - global/number_of_random_variables -> int, total number of random_var variables (across all neural functions aka nodes)
+        - local/{layer_name}/random_variable_id -> id array of shape (num_nodes, num_per_node)
+    Then a node can access its random_var variable IDs by simply indexing the vector of random_var variables (Z) with these ids
+
+    :param params: The parameters tree to update.
+    :param num_nodes: The number of nodes for which to add random_var variable IDs.
+    :param num_per_node: The number of random_var variables per node.
+    :param layer_name: The name (possibly subpath) of the layer to which these random_var variables belong.
+
+    """
+
+    prev_num_random_vars = get_prev_num_random_vars(params)
+    new_num_random_vars = prev_num_random_vars + num_nodes * num_per_node
+    random_var_ids = jnp.arange(prev_num_random_vars, new_num_random_vars).reshape(
+        (num_nodes, num_per_node)
+    )
+    params.at(
+        f"{namespace}/random_variable_id",
+        random_var_ids,
+        tags=[NON_GRAD_TAG],
+        overwrite=None,
+    )
+
+    params.at(
+        GLOBAL_PATH_NUMBER_OF_RANDOM_VARIABLES,
+        new_num_random_vars,
+        tags=[NON_GRAD_TAG],
+        overwrite=True,
+    )
+
+
+def reference_forward_random_var_ids(stack, params, nodelist, inv_namespace):
+    ref = ArrayRef(params.data)
+    for node in nodelist:
+        fwd_node = node.get_forward_stacknode(stack)
+        fwd_namespace = stack.get_layer_namespace(fwd_node.layer_number)
+        ref.push_back(f"{fwd_namespace}/random_variable_id", fwd_node.node_position_in_layer)
+
+    params.at(f"{inv_namespace}/random_variable_id", ref, overwrite=None)
+
+
+def empty_prepare(*_, **__):
+    pass
+
+
+# input_shapes is a list of shape tuples, one for each input
+def single_passthrough(input_shapes: list[tuple[int]], *_, **__) -> LayerInstance:
+    assert len(input_shapes) == 1, f"Passthrough expects 1 input, got {len(input_shapes)}"
+
+    def apply(input: NDArray, **___) -> tuple[ArrayLike, dict]:
+        return input, {"input_shape": input.shape}
+
+    output_shapes = input_shapes
+
+    return LayerInstance(empty_prepare, apply, output_shapes)
