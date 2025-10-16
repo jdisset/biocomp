@@ -15,6 +15,7 @@ from biocomp.neuralutils import (
     DEFAULT_INITIALIZER,
     dense_mlp,
 )
+
 PRNGKey = ArrayLike
 NDArray = np.ndarray | jnp.ndarray
 
@@ -44,9 +45,9 @@ def grouped_output(
 
     layer_name = namespace.split("/")[-1]  # extract layer name from namespace
 
-    def MLP_head(x, q, rng_key, params):
+    def MLP_head(x, rng_key, params):
         return dense_mlp(
-            flat_concat(x, q),
+            x,
             wsize,
             1,
             depth,
@@ -59,8 +60,7 @@ def grouped_output(
         )
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
-        add_random_var_ids(params, len(nodelist), len(input_shapes), layer_name)
-        MLP_head(x=np.zeros(input_shapes[0]), q=np.zeros((1,)), rng_key=key, params=params)
+        MLP_head(x=np.zeros(input_shapes[0]), rng_key=key, params=params)
 
     def apply(
         *inputs: ArrayLike,
@@ -70,20 +70,14 @@ def grouped_output(
         key,
     ) -> tuple[ArrayLike, dict]:
         inputs_arr = jnp.array(inputs)
-
         assert len(inputs_arr) == len(input_shapes)
+        res = vmap(partial(MLP_head, rng_key=key, params=params))(inputs_arr)
 
-        qid = params[f"{namespace}/random_variable_id"][node_id]
-        random_vars_for_node = random_vars[qid]
-        res = vmap(
-            partial(MLP_head, rng_key=key, params=params),
-        )(inputs_arr, random_vars_for_node)
-
+        # simple residual connection
         pre = 0.5 * res + 0.5 * inputs_arr
         output = outer_activation(pre)
 
         return output, {
-            "random_vars": random_vars_for_node,
             "mlp_outputs": res,
             "pre_activation": pre,
             "n_inputs": len(inputs_arr),
