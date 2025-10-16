@@ -15,7 +15,6 @@ from biocomp.nodeutils import (
     get_prev_num_random_vars,
     reference_forward_random_var_ids,
     empty_prepare,
-    single_passthrough,
 )
 from biocomp.utils import get_logger
 from biocomp.neuralutils import (

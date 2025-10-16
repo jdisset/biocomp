@@ -92,15 +92,3 @@ def reference_forward_random_var_ids(stack, params, nodelist, inv_namespace):
 
 def empty_prepare(*_, **__):
     pass
-
-
-# input_shapes is a list of shape tuples, one for each input
-def single_passthrough(input_shapes: list[tuple[int]], *_, **__) -> LayerInstance:
-    assert len(input_shapes) == 1, f"Passthrough expects 1 input, got {len(input_shapes)}"
-
-    def apply(input: NDArray, **___) -> tuple[ArrayLike, dict]:
-        return input, {"input_shape": input.shape}
-
-    output_shapes = input_shapes
-
-    return LayerInstance(empty_prepare, apply, output_shapes)

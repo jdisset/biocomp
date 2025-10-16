@@ -1,0 +1,40 @@
+!biocomp.compute.ComputeConfig
+node_functions:
+  transcription: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.transcription
+
+  translation: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.translation
+
+  inv_transcription: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.inv_transcription
+
+  inv_translation: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.inv_translation
+
+  sequestron_ERN: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.ERN5p
+
+  source: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.source_with_pos
+
+  inv_source: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.inv_source_with_pos
+
+  bias: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.bias
+
+  numeric: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.bias
+
+  aggregation: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.aggregation
+
+  inv_aggregation: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.inv_aggregation
+
+  output: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.grouped_output
+
+  deadend: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.single_passthrough

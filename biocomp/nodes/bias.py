@@ -1,32 +1,14 @@
-from biocomp.jaxutils import flat_concat
-from biocomp.compute import StackNode, ComputeStack
+from biocomp.compute import StackNode
 import jax
-from jax.tree_util import Partial as partial
 from jax.typing import ArrayLike
 from typing import Optional
 import jax.numpy as jnp
-from jax import vmap
 import numpy as np
-from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
+from biocomp.parameters import ParameterTree
 from biocomp.nodeutils import (
     LayerInstance,
-    add_random_var_ids,
-    NON_GRAD_TAG,
-    get_prev_num_random_vars,
-    reference_forward_random_var_ids,
-    empty_prepare,
-    single_passthrough,
 )
 from biocomp.utils import get_logger
-from biocomp.neuralutils import (
-    ACTIVATION_FUNCTIONS,
-    INITIALIZERS,
-    DEFAULT_ACTIVATION,
-    DEFAULT_OUT_ACTIVATION,
-    DEFAULT_INITIALIZER,
-    dense_mlp,
-)
-import biocomp.quantization as qz
 
 
 PRNGKey = ArrayLike

@@ -38,7 +38,6 @@ configurable = ut.configurable_decorator("biocomp.plotting")
 os.environ["PATH"] += os.pathsep + "/Library/TeX/texbin"
 configurable = ut.configurable_decorator("biocomp.plotting")
 
-
 BIOCOMP_COLORS = dr.load("pkg:biocomp:config/colors.yaml")
 cmap_definitions = BIOCOMP_COLORS["color_maps"] or {}
 
@@ -462,12 +461,13 @@ USE_KNN_JAX = getenv("BC_KNN_USE_JAX", default=False)
 def build_tree(x, use_jax=USE_KNN_JAX):
     # filter out nan/inf values before building tree
     import numpy as np
+
     if not use_jax:
         mask = np.all(np.isfinite(x), axis=1) if x.ndim > 1 else np.isfinite(x)
         x_clean = x[mask]
         if len(x_clean) == 0:
             raise ValueError("No finite data points available for building KD-tree")
-    
+
     if use_jax:
         import jaxkd as jk
         import jax

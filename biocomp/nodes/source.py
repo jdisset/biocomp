@@ -7,15 +7,16 @@ import jax.numpy as jnp
 from jax import vmap
 import numpy as np
 from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
+
 from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
     NON_GRAD_TAG,
-    get_prev_num_random_vars,
     reference_forward_random_var_ids,
     empty_prepare,
-    single_passthrough,
 )
+
+from .passthrough import single_passthrough
 from biocomp.utils import get_logger
 from biocomp.neuralutils import (
     ACTIVATION_FUNCTIONS,

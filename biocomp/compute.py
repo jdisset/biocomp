@@ -1,5 +1,4 @@
 ### {{{                          --     imports     --
-from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable, Optional, Union, Any, TypeVar
@@ -10,15 +9,15 @@ from jax import vmap
 from jax.tree_util import Partial as partial
 from jax.typing import ArrayLike
 
-from . import nodes as nd
 from .network import Network
 from . import utils as ut
 from biocomp.utils import ArbitraryModel, EncodedPartialFunction
 from .parameters import ParameterTree
-from . import nodes
 from .graphengine import GraphState
 
 from biocomp.logging_config import get_logger
+from biocomp.graphengine import GraphNode, GraphEdge
+
 
 logger = get_logger(__name__)
 
@@ -46,15 +45,17 @@ class StackNode:
         n_outputs = graph.get_nb_outgoing_slots(node_id)
         return f"{node.node_type}_{n_inputs}_{n_outputs}"
 
-    def get(self, stack: "ComputeStack") -> nd.ComputeNode:
+    def get(self, stack: "ComputeStack") -> GraphNode:
         """Get the actual ComputeNode object from the stack"""
         assert stack.networks is not None, "Stack has no networks"
         assert self.network_id < len(stack.networks)
         cg = stack.networks[self.network_id].compute_graph
         assert cg is not None
-        return cg.get_node(self.node_id)
+        n = cg.get_node(self.node_id)
+        assert n is not None, f"Node {self.node_id} not found in network {self.network_id}"
+        return n
 
-    def get_forward_stacknode(self, stack: "ComputeStack") -> nd.StackNode:
+    def get_forward_stacknode(self, stack: "ComputeStack") -> "StackNode":
         """Get the stack node that this node is an inverse of"""
         node = self.get(stack)
         assert node.is_inverse_of is not None, "Node has no inverse"
@@ -62,7 +63,7 @@ class StackNode:
         assert self.network_id < len(stack.networks)
         return stack.get_node_from_net_and_compute_id(self.network_id, node.is_inverse_of.node_id)
 
-    def get_outgoing_edges(self, stack: "ComputeStack") -> list[nd.ComputeEdge]:
+    def get_outgoing_edges(self, stack: "ComputeStack") -> list[GraphEdge]:
         """Get the outgoing edges of the node from the stack"""
         assert stack.networks is not None, "Stack has no networks"
         assert self.network_id < len(stack.networks)
@@ -70,7 +71,7 @@ class StackNode:
         assert cg is not None
         return cg.get_outgoing_edges(self.node_id)
 
-    def get_incoming_edges(self, stack: "ComputeStack") -> list[nd.ComputeEdge]:
+    def get_incoming_edges(self, stack: "ComputeStack") -> list[GraphEdge]:
         """Get the incoming edges of the node from the stack"""
         assert stack.networks is not None, "Stack has no networks"
         assert self.network_id < len(stack.networks)
@@ -103,34 +104,13 @@ class ComputeConfig(ArbitraryModel):
     node_functions: Optional[dict[str, EncodedPartialFunction]] = None
     extra: Optional[dict[str, Any]] = None
 
-    def get_node_implementation(self, node_name: str, module_name: str = nd.__name__):
+    def get_node_implementation(self, node_name: str, module_name: str = "biocomp.nodes"):
         if self.node_functions is None:
             raise ValueError("No node implementations in this config")
         if node_name not in self.node_functions:
             raise ValueError(f"No node implementation for {node_name}")
 
         return self.node_functions[node_name].get_impl(extra_module_names=[module_name])
-
-
-DEFAULT_COMPUTE_CONFIG = ComputeConfig.model_validate(
-    {
-        "node_functions": {
-            "transcription": nodes.transcription,
-            "translation": nodes.translation,
-            "inv_transcription": nodes.inv_transcription,
-            "inv_translation": nodes.inv_translation,
-            "sequestron_ERN": nodes.ERN5p,
-            "source": nodes.source_with_pos,
-            "inv_source": nodes.inv_source_with_pos,
-            "bias": nodes.hard_bias,
-            "numeric": nodes.hard_bias,
-            "aggregation": nodes.aggregation,
-            "inv_aggregation": nodes.inv_aggregation,
-            "output": nodes.grouped_output,
-            "deadend": nodes.single_passthrough,
-        }
-    }
-)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -173,7 +153,7 @@ class StackLayer:
 
     is_built: bool = False
 
-    def setup(self, config: ComputeConfig, stack: ComputeStack):
+    def setup(self, config: ComputeConfig, stack: "ComputeStack"):
         self.check()
 
         first_key = self.nodes[0]
@@ -640,7 +620,7 @@ class ComputeStack:
 
     ##────────────────────────────────────────────────────────────────────────────}}}
 
-    ### {{{                         --     building     --{{{
+    ### {{{                         --     building     --
 
     def _assemble_stack(self, **kwargs):
         from . import stack_builder

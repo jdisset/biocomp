@@ -34,9 +34,6 @@ NDArray = np.ndarray | jnp.ndarray
 logger = get_logger(__name__)
 
 
-### {{{                         --     ERN node     --
-
-
 def sequestron_ERN(
     input_shapes: list[tuple[int, ...]],
     n_outputs: int,
@@ -232,9 +229,6 @@ def sequestron_ERN(
     output_shape = [(1,)]
 
     return LayerInstance(prepare, apply, output_shape)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ERN_DEFAULT_NEG_PARTS = ["CasE", "Csy4", "PgU"]
