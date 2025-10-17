@@ -1,37 +1,37 @@
 !biocomp.compute.ComputeConfig
 node_functions:
   transcription: !biocomp.utils.PartialFunction
-    func: biocomp.nodes.simple_transcription
+    func: biocomp.nodes.transcription
     kwargs:
       dummy: True
 
   translation: !biocomp.utils.PartialFunction
-    func: biocomp.nodes.simple_translation
+    func: biocomp.nodes.translation
     kwargs:
       dummy: True
 
   inv_transcription: !biocomp.utils.PartialFunction
-    func: biocomp.nodes.simple_inv_transcription
+    func: biocomp.nodes.inv_transcription
     kwargs:
       dummy: True
 
   inv_translation: !biocomp.utils.PartialFunction
-    func: biocomp.nodes.simple_inv_translation
+    func: biocomp.nodes.inv_translation
     kwargs:
       dummy: True
 
   sequestron_ERN: !biocomp.utils.PartialFunction
-    func: biocomp.nodes.simple_ERN5p
+    func: biocomp.nodes.ERN5p
     kwargs:
       dummy: True
 
   source: !biocomp.utils.PartialFunction
-    func: biocomp.nodes.simple_source_with_pos
+    func: biocomp.nodes.source_with_pos
     kwargs:
       dummy: True
 
   inv_source: !biocomp.utils.PartialFunction
-    func: biocomp.nodes.simple_inv_source_with_pos
+    func: biocomp.nodes.inv_source_with_pos
     kwargs:
       dummy: True
 
@@ -49,8 +49,6 @@ node_functions:
 
   output: !biocomp.utils.PartialFunction
     func: biocomp.nodes.single_passthrough
-    kwargs:
-      dummy: True
 
   deadend: !biocomp.utils.PartialFunction
     func: biocomp.nodes.single_passthrough
