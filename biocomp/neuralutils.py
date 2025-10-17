@@ -187,5 +187,5 @@ def dummy_mlp(
 
     mean_val = jnp.mean(input_values) if input_values.shape != () else input_values
     res = jnp.full((output_s,), mean_val)
-        assert res.shape == (output_s,), f"In {name}: {res.shape} != {(output_s,)}"
+    assert res.shape == (output_s,), f"In {name}: {res.shape} != {(output_s,)}"
     return res

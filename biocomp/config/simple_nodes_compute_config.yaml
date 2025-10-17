@@ -48,7 +48,7 @@ node_functions:
     func: biocomp.nodes.inv_aggregation
 
   output: !biocomp.utils.PartialFunction
-    func: biocomp.nodes.single_passthrough
+    func: biocomp.nodes.multi_passthrough
 
   deadend: !biocomp.utils.PartialFunction
     func: biocomp.nodes.single_passthrough

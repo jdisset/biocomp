@@ -235,3 +235,65 @@ def inv_source_with_pos(
     output_shapes = input_shapes  # 1 input shape -> 1 output shape
 
     return LayerInstance(prepare, apply, output_shapes)
+
+
+def simple_source_with_pos(
+    input_shapes: list[tuple[int]],
+    n_outputs: int,
+    stack: ComputeStack,
+    namespace: str,
+    max_L1s: int = 5,
+    **_,
+) -> LayerInstance:
+    """Simple source node: y_p = x * 0.9^p where p is the position"""
+    del stack  # unused
+
+    assert len(input_shapes) == 1, f"A source node should have 1 input, got {len(input_shapes)}"
+
+    def apply(value: ArrayLike, **_) -> tuple[ArrayLike, dict]:
+        # compute position scaling factors: 0.9^p for p in [0, n_outputs)
+        positions = np.arange(n_outputs)
+        scale_factors = 0.9 ** positions
+
+        # apply scaling to each output position
+        result = jnp.array([value * scale for scale in scale_factors])
+
+        return result, {"positions": positions, "scale_factors": scale_factors}
+
+    output_shapes = list(input_shapes) * n_outputs
+
+    return LayerInstance(empty_prepare, apply, output_shapes)
+
+
+def simple_inv_source_with_pos(
+    input_shapes: list[tuple[int]],
+    n_outputs: int,
+    stack: ComputeStack,
+    namespace: str,
+    max_L1s: int = 5,
+    **_,
+) -> LayerInstance:
+    """Inverse of simple source: x = y_p / 0.9^p"""
+    assert len(input_shapes) == 1, f"Inverse source should have 1 input, got {len(input_shapes)}"
+    assert n_outputs == 1, f"Inverse source should have 1 output, got {n_outputs}"
+
+    def prepare(params: ParameterTree, nodelist: list[StackNode], key, **_):
+        # store the original position for each inverse node
+        positions = jnp.array(
+            [n.get(stack).is_inverse_of.output_slot for n in nodelist], dtype=jnp.int32
+        )
+        params.at(f"{namespace}/original_positions", positions, tags=[NON_GRAD_TAG])
+
+    def apply(value: ArrayLike, params: ParameterTree, node_id: ArrayLike, **_) -> tuple[ArrayLike, dict]:
+        # get the original position this node is inverting
+        original_position = params.at(f"{namespace}/original_positions")[node_id]
+        scale_factor = 0.9 ** original_position
+
+        # invert: x = y_p / 0.9^p
+        result = value / scale_factor
+
+        return result, {"original_position": original_position, "scale_factor": scale_factor}
+
+    output_shapes = input_shapes
+
+    return LayerInstance(prepare, apply, output_shapes)

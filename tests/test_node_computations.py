@@ -5,7 +5,6 @@ by comparing stack outputs against manually computed expected values.
 """
 
 import pytest
-import numpy as np
 import jax
 import jax.numpy as jnp
 from biocomp.network import recipe_to_networks
@@ -15,7 +14,6 @@ import biocomp.biorules as br
 from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.parameters import ParameterTree
-from biocomp.nodeutils import get_prev_num_random_vars
 
 
 @pytest.fixture
@@ -116,80 +114,150 @@ def simple_single_ern(lib):
         )
 
 
-def manual_simple_single_reporter(params: ParameterTree, X_numeric: float) -> float:
+def manual_simple_single_reporter(
+    params: ParameterTree, X: float, random_vars: jnp.ndarray, key
+) -> float:
     """
-    Manual computation for simple_single_reporter recipe.
+    Fully manual computation for simple_single_reporter recipe.
 
-    Network structure:
-    1. numeric node (hard_bias) -> outputs X_numeric
-    2. source node (simple_source_with_pos, position 0) -> y_source = X_numeric * 0.9^0 = X_numeric
-    3. transcription node -> y_tc = a_tc * y_source
-    4. translation node -> y_tl = a_tl * y_tc
-    5. output node (passthrough) -> y_out = y_tl
+    Network: hEF1a -> eBFP2 (single reporter)
+    - Transcription uses hEF1a (only option)
+    - Translation uses 00_empty_tc (no uORF, only option)
 
-    Therefore: y_out = a_tl * a_tc * X_numeric
+    Path: input → inv_translation → inv_transcription → inv_source → source → transcription → translation → output
 
-    where:
-    - a_tc = coefficient from transcription layer
-    - a_tl = coefficient from translation layer
+    This computation is completely hardcoded - we manually:
+    1. Look up the exact embeddings we know should be used
+    2. Compute the noise that gets added to them
+    3. Apply the dummy transform formulas
     """
-    # Get the coefficients from the simple transform nodes
-    # The layers are: 0=input, 1=inv_translation, 2=inv_transcription, 3=inv_source,
-    #                 4=source, 5=transcription, 6=translation, 7=output
-    a_tc = params["local/5/transcription/tc_coeffs"][0, 0]  # node 0, input 0
-    a_tl = params["local/6/translation/tl_coeffs"][0, 0]  # node 0, input 0
+    import jax.random as random
 
-    # Compute: y = a_tl * a_tc * X_numeric
-    return a_tl * a_tc * X_numeric
+    # Stack splits key by n_nodes for each layer
+    layer_key = jax.random.split(key, 1)[0]
+    _, _, k_quant = jax.random.split(layer_key, 3)
+
+    # ========== Hardcoded embeddings ==========
+    # Transcription: hEF1a is the ONLY promoter in this recipe, mask has only index 0 as True
+    # From params, tc embeddings are at index 0 (hEF1a is the only one in DEFAULT_AVAILABLE_TC_RATES)
+    tc_embedding_mean = params["shared/quantization/values/tc_rate"][0, 0]  # hEF1a embedding
+    tc_embedding_logstd = params["shared/quantization/logstdevs/tc_rate"][0, 0]
+
+    # Translation: 00_empty_tc is the ONLY uORF option (eBFP2 has no uORF), mask has only index 0 as True
+    # From params, tl embeddings - 00_empty_tc is at index 0 in DEFAULT_AVAILABLE_TL_RATES
+    tl_embedding_mean = params["shared/quantization/values/tl_rate"][0, 0]  # 00_empty_tc
+    tl_embedding_logstd = params["shared/quantization/logstdevs/tl_rate"][0, 0]
+
+    # ========== Compute quantized values with noise ==========
+    # Variational quantization adds noise: value = mean + noise, where noise ~ N(0, exp(logstd))
+    # Translation quantization (used in layers 1 and 6)
+    noise_tl = random.normal(k_quant, (1, 1)) * jnp.exp(tl_embedding_logstd)
+    qrate_tl = tl_embedding_mean + noise_tl[0, 0]
+
+    # Transcription quantization (used in layers 2 and 5) - uses same key so same noise!
+    noise_tc = random.normal(k_quant, (1, 1)) * jnp.exp(tc_embedding_logstd)
+    qrate_tc = tc_embedding_mean + noise_tc[0, 0]
+
+    # ========== Layer 0: input ==========
+    y0 = X
+
+    # ========== Layer 1: inv_translation (dummy inverse) ==========
+    # Dummy inverse: inner = mean([value, qrate, rv]) - (qrate + rv) / 3
+    #                outer = mean([inner×8, rv_extra]) - mean / 9
+    inner_mean = jnp.mean(jnp.array([y0, qrate_tl, random_vars[0]]))
+    inner_val = inner_mean - (qrate_tl + random_vars[0]) / 3.0
+    outer_mean = (inner_val * 8 + random_vars[1]) / 9.0
+    y1 = outer_mean - outer_mean / 9.0  # subtract mean/len where len=9
+
+    # ========== Layer 2: inv_transcription (dummy inverse) ==========
+    inner_mean = jnp.mean(jnp.array([y1, qrate_tc, random_vars[2]]))
+    inner_val = inner_mean - (qrate_tc + random_vars[2]) / 3.0
+    outer_mean = (inner_val * 8 + random_vars[3]) / 9.0
+    y2 = outer_mean - outer_mean / 9.0
+
+    # ========== Layer 3: inv_source (position 0) ==========
+    # Divides by 0.9^0 = 1.0 (passthrough)
+    y3 = y2
+
+    # ========== Layer 4: source (position 0) ==========
+    # Multiplies by 0.9^0 = 1.0 (passthrough)
+    y4 = y3
+
+    # ========== Layer 5: transcription (dummy forward) ==========
+    # Dummy forward: inner = mean([value, qrate, rv])
+    #                outer = mean([inner×8, rv_extra])
+    # Uses random_vars[2] and [3] (shared with inverse)
+    inner_mean = jnp.mean(jnp.array([y4, qrate_tc, random_vars[2]]))
+    y5 = (inner_mean * 8 + random_vars[3]) / 9.0
+
+    # ========== Layer 6: translation (dummy forward) ==========
+    # Uses random_vars[0] and [1] (shared with inverse)
+    inner_mean = jnp.mean(jnp.array([y5, qrate_tl, random_vars[0]]))
+    y6 = (inner_mean * 8 + random_vars[1]) / 9.0
+
+    # ========== Layer 7: output ==========
+    return y6
 
 
-def manual_simple_two_reporters(params: ParameterTree, X_numeric: float) -> jnp.ndarray:
-    """
-    Manual computation for simple_two_reporters recipe.
+def test_simple_single_reporter_computation(lib, simple_single_reporter):
+    """Test that compute stack matches manual computation for simple_single_reporter"""
+    with LibraryContext.with_library(lib):
+        # Build network and stack
+        networks = recipe_to_networks(simple_single_reporter, br.ALL_RULES, lib)
+        stack = ComputeStack([networks[0]])
+        stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
 
-    Network structure (per reporter branch):
-    1. numeric node -> X_numeric
-    2. aggregation node -> splits into two branches with ratios [0.833, 0.167]
-       - branch_0 = 0.833 * X_numeric
-       - branch_1 = 0.167 * X_numeric
-    3. source nodes (position 0 and 1):
-       - y_source_0 = branch_0 * 0.9^0 = 0.833 * X_numeric
-       - y_source_1 = branch_1 * 0.9^1 = 0.167 * X_numeric * 0.9
-    4. transcription nodes:
-       - y_tc_0 = a_tc_0 * y_source_0
-       - y_tc_1 = a_tc_1 * y_source_1
-    5. translation nodes:
-       - y_tl_0 = a_tl_0 * y_tc_0
-       - y_tl_1 = a_tl_1 * y_tc_1
-    6. output nodes (passthrough):
-       - out_0 = y_tl_0
-       - out_1 = y_tl_1
+        # Initialize parameters once
+        init_key = jax.random.PRNGKey(42)
+        params = stack.init(init_key)
 
-    Returns: [out_0, out_1]
-    """
-    # Get coefficients - need to find the right layer numbers
-    # This requires understanding the actual layer structure which might vary
-    # Let's try to find them dynamically or use known structure
+        # ========== Verify quantization masks ==========
+        # Transcription: should only allow hEF1a (index 0 in DEFAULT_AVAILABLE_TC_RATES)
+        tc_mask = params["local/5/transcription/tc_rate_quantization_mask"][0]  # mask for node 0
+        assert tc_mask.shape == (1, 1), f"TC mask shape should be (1, 1), got {tc_mask.shape}"
+        assert tc_mask[0, 0], "hEF1a (index 0) should be available"
 
-    # Get aggregation ratios from the aggregation layer
-    # Need to determine which layer is aggregation
-    r0, r1 = 0.833, 0.167  # These are set in the recipe
+        # Translation: should only allow 00_empty_tc (index 0 in DEFAULT_AVAILABLE_TL_RATES)
+        tl_mask = params["local/6/translation/tl_rate_quantization_mask"][0]  # mask for node 0
+        assert tl_mask.shape == (1, 9), f"TL mask shape should be (1, 9), got {tl_mask.shape}"
+        assert tl_mask[0, 0], "00_empty_tc (index 0) should be available"
+        assert jnp.sum(tl_mask) == 1, (
+            f"Only 1 uORF option should be available, got {jnp.sum(tl_mask)}"
+        )
 
-    # Get transform coefficients - assuming layer numbers from simple_single_reporter + aggregation
-    # This is fragile but for testing purposes we'll hard-code
-    try:
-        # Try to get coefficients - layer numbering might be different
-        a_tc_0 = params["local/5/transcription/tc_coeffs"][0, 0]  # first node
-        a_tc_1 = params["local/5/transcription/tc_coeffs"][1, 0]  # second node
-        a_tl_0 = params["local/6/translation/tl_coeffs"][0, 0]
-        a_tl_1 = params["local/6/translation/tl_coeffs"][1, 0]
-    except (KeyError, IndexError):
-        # If layers are numbered differently, return zeros for now
-        # This test might need adjustment based on actual layer structure
-        return jnp.array([0.0, 0.0])
+        # ========== Test with multiple random keys ==========
+        # Generate 10 test keys from base key using JAX's idiomatic split
+        base_key = jax.random.PRNGKey(123)
+        test_keys = jax.random.split(base_key, 10)
 
-    # Compute outputs for each branch
-    out_0 = a_tl_0 * a_tc_0 * r0 * X_numeric * (0.9**0)
-    out_1 = a_tl_1 * a_tc_1 * r1 * X_numeric * (0.9**1)
+        all_res = []
+        for test_key in test_keys:
+            # Reinitialize parameters with this key
+            params = stack.init(test_key)
 
-    return jnp.array([out_0, out_1])
+            # Generate input and random variables
+            X = 1.0  # input value
+            inputs = jnp.array([X])  # inputs array
+            n_random_vars = params["global/number_of_random_variables"]
+            random_vars = jax.random.normal(test_key, (n_random_vars,))
+
+            # Compute using stack
+            stack_output = stack.apply(params, inputs, random_vars, test_key)
+            stack_result = stack_output[0]  # first (and only) output
+
+            # Compute manually
+            manual_result = manual_simple_single_reporter(params, X, random_vars, test_key)
+
+            # Compare
+            assert jnp.allclose(stack_result, manual_result, rtol=1e-5), (
+                f"Stack output {stack_result} != manual output {manual_result}"
+            )
+
+            all_res.append(stack_result)
+
+        std_dev = jnp.std(jnp.array(all_res))
+        assert std_dev > 1e-5, "All results should be different with different random keys"
+
+
+# TODO:
+# - same for all other manual computations

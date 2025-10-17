@@ -342,6 +342,7 @@ class ComputeStack:
         params.tag("shared", "shared")
 
         from biocomp.nodeutils import NON_GRAD_TAG
+
         params.at(
             "global/dependent_output_mask", self.get_dependent_output_mask(), tags=[NON_GRAD_TAG]
         )

@@ -7,6 +7,8 @@ from .source import (
     inv_source,
     source_with_pos,
     inv_source_with_pos,
+    simple_source_with_pos,
+    simple_inv_source_with_pos,
 )
 from .transform import (
     transform_nn,
@@ -15,4 +17,4 @@ from .transform import (
     inv_transcription,
     inv_translation,
 )
-from .passthrough import single_passthrough
+from .passthrough import single_passthrough, multi_passthrough

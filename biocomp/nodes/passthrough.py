@@ -20,3 +20,14 @@ def single_passthrough(input_shapes: list[tuple[int]], *_, **__) -> LayerInstanc
     output_shapes = input_shapes
 
     return LayerInstance(empty_prepare, apply, output_shapes)
+
+
+def multi_passthrough(input_shapes: list[tuple[int]], *_, **__) -> LayerInstance:
+    """Passthrough for multiple inputs - just passes them through unchanged"""
+
+    def apply(*inputs: NDArray, **___) -> tuple[ArrayLike, dict]:
+        return jnp.array(inputs), {"n_inputs": len(inputs)}
+
+    output_shapes = input_shapes
+
+    return LayerInstance(empty_prepare, apply, output_shapes)
