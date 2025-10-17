@@ -155,6 +155,7 @@ def get_variational_quantized(
     key,
     min_logstdev=-10.0,
     max_logstdev=5.0,
+    disable_variational=False,  # if True, no noise is added
 ):
     """
     Quantize the given values using the quantization values ("code book" of embeddings) stored in params,
@@ -194,10 +195,15 @@ def get_variational_quantized(
     assert means.shape == values_to_quantize.shape, (
         f"Means shape {means.shape} does not match values to quantize shape {values_to_quantize.shape}"
     )
-    noise = random.normal(key, means.shape) * jnp.exp(values_logstds)
-    assert noise.shape == means.shape, (
-        f"Noise shape {noise.shape} does not match means shape {means.shape}"
-    )
+
+    if not disable_variational:
+        noise = random.normal(key, means.shape) * jnp.exp(values_logstds)
+        assert noise.shape == means.shape, (
+            f"Noise shape {noise.shape} does not match means shape {means.shape}"
+        )
+    else:
+        noise = jnp.zeros_like(means)
+
     vq = means + noise
     assert vq.shape == values_to_quantize.shape, (
         f"Quantized values shape {vq.shape} does not match values to quantize shape {values_to_quantize.shape}"

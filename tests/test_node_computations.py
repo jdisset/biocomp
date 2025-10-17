@@ -12,8 +12,10 @@ from biocomp.library import load_lib, LibraryContext
 from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot
 import biocomp.biorules as br
 from biocomp.compute import ComputeStack
+from biocomp.jaxutils import flat_concat
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.parameters import ParameterTree
+import biocomp.quantization as qz
 
 
 @pytest.fixture
@@ -114,9 +116,7 @@ def simple_single_ern(lib):
         )
 
 
-def manual_simple_single_reporter(
-    params: ParameterTree, X: float, random_vars: jnp.ndarray, key
-) -> float:
+def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.ndarray, key):
     """
     Fully manual computation for simple_single_reporter recipe.
 
@@ -140,40 +140,37 @@ def manual_simple_single_reporter(
     # ========== Hardcoded embeddings ==========
     # Transcription: hEF1a is the ONLY promoter in this recipe, mask has only index 0 as True
     # From params, tc embeddings are at index 0 (hEF1a is the only one in DEFAULT_AVAILABLE_TC_RATES)
-    tc_embedding_mean = params["shared/quantization/values/tc_rate"][0, 0]  # hEF1a embedding
-    tc_embedding_logstd = params["shared/quantization/logstdevs/tc_rate"][0, 0]
+    qrate_tc = params["shared/quantization/values/tc_rate"][0, 0]  # hEF1a embedding
 
     # Translation: 00_empty_tc is the ONLY uORF option (eBFP2 has no uORF), mask has only index 0 as True
     # From params, tl embeddings - 00_empty_tc is at index 0 in DEFAULT_AVAILABLE_TL_RATES
-    tl_embedding_mean = params["shared/quantization/values/tl_rate"][0, 0]  # 00_empty_tc
-    tl_embedding_logstd = params["shared/quantization/logstdevs/tl_rate"][0, 0]
-
-    # ========== Compute quantized values with noise ==========
-    # Variational quantization adds noise: value = mean + noise, where noise ~ N(0, exp(logstd))
-    # Translation quantization (used in layers 1 and 6)
-    noise_tl = random.normal(k_quant, (1, 1)) * jnp.exp(tl_embedding_logstd)
-    qrate_tl = tl_embedding_mean + noise_tl[0, 0]
-
-    # Transcription quantization (used in layers 2 and 5) - uses same key so same noise!
-    noise_tc = random.normal(k_quant, (1, 1)) * jnp.exp(tc_embedding_logstd)
-    qrate_tc = tc_embedding_mean + noise_tc[0, 0]
+    qrate_tl = params["shared/quantization/values/tl_rate"][0, 0]  # 00_empty_tc
 
     # ========== Layer 0: input ==========
     y0 = X
+    assert y0.shape == (1,)
+    print(f"Input: {y0}")
 
     # ========== Layer 1: inv_translation (dummy inverse) ==========
     # Dummy inverse: inner = mean([value, qrate, rv]) - (qrate + rv) / 3
     #                outer = mean([inner×8, rv_extra]) - mean / 9
-    inner_mean = jnp.mean(jnp.array([y0, qrate_tl, random_vars[0]]))
+    concatinput = flat_concat(y0, qrate_tl, random_vars[0])
+    print(f"Concat input inv_translation: {concatinput}")
+    inner_mean = jnp.mean(concatinput)
+    print(f"Inner mean inv_translation: {inner_mean}")
     inner_val = inner_mean - (qrate_tl + random_vars[0]) / 3.0
+    print(f"Inner val inv_translation: {inner_val}")
     outer_mean = (inner_val * 8 + random_vars[1]) / 9.0
+    print(f"Outer mean inv_translation: {outer_mean}")
     y1 = outer_mean - outer_mean / 9.0  # subtract mean/len where len=9
+    print(f"After inv_translation: {y1}")
 
     # ========== Layer 2: inv_transcription (dummy inverse) ==========
     inner_mean = jnp.mean(jnp.array([y1, qrate_tc, random_vars[2]]))
     inner_val = inner_mean - (qrate_tc + random_vars[2]) / 3.0
     outer_mean = (inner_val * 8 + random_vars[3]) / 9.0
     y2 = outer_mean - outer_mean / 9.0
+    print(f"After inv_transcription: {y2}")
 
     # ========== Layer 3: inv_source (position 0) ==========
     # Divides by 0.9^0 = 1.0 (passthrough)
@@ -189,14 +186,27 @@ def manual_simple_single_reporter(
     # Uses random_vars[2] and [3] (shared with inverse)
     inner_mean = jnp.mean(jnp.array([y4, qrate_tc, random_vars[2]]))
     y5 = (inner_mean * 8 + random_vars[3]) / 9.0
+    print(f"After transcription: {y5}")
 
     # ========== Layer 6: translation (dummy forward) ==========
     # Uses random_vars[0] and [1] (shared with inverse)
     inner_mean = jnp.mean(jnp.array([y5, qrate_tl, random_vars[0]]))
     y6 = (inner_mean * 8 + random_vars[1]) / 9.0
+    print(f"After translation: {y6}")
 
     # ========== Layer 7: output ==========
     return y6
+
+
+def jax_json_dumps(obj):
+    import json
+
+    def convert(o):
+        if isinstance(o, jnp.ndarray):
+            return o.tolist()
+        raise TypeError
+
+    return json.dumps(obj, default=convert, indent=2)
 
 
 def test_simple_single_reporter_computation(lib, simple_single_reporter):
@@ -225,30 +235,24 @@ def test_simple_single_reporter_computation(lib, simple_single_reporter):
             f"Only 1 uORF option should be available, got {jnp.sum(tl_mask)}"
         )
 
-        # ========== Test with multiple random keys ==========
-        # Generate 10 test keys from base key using JAX's idiomatic split
         base_key = jax.random.PRNGKey(123)
         test_keys = jax.random.split(base_key, 10)
-
         all_res = []
         for test_key in test_keys:
-            # Reinitialize parameters with this key
             params = stack.init(test_key)
 
-            # Generate input and random variables
-            X = 1.0  # input value
-            inputs = jnp.array([X])  # inputs array
+            inputs = jnp.ones((1,))
             n_random_vars = params["global/number_of_random_variables"]
             random_vars = jax.random.normal(test_key, (n_random_vars,))
 
-            # Compute using stack
-            stack_output = stack.apply(params, inputs, random_vars, test_key)
-            stack_result = stack_output[0]  # first (and only) output
+            stack_result, aux = stack.apply(params, inputs, random_vars, test_key)
+            manual_result = manual_simple_single_reporter(params, inputs, random_vars, test_key)
 
-            # Compute manually
-            manual_result = manual_simple_single_reporter(params, X, random_vars, test_key)
+            print(f"Stack result: {stack_result}, Manual result: {manual_result}")
+            print(f"Aux:\n{jax_json_dumps(aux)}")
 
-            # Compare
+            print(f"Parameters used:\n{params}")
+
             assert jnp.allclose(stack_result, manual_result, rtol=1e-5), (
                 f"Stack output {stack_result} != manual output {manual_result}"
             )
@@ -257,7 +261,3 @@ def test_simple_single_reporter_computation(lib, simple_single_reporter):
 
         std_dev = jnp.std(jnp.array(all_res))
         assert std_dev > 1e-5, "All results should be different with different random keys"
-
-
-# TODO:
-# - same for all other manual computations

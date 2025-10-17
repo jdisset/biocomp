@@ -154,14 +154,17 @@ def transform_nn(
 
         assert qvalues.shape == (len(quantization_names), rate_dim)
 
-        init_if_needed(
-            params,
-            f"shared/{shared_layer_name}/residual_alpha",
-            init_f=lambda: jnp.array(alpha_init),
-        )
-        init_if_needed(
-            params, f"shared/{shared_layer_name}/residual_beta", init_f=lambda: jnp.array(beta_init)
-        )
+        if not dummy:
+            init_if_needed(
+                params,
+                f"shared/{shared_layer_name}/residual_alpha",
+                init_f=lambda: jnp.array(alpha_init),
+            )
+            init_if_needed(
+                params,
+                f"shared/{shared_layer_name}/residual_beta",
+                init_f=lambda: jnp.array(beta_init),
+            )
 
         if not is_inverse:  # forward node
             # We initialize quantization masks for these nodes.
@@ -257,8 +260,8 @@ def transform_nn(
     ) -> tuple[ArrayLike, dict]:
         k1, k2, k3 = jax.random.split(key, 3)
 
-        qid = params[f"{namespace}/random_variable_id"][node_id]
-        random_var = random_vars[qid]
+        rvid = params[f"{namespace}/random_variable_id"][node_id]
+        random_var = random_vars[rvid]
 
         val = jnp.array(values)
 
@@ -276,6 +279,7 @@ def transform_nn(
             logstdevs_path,
             node_id,
             k3,
+            disable_variational=dummy,
         )
 
         # first we apply the inner head to all inputs and sum them:
@@ -293,16 +297,17 @@ def transform_nn(
 
         # residual connection
         input_mean = jnp.mean(val, axis=0)
-        alpha = params[f"shared/{shared_layer_name}/residual_alpha"]
-        beta = params[f"shared/{shared_layer_name}/residual_beta"]
-        # apply softmax normalization to alpha and beta
-        alpha_norm = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
-        beta_norm = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
-
         if not dummy:
+            alpha = params[f"shared/{shared_layer_name}/residual_alpha"]
+            beta = params[f"shared/{shared_layer_name}/residual_beta"]
+            # apply softmax normalization to alpha and beta
+            alpha_norm = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
+            beta_norm = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
             final_output = alpha_norm * input_mean + beta_norm * ans
         else:
             final_output = ans
+            alpha_norm = jnp.array(0.0)
+            beta_norm = jnp.array(0.0)
 
         return final_output, {
             "random_var": random_var,
@@ -376,81 +381,24 @@ inv_translation = partial(
     quantization_names=DEFAULT_AVAILABLE_TL_RATES,
 )
 
-
-def simple_transform(
-    input_shapes: list[tuple[int]],
-    n_outputs: int,
-    stack: ComputeStack,
-    namespace: str,
-    transform_name: str,
-    quantization_names: list[str],  # not used in simple version
-    rate_dim: int = 1,
-    is_inverse: bool = False,
-    **_,
-):
-    """Simplified transform node: y = sum(a_i * x_i) where a_i are simple coefficients
-
-    For inverse nodes, we don't share parameters - we just duplicate them for simplicity
-    """
-    assert n_outputs == 1, f"Simple transform only supports 1 output, got {n_outputs}"
-    if is_inverse and len(input_shapes) != 1:
-        raise ValueError(f"Inverse {transform_name} should have 1 input, got {len(input_shapes)}")
-    if not all(s == input_shapes[0] for s in input_shapes):
-        raise ValueError(f"All inputs should have the same shape, got {input_shapes}")
-
-    coeff_name = f"{transform_name}_coeffs"
-
-    def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
-        n_nodes = len(nodelist)
-        n_inputs = len(input_shapes)
-
-        # Create a dummy shared param to ensure "shared" subtree exists
-        try:
-            _ = params["shared/dummy"]
-        except KeyError:
-            params["shared/dummy"] = jnp.array([0.0])
-
-        # Always initialize coefficients, even for inverse nodes (simpler for testing)
-        coeffs = jax.random.uniform(key, (n_nodes, n_inputs), minval=0.5, maxval=1.5)
-        params[f"{namespace}/{coeff_name}"] = coeffs
-
-    def apply(
-        *values: ArrayLike,
-        params: ParameterTree,
-        node_id: ArrayLike,
-        **_,
-    ) -> tuple[ArrayLike, dict]:
-        val = jnp.array(values)
-        coeffs = params[f"{namespace}/{coeff_name}"][node_id]
-
-        # y = sum(a_i * x_i)
-        result = jnp.sum(coeffs[:, None] * val, axis=0)
-
-        return result, {
-            "coefficients": coeffs,
-            "is_inverse": is_inverse,
-        }
-
-    output_shape = [(1,)]
-    return LayerInstance(prepare, apply, output_shape)
-
-
 simple_transcription = partial(
-    simple_transform, transform_name="tc", quantization_names=DEFAULT_AVAILABLE_TC_RATES
+    transform_nn, transform_name="tc", quantization_names=DEFAULT_AVAILABLE_TC_RATES, dummy=True
 )
 simple_translation = partial(
-    simple_transform, transform_name="tl", quantization_names=DEFAULT_AVAILABLE_TL_RATES
+    transform_nn, transform_name="tl", quantization_names=DEFAULT_AVAILABLE_TL_RATES, dummy=True
 )
 
 simple_inv_transcription = partial(
-    simple_transform,
+    transform_nn,
     transform_name="tc",
     is_inverse=True,
     quantization_names=DEFAULT_AVAILABLE_TC_RATES,
+    dummy=True,
 )
 simple_inv_translation = partial(
-    simple_transform,
+    transform_nn,
     transform_name="tl",
     is_inverse=True,
     quantization_names=DEFAULT_AVAILABLE_TL_RATES,
+    dummy=True,
 )
