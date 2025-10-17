@@ -117,7 +117,7 @@ def sequestron_ERN(
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
         # --------- random_var var
-        add_random_var_ids(params, len(nodelist), 1, local_layer_name)
+        add_random_var_ids(params, len(nodelist), 1, namespace)
 
         init_if_needed(
             params,
