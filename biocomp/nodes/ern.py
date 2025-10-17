@@ -53,7 +53,6 @@ def sequestron_ERN(
     max_ern_layers: int = 4,  # for one-hot encoding size
     alpha_init: float = 0.5,  # initial value for input residual
     beta_init: float = 0.5,  # initial value for network output
-    **_,
 ) -> LayerInstance:
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]

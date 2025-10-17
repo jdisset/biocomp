@@ -22,6 +22,7 @@ from biocomp.neuralutils import (
     DEFAULT_OUT_ACTIVATION,
     DEFAULT_INITIALIZER,
     dense_mlp,
+    dummy_mlp,
 )
 import biocomp.quantization as qz
 
@@ -30,6 +31,10 @@ PRNGKey = ArrayLike
 NDArray = np.ndarray | jnp.ndarray
 
 logger = get_logger(__name__)
+
+
+def identity(x):
+    return x
 
 
 def transform_nn(
@@ -52,7 +57,7 @@ def transform_nn(
     bias_offset: float = 0.0,
     alpha_init: float = 0.5,
     beta_init: float = 0.5,
-    **_,
+    dummy: bool = False,  # disable neural + residual, for testing
 ):
     # TODO: make sure incoming edges order is deterministic
 
@@ -82,6 +87,10 @@ def transform_nn(
     logstdevs_path = f"shared/quantization/logstdevs/{rate_name}"
     count_array_path = f"shared/quantization/counts/{rate_name}"
 
+    mlp = dummy_mlp if dummy else dense_mlp
+    i_activation = identity if dummy else inner_activation
+    o_activation = identity if dummy else outer_activation
+
     def inner(params, value: NDArray, random_var, rate_embedding: NDArray, key: PRNGKey):
         """For a single source, computes a latent output from the concatenation of
         the rate embedding and the source value.
@@ -98,8 +107,8 @@ def transform_nn(
 
         inputs = flat_concat(value, rate_embedding, random_var)
 
-        out = inner_activation(
-            dense_mlp(
+        out = i_activation(
+            mlp(
                 inputs,
                 inner_wsize,
                 inner_outsize,
@@ -112,6 +121,8 @@ def transform_nn(
                 name=f"NN/{shared_layer_name}/inner",
             )
         )
+        if dummy and is_inverse:  # we subtract the normalized embedding and random_var
+            out = out - ((rate_embedding + random_var) / len(inputs))
 
         assert out.shape == (inner_outsize,)
 
@@ -218,8 +229,8 @@ def transform_nn(
         )
 
     def outer(inner_out: ArrayLike, params, key: PRNGKey):
-        return outer_activation(
-            dense_mlp(
+        out = o_activation(
+            mlp(
                 inner_out,
                 outer_wsize,
                 1,
@@ -232,6 +243,10 @@ def transform_nn(
                 activation=inner_activation,
             )
         )
+        if dummy and is_inverse:  # we subtract the normalized embedding and random_var
+            out = out - jnp.mean(inner_out) / len(inner_out)
+        assert out.shape == (1,), f"Invalid outer output shape {out.shape}"
+        return out
 
     def apply(
         *values: ArrayLike,
@@ -283,7 +298,11 @@ def transform_nn(
         # apply softmax normalization to alpha and beta
         alpha_norm = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
         beta_norm = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
-        final_output = alpha_norm * input_mean + beta_norm * ans
+
+        if not dummy:
+            final_output = alpha_norm * input_mean + beta_norm * ans
+        else:
+            final_output = ans
 
         return final_output, {
             "random_var": random_var,
@@ -352,6 +371,85 @@ inv_transcription = partial(
 )
 inv_translation = partial(
     transform_nn,
+    transform_name="tl",
+    is_inverse=True,
+    quantization_names=DEFAULT_AVAILABLE_TL_RATES,
+)
+
+
+def simple_transform(
+    input_shapes: list[tuple[int]],
+    n_outputs: int,
+    stack: ComputeStack,
+    namespace: str,
+    transform_name: str,
+    quantization_names: list[str],  # not used in simple version
+    rate_dim: int = 1,
+    is_inverse: bool = False,
+    **_,
+):
+    """Simplified transform node: y = sum(a_i * x_i) where a_i are simple coefficients
+
+    For inverse nodes, we don't share parameters - we just duplicate them for simplicity
+    """
+    assert n_outputs == 1, f"Simple transform only supports 1 output, got {n_outputs}"
+    if is_inverse and len(input_shapes) != 1:
+        raise ValueError(f"Inverse {transform_name} should have 1 input, got {len(input_shapes)}")
+    if not all(s == input_shapes[0] for s in input_shapes):
+        raise ValueError(f"All inputs should have the same shape, got {input_shapes}")
+
+    coeff_name = f"{transform_name}_coeffs"
+
+    def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
+        n_nodes = len(nodelist)
+        n_inputs = len(input_shapes)
+
+        # Create a dummy shared param to ensure "shared" subtree exists
+        try:
+            _ = params["shared/dummy"]
+        except KeyError:
+            params["shared/dummy"] = jnp.array([0.0])
+
+        # Always initialize coefficients, even for inverse nodes (simpler for testing)
+        coeffs = jax.random.uniform(key, (n_nodes, n_inputs), minval=0.5, maxval=1.5)
+        params[f"{namespace}/{coeff_name}"] = coeffs
+
+    def apply(
+        *values: ArrayLike,
+        params: ParameterTree,
+        node_id: ArrayLike,
+        **_,
+    ) -> tuple[ArrayLike, dict]:
+        val = jnp.array(values)
+        coeffs = params[f"{namespace}/{coeff_name}"][node_id]
+
+        # y = sum(a_i * x_i)
+        result = jnp.sum(coeffs[:, None] * val, axis=0)
+
+        return result, {
+            "coefficients": coeffs,
+            "is_inverse": is_inverse,
+        }
+
+    output_shape = [(1,)]
+    return LayerInstance(prepare, apply, output_shape)
+
+
+simple_transcription = partial(
+    simple_transform, transform_name="tc", quantization_names=DEFAULT_AVAILABLE_TC_RATES
+)
+simple_translation = partial(
+    simple_transform, transform_name="tl", quantization_names=DEFAULT_AVAILABLE_TL_RATES
+)
+
+simple_inv_transcription = partial(
+    simple_transform,
+    transform_name="tc",
+    is_inverse=True,
+    quantization_names=DEFAULT_AVAILABLE_TC_RATES,
+)
+simple_inv_translation = partial(
+    simple_transform,
     transform_name="tl",
     is_inverse=True,
     quantization_names=DEFAULT_AVAILABLE_TL_RATES,

@@ -71,7 +71,6 @@ def source_with_pos(
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
     initializer_name: str = DEFAULT_INITIALIZER,
     bias_offset=0.0,
-    **_,
 ) -> LayerInstance:
     """Source node with position encoding. Idea is that each Transcription Unit position in the plasmid might have different yields"""
     del stack  # unused
@@ -147,7 +146,6 @@ def inv_source_with_pos(
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
     initializer_name: str = DEFAULT_INITIALIZER,
     bias_offset=0.0,
-    **_,
 ) -> LayerInstance:
     # inverse source is 1->1, inverting a specific position's transformation
     assert len(input_shapes) == 1, f"Inverse source should have 1 input, got {len(input_shapes)}"
