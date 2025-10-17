@@ -297,7 +297,7 @@ def variable_uorf_network(lib):
                             slots=[
                                 Slot(part="cHS4"),
                                 Slot(part="hEF1a"),
-                                Slot(part=["1x_uORF", "2x_uORF", "3x_uORF"]),
+                                Slot(part=["1x_uORF", "2x_uORF", "3x_uORF"]), # "unlocked" uorf part
                                 Slot(part="eBFP2"),
                                 Slot(part="L0.T_4560"),
                             ]
@@ -373,11 +373,6 @@ def test_variable_uorf_network(variable_uorf_network):
     uorf_slot = [s for s in tu.slots if isinstance(s.part, list) and "uORF" in str(s.part)][0]
     assert len(uorf_slot.part) == 3
     assert "1x_uORF" in uorf_slot.part
-
-
-# ============================================================================
-# Additional fixtures from old test_recipe_roundtrip.py
-# ============================================================================
 
 
 @pytest.fixture
