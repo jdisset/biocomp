@@ -17,6 +17,7 @@ from .graphengine import GraphState
 
 from biocomp.logging_config import get_logger
 from biocomp.graphengine import GraphNode, GraphEdge
+import dracon as dr
 
 
 logger = get_logger(__name__)
@@ -906,5 +907,13 @@ class ComputeStack:
         self.apply = apply
         self.output_indices = output_indices
 
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                  --     Default Configuration     --
+
+DEFAULT_COMPUTE_CONFIG = ComputeConfig.model_validate(
+    dr.load("pkg:biocomp:config/default_compute_config.yaml")
+)
 
 ##────────────────────────────────────────────────────────────────────────────}}}

@@ -54,6 +54,7 @@ create_aggregation_nodes = GraphRewritingRule(
                 "cotx_group": "{{source1.cotx_group}}",
                 "ratios": [],
                 "members": [],
+                "ratio_ranges": [],
             },
         ),
     ],
@@ -88,6 +89,7 @@ connect_sources_to_aggregation = GraphRewritingRule(
             properties={
                 "ratios": "{{ aggregation.ratios + [source.ratio if source.ratio else 1.0] }}",
                 "members": "{{ aggregation.members + [source.source_id] }}",
+                "ratio_ranges": "{{ (aggregation.ratio_ranges if aggregation.ratio_ranges else []) + [source.ratio_range if source.ratio_range else None] }}",
             },
         ),
     ],
@@ -184,7 +186,7 @@ add_numeric_nodes = GraphRewritingRule(
         # Match nodes with no incoming edges (top-level)
         where_not_connected=[EdgeConstraint(source_var="any", target_var="top_node")],
         # Only for source and aggregation nodes
-        where_filter_function="top_node.type in ['source', 'aggregation']",
+        where_filter_function="top_node.type in ['source', 'aggregation'] and (not hasattr(top_node._obj.extra, 'get') or top_node._obj.extra.get('fluo_bias') is None)",
     ),
     actions=[
         AddNode(
@@ -198,6 +200,38 @@ add_numeric_nodes = GraphRewritingRule(
             source="numeric",
             target="top_node",
             properties={"content_type": None},  # Copy number flow
+        ),
+    ],
+    yield_strategy="batched",
+)
+
+add_bias_nodes = GraphRewritingRule(
+    name="add_bias_nodes",
+    query=MatchQuery(
+        bind={
+            "top_node": PropertyConstraint(properties={}),  # Any node type
+        },
+        # Match nodes with no incoming edges (top-level)
+        where_not_connected=[EdgeConstraint(source_var="any", target_var="top_node")],
+        # Only for source nodes WITH fluo_bias (aggregation nodes don't have fluo_bias)
+        where_filter_function="top_node.type == 'source' and hasattr(top_node._obj.extra, 'get') and top_node._obj.extra.get('fluo_bias') is not None",
+    ),
+    actions=[
+        AddNode(
+            local_name="bias",
+            properties={
+                "type": "bias",
+                "role": "fluo_bias",
+                "tu_id": "{{ top_node.fluo_bias['tu_id'] }}",
+                "value": "{{ top_node.fluo_bias['value'] }}",
+                "protein": "{{ top_node.fluo_bias['protein'] if top_node.fluo_bias['protein'] else None }}",
+                "units": "{{ top_node.fluo_bias['units'] if top_node.fluo_bias['units'] else 'AU' }}",
+            },
+        ),
+        AddEdge(
+            source="bias",
+            target="top_node",
+            properties={"content_type": None},  # Bias flow
         ),
     ],
     yield_strategy="batched",
@@ -569,10 +603,7 @@ def sort_output_edges(graph):
         incoming_edges = graph.get_incoming_edges(output_node.node_id)
 
         # Sort edges by protein name (first part in content)
-        sorted_edges = sorted(
-            incoming_edges,
-            key=lambda e: e.content[0].name if e.content else ""
-        )
+        sorted_edges = sorted(incoming_edges, key=lambda e: e.content[0].name if e.content else "")
 
         # Reassign input_slots to match sorted order
         for new_slot, edge in enumerate(sorted_edges):
@@ -590,9 +621,14 @@ def sort_output_edges(graph):
                 content=edge.content,
                 content_type=edge.content_type,
                 content_embedding_names=edge.content_embedding_names,
-                extra=edge.extra
+                extra=edge.extra,
             )
-            new_key = (new_edge.source_id, new_edge.target_id, new_edge.output_slot, new_edge.input_slot)
+            new_key = (
+                new_edge.source_id,
+                new_edge.target_id,
+                new_edge.output_slot,
+                new_edge.input_slot,
+            )
             graph.edges[new_key] = new_edge
 
     return graph
@@ -604,6 +640,7 @@ ALL_RULES = [
     connect_sources_to_aggregation,
     merge_aggregators_by_group,
     sort_aggregation_members,
-    add_numeric_nodes,
+    add_bias_nodes,  # Add bias nodes for cotx with fluo_bias
+    add_numeric_nodes,  # Add numeric (copy number) nodes for regular cotx
     *SEQUESTRON_RULES,
 ]

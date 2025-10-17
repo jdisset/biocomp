@@ -38,7 +38,7 @@ configurable = ut.configurable_decorator("biocomp.plotting")
 os.environ["PATH"] += os.pathsep + "/Library/TeX/texbin"
 configurable = ut.configurable_decorator("biocomp.plotting")
 
-BIOCOMP_COLORS = dr.load("pkg:biocomp:config/colors.yaml")
+BIOCOMP_COLORS = dr.load("pkg:biocomp:config/biocomp_colors.yaml")
 cmap_definitions = BIOCOMP_COLORS["color_maps"] or {}
 
 CUSTOM_CMAPS = {

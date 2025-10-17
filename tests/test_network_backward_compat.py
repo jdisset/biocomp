@@ -33,11 +33,20 @@ def lib():
 @pytest.fixture(scope="module")
 def recipe_paths():
     """Get all test recipe paths"""
-    test_recipe_path = Path("biocomp/tests/networks/old_recipes")
-    if not test_recipe_path.exists():
-        test_recipe_path = Path("tests/networks/old_recipes")
-    paths = sorted(test_recipe_path.glob("*.json5"))
-    return paths
+    # Try multiple possible paths relative to current working directory
+    possible_paths = [
+        Path("biocomp/tests/networks/old_recipes"),
+        Path("tests/networks/old_recipes"),
+        Path(__file__).parent / "networks" / "old_recipes",  # Relative to this test file
+    ]
+
+    for test_recipe_path in possible_paths:
+        if test_recipe_path.exists():
+            paths = sorted(test_recipe_path.glob("*.json5"))
+            if paths:
+                return paths
+
+    return []
 
 
 @pytest.fixture(scope="module")

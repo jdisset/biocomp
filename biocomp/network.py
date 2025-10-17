@@ -69,12 +69,16 @@ class Network(BaseModel):
         return [output_proteins[mapping[i]] for i in range(len(mapping))]
 
     def get_inverted_input_positions(self, include_biases: bool = False) -> dict[int, int]:
-        """Returns a mapping from input position to output position"""
+        """Returns a mapping from input position to output position
+
+        Note: Bias nodes are not included because they are direct inputs (not inverted outputs).
+        They don't have input_position or input_from_output fields.
+        """
         assert self.compute_graph is not None
         mapping = {}
+        # Only input nodes have input_position/input_from_output (from inversion)
+        # Bias nodes are direct inputs like numeric nodes, so we don't include them
         mask_types = ["input"]
-        if include_biases:
-            mask_types.append("bias")
 
         inputs = [n for n in self.compute_graph.nodes.values() if n.node_type in mask_types]
         for node in inputs:
@@ -626,26 +630,48 @@ def _build_cdg_dual_from_preprocessed(
     nodes, edges = [], []
     next_node_id = 0
 
-    # Create a mapping from (source_id, cotx_group) to normalized ratio
-    source_cotx_to_ratio_map: dict[tuple[str | None, str], float] = {}
+    # Create a mapping from (source_id, cotx_group) to normalized ratio and range info
+    from biocomp.recipe import NumRange, FluoIntensity
+
+    source_cotx_to_ratio_map: dict[tuple[str | None, str], tuple[float, Optional[NumRange]]] = {}
+    cotx_to_fluo_bias: dict[str, FluoIntensity] = {}  # cotx_group -> FluoIntensity
+
     for i, cotx in enumerate(recipe or []):
         group_name = cotx.name or f"cotx_{i + 1}"
         raw_ratios = cotx.ratios or [1.0] * len(cotx.units)
-        ratio_sum = sum(raw_ratios)
+
+        # Track fluo_bias info for this cotx
+        if cotx.fluo_bias is not None:
+            cotx_to_fluo_bias[group_name] = cotx.fluo_bias
+
+        # Extract numeric values for normalization (use midpoint for ranges)
+        numeric_ratios = []
+        for r in raw_ratios:
+            if isinstance(r, NumRange):
+                # use midpoint or 1.0 if unbounded
+                min_v = r.min if r.min is not None else 0.0
+                max_v = r.max if r.max is not None else 1.0
+                numeric_ratios.append((min_v + max_v) / 2.0)
+            else:
+                numeric_ratios.append(float(r))
+
+        ratio_sum = sum(numeric_ratios)
         # Normalize ratios within each cotx group to sum to 1.0
         normalized_ratios = (
-            [r / ratio_sum for r in raw_ratios]
+            [r / ratio_sum for r in numeric_ratios]
             if ratio_sum > 0
             else [1.0 / len(cotx.units)] * len(cotx.units)
         )
 
-        for unit, ratio in zip(cotx.units, normalized_ratios):
-            source_cotx_to_ratio_map[(unit.source, group_name)] = float(ratio)
+        for unit, norm_ratio, orig_ratio in zip(cotx.units, normalized_ratios, raw_ratios):
+            # Store both normalized value and original range info (if NumRange)
+            range_info = orig_ratio if isinstance(orig_ratio, NumRange) else None
+            source_cotx_to_ratio_map[(unit.source, group_name)] = (float(norm_ratio), range_info)
 
     source_nodes, tx_nodes, tl_nodes = {}, {}, {}
     output_node, dead_end_nodes = None, {}
 
-    for (source_id, cotx_group), ratio in source_cotx_to_ratio_map.items():
+    for (source_id, cotx_group), (ratio, range_info) in source_cotx_to_ratio_map.items():
         source_key = (source_id, cotx_group)
         if source_key not in source_nodes:
             source_nodes[source_key] = next_node_id
@@ -656,6 +682,25 @@ def _build_cdg_dual_from_preprocessed(
                 "cotx_group": cotx_group,
                 "ratio": ratio,
             }
+            # Add range info if ratio is unlocked
+            if range_info is not None:
+                source_extra["ratio_range"] = {
+                    "min": range_info.min,
+                    "max": range_info.max,
+                }
+            # Add fluo_bias info if this cotx has a bias
+            if cotx_group in cotx_to_fluo_bias:
+                fluo_bias = cotx_to_fluo_bias[cotx_group]
+                source_extra["fluo_bias"] = {
+                    "tu_id": fluo_bias.tu_id,
+                    "value": (
+                        fluo_bias.value
+                        if isinstance(fluo_bias.value, (int, float))
+                        else {"min": fluo_bias.value.min, "max": fluo_bias.value.max}
+                    ),
+                    "protein": fluo_bias.protein,
+                    "units": fluo_bias.units,
+                }
             nodes.append(
                 GraphNode(node_id=source_nodes[source_key], node_type="source", extra=source_extra)
             )

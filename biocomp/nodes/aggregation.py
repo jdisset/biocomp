@@ -47,18 +47,53 @@ def aggregation(
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey, **_):
         ratios = []
-        for node in nodelist:
+        ratio_ranges_list = []  # Store range info for each node
+
+        for i, node in enumerate(nodelist):
             extra = node.get(stack).extra
             if "ratios" in extra and not random_init:
                 assert len(extra["ratios"]) == n_outputs
                 ratio_v = jnp.array(extra["ratios"], dtype=jnp.float32)
+
+                # Check if this node has unlocked ratios (ratio_ranges)
+                if "ratio_ranges" in extra:
+                    ranges = extra["ratio_ranges"]
+                    # Store range info (None if locked, dict with min/max if unlocked)
+                    ratio_ranges_list.append(ranges)
+
+                    # Initialize unlocked ratios within their ranges
+                    for j, range_info in enumerate(ranges):
+                        if range_info is not None:
+                            # Ratio is unlocked - initialize within range
+                            min_v = range_info.get("min", 0.0)
+                            max_v = range_info.get("max", 1.0)
+                            if min_v is None:
+                                min_v = 0.0
+                            if max_v is None:
+                                max_v = 1.0
+                            # Generate random value within range
+                            ratio_v = ratio_v.at[j].set(
+                                jax.random.uniform(
+                                    jax.random.fold_in(key, i * n_outputs + j),
+                                    minval=min_v,
+                                    maxval=max_v,
+                                )
+                            )
+                else:
+                    ratio_ranges_list.append([None] * n_outputs)  # All locked
             else:
+                # Random init
                 ratio_v = jax.random.uniform(key, (n_outputs,), minval=0.05, maxval=1.0)
+                ratio_ranges_list.append([None] * n_outputs)
+
             ratios.append(ratio_v)
 
         ratios = jnp.stack(ratios)
         assert ratios.shape == (len(nodelist), n_outputs), f"Invalid ratio shape {ratios.shape}"
         params[f"{namespace}/{pname}"] = ratios
+
+        # Store ratio_ranges metadata for round-trip and commit
+        params.at(f"{namespace}/{pname}_ranges", ratio_ranges_list, tags=[NON_GRAD_TAG])
 
     def apply(
         input: NDArray,
@@ -73,7 +108,7 @@ def aggregation(
         result = abs_ratios * input
         return result, {"ratios": ratios, "abs_ratios": abs_ratios, "n_outputs": n_outputs}
 
-    def commit(params: ParameterTree, nodelist: list[StackNode], **_):
+    def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack = None, **_):
         for i, n in enumerate(nodelist):
             updt = {}
             ratios = params[f"{namespace}/{pname}"][i]
@@ -88,6 +123,10 @@ def aggregation(
 
             # update extra dict
             updt["ratios"] = normalized_ratios.tolist()[:n_outputs]
+
+            # After commit, ratios are locked - remove ratio_ranges
+            updt["ratio_ranges"] = [None] * n_outputs
+
             n.get(stack).extra.update(updt)
 
     output_shape = input_shapes * n_outputs

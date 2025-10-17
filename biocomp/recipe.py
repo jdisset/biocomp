@@ -20,6 +20,73 @@ PathLike = Union[str, Path]
 PART_TYPE_TO_EMBEDDING_NAME = {"promoter": "tc_rate", "uORF_group": "tl_rate"}
 EMBEDDING_TO_DEFAULT_PART = {"tl_rate": "00_empty_tc", "tc_rate": "hEF1a"}
 
+
+## {{{                      --     NumRange & FluoIntensity     --
+
+
+class NumRange(BaseModel):
+    """Range specification for unlocked numeric parameters (ratios, biases)
+
+    If min or max is None, it means no limit in that direction.
+    """
+
+    min: Optional[float] = None
+    max: Optional[float] = None
+
+    def contains(self, value: float) -> bool:
+        """Check if value is within range"""
+        if self.min is not None and value < self.min:
+            return False
+        if self.max is not None and value > self.max:
+            return False
+        return True
+
+    def clamp(self, value: float) -> float:
+        """Clamp value to range"""
+        if self.min is not None:
+            value = max(value, self.min)
+        if self.max is not None:
+            value = min(value, self.max)
+        return value
+
+    def __repr__(self) -> str:
+        min_str = f"{self.min}" if self.min is not None else "-∞"
+        max_str = f"{self.max}" if self.max is not None else "∞"
+        return f"[{min_str}, {max_str}]"
+
+
+class FluoIntensity(BaseModel):
+    """Specification for fluorescence intensity bias in a CoTransfection
+
+    Refers to a specific TU in the cotx that has a fluorescent reporter.
+    Can be locked (fixed value) or unlocked (NumRange).
+    """
+
+    tu_id: int  # index of the TU in the cotx that has the fluorescent reporter
+    value: Union[NumRange, float] = Field(default_factory=lambda: NumRange(min=0.0))
+    protein: Optional[str] = None  # if None, assumes there's a single marker protein in the TU
+    units: str = "AU"  # e.g. "EBFP2 mapped PacBlue"
+
+    def is_locked(self) -> bool:
+        """Check if bias is locked (fixed value) or unlocked (range)"""
+        return isinstance(self.value, (int, float))
+
+    def get_value(self) -> Optional[float]:
+        """Get the fixed value if locked, None if unlocked"""
+        if self.is_locked():
+            return float(self.value)  # type: ignore
+        return None
+
+    def get_range(self) -> Optional[NumRange]:
+        """Get the range if unlocked, None if locked"""
+        if not self.is_locked():
+            return self.value  # type: ignore
+        return None
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
 ## {{{                           --     Slot     --
 
 
@@ -173,12 +240,41 @@ Unit = TranscriptionUnit  # alias for declarative API
 class CoTransfection(BaseModel):
     name: Optional[str] = None
     units: list[Unit]
-    ratios: Optional[list[float]] = None
+    ratios: Optional[list[Union[NumRange, float]]] = None
+    fluo_bias: Optional[FluoIntensity] = None  # if None, normal input (not a bias)
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
         if self.ratios is None:  # equal ratios by default
             self.ratios = [1.0] * len(self.units)
+        # Validate fluo_bias tu_id if present
+        if self.fluo_bias is not None:
+            if self.fluo_bias.tu_id < 0 or self.fluo_bias.tu_id >= len(self.units):
+                raise ValueError(
+                    f"fluo_bias.tu_id {self.fluo_bias.tu_id} out of range [0, {len(self.units)})"
+                )
+
+    def has_unlocked_ratios(self) -> bool:
+        """Check if any ratio is unlocked (NumRange)"""
+        return self.ratios is not None and any(isinstance(r, NumRange) for r in self.ratios)
+
+    def get_locked_ratios(self) -> Optional[list[float]]:
+        """Get ratios as floats if all are locked, None otherwise"""
+        if self.ratios is None:
+            return None
+        if self.has_unlocked_ratios():
+            return None
+        return [float(r) for r in self.ratios]  # type: ignore
+
+    def get_ratio_ranges(self) -> list[Optional[NumRange]]:
+        """Get ratio range for each unit (None if locked)"""
+        if self.ratios is None:
+            return [None] * len(self.units)
+        return [r if isinstance(r, NumRange) else None for r in self.ratios]
+
+    def has_bias(self) -> bool:
+        """Check if this cotx specifies a bias (not a normal input)"""
+        return self.fluo_bias is not None
 
     def __hash__(self):
         return hash(str(self.model_dump()))
