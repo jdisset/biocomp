@@ -341,8 +341,9 @@ class ComputeStack:
         params.tag("local", "local")
         params.tag("shared", "shared")
 
+        from biocomp.nodeutils import NON_GRAD_TAG
         params.at(
-            "global/dependent_output_mask", self.get_dependent_output_mask(), tags=[nd.NON_GRAD_TAG]
+            "global/dependent_output_mask", self.get_dependent_output_mask(), tags=[NON_GRAD_TAG]
         )
 
         # pp_params = self.post_process(params)
@@ -669,27 +670,14 @@ class ComputeStack:
             length = input_lengths[input_slot]
             indices = np.array([np.arange(st, st + length) for st in starts])
 
-            # We can either dynamically slice the big output array at start:length
-            # or directly index it at indices... I'm not sure which is faster
-            # but I guess it's better to use dynamic slicing for large inputs?
-            DYN_SLICE = False
-            DYN_SLICE_THRESHOLD = 20
-            if length > DYN_SLICE_THRESHOLD:
-                DYN_SLICE = True
-
+            # Use dynamic slicing which works with JAX tracing
             def get_inputs_dyn(all_outputs):
                 def dyn_slice(start):
                     return jax.lax.dynamic_slice(all_outputs, (start,), (length,)).reshape(shape)
 
                 return vmap(dyn_slice)(starts)
 
-            def get_inputs_idx(all_outputs):
-                def slice(idx):
-                    return all_outputs[idx].reshape(shape)
-
-                return vmap(slice)(indices)
-
-            return get_inputs_dyn if DYN_SLICE else get_inputs_idx
+            return get_inputs_dyn
 
         get_inputs = [generate_get_inputs(i) for i in range(len(input_shapes))]
 
