@@ -78,7 +78,6 @@ DEFAULT_ACTIVATION = "leaky_relu"
 DEFAULT_OUT_ACTIVATION = "sigmoid"
 DEFAULT_INITIALIZER = "he_normal"
 
-
 def dense_layer(
     input_values: ArrayLike,
     output_size: ArrayLike,
@@ -158,4 +157,35 @@ def dense_mlp(
         res, output_s, param_f, initializer, bias_offset, keys[-1], f"{name}/l{depth - 1}"
     )
     assert res.shape == (output_s,), f"In {name}: {res.shape} != {(output_s,)}"
+    return res
+
+
+def dummy_mlp(
+    input_values: ArrayLike,
+    hidden_s: int,
+    output_s: int,
+    depth: int,
+    param_f: Callable[[str, Callable], ArrayLike],
+    initializer: Callable,
+    bias_offset,
+    key: PRNGKey,
+    name: str,
+    activation: Callable[[ArrayLike], ArrayLike],
+):
+    """A dummy non-neural module that just returns the mean of the input repeated to match output size."""
+
+    assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
+    assert isinstance(depth, int) and depth >= 1, (
+        f"In {name}: depth should be an integer greater than or equal to 1."
+    )
+    assert isinstance(hidden_s, int) and hidden_s > 0, (
+        f"In {name}: hidden_s should be a positive integer."
+    )
+    assert isinstance(output_s, int) and output_s > 0, (
+        f"In {name}: output_s should be a positive integer."
+    )
+
+    mean_val = jnp.mean(input_values) if input_values.shape != () else input_values
+    res = jnp.full((output_s,), mean_val)
+        assert res.shape == (output_s,), f"In {name}: {res.shape} != {(output_s,)}"
     return res
