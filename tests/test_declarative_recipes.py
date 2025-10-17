@@ -1070,7 +1070,6 @@ def test_unlocked_bias_node_properties(lib, unlocked_bias_network):
         assert value["max"] == 200.0
 
 
-@pytest.mark.skip(reason="Bias nodes for multi-TU CoTransfections not yet implemented. Currently creates numeric node instead. See roadmaps/new_network/newnodes.md line 71-87")
 def test_combined_unlocked_network(lib, combined_unlocked_network):
     """Test network with both unlocked ratios and unlocked bias"""
     from biocomp.network import recipe_to_networks

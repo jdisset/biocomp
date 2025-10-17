@@ -55,6 +55,7 @@ create_aggregation_nodes = GraphRewritingRule(
                 "ratios": [],
                 "members": [],
                 "ratio_ranges": [],
+                "fluo_bias": "{{ source1.fluo_bias if source1.fluo_bias else None }}",
             },
         ),
     ],
@@ -185,8 +186,8 @@ add_numeric_nodes = GraphRewritingRule(
         },
         # Match nodes with no incoming edges (top-level)
         where_not_connected=[EdgeConstraint(source_var="any", target_var="top_node")],
-        # Only for source and aggregation nodes
-        where_filter_function="top_node.type in ['source', 'aggregation'] and (not hasattr(top_node._obj.extra, 'get') or top_node._obj.extra.get('fluo_bias') is None)",
+        # Only for source and aggregation nodes without fluo_bias (or with string 'None')
+        where_filter_function="top_node.type in ['source', 'aggregation'] and (not hasattr(top_node._obj.extra, 'get') or top_node._obj.extra.get('fluo_bias') is None or top_node._obj.extra.get('fluo_bias') == 'None')",
     ),
     actions=[
         AddNode(
@@ -213,8 +214,8 @@ add_bias_nodes = GraphRewritingRule(
         },
         # Match nodes with no incoming edges (top-level)
         where_not_connected=[EdgeConstraint(source_var="any", target_var="top_node")],
-        # Only for source nodes WITH fluo_bias (aggregation nodes don't have fluo_bias)
-        where_filter_function="top_node.type == 'source' and hasattr(top_node._obj.extra, 'get') and top_node._obj.extra.get('fluo_bias') is not None",
+        # For both source and aggregation nodes WITH fluo_bias (but not string 'None')
+        where_filter_function="top_node.type in ['source', 'aggregation'] and hasattr(top_node._obj.extra, 'get') and top_node._obj.extra.get('fluo_bias') is not None and top_node._obj.extra.get('fluo_bias') != 'None'",
     ),
     actions=[
         AddNode(
