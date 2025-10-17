@@ -26,12 +26,12 @@ node_functions:
       dummy: True
 
   source: !biocomp.utils.PartialFunction
-    func: biocomp.nodes.source_with_pos
+    func: biocomp.nodes.simple_source_with_pos
     kwargs:
       dummy: True
 
   inv_source: !biocomp.utils.PartialFunction
-    func: biocomp.nodes.inv_source_with_pos
+    func: biocomp.nodes.simple_inv_source_with_pos
     kwargs:
       dummy: True
 

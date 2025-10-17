@@ -22,6 +22,7 @@ from biocomp.neuralutils import (
     DEFAULT_OUT_ACTIVATION,
     DEFAULT_INITIALIZER,
     dense_mlp,
+    dummy_mlp,
     uniform_initializer,
 )
 import biocomp.quantization as qz
@@ -32,6 +33,10 @@ PRNGKey = ArrayLike
 NDArray = np.ndarray | jnp.ndarray
 
 logger = get_logger(__name__)
+
+
+def identity(x):
+    return x
 
 
 def sequestron_ERN(
@@ -53,6 +58,7 @@ def sequestron_ERN(
     max_ern_layers: int = 4,  # for one-hot encoding size
     alpha_init: float = 0.5,  # initial value for input residual
     beta_init: float = 0.5,  # initial value for network output
+    dummy: bool = False,  # disable neural + residual, for testing
 ) -> LayerInstance:
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
@@ -106,7 +112,8 @@ def sequestron_ERN(
         # apply softmax normalization to alpha and beta
         alpha = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
         beta = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
-        return alpha * (pos_mean - neg_mean) + beta * res
+        out = alpha * (pos_mean - neg_mean) + beta * res
+        return out
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
         # --------- random_var var
@@ -168,14 +175,15 @@ def sequestron_ERN(
         # include dummy one-hot layer id if needed
         layer_id_onehot = jnp.zeros(max_ern_layers) if use_ern_layer_id else np.empty((0,))
 
-        MLP(
-            *[np.zeros(shape) for shape in input_shapes],
-            affinity=np.zeros((affinity_dim,)),
-            random_var=0,
-            param_f=partial(init_if_needed, params, base_path="shared"),
-            key=key,
-            layer_id_onehot=layer_id_onehot,
-        )
+        if not dummy:
+            MLP(
+                *[np.zeros(shape) for shape in input_shapes],
+                affinity=np.zeros((affinity_dim,)),
+                random_var=0,
+                param_f=partial(init_if_needed, params, base_path="shared"),
+                key=key,
+                layer_id_onehot=layer_id_onehot,
+            )
 
     def apply(
         *values: ArrayLike,
@@ -193,22 +201,29 @@ def sequestron_ERN(
 
         # create one-hot encoded layer_id if enabled
         layer_id_onehot = jnp.empty((0,))  # default empty if not using layer_id
+        node_layer_id = 0
         if use_ern_layer_id:
             node_layer_id = params[f"{namespace}/node_layer_ids"][node_id]
             layer_id_onehot = jax.nn.one_hot(node_layer_id, max_ern_layers)
 
-        result = MLP(
-            *values,
-            affinity=affinity,
-            random_var=random_vars[qid],
-            param_f=partial(get_param, params, base_path="shared"),
-            key=key,
-            layer_id_onehot=layer_id_onehot,
-        )
+        if not dummy:
+            result = outer_activation(
+                MLP(
+                    *values,
+                    affinity=affinity,
+                    random_var=random_vars[qid],
+                    param_f=partial(get_param, params, base_path="shared"),
+                    key=key,
+                    layer_id_onehot=layer_id_onehot,
+                )
+            )
 
         # calculate input difference for debug
         neg_val, pos_val = values
         input_diff = jnp.mean(pos_val) - jnp.mean(neg_val)
+
+        if dummy:
+            result = input_diff * (0.9**node_layer_id)  # just a dummy decreasing function
 
         aux_dict = {
             "affinity": affinity,
@@ -223,7 +238,7 @@ def sequestron_ERN(
         if use_ern_layer_id:
             aux_dict["node_layer_id"] = params[f"{namespace}/node_layer_ids"][node_id]
 
-        return outer_activation(result), aux_dict
+        return result, aux_dict
 
     output_shape = [(1,)]
 
