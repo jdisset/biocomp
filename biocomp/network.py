@@ -300,13 +300,28 @@ class Network(BaseModel):
                 source_node = self._find_source_node(source_id, group_id)
                 if source_node:
                     slots = self._extract_slots_from_source(source_node)
-                    tus.append(
-                        TranscriptionUnit(
-                            name=source_node.extra.get("name", ""),
-                            slots=slots,
-                            source=source_id,
-                        )
+
+                    # get param_ref_ids directly from source node
+                    param_ref_ids = source_node.extra.get("param_ref_ids", {})
+
+                    # restore ref_ids to slots from param_ref_ids
+                    if param_ref_ids:
+                        # map parameter names to ref_ids
+                        for slot in slots:
+                            if slot.maps_to_parameter and slot.maps_to_parameter in param_ref_ids:
+                                slot.ref_id = param_ref_ids[slot.maps_to_parameter]
+
+                    tu = TranscriptionUnit(
+                        name=source_node.extra.get("name", ""),
+                        slots=slots,
+                        source=source_id,
                     )
+
+                    # restore param_ref_ids to TU (the __post_init__ will populate it, but we ensure it's correct)
+                    if param_ref_ids:
+                        tu.param_ref_ids = dict(param_ref_ids)
+
+                    tus.append(tu)
             tus_by_cotx[group_id] = tus
         return tus_by_cotx
 
@@ -340,19 +355,21 @@ class Network(BaseModel):
 
         if "tc_rate" in embeddings:
             tc_parts = embeddings["tc_rate"]
-            slots.append(Slot(part=list(tc_parts) if len(tc_parts) > 1 else tc_parts[0]))
+            slot = Slot(part=list(tc_parts) if len(tc_parts) > 1 else tc_parts[0])
+            slot.maps_to_parameter = "tc_rate"
+            slots.append(slot)
 
         if "tl_rate" in embeddings:
             tl_parts = embeddings["tl_rate"]
             if tl_parts and tl_parts != ("00_empty_tc",):
                 tl_parts_cleaned = [p if p != "00_empty_tc" else None for p in tl_parts]
-                slots.append(
-                    Slot(
-                        part=list(tl_parts_cleaned)
-                        if len(tl_parts_cleaned) > 1
-                        else tl_parts_cleaned[0]
-                    )
+                slot = Slot(
+                    part=list(tl_parts_cleaned)
+                    if len(tl_parts_cleaned) > 1
+                    else tl_parts_cleaned[0]
                 )
+                slot.maps_to_parameter = "tl_rate"
+                slots.append(slot)
 
         for part_name in dna_parts[1:]:
             slots.append(Slot(part=part_name))
@@ -805,12 +822,17 @@ def _build_cdg_dual_from_preprocessed(
         for unit, norm_ratio, orig_ratio in zip(cotx.units, normalized_ratios, raw_ratios):
             # Store both normalized value and original range info (if NumRange)
             range_info = orig_ratio if isinstance(orig_ratio, NumRange) else None
-            source_cotx_to_ratio_map[(unit.source, group_name)] = (float(norm_ratio), range_info)
+            # Also store param_ref_ids from the TU for roundtrip preservation
+            source_cotx_to_ratio_map[(unit.source, group_name)] = (
+                float(norm_ratio),
+                range_info,
+                dict(unit.param_ref_ids),  # copy to avoid mutation
+            )
 
     source_nodes, tx_nodes, tl_nodes = {}, {}, {}
     output_node, dead_end_nodes = None, {}
 
-    for (source_id, cotx_group), (ratio, range_info) in source_cotx_to_ratio_map.items():
+    for (source_id, cotx_group), (ratio, range_info, param_ref_ids) in source_cotx_to_ratio_map.items():
         source_key = (source_id, cotx_group)
         if source_key not in source_nodes:
             source_nodes[source_key] = next_node_id
@@ -820,6 +842,7 @@ def _build_cdg_dual_from_preprocessed(
                 "source_id": source_id,
                 "cotx_group": cotx_group,
                 "ratio": ratio,
+                "param_ref_ids": param_ref_ids,  # store for roundtrip preservation
             }
             # Add range info if ratio is unlocked
             if range_info is not None:
