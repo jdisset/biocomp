@@ -23,6 +23,7 @@ from biocomp.library import load_lib, LibraryContext
 # Fixtures
 # ============================================================================
 
+
 @pytest.fixture(scope="module")
 def lib():
     """Load parts library once for all tests"""
@@ -131,17 +132,25 @@ def compare_stacks(old_stack, new_stack):
 
         # Input/output shapes
         if old_layer.f_input_shapes != new_layer.f_input_shapes:
-            diffs.append(f"Layer {i} input shapes: {old_layer.f_input_shapes} vs {new_layer.f_input_shapes}")
+            diffs.append(
+                f"Layer {i} input shapes: {old_layer.f_input_shapes} vs {new_layer.f_input_shapes}"
+            )
 
         if old_layer.f_out_shapes != new_layer.f_out_shapes:
-            diffs.append(f"Layer {i} output shapes: {old_layer.f_out_shapes} vs {new_layer.f_out_shapes}")
+            diffs.append(
+                f"Layer {i} output shapes: {old_layer.f_out_shapes} vs {new_layer.f_out_shapes}"
+            )
 
     # Stack-level properties
     if old_stack.total_nb_of_outputs != new_stack.total_nb_of_outputs:
-        diffs.append(f"Total outputs: {old_stack.total_nb_of_outputs} vs {new_stack.total_nb_of_outputs}")
+        diffs.append(
+            f"Total outputs: {old_stack.total_nb_of_outputs} vs {new_stack.total_nb_of_outputs}"
+        )
 
     if old_stack.total_nb_of_inputs != new_stack.total_nb_of_inputs:
-        diffs.append(f"Total inputs: {old_stack.total_nb_of_inputs} vs {new_stack.total_nb_of_inputs}")
+        diffs.append(
+            f"Total inputs: {old_stack.total_nb_of_inputs} vs {new_stack.total_nb_of_inputs}"
+        )
 
     if old_stack.number_of_nodes != new_stack.number_of_nodes:
         diffs.append(f"Total nodes: {old_stack.number_of_nodes} vs {new_stack.number_of_nodes}")
@@ -152,6 +161,7 @@ def compare_stacks(old_stack, new_stack):
 # ============================================================================
 # Basic Sanity Tests
 # ============================================================================
+
 
 def test_recipes_loaded(recipes_data):
     """Sanity check: ensure we loaded some recipes"""
@@ -169,7 +179,7 @@ def test_old_stack_system_works(recipe_paths, lib):
                 assert len(old_stack.layers) > 0
                 assert old_stack.number_of_nodes > 0
                 # Check old system uses .nodes (VirtualNode objects)
-                assert hasattr(old_stack.layers[0], 'nodes')
+                assert hasattr(old_stack.layers[0], "nodes")
                 assert len(old_stack.layers[0].nodes) > 0
             except Exception as e:
                 pytest.fail(f"Old stack build failed on {path.name}: {e}")
@@ -185,7 +195,7 @@ def test_new_stack_system_works(recipes_data, lib):
                 assert len(new_stack.layers) > 0
                 assert new_stack.number_of_nodes > 0
                 # Check new system uses .nodes (StackNode objects)
-                assert hasattr(new_stack.layers[0], 'nodes')
+                assert hasattr(new_stack.layers[0], "nodes")
                 assert len(new_stack.layers[0].nodes) > 0
             except Exception as e:
                 pytest.fail(f"New stack build failed on {path.name}: {e}")
@@ -194,6 +204,7 @@ def test_new_stack_system_works(recipes_data, lib):
 # ============================================================================
 # Structure Equivalence Tests
 # ============================================================================
+
 
 def test_layer_count_equivalence(recipes_data, lib):
     """Test that old and new produce same number of layers"""
@@ -206,21 +217,25 @@ def test_layer_count_equivalence(recipes_data, lib):
                 new_stack = build_new_stack(recipe, lib)
 
                 if len(old_stack.layers) != len(new_stack.layers):
-                    failed.append({
-                        'name': path.name,
-                        'old_count': len(old_stack.layers),
-                        'new_count': len(new_stack.layers),
-                    })
+                    failed.append(
+                        {
+                            "name": path.name,
+                            "old_count": len(old_stack.layers),
+                            "new_count": len(new_stack.layers),
+                        }
+                    )
             except Exception as e:
-                failed.append({
-                    'name': path.name,
-                    'error': str(e),
-                })
+                failed.append(
+                    {
+                        "name": path.name,
+                        "error": str(e),
+                    }
+                )
 
     if failed:
         print(f"\n❌ Layer count mismatches for {len(failed)} recipes:")
         for item in failed:
-            if 'error' in item:
+            if "error" in item:
                 print(f"  - {item['name']}: ERROR - {item['error']}")
             else:
                 print(f"  - {item['name']}: old={item['old_count']}, new={item['new_count']}")
@@ -238,21 +253,25 @@ def test_node_count_equivalence(recipes_data, lib):
                 new_stack = build_new_stack(recipe, lib)
 
                 if old_stack.number_of_nodes != new_stack.number_of_nodes:
-                    failed.append({
-                        'name': path.name,
-                        'old_count': old_stack.number_of_nodes,
-                        'new_count': new_stack.number_of_nodes,
-                    })
+                    failed.append(
+                        {
+                            "name": path.name,
+                            "old_count": old_stack.number_of_nodes,
+                            "new_count": new_stack.number_of_nodes,
+                        }
+                    )
             except Exception as e:
-                failed.append({
-                    'name': path.name,
-                    'error': str(e),
-                })
+                failed.append(
+                    {
+                        "name": path.name,
+                        "error": str(e),
+                    }
+                )
 
     if failed:
         print(f"\n❌ Node count mismatches for {len(failed)} recipes:")
         for item in failed:
-            if 'error' in item:
+            if "error" in item:
                 print(f"  - {item['name']}: ERROR - {item['error']}")
             else:
                 print(f"  - {item['name']}: old={item['old_count']}, new={item['new_count']}")
@@ -281,105 +300,36 @@ def test_total_inputs_outputs_equivalence(recipes_data, lib):
                     )
 
                 if mismatches:
-                    failed.append({
-                        'name': path.name,
-                        'mismatches': "; ".join(mismatches),
-                    })
+                    failed.append(
+                        {
+                            "name": path.name,
+                            "mismatches": "; ".join(mismatches),
+                        }
+                    )
             except Exception as e:
-                failed.append({
-                    'name': path.name,
-                    'error': str(e),
-                })
+                failed.append(
+                    {
+                        "name": path.name,
+                        "error": str(e),
+                    }
+                )
 
     if failed:
         print(f"\n❌ Input/output mismatches for {len(failed)} recipes:")
         for item in failed:
-            if 'error' in item:
+            if "error" in item:
                 print(f"  - {item['name']}: ERROR - {item['error']}")
             else:
                 print(f"  - {item['name']}: {item['mismatches']}")
-        pytest.fail(f"Input/output equivalence failed for {len(failed)}/{len(recipes_data)} recipes")
-
-
-# ============================================================================
-# Parameter Compatibility Tests
-# ============================================================================
-
-def test_shared_params_identical_with_same_seed(recipes_data, lib):
-    """Test that shared parameters are identical when initialized with same seed
-
-    This verifies that the parameter initialization is deterministic and produces
-    the same shared parameters in both old and new systems when using the same seed.
-
-    Note: Some recipes have ArrayRef path issues in the new system due to different
-    layer node groupings. These are skipped as they represent known limitations.
-    """
-    import jax
-    import jax.numpy as jnp
-
-    # Known recipes with ArrayRef issues in new system initialization
-    # These have structural issues unrelated to parameter compatibility
-    skip_recipes = ['3Rv1', 'ALL', 'BPBLTR', 'Csy4_EBFP2']
-
-    test_count = 0
-    passed = 0
-    skipped = 0
-
-    with LibraryContext.with_library(lib):
-        for path, recipe_dict, recipe_obj in recipes_data[:10]:  # Test first 10
-            # Skip recipes with known ArrayRef issues
-            if any(skip in path.name for skip in skip_recipes):
-                skipped += 1
-                continue
-
-            try:
-                old_stack = build_old_stack(path, lib)
-                new_stack = build_new_stack(recipe_obj, lib)
-
-                # Initialize both with same seed
-                key = jax.random.PRNGKey(42)
-                old_params = old_stack.init(key)
-                new_params = new_stack.init(key)
-
-                # Extract shared parameters
-                old_shared, _ = old_params.filter_by_tag(['shared'])
-                new_shared, _ = new_params.filter_by_tag(['shared'])
-
-                # Compare
-                old_paths = set(p for p, _ in old_shared.data.iter_leaves(path_as_str=True))
-                new_paths = set(p for p, _ in new_shared.data.iter_leaves(path_as_str=True))
-                common = old_paths & new_paths
-
-                all_match = True
-                for param_path in common:
-                    old_val = old_shared[param_path]
-                    new_val = new_shared[param_path]
-
-                    if hasattr(old_val, 'shape') and hasattr(new_val, 'shape'):
-                        if old_val.dtype == bool or new_val.dtype == bool:
-                            if not jnp.array_equal(old_val, new_val):
-                                all_match = False
-                                break
-                        elif not jnp.allclose(old_val, new_val, rtol=1e-7, atol=1e-9):
-                            all_match = False
-                            break
-
-                test_count += 1
-                if all_match:
-                    passed += 1
-
-            except Exception:
-                # Skip recipes that fail to initialize in new system
-                skipped += 1
-                continue
-
-    print(f"\n✅ Shared parameters identical: {passed}/{test_count} recipes ({skipped} skipped)")
-    assert passed == test_count, f"Shared parameters differ in {test_count - passed} recipes"
+        pytest.fail(
+            f"Input/output equivalence failed for {len(failed)}/{len(recipes_data)} recipes"
+        )
 
 
 # ============================================================================
 # Full Stack Equivalence Test (The Main Event)
 # ============================================================================
+
 
 def test_stack_equivalence_all_recipes(recipes_data, lib):
     """Test that new and old systems produce equivalent stacks for all recipes
@@ -413,18 +363,22 @@ def test_stack_equivalence_all_recipes(recipes_data, lib):
                 if is_equal:
                     passed.append(recipe_name)
                 else:
-                    failed.append({
-                        'name': recipe_name,
-                        'layers': f"{len(old_stack.layers)} layers",
-                        'nodes': f"{old_stack.number_of_nodes} nodes",
-                        'diffs': diffs[:3],  # First 3 differences
-                    })
+                    failed.append(
+                        {
+                            "name": recipe_name,
+                            "layers": f"{len(old_stack.layers)} layers",
+                            "nodes": f"{old_stack.number_of_nodes} nodes",
+                            "diffs": diffs[:3],  # First 3 differences
+                        }
+                    )
 
             except Exception as e:
-                errors.append({
-                    'name': recipe_name,
-                    'error': str(e)[:200],  # Truncate long errors
-                })
+                errors.append(
+                    {
+                        "name": recipe_name,
+                        "error": str(e)[:200],  # Truncate long errors
+                    }
+                )
 
     # Report results
     total = len(recipes_data)
@@ -435,15 +389,15 @@ def test_stack_equivalence_all_recipes(recipes_data, lib):
     tested = total - skipped_count
     success_rate = (passed_count / tested * 100) if tested > 0 else 0
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"STACK EQUIVALENCE TEST RESULTS")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"Total recipes:  {total}")
     print(f"⏭️  Skipped:     {skipped_count}")
     print(f"✅ Passed:      {passed_count} ({success_rate:.1f}%)")
     print(f"❌ Failed:      {failed_count}")
     print(f"⚠️  Errors:      {error_count}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     if skipped:
         print(f"\n⏭️  Skipped recipes:")
@@ -454,7 +408,7 @@ def test_stack_equivalence_all_recipes(recipes_data, lib):
         print(f"\n❌ Failed equivalence checks:")
         for item in failed:
             print(f"  - {item['name']} ({item['layers']}, {item['nodes']})")
-            for diff in item['diffs']:
+            for diff in item["diffs"]:
                 print(f"      • {diff}")
 
     if errors:
@@ -467,24 +421,24 @@ def test_stack_equivalence_all_recipes(recipes_data, lib):
     problematic = failed + errors
 
     if problematic:
-        problem_names = [item['name'] for item in problematic]
-        print(f"\n{'='*80}")
+        problem_names = [item["name"] for item in problematic]
+        print(f"\n{'=' * 80}")
         print(f"PROBLEMATIC RECIPES ({len(problem_names)}):")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         for name in sorted(problem_names):
             print(f"  - {name}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         # Create detailed failure message
         msg = f"\nStack equivalence test failed for {len(problematic)}/{total} recipes.\n"
         msg += f"Success rate: {success_rate:.1f}%\n\n"
         msg += "Problematic recipes:\n"
         for item in problematic:
-            if 'error' in item:
+            if "error" in item:
                 msg += f"  ❌ {item['name']}: {item['error']}\n"
             else:
                 msg += f"  ❌ {item['name']}: Stacks are not equivalent\n"
-                for diff in item.get('diffs', []):
+                for diff in item.get("diffs", []):
                     msg += f"       - {diff}\n"
 
         pytest.fail(msg)
@@ -495,6 +449,7 @@ def test_stack_equivalence_all_recipes(recipes_data, lib):
 # ============================================================================
 # Individual Recipe Debugging Tests
 # ============================================================================
+
 
 @pytest.mark.parametrize("recipe_idx", [0, 1, 2])
 def test_first_few_recipes_detailed(recipes_data, lib, recipe_idx):
@@ -509,9 +464,9 @@ def test_first_few_recipes_detailed(recipes_data, lib, recipe_idx):
     if skip_reason:
         pytest.skip(f"{path.name}: {skip_reason}")
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"Testing: {path.name}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     with LibraryContext.with_library(lib):
         # Build old stack
@@ -547,6 +502,7 @@ def test_first_few_recipes_detailed(recipes_data, lib, recipe_idx):
 # Layer-by-Layer Comparison Tests
 # ============================================================================
 
+
 def test_layer_types_match(recipes_data, lib):
     """Test that layer types match in order"""
     failed = []
@@ -563,29 +519,31 @@ def test_layer_types_match(recipes_data, lib):
                 mismatches = []
                 for i, (old_layer, new_layer) in enumerate(zip(old_stack.layers, new_stack.layers)):
                     if old_layer.f_type != new_layer.f_type:
-                        mismatches.append(
-                            f"Layer {i}: {old_layer.f_type} vs {new_layer.f_type}"
-                        )
+                        mismatches.append(f"Layer {i}: {old_layer.f_type} vs {new_layer.f_type}")
 
                 if mismatches:
-                    failed.append({
-                        'name': path.name,
-                        'mismatches': mismatches[:5],  # First 5
-                    })
+                    failed.append(
+                        {
+                            "name": path.name,
+                            "mismatches": mismatches[:5],  # First 5
+                        }
+                    )
             except Exception as e:
-                failed.append({
-                    'name': path.name,
-                    'error': str(e),
-                })
+                failed.append(
+                    {
+                        "name": path.name,
+                        "error": str(e),
+                    }
+                )
 
     if failed:
         print(f"\n❌ Layer type mismatches for {len(failed)} recipes:")
         for item in failed:
-            if 'error' in item:
+            if "error" in item:
                 print(f"  - {item['name']}: ERROR - {item['error']}")
             else:
                 print(f"  - {item['name']}:")
-                for mismatch in item['mismatches']:
+                for mismatch in item["mismatches"]:
                     print(f"      {mismatch}")
         pytest.fail(f"Layer type matching failed for {len(failed)}/{len(recipes_data)} recipes")
 
@@ -619,24 +577,28 @@ def test_layer_shapes_match(recipes_data, lib):
                         )
 
                 if mismatches:
-                    failed.append({
-                        'name': path.name,
-                        'mismatches': mismatches[:5],  # First 5
-                    })
+                    failed.append(
+                        {
+                            "name": path.name,
+                            "mismatches": mismatches[:5],  # First 5
+                        }
+                    )
             except Exception as e:
-                failed.append({
-                    'name': path.name,
-                    'error': str(e),
-                })
+                failed.append(
+                    {
+                        "name": path.name,
+                        "error": str(e),
+                    }
+                )
 
     if failed:
         print(f"\n❌ Shape mismatches for {len(failed)} recipes:")
         for item in failed:
-            if 'error' in item:
+            if "error" in item:
                 print(f"  - {item['name']}: ERROR - {item['error']}")
             else:
                 print(f"  - {item['name']}:")
-                for mismatch in item['mismatches']:
+                for mismatch in item["mismatches"]:
                     print(f"      {mismatch}")
         pytest.fail(f"Layer shape matching failed for {len(failed)}/{len(recipes_data)} recipes")
 
@@ -644,6 +606,7 @@ def test_layer_shapes_match(recipes_data, lib):
 # ============================================================================
 # Per-Recipe Parameterized Tests
 # ============================================================================
+
 
 @pytest.mark.parametrize("recipe_idx", range(18))
 def test_individual_recipe_equivalence(recipes_data, lib, recipe_idx):

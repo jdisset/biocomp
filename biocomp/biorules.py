@@ -90,7 +90,7 @@ connect_sources_to_aggregation = GraphRewritingRule(
             properties={
                 "ratios": "{{ aggregation.ratios + [source.ratio if source.ratio else 1.0] }}",
                 "members": "{{ aggregation.members + [source.source_id] }}",
-                "ratio_ranges": "{{ (aggregation.ratio_ranges if aggregation.ratio_ranges else []) + [source.ratio_range if source.ratio_range else None] }}",
+                "ratio_ranges": "{{ (aggregation.ratio_ranges if aggregation.ratio_ranges else []) + ([source.ratio_range] if source.ratio_range else [None]) }}",
             },
         ),
     ],
@@ -115,6 +115,7 @@ merge_aggregators_by_group = GraphRewritingRule(
             properties={
                 "ratios": "{{ agg1.ratios + agg2.ratios }}",
                 "members": "{{ agg1.members + agg2.members }}",
+                "ratio_ranges": "{{ (agg1.ratio_ranges if agg1.ratio_ranges else []) + (agg2.ratio_ranges if agg2.ratio_ranges else []) }}",
             },
         ),
         # Delete the now-redundant agg1
@@ -138,9 +139,10 @@ sort_aggregation_members = GraphRewritingRule(
         SetProperties(
             node_var="aggregation",
             properties={
-                # Sort members and reorder ratios to match
+                # Sort members and reorder ratios and ratio_ranges to match
                 "members": "{{ sorted(aggregation.members) }}",
                 "ratios": "{{ reorder_list(aggregation.ratios, sorted_with_indices(aggregation.members)[1]) }}",
+                "ratio_ranges": "{{ reorder_list(aggregation.ratio_ranges, sorted_with_indices(aggregation.members)[1]) }}",
             },
         ),
     ],

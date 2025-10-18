@@ -222,7 +222,7 @@ def test_simple_single_reporter_computation(lib, simple_single_reporter):
 
         # Translation: should only allow 00_empty_tc (index 0 in DEFAULT_AVAILABLE_TL_RATES)
         tl_mask = params["local/6/translation/tl_rate_quantization_mask"][0]  # mask for node 0
-        assert tl_mask.shape == (1, 9), f"TL mask shape should be (1, 9), got {tl_mask.shape}"
+        assert tl_mask.shape == (1, 13), f"TL mask shape should be (1, 13), got {tl_mask.shape}"
         assert tl_mask[0, 0], "00_empty_tc (index 0) should be available"
         assert jnp.sum(tl_mask) == 1, (
             f"Only 1 uORF option should be available, got {jnp.sum(tl_mask)}"
@@ -276,7 +276,7 @@ def test_simple_two_reporters_computation(lib, simple_two_reporters):
 
         # Translation: should only allow 00_empty_tc (index 0)
         tl_mask = params["local/8/translation/tl_rate_quantization_mask"]
-        assert tl_mask.shape == (2, 1, 9), f"TL mask shape should be (2, 1, 9), got {tl_mask.shape}"
+        assert tl_mask.shape == (2, 1, 13), f"TL mask shape should be (2, 1, 13), got {tl_mask.shape}"
         assert tl_mask[0, 0, 0] and tl_mask[1, 0, 0], (
             "00_empty_tc should be available for both nodes"
         )
@@ -405,7 +405,7 @@ def test_simple_single_ern_computation(lib, simple_single_ern):
 
         # Translation: 2 nodes (mNeonGreen + ERN target), should only allow 00_empty_tc (index 0)
         tl_mask = params["local/8/translation/tl_rate_quantization_mask"]
-        assert tl_mask.shape == (2, 1, 9), f"TL mask shape should be (2, 1, 9), got {tl_mask.shape}"
+        assert tl_mask.shape == (2, 1, 13), f"TL mask shape should be (2, 1, 13), got {tl_mask.shape}"
         assert tl_mask[0, 0, 0] and tl_mask[1, 0, 0], (
             "00_empty_tc should be available for both nodes"
         )

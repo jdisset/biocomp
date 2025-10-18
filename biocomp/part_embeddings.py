@@ -32,6 +32,10 @@ PART_EMBEDDINGS = [
             "5x_uORF",
             "6x_uORF",
             "8x_uORF",
+            "9x_uORF",
+            "10x_uORF",
+            "11x_uORF",
+            "12x_uORF",
         ],
     ),
 ]
