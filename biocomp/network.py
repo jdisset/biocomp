@@ -222,8 +222,11 @@ class Network(BaseModel):
 
     def to_recipe(self) -> Recipe:
         """Converts the network back to a Recipe object"""
+        from biocomp.recipe import NumRange, FluoIntensity
+
         cotx_groups = self._extract_cotx_groups()
         tus_by_cotx = self._build_transcription_units(cotx_groups)
+        bias_by_cotx = self._extract_bias_nodes()
 
         content = []
         for group_id in sorted(cotx_groups.keys()):
@@ -233,6 +236,7 @@ class Network(BaseModel):
                     name=group_id if group_id != "cotx_1" or len(cotx_groups) > 1 else None,
                     units=tus_by_cotx[group_id],
                     ratios=info["ratios"] if len(info["ratios"]) > 1 else None,
+                    fluo_bias=bias_by_cotx.get(group_id),
                 )
             )
 
@@ -246,14 +250,33 @@ class Network(BaseModel):
         )
 
     def _extract_cotx_groups(self) -> dict[str, dict]:
+        from biocomp.recipe import NumRange
+
         cotx_groups = {}
         assert self.compute_graph is not None
 
         for node in self.compute_graph.nodes.values():
             if node.node_type == "aggregation":
                 group_id = node.extra["cotx_group"]
+
+                # Convert ratio_ranges back to NumRange objects if present
+                ratios = []
+                if "ratio_ranges" in node.extra:
+                    ratio_ranges = node.extra["ratio_ranges"]
+                    base_ratios = node.extra["ratios"]
+                    for i, (base_ratio, ratio_range) in enumerate(zip(base_ratios, ratio_ranges)):
+                        if ratio_range is not None and isinstance(ratio_range, dict):
+                            # Unlocked ratio - create NumRange
+                            ratios.append(NumRange(min=ratio_range.get("min"), max=ratio_range.get("max")))
+                        else:
+                            # Locked ratio - use the float value
+                            ratios.append(base_ratio)
+                else:
+                    # No ratio_ranges, all locked
+                    ratios = node.extra["ratios"]
+
                 cotx_groups[group_id] = {
-                    "ratios": node.extra["ratios"],
+                    "ratios": ratios,
                     "source_ids": node.extra["members"],
                 }
 
@@ -335,6 +358,122 @@ class Network(BaseModel):
             slots.append(Slot(part=part_name))
 
         return slots
+
+    def _parse_value_to_numrange_or_float(self, value_raw):
+        """Parse a value (string/dict/numeric) into NumRange or float"""
+        from biocomp.recipe import NumRange
+        import ast
+
+        if not value_raw or value_raw == "":
+            return None
+
+        # parse string to dict if needed
+        if isinstance(value_raw, str):
+            try:
+                value_raw = ast.literal_eval(value_raw)
+            except:
+                try:
+                    return float(value_raw)
+                except:
+                    return None
+
+        # convert dict to NumRange, otherwise return as float
+        if isinstance(value_raw, dict):
+            return NumRange(min=value_raw.get("min"), max=value_raw.get("max"))
+        elif isinstance(value_raw, (int, float)):
+            return float(value_raw)
+        return None
+
+    def _find_cotx_group_for_bias(self, node) -> str:
+        """Find cotx group by traversing edges from bias node"""
+        assert self.compute_graph is not None
+
+        # check outgoing edges for aggregation/source nodes
+        for edge in self.compute_graph.get_outgoing_edges(node.node_id):
+            target = self.compute_graph.nodes.get(edge.target_id)
+            if target and target.node_type in ["aggregation", "source"]:
+                return target.extra.get("cotx_group", "cotx_1")
+
+        # check incoming edges for inv_aggregation nodes
+        for edge in self.compute_graph.get_incoming_edges(node.node_id):
+            source = self.compute_graph.nodes.get(edge.source_id)
+            if source and source.node_type == "inv_aggregation":
+                return source.extra.get("cotx_group", "cotx_1")
+
+        return "cotx_1"
+
+    def _extract_bias_from_aggregation(self, node):
+        """Extract bias info from connected aggregation node as fallback"""
+        from biocomp.recipe import NumRange
+        import ast
+
+        assert self.compute_graph is not None
+        for edge in self.compute_graph.get_outgoing_edges(node.node_id):
+            target = self.compute_graph.nodes.get(edge.target_id)
+            if target and target.node_type == "aggregation" and "fluo_bias" in target.extra:
+                fb = target.extra["fluo_bias"]
+
+                # parse string representation if needed
+                if isinstance(fb, str):
+                    try:
+                        fb = ast.literal_eval(fb)
+                    except:
+                        continue
+
+                if isinstance(fb, dict):
+                    value = self._parse_value_to_numrange_or_float(fb.get("value"))
+                    return {
+                        "tu_id": fb.get("tu_id", 0),
+                        "value": value if value is not None else 100.0,
+                        "protein": fb.get("protein"),
+                        "units": fb.get("units", "AU"),
+                    }
+        return None
+
+    def _extract_bias_nodes(self) -> dict[str, "FluoIntensity"]:
+        """Extract bias nodes and reconstruct FluoIntensity objects for each cotx group"""
+        from biocomp.recipe import FluoIntensity
+
+        bias_by_cotx = {}
+        assert self.compute_graph is not None
+
+        for node in self.compute_graph.nodes.values():
+            if node.node_type == "bias" and node.extra.get("role") == "fluo_bias":
+                cotx_group = self._find_cotx_group_for_bias(node)
+
+                # extract bias info from node.extra
+                tu_id_str = node.extra.get("tu_id", "")
+                tu_id = 0
+                if tu_id_str and tu_id_str != "":
+                    try:
+                        tu_id = int(tu_id_str)
+                    except (ValueError, TypeError):
+                        pass
+
+                value_raw = node.extra.get("value")
+                value = self._parse_value_to_numrange_or_float(value_raw)
+                protein = node.extra.get("protein")
+                if protein in ["", "None"]:
+                    protein = None
+                units = node.extra.get("units", "AU") or "AU"
+
+                # fallback to aggregation node if values are empty (match original logic)
+                if (not tu_id_str or tu_id_str == "") and (not value_raw or value_raw == ""):
+                    fallback = self._extract_bias_from_aggregation(node)
+                    if fallback:
+                        tu_id = fallback["tu_id"]
+                        value = fallback["value"]
+                        protein = fallback["protein"]
+                        units = fallback["units"]
+
+                bias_by_cotx[cotx_group] = FluoIntensity(
+                    tu_id=tu_id,
+                    value=value if value is not None else 100.0,
+                    protein=protein,
+                    units=units,
+                )
+
+        return bias_by_cotx
 
     def compute_dependency_map(self) -> dict[int, set[int]]:
         """Returns {node id -> set of upstream node ids}"""

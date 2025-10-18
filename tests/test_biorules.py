@@ -96,30 +96,33 @@ def test_cdg_simple_two_reporters(lib, simple_two_reporters):
 
 
 def test_cdg_simple_single_ern(lib, simple_single_ern):
-    """Test CDG for ERN network: 2 TUs (target + source) = 6 nodes"""
+    """Test CDG for ERN network: 3 TUs (target + source + reporter) = 9 nodes"""
     with LibraryContext.with_library(lib):
         recipe = simple_single_ern
         cdg = build_central_dogma_graph_direct(recipe.content, lib, dual=False)
 
-        # 2 TUs × 3 nodes each = 6 nodes
-        assert len(cdg.nodes) == 6
+        # 3 TUs × 3 nodes each = 9 nodes (DNA -> RNA -> PRT for each TU)
+        assert len(cdg.nodes) == 9
 
         # Check node distribution
         node_types = [n.node_type for n in cdg.nodes.values()]
-        assert node_types.count("DNA") == 2
-        assert node_types.count("RNA") == 2
-        assert node_types.count("PRT") == 2
+        assert node_types.count("DNA") == 3  # 3 TUs
+        assert node_types.count("RNA") == 3  # 3 mRNAs
+        assert node_types.count("PRT") == 3  # 3 proteins (eBFP2, CasE, mNeonGreen)
 
-        # Check content: should have CasE and CasE_rec
+        # Check content: should have CasE, CasE_rec, and mNeonGreen
         all_contents = [item for n in cdg.nodes.values() for item in n.extra.get("content", [])]
         assert "CasE" in all_contents
         assert "CasE_rec" in all_contents
+        assert "mNeonGreen" in all_contents
 
-        # Only the reporter (eBFP2) should be output
+        # Both reporters (eBFP2 and mNeonGreen) should be output
         prt_nodes = [n for n in cdg.nodes.values() if n.node_type == "PRT"]
         output_prts = [n for n in prt_nodes if n.extra["is_output"]]
-        assert len(output_prts) == 1
-        assert "eBFP2" in output_prts[0].extra["content"]
+        assert len(output_prts) == 2  # eBFP2 and mNeonGreen are both reporters
+        output_contents = [item for n in output_prts for item in n.extra["content"]]
+        assert "eBFP2" in output_contents
+        assert "mNeonGreen" in output_contents
 
 
 def test_cdg_multi_aggregation_ern(lib, multi_aggregation_ern):

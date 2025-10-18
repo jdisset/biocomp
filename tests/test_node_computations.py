@@ -8,120 +8,18 @@ import pytest
 import jax
 import jax.numpy as jnp
 from biocomp.network import recipe_to_networks
-from biocomp.library import load_lib, LibraryContext
-from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot
+from biocomp.library import LibraryContext
 import biocomp.biorules as br
 from biocomp.compute import ComputeStack
 from biocomp.jaxutils import flat_concat
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.parameters import ParameterTree
-
-
-@pytest.fixture
-def lib():
-    """Load the parts library"""
-    return load_lib()
-
-
-@pytest.fixture
-def simple_single_reporter(lib):
-    """Simplest network: 1 TU with just a reporter"""
-    with LibraryContext.with_library(lib):
-        return Recipe(
-            name="simple_single_reporter",
-            content=[
-                CoTransfection(
-                    units=[
-                        TranscriptionUnit(
-                            name="EBFP2_reporter",
-                            slots=[
-                                Slot(part="cHS4"),
-                                Slot(part="hEF1a"),
-                                Slot(part="eBFP2"),
-                                Slot(part="L0.T_4560"),
-                            ],
-                        ),
-                    ],
-                )
-            ],
-        )
-
-
-@pytest.fixture
-def simple_two_reporters(lib):
-    """Simple network: 2 TUs (two reporters aggregated)"""
-    with LibraryContext.with_library(lib):
-        return Recipe(
-            name="simple_two_reporters",
-            content=[
-                CoTransfection(
-                    units=[
-                        TranscriptionUnit(
-                            name="EBFP2_reporter",
-                            slots=[
-                                Slot(part="cHS4"),
-                                Slot(part="hEF1a"),
-                                Slot(part="eBFP2"),
-                                Slot(part="L0.T_4560"),
-                            ],
-                        ),
-                        TranscriptionUnit(
-                            name="mMaroon1_reporter",
-                            slots=[
-                                Slot(part="cHS4"),
-                                Slot(part="hEF1a"),
-                                Slot(part="mMaroon1"),
-                                Slot(part="L0.T_4560"),
-                            ],
-                        ),
-                    ],
-                    ratios=[0.833, 0.167],
-                )
-            ],
-        )
-
-
-@pytest.fixture
-def simple_single_ern(lib):
-    """Simple ERN network: ERN + target + separate reporter for inversion"""
-    with LibraryContext.with_library(lib):
-        return Recipe(
-            name="simple_single_ern",
-            content=[
-                CoTransfection(
-                    units=[
-                        TranscriptionUnit(
-                            name="CasE_target",
-                            slots=[
-                                Slot(part="cHS4"),
-                                Slot(part="hEF1a"),
-                                Slot(part="CasE_rec"),
-                                Slot(part="eBFP2"),
-                                Slot(part="L0.T_4560"),
-                            ],
-                        ),
-                        TranscriptionUnit(
-                            name="CasE_source",
-                            slots=[
-                                Slot(part="cHS4"),
-                                Slot(part="hEF1a"),
-                                Slot(part="CasE"),
-                                Slot(part="L0.T_4560"),
-                            ],
-                        ),
-                        TranscriptionUnit(
-                            name="mNeonGreen_reporter",
-                            slots=[
-                                Slot(part="cHS4"),
-                                Slot(part="hEF1a"),
-                                Slot(part="mNeonGreen"),
-                                Slot(part="L0.T_4560"),
-                            ],
-                        ),
-                    ],
-                )
-            ],
-        )
+from test_declarative_recipes import (
+    lib,
+    simple_single_reporter,
+    simple_two_reporters,
+    simple_single_ern,
+)
 
 
 def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.ndarray, key):

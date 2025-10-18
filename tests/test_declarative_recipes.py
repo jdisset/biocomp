@@ -92,11 +92,12 @@ def simple_two_reporters(lib):
 
 @pytest.fixture
 def simple_single_ern(lib):
-    """Simple ERN network: 1 cotx, 1 plasmid, 2 TUs (ERN + target)
+    """Simple ERN network: ERN + target + separate reporter for inversion
 
-    This is the minimal ERN network:
-    - One reporter with ERN recognition site (CasE_rec)
+    This is an invertible ERN network:
+    - One reporter with ERN recognition site (CasE_rec + eBFP2)
     - One ERN source (CasE enzyme)
+    - One separate reporter (mNeonGreen) for invertible path
     """
     with LibraryContext.with_library(lib):
         return Recipe(
@@ -120,6 +121,15 @@ def simple_single_ern(lib):
                                 Slot(part="cHS4"),
                                 Slot(part="hEF1a"),
                                 Slot(part="CasE"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                        TranscriptionUnit(
+                            name="mNeonGreen_reporter",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part="mNeonGreen"),
                                 Slot(part="L0.T_4560"),
                             ],
                         ),
@@ -455,6 +465,211 @@ def combined_unlocked_network(lib):
         )
 
 
+@pytest.fixture
+def ern_with_unlocked_ratios(lib):
+    """ERN network with unlocked ratios and separate fluo marker for invertibility"""
+    from biocomp.recipe import NumRange
+
+    with LibraryContext.with_library(lib):
+        return Recipe(
+            name="ern_unlocked_ratios",
+            content=[
+                CoTransfection(
+                    units=[
+                        TranscriptionUnit(
+                            name="CasE_target",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part="CasE_rec"),
+                                Slot(part="eBFP2"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                        TranscriptionUnit(
+                            name="CasE_source",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part="CasE"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                        TranscriptionUnit(
+                            name="mNeonGreen_reporter",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part="mNeonGreen"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                    ],
+                    ratios=[
+                        NumRange(min=0.2, max=0.5),  # Unlocked ratio for CasE_target
+                        0.3,  # Locked ratio for CasE_source
+                        NumRange(min=0.1, max=0.3),  # Unlocked ratio for mNeonGreen
+                    ],
+                )
+            ],
+        )
+
+
+@pytest.fixture
+def ern_with_unlocked_bias(lib):
+    """ERN network with unlocked bias and separate fluo marker"""
+    from biocomp.recipe import FluoIntensity, NumRange
+
+    with LibraryContext.with_library(lib):
+        return Recipe(
+            name="ern_unlocked_bias",
+            content=[
+                CoTransfection(
+                    units=[
+                        TranscriptionUnit(
+                            name="Csy4_target",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part="Csy4_rec"),
+                                Slot(part="eYFP"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                        TranscriptionUnit(
+                            name="Csy4_source",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part="Csy4"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                        TranscriptionUnit(
+                            name="mKO2_reporter",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part="mKO2"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                    ],
+                    ratios=[0.4, 0.3, 0.3],  # All locked ratios
+                    fluo_bias=FluoIntensity(
+                        tu_id=2,  # mKO2 reporter (the invertible path)
+                        value=NumRange(min=50.0, max=200.0),  # Unlocked bias
+                        protein="mKO2",
+                        units="AU",
+                    ),
+                )
+            ],
+        )
+
+
+@pytest.fixture
+def ern_with_unlocked_uorfs(lib):
+    """ERN network with unlocked uORF parts and separate fluo marker"""
+    with LibraryContext.with_library(lib):
+        return Recipe(
+            name="ern_unlocked_uorfs",
+            content=[
+                CoTransfection(
+                    units=[
+                        TranscriptionUnit(
+                            name="CasE_target_with_uorf",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part=["1x_uORF", "2x_uORF", "3x_uORF"]),  # Unlocked uORF
+                                Slot(part="CasE_rec"),
+                                Slot(part="eBFP2"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                        TranscriptionUnit(
+                            name="CasE_source_with_uorf",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part=["1w_uORF", "2x_uORF"]),  # Unlocked uORF
+                                Slot(part="CasE"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                        TranscriptionUnit(
+                            name="mMaroon1_reporter",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part="mMaroon1"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                    ],
+                )
+            ],
+        )
+
+
+@pytest.fixture
+def complex_mixed_unlocked(lib):
+    """Complex ERN network with mixed locked/unlocked ratios, bias, and uORF parts"""
+    from biocomp.recipe import FluoIntensity, NumRange
+
+    with LibraryContext.with_library(lib):
+        return Recipe(
+            name="complex_mixed_unlocked",
+            content=[
+                CoTransfection(
+                    units=[
+                        TranscriptionUnit(
+                            name="Csy4_target_with_uorf",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part=["1x_uORF", "4x_uORF"]),  # Unlocked uORF
+                                Slot(part="Csy4_rec"),
+                                Slot(part="mNeonGreen"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                        TranscriptionUnit(
+                            name="Csy4_source",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part="1w_uORF"),  # Locked uORF
+                                Slot(part="Csy4"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                        TranscriptionUnit(
+                            name="eBFP2_reporter",
+                            slots=[
+                                Slot(part="cHS4"),
+                                Slot(part="hEF1a"),
+                                Slot(part="eBFP2"),
+                                Slot(part="L0.T_4560"),
+                            ],
+                        ),
+                    ],
+                    ratios=[
+                        NumRange(min=0.3, max=0.6),  # Unlocked ratio
+                        0.2,  # Locked ratio
+                        NumRange(min=0.1, max=0.4),  # Unlocked ratio
+                    ],
+                    fluo_bias=FluoIntensity(
+                        tu_id=2,  # eBFP2 reporter (the invertible path)
+                        value=NumRange(min=75.0, max=175.0),  # Unlocked bias
+                        protein="eBFP2",
+                        units="AU",
+                    ),
+                )
+            ],
+        )
+
+
 # ============================================================================
 # Tests for the fixture structures
 # ============================================================================
@@ -479,15 +694,16 @@ def test_simple_two_reporters(simple_two_reporters):
 
 
 def test_simple_single_ern(simple_single_ern):
-    """Test simple ERN network"""
+    """Test simple ERN network (now with invertible reporter)"""
     recipe = simple_single_ern
     assert recipe.name == "simple_single_ern"
     assert len(recipe.content) == 1
-    assert len(recipe.content[0].units) == 2
-    # One unit has CasE_rec (target), other has CasE (source)
+    assert len(recipe.content[0].units) == 3  # ERN target, ERN source, and reporter for invertibility
+    # One unit has CasE_rec (target), one has CasE (source), one has mNeonGreen (reporter)
     parts = [slot.part for tu in recipe.content[0].units for slot in tu.slots]
     assert "CasE_rec" in parts
     assert "CasE" in parts
+    assert "mNeonGreen" in parts
 
 
 def test_simple_single_cotx_ERN(simple_single_cotx_ERN):
@@ -861,13 +1077,13 @@ def test_simple_single_ern_compg_detailed(lib, simple_single_ern):
         compg = networks[0].compute_graph
 
         source_nodes = [n for n in compg.nodes.values() if n.node_type == "source"]
-        assert len(source_nodes) == 2
+        assert len(source_nodes) == 3  # ERN target, ERN source, and reporter
 
         transcription_nodes = [n for n in compg.nodes.values() if n.node_type == "transcription"]
-        assert len(transcription_nodes) == 2
+        assert len(transcription_nodes) == 3  # 3 transcription units
 
         translation_nodes = [n for n in compg.nodes.values() if n.node_type == "translation"]
-        assert len(translation_nodes) == 2
+        assert len(translation_nodes) == 3  # 3 proteins (eBFP2, CasE, mNeonGreen)
 
         ern_nodes = [n for n in compg.nodes.values() if n.node_type == "sequestron_ERN"]
         assert len(ern_nodes) == 1
@@ -1167,3 +1383,196 @@ def test_multiple_random_inits_produce_different_ratios(lib, unlocked_ratios_net
         std_dev = jnp.std(all_ratios, axis=0)
         # At least one ratio should vary (the unlocked one)
         assert jnp.any(std_dev > 1e-6), "Unlocked ratios should vary across random initializations"
+
+
+# ============================================================================
+# Tests for Mixed Locked/Unlocked Parameter Networks
+# ============================================================================
+
+
+def test_ern_with_unlocked_ratios_structure(ern_with_unlocked_ratios):
+    """Test ERN with mixed locked/unlocked ratios structure"""
+    from biocomp.recipe import NumRange
+
+    recipe = ern_with_unlocked_ratios
+    assert recipe.name == "ern_unlocked_ratios"
+    cotx = recipe.content[0]
+    assert len(cotx.units) == 3
+    assert len(cotx.ratios) == 3
+    # Check mixed locked/unlocked ratios
+    assert isinstance(cotx.ratios[0], NumRange)  # Unlocked
+    assert isinstance(cotx.ratios[1], (int, float))  # Locked
+    assert isinstance(cotx.ratios[2], NumRange)  # Unlocked
+
+
+def test_ern_with_unlocked_ratios_compg(lib, ern_with_unlocked_ratios):
+    """Test that ERN with unlocked ratios builds correct compute graph"""
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(ern_with_unlocked_ratios, br.ALL_RULES, invert=True)
+        compg = networks[0].compute_graph
+
+        # Should have aggregation with mixed ratio_ranges
+        agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
+        assert len(agg_nodes) == 1
+        agg = agg_nodes[0]
+        assert "ratio_ranges" in agg.extra
+        ratio_ranges = agg.extra["ratio_ranges"]
+        # First and third ratios should be unlocked (have ranges)
+        assert ratio_ranges[0] is not None
+        assert ratio_ranges[1] is None  # Locked
+        assert ratio_ranges[2] is not None
+
+        # Should have ERN node
+        ern_nodes = [n for n in compg.nodes.values() if n.node_type == "sequestron_ERN"]
+        assert len(ern_nodes) == 1
+
+        # Should have separate reporter for invertibility
+        output_nodes = [n for n in compg.nodes.values() if n.node_type == "output"]
+        assert len(output_nodes) == 1
+
+
+def test_ern_with_unlocked_bias_structure(ern_with_unlocked_bias):
+    """Test ERN with unlocked bias structure"""
+    from biocomp.recipe import FluoIntensity, NumRange
+
+    recipe = ern_with_unlocked_bias
+    assert recipe.name == "ern_unlocked_bias"
+    cotx = recipe.content[0]
+    assert cotx.fluo_bias is not None
+    assert isinstance(cotx.fluo_bias, FluoIntensity)
+    assert cotx.fluo_bias.tu_id == 2  # mKO2 reporter
+    assert not cotx.fluo_bias.is_locked()
+    # Check bias value is NumRange
+    value = cotx.fluo_bias.value
+    assert isinstance(value, NumRange)
+
+
+def test_ern_with_unlocked_bias_compg(lib, ern_with_unlocked_bias):
+    """Test that ERN with unlocked bias creates proper bias node"""
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(ern_with_unlocked_bias, br.ALL_RULES, invert=True)
+        compg = networks[0].compute_graph
+
+        # Should have bias node with unlocked range
+        bias_nodes = [n for n in compg.nodes.values() if n.node_type == "bias"]
+        assert len(bias_nodes) == 1
+        bias = bias_nodes[0]
+        assert bias.extra["role"] == "fluo_bias"
+        # Just check that bias node was created with correct role
+        # Value range info is embedded in the node's initialization logic
+
+
+def test_ern_with_unlocked_uorfs_structure(ern_with_unlocked_uorfs):
+    """Test ERN with unlocked uORF parts structure"""
+    recipe = ern_with_unlocked_uorfs
+    assert recipe.name == "ern_unlocked_uorfs"
+    cotx = recipe.content[0]
+    assert len(cotx.units) == 3
+
+    # Check that first two TUs have unlocked uORF slots
+    tu0_slots = cotx.units[0].slots
+    uorf_slots_0 = [s for s in tu0_slots if isinstance(s.part, list) and any("uORF" in str(p) for p in s.part)]
+    assert len(uorf_slots_0) == 1
+    assert len(uorf_slots_0[0].part) == 3  # ["1x_uORF", "2x_uORF", "3x_uORF"]
+
+    tu1_slots = cotx.units[1].slots
+    uorf_slots_1 = [s for s in tu1_slots if isinstance(s.part, list) and any("uORF" in str(p) for p in s.part)]
+    assert len(uorf_slots_1) == 1
+    assert len(uorf_slots_1[0].part) == 2  # ["1w_uORF", "2x_uORF"]
+
+
+def test_ern_with_unlocked_uorfs_compg(lib, ern_with_unlocked_uorfs):
+    """Test that ERN with unlocked uORFs builds with proper quantization masks"""
+    from biocomp.network import recipe_to_networks
+    from biocomp.compute import ComputeStack
+    from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+    import biocomp.biorules as br
+    import jax
+    import jax.numpy as jnp
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(ern_with_unlocked_uorfs, br.ALL_RULES, invert=True)
+        stack = ComputeStack([networks[0]])
+        stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
+
+        key = jax.random.PRNGKey(42)
+        params = stack.init(key)
+
+        # Find translation layer with uORF quantization masks
+        for layer in stack.layers:
+            if layer.f_type == "translation":
+                tl_mask = params[f"{layer.namespace}/tl_rate_quantization_mask"]
+                # Should have multiple True values for unlocked uORF slots
+                for node_idx in range(tl_mask.shape[0]):
+                    node_mask = tl_mask[node_idx]
+                    n_available = jnp.sum(node_mask)
+                    # At least one node should have multiple uORF options
+                    if n_available > 1:
+                        break
+                else:
+                    pytest.fail("No translation nodes with multiple uORF options found")
+                break
+
+
+def test_complex_mixed_unlocked_structure(complex_mixed_unlocked):
+    """Test complex network with all types of unlocked params"""
+    from biocomp.recipe import FluoIntensity, NumRange
+
+    recipe = complex_mixed_unlocked
+    assert recipe.name == "complex_mixed_unlocked"
+    cotx = recipe.content[0]
+    assert len(cotx.units) == 3
+
+    # Check mixed ratios
+    assert len(cotx.ratios) == 3
+    assert isinstance(cotx.ratios[0], NumRange)  # Unlocked
+    assert isinstance(cotx.ratios[1], (int, float))  # Locked
+    assert isinstance(cotx.ratios[2], NumRange)  # Unlocked
+
+    # Check unlocked bias
+    assert cotx.fluo_bias is not None
+    assert not cotx.fluo_bias.is_locked()
+
+    # Check mixed uORF parts
+    uorf_slots = []
+    for tu in cotx.units:
+        for slot in tu.slots:
+            if isinstance(slot.part, list) and any("uORF" in str(p) for p in slot.part):
+                uorf_slots.append(slot)
+            elif isinstance(slot.part, str) and "uORF" in slot.part:
+                uorf_slots.append(slot)
+    assert len(uorf_slots) >= 2  # Should have both unlocked and locked uORF slots
+
+
+def test_complex_mixed_unlocked_compg(lib, complex_mixed_unlocked):
+    """Test that complex mixed network builds correctly"""
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(complex_mixed_unlocked, br.ALL_RULES, invert=True)
+        compg = networks[0].compute_graph
+
+        # Should have aggregation with mixed ratio_ranges
+        agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
+        assert len(agg_nodes) == 1
+        agg = agg_nodes[0]
+        assert "ratio_ranges" in agg.extra
+        ratio_ranges = agg.extra["ratio_ranges"]
+        assert ratio_ranges[0] is not None  # Unlocked
+        assert ratio_ranges[1] is None  # Locked
+        assert ratio_ranges[2] is not None  # Unlocked
+
+        # Should have bias node
+        bias_nodes = [n for n in compg.nodes.values() if n.node_type == "bias"]
+        assert len(bias_nodes) == 1
+
+        # Should have ERN node
+        ern_nodes = [n for n in compg.nodes.values() if n.node_type == "sequestron_ERN"]
+        assert len(ern_nodes) == 1
