@@ -347,58 +347,46 @@ def transform_nn(
     return LayerInstance(prepare, apply, output_shape, commit=commit)
 
 
-DEFAULT_AVAILABLE_TC_RATES = ["hEF1a"]
-
-DEFAULT_AVAILABLE_TL_RATES = [
-    "00_empty_tc",
-    "1w_uORF",
-    "1x_uORF",
-    "2x_uORF",
-    "3x_uORF",
-    "4x_uORF",
-    "5x_uORF",
-    "6x_uORF",
-    "8x_uORF",
-]
+from biocomp.part_embeddings import EMBEDDINGS_BY_NAME
 
 transcription = partial(
-    transform_nn, transform_name="tc", quantization_names=DEFAULT_AVAILABLE_TC_RATES
+    transform_nn, transform_name="tc", quantization_names=EMBEDDINGS_BY_NAME["tc_rate"].available_parts
 )
 translation = partial(
-    transform_nn, transform_name="tl", quantization_names=DEFAULT_AVAILABLE_TL_RATES
+    transform_nn, transform_name="tl", quantization_names=EMBEDDINGS_BY_NAME["tl_rate"].available_parts
 )
 
 inv_transcription = partial(
     transform_nn,
     transform_name="tc",
     is_inverse=True,
-    quantization_names=DEFAULT_AVAILABLE_TC_RATES,
+    quantization_names=EMBEDDINGS_BY_NAME["tc_rate"].available_parts,
 )
 inv_translation = partial(
     transform_nn,
     transform_name="tl",
     is_inverse=True,
-    quantization_names=DEFAULT_AVAILABLE_TL_RATES,
+    quantization_names=EMBEDDINGS_BY_NAME["tl_rate"].available_parts,
 )
 
 simple_transcription = partial(
-    transform_nn, transform_name="tc", quantization_names=DEFAULT_AVAILABLE_TC_RATES, dummy=True
+    transform_nn, transform_name="tc", quantization_names=EMBEDDINGS_BY_NAME["tc_rate"].available_parts, dummy=True
 )
 simple_translation = partial(
-    transform_nn, transform_name="tl", quantization_names=DEFAULT_AVAILABLE_TL_RATES, dummy=True
+    transform_nn, transform_name="tl", quantization_names=EMBEDDINGS_BY_NAME["tl_rate"].available_parts, dummy=True
 )
 
 simple_inv_transcription = partial(
     transform_nn,
     transform_name="tc",
     is_inverse=True,
-    quantization_names=DEFAULT_AVAILABLE_TC_RATES,
+    quantization_names=EMBEDDINGS_BY_NAME["tc_rate"].available_parts,
     dummy=True,
 )
 simple_inv_translation = partial(
     transform_nn,
     transform_name="tl",
     is_inverse=True,
-    quantization_names=DEFAULT_AVAILABLE_TL_RATES,
+    quantization_names=EMBEDDINGS_BY_NAME["tl_rate"].available_parts,
     dummy=True,
 )

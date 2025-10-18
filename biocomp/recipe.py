@@ -12,13 +12,10 @@ from pydantic import (
 )
 
 from biocomp.logging_config import get_logger
+from biocomp.part_embeddings import EMBEDDINGS_BY_NAME, EMBEDDINGS_BY_CATEGORY
 
 logger = get_logger(__name__)
 PathLike = Union[str, Path]
-
-
-PART_TYPE_TO_EMBEDDING_NAME = {"promoter": "tc_rate", "uORF_group": "tl_rate"}
-EMBEDDING_TO_DEFAULT_PART = {"tl_rate": "00_empty_tc", "tc_rate": "hEF1a"}
 
 
 ## {{{                      --     NumRange & FluoIntensity     --
@@ -148,8 +145,8 @@ class Slot(BaseModel):
         if part_name is not None:
             if part_name in lib.pc.index:
                 category = lib.pc.loc[part_name, "category"]
-                if category in PART_TYPE_TO_EMBEDDING_NAME:
-                    return PART_TYPE_TO_EMBEDDING_NAME[category]
+                if category in EMBEDDINGS_BY_CATEGORY:
+                    return EMBEDDINGS_BY_CATEGORY[category].name
             else:
                 raise ValueError(
                     f'Unknown part: "{part_name}" (type: {type(part_name)}),library: {lib}'
@@ -202,8 +199,8 @@ class TranscriptionUnit(BaseModel):
                 if s.maps_to_parameter in self.params:
                     raise ValueError(f"Parameter {s.maps_to_parameter} already in params")
                 # replace None values with the default part for this parameter
-                if isinstance(s.part, list) and s.maps_to_parameter in EMBEDDING_TO_DEFAULT_PART:
-                    default = EMBEDDING_TO_DEFAULT_PART[s.maps_to_parameter]
+                if isinstance(s.part, list) and s.maps_to_parameter in EMBEDDINGS_BY_NAME:
+                    default = EMBEDDINGS_BY_NAME[s.maps_to_parameter].default_part
                     self.params[s.maps_to_parameter] = [default if p is None else p for p in s.part]
                 else:
                     self.params[s.maps_to_parameter] = s.part
@@ -211,16 +208,10 @@ class TranscriptionUnit(BaseModel):
                 self.param_ref_ids[s.maps_to_parameter] = s.ref_id
 
         # add default parameters
-        for _, p in PART_TYPE_TO_EMBEDDING_NAME.items():
-            if p not in self.params:
-                try:
-                    self.params[p] = [EMBEDDING_TO_DEFAULT_PART[p]]
-                    self.param_ref_ids[p] = None  # default parameters have no ref_id
-                except KeyError:
-                    msg = f"No default part for parameter {p}"
-                    msg += f" (part_type_to_parameter_name: {PART_TYPE_TO_EMBEDDING_NAME})"
-                    msg += f" (parameter_to_default_part: {EMBEDDING_TO_DEFAULT_PART})"
-                    raise
+        for emb in EMBEDDINGS_BY_NAME.values():
+            if emb.name not in self.params:
+                self.params[emb.name] = [emb.default_part]
+                self.param_ref_ids[emb.name] = None  # default parameters have no ref_id
 
     def to_parts(self) -> list[Union[str, list[str]]]:
         """Convert slots back to a parts representation"""
