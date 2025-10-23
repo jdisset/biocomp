@@ -1,3 +1,12 @@
+The biocompiler is a comprehensive machine learning framework for neuromorphic
+synthetic biology circuits. It consists of multiple interconnected modules that
+enable the design, training, and prediction of cell behavior given cellular
+circuits they are transfected with. It uses a novel architecture called
+biomorphic neural networks (BNNs) where compositions of specialized neural
+functions represent cellular processes. The framework is designed for high
+computational efficiency, parallel training, and extensive metadata tracking
+for reproducibility.
+
 # Overview of the Biocompiler
 
 Neuromorphic circuits in cells represent a categorical jump from the currently
@@ -163,3 +172,70 @@ Visualization tools for different plot types.
 - `plotting_smooth.py` - Smoothed visualization of network behavior
 - `plotting_scatter.py` - Scatter plot implementations
 - `plotting_3d.py` - 3D visualization for multi-dimensional data
+
+# Contribution Guidelines
+
+## Coding Style
+
+**DRY (Don't Repeat Yourself)**:
+
+- Extract common patterns into functions
+- Use comprehensions over loops
+- Centralize configuration and constants
+
+**SOLID Principles**:
+
+- Single Responsibility: Each function/class does one thing
+- Open/Closed: Extend via rules/configuration, not modification
+- Liskov Substitution: Consistent interfaces
+- Interface Segregation: Minimal public APIs
+- Dependency Inversion: Depend on abstractions (e.g GraphState) not implementations
+
+**Terse and Elegant**:
+
+- Prioritize clarity, modularity and maintainability, but try really hard to be concise. NO "ENTERPRISE CODE".
+- Always prefer generic solutions to hardcoded special cases, but avoid over-engineering. What we want is pragmatic elegance.
+- Minimize lines of code while preserving readability. Code golf within reason. Don't be afraid of some amount of cleverness, but of course avoid obfuscation.
+- Always reread and refactor code to make it more concise after writing it. There's always some fat to trim.
+
+"One day I will find the right words, and they will be simple." - Jack Kerouac
+
+## Comment Style
+
+**Extremely terse, informal**:
+
+- No comments for obvious code
+- No capitalization of first letter for inline comments
+- Only comment non-obvious intent or biological context
+- Basically, avoid comments. If you feel the need to comment, consider rewriting the code for clarity instead.
+
+## Testing Style
+
+**Functional pytest**:
+
+- No test classes, just functions with fixtures
+- Parameterized tests for combinatorial coverage
+- Direct assertions, no verbose messages
+- Fixture reuse across test files via imports
+- Example:
+
+```python
+@pytest.fixture
+def lib():
+    return load_lib()
+
+def test_something(lib, simple_single_reporter):
+    with LibraryContext.with_library(lib):
+        # some setup ...
+
+        # a bunch of assertions:
+        assert ...
+```
+
+## Linters and Formatters to run:
+
+Always use ruff + basedpyright for linting, type checking, and formatting.
+
+`ruff check filename.py`
+`basedpyright --pythonpath /opt/homebrew/Caskroom/miniconda/base/envs/py311/bin/python filename.py`
+`ruff format filename.py`
