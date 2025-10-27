@@ -91,6 +91,20 @@ class PlotData(ArbitraryModel):
         self.check_shapes()
         return self.yval
 
+    def xy_swapped(self) -> Self:
+        new_instance = PlotData(
+            xval=self.yval,
+            yval=self.xval,
+            input_names=[self.output_name]
+            if isinstance(self.output_name, str)
+            else self.output_name,
+            output_name=self.input_names,
+            metadata=self.metadata.copy(),
+            force_single_output=self.force_single_output,
+            disable_check_shapes=self.disable_check_shapes,
+        )
+        return new_instance
+
     @property
     def dimensions(self) -> DataDimensions:
         self.check_shapes()
