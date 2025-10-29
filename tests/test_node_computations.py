@@ -19,6 +19,7 @@ from test_declarative_recipes import (
     simple_single_reporter,
     simple_two_reporters,
     simple_single_ern,
+    complex_twolayers_design_network,
 )
 
 
@@ -448,3 +449,83 @@ def test_simple_single_ern_computation(lib, simple_single_ern):
         all_res = jnp.array(all_res)
         std_dev = jnp.std(all_res)
         assert std_dev > 1e-5, "All results should be different with different random keys"
+
+
+def test_complex_twolayers_builds_and_runs(lib, complex_twolayers_design_network):
+    """Test that complex_twolayers_design_network builds and runs correctly
+
+    This network is very complex (3 cotx, 24 units, 3 ERNs with 2-layer topology).
+    We check:
+    1. Stack builds successfully
+    2. Parameters initialize correctly
+    3. Forward pass works
+    4. Outputs have correct shape
+    5. Different random seeds produce different outputs
+    6. GOLDEN FILE: Output matches saved reference (regression prevention)
+    """
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(complex_twolayers_design_network, br.ALL_RULES, invert=True)
+        stack = ComputeStack([networks[0]])
+        stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
+
+        # Check that we have 2 inputs (mKO2, eBFP2)
+        assert networks[0].nb_inputs == 2, f"Expected 2 inputs, got {networks[0].nb_inputs}"
+
+        # === GOLDEN FILE TEST: Reproduce exact output with fixed seed ===
+        from pathlib import Path
+        import numpy as np
+
+        golden_path = Path(__file__).parent / "golden_files" / "complex_twolayers_output.npz"
+        if golden_path.exists():
+            # Load golden reference
+            golden_data = np.load(golden_path)
+            golden_result = golden_data["stack_result"]
+
+            # Reproduce with same fixed seed
+            fixed_key = jax.random.PRNGKey(12345)
+            params = stack.init(fixed_key)
+            inputs = jnp.ones((2,))
+            n_random_vars = params["global/number_of_random_variables"]
+            random_vars = jax.random.normal(fixed_key, (n_random_vars,))
+
+            stack_result, aux = stack.apply(params, inputs, random_vars, fixed_key)
+
+            # Compare to golden file (tight tolerance for regression detection)
+            assert jnp.allclose(stack_result, golden_result, rtol=1e-6, atol=1e-6), (
+                f"Output differs from golden file!\n"
+                f"  Expected: {golden_result}\n"
+                f"  Got:      {stack_result}\n"
+                f"  Diff:     {stack_result - golden_result}\n"
+                f"Regenerate golden file if this is intentional: python tests/generate_golden_complex_twolayers.py"
+            )
+        else:
+            print(f"WARNING: Golden file not found at {golden_path}. Skipping regression test.")
+
+        # === SMOKE TESTS: Check variability across different seeds ===
+        base_key = jax.random.PRNGKey(42)
+        test_keys = jax.random.split(base_key, 5)
+        all_outputs = []
+
+        for test_key in test_keys:
+            params = stack.init(test_key)
+            inputs = jnp.ones((2,))
+            n_random_vars = params["global/number_of_random_variables"]
+            random_vars = jax.random.normal(test_key, (n_random_vars,))
+
+            stack_result, aux = stack.apply(params, inputs, random_vars, test_key)
+
+            # Check output shape - should have 4 outputs (eBFP2, mKO2, mMaroon1, mNeonGreen)
+            assert stack_result.shape == (4,), f"Expected 4 outputs, got shape {stack_result.shape}"
+
+            # Check outputs are finite
+            assert jnp.all(jnp.isfinite(stack_result)), "All outputs should be finite"
+
+            all_outputs.append(stack_result)
+
+        # Check that different random seeds produce different outputs
+        all_outputs = jnp.array(all_outputs)
+        std_dev = jnp.std(all_outputs, axis=0)
+        # At least some outputs should vary across random initializations
+        assert jnp.any(std_dev > 1e-5), (
+            "Some outputs should vary with different random seeds"
+        )

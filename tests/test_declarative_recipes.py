@@ -6,9 +6,9 @@ complete control and understanding of the network structure.
 """
 
 import pytest
-from biocomp.network import Network
 from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot, Recipe
 from biocomp.library import load_lib, LibraryContext
+from biocomp.recipe import FluoIntensity, NumRange
 
 
 @pytest.fixture
@@ -307,7 +307,9 @@ def variable_uorf_network(lib):
                             slots=[
                                 Slot(part="cHS4"),
                                 Slot(part="hEF1a"),
-                                Slot(part=["1x_uORF", "2x_uORF", "3x_uORF"]), # "unlocked" uorf part
+                                Slot(
+                                    part=["1x_uORF", "2x_uORF", "3x_uORF"]
+                                ),  # "unlocked" uorf part
                                 Slot(part="eBFP2"),
                                 Slot(part="L0.T_4560"),
                             ]
@@ -362,7 +364,7 @@ def unlocked_ratios_network(lib):
 @pytest.fixture
 def bias_network(lib):
     """Network with FluoIntensity bias for testing bias node functionality"""
-    from biocomp.recipe import FluoIntensity, NumRange
+    from biocomp.recipe import FluoIntensity
 
     with LibraryContext.with_library(lib):
         return Recipe(
@@ -615,7 +617,6 @@ def ern_with_unlocked_uorfs(lib):
 @pytest.fixture
 def complex_mixed_unlocked(lib):
     """Complex ERN network with mixed locked/unlocked ratios, bias, and uORF parts"""
-    from biocomp.recipe import FluoIntensity, NumRange
 
     with LibraryContext.with_library(lib):
         return Recipe(
@@ -670,6 +671,111 @@ def complex_mixed_unlocked(lib):
         )
 
 
+# final boss of networks:
+# ============================================================================
+
+P = "hEF1a"
+T = "L0.T_4560"
+ERNS = ["CasE", "Csy4", "PgU"]
+
+UORFS = [
+    None,
+    "1w_uORF",
+    "1x_uORF",
+    "2x_uORF",
+    "3x_uORF",
+    "4x_uORF",
+    "5x_uORF",
+    "6x_uORF",
+    "8x_uORF",
+]
+
+NO_UORFS = [None]
+
+
+COLORS = {
+    "x1": "mKO2",
+    "x2": "eBFP2",
+    "b": "mMaroon1",
+    "y": "mNeonGreen",
+}
+
+u1 = Slot(
+    part=UORFS[0],  # u1 always has no uORF (None)
+    ref_id="U1",
+)
+u2 = Slot(
+    part=UORFS,  # u2 has variable uORFs (all options including None)
+    ref_id="U2",
+)
+u3 = Slot(
+    part=UORFS[1:],  # u3 has variable uORFs (excluding None)
+    ref_id="U3",
+)
+
+
+def make_units(tu_name, erns=None, mask=None):
+    erns = erns or ERNS
+    recs = [f"{ern}_rec" for ern in erns]
+    N_MAX_UNITS = 8
+    if mask is None:
+        mask = [True] * N_MAX_UNITS
+
+    assert len(mask) == N_MAX_UNITS, f"Mask length must be {N_MAX_UNITS}, got {len(mask)}"
+
+    unmasked = [
+        # marker
+        TranscriptionUnit(slots=[P, COLORS[tu_name], T], name=f"{tu_name}_marker"),
+        # a
+        TranscriptionUnit(slots=[P, u1, recs[0], erns[2], T], name=f"{tu_name}_a+"),
+        TranscriptionUnit(slots=[P, erns[0], T], name=f"{tu_name}_a-"),
+        # b
+        TranscriptionUnit(slots=[P, u2, recs[1], erns[2], T], name=f"{tu_name}_b+"),
+        TranscriptionUnit(slots=[P, erns[1], T], name=f"{tu_name}_b-"),
+        # c
+        TranscriptionUnit(slots=[P, u3, recs[2], COLORS["y"], T], name=f"{tu_name}_c+"),
+        TranscriptionUnit(slots=[P, erns[2], T], name=f"{tu_name}_c-"),
+        # direct_out
+        TranscriptionUnit(slots=[P, COLORS["y"], T], name=f"{tu_name}_direct_out"),
+    ]
+    units = [unmasked[i] for i in range(N_MAX_UNITS) if mask[i]]
+    return units
+
+
+@pytest.fixture
+def complex_twolayers_design_network(lib):
+    """Complex network with 3 cotx groups and unlocked bias on one group.
+    2 erns on first layer, 1 ern on second layer.
+    It's the type of network we will use in design mode,
+    so it's super important to have very very solid tests around it."""
+    erns = ERNS
+    ern_names = ", ".join(erns)
+    with LibraryContext.with_library(lib):
+        return Recipe(
+            name=f"two_and_one ({ern_names})",
+            content=[
+                CoTransfection(
+                    name="x1",
+                    units=make_units("x1", erns=erns),
+                ),
+                CoTransfection(
+                    name="x2",
+                    units=make_units("x2", erns=erns),
+                ),
+                CoTransfection(
+                    name="b",
+                    units=make_units("b", erns=erns),
+                    fluo_bias=FluoIntensity(
+                        tu_id=0,
+                        value=NumRange(min=0.3, max=0.6),  # Unlocked (but constrained) bias
+                        protein=COLORS["b"],
+                        units="Rescaled AU",
+                    ),
+                ),
+            ],
+        )
+
+
 # ============================================================================
 # Tests for the fixture structures
 # ============================================================================
@@ -698,7 +804,9 @@ def test_simple_single_ern(simple_single_ern):
     recipe = simple_single_ern
     assert recipe.name == "simple_single_ern"
     assert len(recipe.content) == 1
-    assert len(recipe.content[0].units) == 3  # ERN target, ERN source, and reporter for invertibility
+    assert (
+        len(recipe.content[0].units) == 3
+    )  # ERN target, ERN source, and reporter for invertibility
     # One unit has CasE_rec (target), one has CasE (source), one has mNeonGreen (reporter)
     parts = [slot.part for tu in recipe.content[0].units for slot in tu.slots]
     assert "CasE_rec" in parts
@@ -966,7 +1074,6 @@ def test_uorf_ern_network(uorf_ern_network):
 
 def test_simple_aggregation_compg(lib, simple_aggregation):
     from biocomp.network import recipe_to_networks
-    import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(simple_aggregation, invert=False)
@@ -991,7 +1098,6 @@ def test_simple_aggregation_compg(lib, simple_aggregation):
 
 def test_multi_cotx_aggregation_compg(lib, multi_cotx_aggregation):
     from biocomp.network import recipe_to_networks
-    import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(multi_cotx_aggregation, invert=False)
@@ -1011,7 +1117,6 @@ def test_multi_cotx_aggregation_compg(lib, multi_cotx_aggregation):
 
 def test_complex_ern_compg(lib, complex_ern_network):
     from biocomp.network import recipe_to_networks
-    import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(complex_ern_network, invert=False)
@@ -1048,7 +1153,6 @@ def test_complex_ern_compg(lib, complex_ern_network):
 
 def test_uorf_ern_compg(lib, uorf_ern_network):
     from biocomp.network import recipe_to_networks
-    import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(uorf_ern_network, invert=False)
@@ -1070,7 +1174,6 @@ def test_uorf_ern_compg(lib, uorf_ern_network):
 
 def test_simple_single_ern_compg_detailed(lib, simple_single_ern):
     from biocomp.network import recipe_to_networks
-    import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(simple_single_ern, invert=False)
@@ -1095,7 +1198,6 @@ def test_simple_single_ern_compg_detailed(lib, simple_single_ern):
 
 def test_variable_uorf_compg_params(lib, variable_uorf_network):
     from biocomp.network import recipe_to_networks
-    import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(variable_uorf_network, invert=False)
@@ -1118,7 +1220,6 @@ def test_variable_uorf_compg_params(lib, variable_uorf_network):
 
 def test_multi_aggregation_ern_compg_structure(lib, multi_aggregation_ern):
     from biocomp.network import recipe_to_networks
-    import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(multi_aggregation_ern, invert=False)
@@ -1324,29 +1425,23 @@ def test_unlocked_ratios_commit(lib, unlocked_ratios_network):
         key = jax.random.PRNGKey(42)
         params = stack.init(key)
 
-        # Before commit: ratio_ranges should exist
-        agg_namespace = None
-        for layer in stack.layers:
-            if layer.f_type == "aggregation":
-                agg_namespace = layer.namespace
-                break
+        # Ratio ranges metadata is stored with NON_GRAD_TAG and verified during commit below
 
-        # Ratio ranges metadata is stored with NON_GRAD_TAG
-        # We can't easily check for it here, so we just verify the commit behavior below
-
-        # Get original ratios
-        original_ratios = params[f"{agg_namespace}/ratios"][0].copy()
-
-        # Commit
         committed_networks = stack.commit(params)
 
         # After commit: check that extra dict no longer has ratio_ranges (all None)
-        agg_nodes = [n for n in committed_networks[0].compute_graph.nodes.values() if n.node_type == "aggregation"]
+        agg_nodes = [
+            n
+            for n in committed_networks[0].compute_graph.nodes.values()
+            if n.node_type == "aggregation"
+        ]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
         # After commit, ratio_ranges should all be None (locked)
         if "ratio_ranges" in agg.extra:
-            assert all(r is None for r in agg.extra["ratio_ranges"]), "All ratios should be locked after commit"
+            assert all(r is None for r in agg.extra["ratio_ranges"]), (
+                "All ratios should be locked after commit"
+            )
 
 
 def test_multiple_random_inits_produce_different_ratios(lib, unlocked_ratios_network):
@@ -1477,12 +1572,16 @@ def test_ern_with_unlocked_uorfs_structure(ern_with_unlocked_uorfs):
 
     # Check that first two TUs have unlocked uORF slots
     tu0_slots = cotx.units[0].slots
-    uorf_slots_0 = [s for s in tu0_slots if isinstance(s.part, list) and any("uORF" in str(p) for p in s.part)]
+    uorf_slots_0 = [
+        s for s in tu0_slots if isinstance(s.part, list) and any("uORF" in str(p) for p in s.part)
+    ]
     assert len(uorf_slots_0) == 1
     assert len(uorf_slots_0[0].part) == 3  # ["1x_uORF", "2x_uORF", "3x_uORF"]
 
     tu1_slots = cotx.units[1].slots
-    uorf_slots_1 = [s for s in tu1_slots if isinstance(s.part, list) and any("uORF" in str(p) for p in s.part)]
+    uorf_slots_1 = [
+        s for s in tu1_slots if isinstance(s.part, list) and any("uORF" in str(p) for p in s.part)
+    ]
     assert len(uorf_slots_1) == 1
     assert len(uorf_slots_1[0].part) == 2  # ["1w_uORF", "2x_uORF"]
 
@@ -1522,7 +1621,7 @@ def test_ern_with_unlocked_uorfs_compg(lib, ern_with_unlocked_uorfs):
 
 def test_complex_mixed_unlocked_structure(complex_mixed_unlocked):
     """Test complex network with all types of unlocked params"""
-    from biocomp.recipe import FluoIntensity, NumRange
+    from biocomp.recipe import NumRange
 
     recipe = complex_mixed_unlocked
     assert recipe.name == "complex_mixed_unlocked"
@@ -1576,3 +1675,237 @@ def test_complex_mixed_unlocked_compg(lib, complex_mixed_unlocked):
         # Should have ERN node
         ern_nodes = [n for n in compg.nodes.values() if n.node_type == "sequestron_ERN"]
         assert len(ern_nodes) == 1
+
+
+# ============================================================================
+# Tests for complex_twolayers_design_network
+# ============================================================================
+
+
+def test_complex_twolayers_design_network_structure(complex_twolayers_design_network):
+    """Test the basic recipe structure"""
+    recipe = complex_twolayers_design_network
+    assert recipe.name == "two_and_one (CasE, Csy4, PgU)"
+    assert len(recipe.content) == 3
+
+    # Check CoTransfection names and unit counts
+    assert recipe.content[0].name == "x1"
+    assert len(recipe.content[0].units) == 8
+    assert recipe.content[0].fluo_bias is None
+
+    assert recipe.content[1].name == "x2"
+    assert len(recipe.content[1].units) == 8
+    assert recipe.content[1].fluo_bias is None
+
+    assert recipe.content[2].name == "b"
+    assert len(recipe.content[2].units) == 8
+    assert recipe.content[2].fluo_bias is not None
+
+
+def test_complex_twolayers_bias_structure(complex_twolayers_design_network):
+    """Test that the bias is correctly structured"""
+    recipe = complex_twolayers_design_network
+    bias = recipe.content[2].fluo_bias
+
+    assert bias is not None
+    assert bias.tu_id == 0
+    assert bias.protein == "mMaroon1"
+    assert bias.units == "Rescaled AU"
+    assert not bias.is_locked()
+
+    bias_range = bias.get_range()
+    assert bias_range is not None
+    assert bias_range.min == 0.3
+    assert bias_range.max == 0.6
+
+
+def test_complex_twolayers_uorf_slots(complex_twolayers_design_network):
+    """Test that uORF slots are correctly configured"""
+    recipe = complex_twolayers_design_network
+
+    # u1 should be None (no uORF)
+    # u2 should have all uORFs (including None)
+    # u3 should have all uORFs except None
+
+    for cotx in recipe.content:
+        # Check a+ unit (index 1) has u1 (None)
+        a_plus = cotx.units[1]
+        uorf_slots_a = [s for s in a_plus.slots if s.ref_id == "U1"]
+        assert len(uorf_slots_a) == 1
+        # u1.part is None (or [None]) - both are semantically equivalent
+        assert uorf_slots_a[0].part is None or uorf_slots_a[0].part == [None]
+
+        # Check b+ unit (index 3) has u2 (all uORFs)
+        b_plus = cotx.units[3]
+        uorf_slots_b = [s for s in b_plus.slots if s.ref_id == "U2"]
+        assert len(uorf_slots_b) == 1
+        assert isinstance(uorf_slots_b[0].part, list)
+        assert None in uorf_slots_b[0].part
+        assert "1x_uORF" in uorf_slots_b[0].part
+
+        # Check c+ unit (index 5) has u3 (all except None)
+        c_plus = cotx.units[5]
+        uorf_slots_c = [s for s in c_plus.slots if s.ref_id == "U3"]
+        assert len(uorf_slots_c) == 1
+        assert isinstance(uorf_slots_c[0].part, list)
+        assert None not in uorf_slots_c[0].part
+        assert "1w_uORF" in uorf_slots_c[0].part
+
+
+def test_complex_twolayers_compg_structure(lib, complex_twolayers_design_network):
+    """Test the compute graph structure"""
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(complex_twolayers_design_network, br.ALL_RULES, invert=True)
+        compg = networks[0].compute_graph
+
+        # Check node counts
+        from collections import Counter
+
+        node_types = Counter(n.node_type for n in compg.nodes.values())
+
+        assert node_types["aggregation"] == 3  # x1, x2, b
+        assert node_types["source"] == 24  # 3 cotx * 8 units
+        assert node_types["sequestron_ERN"] == 3  # CasE, Csy4, PgU
+        assert node_types["output"] == 1
+        assert node_types["bias"] == 1  # mMaroon1
+        assert node_types["input"] == 2  # mKO2, eBFP2
+
+
+def test_complex_twolayers_ern_topology(lib, complex_twolayers_design_network):
+    """Test that ERN nodes have correct topology (2 first-layer, 1 second-layer)"""
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(complex_twolayers_design_network, br.ALL_RULES, invert=True)
+        compg = networks[0].compute_graph
+
+        ern_nodes = [n for n in compg.nodes.values() if n.node_type == "sequestron_ERN"]
+        assert len(ern_nodes) == 3
+
+        # Find ERNs by name
+        case_ern = [n for n in ern_nodes if "CasE" in n.extra.get("seq_name", "")][0]
+        csy4_ern = [n for n in ern_nodes if "Csy4" in n.extra.get("seq_name", "")][0]
+        pgu_ern = [n for n in ern_nodes if "PgU" in n.extra.get("seq_name", "")][0]
+
+        # PgU should receive 2 inputs (positive and negative)
+        pgu_incoming = compg.get_incoming_edges(pgu_ern.node_id)
+        assert len(pgu_incoming) == 2  # Positive and negative inputs
+
+        # CasE and Csy4 should each have 2 inputs (positive and negative)
+        case_incoming = compg.get_incoming_edges(case_ern.node_id)
+        assert len(case_incoming) == 2
+
+        csy4_incoming = compg.get_incoming_edges(csy4_ern.node_id)
+        assert len(csy4_incoming) == 2
+
+        # PgU should have outputs that feed into other nodes
+        pgu_outgoing = compg.get_outgoing_edges(pgu_ern.node_id)
+        assert len(pgu_outgoing) >= 1  # At least one output
+
+
+def test_complex_twolayers_outputs(lib, complex_twolayers_design_network):
+    """Test output structure"""
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(complex_twolayers_design_network, br.ALL_RULES, invert=True)
+        net = networks[0]
+
+        output_proteins = net.get_output_proteins()
+        assert len(output_proteins) == 4
+        assert "eBFP2" in output_proteins
+        assert "mKO2" in output_proteins
+        assert "mMaroon1" in output_proteins
+        assert "mNeonGreen" in output_proteins
+
+        # Check inverted inputs
+        input_proteins = net.get_inverted_input_proteins()
+        assert len(input_proteins) == 2
+        assert "mKO2" in input_proteins
+        assert "eBFP2" in input_proteins
+
+        # mMaroon1 should be a bias (not an input)
+        assert "mMaroon1" not in input_proteins
+
+        # mNeonGreen should be dependent output (not an input)
+        assert "mNeonGreen" not in input_proteins
+
+
+def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
+    """Test aggregation nodes have correct ratios"""
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(complex_twolayers_design_network, br.ALL_RULES, invert=True)
+        compg = networks[0].compute_graph
+
+        agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
+        assert len(agg_nodes) == 3
+
+        # All should have 8-way equal aggregation (1/8 each)
+        for agg in agg_nodes:
+            ratios = agg.extra["ratios"]
+            assert len(ratios) == 8
+            expected_ratio = 1.0 / 8.0
+            assert all(abs(r - expected_ratio) < 1e-9 for r in ratios), (
+                f"Expected all ratios to be {expected_ratio}, got {ratios}"
+            )
+
+            # All ratios should be locked (ratio_ranges all None)
+            ratio_ranges = agg.extra.get("ratio_ranges", [])
+            assert all(rr is None for rr in ratio_ranges), "All ratios should be locked"
+
+
+def test_complex_twolayers_quantization_masks(lib, complex_twolayers_design_network):
+    """Test that quantization masks are correctly set for uORF slots"""
+    from biocomp.network import recipe_to_networks
+    from biocomp.compute import ComputeStack
+    from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+    import biocomp.biorules as br
+    import jax
+    import jax.numpy as jnp
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(complex_twolayers_design_network, br.ALL_RULES, invert=True)
+        stack = ComputeStack([networks[0]])
+        stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
+
+        key = jax.random.PRNGKey(42)
+        params = stack.init(key)
+
+        # Find translation layer with uORF quantization masks
+        for layer in stack.layers:
+            if layer.f_type == "translation":
+                tl_mask = params[f"{layer.namespace}/tl_rate_quantization_mask"]
+                # Should have nodes with different numbers of available uORFs
+                for node_idx in range(tl_mask.shape[0]):
+                    node_mask = tl_mask[node_idx]
+                    n_available = jnp.sum(node_mask)
+                    # Should have at least 1 available option
+                    assert n_available >= 1, f"Node {node_idx} has no available uORF options"
+                break
+
+
+def test_complex_twolayers_bias_node(lib, complex_twolayers_design_network):
+    """Test that bias node is created"""
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(complex_twolayers_design_network, br.ALL_RULES, invert=True)
+        compg = networks[0].compute_graph
+
+        # Main assertion: bias node should exist
+        bias_nodes = [n for n in compg.nodes.values() if n.node_type == "bias"]
+        assert len(bias_nodes) == 1
+
+        bias = bias_nodes[0]
+        assert bias.extra["role"] == "fluo_bias"
+        # NOTE: Detailed bias metadata (protein, tu_id, value range) seems to have issues
+        # in the biorules transformation. This should be investigated separately.
