@@ -217,6 +217,8 @@ Visualization tools for different plot types.
 - Parameterized tests for combinatorial coverage
 - Direct assertions, no verbose messages
 - Fixture reuse across test files via imports
+- Avoid special cases like the plague: if a fix requires manual intervention for specific test data, it's probably the wrong fix.
+
 - Example:
 
 ```python
