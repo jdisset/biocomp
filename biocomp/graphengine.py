@@ -1024,7 +1024,7 @@ def _get_canonical_edge_tuple(
     ignore_input_slot=False,
     ignore_output_slot=False,
 ):
-    content_sig = tuple(sorted((p.name, p.category) for p in edge.content)) if edge.content else ()
+    content_sig = tuple(sorted(p.name for p in edge.content)) if edge.content else ()
     parts = [
         edge.content_type,
         content_sig,

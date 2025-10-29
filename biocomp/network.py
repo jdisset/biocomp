@@ -28,6 +28,21 @@ import biocomp.biorules as br
 
 logger = get_logger(__name__)
 
+# Canonical biological ordering of part categories for slot reconstruction
+CATEGORY_ORDER = {
+    "insulator": 0,
+    "promoter": 10,
+    "uORF_group": 15,
+    "ERN_recog_site_5p": 17,
+    "fluo_marker": 20,
+    "ERN": 20,
+    "ERN_recog_site_3p": 25,
+    "terminator": 30,
+}
+
+# Default/implicit values that represent "empty" embeddings
+IMPLICIT_EMPTY = {"tl_rate": "00_empty_tc"}
+
 
 class Network(BaseModel):
     """Pure data container for network definitions"""
@@ -222,14 +237,16 @@ class Network(BaseModel):
 
     def to_recipe(self) -> Recipe:
         """Converts the network back to a Recipe object"""
-        from biocomp.recipe import NumRange, FluoIntensity
 
         cotx_groups = self._extract_cotx_groups()
         tus_by_cotx = self._build_transcription_units(cotx_groups)
         bias_by_cotx = self._extract_bias_nodes()
 
+        # Sort by cotx_index to preserve original order
+        sorted_group_ids = sorted(cotx_groups.keys(), key=lambda g: cotx_groups[g]["cotx_index"])
+
         content = []
-        for group_id in sorted(cotx_groups.keys()):
+        for group_id in sorted_group_ids:
             info = cotx_groups[group_id]
             content.append(
                 CoTransfection(
@@ -255,39 +272,48 @@ class Network(BaseModel):
         cotx_groups = {}
         assert self.compute_graph is not None
 
+        source_cotx_indices = {}
+        for node in self.compute_graph.nodes.values():
+            if node.node_type == "source":
+                group_id = node.extra.get("cotx_group")
+                cotx_index = node.extra.get("cotx_index", 0)
+                if group_id not in source_cotx_indices:
+                    source_cotx_indices[group_id] = cotx_index
+
         for node in self.compute_graph.nodes.values():
             if node.node_type == "aggregation":
                 group_id = node.extra["cotx_group"]
 
-                # Convert ratio_ranges back to NumRange objects if present
                 ratios = []
                 if "ratio_ranges" in node.extra:
                     ratio_ranges = node.extra["ratio_ranges"]
                     base_ratios = node.extra["ratios"]
-                    for i, (base_ratio, ratio_range) in enumerate(zip(base_ratios, ratio_ranges)):
+                    for base_ratio, ratio_range in zip(base_ratios, ratio_ranges):
                         if ratio_range is not None and isinstance(ratio_range, dict):
-                            # Unlocked ratio - create NumRange
-                            ratios.append(NumRange(min=ratio_range.get("min"), max=ratio_range.get("max")))
+                            ratios.append(
+                                NumRange(min=ratio_range.get("min"), max=ratio_range.get("max"))
+                            )
                         else:
-                            # Locked ratio - use the float value
                             ratios.append(base_ratio)
                 else:
-                    # No ratio_ranges, all locked
                     ratios = node.extra["ratios"]
 
                 cotx_groups[group_id] = {
                     "ratios": ratios,
                     "source_ids": node.extra["members"],
+                    "cotx_index": source_cotx_indices.get(group_id, 0),
                 }
 
         for node in self.compute_graph.nodes.values():
             if node.node_type == "source":
                 group_id = node.extra.get("cotx_group")
                 source_id = node.extra.get("source_id")
+                cotx_index = node.extra.get("cotx_index", 0)
                 if group_id not in cotx_groups:
                     cotx_groups[group_id] = {
                         "ratios": [node.extra.get("ratio", 1.0)],
                         "source_ids": [source_id],
+                        "cotx_index": cotx_index,
                     }
 
         return cotx_groups
@@ -296,32 +322,35 @@ class Network(BaseModel):
         tus_by_cotx = {}
         for group_id, info in cotx_groups.items():
             tus = []
+            source_nodes_with_pos = []
             for source_id in info["source_ids"]:
                 source_node = self._find_source_node(source_id, group_id)
                 if source_node:
-                    slots = self._extract_slots_from_source(source_node)
+                    position = source_node.extra.get("position_in_source", 0)
+                    source_nodes_with_pos.append((position, source_id, source_node))
 
-                    # get param_ref_ids directly from source node
-                    param_ref_ids = source_node.extra.get("param_ref_ids", {})
+            source_nodes_with_pos.sort(key=lambda x: x[0])
 
-                    # restore ref_ids to slots from param_ref_ids
-                    if param_ref_ids:
-                        # map parameter names to ref_ids
-                        for slot in slots:
-                            if slot.maps_to_parameter and slot.maps_to_parameter in param_ref_ids:
-                                slot.ref_id = param_ref_ids[slot.maps_to_parameter]
+            for position, source_id, source_node in source_nodes_with_pos:
+                param_ref_ids = source_node.extra.get("param_ref_ids", {})
+                slots = self._extract_slots_from_source(source_node, param_ref_ids)
 
-                    tu = TranscriptionUnit(
-                        name=source_node.extra.get("name", ""),
-                        slots=slots,
-                        source=source_id,
-                    )
+                if param_ref_ids:
+                    for slot in slots:
+                        if slot.maps_to_parameter and slot.maps_to_parameter in param_ref_ids:
+                            slot.ref_id = param_ref_ids[slot.maps_to_parameter]
 
-                    # restore param_ref_ids to TU (the __post_init__ will populate it, but we ensure it's correct)
-                    if param_ref_ids:
-                        tu.param_ref_ids = dict(param_ref_ids)
+                tu = TranscriptionUnit(
+                    name=source_node.extra.get("name", ""),
+                    slots=slots,
+                    source=source_id,
+                    position_in_source=position,
+                )
 
-                    tus.append(tu)
+                if param_ref_ids:
+                    tu.param_ref_ids = dict(param_ref_ids)
+
+                tus.append(tu)
             tus_by_cotx[group_id] = tus
         return tus_by_cotx
 
@@ -336,43 +365,65 @@ class Network(BaseModel):
                 return node
         return None
 
-    def _extract_slots_from_source(self, source_node) -> list[Slot]:
+    def _get_dna_edge(self, source_node):
+        """Get DNA edge from source node, or None if not found"""
         assert self.compute_graph is not None
         outgoing = self.compute_graph.get_outgoing_edges(source_node.node_id)
         dna_edges = [e for e in outgoing if e.content_type == "DNA"]
+        return dna_edges[0] if dna_edges else None
 
-        if not dna_edges:
+    def _should_include_embedding(
+        self, emb_name: str, part_names: tuple, param_ref_ids: dict
+    ) -> bool:
+        """Check if embedding should be included (has real parts or explicit ref_id)"""
+        implicit_empty = IMPLICIT_EMPTY.get(emb_name)
+        has_real_parts = any(p != implicit_empty for p in part_names) if part_names else False
+        has_ref_id = emb_name in param_ref_ids and param_ref_ids[emb_name] is not None
+        return has_real_parts or has_ref_id
+
+    def _extract_slots_from_source(self, source_node, param_ref_ids: dict = None) -> list[Slot]:
+        """Reconstruct slots by sorting all parts by their biological category"""
+        param_ref_ids = param_ref_ids or {}
+        lib = LibraryContext.get_library()
+
+        dna_edge = self._get_dna_edge(source_node)
+        if not dna_edge:
             return []
 
-        dna_edge = dna_edges[0]
-        slots = []
-
-        dna_parts = [p.name for p in dna_edge.content]
         embeddings = dna_edge.content_embedding_names or {}
 
-        if dna_parts:
-            slots.append(Slot(part=dna_parts[0]))
+        # Collect all parts with (category, name, embedding_name)
+        parts = []
 
-        if "tc_rate" in embeddings:
-            tc_parts = embeddings["tc_rate"]
-            slot = Slot(part=list(tc_parts) if len(tc_parts) > 1 else tc_parts[0])
-            slot.maps_to_parameter = "tc_rate"
+        # DNA parts (non-embeddings) - categories already stored in edge
+        for part_obj in dna_edge.content:
+            parts.append((part_obj.category, part_obj.name, None))
+
+        # Embedding parts - look up categories from library
+        for emb_name, part_names in embeddings.items():
+            if self._should_include_embedding(emb_name, part_names, param_ref_ids):
+                implicit_empty = IMPLICIT_EMPTY.get(emb_name)
+                # Clean up implicit empties
+                cleaned_parts = [p if p != implicit_empty else None for p in part_names]
+                # Determine category from first non-None part
+                cat = None
+                for pname in cleaned_parts:
+                    if pname is not None and pname in lib.pc.index:
+                        cat = lib.pc.loc[pname, "category"]
+                        break
+                # Add as single entry (will become one slot with potentially multiple parts)
+                parts.append((cat, cleaned_parts, emb_name))
+
+        # Sort by category order (stable sort preserves relative order within category)
+        parts.sort(key=lambda x: CATEGORY_ORDER.get(x[0], 999) if x[0] else 998)
+
+        # Create slots
+        slots = []
+        for category, name, emb in parts:
+            slot = Slot(part=name)
+            if emb:
+                slot.maps_to_parameter = emb
             slots.append(slot)
-
-        if "tl_rate" in embeddings:
-            tl_parts = embeddings["tl_rate"]
-            if tl_parts and tl_parts != ("00_empty_tc",):
-                tl_parts_cleaned = [p if p != "00_empty_tc" else None for p in tl_parts]
-                slot = Slot(
-                    part=list(tl_parts_cleaned)
-                    if len(tl_parts_cleaned) > 1
-                    else tl_parts_cleaned[0]
-                )
-                slot.maps_to_parameter = "tl_rate"
-                slots.append(slot)
-
-        for part_name in dna_parts[1:]:
-            slots.append(Slot(part=part_name))
 
         return slots
 
@@ -421,7 +472,6 @@ class Network(BaseModel):
 
     def _extract_bias_from_aggregation(self, node):
         """Extract bias info from connected aggregation node as fallback"""
-        from biocomp.recipe import NumRange
         import ast
 
         assert self.compute_graph is not None
@@ -447,7 +497,7 @@ class Network(BaseModel):
                     }
         return None
 
-    def _extract_bias_nodes(self) -> dict[str, "FluoIntensity"]:
+    def _extract_bias_nodes(self) -> dict:
         """Extract bias nodes and reconstruct FluoIntensity objects for each cotx group"""
         from biocomp.recipe import FluoIntensity
 
@@ -819,20 +869,38 @@ def _build_cdg_dual_from_preprocessed(
             else [1.0 / len(cotx.units)] * len(cotx.units)
         )
 
-        for unit, norm_ratio, orig_ratio in zip(cotx.units, normalized_ratios, raw_ratios):
+        for unit_idx, (unit, norm_ratio, orig_ratio) in enumerate(
+            zip(cotx.units, normalized_ratios, raw_ratios)
+        ):
             # Store both normalized value and original range info (if NumRange)
             range_info = orig_ratio if isinstance(orig_ratio, NumRange) else None
-            # Also store param_ref_ids from the TU for roundtrip preservation
+            # Also store param_ref_ids, TU name, position, and cotx_index for roundtrip preservation
+            # Use position_in_source if explicitly set (non-zero), otherwise use unit_idx
+            position = (
+                unit.position_in_source
+                if (hasattr(unit, "position_in_source") and unit.position_in_source != 0)
+                else unit_idx
+            )
             source_cotx_to_ratio_map[(unit.source, group_name)] = (
                 float(norm_ratio),
                 range_info,
                 dict(unit.param_ref_ids),  # copy to avoid mutation
+                unit.name,  # TU name for roundtrip
+                position,  # position in cotx for ordering
+                i,  # cotx index for ordering CoTransfections
             )
 
     source_nodes, tx_nodes, tl_nodes = {}, {}, {}
     output_node, dead_end_nodes = None, {}
 
-    for (source_id, cotx_group), (ratio, range_info, param_ref_ids) in source_cotx_to_ratio_map.items():
+    for (source_id, cotx_group), (
+        ratio,
+        range_info,
+        param_ref_ids,
+        tu_name,
+        position,
+        cotx_index,
+    ) in source_cotx_to_ratio_map.items():
         source_key = (source_id, cotx_group)
         if source_key not in source_nodes:
             source_nodes[source_key] = next_node_id
@@ -843,6 +911,9 @@ def _build_cdg_dual_from_preprocessed(
                 "cotx_group": cotx_group,
                 "ratio": ratio,
                 "param_ref_ids": param_ref_ids,  # store for roundtrip preservation
+                "name": tu_name,  # store TU name for roundtrip
+                "position_in_source": position,  # store position for ordering units
+                "cotx_index": cotx_index,  # store index for ordering CoTransfections
             }
             # Add range info if ratio is unlocked
             if range_info is not None:
@@ -913,7 +984,10 @@ def _build_cdg_dual_from_preprocessed(
                 output_slot=source_output_slot,
                 input_slot=0,
                 content_type="DNA",
-                content=tuple(Part(name=p, category="DNA") for p in info["DNA_content"]),
+                content=tuple(
+                    Part(name=p, category=lib.pc.loc[p, "category"] if p in lib.pc.index else "DNA")
+                    for p in info["DNA_content"]
+                ),
                 content_embedding_names={k: tuple(v) for k, v in info["DNA_params"].items()},
                 extra={"tu_id": [tuid]},
             )
@@ -1125,7 +1199,11 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
 
     def parts_from_cdg_row(row: pd.Series, kind: str) -> tuple[Part, ...]:
         items = to_list(row.get("content"))
-        return tuple(Part(name=str(p), category=kind) for p in items)
+        lib = LibraryContext.get_library()
+        return tuple(
+            Part(name=str(p), category=lib.pc.loc[p, "category"] if p in lib.pc.index else kind)
+            for p in items
+        )
 
     def embeddings_from_cdg_row(row: pd.Series) -> dict[str, tuple[str, ...]]:
         p = row.get("params") or {}
