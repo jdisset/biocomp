@@ -1,8 +1,7 @@
 """Interactive graph visualization for GraphState objects using Dash Cytoscape."""
 
 import dash
-from dash import html, dcc, Input, Output, callback
-import dash
+from dash import html, dcc, Input, Output
 import dash_cytoscape as cyto
 import webbrowser
 import threading
@@ -310,102 +309,211 @@ def show_graph(
     def show_selection_info(selected_nodes, selected_edges):
         def format_node(node):
             content = [
-                html.Div([
-                    html.Span("🔵 ", style={"fontSize": "16px"}),
-                    html.Span(f"NODE {node.node_id}", style={"fontWeight": "bold", "color": "#2c3e50", "fontSize": "15px"})
-                ], style={"marginBottom": "8px"}),
-                html.Div([
-                    html.Span("Type: ", style={"fontWeight": "600", "color": "#34495e"}),
-                    html.Span(node.node_type, style={"color": "#e74c3c", "fontWeight": "500", "fontFamily": "monospace"})
-                ], style={"marginBottom": "6px"})
+                html.Div(
+                    [
+                        html.Span("🔵 ", style={"fontSize": "16px"}),
+                        html.Span(
+                            f"NODE {node.node_id}",
+                            style={"fontWeight": "bold", "color": "#2c3e50", "fontSize": "15px"},
+                        ),
+                    ],
+                    style={"marginBottom": "8px"},
+                ),
+                html.Div(
+                    [
+                        html.Span("Type: ", style={"fontWeight": "600", "color": "#34495e"}),
+                        html.Span(
+                            node.node_type,
+                            style={
+                                "color": "#e74c3c",
+                                "fontWeight": "500",
+                                "fontFamily": "monospace",
+                            },
+                        ),
+                    ],
+                    style={"marginBottom": "6px"},
+                ),
             ]
 
             if node.is_inverse_of:
-                content.append(html.Div([
-                    html.Span("Inverse of: ", style={"fontWeight": "600", "color": "#34495e"}),
-                    html.Span(f"Node {node.is_inverse_of.node_id} ", style={"color": "#3498db"}),
-                    html.Span(f"(slot {node.is_inverse_of.output_slot}, len {node.is_inverse_of.output_len})",
-                             style={"color": "#7f8c8d", "fontSize": "12px"})
-                ], style={"marginBottom": "6px"}))
+                content.append(
+                    html.Div(
+                        [
+                            html.Span(
+                                "Inverse of: ", style={"fontWeight": "600", "color": "#34495e"}
+                            ),
+                            html.Span(
+                                f"Node {node.is_inverse_of.node_id} ", style={"color": "#3498db"}
+                            ),
+                            html.Span(
+                                f"(slot {node.is_inverse_of.output_slot}, len {node.is_inverse_of.output_len})",
+                                style={"color": "#7f8c8d", "fontSize": "12px"},
+                            ),
+                        ],
+                        style={"marginBottom": "6px"},
+                    )
+                )
 
             if node.extra:
-                content.append(html.Div([
-                    html.Span("📝 ", style={"fontSize": "14px"}),
-                    html.Span("Extra Properties", style={"fontWeight": "600", "color": "#8e44ad"})
-                ], style={"marginTop": "10px", "marginBottom": "6px"}))
+                content.append(
+                    html.Div(
+                        [
+                            html.Span("📝 ", style={"fontSize": "14px"}),
+                            html.Span(
+                                "Extra Properties", style={"fontWeight": "600", "color": "#8e44ad"}
+                            ),
+                        ],
+                        style={"marginTop": "10px", "marginBottom": "6px"},
+                    )
+                )
 
                 for key, value in node.extra.items():
-                    content.append(html.Div([
-                        html.Span(f"  {key}: ", style={"fontWeight": "600", "color": "#2c3e50"}),
-                        html.Span(str(value), style={"color": "#27ae60", "fontFamily": "monospace"})
-                    ], style={"marginLeft": "10px", "marginBottom": "4px"}))
+                    content.append(
+                        html.Div(
+                            [
+                                html.Span(
+                                    f"  {key}: ", style={"fontWeight": "600", "color": "#2c3e50"}
+                                ),
+                                html.Span(
+                                    str(value),
+                                    style={"color": "#27ae60", "fontFamily": "monospace"},
+                                ),
+                            ],
+                            style={"marginLeft": "10px", "marginBottom": "4px"},
+                        )
+                    )
 
             return html.Div(content)
 
         def format_edge(edge):
             content = [
-                html.Div([
-                    html.Span("🔗 ", style={"fontSize": "16px"}),
-                    html.Span(f"EDGE {edge.source_id} → {edge.target_id}",
-                             style={"fontWeight": "bold", "color": "#2c3e50", "fontSize": "15px"})
-                ], style={"marginBottom": "8px"})
+                html.Div(
+                    [
+                        html.Span("🔗 ", style={"fontSize": "16px"}),
+                        html.Span(
+                            f"EDGE {edge.source_id} → {edge.target_id}",
+                            style={"fontWeight": "bold", "color": "#2c3e50", "fontSize": "15px"},
+                        ),
+                    ],
+                    style={"marginBottom": "8px"},
+                )
             ]
 
             if edge.output_slot != 0 or edge.input_slot != 0:
-                content.append(html.Div([
-                    html.Span("Slots: ", style={"fontWeight": "600", "color": "#34495e"}),
-                    html.Span(f"{edge.output_slot} → {edge.input_slot}",
-                             style={"color": "#e67e22", "fontFamily": "monospace"})
-                ], style={"marginBottom": "6px"}))
+                content.append(
+                    html.Div(
+                        [
+                            html.Span("Slots: ", style={"fontWeight": "600", "color": "#34495e"}),
+                            html.Span(
+                                f"{edge.output_slot} → {edge.input_slot}",
+                                style={"color": "#e67e22", "fontFamily": "monospace"},
+                            ),
+                        ],
+                        style={"marginBottom": "6px"},
+                    )
+                )
 
             if edge.content_type:
-                content.append(html.Div([
-                    html.Span("Content Type: ", style={"fontWeight": "600", "color": "#34495e"}),
-                    html.Span(edge.content_type, style={"color": "#9b59b6", "fontWeight": "500"})
-                ], style={"marginBottom": "6px"}))
+                content.append(
+                    html.Div(
+                        [
+                            html.Span(
+                                "Content Type: ", style={"fontWeight": "600", "color": "#34495e"}
+                            ),
+                            html.Span(
+                                edge.content_type, style={"color": "#9b59b6", "fontWeight": "500"}
+                            ),
+                        ],
+                        style={"marginBottom": "6px"},
+                    )
+                )
 
             if edge.content:
-                content.append(html.Div([
-                    html.Span("🧬 ", style={"fontSize": "14px"}),
-                    html.Span(f"Content ({len(edge.content)} parts)",
-                             style={"fontWeight": "600", "color": "#16a085"})
-                ], style={"marginTop": "10px", "marginBottom": "6px"}))
+                content.append(
+                    html.Div(
+                        [
+                            html.Span("🧬 ", style={"fontSize": "14px"}),
+                            html.Span(
+                                f"Content ({len(edge.content)} parts)",
+                                style={"fontWeight": "600", "color": "#16a085"},
+                            ),
+                        ],
+                        style={"marginTop": "10px", "marginBottom": "6px"},
+                    )
+                )
 
                 for part in edge.content:
-                    content.append(html.Div([
-                        html.Span("  • ", style={"color": "#95a5a6"}),
-                        html.Span(part.name, style={"fontWeight": "500", "color": "#2c3e50"}),
-                        html.Span(f" ({part.category})", style={"color": "#7f8c8d", "fontSize": "12px"})
-                    ], style={"marginLeft": "10px", "marginBottom": "3px"}))
+                    content.append(
+                        html.Div(
+                            [
+                                html.Span("  • ", style={"color": "#95a5a6"}),
+                                html.Span(
+                                    part.name, style={"fontWeight": "500", "color": "#2c3e50"}
+                                ),
+                                html.Span(
+                                    f" ({part.category})",
+                                    style={"color": "#7f8c8d", "fontSize": "12px"},
+                                ),
+                            ],
+                            style={"marginLeft": "10px", "marginBottom": "3px"},
+                        )
+                    )
 
             if edge.content_embedding_names:
-                content.append(html.Div([
-                    html.Span("🏷️ ", style={"fontSize": "14px"}),
-                    html.Span("Embeddings", style={"fontWeight": "600", "color": "#d35400"})
-                ], style={"marginTop": "10px", "marginBottom": "6px"}))
+                content.append(
+                    html.Div(
+                        [
+                            html.Span("🏷️ ", style={"fontSize": "14px"}),
+                            html.Span(
+                                "Embeddings", style={"fontWeight": "600", "color": "#d35400"}
+                            ),
+                        ],
+                        style={"marginTop": "10px", "marginBottom": "6px"},
+                    )
+                )
 
                 for key, value in edge.content_embedding_names.items():
-                    val_str = value[0] if isinstance(value, tuple) and len(value) == 1 else str(value)
-                    content.append(html.Div([
-                        html.Span(f"  {key}: ", style={"fontWeight": "600", "color": "#2c3e50"}),
-                        html.Span(val_str, style={"color": "#f39c12", "fontFamily": "monospace"})
-                    ], style={"marginLeft": "10px", "marginBottom": "4px"}))
+                    val_str = (
+                        value[0] if isinstance(value, tuple) and len(value) == 1 else str(value)
+                    )
+                    content.append(
+                        html.Div(
+                            [
+                                html.Span(
+                                    f"  {key}: ", style={"fontWeight": "600", "color": "#2c3e50"}
+                                ),
+                                html.Span(
+                                    val_str, style={"color": "#f39c12", "fontFamily": "monospace"}
+                                ),
+                            ],
+                            style={"marginLeft": "10px", "marginBottom": "4px"},
+                        )
+                    )
 
             return html.Div(content)
 
         if selected_nodes:
             node_id = int(selected_nodes[0]["id"])
-            node = next((n for n in graph.nodes if n.node_id == node_id), None)
+            node = next((n for n in graph.nodes.values() if n.node_id == node_id), None)
             return format_node(node) if node else f"NODE {node_id} not found"
         elif selected_edges:
             edge_data = selected_edges[0]
             source_id = int(edge_data["source"])
             target_id = int(edge_data["target"])
-            edge = next((e for e in graph.edges if e.source_id == source_id and e.target_id == target_id), None)
+            edge = next(
+                (
+                    e
+                    for e in graph.edges.values()
+                    if e.source_id == source_id and e.target_id == target_id
+                ),
+                None,
+            )
             return format_edge(edge) if edge else f"EDGE {source_id} → {target_id} not found"
         else:
-            return html.Div("Click a node or edge to see details",
-                          style={"color": "#7f8c8d", "fontStyle": "italic"})
+            return html.Div(
+                "Click a node or edge to see details",
+                style={"color": "#7f8c8d", "fontStyle": "italic"},
+            )
 
     if auto_open:
         threading.Timer(1, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
