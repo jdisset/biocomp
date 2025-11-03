@@ -267,6 +267,21 @@ class CoTransfection(BaseModel):
         """Check if this cotx specifies a bias (not a normal input)"""
         return self.fluo_bias is not None
 
+    def get_tu_ratio(self, tu_index: int | str) -> Optional[Union[NumRange, float]]:
+        """Get the ratio for a specific TU by index or name"""
+        if isinstance(tu_index, str):
+            tu_indices = [i for i, tu in enumerate(self.units) if tu.name == tu_index]
+            if not tu_indices:
+                raise ValueError(f"TU with name '{tu_index}' not found in cotx '{self.name}'")
+            if len(tu_indices) > 1:
+                raise ValueError(f"Multiple TUs with name '{tu_index}' found in cotx '{self.name}'")
+            tu_index = tu_indices[0]
+        if self.ratios is None:
+            return 1.0
+        if tu_index < 0 or tu_index >= len(self.units):
+            raise IndexError(f"TU index {tu_index} out of range for cotx '{self.name}'")
+        return self.ratios[tu_index]
+
     def __hash__(self):
         return hash(str(self.model_dump()))
 
