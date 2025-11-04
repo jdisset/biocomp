@@ -2,6 +2,7 @@
 
 Run this script to create or update the golden reference file.
 """
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -13,10 +14,13 @@ from biocomp.compute import ComputeStack
 from biocomp.recipe import Recipe, CoTransfection, FluoIntensity, NumRange
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 import biocomp.biorules as br
+
 # Import the make_units function and other dependencies from test file
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent))
 from test_declarative_recipes import make_units, COLORS, ERNS
+
 
 def main():
     lib = load_lib()
@@ -51,8 +55,9 @@ def main():
         fixed_key = jax.random.PRNGKey(12345)
         params = stack.init(fixed_key)
 
-        # Create fixed inputs
-        inputs = jnp.ones((2,))
+        # Create fixed inputs (size based on actual number of input nodes, not bias nodes)
+        nb_inputs = networks[0].nb_inputs
+        inputs = jnp.ones((nb_inputs,)) if nb_inputs > 0 else jnp.array([])
         n_random_vars = params["global/number_of_random_variables"]
         random_vars = jax.random.normal(fixed_key, (n_random_vars,))
 
@@ -76,6 +81,7 @@ def main():
         print(f"  stack_result: {stack_result}")
         print(f"  output shape: {stack_result.shape}")
         print(f"  nb_inputs: {networks[0].nb_inputs}")
+
 
 if __name__ == "__main__":
     main()

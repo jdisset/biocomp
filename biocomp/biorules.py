@@ -225,7 +225,7 @@ add_bias_nodes = GraphRewritingRule(
             properties={
                 "type": "bias",
                 "role": "fluo_bias",
-                "fluo_bias_data": "{{ top_node.fluo_bias }}",  # Store the entire fluo_bias dict
+                "fluo_bias_data": "{{ top_node.fluo_bias }}",
             },
         ),
         AddEdge(
@@ -592,7 +592,7 @@ INVERSION_RULES = [
 
 def sort_output_edges(graph):
     """Sort incoming edges to output nodes alphabetically by protein name for deterministic ordering"""
-    from biocomp.graphengine import GraphState, GraphEdge
+    from biocomp.graphengine import GraphEdge
 
     output_nodes = [n for n in graph.nodes.values() if n.node_type == "output"]
 

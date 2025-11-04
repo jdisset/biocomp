@@ -547,10 +547,11 @@ class ComputeStack:
                 assert key.node_id in self.networks[key.network_id].compute_graph.nodes, (
                     f"Invalid node_id {key.node_id} in network {key.network_id}"
                 )
-        # verify first layer is input
         first_key = self.layers[0].nodes[0]
         first_node = self.networks[first_key.network_id].compute_graph.nodes[first_key.node_id]
-        assert first_node.node_type == "input", f"First node is not input: {first_node.node_type}"
+        assert first_node.node_type in ("input", "bias"), (
+            f"First node must be input or bias: {first_node.node_type}"
+        )
 
     def get_all_node_keys(self) -> list[StackNode]:
         """Get all NodeKeys from all layers"""

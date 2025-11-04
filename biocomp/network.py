@@ -513,15 +513,15 @@ class Network(BaseModel):
                     }
         return None
 
-    def _parse_fluo_bias_data(self, data_str):
-        """Parse fluo_bias_data from string to dict"""
-        import ast
-        if not data_str:
+    def _parse_fluo_bias_data(self, data):
+        if not data:
             return None
-        if isinstance(data_str, dict):
-            return data_str
+        if isinstance(data, dict):
+            return data
+        import ast
+
         try:
-            return ast.literal_eval(data_str)
+            return ast.literal_eval(data) if isinstance(data, str) else None
         except (ValueError, SyntaxError):
             return None
 

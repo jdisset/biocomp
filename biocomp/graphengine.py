@@ -500,69 +500,30 @@ class EdgeProxy(TemplateProxy):
 
 
 def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEdge]]) -> Any:
+    """Expand template strings, preserving types for simple expressions.
+
+    Simple expressions (exactly "{{ expr }}") are evaluated as Python → preserves types.
+    Complex templates with text use Jinja2 → produces strings.
+    """
     if not isinstance(template_str, str) or "{{" not in template_str:
         return template_str
-
-    if "+" in template_str and all(
-        p.strip().split(".")[0] in match
-        for p in template_str.replace("{{", "").replace("}}", "").split("+")
-    ):
-        parts = [p.strip() for p in template_str.replace("{{", "").replace("}}", "").split("+")]
-        result = []
-        for part_str in parts:
-            var, attr = part_str.split(".")
-            proxy = (
-                NodeProxy(match[var])
-                if isinstance(match[var], GraphNode)
-                else EdgeProxy(match[var])
-            )
-            # First try to get raw value directly from the object
-            raw_value = getattr(proxy._obj, attr, None)
-            if raw_value is not None:
-                val = raw_value
-            else:
-                # Fall back to proxy (which might do string conversion)
-                val = getattr(proxy, attr)
-
-            # If the value is a string that looks like a list, try to parse it
-            if isinstance(val, str) and val.startswith("[") and val.endswith("]"):
-                try:
-                    parsed_val = eval(val)
-                    if isinstance(parsed_val, list):
-                        val = parsed_val
-                except (SyntaxError, NameError, ValueError):
-                    pass
-
-            if isinstance(val, list):
-                result.extend(val)
-            else:
-                result.append(val)
-        return result
-
-    # Check if template is a simple variable access like "{{var.attr}}"
-    # If so, return the value directly without string conversion
-    simple_var_pattern = template_str.strip()
-    if simple_var_pattern.startswith("{{") and simple_var_pattern.endswith("}}"):
-        var_expr = simple_var_pattern[2:-2].strip()
-        if "." in var_expr and var_expr.count(".") == 1:
-            var_name, attr_name = var_expr.split(".", 1)
-            if var_name in match:
-                proxy = (
-                    NodeProxy(match[var_name])
-                    if isinstance(match[var_name], GraphNode)
-                    else EdgeProxy(match[var_name])
-                )
-                raw_value = getattr(proxy._obj, attr_name, None)
-                if raw_value is not None:
-                    return raw_value
 
     context = {
         var_name: NodeProxy(obj) if isinstance(obj, GraphNode) else EdgeProxy(obj)
         for var_name, obj in match.items()
     }
-    jinja_template = _jinja_env.from_string(template_str)
-    rendered = jinja_template.render(**context)
-    return rendered
+
+    stripped = template_str.strip()
+
+    # simple expression "{{ expr }}" → direct eval preserves types
+    if stripped.startswith("{{") and stripped.endswith("}}") and stripped.count("{{") == 1:
+        expr = stripped[2:-2].strip()
+        try:
+            return eval(expr, {"__builtins__": {}}, {**context, **_jinja_env.globals})
+        except Exception:
+            pass
+
+    return _jinja_env.from_string(template_str).render(**context)
 
 
 def _process_match(
@@ -601,6 +562,7 @@ def _process_match(
                 expanded = expand_props(v)
             else:
                 expanded = expand_template(v, match_with_index)
+
             if debug:
                 print(f"      Template '{v}' -> {expanded} (type: {type(expanded)})")
             result[k] = expanded

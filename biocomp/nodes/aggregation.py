@@ -1,31 +1,13 @@
-from biocomp.jaxutils import flat_concat
 from biocomp.compute import StackNode, ComputeStack
 import jax
-from jax.tree_util import Partial as partial
 from jax.typing import ArrayLike
-from typing import Optional
 import jax.numpy as jnp
-from jax import vmap
 import numpy as np
-from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
+from biocomp.parameters import ArrayRef, ParameterTree
 from biocomp.nodeutils import (
     LayerInstance,
-    add_random_var_ids,
-    NON_GRAD_TAG,
-    get_prev_num_random_vars,
-    reference_forward_random_var_ids,
-    empty_prepare,
 )
 from biocomp.utils import get_logger
-from biocomp.neuralutils import (
-    ACTIVATION_FUNCTIONS,
-    INITIALIZERS,
-    DEFAULT_ACTIVATION,
-    DEFAULT_OUT_ACTIVATION,
-    DEFAULT_INITIALIZER,
-    dense_mlp,
-)
-import biocomp.quantization as qz
 
 
 PRNGKey = ArrayLike
@@ -43,7 +25,7 @@ def aggregation(
     **_,
 ) -> LayerInstance:
     assert len(input_shapes) == 1, f"Aggregation expects 1 input, got {len(input_shapes)}"
-    pname = "ratios"
+    PNAME = "ratios"
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey, **_):
         ratios = []
@@ -90,10 +72,7 @@ def aggregation(
 
         ratios = jnp.stack(ratios)
         assert ratios.shape == (len(nodelist), n_outputs), f"Invalid ratio shape {ratios.shape}"
-        params[f"{namespace}/{pname}"] = ratios
-
-        # Store ratio_ranges metadata for round-trip and commit
-        params.at(f"{namespace}/{pname}_ranges", ratio_ranges_list, tags=[NON_GRAD_TAG])
+        params[f"{namespace}/{PNAME}"] = ratios
 
     def apply(
         input: NDArray,
@@ -103,7 +82,7 @@ def aggregation(
         key: PRNGKey,
     ) -> tuple[ArrayLike, dict]:
         assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
-        ratios = params[f"{namespace}/{pname}"][node_id][:n_outputs]
+        ratios = params[f"{namespace}/{PNAME}"][node_id][:n_outputs]
         abs_ratios = jnp.abs(jnp.array(ratios))
         result = abs_ratios * input
         return result, {"ratios": ratios, "abs_ratios": abs_ratios, "n_outputs": n_outputs}
@@ -111,7 +90,7 @@ def aggregation(
     def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack = None, **_):
         for i, n in enumerate(nodelist):
             updt = {}
-            ratios = params[f"{namespace}/{pname}"][i]
+            ratios = params[f"{namespace}/{PNAME}"][i]
 
             # normalize absolute ratios so that the minimum is 1
             ratios_array = jnp.abs(jnp.array(ratios))  # use absolute values like in apply

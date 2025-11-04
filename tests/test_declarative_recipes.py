@@ -1354,14 +1354,14 @@ def test_bias_network_creates_bias_node(lib, bias_network):
         assert len(bias_nodes) == 1, "Should have exactly 1 bias node"
         assert len(numeric_nodes) == 0, "Should have NO numeric nodes"
 
-        # Check bias node properties (now stored in fluo_bias_data)
+        # Check bias node properties (now stored in fluo_bias_data as dict)
         bias = bias_nodes[0]
         assert bias.extra["role"] == "fluo_bias"
         assert "fluo_bias_data" in bias.extra
 
-        # Parse fluo_bias_data
-        import ast
-        fluo_data = ast.literal_eval(bias.extra["fluo_bias_data"])
+        # fluo_bias_data should be a dict, not a string
+        fluo_data = bias.extra["fluo_bias_data"]
+        assert isinstance(fluo_data, dict), f"Expected dict, got {type(fluo_data)}"
         assert fluo_data["tu_id"] == 0
         assert fluo_data["value"] == 100.0
         assert fluo_data["protein"] == "eBFP2"
@@ -1381,9 +1381,9 @@ def test_unlocked_bias_node_properties(lib, unlocked_bias_network):
         assert len(bias_nodes) == 1
 
         bias = bias_nodes[0]
-        # Value should be a dict with min/max for unlocked bias (now in fluo_bias_data)
-        import ast
-        fluo_data = ast.literal_eval(bias.extra["fluo_bias_data"])
+        # Value should be a dict with min/max for unlocked bias (now in fluo_bias_data as dict)
+        fluo_data = bias.extra["fluo_bias_data"]
+        assert isinstance(fluo_data, dict), f"Expected dict, got {type(fluo_data)}"
         value = fluo_data["value"]
         assert isinstance(value, dict)
         assert value["min"] == 50.0
