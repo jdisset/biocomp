@@ -3,8 +3,9 @@ from biocomp.graphengine import GraphState, GraphBuilder, InverseSpec
 
 
 def invert_all_paths(graph: GraphState, mode: str = "shortest") -> list[GraphState]:
-    numeric_nodes = [n for n in graph.nodes.values() if n.node_type == "numeric"]
-    if not numeric_nodes:
+    # Include both numeric and bias nodes for inversion
+    invertible_start_nodes = [n for n in graph.nodes.values() if n.node_type in ("numeric", "bias")]
+    if not invertible_start_nodes:
         return [graph]
 
     nodes_by_id = graph.nodes
@@ -15,7 +16,7 @@ def invert_all_paths(graph: GraphState, mode: str = "shortest") -> list[GraphSta
         outgoing.setdefault(edge.source_id, []).append((edge.target_id, edge.output_slot, edge.input_slot))
         incoming_count[edge.target_id] += 1
 
-    invertible_types = {"numeric", "aggregation", "source", "transcription", "translation"}
+    invertible_types = {"numeric", "bias", "aggregation", "source", "transcription", "translation"}
     is_invertible = lambda nid: nodes_by_id[nid].node_type in invertible_types and incoming_count[nid] <= 1
 
     def find_paths(start_id):
@@ -37,7 +38,7 @@ def invert_all_paths(graph: GraphState, mode: str = "shortest") -> list[GraphSta
         dfs(start_id, [], set())
         return paths
 
-    inv_paths = {n.node_id: find_paths(n.node_id) for n in numeric_nodes}
+    inv_paths = {n.node_id: find_paths(n.node_id) for n in invertible_start_nodes}
     inv_paths = {nid: paths for nid, paths in inv_paths.items() if paths}
 
     if not inv_paths:
@@ -51,16 +52,29 @@ def invert_all_paths(graph: GraphState, mode: str = "shortest") -> list[GraphSta
     results = []
     for path_combo in inversions:
         builder = GraphBuilder(graph)
-        for numeric_id, path in path_combo.items():
+        for start_node_id, path in path_combo.items():
             if len(path) <= 1:
                 continue
-            builder.delete_node(numeric_id)
+
+            original_node = nodes_by_id[start_node_id]
+            builder.delete_node(start_node_id)
             prev_id = path[1][0]
 
             for node_id, slot in path[1:]:
                 node = nodes_by_id[node_id]
                 if node.node_type == "output":
-                    inp_id = builder.add_node("input", extra={"input_from_output": slot, "input_position": len([n for n in builder.nodes.values() if n.node_type == "input"])})
+                    # Create input or bias node based on original type
+                    if original_node.node_type == "bias":
+                        inp_extra = {**original_node.extra, "input_from_output": slot}
+                        node_type = "bias"
+                    else:
+                        inp_extra = {
+                            "input_from_output": slot,
+                            "input_position": len([n for n in builder.nodes.values() if n.node_type == "input"])
+                        }
+                        node_type = "input"
+
+                    inp_id = builder.add_node(node_type, extra=inp_extra)
                     builder.add_edge(inp_id, prev_id, output_slot=0, input_slot=0)
                     break
 

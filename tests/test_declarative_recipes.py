@@ -1354,14 +1354,18 @@ def test_bias_network_creates_bias_node(lib, bias_network):
         assert len(bias_nodes) == 1, "Should have exactly 1 bias node"
         assert len(numeric_nodes) == 0, "Should have NO numeric nodes"
 
-        # Check bias node properties
-        # Note: Jinja2 templates convert values to strings, so we compare as strings
+        # Check bias node properties (now stored in fluo_bias_data)
         bias = bias_nodes[0]
         assert bias.extra["role"] == "fluo_bias"
-        assert int(bias.extra["tu_id"]) == 0
-        assert float(bias.extra["value"]) == 100.0
-        assert bias.extra["protein"] == "eBFP2"
-        assert bias.extra["units"] == "AU"
+        assert "fluo_bias_data" in bias.extra
+
+        # Parse fluo_bias_data
+        import ast
+        fluo_data = ast.literal_eval(bias.extra["fluo_bias_data"])
+        assert fluo_data["tu_id"] == 0
+        assert fluo_data["value"] == 100.0
+        assert fluo_data["protein"] == "eBFP2"
+        assert fluo_data["units"] == "AU"
 
 
 def test_unlocked_bias_node_properties(lib, unlocked_bias_network):
@@ -1377,11 +1381,10 @@ def test_unlocked_bias_node_properties(lib, unlocked_bias_network):
         assert len(bias_nodes) == 1
 
         bias = bias_nodes[0]
-        # Value should be a dict with min/max for unlocked bias
-        # Note: Jinja2 templates convert dicts to strings, so we parse it back
-        value = bias.extra["value"]
-        if isinstance(value, str):
-            value = eval(value)
+        # Value should be a dict with min/max for unlocked bias (now in fluo_bias_data)
+        import ast
+        fluo_data = ast.literal_eval(bias.extra["fluo_bias_data"])
+        value = fluo_data["value"]
         assert isinstance(value, dict)
         assert value["min"] == 50.0
         assert value["max"] == 200.0

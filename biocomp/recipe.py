@@ -267,8 +267,9 @@ class CoTransfection(BaseModel):
         """Check if this cotx specifies a bias (not a normal input)"""
         return self.fluo_bias is not None
 
-    def get_tu_ratio(self, tu_index: int | str) -> Optional[Union[NumRange, float]]:
-        """Get the ratio for a specific TU by index or name"""
+    def get_tu_ratio(self, tu_index: int | str, wrt: int | str) -> Optional[Union[NumRange, float]]:
+        """Get the ratio for a specific TU by index or name, optionally relative to another TU"""
+        rel_index = None
         if isinstance(tu_index, str):
             tu_indices = [i for i, tu in enumerate(self.units) if tu.name == tu_index]
             if not tu_indices:
@@ -276,11 +277,32 @@ class CoTransfection(BaseModel):
             if len(tu_indices) > 1:
                 raise ValueError(f"Multiple TUs with name '{tu_index}' found in cotx '{self.name}'")
             tu_index = tu_indices[0]
+        if isinstance(wrt, str):
+            wrt_indices = [i for i, tu in enumerate(self.units) if tu.name == wrt]
+            if not wrt_indices:
+                raise ValueError(f"TU with name '{wrt}' not found in cotx '{self.name}'")
+            if len(wrt_indices) > 1:
+                raise ValueError(f"Multiple TUs with name '{wrt}' found in cotx '{self.name}'")
+            rel_index = wrt_indices[0]
         if self.ratios is None:
             return 1.0
         if tu_index < 0 or tu_index >= len(self.units):
-            raise IndexError(f"TU index {tu_index} out of range for cotx '{self.name}'")
-        return self.ratios[tu_index]
+            return self.ratios[tu_index]
+        if rel_index is None:
+            wrt_ratio = 1.0
+        if rel_index < 0 or rel_index >= len(self.units):
+            raise IndexError(f"wrt index {rel_index} out of range for cotx '{self.name}'")
+        wrt_ratio = self.ratios[rel_index]
+        tu_ratio = self.ratios[tu_index]
+        max_wrt = wrt_ratio.max if isinstance(wrt_ratio, NumRange) else wrt_ratio
+        min_wrt = wrt_ratio.min if isinstance(wrt_ratio, NumRange) else wrt_ratio
+        if isinstance(tu_ratio, NumRange):
+            return NumRange(
+                min=(tu_ratio.min / max_wrt) if tu_ratio.min is not None else None,
+                max=(tu_ratio.max / min_wrt) if tu_ratio.max is not None else None,
+            )
+        else:
+            return tu_ratio / wrt_ratio
 
     def __hash__(self):
         return hash(str(self.model_dump()))

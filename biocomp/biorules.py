@@ -225,10 +225,7 @@ add_bias_nodes = GraphRewritingRule(
             properties={
                 "type": "bias",
                 "role": "fluo_bias",
-                "tu_id": "{{ top_node.fluo_bias['tu_id'] }}",
-                "value": "{{ top_node.fluo_bias['value'] }}",
-                "protein": "{{ top_node.fluo_bias['protein'] if top_node.fluo_bias['protein'] else None }}",
-                "units": "{{ top_node.fluo_bias['units'] if top_node.fluo_bias['units'] else 'AU' }}",
+                "fluo_bias_data": "{{ top_node.fluo_bias }}",  # Store the entire fluo_bias dict
             },
         ),
         AddEdge(

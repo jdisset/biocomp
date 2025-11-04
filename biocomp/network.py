@@ -456,17 +456,33 @@ class Network(BaseModel):
         """Find cotx group by traversing edges from bias node"""
         assert self.compute_graph is not None
 
-        # check outgoing edges for aggregation/source nodes
-        for edge in self.compute_graph.get_outgoing_edges(node.node_id):
-            target = self.compute_graph.nodes.get(edge.target_id)
-            if target and target.node_type in ["aggregation", "source"]:
-                return target.extra.get("cotx_group", "cotx_1")
+        # Traverse forward through inv_ nodes to find aggregation/source
+        current_id = node.node_id
+        visited = set()
+        while current_id not in visited:
+            visited.add(current_id)
+            current_node = self.compute_graph.nodes.get(current_id)
+            if not current_node:
+                break
 
-        # check incoming edges for inv_aggregation nodes
-        for edge in self.compute_graph.get_incoming_edges(node.node_id):
-            source = self.compute_graph.nodes.get(edge.source_id)
-            if source and source.node_type == "inv_aggregation":
-                return source.extra.get("cotx_group", "cotx_1")
+            # Check if we reached aggregation or source
+            if current_node.node_type in ["aggregation", "source"]:
+                return current_node.extra.get("cotx_group", "cotx_1")
+
+            # Check if we reached inv_aggregation (which has cotx_group from original)
+            if current_node.node_type == "inv_aggregation":
+                # Get the original aggregation node it inverts
+                if current_node.is_inverse_of:
+                    orig_node = self.compute_graph.nodes.get(current_node.is_inverse_of.node_id)
+                    if orig_node:
+                        return orig_node.extra.get("cotx_group", "cotx_1")
+                return current_node.extra.get("cotx_group", "cotx_1")
+
+            # Follow outgoing edges
+            outgoing = list(self.compute_graph.get_outgoing_edges(current_id))
+            if not outgoing:
+                break
+            current_id = outgoing[0].target_id
 
         return "cotx_1"
 
@@ -497,6 +513,36 @@ class Network(BaseModel):
                     }
         return None
 
+    def _parse_fluo_bias_data(self, data_str):
+        """Parse fluo_bias_data from string to dict"""
+        import ast
+        if not data_str:
+            return None
+        if isinstance(data_str, dict):
+            return data_str
+        try:
+            return ast.literal_eval(data_str)
+        except (ValueError, SyntaxError):
+            return None
+
+    def _create_fluo_intensity_from_dict(self, data: dict):
+        """Create FluoIntensity from parsed dict data"""
+        from biocomp.recipe import FluoIntensity
+
+        tu_id = data.get("tu_id", 0)
+        value = self._parse_value_to_numrange_or_float(data.get("value"))
+        protein = data.get("protein")
+        if protein in ["", "None", None]:
+            protein = None
+        units = data.get("units", "AU") or "AU"
+
+        return FluoIntensity(
+            tu_id=tu_id,
+            value=value if value is not None else 100.0,
+            protein=protein,
+            units=units,
+        )
+
     def _extract_bias_nodes(self) -> dict:
         """Extract bias nodes and reconstruct FluoIntensity objects for each cotx group"""
         from biocomp.recipe import FluoIntensity
@@ -505,40 +551,45 @@ class Network(BaseModel):
         assert self.compute_graph is not None
 
         for node in self.compute_graph.nodes.values():
-            if node.node_type == "bias" and node.extra.get("role") == "fluo_bias":
-                cotx_group = self._find_cotx_group_for_bias(node)
+            if node.node_type != "bias" or node.extra.get("role") != "fluo_bias":
+                continue
 
-                # extract bias info from node.extra
-                tu_id_str = node.extra.get("tu_id", "")
-                tu_id = 0
-                if tu_id_str and tu_id_str != "":
-                    try:
-                        tu_id = int(tu_id_str)
-                    except (ValueError, TypeError):
-                        pass
+            cotx_group = self._find_cotx_group_for_bias(node)
 
-                value_raw = node.extra.get("value")
-                value = self._parse_value_to_numrange_or_float(value_raw)
-                protein = node.extra.get("protein")
-                if protein in ["", "None"]:
-                    protein = None
-                units = node.extra.get("units", "AU") or "AU"
+            # Try new format first (fluo_bias_data dict)
+            fluo_bias_data = self._parse_fluo_bias_data(node.extra.get("fluo_bias_data"))
+            if fluo_bias_data:
+                bias_by_cotx[cotx_group] = self._create_fluo_intensity_from_dict(fluo_bias_data)
+                continue
 
-                # fallback to aggregation node if values are empty (match original logic)
-                if (not tu_id_str or tu_id_str == "") and (not value_raw or value_raw == ""):
-                    fallback = self._extract_bias_from_aggregation(node)
-                    if fallback:
-                        tu_id = fallback["tu_id"]
-                        value = fallback["value"]
-                        protein = fallback["protein"]
-                        units = fallback["units"]
+            # Fallback to old format (individual fields)
+            tu_id = 0
+            if tu_id_str := node.extra.get("tu_id", ""):
+                try:
+                    tu_id = int(tu_id_str)
+                except (ValueError, TypeError):
+                    pass
 
-                bias_by_cotx[cotx_group] = FluoIntensity(
-                    tu_id=tu_id,
-                    value=value if value is not None else 100.0,
-                    protein=protein,
-                    units=units,
-                )
+            value = self._parse_value_to_numrange_or_float(node.extra.get("value"))
+            protein = node.extra.get("protein")
+            if protein in ["", "None"]:
+                protein = None
+            units = node.extra.get("units", "AU") or "AU"
+
+            # Fallback to aggregation node if values are empty
+            if not tu_id_str and not node.extra.get("value"):
+                if fallback := self._extract_bias_from_aggregation(node):
+                    tu_id = fallback["tu_id"]
+                    value = fallback["value"]
+                    protein = fallback["protein"]
+                    units = fallback["units"]
+
+            bias_by_cotx[cotx_group] = FluoIntensity(
+                tu_id=tu_id,
+                value=value if value is not None else 100.0,
+                protein=protein,
+                units=units,
+            )
 
         return bias_by_cotx
 
