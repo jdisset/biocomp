@@ -57,24 +57,24 @@ def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.nda
     print(f"Input: {y0}")
 
     # ========== Layer 1: inv_translation (dummy inverse) ==========
-    # Dummy inverse: inner = mean([value, qrate, rv]) - (qrate + rv) / 3
-    #                outer = mean([inner×8, rv_extra]) - mean / 9
+    # Dummy inverse: inner = sum([value, qrate, rv]) - (qrate + rv)
+    #                outer = sum([inner×8, rv_extra]) - sum / 9
     concatinput = flat_concat(y0, qrate_tl, random_vars[0])
     print(f"Concat input inv_translation: {concatinput}")
-    inner_mean = jnp.mean(concatinput)
-    print(f"Inner mean inv_translation: {inner_mean}")
-    inner_val = inner_mean - (qrate_tl + random_vars[0]) / 3.0
+    inner_sum = jnp.sum(concatinput)
+    print(f"Inner sum inv_translation: {inner_sum}")
+    inner_val = inner_sum - (qrate_tl + random_vars[0])
     print(f"Inner val inv_translation: {inner_val}")
-    outer_mean = (inner_val * 8 + random_vars[1]) / 9.0
-    print(f"Outer mean inv_translation: {outer_mean}")
-    y1 = outer_mean - outer_mean / 9.0  # subtract mean/len where len=9
+    outer_sum = inner_val * 8 + random_vars[1]
+    print(f"Outer sum inv_translation: {outer_sum}")
+    y1 = outer_sum - outer_sum / 9.0  # subtract sum/len where len=9
     print(f"After inv_translation: {y1}")
 
     # ========== Layer 2: inv_transcription (dummy inverse) ==========
-    inner_mean = jnp.mean(jnp.array([y1, qrate_tc, random_vars[2]]))
-    inner_val = inner_mean - (qrate_tc + random_vars[2]) / 3.0
-    outer_mean = (inner_val * 8 + random_vars[3]) / 9.0
-    y2 = outer_mean - outer_mean / 9.0
+    inner_sum = jnp.sum(jnp.array([y1, qrate_tc, random_vars[2]]))
+    inner_val = inner_sum - (qrate_tc + random_vars[2])
+    outer_sum = inner_val * 8 + random_vars[3]
+    y2 = outer_sum - outer_sum / 9.0
     print(f"After inv_transcription: {y2}")
 
     # ========== Layer 3: inv_source (position 0) ==========
@@ -86,17 +86,17 @@ def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.nda
     y4 = y3
 
     # ========== Layer 5: transcription (dummy forward) ==========
-    # Dummy forward: inner = mean([value, qrate, rv])
-    #                outer = mean([inner×8, rv_extra])
+    # Dummy forward: inner = sum([value, qrate, rv])
+    #                outer = sum([inner×8, rv_extra])
     # Uses random_vars[2] and [3] (shared with inverse)
-    inner_mean = jnp.mean(jnp.array([y4, qrate_tc, random_vars[2]]))
-    y5 = (inner_mean * 8 + random_vars[3]) / 9.0
+    inner_sum = jnp.sum(jnp.array([y4, qrate_tc, random_vars[2]]))
+    y5 = inner_sum * 8 + random_vars[3]
     print(f"After transcription: {y5}")
 
     # ========== Layer 6: translation (dummy forward) ==========
     # Uses random_vars[0] and [1] (shared with inverse)
-    inner_mean = jnp.mean(jnp.array([y5, qrate_tl, random_vars[0]]))
-    y6 = (inner_mean * 8 + random_vars[1]) / 9.0
+    inner_sum = jnp.sum(jnp.array([y5, qrate_tl, random_vars[0]]))
+    y6 = inner_sum * 8 + random_vars[1]
     print(f"After translation: {y6}")
 
     # ========== Layer 7: output ==========
@@ -142,20 +142,20 @@ def manual_simple_two_reporters(params: ParameterTree, X, random_vars: jnp.ndarr
 
     # ========== Layer 1: inv_translation (slot 0) ==========
     # Uses random_vars[0] and [1] (shared with translation node 0)
-    # Dummy inverse: inner = mean([value, qrate, rv]) - (qrate + rv) / 3
-    #                outer = mean([inner×8, rv_extra]) - mean / 9
+    # Dummy inverse: inner = sum([value, qrate, rv]) - (qrate + rv)
+    #                outer = sum([inner×8, rv_extra]) - sum / 9
     concatinput = flat_concat(y0, qrate_tl, random_vars[0])
-    inner_mean = jnp.mean(concatinput)
-    inner_val = inner_mean - (qrate_tl + random_vars[0]) / 3.0
-    outer_mean = (inner_val * 8 + random_vars[1]) / 9.0
-    y1 = outer_mean - outer_mean / 9.0
+    inner_sum = jnp.sum(concatinput)
+    inner_val = inner_sum - (qrate_tl + random_vars[0])
+    outer_sum = inner_val * 8 + random_vars[1]
+    y1 = outer_sum - outer_sum / 9.0
 
     # ========== Layer 2: inv_transcription (slot 0) ==========
     # Uses random_vars[4] and [5] (shared with transcription node 0)
-    inner_mean = jnp.mean(jnp.array([y1, qrate_tc, random_vars[4]]))
-    inner_val = inner_mean - (qrate_tc + random_vars[4]) / 3.0
-    outer_mean = (inner_val * 8 + random_vars[5]) / 9.0
-    y2 = outer_mean - outer_mean / 9.0
+    inner_sum = jnp.sum(jnp.array([y1, qrate_tc, random_vars[4]]))
+    inner_val = inner_sum - (qrate_tc + random_vars[4])
+    outer_sum = inner_val * 8 + random_vars[5]
+    y2 = outer_sum - outer_sum / 9.0
 
     # ========== Layer 3: inv_source (position 0) ==========
     # Divides by 0.9^0 = 1.0 (passthrough)
@@ -177,27 +177,27 @@ def manual_simple_two_reporters(params: ParameterTree, X, random_vars: jnp.ndarr
 
     # ========== Layer 7: transcription (2 nodes) ==========
     # Node 0 uses random_vars[4,5], Node 1 uses random_vars[6,7]
-    # Dummy forward: inner = mean([value, qrate, rv])
-    #                outer = mean([inner×8, rv_extra])
+    # Dummy forward: inner = sum([value, qrate, rv])
+    #                outer = sum([inner×8, rv_extra])
 
     # Transcription node 0
-    inner_mean_0 = jnp.mean(jnp.array([y6_0, qrate_tc, random_vars[4]]))
-    y7_0 = (inner_mean_0 * 8 + random_vars[5]) / 9.0
+    inner_sum_0 = jnp.sum(jnp.array([y6_0, qrate_tc, random_vars[4]]))
+    y7_0 = inner_sum_0 * 8 + random_vars[5]
 
     # Transcription node 1
-    inner_mean_1 = jnp.mean(jnp.array([y6_1, qrate_tc, random_vars[6]]))
-    y7_1 = (inner_mean_1 * 8 + random_vars[7]) / 9.0
+    inner_sum_1 = jnp.sum(jnp.array([y6_1, qrate_tc, random_vars[6]]))
+    y7_1 = inner_sum_1 * 8 + random_vars[7]
 
     # ========== Layer 8: translation (2 nodes) ==========
     # Node 0 uses random_vars[0,1], Node 1 uses random_vars[2,3]
 
     # Translation node 0
-    inner_mean_0 = jnp.mean(jnp.array([y7_0, qrate_tl, random_vars[0]]))
-    y8_0 = (inner_mean_0 * 8 + random_vars[1]) / 9.0
+    inner_sum_0 = jnp.sum(jnp.array([y7_0, qrate_tl, random_vars[0]]))
+    y8_0 = inner_sum_0 * 8 + random_vars[1]
 
     # Translation node 1
-    inner_mean_1 = jnp.mean(jnp.array([y7_1, qrate_tl, random_vars[2]]))
-    y8_1 = (inner_mean_1 * 8 + random_vars[3]) / 9.0
+    inner_sum_1 = jnp.sum(jnp.array([y7_1, qrate_tl, random_vars[2]]))
+    y8_1 = inner_sum_1 * 8 + random_vars[3]
 
     # ========== Layer 9: output ==========
     return jnp.array([y8_0, y8_1])
@@ -347,17 +347,17 @@ def manual_simple_single_ern(params: ParameterTree, X, random_vars: jnp.ndarray,
     # ========== Layer 1: inv_translation ==========
     # Shares random_vars with translation node 1 (layer 8): [5,6]
     concatinput = flat_concat(y0, qrate_tl, random_vars[5])
-    inner_mean = jnp.mean(concatinput)
-    inner_val = inner_mean - (qrate_tl + random_vars[5]) / 3.0
-    outer_mean = (inner_val * 8 + random_vars[6]) / 9.0
-    y1 = outer_mean - outer_mean / 9.0
+    inner_sum = jnp.sum(concatinput)
+    inner_val = inner_sum - (qrate_tl + random_vars[5])
+    outer_sum = inner_val * 8 + random_vars[6]
+    y1 = outer_sum - outer_sum / 9.0
 
     # ========== Layer 2: inv_transcription ==========
     # Shares random_vars with transcription node 2 (layer 7): [11,12]
-    inner_mean = jnp.mean(jnp.array([y1, qrate_tc, random_vars[11]]))
-    inner_val = inner_mean - (qrate_tc + random_vars[11]) / 3.0
-    outer_mean = (inner_val * 8 + random_vars[12]) / 9.0
-    y2 = outer_mean - outer_mean / 9.0
+    inner_sum = jnp.sum(jnp.array([y1, qrate_tc, random_vars[11]]))
+    inner_val = inner_sum - (qrate_tc + random_vars[11])
+    outer_sum = inner_val * 8 + random_vars[12]
+    y2 = outer_sum - outer_sum / 9.0
 
     # ========== Layer 3: inv_source (position 0) ==========
     y3 = y2  # passthrough (÷1.0)
@@ -374,13 +374,13 @@ def manual_simple_single_ern(params: ParameterTree, X, random_vars: jnp.ndarray,
 
     # ========== Layer 7: transcription 2 ==========
     # Node 2 uses random_vars[11,12]
-    inner_mean = jnp.mean(jnp.array([y6_2, qrate_tc, random_vars[11]]))
-    y7_2 = (inner_mean * 8 + random_vars[12]) / 9.0
+    inner_sum = jnp.sum(jnp.array([y6_2, qrate_tc, random_vars[11]]))
+    y7_2 = inner_sum * 8 + random_vars[12]
 
     # ========== Layer 8: translation (node 1) ==========
     # Node 1 uses random_vars[5,6]
-    inner_mean = jnp.mean(jnp.array([y7_2, qrate_tl, random_vars[5]]))
-    y8_1 = (inner_mean * 8 + random_vars[6]) / 9.0
+    inner_sum = jnp.sum(jnp.array([y7_2, qrate_tl, random_vars[5]]))
+    y8_1 = inner_sum * 8 + random_vars[6]
 
     # ========== Layer 11: output (slot 1 = mNeonGreen) ==========
     return y8_1

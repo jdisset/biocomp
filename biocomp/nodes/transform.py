@@ -121,8 +121,8 @@ def transform_nn(
                 name=f"NN/{shared_layer_name}/inner",
             )
         )
-        if dummy and is_inverse:  # we subtract the normalized embedding and random_var
-            out = out - ((rate_embedding + random_var) / len(inputs))
+        if dummy and is_inverse:  # we subtract the summed embedding and random_var
+            out = out - (rate_embedding + random_var)
 
         assert out.shape == (inner_outsize,)
 
@@ -246,8 +246,8 @@ def transform_nn(
                 activation=inner_activation,
             )
         )
-        if dummy and is_inverse:  # we subtract the normalized embedding and random_var
-            out = out - jnp.mean(inner_out) / len(inner_out)
+        if dummy and is_inverse:  # we subtract to maintain 8/9 ratio
+            out = out - jnp.sum(inner_out) / len(inner_out)
         assert out.shape == (1,), f"Invalid outer output shape {out.shape}"
         return out
 
@@ -296,14 +296,14 @@ def transform_nn(
         ans = outer(inner_out, params, k2)
 
         # residual connection
-        input_mean = jnp.mean(val, axis=0)
+        input_sum = jnp.sum(val, axis=0)
         if not dummy:
             alpha = params[f"shared/{shared_layer_name}/residual_alpha"]
             beta = params[f"shared/{shared_layer_name}/residual_beta"]
             # apply softmax normalization to alpha and beta
             alpha_norm = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
             beta_norm = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
-            final_output = alpha_norm * input_mean + beta_norm * ans
+            final_output = alpha_norm * input_sum + beta_norm * ans
         else:
             final_output = ans
             alpha_norm = jnp.array(0.0)
@@ -315,7 +315,7 @@ def transform_nn(
             "quantized_rates": qrates,
             "inner_output": inner_out,
             "outer_output": ans,
-            "input_mean": input_mean,
+            "input_sum": input_sum,
             "alpha_norm": alpha_norm,
             "beta_norm": beta_norm,
             "is_inverse": is_inverse,

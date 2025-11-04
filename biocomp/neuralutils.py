@@ -172,7 +172,7 @@ def dummy_mlp(
     name: str,
     activation: Callable[[ArrayLike], ArrayLike],
 ):
-    """A dummy non-neural module that just returns the mean of the input repeated to match output size."""
+    """A dummy non-neural module that just returns the sum of the input repeated to match output size."""
 
     assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
     assert isinstance(depth, int) and depth >= 1, (
@@ -185,7 +185,7 @@ def dummy_mlp(
         f"In {name}: output_s should be a positive integer."
     )
 
-    mean_val = jnp.mean(input_values) if input_values.shape != () else input_values
-    res = jnp.full((output_s,), mean_val)
+    sum_val = jnp.sum(input_values) if input_values.shape != () else input_values
+    res = jnp.full((output_s,), sum_val)
     assert res.shape == (output_s,), f"In {name}: {res.shape} != {(output_s,)}"
     return res

@@ -105,14 +105,14 @@ def sequestron_ERN(
         )
 
         # add residual connections
-        neg_mean = jnp.mean(neg)
-        pos_mean = jnp.mean(pos)
+        neg_sum = jnp.sum(neg)
+        pos_sum = jnp.sum(pos)
         alpha = param_f(f"{shared_layer_name}/residual_alpha", init_f=lambda: jnp.array(alpha_init))
         beta = param_f(f"{shared_layer_name}/residual_beta", init_f=lambda: jnp.array(beta_init))
         # apply softmax normalization to alpha and beta
         alpha = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
         beta = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
-        out = alpha * (pos_mean - neg_mean) + beta * res
+        out = alpha * (pos_sum - neg_sum) + beta * res
         return out
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
@@ -220,7 +220,7 @@ def sequestron_ERN(
 
         # calculate input difference for debug
         neg_val, pos_val = values
-        input_diff = jnp.mean(pos_val) - jnp.mean(neg_val)
+        input_diff = jnp.sum(pos_val) - jnp.sum(neg_val)
 
         if dummy:
             result = input_diff * (0.9**node_layer_id)  # just a dummy decreasing function
