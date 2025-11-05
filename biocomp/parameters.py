@@ -650,8 +650,8 @@ class ArrayRef:
 
     def __repr__(self):
         r = f"RefArray from {len(self.paths)} pointed arrays:\n"
-        for a, p, i in self.map:
-            r += f"* {self.paths[a]}: ({len(i[0])} elmts)\n"
+        for a, p, i in self.map:  # a: array num, p: positions in ref array, i: indices in array
+            r += f"* {self.paths[a]}: ({len(i[0])} elmts: positions {p}\n"
         return r
 
     def push_back(self, array_path, id):
