@@ -755,12 +755,10 @@ def complex_twolayers_design_network(lib):
             name=f"two_and_one ({ern_names})",
             content=[
                 CoTransfection(
-                    name="x1",
-                    units=make_units("x1", erns=erns),
+                    name="x1", units=make_units("x1", erns=erns), ratios=[1, 2, 3, 4, 5, 6, 7, 8]
                 ),
                 CoTransfection(
-                    name="x2",
-                    units=make_units("x2", erns=erns),
+                    name="x2", units=make_units("x2", erns=erns), ratios=[8, 7, 6, 5, 4, 3, 2, 1]
                 ),
                 CoTransfection(
                     name="b",
