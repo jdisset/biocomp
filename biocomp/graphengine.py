@@ -78,7 +78,7 @@ class GraphState(BaseModel):
     def get_edge(
         self, source_id: int, target_id: int, from_output_slot: int = 0, to_input_slot: int = 0
     ) -> Optional[GraphEdge]:
-        return self.edges.get((source_id, target_id, output_slot, to_input_slot))
+        return self.edges.get((source_id, target_id, from_output_slot, to_input_slot))
 
     def get_outgoing_edges(self, node_id: int) -> list[GraphEdge]:
         """Returns the *sorted* list of outgoing edges from the given node."""
@@ -400,8 +400,7 @@ def find_matches(
                 )
 
         if rule.query.where_filter_function:
-            context = {var: NodeProxy(node) for var, node in assignment.items()}
-            if not eval(rule.query.where_filter_function, {}, context):
+            if not eval(rule.query.where_filter_function, {}, assignment):
                 return False
 
         return all(check_edge_exists(c, True) for c in rule.query.where_connected) and all(
@@ -487,55 +486,30 @@ def find_index(lst, item):
     return lst.index(item)
 
 
-class TemplateProxy:
-    def __init__(self, obj: Any, attr_map: Dict[str, str] = None, fallback_dict: str = None):
-        self._obj, self._attr_map, self._fallback = obj, attr_map or {}, fallback_dict
-
-    def __getattr__(self, name):
-        if hasattr(self._obj, name):
-            return getattr(self._obj, name)
-        if name in self._attr_map and hasattr(self._obj, self._attr_map[name]):
-            return getattr(self._obj, self._attr_map[name])
-        if self._fallback and hasattr(self._obj, self._fallback):
-            fallback_data = getattr(self._obj, self._fallback)
-            if isinstance(fallback_data, dict) and name in fallback_data:
-                return fallback_data.get(name)
-        return None
-
-
-class NodeProxy(TemplateProxy):
-    def __init__(self, node: GraphNode):
-        super().__init__(node, {"type": "node_type"}, "extra")
-
-
-class EdgeProxy(TemplateProxy):
-    def __init__(self, edge: GraphEdge):
-        super().__init__(edge, fallback_dict="content_embedding_names")
-
-    @property
-    def content(self):
-        return [part.name for part in self._obj.content]
 
 
 def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEdge]]) -> Any:
     """Expand template strings, preserving types for simple expressions.
-    Simple expressions (exactly "{{ expr }}") are evaluated as Python → preserves types.
+
+    Only supports simple expressions of the form "{{ expr }}" where the entire string
+    is a single template expression. The expression is evaluated as Python code with
+    match variables available. Multi-part string interpolation is NOT supported.
+
+    Examples:
+        "{{ node.node_type }}" -> evaluates to the node type
+        "{{ len(node.extra.get('members', [])) }}" -> evaluates to integer
+        "{{ node.extra.get('value') }}_suffix" -> NOT SUPPORTED (raises ValueError)
     """
     if not isinstance(template_str, str) or "{{" not in template_str:
         return template_str
 
-    context = {
-        var_name: NodeProxy(obj) if isinstance(obj, GraphNode) else EdgeProxy(obj)
-        for var_name, obj in match.items()
-    }
-
     stripped = template_str.strip()
     if stripped.startswith("{{") and stripped.endswith("}}") and stripped.count("{{") == 1:
         expr = stripped[2:-2].strip()
-        res = eval(expr, {**context})
+        res = eval(expr, {**match})
         if "len" in expr:
             print(
-                f"      Evaluated len() in template '{template_str}' -> {res}. Context is {context}"
+                f"      Evaluated len() in template '{template_str}' -> {res}. Context is {match}"
             )
         return res
     else:
