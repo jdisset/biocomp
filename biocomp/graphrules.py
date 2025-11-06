@@ -150,6 +150,12 @@ class SetProperties(ActionBase):
     properties: dict[str, Any]  # dictionary of properties to set. Also supports templating.
 
 
+class DeleteProperties(ActionBase):
+    action_type: Literal["delete_properties"] = "delete_properties"
+    node_var: str  # name of the variable (from match or a new node) to modify.
+    property_keys: list[str]  # list of property keys to delete.
+
+
 class DeleteNode(ActionBase):
     action_type: Literal["delete_node"] = "delete_node"
     node_var: str  # the variable name of the node to delete from the match.
@@ -203,6 +209,7 @@ AnyAction = Annotated[
         RewireEdgesTo,
         EditEdge,
         CopyEdge,
+        DeleteProperties,
     ],
     Field(discriminator="action_type"),
 ]

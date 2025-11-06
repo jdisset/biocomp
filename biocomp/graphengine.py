@@ -100,12 +100,21 @@ class GraphState(BaseModel):
                 connected.append((target_node, edge))
         return connected
 
-    def get_upstream_nodes(self, node_id: int) -> List[Tuple[GraphNode, GraphEdge]]:
+    def get_upstream_nodes(
+        self, node_id: int, recursive=False
+    ) -> List[Tuple[GraphNode, GraphEdge]]:
         connected = []
         for edge in self.get_incoming_edges(node_id):
             source_node = self.get_node(edge.source_id)
             if source_node:
                 connected.append((source_node, edge))
+        if recursive:
+            all_upstream = []
+            for source_node, edge in connected:
+                all_upstream.append((source_node, edge))
+                upstream_of_source = self.get_upstream_nodes(source_node.node_id, recursive=True)
+                all_upstream.extend(upstream_of_source)
+            return all_upstream
         return connected
 
     def get_nb_outgoing_edges(self, node_id: int) -> int:
@@ -121,6 +130,44 @@ class GraphState(BaseModel):
     def get_nb_incoming_slots(self, node_id: int) -> int:
         edges = self.get_incoming_edges(node_id)
         return len(set(e.to_input_slot for e in edges))
+
+    def compute_dependency_map(self) -> dict[int, set[int]]:
+        """Returns {node id -> set of upstream node ids}"""
+        dependency_map = {}
+        for node_id, node in self.nodes.items():
+            incoming = self.get_incoming_edges(node_id)
+            if incoming:
+                dependency_map[node_id] = set(e.source_id for e in incoming)
+            else:
+                dependency_map[node_id] = set()
+        return dependency_map
+
+    def topological_order(self, nodes=None, dependency_map=None):
+        """Returns a list of lists of nodes, where each node of
+        a sublist can be computed independently of the others,
+        but each sublist must be computed in order. Possibly limited
+        to a subset of nodes.
+        """
+        all_nodes = set(self.nodes.keys())
+        nodes_set = set(nodes) if nodes is not None else all_nodes
+        dependency_map = dependency_map or self.compute_dependency_map()
+
+        visited = set()
+        batches = []
+        remaining = all_nodes.copy()
+
+        while remaining:
+            independent = [node for node in remaining if dependency_map[node].issubset(visited)]
+            if not independent:
+                msg = f"No independent node. Remaining:{set(self.nodes.keys()) - visited}. Visited:{visited}"
+                raise ValueError(msg)
+            visited.update(independent)
+            remaining.difference_update(independent)
+            batch = [node for node in independent if node in nodes_set]
+            if batch:
+                batches.append(batch)
+
+        return batches
 
 
 class GraphBuilder:
@@ -505,10 +552,6 @@ def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEd
     if stripped.startswith("{{") and stripped.endswith("}}") and stripped.count("{{") == 1:
         expr = stripped[2:-2].strip()
         res = eval(expr, {**match})
-        if "len" in expr:
-            print(
-                f"      Evaluated len() in template '{template_str}' -> {res}. Context is {match}"
-            )
         return res
     else:
         raise ValueError(f"Unsupported template format: '{template_str}'")
@@ -601,6 +644,17 @@ def _process_match(
                 if debug:
                     print(f"    Setting properties on '{action.node_var}' (ID: {node_id}): {props}")
                 builder.set_node_properties(node_id, props)
+
+        elif action_type == "delete_properties":
+            node_id = get_node_id(action.node_var)
+            if node_id is not None:
+                if debug:
+                    print(
+                        f"    Deleting {action.property_keys} from '{action.node_var}' (ID: {node_id})"
+                    )
+                for key in action.property_keys:
+                    if key in builder.nodes[node_id].extra:
+                        del builder.nodes[node_id].extra[key]
 
         elif action_type == "delete_node":
             node_id = var_to_node_id[action.node_var]

@@ -11,6 +11,7 @@ from biocomp.graphrules import (
     CopyEdge,
     RewireEdgesFrom,
     SetProperties,
+    DeleteProperties,
 )
 
 
@@ -222,13 +223,18 @@ add_bias_nodes = GraphRewritingRule(
             properties={
                 "type": "bias",
                 "role": "fluo_bias",
-                "fluo_bias_data": "{{ top_node.extra.get('fluo_bias') }}",
+                "fluo_bias": "{{ top_node.extra.get('fluo_bias') }}",
             },
         ),
         AddEdge(
             source="bias",
             target="top_node",
             properties={"content_type": None},  # Bias flow
+        ),
+        # single source of truth: we remove fluo_bias from top_node
+        DeleteProperties(
+            node_var="top_node",
+            property_keys=["fluo_bias"],
         ),
     ],
     yield_strategy="batched",

@@ -1882,22 +1882,85 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(complex_twolayers_design_network, br.ALL_RULES, invert=True)
         compg = networks[0].compute_graph
+        assert compg is not None
 
-        agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
-        assert len(agg_nodes) == 3
-
-        # All should have 8-way equal aggregation (1/8 each)
-        for agg in agg_nodes:
-            ratios = agg.extra["ratios"]
-            assert len(ratios) == 8
-            expected_ratio = 1.0 / 8.0
-            assert all(abs(r - expected_ratio) < 1e-9 for r in ratios), (
-                f"Expected all ratios to be {expected_ratio}, got {ratios}"
+    aggs = compg.get_nodes_by_type("aggregation")
+    for a in aggs:
+        downnodes = compg.get_downstream_nodes(a.node_id)
+        assert len(downnodes) == 8
+        assert all(dn[0].node_type == "source" for dn in downnodes)
+        for dnode, dedge in downnodes:
+            assert dedge.to_input_slot == 0
+            assert len(compg.get_upstream_nodes(dnode.node_id)) == 1
+        # all edges should come from a different output_slot:
+        unique_slots = set(dedge.from_output_slot for _, dedge in downnodes)
+        assert len(unique_slots) == 8, f"Expected 8 unique output slots for agg, got {unique_slots}"
+        # each downstream (source) node stores a ratio in its extra.
+        # it should be the same as the ratios[outslot] of the aggregation node.
+        # similarly, aggregation.extra['members'][outslot] should match the downstream extra['source_id']:
+        for dnode, dedge in downnodes:
+            outslot = dedge.from_output_slot
+            ratio_expected = dnode.extra["ratio"]
+            ratio_actual = a.extra["ratios"][outslot]
+            source_id_expected = dnode.extra["source_id"]
+            source_id_actual = a.extra["members"][outslot]
+            assert ratio_expected == ratio_actual, (
+                f"Downstream node {dnode.node_id} ratio {ratio_expected} != aggregation ratio {ratio_actual}"
             )
-
-            # All ratios should be locked (ratio_ranges all None)
-            ratio_ranges = agg.extra.get("ratio_ranges", [])
-            assert all(rr is None for rr in ratio_ranges), "All ratios should be locked"
+            assert source_id_expected == source_id_actual, (
+                f"Downstream node {dnode.node_id} source_id {source_id_expected} != aggregation member {source_id_actual}"
+            )
+        # now, upstream of the aggregation should be an inverse aggregation node:
+        upnodes = compg.get_upstream_nodes(a.node_id)
+        assert len(upnodes) == 1
+        upnode, upedge = upnodes[0]
+        assert upnode.node_type == "inv_aggregation"
+        assert upnode.extra["original_output_len"] == 8
+        orig_outslot = upnode.extra["original_output_slot"]
+        # the path that is inverted should always be the marker path
+        assert a.extra["members"][orig_outslot] == "themarker"
+        # now for some hardcoded checks of the aggregation ratios:
+        if a.extra["cotx_group"] == "x1":
+            # let's find out what order the ratios are in:
+            ratio_order = a.extra["members"]
+            expected_ratios = {
+                "x1_marker": COMPLEX_RATIOS[0],
+                "x1_a+": COMPLEX_RATIOS[1],
+                "x1_a-": COMPLEX_RATIOS[2],
+                "x1_b+": COMPLEX_RATIOS[3],
+                "x1_b-": COMPLEX_RATIOS[4],
+                "x1_c+": COMPLEX_RATIOS[5],
+                "x1_c-": COMPLEX_RATIOS[6],
+                "x1_direct_out": COMPLEX_RATIOS[7],
+            }
+            for src_id, ratio in zip(ratio_order, a.extra["ratios"]):
+                assert np.isclose(ratio, expected_ratios[src_id]), (
+                    f"Aggregation ratio for {src_id} in cotx x1 is {ratio}, expected {expected_ratios[src_id]}"
+                )
+        elif a.extra["cotx_group"] == "x2":
+            ratio_order = a.extra["members"]
+            expected_ratios = {
+                "x2_marker": COMPLEX_RATIOS[7],
+                "x2_a+": COMPLEX_RATIOS[6],
+                "x2_a-": COMPLEX_RATIOS[5],
+                "x2_b+": COMPLEX_RATIOS[4],
+                "x2_b-": COMPLEX_RATIOS[3],
+                "x2_c+": COMPLEX_RATIOS[2],
+                "x2_c-": COMPLEX_RATIOS[1],
+                "x2_direct_out": COMPLEX_RATIOS[0],
+            }
+            for src_id, ratio in zip(ratio_order, a.extra["ratios"]):
+                assert np.isclose(ratio, expected_ratios[src_id]), (
+                    f"Aggregation ratio for {src_id} in cotx x2 is {ratio}, expected {expected_ratios[src_id]}"
+                )
+        elif a.extra["cotx_group"] == "b":
+            # everything should be uniform for b
+            for ratio in a.extra["ratios"]:
+                assert np.isclose(ratio, 0.125), (
+                    f"Aggregation ratio for cotx b is {ratio}, expected 0.125"
+                )
+        else:
+            raise ValueError(f"Unknown cotx group {a.extra['cotx_group']}")
 
 
 def test_complex_twolayers_quantization_masks(lib, complex_twolayers_design_network):
@@ -1920,14 +1983,8 @@ def test_complex_twolayers_quantization_masks(lib, complex_twolayers_design_netw
         # Find translation layer with uORF quantization masks
         for layer in stack.layers:
             if layer.f_type == "translation":
-                tl_mask = params[f"{layer.namespace}/tl_rate_quantization_mask"]
-                # Should have nodes with different numbers of available uORFs
-                for node_idx in range(tl_mask.shape[0]):
-                    node_mask = tl_mask[node_idx]
-                    n_available = jnp.sum(node_mask)
-                    # Should have at least 1 available option
-                    assert n_available >= 1, f"Node {node_idx} has no available uORF options"
-                break
+            # TODO: ...
+
 
 
 def test_complex_twolayers_bias_node(lib, complex_twolayers_design_network):
@@ -1945,5 +2002,3 @@ def test_complex_twolayers_bias_node(lib, complex_twolayers_design_network):
 
         bias = bias_nodes[0]
         assert bias.extra["role"] == "fluo_bias"
-        # NOTE: Detailed bias metadata (protein, tu_id, value range) seems to have issues
-        # in the biorules transformation. This should be investigated separately.

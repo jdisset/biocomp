@@ -84,11 +84,8 @@ class Network(BaseModel):
         return [output_proteins[mapping[i]] for i in range(len(mapping))]
 
     def get_inverted_input_positions(self, include_biases: bool = False) -> dict[int, int]:
-        """Returns a mapping from input position to output position
-
-        Note: Bias nodes are not included because they are direct inputs (not inverted outputs).
-        They don't have input_position or input_from_output fields.
-        """
+        """Returns a mapping from input position to output position"""
+        # TODO: include_biases parameter
         assert self.compute_graph is not None
         mapping = {}
         # Only input nodes have input_position/input_from_output (from inversion)
@@ -105,6 +102,8 @@ class Network(BaseModel):
         assert set(mapping.keys()) == set(range(len(mapping.keys()))), f"Invalid mapping: {mapping}"
         assert len(mapping.keys()) == len(set(mapping.values())), f"Invalid mapping: {mapping}"
         return mapping
+
+    def get_bias_proteins(self) -> list[str]: ...
 
     def get_output_proteins(self, only_dependent_outputs: bool = False) -> list[str]:
         """Returns the names of all proteins that are outputs of the network"""
@@ -585,39 +584,11 @@ class Network(BaseModel):
     def compute_dependency_map(self) -> dict[int, set[int]]:
         """Returns {node id -> set of upstream node ids}"""
         assert self.compute_graph is not None
-        dependency_map = {}
-        for node_id, node in self.compute_graph.nodes.items():
-            incoming = self.compute_graph.get_incoming_edges(node_id)
-            if incoming:
-                dependency_map[node_id] = set(e.source_id for e in incoming)
-            else:
-                dependency_map[node_id] = set()
-        return dependency_map
+        return self.compute_graph.compute_dependency_map()
 
     def topological_order(self, nodes=None, dependency_map=None):
-        """Returns a list of lists of compute nodes from the network,
-        where each node of a sublist can be computed independently of the others,
-        but each sublist must be computed in order."""
-        all_nodes = set(self.compute_graph.nodes.keys())
-        nodes_set = set(nodes) if nodes is not None else all_nodes
-        dependency_map = dependency_map or self.compute_dependency_map()
-
-        visited = set()
-        batches = []
-        remaining = all_nodes.copy()
-
-        while remaining:
-            independent = [node for node in remaining if dependency_map[node].issubset(visited)]
-            if not independent:
-                msg = f"No independent node. Remaining:{set(self.compute_graph.nodes.keys()) - visited}. Visited:{visited}"
-                raise ValueError(msg)
-            visited.update(independent)
-            remaining.difference_update(independent)
-            batch = [node for node in independent if node in nodes_set]
-            if batch:
-                batches.append(batch)
-
-        return batches
+        assert self.compute_graph is not None
+        return self.compute_graph.topological_order(nodes, dependency_map)
 
 
 def recipe_to_networks(
