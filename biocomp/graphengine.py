@@ -135,7 +135,7 @@ class GraphBuilder:
         self.next_id = max(self.nodes.keys(), default=-1) + 1
 
     def add_node(
-        self, node_type: str, extra: Dict = None, is_inverse_of: Optional[InverseSpec] = None
+        self, node_type: str, extra: dict | None = None, is_inverse_of: Optional[InverseSpec] = None
     ) -> int:
         node_id = self.next_id
         self.next_id += 1
@@ -486,8 +486,6 @@ def find_index(lst, item):
     return lst.index(item)
 
 
-
-
 def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEdge]]) -> Any:
     """Expand template strings, preserving types for simple expressions.
 
@@ -516,6 +514,7 @@ def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEd
         raise ValueError(f"Unsupported template format: '{template_str}'")
 
 
+# pyright: reportAttributeAccessIssue=false
 def _process_match(
     match: Dict[str, Union[GraphNode, GraphEdge]],
     rule: GraphRewritingRule,
@@ -543,7 +542,7 @@ def _process_match(
         def __str__(self):
             return str(self.value)
 
-    match_with_index["__match_index__"] = IndexHolder(match_index)
+    match_with_index["__match_index__"] = IndexHolder(match_index)  # type: ignore[assignment]
 
     def expand_props(props: Dict[str, Any]) -> Dict[str, Any]:
         result = {}
@@ -567,7 +566,7 @@ def _process_match(
             print(f"  [Action] Executing '{action_type}'...")
 
         if action_type == "add_node":
-            props = expand_props(action.properties)
+            props = expand_props(action.properties or {})
             node_type = props.pop("type", "unknown")
             is_inverse_of_dict = props.pop("is_inverse_of", None)
             is_inverse_of = None
@@ -588,7 +587,7 @@ def _process_match(
         elif action_type == "add_edge":
             source_id, target_id = get_node_id(action.source), get_node_id(action.target)
             if source_id is not None and target_id is not None:
-                props = expand_props(action.properties)
+                props = expand_props(action.properties or {})
                 builder.add_edge(source_id, target_id, **props)
                 if debug:
                     print(
@@ -598,7 +597,7 @@ def _process_match(
         elif action_type == "set_properties":
             node_id = get_node_id(action.node_var)
             if node_id is not None:
-                props = expand_props(action.properties)
+                props = expand_props(action.properties or {})
                 if debug:
                     print(f"    Setting properties on '{action.node_var}' (ID: {node_id}): {props}")
                 builder.set_node_properties(node_id, props)
@@ -611,8 +610,8 @@ def _process_match(
 
         elif action_type == "delete_edge":
             source_id, target_id = (
-                var_to_node_id[action.source_var],
-                var_to_node_id[action.target_var],
+                var_to_node_id[action.source_var],  # type: ignore[index]
+                var_to_node_id[action.target_var],  # type: ignore[index]
             )
             if debug:
                 print(
@@ -703,8 +702,8 @@ def _process_match(
                 )
             source_edge = match[action.source_edge_var]
             if isinstance(source_edge, GraphEdge):
-                new_source_id = get_node_id(action.source_var)
-                new_target_id = get_node_id(action.target_var)
+                new_source_id = get_node_id(action.source_var)  # type: ignore[arg-type]
+                new_target_id = get_node_id(action.target_var)  # type: ignore[arg-type]
 
                 if new_source_id is None:
                     raise ValueError(
