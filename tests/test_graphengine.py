@@ -40,8 +40,8 @@ def create_graph_state(nodes_data, edges_data):
             GraphEdge(
                 source_id=edge["source"],
                 target_id=edge["target"],
-                output_slot=edge.get("output_slot", 0),
-                input_slot=edge.get("input_slot", 0),
+                from_output_slot=edge.get("from_output_slot", 0),
+                to_input_slot=edge.get("to_input_slot", 0),
                 content=edge.get("content", ()),
                 content_type=edge.get("content_type", None),
             )
@@ -51,7 +51,7 @@ def create_graph_state(nodes_data, edges_data):
         else []
     )
 
-    edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges_list}
+    edges = {(e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges_list}
     return GraphState(nodes=nodes, edges=edges)
 
 
@@ -1001,8 +1001,8 @@ def test_bind_edges_with_none_values():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(),
             content_type="DNA",
             content_embedding_names={"strength": ("strong",)},
@@ -1010,14 +1010,16 @@ def test_bind_edges_with_none_values():
         GraphEdge(
             source_id=1,
             target_id=2,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(),
             content_type="RNA",
             content_embedding_names={"strength": ("weak",)},
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Find strong edges and mark their targets",
@@ -1087,8 +1089,8 @@ def test_edge_constraint_none_with_properties():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(),
             content_type="DNA",
             content_embedding_names={"edge_type": ("regulatory",)},
@@ -1096,8 +1098,8 @@ def test_edge_constraint_none_with_properties():
         GraphEdge(
             source_id=1,
             target_id=2,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(),
             content_type="RNA",
             content_embedding_names={"edge_type": ("structural",)},
@@ -1105,14 +1107,16 @@ def test_edge_constraint_none_with_properties():
         GraphEdge(
             source_id=2,
             target_id=0,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(),
             content_type="DNA",
             content_embedding_names={"edge_type": ("regulatory",)},
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Find nodes connected by regulatory edges",
@@ -1161,29 +1165,31 @@ def test_edge_constraint_contains_basic():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1, part2),
             content_type="DNA",
         ),
         GraphEdge(
             source_id=1,
             target_id=2,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part3,),
             content_type="RNA",
         ),
         GraphEdge(
             source_id=0,
             target_id=2,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1, part3),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Find edges containing uORF1",
@@ -1227,29 +1233,31 @@ def test_edge_constraint_contains_multiple_parts():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1, part2, part3),
             content_type="DNA",
         ),  # Has all three
         GraphEdge(
             source_id=1,
             target_id=2,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1, part3),
             content_type="DNA",
         ),  # Missing part2
         GraphEdge(
             source_id=0,
             target_id=2,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part2,),
             content_type="DNA",
         ),  # Only has part2
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Find edges containing both uORF1 and RBS1",
@@ -1299,13 +1307,15 @@ def test_edge_constraint_contains_no_match():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Find edges containing non-existent part",
@@ -1347,29 +1357,31 @@ def test_edge_constraint_contains_with_none_endpoints():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
         GraphEdge(
             source_id=1,
             target_id=2,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part2,),
             content_type="RNA",
         ),
         GraphEdge(
             source_id=2,
             target_id=0,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1, part2),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Find any edges containing uORF1",
@@ -1409,13 +1421,15 @@ def test_edge_constraint_contains_empty_list():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Find edges with empty contains list",
@@ -1461,13 +1475,15 @@ def test_edge_constraint_contains_bind_edges():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1, part2),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Bind edges containing specific parts",
@@ -1519,13 +1535,15 @@ def test_automatic_endpoint_binding_basic():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Test automatic endpoint binding",
@@ -1573,21 +1591,23 @@ def test_automatic_endpoint_binding_multiple_edges():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
         GraphEdge(
             source_id=1,
             target_id=2,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part2,),
             content_type="RNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Test multiple edge endpoint binding",
@@ -1643,13 +1663,15 @@ def test_automatic_endpoint_binding_disabled():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Test disabled endpoint binding",
@@ -1708,21 +1730,23 @@ def test_automatic_endpoint_binding_with_none_constraints():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
         GraphEdge(
             source_id=1,
             target_id=2,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="RNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Test endpoint binding with None constraints",
@@ -1770,13 +1794,15 @@ def test_edit_edge_basic():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Edit edge properties",
@@ -1821,13 +1847,15 @@ def test_edit_edge_change_endpoints():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Rewire edge endpoints",
@@ -1875,13 +1903,15 @@ def test_edit_edge_change_content():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Change edge content",
@@ -1929,13 +1959,15 @@ def test_edit_edge_comprehensive():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Comprehensive edge edit",
@@ -1999,14 +2031,16 @@ def test_edit_edge_partial_updates():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1, part2),
             content_type="DNA",
             extra={"original_prop": "keep_me"},
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Partial edge edit",
@@ -2062,13 +2096,15 @@ def test_edit_edge_with_templates():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Template-based edge edit",
@@ -2120,13 +2156,15 @@ def test_edit_edge_nonexistent_variable():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Edit nonexistent edge",
@@ -2169,14 +2207,16 @@ def test_copy_edge_basic():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
             extra={"strength": 0.8, "original": True},
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Copy edge to new endpoints",
@@ -2232,14 +2272,16 @@ def test_copy_edge_with_property_overrides():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="RNA",
             extra={"strength": 0.5, "category": "original", "keep_me": True},
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Copy edge with overrides",
@@ -2308,14 +2350,16 @@ def test_copy_edge_with_content_override():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
             extra={"version": 1},
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Copy edge with new content",
@@ -2382,15 +2426,17 @@ def test_copy_edge_comprehensive():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=1,
-            input_slot=2,
+            from_output_slot=1,
+            to_input_slot=2,
             content=(part1, part2),
             content_type="DNA",
             content_embedding_names={"rate": ("fast",)},
             extra={"strength": 0.3, "category": "original", "keep": "yes"},
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Comprehensive copy with all modifications",
@@ -2431,8 +2477,8 @@ def test_copy_edge_comprehensive():
     )
 
     # Check copied slots and embedding names
-    assert new_edge.output_slot == 1  # Copied from original
-    assert new_edge.input_slot == 2  # Copied from original
+    assert new_edge.from_output_slot == 1  # Copied from original
+    assert new_edge.to_input_slot == 2  # Copied from original
     assert new_edge.content_embedding_names == {"rate": ("fast",)}  # Copied
 
     # Check overridden content and content_type
@@ -2470,14 +2516,16 @@ def test_copy_edge_with_templates():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
             extra={"connection_id": "original_123"},
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Copy edge with template properties",
@@ -2543,13 +2591,15 @@ def test_copy_edge_nonexistent_source_edge():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Copy from nonexistent edge",
@@ -2595,13 +2645,15 @@ def test_copy_edge_nonexistent_node_variables():
         GraphEdge(
             source_id=0,
             target_id=1,
-            output_slot=0,
-            input_slot=0,
+            from_output_slot=0,
+            to_input_slot=0,
             content=(part1,),
             content_type="DNA",
         ),
     ]
-    graph.edges = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    graph.edges = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges
+    }
 
     rule = GraphRewritingRule(
         name="Copy to nonexistent nodes",
@@ -2625,14 +2677,9 @@ def test_copy_edge_nonexistent_node_variables():
         assert "not found in match" in str(e)
 
 
-# ---------------------------------------------------------------------------
-# Tests for compute_graphs_are_equivalent
-# ---------------------------------------------------------------------------
-
-
-def test_compute_graphs_are_equivalent_identical():
+def test_graphs_are_isomorphic_identical():
     """Test that identical graphs are equivalent"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     # Create identical graphs
     nodes_data = [
@@ -2648,12 +2695,12 @@ def test_compute_graphs_are_equivalent_identical():
     graph1 = create_graph_state(nodes_data, edges_data)
     graph2 = create_graph_state(nodes_data, edges_data)
 
-    assert compute_graphs_are_equivalent(graph1, graph2)
+    assert graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_different_node_ids():
+def test_graphs_are_isomorphic_different_node_ids():
     """Test that graphs with different node IDs but same topology are equivalent"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     # Graph 1: nodes 0,1,2
     graph1 = create_graph_state(
@@ -2681,12 +2728,12 @@ def test_compute_graphs_are_equivalent_different_node_ids():
         ],
     )
 
-    assert compute_graphs_are_equivalent(graph1, graph2)
+    assert graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_different_node_order():
+def test_graphs_are_isomorphic_different_node_order():
     """Test that graphs with same nodes/edges in different order are equivalent"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     # Graph 1: normal order
     graph1 = create_graph_state(
@@ -2714,12 +2761,12 @@ def test_compute_graphs_are_equivalent_different_node_order():
         ],
     )
 
-    assert compute_graphs_are_equivalent(graph1, graph2)
+    assert graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_with_content():
+def test_graphs_are_isomorphic_with_content():
     """Test that graphs with edge content are compared correctly"""
-    from biocomp.graphengine import compute_graphs_are_equivalent, Part, GraphEdge
+    from biocomp.graphengine import graphs_are_isomorphic, Part, GraphEdge
 
     part1 = Part(name="uORF1", category="regulatory")
     part2 = Part(name="RBS1", category="ribosome_binding")
@@ -2729,13 +2776,13 @@ def test_compute_graphs_are_equivalent_with_content():
 
     graph1 = create_graph_state(nodes_data, [])
     graph1.edges = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
         for e in [
             GraphEdge(
                 source_id=0,
                 target_id=1,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part1, part2),
                 content_type="DNA",
             )
@@ -2744,25 +2791,25 @@ def test_compute_graphs_are_equivalent_with_content():
 
     graph2 = create_graph_state(nodes_data, [])
     graph2.edges = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
         for e in [
             GraphEdge(
                 source_id=0,
                 target_id=1,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part1, part2),
                 content_type="DNA",
             )
         ]
     }
 
-    assert compute_graphs_are_equivalent(graph1, graph2)
+    assert graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_different_content():
+def test_graphs_are_isomorphic_different_content():
     """Test that graphs with different edge content are not equivalent"""
-    from biocomp.graphengine import compute_graphs_are_equivalent, Part, GraphEdge
+    from biocomp.graphengine import graphs_are_isomorphic, Part, GraphEdge
 
     part1 = Part(name="uORF1", category="regulatory")
     part2 = Part(name="RBS1", category="ribosome_binding")
@@ -2772,13 +2819,13 @@ def test_compute_graphs_are_equivalent_different_content():
 
     graph1 = create_graph_state(nodes_data, [])
     graph1.edges = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
         for e in [
             GraphEdge(
                 source_id=0,
                 target_id=1,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part1, part2),
                 content_type="DNA",
             )
@@ -2787,25 +2834,25 @@ def test_compute_graphs_are_equivalent_different_content():
 
     graph2 = create_graph_state(nodes_data, [])
     graph2.edges = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
         for e in [
             GraphEdge(
                 source_id=0,
                 target_id=1,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part1, part3),
                 content_type="DNA",
             )  # Different content
         ]
     }
 
-    assert not compute_graphs_are_equivalent(graph1, graph2)
+    assert not graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_different_node_types():
+def test_graphs_are_isomorphic_different_node_types():
     """Test that graphs with different node types are not equivalent"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     graph1 = create_graph_state(
         [{"id": 0, "type": "promoter"}, {"id": 1, "type": "gene"}], [{"source": 0, "target": 1}]
@@ -2816,12 +2863,12 @@ def test_compute_graphs_are_equivalent_different_node_types():
         [{"source": 0, "target": 1}],
     )
 
-    assert not compute_graphs_are_equivalent(graph1, graph2)
+    assert not graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_different_topology():
+def test_graphs_are_isomorphic_different_topology():
     """Test that graphs with different topology are not equivalent"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     nodes_data = [
         {"id": 0, "type": "promoter"},
@@ -2839,12 +2886,12 @@ def test_compute_graphs_are_equivalent_different_topology():
         nodes_data, [{"source": 0, "target": 2}, {"source": 1, "target": 2}]
     )
 
-    assert not compute_graphs_are_equivalent(graph1, graph2)
+    assert not graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_different_sizes():
+def test_graphs_are_isomorphic_different_sizes():
     """Test that graphs with different sizes are not equivalent"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     graph1 = create_graph_state(
         [{"id": 0, "type": "promoter"}, {"id": 1, "type": "gene"}], [{"source": 0, "target": 1}]
@@ -2855,12 +2902,12 @@ def test_compute_graphs_are_equivalent_different_sizes():
         [],
     )
 
-    assert not compute_graphs_are_equivalent(graph1, graph2)
+    assert not graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_with_extra_ignored():
+def test_graphs_are_isomorphic_with_extra_ignored():
     """Test that extra fields are ignored by default"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     graph1 = create_graph_state([{"id": 0, "type": "promoter", "strength": 0.8}], [])
 
@@ -2870,12 +2917,12 @@ def test_compute_graphs_are_equivalent_with_extra_ignored():
     )
 
     # Should be equivalent when compare_extra=False (default)
-    assert compute_graphs_are_equivalent(graph1, graph2, compare_extra=False)
+    assert graphs_are_isomorphic(graph1, graph2, compare_extra=False)
 
 
-def test_compute_graphs_are_equivalent_with_extra_compared():
+def test_graphs_are_isomorphic_with_extra_compared():
     """Test that extra fields are compared when compare_extra=True"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     graph1 = create_graph_state([{"id": 0, "type": "promoter", "strength": 0.8}], [])
 
@@ -2885,7 +2932,7 @@ def test_compute_graphs_are_equivalent_with_extra_compared():
     )
 
     # Should NOT be equivalent when compare_extra=True
-    assert not compute_graphs_are_equivalent(graph1, graph2, compare_extra=True)
+    assert not graphs_are_isomorphic(graph1, graph2, compare_extra=True)
 
     # But should be equivalent if extra is the same
     graph3 = create_graph_state(
@@ -2893,25 +2940,25 @@ def test_compute_graphs_are_equivalent_with_extra_compared():
         [],
     )
 
-    assert compute_graphs_are_equivalent(graph1, graph3, compare_extra=True)
+    assert graphs_are_isomorphic(graph1, graph3, compare_extra=True)
 
 
-def test_compute_graphs_are_equivalent_content_embedding_names():
+def test_graphs_are_isomorphic_content_embedding_names():
     """Test comparison of content_embedding_names"""
-    from biocomp.graphengine import compute_graphs_are_equivalent, Part, GraphEdge
+    from biocomp.graphengine import graphs_are_isomorphic, Part, GraphEdge
 
     part1 = Part(name="uORF1", category="regulatory")
     nodes_data = [{"id": 0, "type": "source"}, {"id": 1, "type": "target"}]
 
     graph1 = create_graph_state(nodes_data, [])
     graph1.edges = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
         for e in [
             GraphEdge(
                 source_id=0,
                 target_id=1,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part1,),
                 content_type="DNA",
                 content_embedding_names={"rate": ("fast",)},
@@ -2921,13 +2968,13 @@ def test_compute_graphs_are_equivalent_content_embedding_names():
 
     graph2 = create_graph_state(nodes_data, [])
     graph2.edges = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
         for e in [
             GraphEdge(
                 source_id=0,
                 target_id=1,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part1,),
                 content_type="DNA",
                 content_embedding_names={"rate": ("slow",)},
@@ -2936,15 +2983,15 @@ def test_compute_graphs_are_equivalent_content_embedding_names():
     }
 
     # Should be equivalent when compare_content_embedding_names=False (default)
-    assert compute_graphs_are_equivalent(graph1, graph2, compare_content_embedding_names=False)
+    assert graphs_are_isomorphic(graph1, graph2, compare_content_embedding_names=False)
 
     # Should NOT be equivalent when compare_content_embedding_names=True
-    assert not compute_graphs_are_equivalent(graph1, graph2, compare_content_embedding_names=True)
+    assert not graphs_are_isomorphic(graph1, graph2, compare_content_embedding_names=True)
 
 
-def test_compute_graphs_are_equivalent_multiple_node_types():
+def test_graphs_are_isomorphic_multiple_node_types():
     """Test equivalence with multiple nodes of the same type"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     # Both graphs have 2 genes and 1 promoter
     graph1 = create_graph_state(
@@ -2972,37 +3019,39 @@ def test_compute_graphs_are_equivalent_multiple_node_types():
         ],
     )
 
-    assert compute_graphs_are_equivalent(graph1, graph2)
+    assert graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_edge_slots():
+def test_graphs_are_isomorphic_edge_slots():
     """Test that edge input/output slots are compared"""
-    from biocomp.graphengine import compute_graphs_are_equivalent, GraphEdge
+    from biocomp.graphengine import graphs_are_isomorphic, GraphEdge
 
     nodes_data = [{"id": 0, "type": "source"}, {"id": 1, "type": "target"}]
 
     graph1 = create_graph_state(nodes_data, [])
     graph1.edges = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
-        for e in [GraphEdge(source_id=0, target_id=1, output_slot=0, input_slot=1, content=())]
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
+        for e in [
+            GraphEdge(source_id=0, target_id=1, from_output_slot=0, to_input_slot=1, content=())
+        ]
     }
 
     graph2 = create_graph_state(nodes_data, [])
     graph2.edges = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
         for e in [
             GraphEdge(
-                source_id=0, target_id=1, output_slot=1, input_slot=0, content=()
+                source_id=0, target_id=1, from_output_slot=1, to_input_slot=0, content=()
             )  # Different slots
         ]
     }
 
-    assert not compute_graphs_are_equivalent(graph1, graph2)
+    assert not graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_complex_mapping():
+def test_graphs_are_isomorphic_complex_mapping():
     """Test complex node mapping with multiple permutations"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     # Create a graph where multiple nodes have the same type
     # This tests that the algorithm tries all possible mappings
@@ -3031,32 +3080,32 @@ def test_compute_graphs_are_equivalent_complex_mapping():
         ],
     )
 
-    assert compute_graphs_are_equivalent(graph1, graph2)
+    assert graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_empty_graphs():
+def test_graphs_are_isomorphic_empty_graphs():
     """Test that empty graphs are equivalent"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     graph1 = create_graph_state([], [])
     graph2 = create_graph_state([], [])
 
-    assert compute_graphs_are_equivalent(graph1, graph2)
+    assert graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_single_node():
+def test_graphs_are_isomorphic_single_node():
     """Test equivalence with single node graphs"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     graph1 = create_graph_state([{"id": 0, "type": "gene"}], [])
     graph2 = create_graph_state([{"id": 100, "type": "gene"}], [])
 
-    assert compute_graphs_are_equivalent(graph1, graph2)
+    assert graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_self_loop():
+def test_graphs_are_isomorphic_self_loop():
     """Test equivalence with self-loops"""
-    from biocomp.graphengine import compute_graphs_are_equivalent
+    from biocomp.graphengine import graphs_are_isomorphic
 
     graph1 = create_graph_state(
         [{"id": 0, "type": "gene"}],
@@ -3068,12 +3117,12 @@ def test_compute_graphs_are_equivalent_self_loop():
         [{"source": 5, "target": 5}],  # Self-loop
     )
 
-    assert compute_graphs_are_equivalent(graph1, graph2)
+    assert graphs_are_isomorphic(graph1, graph2)
 
 
-def test_compute_graphs_are_equivalent_with_real_networks():
+def test_graphs_are_isomorphic_with_real_networks():
     """Test equivalence using real network structures similar to biocompiler networks"""
-    from biocomp.graphengine import compute_graphs_are_equivalent, Part, GraphEdge
+    from biocomp.graphengine import graphs_are_isomorphic, Part, GraphEdge
 
     # Create a realistic network structure
     part_dna = Part(name="CasE", category="DNA")
@@ -3091,29 +3140,29 @@ def test_compute_graphs_are_equivalent_with_real_networks():
         [],
     )
     graph1.edges = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
         for e in [
             GraphEdge(
                 source_id=0,
                 target_id=1,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part_dna,),
                 content_type="DNA",
             ),
             GraphEdge(
                 source_id=1,
                 target_id=2,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part_rna,),
                 content_type="RNA",
             ),
             GraphEdge(
                 source_id=2,
                 target_id=3,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part_prt,),
                 content_type="PRT",
             ),
@@ -3131,36 +3180,36 @@ def test_compute_graphs_are_equivalent_with_real_networks():
         [],
     )
     graph2.edges = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
         for e in [
             GraphEdge(
                 source_id=10,
                 target_id=20,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part_dna,),
                 content_type="DNA",
             ),
             GraphEdge(
                 source_id=20,
                 target_id=30,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part_rna,),
                 content_type="RNA",
             ),
             GraphEdge(
                 source_id=30,
                 target_id=40,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(part_prt,),
                 content_type="PRT",
             ),
         ]
     }
 
-    assert compute_graphs_are_equivalent(graph1, graph2)
+    assert graphs_are_isomorphic(graph1, graph2)
 
 
 # ============================================================================
@@ -3184,7 +3233,7 @@ def test_graphstate_get_edge():
     """Test get_edge() returns correct edge or None"""
     graph = create_graph_state(
         [{"id": 0, "type": "input"}, {"id": 1, "type": "output"}],
-        [{"source": 0, "target": 1, "output_slot": 0, "input_slot": 0}],
+        [{"source": 0, "target": 1, "from_output_slot": 0, "to_input_slot": 0}],
     )
 
     edge = graph.get_edge(0, 1)
@@ -3194,7 +3243,7 @@ def test_graphstate_get_edge():
 
     assert graph.get_edge(999, 1) is None
     assert graph.get_edge(0, 999) is None
-    assert graph.get_edge(0, 1, output_slot=1) is None
+    assert graph.get_edge(0, 1, from_output_slot=1) is None
 
 
 def test_graphstate_get_outgoing_edges():
@@ -3250,8 +3299,8 @@ def test_graphstate_dict_structure_uniqueness():
     }
 
     # Edge keys enforce uniqueness
-    edge1 = GraphEdge(source_id=0, target_id=1, output_slot=0, input_slot=0, content=())
-    edge2 = GraphEdge(source_id=0, target_id=1, output_slot=1, input_slot=0, content=())
+    edge1 = GraphEdge(source_id=0, target_id=1, from_output_slot=0, to_input_slot=0, content=())
+    edge2 = GraphEdge(source_id=0, target_id=1, from_output_slot=1, to_input_slot=0, content=())
 
     edges = {
         (0, 1, 0, 0): edge1,
@@ -3262,5 +3311,5 @@ def test_graphstate_dict_structure_uniqueness():
 
     assert len(graph.nodes) == 2
     assert len(graph.edges) == 2
-    assert graph.get_edge(0, 1, output_slot=0) == edge1
-    assert graph.get_edge(0, 1, output_slot=1) == edge2
+    assert graph.get_edge(0, 1, from_output_slot=0) == edge1
+    assert graph.get_edge(0, 1, from_output_slot=1) == edge2

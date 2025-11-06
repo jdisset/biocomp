@@ -6,6 +6,7 @@ complete control and understanding of the network structure.
 """
 
 import pytest
+import numpy as np
 from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot, Recipe
 from biocomp.library import load_lib, LibraryContext
 from biocomp.recipe import FluoIntensity, NumRange
@@ -742,6 +743,31 @@ def make_units(tu_name, erns=None, mask=None):
     return units
 
 
+def make_units(tu_name, erns):
+    recs = [f"{ern}_rec" for ern in erns]
+    u1 = Slot(part=UORFS[0], ref_id="U1")  # No uORF (None)
+    u2 = Slot(part=UORFS, ref_id="U2")  # All uORFs
+    u3 = Slot(part=UORFS[1:], ref_id="U3")  # All uORFs except None
+    return [
+        TranscriptionUnit(slots=[P, COLORS[tu_name], T], name=f"{tu_name}_marker", source="123"),
+        TranscriptionUnit(slots=[P, u1, recs[0], erns[2], T], name=f"{tu_name}_a+", source="03"),
+        TranscriptionUnit(slots=[P, erns[0], T], name=f"{tu_name}_a-", source="45"),
+        TranscriptionUnit(
+            slots=[P, u2, recs[1], erns[2], T], name=f"{tu_name}_b+", source="haha12"
+        ),
+        TranscriptionUnit(slots=[P, erns[1], T], name=f"{tu_name}_b-", source="wrong order 78"),
+        TranscriptionUnit(
+            slots=[P, u3, recs[2], COLORS["y"], T], name=f"{tu_name}_c+", source="a random id"
+        ),
+        TranscriptionUnit(slots=[P, erns[2], T], name=f"{tu_name}_c-", source="00aaa"),
+        TranscriptionUnit(slots=[P, COLORS["y"], T], name=f"{tu_name}_direct_out", source="direct"),
+    ]
+
+
+RAW_RATIOS = np.arange(8, dtype=float) + 1
+COMPLEX_RATIOS = RAW_RATIOS / np.sum(RAW_RATIOS)
+
+
 @pytest.fixture
 def complex_twolayers_design_network(lib):
     """Complex network with 3 cotx groups and unlocked bias on one group.
@@ -755,10 +781,14 @@ def complex_twolayers_design_network(lib):
             name=f"two_and_one ({ern_names})",
             content=[
                 CoTransfection(
-                    name="x1", units=make_units("x1", erns=erns), ratios=[1, 2, 3, 4, 5, 6, 7, 8]
+                    name="x1",
+                    units=make_units("x1", erns=erns),
+                    ratios=COMPLEX_RATIOS.tolist(),
                 ),
                 CoTransfection(
-                    name="x2", units=make_units("x2", erns=erns), ratios=[8, 7, 6, 5, 4, 3, 2, 1]
+                    name="x2",
+                    units=make_units("x2", erns=erns),
+                    ratios=COMPLEX_RATIOS.tolist()[::-1],
                 ),
                 CoTransfection(
                     name="b",
@@ -798,7 +828,7 @@ def test_simple_two_reporters(simple_two_reporters):
 
 
 def test_simple_single_ern(simple_single_ern):
-    """Test simple ERN network (now with invertible reporter)"""
+    """Test simple ERN network (with invertible reporter)"""
     recipe = simple_single_ern
     assert recipe.name == "simple_single_ern"
     assert len(recipe.content) == 1
@@ -1076,6 +1106,7 @@ def test_simple_aggregation_compg(lib, simple_aggregation):
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(simple_aggregation, invert=False)
         compg = networks[0].compute_graph
+        assert compg is not None
 
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
@@ -1100,6 +1131,7 @@ def test_multi_cotx_aggregation_compg(lib, multi_cotx_aggregation):
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(multi_cotx_aggregation, invert=False)
         compg = networks[0].compute_graph
+        assert compg is not None
 
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 2
@@ -1119,6 +1151,7 @@ def test_complex_ern_compg(lib, complex_ern_network):
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(complex_ern_network, invert=False)
         compg = networks[0].compute_graph
+        assert compg is not None
 
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
@@ -1131,12 +1164,12 @@ def test_complex_ern_compg(lib, complex_ern_network):
         ern_node = ern_nodes[0]
         incoming_ern = compg.get_incoming_edges(ern_node.node_id)
 
-        positive_edges = [e for e in incoming_ern if e.input_slot == 0]
+        positive_edges = [e for e in incoming_ern if e.to_input_slot == 0]
         assert len(positive_edges) == 1
         positive_content = [p.name for p in positive_edges[0].content]
         assert "CasE" in positive_content
 
-        negative_edges = [e for e in incoming_ern if e.input_slot == 1]
+        negative_edges = [e for e in incoming_ern if e.to_input_slot == 1]
         assert len(negative_edges) == 1
         negative_content = [p.name for p in negative_edges[0].content]
         assert "CasE_rec" in negative_content
@@ -1155,6 +1188,7 @@ def test_uorf_ern_compg(lib, uorf_ern_network):
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(uorf_ern_network, invert=False)
         compg = networks[0].compute_graph
+        assert compg is not None
 
         # Check for translation nodes (central dogma: DNA → RNA → Protein)
         translation_nodes = [n for n in compg.nodes.values() if n.node_type == "translation"]
@@ -1176,6 +1210,7 @@ def test_simple_single_ern_compg_detailed(lib, simple_single_ern):
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(simple_single_ern, invert=False)
         compg = networks[0].compute_graph
+        assert compg is not None
 
         source_nodes = [n for n in compg.nodes.values() if n.node_type == "source"]
         assert len(source_nodes) == 3  # ERN target, ERN source, and reporter
@@ -1200,6 +1235,7 @@ def test_variable_uorf_compg_params(lib, variable_uorf_network):
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(variable_uorf_network, invert=False)
         compg = networks[0].compute_graph
+        assert compg is not None
 
         source_nodes = [n for n in compg.nodes.values() if n.node_type == "source"]
         assert len(source_nodes) == 1
@@ -1222,6 +1258,7 @@ def test_multi_aggregation_ern_compg_structure(lib, multi_aggregation_ern):
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(multi_aggregation_ern, invert=False)
         compg = networks[0].compute_graph
+        assert compg is not None
 
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 3

@@ -69,12 +69,9 @@ connect_sources_to_aggregation = GraphRewritingRule(
             "source": PropertyConstraint(properties={"type": "source"}),
             "aggregation": PropertyConstraint(properties={"type": "aggregation"}),
         },
-        # Only connect to aggregation in same cotx group
+        # Only connect to aggregation in same cotx group and sources that are not yet connected
         where_filter_function="source.cotx_group == aggregation.cotx_group and source.source_id not in aggregation.members",
-        where_not_connected=[
-            EdgeConstraint(source_var="aggregation", target_var="source"),
-            EdgeConstraint(source_var="any", target_var="source", properties={"output_slot": None}),
-        ],
+        where_not_connected=[EdgeConstraint(target_var="source")],
     ),
     actions=[
         AddEdge(
@@ -82,7 +79,7 @@ connect_sources_to_aggregation = GraphRewritingRule(
             target="source",
             properties={
                 "content_type": None,
-                "output_slot": "{{ len(aggregation.members) }}",
+                "from_output_slot": "{{ len(aggregation.members) }}",
             },
         ),
         SetProperties(
@@ -173,7 +170,7 @@ fix_edge_slots = GraphRewritingRule(
             target="source",
             properties={
                 "content_type": None,
-                "output_slot": "{{ 0 if aggregation.members[0] == source.source_id else 1 }}",
+                "from_output_slot": "{{ 0 if aggregation.members[0] == source.source_id else 1 }}",
             },
         ),
     ],
@@ -243,17 +240,9 @@ def make_ern_rule(ern_name="CasE", ern_rec_name="CasE_rec"):
         name=f"add_{ern_name.lower()}_sequestron",
         query=MatchQuery(
             bind_edges={
-                "negative": EdgeConstraint(
-                    properties={
-                        "content_type": "PRT",
-                    },
-                    contains=[ern_name],
-                ),
+                "negative": EdgeConstraint(properties={"content_type": "PRT"}, contains=[ern_name]),
                 "positive": EdgeConstraint(
-                    properties={
-                        "content_type": "RNA",
-                    },
-                    contains=[ern_rec_name],
+                    properties={"content_type": "RNA"}, contains=[ern_rec_name]
                 ),
             },
         ),
@@ -266,13 +255,13 @@ def make_ern_rule(ern_name="CasE", ern_rec_name="CasE_rec"):
                 },
             ),
             DeleteNode(node_var="negative_target"),  # Auto-bound target node
-            # Rewire the PRT edge (negative input): translation → sequestron (input_slot=0)
-            EditEdge(edge_var="negative", target_var="sequestron", properties={"input_slot": 0}),
+            # Rewire the PRT edge (negative input): translation → sequestron (to_input_slot=0)
+            EditEdge(edge_var="negative", target_var="sequestron", properties={"to_input_slot": 0}),
             CopyEdge(
                 source_edge_var="positive", target_var="positive_target", source_var="sequestron"
             ),
-            # Rewire the RNA edge (positive input): transcription → sequestron (input_slot=1)
-            EditEdge(edge_var="positive", target_var="sequestron", properties={"input_slot": 1}),
+            # Rewire the RNA edge (positive input): transcription → sequestron (to_input_slot=1)
+            EditEdge(edge_var="positive", target_var="sequestron", properties={"to_input_slot": 1}),
         ],
         yield_strategy="batched",
         run_until_stable=True,
@@ -281,312 +270,6 @@ def make_ern_rule(ern_name="CasE", ern_rec_name="CasE_rec"):
 
 SEQUESTRON_RULES = [
     make_ern_rule(ern_name=e, ern_rec_name=f"{e}_rec") for e in ["Csy4", "CasE", "PgU"]
-]
-
-
-# Inversion rules using the cartesian_product_by_key yield strategy
-# This finds ALL invertible paths from ALL numeric nodes and creates
-# one inverted network per combination of path selections (cartesian product)
-
-invert_chain_with_aggregation = GraphRewritingRule(
-    name="invert_chain_with_aggregation",
-    query=MatchQuery(
-        bind={
-            "numeric": PropertyConstraint(properties={"type": "numeric"}),
-            "agg": PropertyConstraint(properties={"type": "aggregation"}),
-            "source": PropertyConstraint(properties={"type": "source"}),
-            "tx": PropertyConstraint(properties={"type": "transcription"}),
-            "tl": PropertyConstraint(properties={"type": "translation"}),
-            "output": PropertyConstraint(properties={"type": "output"}),
-        },
-        where_connected=[
-            EdgeConstraint(
-                source_var="numeric", target_var="agg", properties={"content_type": None}
-            ),
-            EdgeConstraint(
-                source_var="agg", target_var="source", properties={"content_type": None}
-            ),
-            EdgeConstraint(
-                source_var="source", target_var="tx", properties={"content_type": "DNA"}
-            ),
-            EdgeConstraint(source_var="tx", target_var="tl", properties={"content_type": "RNA"}),
-            EdgeConstraint(
-                source_var="tl", target_var="output", properties={"content_type": "PRT"}
-            ),
-        ],
-    ),
-    actions=[
-        AddNode(
-            local_name="input",
-            properties={
-                "type": "input",
-                "input_position": "{{__match_index__}}",
-                "input_from_output": 0,
-            },
-        ),
-        AddNode(
-            local_name="inv_translation",
-            properties={
-                "type": "inv_translation",
-                "is_inverse_of": {
-                    "node_id": "{{tl.node_id}}",
-                    "output_slot": 0,
-                    "output_len": 1,
-                },
-            },
-        ),
-        AddNode(
-            local_name="inv_transcription",
-            properties={
-                "type": "inv_transcription",
-                "is_inverse_of": {
-                    "node_id": "{{tx.node_id}}",
-                    "output_slot": 0,
-                    "output_len": 1,
-                },
-            },
-        ),
-        AddNode(
-            local_name="inv_source",
-            properties={
-                "type": "inv_source",
-                "is_inverse_of": {
-                    "node_id": "{{source.node_id}}",
-                    "output_slot": 0,
-                    "output_len": 1,
-                },
-            },
-        ),
-        AddNode(
-            local_name="inv_aggregation",
-            properties={
-                "type": "inv_aggregation",
-                "is_inverse_of": {
-                    "node_id": "{{agg.node_id}}",
-                    "output_slot": 0,
-                    "output_len": "{{len(agg.members) if agg.members else 1}}",
-                },
-            },
-        ),
-        AddEdge(
-            source="input", target="inv_translation", properties={"output_slot": 0, "input_slot": 0}
-        ),
-        AddEdge(
-            source="inv_translation",
-            target="inv_transcription",
-            properties={"output_slot": 0, "input_slot": 0},
-        ),
-        AddEdge(
-            source="inv_transcription",
-            target="inv_source",
-            properties={"output_slot": 0, "input_slot": 0},
-        ),
-        AddEdge(
-            source="inv_source",
-            target="inv_aggregation",
-            properties={"output_slot": 0, "input_slot": 0},
-        ),
-        AddEdge(
-            source="inv_aggregation",
-            target="source",
-            properties={"output_slot": 0, "input_slot": 0},
-        ),
-        DeleteNode(node_var="numeric"),
-    ],
-    yield_strategy="cartesian_product_by_key",
-    cartesian_product_key="numeric",
-)
-
-invert_chain_without_aggregation = GraphRewritingRule(
-    name="invert_chain_without_aggregation",
-    query=MatchQuery(
-        bind={
-            "numeric": PropertyConstraint(properties={"type": "numeric"}),
-            "source": PropertyConstraint(properties={"type": "source"}),
-            "tx": PropertyConstraint(properties={"type": "transcription"}),
-            "tl": PropertyConstraint(properties={"type": "translation"}),
-            "output": PropertyConstraint(properties={"type": "output"}),
-        },
-        where_connected=[
-            EdgeConstraint(
-                source_var="numeric", target_var="source", properties={"content_type": None}
-            ),
-            EdgeConstraint(
-                source_var="source", target_var="tx", properties={"content_type": "DNA"}
-            ),
-            EdgeConstraint(source_var="tx", target_var="tl", properties={"content_type": "RNA"}),
-            EdgeConstraint(
-                source_var="tl", target_var="output", properties={"content_type": "PRT"}
-            ),
-        ],
-    ),
-    actions=[
-        AddNode(
-            local_name="input",
-            properties={"type": "input", "input_position": 0, "input_from_output": 0},
-        ),
-        AddNode(
-            local_name="inv_translation",
-            properties={
-                "type": "inv_translation",
-                "is_inverse_of": {
-                    "node_id": "{{tl.node_id}}",
-                    "output_slot": 0,
-                    "output_len": 1,
-                },
-            },
-        ),
-        AddNode(
-            local_name="inv_transcription",
-            properties={
-                "type": "inv_transcription",
-                "is_inverse_of": {
-                    "node_id": "{{tx.node_id}}",
-                    "output_slot": 0,
-                    "output_len": 1,
-                },
-            },
-        ),
-        AddNode(
-            local_name="inv_source",
-            properties={
-                "type": "inv_source",
-                "is_inverse_of": {
-                    "node_id": "{{source.node_id}}",
-                    "output_slot": 0,
-                    "output_len": 1,
-                },
-            },
-        ),
-        AddEdge(
-            source="input", target="inv_translation", properties={"output_slot": 0, "input_slot": 0}
-        ),
-        AddEdge(
-            source="inv_translation",
-            target="inv_transcription",
-            properties={"output_slot": 0, "input_slot": 0},
-        ),
-        AddEdge(
-            source="inv_transcription",
-            target="inv_source",
-            properties={"output_slot": 0, "input_slot": 0},
-        ),
-        AddEdge(
-            source="inv_source", target="source", properties={"output_slot": 0, "input_slot": 0}
-        ),
-        DeleteNode(node_var="numeric"),
-    ],
-    yield_strategy="cartesian_product_by_key",
-    cartesian_product_key="numeric",
-)
-
-_deprecated_invert_chain_with_aggregation = GraphRewritingRule(
-    name="invert_chain_with_aggregation",
-    query=MatchQuery(
-        bind={
-            "numeric": PropertyConstraint(properties={"type": "numeric"}),
-            "agg": PropertyConstraint(properties={"type": "aggregation"}),
-            "source": PropertyConstraint(properties={"type": "source"}),
-            "tx": PropertyConstraint(properties={"type": "transcription"}),
-            "tl": PropertyConstraint(properties={"type": "translation"}),
-            "output": PropertyConstraint(properties={"type": "output"}),
-        },
-        where_connected=[
-            EdgeConstraint(
-                source_var="numeric", target_var="agg", properties={"content_type": None}
-            ),
-            EdgeConstraint(
-                source_var="agg", target_var="source", properties={"content_type": None}
-            ),
-            EdgeConstraint(
-                source_var="source", target_var="tx", properties={"content_type": "DNA"}
-            ),
-            EdgeConstraint(source_var="tx", target_var="tl", properties={"content_type": "RNA"}),
-            EdgeConstraint(
-                source_var="tl", target_var="output", properties={"content_type": "PRT"}
-            ),
-        ],
-    ),
-    actions=[
-        AddNode(
-            local_name="input",
-            properties={"type": "input", "input_position": 0, "input_from_output": 0},
-        ),
-        AddNode(
-            local_name="inv_translation",
-            properties={
-                "type": "inv_translation",
-                "is_inverse_of": {
-                    "node_id": "{{tl.node_id}}",
-                    "output_slot": 0,
-                    "output_len": 1,
-                },
-            },
-        ),
-        AddNode(
-            local_name="inv_transcription",
-            properties={
-                "type": "inv_transcription",
-                "is_inverse_of": {
-                    "node_id": "{{tx.node_id}}",
-                    "output_slot": 0,
-                    "output_len": 1,
-                },
-            },
-        ),
-        AddNode(
-            local_name="inv_source",
-            properties={
-                "type": "inv_source",
-                "is_inverse_of": {
-                    "node_id": "{{source.node_id}}",
-                    "output_slot": 0,
-                    "output_len": 1,
-                },
-            },
-        ),
-        AddNode(
-            local_name="inv_aggregation",
-            properties={
-                "type": "inv_aggregation",
-                "is_inverse_of": {
-                    "node_id": "{{agg.node_id}}",
-                    "output_slot": 0,
-                    "output_len": "{{len(agg.members) if agg.members else 1}}",
-                },
-            },
-        ),
-        AddEdge(
-            source="input", target="inv_translation", properties={"output_slot": 0, "input_slot": 0}
-        ),
-        AddEdge(
-            source="inv_translation",
-            target="inv_transcription",
-            properties={"output_slot": 0, "input_slot": 0},
-        ),
-        AddEdge(
-            source="inv_transcription",
-            target="inv_source",
-            properties={"output_slot": 0, "input_slot": 0},
-        ),
-        AddEdge(
-            source="inv_source",
-            target="inv_aggregation",
-            properties={"output_slot": 0, "input_slot": 0},
-        ),
-        AddEdge(
-            source="inv_aggregation",
-            target="source",
-            properties={"output_slot": 0, "input_slot": 0},
-        ),
-        DeleteNode(node_var="numeric"),
-    ],
-    yield_strategy="per_match",
-)
-
-INVERSION_RULES = [
-    invert_chain_with_aggregation,
-    invert_chain_without_aggregation,
 ]
 
 
@@ -608,7 +291,7 @@ def sort_output_edges(graph):
         # Reassign input_slots to match sorted order
         for new_slot, edge in enumerate(sorted_edges):
             # Remove old edge
-            old_key = (edge.source_id, edge.target_id, edge.output_slot, edge.input_slot)
+            old_key = (edge.source_id, edge.target_id, edge.from_output_slot, edge.to_input_slot)
             if old_key in graph.edges:
                 del graph.edges[old_key]
 
@@ -616,8 +299,8 @@ def sort_output_edges(graph):
             new_edge = GraphEdge(
                 source_id=edge.source_id,
                 target_id=edge.target_id,
-                output_slot=edge.output_slot,
-                input_slot=new_slot,
+                from_output_slot=edge.from_output_slot,
+                to_input_slot=new_slot,
                 content=edge.content,
                 content_type=edge.content_type,
                 content_embedding_names=edge.content_embedding_names,
@@ -626,8 +309,8 @@ def sort_output_edges(graph):
             new_key = (
                 new_edge.source_id,
                 new_edge.target_id,
-                new_edge.output_slot,
-                new_edge.input_slot,
+                new_edge.from_output_slot,
+                new_edge.to_input_slot,
             )
             graph.edges[new_key] = new_edge
 
@@ -639,7 +322,7 @@ ALL_RULES = [
     create_aggregation_nodes,
     connect_sources_to_aggregation,
     merge_aggregators_by_group,
-    sort_aggregation_members,
+    # sort_aggregation_members,
     add_bias_nodes,  # Add bias nodes for cotx with fluo_bias
     add_numeric_nodes,  # Add numeric (copy number) nodes for regular cotx
     *SEQUESTRON_RULES,

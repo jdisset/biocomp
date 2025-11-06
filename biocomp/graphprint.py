@@ -62,8 +62,8 @@ def _edge_label(edge: GraphEdge) -> str:
         parts.append(f"[{', '.join(p.name for p in edge.content)}]")
     if edge.content_type:
         parts.append(edge.content_type)
-    if edge.output_slot or edge.input_slot:
-        parts.append(f"{edge.output_slot}→{edge.input_slot}")
+    if edge.from_output_slot or edge.to_input_slot:
+        parts.append(f"{edge.from_output_slot}→{edge.to_input_slot}")
     return " ".join(parts)
 
 
@@ -399,13 +399,13 @@ def show_graph(
                 )
             ]
 
-            if edge.output_slot != 0 or edge.input_slot != 0:
+            if edge.from_output_slot != 0 or edge.to_input_slot != 0:
                 content.append(
                     html.Div(
                         [
                             html.Span("Slots: ", style={"fontWeight": "600", "color": "#34495e"}),
                             html.Span(
-                                f"{edge.output_slot} → {edge.input_slot}",
+                                f"{edge.from_output_slot} → {edge.to_input_slot}",
                                 style={"color": "#e67e22", "fontFamily": "monospace"},
                             ),
                         ],

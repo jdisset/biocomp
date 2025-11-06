@@ -175,8 +175,8 @@ class StackLayer:
             graph = stack.networks[key.network_id].compute_graph
             incoming_edges = graph.get_incoming_edges(key.node_id)
             # sort by input_slot to match old behavior
-            incoming_edges_sorted = sorted(incoming_edges, key=lambda e: e.input_slot)
-            ninp = [(edge.source_id, edge.output_slot) for edge in incoming_edges_sorted]
+            incoming_edges_sorted = sorted(incoming_edges, key=lambda e: e.to_input_slot)
+            ninp = [(edge.source_id, edge.from_output_slot) for edge in incoming_edges_sorted]
             node_inputs.append([(key.network_id, *i) for i in ninp])
 
         # get the shapes of the inputs
@@ -569,12 +569,12 @@ class ComputeStack:
         # get incoming edges for this node
         graph = self.networks[node_key.network_id].compute_graph
         incoming_edges = sorted(
-            graph.get_incoming_edges(node_key.node_id), key=lambda e: e.input_slot
+            graph.get_incoming_edges(node_key.node_id), key=lambda e: e.to_input_slot
         )
 
         input_edge = incoming_edges[input_slot]
         input_compute_node_id = input_edge.source_id
-        input_compute_node_outslot = input_edge.output_slot
+        input_compute_node_outslot = input_edge.from_output_slot
 
         input_layer_id, input_node_layer_loc = self.node_map[
             (node_key.network_id, input_compute_node_id)

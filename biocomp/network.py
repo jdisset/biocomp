@@ -116,7 +116,7 @@ class Network(BaseModel):
 
         incoming_edges = self.compute_graph.get_incoming_edges(onode.node_id)
         output_proteins = []
-        for edge in sorted(incoming_edges, key=lambda e: e.input_slot):
+        for edge in sorted(incoming_edges, key=lambda e: e.to_input_slot):
             if edge.content and edge.content_type == "PRT":
                 output_proteins.append(edge.content[0].name)
 
@@ -149,7 +149,7 @@ class Network(BaseModel):
         output_position = output_proteins.index(input_protein_name)
         assert output_position in original_mapping.values()
 
-        inputs = [n for n in self.compute_graph.nodes.values() if n.node_type == "input"]
+        inputs = self.compute_graph.get_nodes_by_type("input")
         found = False
         for node in inputs:
             assert "input_position" in node.extra, f"input_position not in {node.extra}"
@@ -175,6 +175,7 @@ class Network(BaseModel):
 
     def set_bias_as_input(self, bias_protein_name: Sequence[str]) -> None:
         """Sets this bias protein back as an input node (instead of a bias one)"""
+        assert self.compute_graph is not None
         original_mapping = self.get_inverted_input_positions()
         output_proteins = self.get_output_proteins()
         assert bias_protein_name in output_proteins, (
@@ -186,7 +187,7 @@ class Network(BaseModel):
             f"Protein {bias_protein_name} is already an input, not a bias"
         )
 
-        biases = [n for n in self.compute_graph.nodes.values() if n.node_type == "bias"]
+        biases = self.compute_graph.get_nodes_by_type("bias")
         found = False
         for node in biases:
             assert "input_from_output" in node.extra, f"input_from_output not in {node.extra}"
@@ -215,7 +216,8 @@ class Network(BaseModel):
 
     def _renumber_input_positions(self) -> None:
         """Renumbers input positions to be consecutive starting from 0"""
-        inputs = [n for n in self.compute_graph.nodes.values() if n.node_type == "input"]
+        assert self.compute_graph is not None
+        inputs = self.compute_graph.get_nodes_by_type("input")
 
         input_output_pairs = []
         for node in inputs:
@@ -273,48 +275,43 @@ class Network(BaseModel):
         assert self.compute_graph is not None
 
         source_cotx_indices = {}
-        for node in self.compute_graph.nodes.values():
-            if node.node_type == "source":
-                group_id = node.extra.get("cotx_group")
-                cotx_index = node.extra.get("cotx_index", 0)
-                if group_id not in source_cotx_indices:
-                    source_cotx_indices[group_id] = cotx_index
+        for node in self.compute_graph.get_nodes_by_type("source"):
+            group_id = node.extra.get("cotx_group")
+            cotx_index = node.extra.get("cotx_index", 0)
+            if group_id not in source_cotx_indices:
+                source_cotx_indices[group_id] = cotx_index
 
-        for node in self.compute_graph.nodes.values():
-            if node.node_type == "aggregation":
-                group_id = node.extra["cotx_group"]
+        for node in self.compute_graph.get_nodes_by_type("aggregation"):
+            group_id = node.extra["cotx_group"]
+            ratios = []
+            if "ratio_ranges" in node.extra:
+                ratio_ranges = node.extra["ratio_ranges"]
+                base_ratios = node.extra["ratios"]
+                for base_ratio, ratio_range in zip(base_ratios, ratio_ranges):
+                    if ratio_range is not None and isinstance(ratio_range, dict):
+                        ratios.append(
+                            NumRange(min=ratio_range.get("min"), max=ratio_range.get("max"))
+                        )
+                    else:
+                        ratios.append(base_ratio)
+            else:
+                ratios = node.extra["ratios"]
+            cotx_groups[group_id] = {
+                "ratios": ratios,
+                "source_ids": node.extra["members"],
+                "cotx_index": source_cotx_indices.get(group_id, 0),
+            }
 
-                ratios = []
-                if "ratio_ranges" in node.extra:
-                    ratio_ranges = node.extra["ratio_ranges"]
-                    base_ratios = node.extra["ratios"]
-                    for base_ratio, ratio_range in zip(base_ratios, ratio_ranges):
-                        if ratio_range is not None and isinstance(ratio_range, dict):
-                            ratios.append(
-                                NumRange(min=ratio_range.get("min"), max=ratio_range.get("max"))
-                            )
-                        else:
-                            ratios.append(base_ratio)
-                else:
-                    ratios = node.extra["ratios"]
-
+        for node in self.compute_graph.get_nodes_by_type("source"):
+            group_id = node.extra.get("cotx_group")
+            source_id = node.extra.get("source_id")
+            cotx_index = node.extra.get("cotx_index", 0)
+            if group_id not in cotx_groups:
                 cotx_groups[group_id] = {
-                    "ratios": ratios,
-                    "source_ids": node.extra["members"],
-                    "cotx_index": source_cotx_indices.get(group_id, 0),
+                    "ratios": [node.extra.get("ratio", 1.0)],
+                    "source_ids": [source_id],
+                    "cotx_index": cotx_index,
                 }
-
-        for node in self.compute_graph.nodes.values():
-            if node.node_type == "source":
-                group_id = node.extra.get("cotx_group")
-                source_id = node.extra.get("source_id")
-                cotx_index = node.extra.get("cotx_index", 0)
-                if group_id not in cotx_groups:
-                    cotx_groups[group_id] = {
-                        "ratios": [node.extra.get("ratio", 1.0)],
-                        "source_ids": [source_id],
-                        "cotx_index": cotx_index,
-                    }
 
         return cotx_groups
 
@@ -562,27 +559,19 @@ class Network(BaseModel):
                 bias_by_cotx[cotx_group] = self._create_fluo_intensity_from_dict(fluo_bias_data)
                 continue
 
-            # Fallback to old format (individual fields)
-            tu_id = 0
-            if tu_id_str := node.extra.get("tu_id", ""):
-                try:
-                    tu_id = int(tu_id_str)
-                except (ValueError, TypeError):
-                    pass
-
             value = self._parse_value_to_numrange_or_float(node.extra.get("value"))
             protein = node.extra.get("protein")
             if protein in ["", "None"]:
                 protein = None
             units = node.extra.get("units", "AU") or "AU"
 
-            # Fallback to aggregation node if values are empty
-            if not tu_id_str and not node.extra.get("value"):
-                if fallback := self._extract_bias_from_aggregation(node):
-                    tu_id = fallback["tu_id"]
-                    value = fallback["value"]
-                    protein = fallback["protein"]
-                    units = fallback["units"]
+            # # Fallback to aggregation node if values are empty
+            # if not tu_id_str and not node.extra.get("value"):
+            #     if fallback := self._extract_bias_from_aggregation(node):
+            #         tu_id = fallback["tu_id"]
+            #         value = fallback["value"]
+            #         protein = fallback["protein"]
+            #         units = fallback["units"]
 
             bias_by_cotx[cotx_group] = FluoIntensity(
                 tu_id=tu_id,
@@ -845,8 +834,8 @@ def _build_cdg_primal_from_preprocessed(
             GraphEdge(
                 source_id=tu_to_node_id[("DNA", tuid)],
                 target_id=tu_to_node_id[("RNA", tuid)],
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content=(),
             )
         )
@@ -861,15 +850,17 @@ def _build_cdg_primal_from_preprocessed(
                     GraphEdge(
                         source_id=rna_node.node_id,
                         target_id=prt_node.node_id,
-                        output_slot=0,
-                        input_slot=0,
+                        from_output_slot=0,
+                        to_input_slot=0,
                         content=(),
                     )
                 )
 
     unique_edges = {(e.source_id, e.target_id): e for e in edges}.values()
     nodes_dict = {n.node_id: n for n in nodes}
-    edges_dict = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in unique_edges}
+    edges_dict = {
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in unique_edges
+    }
     return GraphState(nodes=nodes_dict, edges=edges_dict)
 
 
@@ -1032,8 +1023,8 @@ def _build_cdg_dual_from_preprocessed(
             GraphEdge(
                 source_id=src_id,
                 target_id=tx_id,
-                output_slot=source_output_slot,
-                input_slot=0,
+                from_output_slot=source_output_slot,
+                to_input_slot=0,
                 content_type="DNA",
                 content=tuple(
                     Part(name=p, category=lib.pc.loc[p, "category"] if p in lib.pc.index else "DNA")
@@ -1054,8 +1045,8 @@ def _build_cdg_dual_from_preprocessed(
             GraphEdge(
                 source_id=tx_id,
                 target_id=tl_id,
-                output_slot=0,
-                input_slot=0,
+                from_output_slot=0,
+                to_input_slot=0,
                 content_type="RNA",
                 content=tuple(Part(name=p, category="RNA") for p in info["RNA_content"]),
                 content_embedding_names={k: tuple(v) for k, v in info["RNA_params"].items()},
@@ -1090,8 +1081,8 @@ def _build_cdg_dual_from_preprocessed(
             GraphEdge(
                 source_id=tl_id,
                 target_id=target_node_id,
-                output_slot=0,
-                input_slot=input_slot,
+                from_output_slot=0,
+                to_input_slot=input_slot,
                 content_type="PRT",
                 content=tuple(Part(name=p, category="PRT") for p in info["PRT_content"]),
                 content_embedding_names={k: tuple(v) for k, v in info["PRT_params"].items()},
@@ -1101,7 +1092,7 @@ def _build_cdg_dual_from_preprocessed(
     unique_edges_dict = {}
     for e in edges:
         if e.content_type == "DNA":
-            key = (e.source_id, e.output_slot)
+            key = (e.source_id, e.from_output_slot)
         else:
             key = (e.source_id, e.target_id, e.content_type)
         if key not in unique_edges_dict:
@@ -1109,7 +1100,7 @@ def _build_cdg_dual_from_preprocessed(
 
     nodes_dict = {n.node_id: n for n in nodes}
     edges_dict = {
-        (e.source_id, e.target_id, e.output_slot, e.input_slot): e
+        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e
         for e in unique_edges_dict.values()
     }
     return GraphState(nodes=nodes_dict, edges=edges_dict)
@@ -1139,17 +1130,6 @@ def build_central_dogma_graph_direct(
         return _build_cdg_primal_from_preprocessed(preprocessed_data, lib, custom_outputs_parts)
 
 
-def build_central_dogma_graph(
-    network: Network, lib: PartsLibrary, custom_outputs_parts=None
-) -> pd.DataFrame:
-    """
-    Builds the primal central dogma graph and returns it as a pandas DataFrame
-    for backward compatibility with the old API.
-    """
-    graph_state = build_central_dogma_graph_direct(network, lib, custom_outputs_parts, dual=False)
-    return graphstate_to_cdg_df(graph_state)
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
@@ -1175,11 +1155,11 @@ def graphstate_to_compute_df(graph: GraphState) -> pd.DataFrame:
             edges_by_target[edge.target_id].append(edge)
 
     for nid, data in node_data.items():
-        outgoing = sorted(edges_by_source.get(nid, []), key=lambda e: e.output_slot)
-        data["output_to"] = [(e.target_id, e.input_slot) for e in outgoing]
+        outgoing = sorted(edges_by_source.get(nid, []), key=lambda e: e.from_output_slot)
+        data["output_to"] = [(e.target_id, e.to_input_slot) for e in outgoing]
 
-        incoming = sorted(edges_by_target.get(nid, []), key=lambda e: e.input_slot)
-        data["input_from"] = [(e.source_id, e.output_slot) for e in incoming]
+        incoming = sorted(edges_by_target.get(nid, []), key=lambda e: e.to_input_slot)
+        data["input_from"] = [(e.source_id, e.from_output_slot) for e in incoming]
 
     return pd.DataFrame.from_dict(node_data, orient="index")
 
@@ -1213,14 +1193,14 @@ def compute_df_to_graphstate(compute_df: pd.DataFrame) -> GraphState:
                 edge = GraphEdge(
                     source_id=int(idx),
                     target_id=int(target_id),
-                    output_slot=int(output_slot),
-                    input_slot=int(input_slot),
+                    from_output_slot=int(output_slot),
+                    to_input_slot=int(input_slot),
                     content=(),
                 )
                 edges.append(edge)
 
     nodes_dict = {n.node_id: n for n in nodes}
-    edges_dict = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    edges_dict = {(e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges}
     return GraphState(nodes=nodes_dict, edges=edges_dict)
 
 
@@ -1332,8 +1312,8 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
             kwargs = dict(
                 source_id=int(src_id),
                 target_id=int(dst_id),
-                output_slot=int(out_slot),
-                input_slot=int(in_slot),
+                from_output_slot=int(out_slot),
+                to_input_slot=int(in_slot),
                 content=(),
             )
             if ctype is not None:
@@ -1356,7 +1336,7 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
             edges.append(GraphEdge(**kwargs))
 
     nodes_dict = {n.node_id: n for n in nodes}
-    edges_dict = {(e.source_id, e.target_id, e.output_slot, e.input_slot): e for e in edges}
+    edges_dict = {(e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): e for e in edges}
     return GraphState(nodes=nodes_dict, edges=edges_dict)
 
 

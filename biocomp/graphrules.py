@@ -131,7 +131,6 @@ class AddNode(ActionBase):
     action_type: Literal["add_node"] = "add_node"
     # the local name used to refer to this new node in subsequent actions.
     local_name: str
-    # properties for the new node. Can use Jinja2-style templates to reference
     # properties of matched nodes, e.g., {"type": "translation", "tu_id": "{{protein.tu_id}}"}.
     properties: dict[str, Any]
 

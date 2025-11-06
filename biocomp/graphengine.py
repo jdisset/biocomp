@@ -2,7 +2,6 @@ from typing import Optional, Literal, Union, Dict, List, Any, Set, Tuple
 from pydantic import BaseModel
 from copy import deepcopy
 from itertools import chain
-from jinja2 import Environment, BaseLoader
 from biocomp.graphrules import GraphRewritingRule, PropertyConstraint, EdgeConstraint
 from collections import defaultdict, Counter
 
@@ -25,6 +24,16 @@ NodeType = Union[
 ]
 
 
+"""
+Some notes on input/output slots (for me, mostly):
+- nodes can have multiple inputs and output slots, which are basically "hubs" of unordered connections
+- THERE IS NO ORDER GUARANTEE for edges connected to the same input/output slot other than "it's stable and reproducible for a given graph so long as node ids don't change"
+- that's fine for some nodes like the transforms inputs (transcription/translation) or the negative and positive "input hubs" of ERNs
+- some nodes like aggregation and inputs really do care about their output channel though so for those the edges are connected from a specific output slot
+- output node cares about the input channel (because it maps to a consistent protein ordering)
+"""
+
+
 class Part(BaseModel):
     name: str
     category: str
@@ -33,8 +42,8 @@ class Part(BaseModel):
 class GraphEdge(BaseModel):
     source_id: int
     target_id: int
-    output_slot: int
-    input_slot: int
+    from_output_slot: int
+    to_input_slot: int
     content: tuple[Part, ...]
     content_type: Optional[Literal["DNA", "RNA", "PRT"]] = None
     # Embedding choices carried by the edge; allow multiple possible values per key
@@ -57,43 +66,61 @@ class GraphNode(BaseModel):
 
 class GraphState(BaseModel):
     nodes: dict[int, GraphNode]
-    edges: dict[
-        tuple[int, int, int, int], GraphEdge
-    ]  # key: (source_id, target_id, output_slot, input_slot)
+    edges: dict[tuple[int, int, int, int], GraphEdge]
+    # key for edges is (source_id, target_id, from_output_slot, to_input_slot)
 
     def get_node(self, node_id: int) -> Optional[GraphNode]:
         return self.nodes.get(node_id)
 
+    def get_nodes_by_type(self, node_type: str) -> List[GraphNode]:
+        return [n for n in self.nodes.values() if n.node_type == node_type]
+
     def get_edge(
-        self, source_id: int, target_id: int, output_slot: int = 0, input_slot: int = 0
+        self, source_id: int, target_id: int, from_output_slot: int = 0, to_input_slot: int = 0
     ) -> Optional[GraphEdge]:
-        return self.edges.get((source_id, target_id, output_slot, input_slot))
+        return self.edges.get((source_id, target_id, output_slot, to_input_slot))
 
     def get_outgoing_edges(self, node_id: int) -> list[GraphEdge]:
         """Returns the *sorted* list of outgoing edges from the given node."""
         o_edges = [e for e in self.edges.values() if e.source_id == node_id]
-        o_edges.sort(key=lambda e: (e.target_id, e.output_slot, e.input_slot))
+        o_edges.sort(key=lambda e: (e.target_id, e.from_output_slot, e.to_input_slot))
         return o_edges
 
     def get_incoming_edges(self, node_id: int) -> list[GraphEdge]:
         """Returns the *sorted* list of incoming edges to the given node."""
         i_edges = [e for e in self.edges.values() if e.target_id == node_id]
-        i_edges.sort(key=lambda e: (e.source_id, e.output_slot, e.input_slot))
+        i_edges.sort(key=lambda e: (e.source_id, e.from_output_slot, e.to_input_slot))
         return i_edges
+
+    def get_downstream_nodes(self, node_id: int) -> List[Tuple[GraphNode, GraphEdge]]:
+        connected = []
+        for edge in self.get_outgoing_edges(node_id):
+            target_node = self.get_node(edge.target_id)
+            if target_node:
+                connected.append((target_node, edge))
+        return connected
+
+    def get_upstream_nodes(self, node_id: int) -> List[Tuple[GraphNode, GraphEdge]]:
+        connected = []
+        for edge in self.get_incoming_edges(node_id):
+            source_node = self.get_node(edge.source_id)
+            if source_node:
+                connected.append((source_node, edge))
+        return connected
 
     def get_nb_outgoing_edges(self, node_id: int) -> int:
         return len(self.get_outgoing_edges(node_id))
 
     def get_nb_outgoing_slots(self, node_id: int) -> int:
         edges = self.get_outgoing_edges(node_id)
-        return len(set(e.output_slot for e in edges))
+        return len(set(e.from_output_slot for e in edges))
 
     def get_nb_incoming_edges(self, node_id: int) -> int:
         return len(self.get_incoming_edges(node_id))
 
     def get_nb_incoming_slots(self, node_id: int) -> int:
         edges = self.get_incoming_edges(node_id)
-        return len(set(e.input_slot for e in edges))
+        return len(set(e.to_input_slot for e in edges))
 
 
 class GraphBuilder:
@@ -102,7 +129,7 @@ class GraphBuilder:
             node_id: deepcopy(node) for node_id, node in graph.nodes.items()
         }
         self.edges: Dict[tuple[int, int, int, int], GraphEdge] = {
-            (e.source_id, e.target_id, e.output_slot, e.input_slot): deepcopy(e)
+            (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): deepcopy(e)
             for e in graph.edges.values()
         }
         self.next_id = max(self.nodes.keys(), default=-1) + 1
@@ -125,14 +152,14 @@ class GraphBuilder:
         }
 
     def add_edge(self, source_id: int, target_id: int, **properties):
-        output_slot = properties.get("output_slot", 0)
-        input_slot = properties.get("input_slot", 0)
+        from_output_slot = properties.get("from_output_slot", 0)
+        to_input_slot = properties.get("to_input_slot", 0)
 
         edge_fields = {
             "source_id": source_id,
             "target_id": target_id,
-            "output_slot": output_slot,
-            "input_slot": input_slot,
+            "from_output_slot": from_output_slot,
+            "to_input_slot": to_input_slot,
             "content": properties.get("content", ()),
             "content_type": properties.get("content_type"),
             "content_embedding_names": properties.get("content_embedding_names", {}),
@@ -143,8 +170,8 @@ class GraphBuilder:
             for k, v in properties.items()
             if k
             not in {
-                "output_slot",
-                "input_slot",
+                "from_output_slot",
+                "to_input_slot",
                 "content",
                 "content_type",
                 "content_embedding_names",
@@ -153,7 +180,7 @@ class GraphBuilder:
         edge_fields["extra"] = extra_props
 
         edge = GraphEdge(**edge_fields)
-        edge_key = (source_id, target_id, output_slot, input_slot)
+        edge_key = (source_id, target_id, from_output_slot, to_input_slot)
         self.edges[edge_key] = edge
 
     def delete_edge(self, source_id: int, target_id: int):
@@ -183,14 +210,14 @@ class GraphBuilder:
             new_edge = GraphEdge(
                 source_id=new_source_id,
                 target_id=edge.target_id,
-                output_slot=edge.output_slot,
-                input_slot=edge.input_slot,
+                from_output_slot=edge.from_output_slot,
+                to_input_slot=edge.to_input_slot,
                 content=edge.content,
                 content_type=edge.content_type,
                 content_embedding_names=edge.content_embedding_names,
                 extra=edge.extra,
             )
-            new_key = (new_source_id, edge.target_id, edge.output_slot, edge.input_slot)
+            new_key = (new_source_id, edge.target_id, edge.from_output_slot, edge.to_input_slot)
             self.edges[new_key] = new_edge
 
     def rewire_edges_to(self, old_target_id: int, new_target_id: int):
@@ -201,14 +228,14 @@ class GraphBuilder:
             new_edge = GraphEdge(
                 source_id=edge.source_id,
                 target_id=new_target_id,
-                output_slot=edge.output_slot,
-                input_slot=edge.input_slot,
+                from_output_slot=edge.from_output_slot,
+                to_input_slot=edge.to_input_slot,
                 content=edge.content,
                 content_type=edge.content_type,
                 content_embedding_names=edge.content_embedding_names,
                 extra=edge.extra,
             )
-            new_key = (edge.source_id, new_target_id, edge.output_slot, edge.input_slot)
+            new_key = (edge.source_id, new_target_id, edge.from_output_slot, edge.to_input_slot)
             self.edges[new_key] = new_edge
 
     def build(self) -> GraphState:
@@ -218,8 +245,8 @@ class GraphBuilder:
 def match_properties_generic(
     obj: Any,
     properties: Dict[str, Any],
-    special_cases: Dict[str, str] = None,
-    fallback_dict: str = None,
+    special_cases: Optional[Dict[str, str]] = None,
+    fallback_dict: Optional[str] = None,
 ) -> bool:
     for key, expected in properties.items():
         if special_cases and key in special_cases:
@@ -296,7 +323,7 @@ def has_edge_in_graph(
 
 def find_matches(
     rule: GraphRewritingRule, target_graph: GraphState, debug: bool = False
-) -> List[Dict[str, any]]:
+) -> List[Dict[str, Any]]:
     node_vars = list(rule.query.bind.keys())
     edge_vars = list(rule.query.bind_edges.keys())
 
@@ -460,15 +487,6 @@ def find_index(lst, item):
     return lst.index(item)
 
 
-_jinja_env = Environment(loader=BaseLoader())
-_jinja_env.globals["len"] = len
-_jinja_env.globals["sorted"] = sorted
-_jinja_env.globals["sorted_with_indices"] = sorted_with_indices
-_jinja_env.globals["reorder_list"] = reorder_list
-_jinja_env.globals["find_index"] = find_index
-_jinja_env.globals["list"] = list  # For list() constructor if needed
-
-
 class TemplateProxy:
     def __init__(self, obj: Any, attr_map: Dict[str, str] = None, fallback_dict: str = None):
         self._obj, self._attr_map, self._fallback = obj, attr_map or {}, fallback_dict
@@ -501,9 +519,7 @@ class EdgeProxy(TemplateProxy):
 
 def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEdge]]) -> Any:
     """Expand template strings, preserving types for simple expressions.
-
     Simple expressions (exactly "{{ expr }}") are evaluated as Python → preserves types.
-    Complex templates with text use Jinja2 → produces strings.
     """
     if not isinstance(template_str, str) or "{{" not in template_str:
         return template_str
@@ -514,16 +530,16 @@ def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEd
     }
 
     stripped = template_str.strip()
-
-    # simple expression "{{ expr }}" → direct eval preserves types
     if stripped.startswith("{{") and stripped.endswith("}}") and stripped.count("{{") == 1:
         expr = stripped[2:-2].strip()
-        try:
-            return eval(expr, {"__builtins__": {}}, {**context, **_jinja_env.globals})
-        except Exception:
-            pass
-
-    return _jinja_env.from_string(template_str).render(**context)
+        res = eval(expr, {**context})
+        if "len" in expr:
+            print(
+                f"      Evaluated len() in template '{template_str}' -> {res}. Context is {context}"
+            )
+        return res
+    else:
+        raise ValueError(f"Unsupported template format: '{template_str}'")
 
 
 def _process_match(
@@ -670,14 +686,14 @@ def _process_match(
                         new_target_id = target_id
 
                 new_extra = dict(edge.extra)
-                new_output_slot = edge.output_slot
-                new_input_slot = edge.input_slot
+                new_output_slot = edge.from_output_slot
+                new_input_slot = edge.to_input_slot
                 if action.properties is not None:
                     expanded_props = expand_props(action.properties)
-                    if "output_slot" in expanded_props:
-                        new_output_slot = expanded_props.pop("output_slot")
-                    if "input_slot" in expanded_props:
-                        new_input_slot = expanded_props.pop("input_slot")
+                    if "from_output_slot" in expanded_props:
+                        new_output_slot = expanded_props.pop("from_output_slot")
+                    if "to_input_slot" in expanded_props:
+                        new_input_slot = expanded_props.pop("to_input_slot")
                     new_extra.update(expanded_props)
 
                 new_content = edge.content
@@ -698,8 +714,8 @@ def _process_match(
                 builder.add_edge(
                     source_id=new_source_id,
                     target_id=new_target_id,
-                    output_slot=new_output_slot,
-                    input_slot=new_input_slot,
+                    from_output_slot=new_output_slot,
+                    to_input_slot=new_input_slot,
                     content=new_content,
                     content_type=edge.content_type,
                     content_embedding_names=edge.content_embedding_names,
@@ -751,8 +767,8 @@ def _process_match(
                 builder.add_edge(
                     source_id=new_source_id,
                     target_id=new_target_id,
-                    output_slot=source_edge.output_slot,
-                    input_slot=source_edge.input_slot,
+                    from_output_slot=source_edge.from_output_slot,
+                    to_input_slot=source_edge.to_input_slot,
                     content=new_content,
                     content_type=new_content_type,
                     content_embedding_names=source_edge.content_embedding_names,
@@ -992,9 +1008,9 @@ def _get_canonical_edge_tuple(
         content_sig,
     ]
     if not ignore_output_slot:
-        parts.append(edge.output_slot)
+        parts.append(edge.from_output_slot)
     if not ignore_input_slot:
-        parts.append(edge.input_slot)
+        parts.append(edge.to_input_slot)
     if compare_content_embedding_names and edge.content_embedding_names:
         hashable_names = tuple(
             sorted((k, _make_hashable(v)) for k, v in edge.content_embedding_names.items())
@@ -1155,10 +1171,6 @@ def _get_canonical_invariants_for_diffing(
         hash_to_description[h] = desc
 
     return node_hashes, hash_to_description
-
-
-# Alias for backward compatibility with tests
-compute_graphs_are_equivalent = graphs_are_isomorphic
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
