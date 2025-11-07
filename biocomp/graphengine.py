@@ -250,8 +250,32 @@ class GraphBuilder:
             self.nodes[node_id].extra.update(properties)
 
     def rewire_edges_from(self, old_source_id: int, new_source_id: int):
+        # edges to move from old_source to new_source
         to_rewire = [(k, e) for k, e in self.edges.items() if e.source_id == old_source_id]
 
+        # existing edges on new_source that need to be offset
+        existing_on_new = [(k, e) for k, e in self.edges.items() if e.source_id == new_source_id]
+
+        # offset amount is the number of edges being moved
+        offset = len(to_rewire)
+
+        # first, offset existing edges on new_source
+        for old_key, edge in existing_on_new:
+            del self.edges[old_key]
+            new_edge = GraphEdge(
+                source_id=new_source_id,
+                target_id=edge.target_id,
+                from_output_slot=edge.from_output_slot + offset,  # offset the slot
+                to_input_slot=edge.to_input_slot,
+                content=edge.content,
+                content_type=edge.content_type,
+                content_embedding_names=edge.content_embedding_names,
+                extra=edge.extra,
+            )
+            new_key = (new_source_id, edge.target_id, edge.from_output_slot + offset, edge.to_input_slot)
+            self.edges[new_key] = new_edge
+
+        # then, rewire edges from old_source to new_source (keeping their original slots)
         for old_key, edge in to_rewire:
             del self.edges[old_key]
             new_edge = GraphEdge(
@@ -533,6 +557,26 @@ def find_index(lst, item):
     return lst.index(item)
 
 
+def sorted_with_indices(lst):
+    """Return (sorted_list, indices_for_reordering).
+
+    indices_for_reordering[i] gives the index in the original list where sorted[i] came from.
+    """
+    indexed = list(enumerate(lst))
+    sorted_indexed = sorted(indexed, key=lambda x: x[1])
+    sorted_list = [item for _, item in sorted_indexed]
+    indices = [idx for idx, _ in sorted_indexed]
+    return (sorted_list, indices)
+
+
+def reorder_list(lst, indices):
+    """Reorder list according to indices.
+
+    Result[i] = lst[indices[i]]
+    """
+    return [lst[i] for i in indices]
+
+
 def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEdge]]) -> Any:
     """Expand template strings, preserving types for simple expressions.
 
@@ -551,7 +595,13 @@ def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEd
     stripped = template_str.strip()
     if stripped.startswith("{{") and stripped.endswith("}}") and stripped.count("{{") == 1:
         expr = stripped[2:-2].strip()
-        res = eval(expr, {**match})
+        # Add utility functions to eval context
+        context = {
+            **match,
+            'sorted_with_indices': sorted_with_indices,
+            'reorder_list': reorder_list,
+        }
+        res = eval(expr, context)
         return res
     else:
         raise ValueError(f"Unsupported template format: '{template_str}'")
