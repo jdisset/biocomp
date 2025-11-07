@@ -154,28 +154,22 @@ fix_edge_slots = GraphRewritingRule(
             "aggregation": PropertyConstraint(properties={"type": "aggregation"}),
             "source": PropertyConstraint(properties={"type": "source"}),
         },
-        where_connected=[
-            EdgeConstraint(
-                source_var="aggregation", target_var="source", properties={"content_type": None}
-            ),
-        ],
+        bind_edges={
+            "edge": EdgeConstraint(source_var="aggregation", target_var="source"),
+        },
         # Only process edges where the source is in the aggregation's members
         where_filter_function="source.extra.get('source_id') in aggregation.extra.get('members', [])",
     ),
     actions=[
-        # Delete the existing edge
-        DeleteEdge(source_var="aggregation", target_var="source"),
-        # Recreate with correct slot
-        AddEdge(
-            source="aggregation",
-            target="source",
+        # Update the edge's from_output_slot to match the position in sorted members
+        EditEdge(
+            edge_var="edge",
             properties={
-                "content_type": None,
-                "from_output_slot": "{{ 0 if aggregation.extra.get('members', [])[0] == source.extra.get('source_id') else 1 }}",
+                "from_output_slot": "{{ aggregation.extra.get('members', []).index(source.extra.get('source_id')) }}",
             },
         ),
     ],
-    yield_strategy="batched",
+    yield_strategy="batched",  # Batch all edge updates together
 )
 
 add_numeric_nodes = GraphRewritingRule(
@@ -328,7 +322,8 @@ ALL_RULES = [
     create_aggregation_nodes,
     connect_sources_to_aggregation,
     merge_aggregators_by_group,
-    # sort_aggregation_members,
+    sort_aggregation_members,  # Sort members alphabetically and reorder ratios to match
+    fix_edge_slots,  # Update edge output slots to match sorted member positions
     add_bias_nodes,  # Add bias nodes for cotx with fluo_bias
     add_numeric_nodes,  # Add numeric (copy number) nodes for regular cotx
     *SEQUESTRON_RULES,
