@@ -84,26 +84,57 @@ class Network(BaseModel):
         return [output_proteins[mapping[i]] for i in range(len(mapping))]
 
     def get_inverted_input_positions(self, include_biases: bool = False) -> dict[int, int]:
-        """Returns a mapping from input position to output position"""
-        # TODO: include_biases parameter
+        """Returns a mapping from input position to output position
+
+        Args:
+            include_biases: If True, also includes bias nodes in the mapping
+        """
         assert self.compute_graph is not None
         mapping = {}
-        # Only input nodes have input_position/input_from_output (from inversion)
-        # Bias nodes are direct inputs like numeric nodes, so we don't include them
+        # Input nodes have input_position/input_from_output (from inversion)
         mask_types = ["input"]
+
+        # If including biases, add bias nodes to the types
+        if include_biases:
+            mask_types.append("bias")
 
         inputs = [n for n in self.compute_graph.nodes.values() if n.node_type in mask_types]
         for node in inputs:
-            assert "input_position" in node.extra, f"input_position not in {node.extra}"
-            assert "input_from_output" in node.extra, f"input_from_output not in {node.extra}"
-            assert node.extra["input_position"] not in mapping
-            mapping[node.extra["input_position"]] = node.extra["input_from_output"]
+            # Bias nodes don't have input_position, they map directly via input_from_output
+            if node.node_type == "bias":
+                # Bias nodes only have input_from_output in inverted networks
+                if "input_from_output" not in node.extra:
+                    # Skip bias nodes without input_from_output (non-inverted networks)
+                    continue
+                # For bias nodes, use a special position (after regular inputs)
+                # Count existing inputs to determine position
+                bias_position = len([n for n in inputs if n.node_type == "input" and n.node_id < node.node_id])
+                # Add number of regular inputs to get the bias position
+                regular_input_count = len([n for n in inputs if n.node_type == "input"])
+                bias_input_pos = regular_input_count + len([n for n in inputs if n.node_type == "bias" and n.node_id < node.node_id and "input_from_output" in n.extra])
+                mapping[bias_input_pos] = node.extra["input_from_output"]
+            else:
+                assert "input_position" in node.extra, f"input_position not in {node.extra}"
+                assert "input_from_output" in node.extra, f"input_from_output not in {node.extra}"
+                assert node.extra["input_position"] not in mapping
+                mapping[node.extra["input_position"]] = node.extra["input_from_output"]
 
         assert set(mapping.keys()) == set(range(len(mapping.keys()))), f"Invalid mapping: {mapping}"
         assert len(mapping.keys()) == len(set(mapping.values())), f"Invalid mapping: {mapping}"
         return mapping
 
-    def get_bias_proteins(self) -> list[str]: ...
+    def get_bias_proteins(self) -> list[str]:
+        """Returns the names of proteins that are bias inputs (fluo_bias nodes)"""
+        assert self.compute_graph is not None
+        bias_nodes = self.compute_graph.get_nodes_by_type("bias")
+        bias_proteins = []
+        for bias_node in bias_nodes:
+            fluo_bias = bias_node.extra.get("fluo_bias")
+            if fluo_bias and isinstance(fluo_bias, dict):
+                protein = fluo_bias.get("protein")
+                if protein:
+                    bias_proteins.append(protein)
+        return bias_proteins
 
     def get_output_proteins(self, only_dependent_outputs: bool = False) -> list[str]:
         """Returns the names of all proteins that are outputs of the network"""
@@ -240,7 +271,7 @@ class Network(BaseModel):
         """Converts the network back to a Recipe object"""
 
         cotx_groups = self._extract_cotx_groups()
-        tus_by_cotx = self._build_transcription_units(cotx_groups)
+        tus_and_ratios_by_cotx = self._build_transcription_units(cotx_groups)
         bias_by_cotx = self._extract_bias_nodes()
 
         # Sort by cotx_index to preserve original order
@@ -248,12 +279,12 @@ class Network(BaseModel):
 
         content = []
         for group_id in sorted_group_ids:
-            info = cotx_groups[group_id]
+            tus, reordered_ratios = tus_and_ratios_by_cotx[group_id]
             content.append(
                 CoTransfection(
                     name=group_id if group_id != "cotx_1" or len(cotx_groups) > 1 else None,
-                    units=tus_by_cotx[group_id],
-                    ratios=info["ratios"] if len(info["ratios"]) > 1 else None,
+                    units=tus,
+                    ratios=reordered_ratios if len(reordered_ratios) > 1 else None,
                     fluo_bias=bias_by_cotx.get(group_id),
                 )
             )
@@ -314,10 +345,14 @@ class Network(BaseModel):
 
         return cotx_groups
 
-    def _build_transcription_units(self, cotx_groups: dict) -> dict[str, list[TranscriptionUnit]]:
-        tus_by_cotx = {}
+    def _build_transcription_units(self, cotx_groups: dict) -> dict[str, tuple[list[TranscriptionUnit], list]]:
+        tus_and_ratios_by_cotx = {}
         for group_id, info in cotx_groups.items():
             tus = []
+            reordered_ratios = []
+            # Create mapping from source_id to ratio (both are in aggregation order, e.g. alphabetically sorted)
+            source_id_to_ratio = dict(zip(info["source_ids"], info["ratios"]))
+
             source_nodes_with_pos = []
             for source_id in info["source_ids"]:
                 source_node = self._find_source_node(source_id, group_id)
@@ -325,9 +360,13 @@ class Network(BaseModel):
                     position = source_node.extra.get("position_in_source", 0)
                     source_nodes_with_pos.append((position, source_id, source_node))
 
+            # Sort by position to restore original TU order
             source_nodes_with_pos.sort(key=lambda x: x[0])
 
             for position, source_id, source_node in source_nodes_with_pos:
+                # Look up the ratio for this source_id in the correct order
+                reordered_ratios.append(source_id_to_ratio.get(source_id, 1.0))
+
                 param_ref_ids = source_node.extra.get("param_ref_ids", {})
                 slots = self._extract_slots_from_source(source_node, param_ref_ids)
 
@@ -347,8 +386,8 @@ class Network(BaseModel):
                     tu.param_ref_ids = dict(param_ref_ids)
 
                 tus.append(tu)
-            tus_by_cotx[group_id] = tus
-        return tus_by_cotx
+            tus_and_ratios_by_cotx[group_id] = (tus, reordered_ratios)
+        return tus_and_ratios_by_cotx
 
     def _find_source_node(self, source_id: str, cotx_group: str):
         assert self.compute_graph is not None
@@ -552,25 +591,38 @@ class Network(BaseModel):
 
             cotx_group = self._find_cotx_group_for_bias(node)
 
-            # Try new format first (fluo_bias_data dict)
+            # Try to get fluo_bias dict (current format)
+            fluo_bias = node.extra.get("fluo_bias")
+            if fluo_bias and isinstance(fluo_bias, dict):
+                # Parse value from fluo_bias dict
+                value = self._parse_value_to_numrange_or_float(fluo_bias.get("value"))
+                protein = fluo_bias.get("protein")
+                if protein in ["", "None"]:
+                    protein = None
+                units = fluo_bias.get("units", "AU") or "AU"
+                tu_id = fluo_bias.get("tu_id", 0)
+
+                bias_by_cotx[cotx_group] = FluoIntensity(
+                    tu_id=tu_id,
+                    value=value if value is not None else 100.0,
+                    protein=protein,
+                    units=units,
+                )
+                continue
+
+            # Legacy format: try fluo_bias_data dict
             fluo_bias_data = self._parse_fluo_bias_data(node.extra.get("fluo_bias_data"))
             if fluo_bias_data:
                 bias_by_cotx[cotx_group] = self._create_fluo_intensity_from_dict(fluo_bias_data)
                 continue
 
+            # Fallback: try to get fields directly from node.extra (oldest format)
             value = self._parse_value_to_numrange_or_float(node.extra.get("value"))
             protein = node.extra.get("protein")
             if protein in ["", "None"]:
                 protein = None
             units = node.extra.get("units", "AU") or "AU"
-
-            # # Fallback to aggregation node if values are empty
-            # if not tu_id_str and not node.extra.get("value"):
-            #     if fallback := self._extract_bias_from_aggregation(node):
-            #         tu_id = fallback["tu_id"]
-            #         value = fallback["value"]
-            #         protein = fallback["protein"]
-            #         units = fallback["units"]
+            tu_id = node.extra.get("tu_id", 0)
 
             bias_by_cotx[cotx_group] = FluoIntensity(
                 tu_id=tu_id,
