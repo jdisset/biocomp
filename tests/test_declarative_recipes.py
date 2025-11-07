@@ -1493,7 +1493,7 @@ def test_multiple_random_inits_produce_different_ratios(lib, unlocked_ratios_net
         # Get aggregation namespace
         agg_namespace = None
         for layer in stack.layers:
-            if "aggregation" in layer.namespace:
+            if layer.f_type == "aggregation":
                 agg_namespace = layer.namespace
                 break
 

@@ -43,22 +43,25 @@ def aggregation(
                     # Store range info (None if locked, dict with min/max if unlocked)
                     ratio_ranges_list.append(ranges)
 
-                    # Initialize unlocked ratios within their ranges
                     for j, range_info in enumerate(ranges):
                         if range_info is not None:
-                            # Ratio is unlocked - initialize within range
                             min_v = range_info.get("min", 0.0)
                             max_v = range_info.get("max", 1.0)
                             if min_v is None:
                                 min_v = 0.0
                             if max_v is None:
                                 max_v = 1.0
-                            # Generate random value within range
+
+                            # normalize range: ratio_j / (other_ratios_sum + ratio_j)
+                            other_ratios_sum = jnp.sum(ratio_v) - ratio_v[j]
+                            normalized_min = min_v / (other_ratios_sum + min_v)
+                            normalized_max = max_v / (other_ratios_sum + max_v)
+
                             ratio_v = ratio_v.at[j].set(
                                 jax.random.uniform(
                                     jax.random.fold_in(key, i * n_outputs + j),
-                                    minval=min_v,
-                                    maxval=max_v,
+                                    minval=normalized_min,
+                                    maxval=normalized_max,
                                 )
                             )
                 else:
