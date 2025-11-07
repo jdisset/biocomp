@@ -147,31 +147,6 @@ sort_aggregation_members = GraphRewritingRule(
     yield_strategy="batched",
 )
 
-fix_edge_slots = GraphRewritingRule(
-    name="fix_edge_slots",
-    query=MatchQuery(
-        bind={
-            "aggregation": PropertyConstraint(properties={"type": "aggregation"}),
-            "source": PropertyConstraint(properties={"type": "source"}),
-        },
-        bind_edges={
-            "edge": EdgeConstraint(source_var="aggregation", target_var="source"),
-        },
-        # Only process edges where the source is in the aggregation's members
-        where_filter_function="source.extra.get('source_id') in aggregation.extra.get('members', [])",
-    ),
-    actions=[
-        # Update the edge's from_output_slot to match the position in sorted members
-        EditEdge(
-            edge_var="edge",
-            properties={
-                "from_output_slot": "{{ aggregation.extra.get('members', []).index(source.extra.get('source_id')) }}",
-            },
-        ),
-    ],
-    yield_strategy="batched",  # Batch all edge updates together
-)
-
 add_numeric_nodes = GraphRewritingRule(
     name="add_numeric_nodes",
     query=MatchQuery(
@@ -322,8 +297,6 @@ ALL_RULES = [
     create_aggregation_nodes,
     connect_sources_to_aggregation,
     merge_aggregators_by_group,
-    sort_aggregation_members,  # Sort members alphabetically and reorder ratios to match
-    fix_edge_slots,  # Update edge output slots to match sorted member positions
     add_bias_nodes,  # Add bias nodes for cotx with fluo_bias
     add_numeric_nodes,  # Add numeric (copy number) nodes for regular cotx
     *SEQUESTRON_RULES,

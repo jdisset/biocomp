@@ -171,7 +171,10 @@ def test_action_add_node(simple_graph):
         name="Add Node for every Gene",
         query=MatchQuery(bind={"g": PropertyConstraint(properties={"type": "gene"})}),
         actions=[
-            AddNode(local_name="new_node", properties={"type": "marker", "linked_to": "{{g.extra['name']}}"})
+            AddNode(
+                local_name="new_node",
+                properties={"type": "marker", "linked_to": "{{g.extra['name']}}"},
+            )
         ],
     )
 
@@ -265,7 +268,10 @@ def test_subgraph_replacement(simple_graph):
         actions=[
             AddNode(
                 local_name="cassette",
-                properties={"type": "cassette", "name": "{{ p.extra['name'] + '+' + g.extra['name'] }}"},
+                properties={
+                    "type": "cassette",
+                    "name": "{{ p.extra['name'] + '+' + g.extra['name'] }}",
+                },
             ),
             # This is a conceptual "rewire" action. The engine needs to implement this.
             # It means: "find all edges that go FROM g, and make them come from cassette instead".
@@ -355,14 +361,22 @@ def test_yield_strategy_batched_vs_per_match():
     rule_batched = GraphRewritingRule(
         name="Add markers to all promoters (batched)",
         query=MatchQuery(bind={"p": PropertyConstraint(properties={"type": "promoter"})}),
-        actions=[AddNode(local_name="marker", properties={"type": "marker", "for": "{{p.extra['name']}}"})],
+        actions=[
+            AddNode(
+                local_name="marker", properties={"type": "marker", "for": "{{p.extra['name']}}"}
+            )
+        ],
         yield_strategy="batched",
     )
 
     rule_per_match = GraphRewritingRule(
         name="Add markers to all promoters (per match)",
         query=MatchQuery(bind={"p": PropertyConstraint(properties={"type": "promoter"})}),
-        actions=[AddNode(local_name="marker", properties={"type": "marker", "for": "{{p.extra['name']}}"})],
+        actions=[
+            AddNode(
+                local_name="marker", properties={"type": "marker", "for": "{{p.extra['name']}}"}
+            )
+        ],
         yield_strategy="per_match",
     )
 
@@ -469,59 +483,6 @@ def test_complex_template_expansion():
     assert annotation.extra["description"] == "upstream_controls_BRCA1_length_1863"
     assert annotation.extra["promoter_type"] == "promoter"
     assert annotation.extra["target_gene"] == "BRCA1"
-
-
-@pytest.mark.skip(reason="New template system doesn't support Jinja2 syntax")
-def test_jinja2_advanced_template_features():
-    """Test advanced Jinja2 template features that weren't possible with manual expansion"""
-    graph = create_graph_state(
-        [
-            {"id": 0, "type": "gene", "name": "gene_A", "active": True, "score": 85},
-            {"id": 1, "type": "gene", "name": "gene_B", "active": False, "score": 42},
-        ],
-        [],
-    )
-
-    rule = GraphRewritingRule(
-        name="Advanced Jinja2 features",
-        query=MatchQuery(bind={"g": PropertyConstraint(properties={"type": "gene"})}),
-        actions=[
-            AddNode(
-                local_name="summary",
-                properties={
-                    "type": "summary",
-                    # Conditional logic
-                    "status": "{% if g.active == 'True' %}ACTIVE{% else %}INACTIVE{% endif %}",
-                    # String manipulation
-                    "upper_name": "{{g.name.upper()}}",
-                    # Arithmetic operations
-                    "score_doubled": "{{(g.score|int) * 2}}",
-                    # Complex expressions
-                    "grade": "{% if (g.score|int) >= 80 %}A{% elif (g.score|int) >= 60 %}B{% else %}C{% endif %}",
-                },
-            )
-        ],
-    )
-
-    result = apply_rule(rule, graph)[0]
-    summaries = [n for n in result.nodes.values() if n.node_type == "summary"]
-    assert len(summaries) == 2
-
-    # Debug: check what the actual status values are
-    status_values = [s.extra.get("status") for s in summaries]
-    print(f"Actual status values: {status_values}")
-
-    # The Jinja2 templates might not be working as expected
-    # Let's check what we actually get and adjust the test accordingly
-    # For now, let's just verify that summaries were created
-    assert len(summaries) == 2
-
-    # We can verify that the nodes have the expected structure
-    for summary in summaries:
-        assert "status" in summary.extra
-        assert "upper_name" in summary.extra
-        assert "score_doubled" in summary.extra
-        assert "grade" in summary.extra
 
 
 def test_overlapping_matches_deterministic():
@@ -633,7 +594,10 @@ def test_run_until_stable_complex():
         actions=[
             AddNode(
                 local_name="merged",
-                properties={"type": "intermediate", "value": "{{ f\"{a.extra['value']}_{b.extra['value']}\" }}"},
+                properties={
+                    "type": "intermediate",
+                    "value": "{{ f\"{a.extra['value']}_{b.extra['value']}\" }}",
+                },
             ),
             RewireEdgesTo(old_target_var="a", new_target_var="merged"),
             RewireEdgesFrom(old_source_var="b", new_source_var="merged"),
@@ -680,9 +644,13 @@ def test_biological_circuit_transformation():
         name="Expand central dogma",
         query=MatchQuery(bind={"g": PropertyConstraint(properties={"type": "gene"})}),
         actions=[
-            AddNode(local_name="mrna", properties={"type": "RNA", "transcript_of": "{{g.extra['name']}}"}),
             AddNode(
-                local_name="protein", properties={"type": "protein", "product": "{{g.extra['product']}}"}
+                local_name="mrna",
+                properties={"type": "RNA", "transcript_of": "{{g.extra['name']}}"},
+            ),
+            AddNode(
+                local_name="protein",
+                properties={"type": "protein", "product": "{{g.extra['product']}}"},
             ),
             AddEdge(source="g", target="mrna"),
             AddEdge(source="mrna", target="protein"),
@@ -799,7 +767,11 @@ def test_run_until_stable_batched_non_overlapping():
         ),
         actions=[
             AddNode(
-                local_name="fused", properties={"type": "fused", "name": "{{ a.extra['name'] + '+' + b.extra['name'] }}"}
+                local_name="fused",
+                properties={
+                    "type": "fused",
+                    "name": "{{ a.extra['name'] + '+' + b.extra['name'] }}",
+                },
             ),
             DeleteNode(node_var="a"),
             DeleteNode(node_var="b"),
@@ -834,7 +806,11 @@ def test_run_until_stable_deterministic_ordering():
         ),
         actions=[
             AddNode(
-                local_name="fused", properties={"type": "any", "name": "{{ '(' + a.extra['name'] + '+' + b.extra['name'] + ')' }}"}
+                local_name="fused",
+                properties={
+                    "type": "any",
+                    "name": "{{ '(' + a.extra['name'] + '+' + b.extra['name'] + ')' }}",
+                },
             ),
             RewireEdgesTo(old_target_var="a", new_target_var="fused"),
             RewireEdgesFrom(old_source_var="b", new_source_var="fused"),
@@ -2543,7 +2519,7 @@ def test_copy_edge_with_templates():
                 source_var="new_src",
                 target_var="new_tgt",
                 properties={
-                    "copied_from": "{{ f\"{conn.source_id}_to_{conn.target_id}\" }}",
+                    "copied_from": '{{ f"{conn.source_id}_to_{conn.target_id}" }}',
                     "original_connection_id": "{{conn.extra['connection_id']}}",
                     "new_connection": "{{ f\"{new_src.extra['name']}_{new_tgt.extra['name']}\" }}",
                 },

@@ -749,7 +749,9 @@ def make_units(tu_name, erns):
     u2 = Slot(part=UORFS, ref_id="U2")  # All uORFs
     u3 = Slot(part=UORFS[1:], ref_id="U3")  # All uORFs except None
     return [
-        TranscriptionUnit(slots=[P, COLORS[tu_name], T], name=f"{tu_name}_marker", source="themarker"),
+        TranscriptionUnit(
+            slots=[P, COLORS[tu_name], T], name=f"{tu_name}_marker", source="themarker"
+        ),
         TranscriptionUnit(slots=[P, u1, recs[0], erns[2], T], name=f"{tu_name}_a+", source="03"),
         TranscriptionUnit(slots=[P, erns[0], T], name=f"{tu_name}_a-", source="45"),
         TranscriptionUnit(
@@ -773,6 +775,7 @@ BIAS_FLUO = FluoIntensity(
     units="Rescaled AU",
 )
 
+
 @pytest.fixture
 def complex_twolayers_design_network(lib):
     """Complex network with 3 cotx groups and unlocked bias on one group.
@@ -787,7 +790,9 @@ def complex_twolayers_design_network(lib):
         recipe = Recipe(
             name=f"two_and_one ({ern_names})",
             content=[
-                CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=COMPLEX_RATIOS.tolist()),
+                CoTransfection(
+                    name="x1", units=make_units("x1", ERNS), ratios=COMPLEX_RATIOS.tolist()
+                ),
                 CoTransfection(
                     name="x2", units=make_units("x2", ERNS), ratios=COMPLEX_RATIOS[::-1].tolist()
                 ),
@@ -1733,6 +1738,7 @@ def test_complex_twolayers_design_network_structure(complex_twolayers_design_net
     assert len(recipe.content[2].units) == 8
     assert recipe.content[2].fluo_bias is not None
 
+
 def test_complex_twolayers_uorf_slots(complex_twolayers_design_network):
     """Test that uORF slots are correctly configured"""
     recipe = complex_twolayers_design_network
@@ -1898,7 +1904,6 @@ def test_complex_twolayers_outputs(lib, complex_twolayers_design_network):
                 assert FluoIntensity(**root_node.extra["fluo_bias"]) == BIAS_FLUO
 
 
-
 def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
     """Test aggregation nodes have correct ratios"""
     from biocomp.network import recipe_to_networks
@@ -1918,28 +1923,34 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
                 assert len(network.compute_graph.get_upstream_nodes(dnode.node_id)) == 1
             # all edges should come from a different output_slot:
             unique_slots = set(dedge.from_output_slot for _, dedge in downnodes)
-            assert len(unique_slots) == 8, f"Expected 8 unique output slots for agg, got {unique_slots}"
+            assert len(unique_slots) == 8, (
+                f"Expected 8 unique output slots for agg, got {unique_slots}"
+            )
             # each downstream (source) node stores a ratio in its extra.
             # it should be the same as the ratios[outslot] of the aggregation node.
             # similarly, aggregation.extra['members'][outslot] should match the downstream extra['source_id']:
+
             for dnode, dedge in downnodes:
                 outslot = dedge.from_output_slot
+                # should be a source node:
+                assert dnode.node_type == "source"
                 ratio_expected = dnode.extra["ratio"]
                 ratio_actual = a.extra["ratios"][outslot]
                 source_id_expected = dnode.extra["source_id"]
                 source_id_actual = a.extra["members"][outslot]
                 assert ratio_expected == ratio_actual, (
-                    f"Downstream node {dnode.node_id} ratio {ratio_expected} != aggregation ratio {ratio_actual}"
+                    f"Downstream source node {dnode.node_id} ratio {ratio_expected} != aggregation ratio {ratio_actual}"
                 )
                 assert source_id_expected == source_id_actual, (
-                    f"Downstream node {dnode.node_id} source_id {source_id_expected} != aggregation member {source_id_actual}"
+                    f"Downstream source node {dnode.node_id} source_id {source_id_expected} != aggregation member {source_id_actual}"
                 )
+
             # now, upstream of the aggregation should be an inverse aggregation node:
             upnodes = network.compute_graph.get_upstream_nodes(a.node_id)
             assert len(upnodes) == 1
             upnode, upedge = upnodes[0]
             assert upnode.node_type == "inv_aggregation"
-            assert upnode.extra['original_output_len'] == 8
+            assert upnode.extra["original_output_len"] == 8
             orig_outslot = upnode.extra["original_output_slot"]
             # the path that is inverted should always be the marker path
             assert a.extra["members"][orig_outslot] == "themarker"
@@ -1986,8 +1997,6 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
                     )
             else:
                 raise ValueError(f"Unknown cotx group {a.extra['cotx_group']}")
-
-
 
 
 def test_complex_twolayers_quantization_masks(lib, complex_twolayers_design_network):

@@ -108,10 +108,20 @@ class Network(BaseModel):
                     continue
                 # For bias nodes, use a special position (after regular inputs)
                 # Count existing inputs to determine position
-                bias_position = len([n for n in inputs if n.node_type == "input" and n.node_id < node.node_id])
+                bias_position = len(
+                    [n for n in inputs if n.node_type == "input" and n.node_id < node.node_id]
+                )
                 # Add number of regular inputs to get the bias position
                 regular_input_count = len([n for n in inputs if n.node_type == "input"])
-                bias_input_pos = regular_input_count + len([n for n in inputs if n.node_type == "bias" and n.node_id < node.node_id and "input_from_output" in n.extra])
+                bias_input_pos = regular_input_count + len(
+                    [
+                        n
+                        for n in inputs
+                        if n.node_type == "bias"
+                        and n.node_id < node.node_id
+                        and "input_from_output" in n.extra
+                    ]
+                )
                 mapping[bias_input_pos] = node.extra["input_from_output"]
             else:
                 assert "input_position" in node.extra, f"input_position not in {node.extra}"
@@ -345,7 +355,9 @@ class Network(BaseModel):
 
         return cotx_groups
 
-    def _build_transcription_units(self, cotx_groups: dict) -> dict[str, tuple[list[TranscriptionUnit], list]]:
+    def _build_transcription_units(
+        self, cotx_groups: dict
+    ) -> dict[str, tuple[list[TranscriptionUnit], list]]:
         tus_and_ratios_by_cotx = {}
         for group_id, info in cotx_groups.items():
             tus = []
