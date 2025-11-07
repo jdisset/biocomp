@@ -102,33 +102,35 @@ def test_complex_twolayers_parameter_constraints(lib, complex_twolayers_design_n
         ratios_norm = jnp.abs(ratios) / jnp.sum(jnp.abs(ratios), axis=1, keepdims=True)
 
         # Compare sorted ratios (order-independent comparison)
-        def matches_pattern_sorted(row, expected, rtol=1e-5):
-            """Check if ratio values match when sorted (order-independent)"""
-            return jnp.allclose(jnp.sort(row), jnp.sort(expected), rtol=rtol)
+        # Note: x1 and x2 have the same sorted pattern (just reversed), so we can't distinguish them by sorted values
+        # We need to check: 2 rows match x1/x2 pattern (sorted), 1 row matches b pattern
+        x1x2_sorted = jnp.sort(expected_x1_norm)  # Same as jnp.sort(expected_x2_norm)
+        b_sorted = jnp.sort(expected_b_norm)
 
-        # Check that we have matches for all three patterns
-        matches = []
+        # Count matches for each pattern
+        x1x2_matches = []
+        b_matches = []
+
         for row_idx in range(3):
             row = ratios_norm[row_idx]
-            if matches_pattern_sorted(row, expected_x1_norm):
-                matches.append(("x1", row_idx))
-            elif matches_pattern_sorted(row, expected_x2_norm):
-                matches.append(("x2", row_idx))
-            elif matches_pattern_sorted(row, expected_b_norm):
-                matches.append(("b", row_idx))
+            row_sorted = jnp.sort(row)
+            if jnp.allclose(row_sorted, x1x2_sorted, rtol=1e-5):
+                x1x2_matches.append(row_idx)
+            elif jnp.allclose(row_sorted, b_sorted, rtol=1e-5):
+                b_matches.append(row_idx)
 
-        assert len(matches) == 3, (
-            f"Expected to find 3 matching ratio patterns, found {len(matches)}.\n"
+        # We expect 2 rows to match x1/x2 pattern (since they're indistinguishable when sorted)
+        # and 1 row to match b pattern
+        assert len(x1x2_matches) == 2, (
+            f"Expected 2 rows to match x1/x2 pattern, found {len(x1x2_matches)}.\n"
             f"Ratios (normalized, sorted):\n{jnp.sort(ratios_norm, axis=1)}\n"
-            f"Expected x1 (sorted): {jnp.sort(expected_x1_norm)}\n"
-            f"Expected x2 (sorted): {jnp.sort(expected_x2_norm)}\n"
-            f"Expected b (sorted): {jnp.sort(expected_b_norm)}"
+            f"Expected x1/x2 (sorted): {x1x2_sorted}\n"
+            f"Expected b (sorted): {b_sorted}"
         )
-
-        # Verify we have one of each
-        match_names = {name for name, _ in matches}
-        assert match_names == {"x1", "x2", "b"}, (
-            f"Expected matches for x1, x2, and b, got {match_names}"
+        assert len(b_matches) == 1, (
+            f"Expected 1 row to match b pattern, found {len(b_matches)}.\n"
+            f"Ratios (normalized, sorted):\n{jnp.sort(ratios_norm, axis=1)}\n"
+            f"Expected b (sorted): {b_sorted}"
         )
 
         # Check quantization masks for translation nodes

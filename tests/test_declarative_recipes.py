@@ -749,7 +749,7 @@ def make_units(tu_name, erns):
     u2 = Slot(part=UORFS, ref_id="U2")  # All uORFs
     u3 = Slot(part=UORFS[1:], ref_id="U3")  # All uORFs except None
     return [
-        TranscriptionUnit(slots=[P, COLORS[tu_name], T], name=f"{tu_name}_marker", source="123"),
+        TranscriptionUnit(slots=[P, COLORS[tu_name], T], name=f"{tu_name}_marker", source="themarker"),
         TranscriptionUnit(slots=[P, u1, recs[0], erns[2], T], name=f"{tu_name}_a+", source="03"),
         TranscriptionUnit(slots=[P, erns[0], T], name=f"{tu_name}_a-", source="45"),
         TranscriptionUnit(
@@ -785,7 +785,7 @@ def complex_twolayers_design_network(lib):
     lib = load_lib()
     with LibraryContext.with_library(lib):
         recipe = Recipe(
-            name="two_and_one",
+            name=f"two_and_one ({ern_names})",
             content=[
                 CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=COMPLEX_RATIOS.tolist()),
                 CoTransfection(
@@ -1383,13 +1383,13 @@ def test_bias_network_creates_bias_node(lib, bias_network):
         assert len(bias_nodes) == 1, "Should have exactly 1 bias node"
         assert len(numeric_nodes) == 0, "Should have NO numeric nodes"
 
-        # Check bias node properties (now stored in fluo_bias_data as dict)
+        # Check bias node properties (stored in fluo_bias as dict)
         bias = bias_nodes[0]
         assert bias.extra["role"] == "fluo_bias"
-        assert "fluo_bias_data" in bias.extra
+        assert "fluo_bias" in bias.extra
 
-        # fluo_bias_data should be a dict, not a string
-        fluo_data = bias.extra["fluo_bias_data"]
+        # fluo_bias should be a dict
+        fluo_data = bias.extra["fluo_bias"]
         assert isinstance(fluo_data, dict), f"Expected dict, got {type(fluo_data)}"
         assert fluo_data["tu_id"] == 0
         assert fluo_data["value"] == 100.0
@@ -1410,8 +1410,8 @@ def test_unlocked_bias_node_properties(lib, unlocked_bias_network):
         assert len(bias_nodes) == 1
 
         bias = bias_nodes[0]
-        # Value should be a dict with min/max for unlocked bias (now in fluo_bias_data as dict)
-        fluo_data = bias.extra["fluo_bias_data"]
+        # Value should be a dict with min/max for unlocked bias (stored in fluo_bias as dict)
+        fluo_data = bias.extra["fluo_bias"]
         assert isinstance(fluo_data, dict), f"Expected dict, got {type(fluo_data)}"
         value = fluo_data["value"]
         assert isinstance(value, dict)
@@ -1871,6 +1871,8 @@ def test_complex_twolayers_outputs(lib, complex_twolayers_design_network):
         for inp_id, outp_id in input_output_map_wbias.items():
             assert input_proteins_wbias[inp_id] == output_proteins[outp_id]
 
+        # Check upstream connections for aggregation nodes
+        aggs = network.compute_graph.get_nodes_by_type("aggregation")
         for a in aggs:
             upnodes = network.compute_graph.get_upstream_nodes(a.node_id, recursive=True)
             upnode_types = [n.node_type for n, e in upnodes]
@@ -1946,14 +1948,14 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
             if a.extra["cotx_group"] == "x1":
                 ratio_order = a.extra["members"]
                 expected_ratios = {
-                    "x1_marker": COMPLEX_RATIOS[0],
-                    "x1_a+": COMPLEX_RATIOS[1],
-                    "x1_a-": COMPLEX_RATIOS[2],
-                    "x1_b+": COMPLEX_RATIOS[3],
-                    "x1_b-": COMPLEX_RATIOS[4],
-                    "x1_c+": COMPLEX_RATIOS[5],
-                    "x1_c-": COMPLEX_RATIOS[6],
-                    "x1_direct_out": COMPLEX_RATIOS[7],
+                    "themarker": COMPLEX_RATIOS[0],
+                    "03": COMPLEX_RATIOS[1],
+                    "45": COMPLEX_RATIOS[2],
+                    "haha12": COMPLEX_RATIOS[3],
+                    "wrong order 78": COMPLEX_RATIOS[4],
+                    "a random id": COMPLEX_RATIOS[5],
+                    "00aaa": COMPLEX_RATIOS[6],
+                    "direct": COMPLEX_RATIOS[7],
                 }
                 for src_id, ratio in zip(ratio_order, a.extra["ratios"]):
                     assert np.isclose(ratio, expected_ratios[src_id]), (
@@ -1963,14 +1965,14 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
             elif a.extra["cotx_group"] == "x2":
                 ratio_order = a.extra["members"]
                 expected_ratios = {
-                    "x2_marker": COMPLEX_RATIOS[7],
-                    "x2_a+": COMPLEX_RATIOS[6],
-                    "x2_a-": COMPLEX_RATIOS[5],
-                    "x2_b+": COMPLEX_RATIOS[4],
-                    "x2_b-": COMPLEX_RATIOS[3],
-                    "x2_c+": COMPLEX_RATIOS[2],
-                    "x2_c-": COMPLEX_RATIOS[1],
-                    "x2_direct_out": COMPLEX_RATIOS[0],
+                    "themarker": COMPLEX_RATIOS[7],
+                    "03": COMPLEX_RATIOS[6],
+                    "45": COMPLEX_RATIOS[5],
+                    "haha12": COMPLEX_RATIOS[4],
+                    "wrong order 78": COMPLEX_RATIOS[3],
+                    "a random id": COMPLEX_RATIOS[2],
+                    "00aaa": COMPLEX_RATIOS[1],
+                    "direct": COMPLEX_RATIOS[0],
                 }
                 for src_id, ratio in zip(ratio_order, a.extra["ratios"]):
                     assert np.isclose(ratio, expected_ratios[src_id]), (
