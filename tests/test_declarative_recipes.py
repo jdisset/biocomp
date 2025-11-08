@@ -2004,20 +2004,148 @@ def test_complex_twolayers_quantization_masks(lib, complex_twolayers_design_netw
     from biocomp.network import recipe_to_networks
     from biocomp.compute import ComputeStack
     from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+    from biocomp.nodes.ern import ERN_DEFAULT_NEG_PARTS
     import biocomp.biorules as br
+    from collections import Counter
     import jax
     import jax.numpy as jnp
 
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(complex_twolayers_design_network, br.ALL_RULES, invert=True)
-        stack = ComputeStack([networks[0]])
+        network = networks[0]
+        stack = ComputeStack([network])
         stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
 
         key = jax.random.PRNGKey(42)
         params = stack.init(key)
 
-        # Find translation layer with uORF quantization masks
-        for layer in stack.layers:
-            if layer.f_type == "translation":
-                # TODO: ...
-                pass
+    assert stack.layers is not None
+    assert stack.node_map is not None
+
+    ## checking stack:
+    # we check a few key nodes to ensure structure is correct
+    # aggregation nodes
+    aggs = network.compute_graph.get_nodes_by_type("aggregation")
+    for a in aggs:
+        ag_layer_num, ag_pos = stack.node_map[(0, a.node_id)]
+        assert ag_layer_num == 6
+        ag_layer = stack.layers[ag_layer_num]
+        assert len(ag_layer.nodes) == 3
+        assert list(ag_layer.f_out_shapes) == [(1,)] * 8
+        assert list(ag_layer.f_input_shapes) == [(1,)]
+        assert ag_layer.f_type == "aggregation"
+        assert ag_layer.namespace == "local/6/aggregation8x"
+        assert params[ag_layer.namespace]["ratios"].shape == (3, 8)
+        param_ratios = params[ag_layer.namespace]["ratios"][ag_pos]
+        assert np.allclose(a.extra["ratios"], param_ratios)
+
+    # translation node that goes from both first layer ERNs to c-
+    tlnode = network.compute_graph.get_node(27)
+    assert tlnode.node_type == "translation"
+    tl_layer_num, tl_pos = stack.node_map[(0, 27)]
+    assert tl_layer_num == 12
+    assert tl_pos == 0
+    assert stack.layers is not None
+    tl_layer = stack.layers[tl_layer_num]
+    assert tl_layer.f_type == "translation"
+    assert tl_layer.f_out_shapes == [(1,)]  # single output
+    assert tl_layer.f_input_shapes == ((1,), (1,), (1,))
+    assert tl_layer.namespace == "local/12/translation"
+    assert len(tl_layer.nodes) == 1
+    assert tl_layer.nodes[0].node_id == 27
+    assert tl_layer.nodes[0].layer_number == tl_layer_num
+    assert tl_layer.nodes[0].node_position_in_layer == tl_pos
+    params[tl_layer.namespace]
+    upnodes = network.compute_graph.get_upstream_nodes(tlnode.node_id)
+    assert len(upnodes) == 3
+    # should be 2 sequestron_ERN nodes and one transcription node
+    type_counts = Counter([un[0].node_type for un in upnodes])
+    assert type_counts["sequestron_ERN"] == 2
+    assert type_counts["transcription"] == 1
+
+    u1_local_emb = None
+    u2_local_emb = None
+    u3_local_emb = None
+    EMBEDDING_SHAPE = (1,)
+
+    u1_expected_mask = np.zeros(13, dtype=bool)
+    u1_expected_mask[0] = True  # u1 is None (no uORF)
+    u2_expected_mask = np.zeros(13, dtype=bool)
+    u2_expected_mask[:9] = True  # u2 is all uORFs
+    u3_expected_mask = np.zeros(13, dtype=bool)
+    u3_expected_mask[1:9] = True  # u3 is all except None
+
+    E0, E1, E2 = ERNS
+    for i, (un, ue) in enumerate(upnodes):
+        assert ue.content_type == "RNA"
+        if un.node_type == "sequestron_ERN":
+            ern_layer_num, ern_pos = stack.node_map[(0, un.node_id)]
+            ern_layer = stack.layers[ern_layer_num]
+            assert ern_layer.f_type == "sequestron_ERN"
+            assert ern_layer.f_out_shapes == [(1,)]
+            assert ern_layer.f_input_shapes == ((1,), (1,))
+            assert ern_layer.namespace == "local/11/sequestron_ERN"
+            assert len(ern_layer.nodes) == 2
+            assert ern_layer.nodes[ern_pos].node_id == un.node_id
+            ern_affinity = params[ern_layer.namespace]["affinity"][ern_pos]
+            assert ern_affinity.shape == (1,)
+            if un.extra["seq_name"] == f"ERN::{E0}#{E0}_rec":
+                eid = ERN_DEFAULT_NEG_PARTS.index(E0)
+                assert params["shared/ERN_5p/affinities"][eid] == ern_affinity
+                # this is ern A so the translation mask should be u1:
+                i_mask = params[tl_layer.namespace]["tl_rate_quantization_mask"][tl_pos, i, :]
+                i_mask = params[tl_layer.namespace]["tl_rate_quantization_mask"][tl_pos, i, :]
+                params[tl_layer.namespace]["tl_rate_quantization_mask"]
+                u1_local_emb = params[tl_layer.namespace]["tl_rate"][0, i, :]
+                assert u1_local_emb.shape == EMBEDDING_SHAPE
+                assert np.array_equal(i_mask, u1_expected_mask)
+            elif un.extra["seq_name"] == f"ERN::{E1}#{E1}_rec":
+                eid = ERN_DEFAULT_NEG_PARTS.index(E1)
+                assert params["shared/ERN_5p/affinities"][eid] == ern_affinity
+                # ern B so the translation mask should be u2:
+                i_mask = params[tl_layer.namespace]["tl_rate_quantization_mask"][tl_pos, i, :]
+                u2_local_emb = params[tl_layer.namespace]["tl_rate"][0, i, :]
+                assert u2_local_emb.shape == EMBEDDING_SHAPE
+                assert np.array_equal(i_mask, u2_expected_mask)
+            else:
+                raise ValueError("Unexpected ern node")
+        elif un.node_type == "transcription":
+            print("Found transcription node")
+            i_mask = params[tl_layer.namespace]["tl_rate_quantization_mask"][tl_pos, i, :]
+            # mask should be all zeros except for none (no uORF, but implicit!)
+            assert np.array_equal(i_mask, u1_expected_mask)
+
+    # now we just need to grab u3 from translation node 34
+    tlnode2 = network.compute_graph.get_node(34)
+    assert tlnode2.node_type == "translation"
+    tl_layer_num2, tl_pos2 = stack.node_map[(0, 34)]
+    tl_layer2 = stack.layers[tl_layer_num2]
+    assert tl_layer_num2 == 14
+    assert tl_pos2 == 0
+    upnodes2 = network.compute_graph.get_upstream_nodes(tlnode2.node_id)
+    assert len(upnodes2) == 2
+    # check that downstream is the output node:
+    downnodes2 = network.compute_graph.get_downstream_nodes(tlnode2.node_id)
+    assert len(downnodes2) == 1
+    assert downnodes2[0][0].node_type == "output"
+    for i, (un, ue) in enumerate(upnodes2):
+        assert ue.content_type == "RNA"
+        if un.node_type == "sequestron_ERN":
+            ern_layer_num, ern_pos = stack.node_map[(0, un.node_id)]
+            ern_layer = stack.layers[ern_layer_num]
+            assert ern_layer.f_type == "sequestron_ERN"
+            assert ern_layer.f_out_shapes == [(1,)]
+            assert ern_layer.f_input_shapes == ((1,), (1,))
+            assert ern_layer.namespace == "local/13/sequestron_ERN"
+            assert len(ern_layer.nodes) == 1
+            assert ern_layer.nodes[ern_pos].node_id == un.node_id
+            ern_affinity = params[ern_layer.namespace]["affinity"][ern_pos]
+            assert ern_affinity.shape == (1,)
+            assert un.extra["seq_name"] == f"ERN::{E2}#{E2}_rec"
+            eid = ERN_DEFAULT_NEG_PARTS.index(E2)
+            assert params["shared/ERN_5p/affinities"][eid] == ern_affinity
+            # ok this is indeed ern C so the translation mask should be u3:
+            i_mask = params[tl_layer2.namespace]["tl_rate_quantization_mask"][tl_pos2, i, :]
+            u3_local_emb = params[tl_layer2.namespace]["tl_rate"][0, i, :]
+            assert u3_local_emb.shape == EMBEDDING_SHAPE
+            assert np.array_equal(i_mask, u3_expected_mask)
