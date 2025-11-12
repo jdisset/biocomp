@@ -15,6 +15,7 @@ from biocomp.nodeutils import (
     reference_forward_random_var_ids,
 )
 from biocomp.utils import get_logger
+
 from biocomp.neuralutils import (
     ACTIVATION_FUNCTIONS,
     INITIALIZERS,
@@ -24,6 +25,7 @@ from biocomp.neuralutils import (
     dense_mlp,
     dummy_mlp,
 )
+
 import biocomp.quantization as qz
 
 
@@ -121,8 +123,8 @@ def transform_nn(
                 name=f"NN/{shared_layer_name}/inner",
             )
         )
-        if dummy and is_inverse:  # we subtract the summed embedding and random_var
-            out = out - (rate_embedding + random_var)
+        if dummy and is_inverse:
+            out = out - (inner_outsize + 1) * (rate_embedding + random_var)
 
         assert out.shape == (inner_outsize,)
 
@@ -232,22 +234,23 @@ def transform_nn(
         )
 
     def outer(inner_out: ArrayLike, params, key: PRNGKey):
-        out = o_activation(
-            mlp(
-                inner_out,
-                outer_wsize,
-                1,
-                depth=outer_depth,
-                param_f=partial(init_if_needed, params, base_path="shared"),
-                initializer=initializer,
-                bias_offset=bias_offset,
-                key=key,
-                name=f"NN/{shared_layer_name}/outer",
-                activation=inner_activation,
+        if dummy and is_inverse:
+            out = jnp.array([(inner_out[0] - inner_out[-1]) / inner_outsize])
+        else:
+            out = o_activation(
+                mlp(
+                    inner_out,
+                    outer_wsize,
+                    1,
+                    depth=outer_depth,
+                    param_f=partial(init_if_needed, params, base_path="shared"),
+                    initializer=initializer,
+                    bias_offset=bias_offset,
+                    key=key,
+                    name=f"NN/{shared_layer_name}/outer",
+                    activation=inner_activation,
+                )
             )
-        )
-        if dummy and is_inverse:  # we subtract to maintain 8/9 ratio
-            out = out - jnp.sum(inner_out) / len(inner_out)
         assert out.shape == (1,), f"Invalid outer output shape {out.shape}"
         return out
 
@@ -350,10 +353,14 @@ def transform_nn(
 from biocomp.part_embeddings import EMBEDDINGS_BY_NAME
 
 transcription = partial(
-    transform_nn, transform_name="tc", quantization_names=EMBEDDINGS_BY_NAME["tc_rate"].available_parts
+    transform_nn,
+    transform_name="tc",
+    quantization_names=EMBEDDINGS_BY_NAME["tc_rate"].available_parts,
 )
 translation = partial(
-    transform_nn, transform_name="tl", quantization_names=EMBEDDINGS_BY_NAME["tl_rate"].available_parts
+    transform_nn,
+    transform_name="tl",
+    quantization_names=EMBEDDINGS_BY_NAME["tl_rate"].available_parts,
 )
 
 inv_transcription = partial(
@@ -370,10 +377,16 @@ inv_translation = partial(
 )
 
 simple_transcription = partial(
-    transform_nn, transform_name="tc", quantization_names=EMBEDDINGS_BY_NAME["tc_rate"].available_parts, dummy=True
+    transform_nn,
+    transform_name="tc",
+    quantization_names=EMBEDDINGS_BY_NAME["tc_rate"].available_parts,
+    dummy=True,
 )
 simple_translation = partial(
-    transform_nn, transform_name="tl", quantization_names=EMBEDDINGS_BY_NAME["tl_rate"].available_parts, dummy=True
+    transform_nn,
+    transform_name="tl",
+    quantization_names=EMBEDDINGS_BY_NAME["tl_rate"].available_parts,
+    dummy=True,
 )
 
 simple_inv_transcription = partial(

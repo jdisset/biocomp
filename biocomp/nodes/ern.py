@@ -62,6 +62,10 @@ def sequestron_ERN(
 ) -> LayerInstance:
     inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
+
+    i_activation = identity if dummy else inner_activation
+    o_activation = identity if dummy else outer_activation
+
     initializer = INITIALIZERS[initializer_name]
 
     # ERN have 2 inputs of same size
@@ -91,7 +95,9 @@ def sequestron_ERN(
         else:
             input_values = flat_concat(neg, pos, affinity, random_var)
 
-        res = dense_mlp(
+        mlp = dummy_mlp if dummy else dense_mlp
+
+        res = mlp(
             input_values,
             wsize,
             out_dim,
@@ -101,18 +107,25 @@ def sequestron_ERN(
             bias_offset=bias_offset,
             key=key,
             name=f"NN/ERN_{subtype}",
-            activation=inner_activation,
+            activation=i_activation,
         )
 
         # add residual connections
         neg_sum = jnp.sum(neg)
         pos_sum = jnp.sum(pos)
-        alpha = param_f(f"{shared_layer_name}/residual_alpha", init_f=lambda: jnp.array(alpha_init))
-        beta = param_f(f"{shared_layer_name}/residual_beta", init_f=lambda: jnp.array(beta_init))
-        # apply softmax normalization to alpha and beta
-        alpha = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
-        beta = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
-        out = alpha * (pos_sum - neg_sum) + beta * res
+        if not dummy:
+            alpha = param_f(
+                f"{shared_layer_name}/residual_alpha", init_f=lambda: jnp.array(alpha_init)
+            )
+            beta = param_f(
+                f"{shared_layer_name}/residual_beta", init_f=lambda: jnp.array(beta_init)
+            )
+            # apply softmax normalization to alpha and beta
+            alpha = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
+            beta = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
+            out = alpha * (pos_sum - neg_sum) + beta * res
+        else:
+            out = res
         return out
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
@@ -175,15 +188,14 @@ def sequestron_ERN(
         # include dummy one-hot layer id if needed
         layer_id_onehot = jnp.zeros(max_ern_layers) if use_ern_layer_id else np.empty((0,))
 
-        if not dummy:
-            MLP(
-                *[np.zeros(shape) for shape in input_shapes],
-                affinity=np.zeros((affinity_dim,)),
-                random_var=0,
-                param_f=partial(init_if_needed, params, base_path="shared"),
-                key=key,
-                layer_id_onehot=layer_id_onehot,
-            )
+        MLP(
+            *[np.zeros(shape) for shape in input_shapes],
+            affinity=np.zeros((affinity_dim,)),
+            random_var=0,
+            param_f=partial(init_if_needed, params, base_path="shared"),
+            key=key,
+            layer_id_onehot=layer_id_onehot,
+        )
 
     def apply(
         *values: ArrayLike,
@@ -206,24 +218,23 @@ def sequestron_ERN(
             node_layer_id = params[f"{namespace}/node_layer_ids"][node_id]
             layer_id_onehot = jax.nn.one_hot(node_layer_id, max_ern_layers)
 
-        if not dummy:
-            result = outer_activation(
-                MLP(
-                    *values,
-                    affinity=affinity,
-                    random_var=random_vars[qid],
-                    param_f=partial(get_param, params, base_path="shared"),
-                    key=key,
-                    layer_id_onehot=layer_id_onehot,
-                )
+        result = o_activation(
+            MLP(
+                *values,
+                affinity=affinity,
+                random_var=random_vars[qid],
+                param_f=partial(get_param, params, base_path="shared"),
+                key=key,
+                layer_id_onehot=layer_id_onehot,
             )
+        )
 
         # calculate input difference for debug
         neg_val, pos_val = values
         input_diff = jnp.sum(pos_val) - jnp.sum(neg_val)
 
-        if dummy:
-            result = input_diff * (0.9**node_layer_id)  # just a dummy decreasing function
+        # if dummy:
+        #     result = input_diff * (0.9**node_layer_id)  # just a dummy decreasing function
 
         aux_dict = {
             "affinity": affinity,

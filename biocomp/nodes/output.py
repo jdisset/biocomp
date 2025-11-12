@@ -7,6 +7,7 @@ from jax import vmap
 import numpy as np
 from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
 from biocomp.nodeutils import LayerInstance, add_random_var_ids
+
 from biocomp.neuralutils import (
     ACTIVATION_FUNCTIONS,
     INITIALIZERS,
@@ -14,6 +15,7 @@ from biocomp.neuralutils import (
     DEFAULT_OUT_ACTIVATION,
     DEFAULT_INITIALIZER,
     dense_mlp,
+    dummy_mlp,
 )
 
 PRNGKey = ArrayLike
@@ -33,6 +35,7 @@ def grouped_output(
     inner_activation_name: str = DEFAULT_ACTIVATION,
     outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
     initializer_name: str = DEFAULT_INITIALIZER,
+    dummy: bool = False,  # disable neural + residual, for testing
     **_,
 ):
     del n_outputs
@@ -43,10 +46,10 @@ def grouped_output(
     outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
     initializer = INITIALIZERS[initializer_name]
 
-    layer_name = namespace.split("/")[-1]  # extract layer name from namespace
+    mlp = dummy_mlp if dummy else dense_mlp
 
     def MLP_head(x, rng_key, params):
-        return dense_mlp(
+        return mlp(
             x,
             wsize,
             1,
@@ -74,8 +77,12 @@ def grouped_output(
         res = vmap(partial(MLP_head, rng_key=key, params=params))(inputs_arr)
 
         # simple residual connection
-        pre = 0.5 * res + 0.5 * inputs_arr
-        output = outer_activation(pre)
+        if dummy:
+            pre = res
+            output = res
+        else:
+            pre = 0.5 * res + 0.5 * inputs_arr
+            output = outer_activation(pre)
 
         return output, {
             "mlp_outputs": res,
