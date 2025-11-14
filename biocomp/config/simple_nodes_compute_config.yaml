@@ -24,6 +24,7 @@ node_functions:
     func: biocomp.nodes.ERN5p
     kwargs:
       dummy: True
+      use_ern_layer_id: True
 
   source: !biocomp.utils.PartialFunction
     func: biocomp.nodes.simple_source_with_pos

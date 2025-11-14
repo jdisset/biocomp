@@ -655,6 +655,19 @@ class Network(BaseModel):
         return self.compute_graph.topological_order(nodes, dependency_map)
 
 
+def assign_ern_layer_ids(graph: GraphState) -> GraphState:
+    ern_nodes = {n.node_id: n for n in graph.nodes.values() if n.node_type == "sequestron_ERN"}
+    if not ern_nodes:
+        return graph
+
+    topo_layers = graph.topological_order(nodes=ern_nodes.keys())
+    for layer_id, layer_nodes in enumerate(topo_layers):
+        for node_id in layer_nodes:
+            ern_nodes[node_id].extra["layer_id"] = layer_id
+
+    return graph
+
+
 def recipe_to_networks(
     recipe: Recipe,
     rules: Optional[list[GraphRewritingRule]] = None,
@@ -672,11 +685,13 @@ def recipe_to_networks(
     assert len(compg) == 1, "Multiple computation graphs generated before inversion"
     compg = compg[0]
     compg = br.sort_output_edges(compg)
+    compg = assign_ern_layer_ids(compg)
     graphs = invert_all_paths(compg) if invert else [compg]
 
     result = []
 
     for graph in graphs:
+        graph = assign_ern_layer_ids(graph)
         net = Network(compute_graph=graph)
         dependent_outputs_names = "_".join(net.get_dependent_output_proteins())
         base_name = recipe.name or "network"

@@ -287,10 +287,12 @@ def transform_nn(
 
         # first we apply the inner head to all inputs and sum them:
         inner_keys = jax.random.split(k1, val.shape[0])
+
         inner_out = sum(
             inner(params, value=v, random_var=random_var[i], rate_embedding=r, key=k)
             for i, (v, r, k) in enumerate(zip(val, qrates, inner_keys))
         )
+
         inner_out = flat_concat(inner_out, random_var[len(input_shapes)])
 
         assert inner_out.shape == (inner_outsize + 1,)
