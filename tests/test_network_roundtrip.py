@@ -22,6 +22,8 @@ from test_declarative_recipes import (  # noqa: F401
     ern_with_unlocked_bias,
     ern_with_unlocked_uorfs,
     complex_mixed_unlocked,
+)
+from test_complex_twolayers_computation import (  # noqa: F401
     complex_twolayers_design_network,
 )
 

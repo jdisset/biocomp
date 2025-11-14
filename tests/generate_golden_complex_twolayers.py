@@ -19,7 +19,7 @@ import biocomp.biorules as br
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
-from test_declarative_recipes import make_units, COLORS, ERNS
+from test_complex_twolayers_computation import make_units, COLORS, ERNS
 
 
 def main():

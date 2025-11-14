@@ -19,8 +19,8 @@ from test_declarative_recipes import (
     simple_single_reporter,
     simple_two_reporters,
     simple_single_ern,
-    complex_twolayers_design_network,
 )
+from test_complex_twolayers_computation import complex_twolayers_design_network
 
 
 def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.ndarray, key):
