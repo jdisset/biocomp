@@ -267,7 +267,9 @@ class CoTransfection(BaseModel):
         """Check if this cotx specifies a bias (not a normal input)"""
         return self.fluo_bias is not None
 
-    def get_tu_ratio(self, tu_index: int | str, wrt: int | str) -> Optional[Union[NumRange, float]]:
+    def get_tu_ratio(
+        self, tu_index: int | str, wrt: Optional[int | str] = None
+    ) -> Optional[Union[NumRange, float]]:
         """Get the ratio for a specific TU by index or name, optionally relative to another TU"""
         rel_index = None
         if isinstance(tu_index, str):
@@ -284,15 +286,20 @@ class CoTransfection(BaseModel):
             if len(wrt_indices) > 1:
                 raise ValueError(f"Multiple TUs with name '{wrt}' found in cotx '{self.name}'")
             rel_index = wrt_indices[0]
+        elif isinstance(wrt, int):
+            rel_index = wrt
+        else:
+            assert wrt is None
         if self.ratios is None:
             return 1.0
         if tu_index < 0 or tu_index >= len(self.units):
             return self.ratios[tu_index]
         if rel_index is None:
             wrt_ratio = 1.0
-        if rel_index < 0 or rel_index >= len(self.units):
-            raise IndexError(f"wrt index {rel_index} out of range for cotx '{self.name}'")
-        wrt_ratio = self.ratios[rel_index]
+        else:
+            if rel_index < 0 or rel_index >= len(self.units):
+                raise IndexError(f"wrt index {rel_index} out of range for cotx '{self.name}'")
+            wrt_ratio = self.ratios[rel_index]
         tu_ratio = self.ratios[tu_index]
         max_wrt = wrt_ratio.max if isinstance(wrt_ratio, NumRange) else wrt_ratio
         min_wrt = wrt_ratio.min if isinstance(wrt_ratio, NumRange) else wrt_ratio
