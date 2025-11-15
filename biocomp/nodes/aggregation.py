@@ -36,9 +36,11 @@ def aggregation(
             if "ratios" in extra and not random_init:
                 assert len(extra["ratios"]) == n_outputs
 
-                # Check if this node has unlocked ratios (ratio_ranges)
-                if "ratio_ranges" in extra:
-                    ranges = extra["ratio_ranges"]
+                # Check if this node has unlocked ratios (ratio_ranges with non-None values)
+                ranges = extra.get("ratio_ranges", [])
+                has_unlocked = any(r is not None for r in ranges)
+
+                if ranges and has_unlocked:
                     ratio_ranges_list.append(ranges)
 
                     # find min of unlocked ranges for locked ratios' default
