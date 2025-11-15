@@ -735,6 +735,7 @@ def test_complex_twolayers_variability(lib, complex_twolayers_design_network):
 
 def test_complex_twolayers_quantization_masks(lib, complex_twolayers_design_network):
     """Test that quantization masks are correctly set for uORF slots"""
+
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(complex_twolayers_design_network, br.ALL_RULES, invert=True)
         network = networks[0]
@@ -742,7 +743,6 @@ def test_complex_twolayers_quantization_masks(lib, complex_twolayers_design_netw
         stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
         test_key = jax.random.PRNGKey(423)
         params = stack.init(test_key)
-
     assert stack.layers is not None
     assert stack.node_map is not None
 
