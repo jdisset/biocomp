@@ -86,6 +86,15 @@ class GraphState(BaseModel):
         o_edges.sort(key=lambda e: (e.target_id, e.from_output_slot, e.to_input_slot))
         return o_edges
 
+    def get_downstream_nodes_by_output_slot(self, source_id: int, output_slot: int) -> List[int]:
+        """Returns the list of target node ids connected to the given source node's output slot."""
+        target_ids = [
+            e.target_id
+            for e in self.edges.values()
+            if e.source_id == source_id and e.from_output_slot == output_slot
+        ]
+        return target_ids
+
     def get_incoming_edges(self, node_id: int) -> list[GraphEdge]:
         """Returns the *sorted* list of incoming edges to the given node."""
         i_edges = [e for e in self.edges.values() if e.target_id == node_id]
@@ -272,7 +281,12 @@ class GraphBuilder:
                 content_embedding_names=edge.content_embedding_names,
                 extra=edge.extra,
             )
-            new_key = (new_source_id, edge.target_id, edge.from_output_slot + offset, edge.to_input_slot)
+            new_key = (
+                new_source_id,
+                edge.target_id,
+                edge.from_output_slot + offset,
+                edge.to_input_slot,
+            )
             self.edges[new_key] = new_edge
 
         # then, rewire edges from old_source to new_source (keeping their original slots)
@@ -598,8 +612,8 @@ def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEd
         # Add utility functions to eval context
         context = {
             **match,
-            'sorted_with_indices': sorted_with_indices,
-            'reorder_list': reorder_list,
+            "sorted_with_indices": sorted_with_indices,
+            "reorder_list": reorder_list,
         }
         res = eval(expr, context)
         return res
