@@ -361,26 +361,38 @@ class Network(BaseModel):
         tus_and_ratios_by_cotx = {}
         for group_id, info in cotx_groups.items():
             tus = []
-            reordered_ratios = []
             # Create mapping from source_id to ratio (both are in aggregation order, e.g. alphabetically sorted)
             source_id_to_ratio = dict(zip(info["source_ids"], info["ratios"]))
 
-            source_nodes_with_pos = []
-            for source_id in info["source_ids"]:
-                source_node = self._find_source_node(source_id, group_id)
-                if source_node:
-                    position = source_node.extra.get("position_in_source", 0)
-                    source_nodes_with_pos.append((position, source_id, source_node))
+            # Collect source node with their output slots (one TU per output slot)
+            tu_specs = []  # (position, source_id, source_node, output_slot)
+            assert self.compute_graph is not None
+            for node in self.compute_graph.get_nodes_by_type("source"):
+                if node.extra.get("cotx_group") == group_id:
+                    source_id = node.extra.get("source_id")
+                    # Count output slots from outgoing edges
+                    outgoing = self.compute_graph.get_outgoing_edges(node.node_id)
+                    output_slots = sorted(set(e.from_output_slot for e in outgoing))
+
+                    for output_slot in output_slots:
+                        position = node.extra.get("position_in_source", 0) + output_slot
+                        tu_specs.append((position, source_id, node, output_slot))
 
             # Sort by position to restore original TU order
-            source_nodes_with_pos.sort(key=lambda x: x[0])
+            tu_specs.sort(key=lambda x: x[0])
 
-            for position, source_id, source_node in source_nodes_with_pos:
-                # Look up the ratio for this source_id in the correct order
-                reordered_ratios.append(source_id_to_ratio.get(source_id, 1.0))
+            # Build ratios list (one per unique source in TU order)
+            seen_sources = set()
+            reordered_ratios = []
+            for position, source_id, source_node, output_slot in tu_specs:
+                if source_id not in seen_sources:
+                    reordered_ratios.append(source_id_to_ratio.get(source_id, 1.0))
+                    seen_sources.add(source_id)
+
+            for position, source_id, source_node, output_slot in tu_specs:
 
                 param_ref_ids = source_node.extra.get("param_ref_ids", {})
-                slots = self._extract_slots_from_source(source_node, param_ref_ids)
+                slots = self._extract_slots_from_source(source_node, param_ref_ids, output_slot)
 
                 if param_ref_ids:
                     for slot in slots:
@@ -412,11 +424,11 @@ class Network(BaseModel):
                 return node
         return None
 
-    def _get_dna_edge(self, source_node):
-        """Get DNA edge from source node, or None if not found"""
+    def _get_dna_edge(self, source_node, output_slot: int = 0):
+        """Get DNA edge from source node for specific output slot, or None if not found"""
         assert self.compute_graph is not None
         outgoing = self.compute_graph.get_outgoing_edges(source_node.node_id)
-        dna_edges = [e for e in outgoing if e.content_type == "DNA"]
+        dna_edges = [e for e in outgoing if e.content_type == "DNA" and e.from_output_slot == output_slot]
         return dna_edges[0] if dna_edges else None
 
     def _should_include_embedding(
@@ -428,12 +440,12 @@ class Network(BaseModel):
         has_ref_id = emb_name in param_ref_ids and param_ref_ids[emb_name] is not None
         return has_real_parts or has_ref_id
 
-    def _extract_slots_from_source(self, source_node, param_ref_ids: dict = None) -> list[Slot]:
+    def _extract_slots_from_source(self, source_node, param_ref_ids: dict = None, output_slot: int = 0) -> list[Slot]:
         """Reconstruct slots by sorting all parts by their biological category"""
         param_ref_ids = param_ref_ids or {}
         lib = LibraryContext.get_library()
 
-        dna_edge = self._get_dna_edge(source_node)
+        dna_edge = self._get_dna_edge(source_node, output_slot)
         if not dna_edge:
             return []
 
