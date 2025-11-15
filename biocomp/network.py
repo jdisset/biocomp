@@ -936,8 +936,11 @@ def _build_cdg_dual_from_preprocessed(
 
     for i, cotx in enumerate(recipe or []):
         group_name = cotx.name or f"cotx_{i + 1}"
-        raw_ratios = list(cotx.ratios) if cotx.ratios else []
-        raw_ratios.extend([1.0] * (len(cotx.units) - len(raw_ratios)))
+        if cotx.ratios and len(cotx.ratios) != len(cotx.units):
+            raise ValueError(
+                f"CoTransfection '{group_name}': ratios count ({len(cotx.ratios)}) must match units count ({len(cotx.units)})"
+            )
+        raw_ratios = cotx.ratios or [1.0] * len(cotx.units)
 
         # Track fluo_bias info for this cotx
         if cotx.fluo_bias is not None:
