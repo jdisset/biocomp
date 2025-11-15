@@ -38,12 +38,14 @@ def isArrayRef(x):
     return str(type(x)) == str(ArrayRef)
 
 
-def is_equal(a, b):
+def is_equal(a, b, close_ok=False):
     if id(a) == id(b):
         return True
     if type(a) is not type(b):
         return False
     if isinstance(a, (np.ndarray, jnp.ndarray)):
+        if close_ok:
+            return np.allclose(a, b)
         return np.all(a == b)
     if isinstance(a, PTree):
         return a.direct_compare(b)
