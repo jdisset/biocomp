@@ -186,11 +186,8 @@ def tu_equals_assert(u1: TranscriptionUnit, u2: TranscriptionUnit, path: str):
                 f"{slot_path}: Part mismatch (original='{part1}', reconstructed='{part2}')"
             )
 
-        ref1 = getattr(s1, "ref_id", None)
-        ref2 = getattr(s2, "ref_id", None)
-        assert ref1 == ref2, (
-            f"{slot_path}: ref_id mismatch (original='{ref1}', reconstructed='{ref2}')"
-        )
+        # ref_id is excluded from serialization (exclude=True in Slot model)
+        # so it's expected to be lost during roundtrip - don't check it
 
 
 def _test_roundtrip(lib, recipe: Recipe, invert: bool = False):  # noqa: F811
