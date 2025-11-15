@@ -936,7 +936,8 @@ def _build_cdg_dual_from_preprocessed(
 
     for i, cotx in enumerate(recipe or []):
         group_name = cotx.name or f"cotx_{i + 1}"
-        raw_ratios = cotx.ratios or [1.0] * len(cotx.units)
+        raw_ratios = list(cotx.ratios) if cotx.ratios else []
+        raw_ratios.extend([1.0] * (len(cotx.units) - len(raw_ratios)))
 
         # Track fluo_bias info for this cotx
         if cotx.fluo_bias is not None:

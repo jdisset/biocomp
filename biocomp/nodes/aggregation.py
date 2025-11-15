@@ -35,36 +35,42 @@ def aggregation(
             extra = node.get(stack).extra
             if "ratios" in extra and not random_init:
                 assert len(extra["ratios"]) == n_outputs
-                ratio_v = jnp.array(extra["ratios"], dtype=jnp.float32)
 
                 # Check if this node has unlocked ratios (ratio_ranges)
                 if "ratio_ranges" in extra:
                     ranges = extra["ratio_ranges"]
-                    # Store range info (None if locked, dict with min/max if unlocked)
                     ratio_ranges_list.append(ranges)
 
+                    # find min of unlocked ranges for locked ratios' default
+                    locked_default = 1.0
+                    for range_info in ranges:
+                        if range_info is not None:
+                            locked_default = range_info.get("min", 1.0) or 1.0
+                            break  # use first unlocked range's min
+
+                    # sample in absolute space, then normalize
+                    absolute_ratios = []
                     for j, range_info in enumerate(ranges):
                         if range_info is not None:
-                            min_v = range_info.get("min", 0.0)
-                            max_v = range_info.get("max", 1.0)
-                            if min_v is None:
-                                min_v = 0.0
-                            if max_v is None:
-                                max_v = 1.0
-
-                            # normalize range: ratio_j / (other_ratios_sum + ratio_j)
-                            other_ratios_sum = jnp.sum(ratio_v) - ratio_v[j]
-                            normalized_min = min_v / (other_ratios_sum + min_v)
-                            normalized_max = max_v / (other_ratios_sum + max_v)
-
-                            ratio_v = ratio_v.at[j].set(
+                            min_v = range_info.get("min", 1.0) or 1.0
+                            max_v = range_info.get("max", 1.0) or 1.0
+                            # sample absolute ratio from range
+                            absolute_ratios.append(
                                 jax.random.uniform(
                                     jax.random.fold_in(key, i * n_outputs + j),
-                                    minval=normalized_min,
-                                    maxval=normalized_max,
+                                    minval=min_v,
+                                    maxval=max_v,
                                 )
                             )
+                        else:
+                            # locked: use min of unlocked range
+                            absolute_ratios.append(locked_default)
+
+                    # normalize to sum to 1
+                    absolute_ratios = jnp.array(absolute_ratios, dtype=jnp.float32)
+                    ratio_v = absolute_ratios / jnp.sum(absolute_ratios)
                 else:
+                    ratio_v = jnp.array(extra["ratios"], dtype=jnp.float32)
                     ratio_ranges_list.append([None] * n_outputs)  # All locked
             else:
                 # Random init
