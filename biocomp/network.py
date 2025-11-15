@@ -1054,7 +1054,10 @@ def _build_cdg_dual_from_preprocessed(
             next_node_id += 1
             nodes.append(GraphNode(node_id=tl_nodes[prt_key], node_type="translation", extra={}))
 
+    # track output slot per source to handle multiple TUs on same plasmid
+    source_output_slot_counters = {}
     output_slot_counter = 0
+
     for tuid, info in tu_info.items():
         tu = info["tu"]
 
@@ -1068,7 +1071,11 @@ def _build_cdg_dual_from_preprocessed(
         )
         tx_id = tx_nodes[rna_key]
 
-        source_output_slot = getattr(tu, "position_in_source", 0) or 0
+        # assign sequential output slots for TUs sharing same source
+        if source_key not in source_output_slot_counters:
+            source_output_slot_counters[source_key] = 0
+        source_output_slot = source_output_slot_counters[source_key]
+        source_output_slot_counters[source_key] += 1
 
         edges.append(
             GraphEdge(
