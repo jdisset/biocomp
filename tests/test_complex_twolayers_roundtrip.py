@@ -12,6 +12,7 @@ Validates:
 import pytest
 import jax
 import jax.numpy as jnp
+import numpy as np
 import biocomp.parameters as pr
 from biocomp.network import recipe_to_networks
 from biocomp.library import LibraryContext, load_lib
@@ -51,6 +52,65 @@ def lib():
     return load_lib()
 
 
+@pytest.fixture(params=["complex_twolayers", "simple_two_reporters", "unlocked_ratios"])
+def roundtrip_recipe(request, lib):
+    with LibraryContext.with_library(lib):
+        if request.param == "complex_twolayers":
+            return Recipe(
+                name="two_and_one",
+                content=[
+                    CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=[NumRange(min=1, max=10) for _ in range(8)]),
+                    CoTransfection(name="x2", units=make_units("x2", ERNS), ratios=[NumRange(min=2, max=100) for _ in range(8)]),
+                    CoTransfection(name="b", units=make_units("b", ERNS), fluo_bias=BIAS_FLUO, ratios=[NumRange(min=1, max=2) for _ in range(8)]),
+                ],
+            )
+        elif request.param == "simple_two_reporters":
+            return Recipe(
+                name="simple_two_reporters",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "eBFP2", "L0.T_4560"]),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "mMaroon1", "L0.T_4560"]),
+                        ],
+                        ratios=[0.833, 0.167],
+                    )
+                ],
+            )
+        elif request.param == "unlocked_ratios":
+            return Recipe(
+                name="unlocked_ratios",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "CasE_rec", "eBFP2", "L0.T_4560"], source="p1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "CasE", "L0.T_4560"], source="p2"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "mNeonGreen", "L0.T_4560"], source="p3"),
+                        ],
+                        ratios=[NumRange(min=0.2, max=0.5), 0.3, NumRange(min=0.1, max=0.3)],
+                    )
+                ],
+            )
+        elif request.param == "shared_source":
+            u1 = Slot(part=["1w_uORF", "2x_uORF"], ref_id="U1")
+            u2 = Slot(part=[None, "4x_uORF", "3x_uORF"], ref_id="U2")
+            return Recipe(
+                name="shared_source",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u1, "CasE_rec", "eBFP2", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "CasE", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u2, "Csy4_rec", "eYFP", "L0.T_4560"], source="out2_plsmd"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "Csy4", "L0.T_4560"], source="ern2_plsmd"),
+                            TranscriptionUnit(slots=["mKO2"], source="mrkr_plsmd"),
+                        ],
+                        ratios=[i + 1 for i in range(4)],
+                    )
+                ],
+            )
+
+
 @pytest.fixture
 def design_recipe_with_ranges(lib):
     with LibraryContext.with_library(lib):
@@ -73,7 +133,7 @@ def test_ratio_count_validation(lib):
                 CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=[1.0, 2.0, 3.0])
             ],
         )
-        with pytest.raises(ValueError, match="ratios count .* must match units count"):
+        with pytest.raises(ValueError, match="ratios count .* must match number of unique sources"):
             recipe_to_networks(recipe, br.ALL_RULES, invert=True)
 
 
@@ -100,9 +160,9 @@ def test_ratio_range_bounds(lib, design_recipe_with_ranges):
             assert ratio_range <= maxrange_expected + 1e-6
 
 
-def test_commit_and_export(lib, design_recipe_with_ranges):
-    with LibraryContext.with_library(lib):
-        networks = recipe_to_networks(design_recipe_with_ranges, br.ALL_RULES, invert=True)
+def test_commit_and_export(roundtrip_recipe):
+    with LibraryContext.with_library(load_lib()):
+        networks = recipe_to_networks(roundtrip_recipe, br.ALL_RULES, invert=True)
         network = networks[0]
         stack = ComputeStack([network])
         stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
@@ -113,15 +173,14 @@ def test_commit_and_export(lib, design_recipe_with_ranges):
         committed_network = stack.commit(params)[0]
         exported_recipe = committed_network.to_recipe()
 
-        assert len(exported_recipe.content) == 3
-        for cotx in exported_recipe.content:
-            assert len(cotx.units) == 8
-            assert len(cotx.ratios) == 8
+        assert len(exported_recipe.content) == len(roundtrip_recipe.content)
+        for cotx_orig, cotx_exp in zip(roundtrip_recipe.content, exported_recipe.content):
+            assert len(cotx_exp.ratios) == len(set(tu.source for tu in cotx_orig.units))
 
 
-def test_rebuild_structure(lib, design_recipe_with_ranges):
-    with LibraryContext.with_library(lib):
-        networks = recipe_to_networks(design_recipe_with_ranges, br.ALL_RULES, invert=True)
+def test_rebuild_structure(roundtrip_recipe):
+    with LibraryContext.with_library(load_lib()):
+        networks = recipe_to_networks(roundtrip_recipe, br.ALL_RULES, invert=True)
         network = networks[0]
         stack = ComputeStack([network])
         stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
@@ -139,9 +198,9 @@ def test_rebuild_structure(lib, design_recipe_with_ranges):
         assert len(rebuilt_stack.layers) == len(stack.layers)
 
 
-def test_ratios_preserved(lib, design_recipe_with_ranges):
-    with LibraryContext.with_library(lib):
-        networks = recipe_to_networks(design_recipe_with_ranges, br.ALL_RULES, invert=True)
+def test_ratios_preserved(roundtrip_recipe):
+    with LibraryContext.with_library(load_lib()):
+        networks = recipe_to_networks(roundtrip_recipe, br.ALL_RULES, invert=True)
         network = networks[0]
         stack = ComputeStack([network])
         stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
@@ -173,9 +232,9 @@ def test_ratios_preserved(lib, design_recipe_with_ranges):
                 assert jnp.allclose(opt_ratios, reb_ratios)
 
 
-def test_outputs_match(lib, design_recipe_with_ranges):
-    with LibraryContext.with_library(lib):
-        networks = recipe_to_networks(design_recipe_with_ranges, br.ALL_RULES, invert=True)
+def test_outputs_match(roundtrip_recipe):
+    with LibraryContext.with_library(load_lib()):
+        networks = recipe_to_networks(roundtrip_recipe, br.ALL_RULES, invert=True)
         network = networks[0]
         stack = ComputeStack([network])
         stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
@@ -200,16 +259,16 @@ def test_outputs_match(lib, design_recipe_with_ranges):
         rebuilt_shared, rebuilt_nonshared = rebuilt_params.filter_by_tag(['shared'])
         rebuilt_params = pr.ParameterTree.merge(orig_shared, rebuilt_nonshared)
 
+        nb_inputs = network.nb_inputs
         N_EVALS = 100
-        x = jax.random.uniform(eval_key, (N_EVALS, 2))
+        x = jax.random.uniform(eval_key, (N_EVALS, nb_inputs))
         num_z = opt_params["global/number_of_random_variables"]
         random_variables = jnp.zeros((num_z,))
 
         y_opt, _ = jax.vmap(stack.apply, in_axes=(None, 0, None, None))(opt_params, x, random_variables, eval_key)
         y_rebuilt, _ = jax.vmap(rebuilt_stack.apply, in_axes=(None, 0, None, None))(rebuilt_params, x, random_variables, eval_key)
 
-        assert y_opt.shape == (N_EVALS, 4)
-        assert y_rebuilt.shape == (N_EVALS, 4)
+        assert y_opt.shape == y_rebuilt.shape
         assert jnp.allclose(y_opt, y_rebuilt)
 
 
@@ -225,7 +284,7 @@ def test_source_output_slots(lib):
                         TranscriptionUnit(slots=[P, COLORS["x1"], T], name="tu2", source="shared_src"),
                         TranscriptionUnit(slots=[P, COLORS["x1"], T], name="tu3", source="unique_src"),
                     ],
-                    ratios=[1.0, 2.0, 3.0],
+                    ratios=[1.0, 2.0],
                 )
             ],
         )
@@ -242,8 +301,68 @@ def test_source_output_slots(lib):
         assert sorted(slots) == [0, 1]
 
 
+def test_shared_source_network_structure(lib):
+    with LibraryContext.with_library(lib):
+        u1 = Slot(part=["1w_uORF", "2x_uORF"], ref_id="U1")
+        u2 = Slot(part=[None, "4x_uORF", "3x_uORF"], ref_id="U2")
+
+        recipe = Recipe(
+            name="shared_source",
+            content=[
+                CoTransfection(
+                    units=[
+                        TranscriptionUnit(name="output1", slots=["cHS4", "hEF1a", u1, "CasE_rec", "eBFP2", "L0.T_4560"], source="plsmd1"),
+                        TranscriptionUnit(name="ern", slots=["cHS4", "hEF1a", "CasE", "L0.T_4560"], source="plsmd1"),
+                        TranscriptionUnit(name="output2", slots=["cHS4", "hEF1a", u2, "Csy4_rec", "eYFP", "L0.T_4560"], source="out2_plsmd"),
+                        TranscriptionUnit(name="ern2", slots=["cHS4", "hEF1a", "Csy4", "L0.T_4560"], source="ern2_plsmd"),
+                        TranscriptionUnit(name="marker", slots=["mKO2"], source="mrkr_plsmd"),
+                    ],
+                    ratios=[i + 1 for i in range(4)],
+                )
+            ],
+        )
+
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
+        network = networks[0]
+        stack = ComputeStack([network])
+        stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
+
+        assert network.nb_inputs == 1
+        assert network.get_inverted_input_proteins() == ["mKO2"]
+        assert network.get_output_proteins() == ["eBFP2", "eYFP", "mKO2"]
+        assert np.all(network.get_dependent_output_mask() == [True, True, False])
+
+        agglayer = stack.layers[5]
+        assert len(agglayer.nodes) == 1
+        aggnode = network.compute_graph.get_node(agglayer.nodes[0].node_id)
+
+        members_to_ratio = dict(zip(aggnode.extra['members'], aggnode.extra['ratios']))
+        assert members_to_ratio == {'plsmd1': 0.1, 'out2_plsmd': 0.2, 'ern2_plsmd': 0.3, 'mrkr_plsmd': 0.4}
+
+        plsmd1_idx = aggnode.extra['members'].index('plsmd1')
+        plsmd1_nodes = network.compute_graph.get_downstream_nodes_by_output_slot(aggnode.node_id, plsmd1_idx)
+        assert len(plsmd1_nodes) == 1
+
+        plsmd1_node = network.compute_graph.get_node(plsmd1_nodes[0])
+        downstream = network.compute_graph.get_downstream_nodes(plsmd1_node.node_id)
+        assert len(downstream) == 2
+
+        for i, (dn, de) in enumerate(downstream):
+            assert dn.node_type == 'transcription'
+            if i == 0:
+                assert de.content_embedding_names['tl_rate'] == ('1w_uORF', '2x_uORF')
+            else:
+                assert de.content_embedding_names['tl_rate'] == ('00_empty_tc',)
+
+
 if __name__ == "__main__":
+    import sys
+
     lib_instance = load_lib()
+
+    print("Running ratio count validation test...")
+    test_ratio_count_validation(lib_instance)
+    print("✓ Ratio count validation test passed\n")
 
     with LibraryContext.with_library(lib_instance):
         recipe_instance = Recipe(
@@ -255,32 +374,62 @@ if __name__ == "__main__":
             ],
         )
 
-    print("Running ratio count validation test...")
-    test_ratio_count_validation(lib_instance)
-    print("✓ Ratio count validation test passed\n")
-
     print("Running ratio range bounds test...")
     test_ratio_range_bounds(lib_instance, recipe_instance)
     print("✓ Ratio range bounds test passed\n")
-
-    print("Running commit and export test...")
-    test_commit_and_export(lib_instance, recipe_instance)
-    print("✓ Commit and export test passed\n")
-
-    print("Running rebuild structure test...")
-    test_rebuild_structure(lib_instance, recipe_instance)
-    print("✓ Rebuild structure test passed\n")
-
-    print("Running ratios preserved test...")
-    test_ratios_preserved(lib_instance, recipe_instance)
-    print("✓ Ratios preserved test passed\n")
-
-    print("Running outputs match test...")
-    test_outputs_match(lib_instance, recipe_instance)
-    print("✓ Outputs match test passed\n")
 
     print("Running source output slots test...")
     test_source_output_slots(lib_instance)
     print("✓ Source output slots test passed\n")
 
-    print("All roundtrip tests passed!")
+    print("Running shared source network structure test...")
+    test_shared_source_network_structure(lib_instance)
+    print("✓ Shared source network structure test passed\n")
+
+    # Run parametrized roundtrip tests on all recipes
+    with LibraryContext.with_library(lib_instance):
+        recipes = {
+            "complex_twolayers": Recipe(
+                name="two_and_one",
+                content=[
+                    CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=[NumRange(min=1, max=10) for _ in range(8)]),
+                    CoTransfection(name="x2", units=make_units("x2", ERNS), ratios=[NumRange(min=2, max=100) for _ in range(8)]),
+                    CoTransfection(name="b", units=make_units("b", ERNS), fluo_bias=BIAS_FLUO, ratios=[NumRange(min=1, max=2) for _ in range(8)]),
+                ],
+            ),
+            "simple_two_reporters": Recipe(
+                name="simple_two_reporters",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "eBFP2", "L0.T_4560"]),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "mMaroon1", "L0.T_4560"]),
+                        ],
+                        ratios=[0.833, 0.167],
+                    )
+                ],
+            ),
+            "unlocked_ratios": Recipe(
+                name="unlocked_ratios",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "CasE_rec", "eBFP2", "L0.T_4560"], source="p1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "CasE", "L0.T_4560"], source="p2"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "mNeonGreen", "L0.T_4560"], source="p3"),
+                        ],
+                        ratios=[NumRange(min=0.2, max=0.5), 0.3, NumRange(min=0.1, max=0.3)],
+                    )
+                ],
+            ),
+        }
+
+    for recipe_name, recipe in recipes.items():
+        print(f"Running roundtrip tests for {recipe_name}...")
+        test_commit_and_export(recipe)
+        test_rebuild_structure(recipe)
+        test_ratios_preserved(recipe)
+        test_outputs_match(recipe)
+        print(f"✓ All roundtrip tests passed for {recipe_name}\n")
+
+    print("All tests passed!")

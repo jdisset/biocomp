@@ -144,7 +144,7 @@ def simple_single_ern(lib):
 
 @pytest.fixture
 def simple_single_cotx_ERN(lib):
-    """From test_biorules: 1 cotx group, 2 plasmids, 4 units with variable uORFs"""
+    """1 cotx group, 3 plasmids, 4 units with variable uORFs"""
     with LibraryContext.with_library(lib):
         u1 = Slot(part=["1w_uORF", "2x_uORF"], ref_id="U1")
         u2 = Slot(part=[None, "4x_uORF", "3x_uORF"], ref_id="U2")
@@ -162,7 +162,8 @@ def simple_single_cotx_ERN(lib):
                                 Slot(part="CasE_rec"),
                                 Slot(part="eBFP2"),
                                 Slot(part="L0.T_4560"),
-                            ]
+                            ],
+                            source="plsmd1",
                         ),
                         TranscriptionUnit(
                             slots=[
@@ -170,7 +171,8 @@ def simple_single_cotx_ERN(lib):
                                 Slot(part="hEF1a"),
                                 Slot(part="CasE"),
                                 Slot(part="L0.T_4560"),
-                            ]
+                            ],
+                            source="plsmd1",
                         ),
                         TranscriptionUnit(
                             slots=[
@@ -995,6 +997,31 @@ def test_simple_aggregation_compg(lib, simple_aggregation):
         assert "mKO2" in proteins
 
 
+def test_single_cotx_ERN(lib, simple_two_reporters):
+    from biocomp.network import recipe_to_networks
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(simple_two_reporters, invert=False)
+        compg = networks[0].compute_graph
+        assert compg is not None
+
+        agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
+        assert len(agg_nodes) == 1
+
+        agg = agg_nodes[0]
+        assert agg.extra["ratios"] == [0.833, 0.167]
+        assert len(agg.extra["members"]) == 2
+
+        output_nodes = [n for n in compg.nodes.values() if n.node_type == "output"]
+        assert len(output_nodes) == 1
+
+        output_node = output_nodes[0]
+        incoming = compg.get_incoming_edges(output_node.node_id)
+        proteins = sorted([e.content[0].name for e in incoming])
+        assert "eBFP2" in proteins
+        assert "mMaroon1" in proteins
+
+
 def test_multi_cotx_aggregation_compg(lib, multi_cotx_aggregation):
     from biocomp.network import recipe_to_networks
 
@@ -1583,6 +1610,3 @@ def test_complex_mixed_unlocked_compg(lib, complex_mixed_unlocked):
         # Should have ERN node
         ern_nodes = [n for n in compg.nodes.values() if n.node_type == "sequestron_ERN"]
         assert len(ern_nodes) == 1
-
-
-
