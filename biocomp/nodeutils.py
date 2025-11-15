@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
 from biocomp.parameters import ArrayRef, ParameterTree
-from biocomp.compute import StackNode
+from biocomp.compute import StackNode, ComputeStack
 
 PRNGKey = ArrayLike
 NDArray = np.ndarray | jnp.ndarray
@@ -20,7 +20,7 @@ class LayerInstance:
     prepare: Callable[[ParameterTree, list[StackNode], PRNGKey], None]
     apply: Callable[[NDArray, NDArray, ParameterTree, NodeID, NDArray], ResultAndAux]
     output_shapes: list[tuple[int]]
-    commit: Optional[Callable] = None
+    commit: Optional[Callable[[ParameterTree, list[StackNode], ComputeStack], None]] = None
 
     def __post_init__(self):
         assert all(isinstance(shape, tuple) for shape in self.output_shapes), (

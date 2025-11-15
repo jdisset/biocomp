@@ -328,7 +328,7 @@ def transform_nn(
             **qaux,
         }
 
-    def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack = None, **_):
+    def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack, **_):
         for node_id, node in enumerate(nodelist):
             rates = params[f"{namespace}/{rate_name}"][node_id]
             resolved_parameter_names = qz.get_quantized_part_names(

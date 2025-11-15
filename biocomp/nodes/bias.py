@@ -1,4 +1,4 @@
-from biocomp.compute import StackNode
+from biocomp.compute import StackNode, ComputeStack
 import jax
 from jax.typing import ArrayLike
 import jax.numpy as jnp
@@ -74,7 +74,7 @@ def hard_bias(
             "bias_value": bias_value,
         }
 
-    def commit(params: ParameterTree, nodelist: list[StackNode], **_):
+    def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack, **_):
         for i, n in enumerate(nodelist):
             newextra = {}
             bias_value = get_bias_value(params, i)
@@ -152,7 +152,7 @@ def bias(
             "scale": scale,
         }
 
-    def commit(params: ParameterTree, nodelist: list[StackNode], **_):
+    def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack, **_):
         for i, n in enumerate(nodelist):
             newextra = {}
             bias_value = get_bias_value(params, i)
