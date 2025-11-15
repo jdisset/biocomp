@@ -52,7 +52,7 @@ def lib():
     return load_lib()
 
 
-@pytest.fixture(params=["complex_twolayers", "simple_two_reporters", "unlocked_ratios"])
+@pytest.fixture(params=["complex_twolayers", "simple_two_reporters", "unlocked_ratios", "shared_source"])
 def roundtrip_recipe(request, lib):
     with LibraryContext.with_library(lib):
         if request.param == "complex_twolayers":
@@ -271,6 +271,22 @@ def test_outputs_match(roundtrip_recipe):
         assert y_opt.shape == y_rebuilt.shape
         assert jnp.allclose(y_opt, y_rebuilt)
 
+        # Also verify that rebuilding with original key produces original outputs
+        # Only valid for recipes without unlocked ratios (commit locks structure)
+        from biocomp.recipe import NumRange
+        has_unlocked_ratios = any(
+            isinstance(r, NumRange) for cotx in roundtrip_recipe.content
+            for r in (cotx.ratios or [])
+        )
+
+        if not has_unlocked_ratios:
+            orig_y, _ = jax.vmap(stack.apply, in_axes=(None, 0, None, None))(orig_params, x, random_variables, eval_key)
+            rebuilt_orig_params = rebuilt_stack.init(orig_key)
+            rebuilt_orig_shared, rebuilt_orig_nonshared = rebuilt_orig_params.filter_by_tag(['shared'])
+            rebuilt_orig_params = pr.ParameterTree.merge(orig_shared, rebuilt_orig_nonshared)
+            y_rebuilt_orig, _ = jax.vmap(rebuilt_stack.apply, in_axes=(None, 0, None, None))(rebuilt_orig_params, x, random_variables, eval_key)
+            assert jnp.allclose(orig_y, y_rebuilt_orig)
+
 
 def test_source_output_slots(lib):
     with LibraryContext.with_library(lib):
@@ -388,6 +404,8 @@ if __name__ == "__main__":
 
     # Run parametrized roundtrip tests on all recipes
     with LibraryContext.with_library(lib_instance):
+        u1 = Slot(part=["1w_uORF", "2x_uORF"], ref_id="U1")
+        u2 = Slot(part=[None, "4x_uORF", "3x_uORF"], ref_id="U2")
         recipes = {
             "complex_twolayers": Recipe(
                 name="two_and_one",
@@ -419,6 +437,21 @@ if __name__ == "__main__":
                             TranscriptionUnit(slots=["cHS4", "hEF1a", "mNeonGreen", "L0.T_4560"], source="p3"),
                         ],
                         ratios=[NumRange(min=0.2, max=0.5), 0.3, NumRange(min=0.1, max=0.3)],
+                    )
+                ],
+            ),
+            "shared_source": Recipe(
+                name="shared_source",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u1, "CasE_rec", "eBFP2", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "CasE", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u2, "Csy4_rec", "eYFP", "L0.T_4560"], source="out2_plsmd"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "Csy4", "L0.T_4560"], source="ern2_plsmd"),
+                            TranscriptionUnit(slots=["mKO2"], source="mrkr_plsmd"),
+                        ],
+                        ratios=[i + 1 for i in range(4)],
                     )
                 ],
             ),
