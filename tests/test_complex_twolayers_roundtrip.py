@@ -52,7 +52,12 @@ def lib():
     return load_lib()
 
 
-@pytest.fixture(params=["complex_twolayers", "simple_two_reporters", "unlocked_ratios", "shared_source"])
+@pytest.fixture(params=[
+    "complex_twolayers", "complex_twolayers_locked", "complex_twolayers_mixed",
+    "simple_two_reporters", "simple_two_reporters_unlocked",
+    "unlocked_ratios",
+    "shared_source", "shared_source_unlocked", "shared_source_mixed"
+])
 def roundtrip_recipe(request, lib):
     with LibraryContext.with_library(lib):
         if request.param == "complex_twolayers":
@@ -62,6 +67,24 @@ def roundtrip_recipe(request, lib):
                     CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=[NumRange(min=1, max=10) for _ in range(8)]),
                     CoTransfection(name="x2", units=make_units("x2", ERNS), ratios=[NumRange(min=2, max=100) for _ in range(8)]),
                     CoTransfection(name="b", units=make_units("b", ERNS), fluo_bias=BIAS_FLUO, ratios=[NumRange(min=1, max=2) for _ in range(8)]),
+                ],
+            )
+        elif request.param == "complex_twolayers_locked":
+            return Recipe(
+                name="two_and_one_locked",
+                content=[
+                    CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=[1.0 + i * 0.5 for i in range(8)]),
+                    CoTransfection(name="x2", units=make_units("x2", ERNS), ratios=[2.0 + i * 2.0 for i in range(8)]),
+                    CoTransfection(name="b", units=make_units("b", ERNS), fluo_bias=BIAS_FLUO, ratios=[1.0 + i * 0.1 for i in range(8)]),
+                ],
+            )
+        elif request.param == "complex_twolayers_mixed":
+            return Recipe(
+                name="two_and_one_mixed",
+                content=[
+                    CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=[NumRange(min=1, max=10) if i % 2 == 0 else 2.0 + i for i in range(8)]),
+                    CoTransfection(name="x2", units=make_units("x2", ERNS), ratios=[5.0, NumRange(min=2, max=50), 10.0, NumRange(min=5, max=100), 15.0, 20.0, NumRange(min=10, max=80), 25.0]),
+                    CoTransfection(name="b", units=make_units("b", ERNS), fluo_bias=BIAS_FLUO, ratios=[1.0, 1.2, NumRange(min=1, max=2), 1.4, 1.5, NumRange(min=1, max=1.8), 1.6, 1.7]),
                 ],
             )
         elif request.param == "simple_two_reporters":
@@ -74,6 +97,19 @@ def roundtrip_recipe(request, lib):
                             TranscriptionUnit(slots=["cHS4", "hEF1a", "mMaroon1", "L0.T_4560"]),
                         ],
                         ratios=[0.833, 0.167],
+                    )
+                ],
+            )
+        elif request.param == "simple_two_reporters_unlocked":
+            return Recipe(
+                name="simple_two_reporters_unlocked",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "eBFP2", "L0.T_4560"]),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "mMaroon1", "L0.T_4560"]),
+                        ],
+                        ratios=[NumRange(min=0.5, max=0.9), NumRange(min=0.1, max=0.5)],
                     )
                 ],
             )
@@ -106,6 +142,42 @@ def roundtrip_recipe(request, lib):
                             TranscriptionUnit(slots=["mKO2"], source="mrkr_plsmd"),
                         ],
                         ratios=[i + 1 for i in range(4)],
+                    )
+                ],
+            )
+        elif request.param == "shared_source_unlocked":
+            u1 = Slot(part=["1w_uORF", "2x_uORF"], ref_id="U1")
+            u2 = Slot(part=[None, "4x_uORF", "3x_uORF"], ref_id="U2")
+            return Recipe(
+                name="shared_source_unlocked",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u1, "CasE_rec", "eBFP2", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "CasE", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u2, "Csy4_rec", "eYFP", "L0.T_4560"], source="out2_plsmd"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "Csy4", "L0.T_4560"], source="ern2_plsmd"),
+                            TranscriptionUnit(slots=["mKO2"], source="mrkr_plsmd"),
+                        ],
+                        ratios=[NumRange(min=1, max=5), NumRange(min=2, max=8), NumRange(min=1, max=4), NumRange(min=1, max=3)],
+                    )
+                ],
+            )
+        elif request.param == "shared_source_mixed":
+            u1 = Slot(part=["1w_uORF", "2x_uORF"], ref_id="U1")
+            u2 = Slot(part=[None, "4x_uORF", "3x_uORF"], ref_id="U2")
+            return Recipe(
+                name="shared_source_mixed",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u1, "CasE_rec", "eBFP2", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "CasE", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u2, "Csy4_rec", "eYFP", "L0.T_4560"], source="out2_plsmd"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "Csy4", "L0.T_4560"], source="ern2_plsmd"),
+                            TranscriptionUnit(slots=["mKO2"], source="mrkr_plsmd"),
+                        ],
+                        ratios=[NumRange(min=1, max=5), 2.5, NumRange(min=1, max=4), 1.8],
                     )
                 ],
             )
@@ -403,6 +475,8 @@ if __name__ == "__main__":
     print("✓ Shared source network structure test passed\n")
 
     # Run parametrized roundtrip tests on all recipes
+    print("Running roundtrip tests on all recipe variants...\n")
+
     with LibraryContext.with_library(lib_instance):
         u1 = Slot(part=["1w_uORF", "2x_uORF"], ref_id="U1")
         u2 = Slot(part=[None, "4x_uORF", "3x_uORF"], ref_id="U2")
@@ -415,6 +489,22 @@ if __name__ == "__main__":
                     CoTransfection(name="b", units=make_units("b", ERNS), fluo_bias=BIAS_FLUO, ratios=[NumRange(min=1, max=2) for _ in range(8)]),
                 ],
             ),
+            "complex_twolayers_locked": Recipe(
+                name="two_and_one_locked",
+                content=[
+                    CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=[1.0 + i * 0.5 for i in range(8)]),
+                    CoTransfection(name="x2", units=make_units("x2", ERNS), ratios=[2.0 + i * 2.0 for i in range(8)]),
+                    CoTransfection(name="b", units=make_units("b", ERNS), fluo_bias=BIAS_FLUO, ratios=[1.0 + i * 0.1 for i in range(8)]),
+                ],
+            ),
+            "complex_twolayers_mixed": Recipe(
+                name="two_and_one_mixed",
+                content=[
+                    CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=[NumRange(min=1, max=10) if i % 2 == 0 else 2.0 + i for i in range(8)]),
+                    CoTransfection(name="x2", units=make_units("x2", ERNS), ratios=[5.0, NumRange(min=2, max=50), 10.0, NumRange(min=5, max=100), 15.0, 20.0, NumRange(min=10, max=80), 25.0]),
+                    CoTransfection(name="b", units=make_units("b", ERNS), fluo_bias=BIAS_FLUO, ratios=[1.0, 1.2, NumRange(min=1, max=2), 1.4, 1.5, NumRange(min=1, max=1.8), 1.6, 1.7]),
+                ],
+            ),
             "simple_two_reporters": Recipe(
                 name="simple_two_reporters",
                 content=[
@@ -424,6 +514,18 @@ if __name__ == "__main__":
                             TranscriptionUnit(slots=["cHS4", "hEF1a", "mMaroon1", "L0.T_4560"]),
                         ],
                         ratios=[0.833, 0.167],
+                    )
+                ],
+            ),
+            "simple_two_reporters_unlocked": Recipe(
+                name="simple_two_reporters_unlocked",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "eBFP2", "L0.T_4560"]),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "mMaroon1", "L0.T_4560"]),
+                        ],
+                        ratios=[NumRange(min=0.5, max=0.9), NumRange(min=0.1, max=0.5)],
                     )
                 ],
             ),
@@ -452,6 +554,36 @@ if __name__ == "__main__":
                             TranscriptionUnit(slots=["mKO2"], source="mrkr_plsmd"),
                         ],
                         ratios=[i + 1 for i in range(4)],
+                    )
+                ],
+            ),
+            "shared_source_unlocked": Recipe(
+                name="shared_source_unlocked",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u1, "CasE_rec", "eBFP2", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "CasE", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u2, "Csy4_rec", "eYFP", "L0.T_4560"], source="out2_plsmd"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "Csy4", "L0.T_4560"], source="ern2_plsmd"),
+                            TranscriptionUnit(slots=["mKO2"], source="mrkr_plsmd"),
+                        ],
+                        ratios=[NumRange(min=1, max=5), NumRange(min=2, max=8), NumRange(min=1, max=4), NumRange(min=1, max=3)],
+                    )
+                ],
+            ),
+            "shared_source_mixed": Recipe(
+                name="shared_source_mixed",
+                content=[
+                    CoTransfection(
+                        units=[
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u1, "CasE_rec", "eBFP2", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "CasE", "L0.T_4560"], source="plsmd1"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", u2, "Csy4_rec", "eYFP", "L0.T_4560"], source="out2_plsmd"),
+                            TranscriptionUnit(slots=["cHS4", "hEF1a", "Csy4", "L0.T_4560"], source="ern2_plsmd"),
+                            TranscriptionUnit(slots=["mKO2"], source="mrkr_plsmd"),
+                        ],
+                        ratios=[NumRange(min=1, max=5), 2.5, NumRange(min=1, max=4), 1.8],
                     )
                 ],
             ),
