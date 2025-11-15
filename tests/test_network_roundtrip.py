@@ -74,8 +74,17 @@ def cotx_equals_assert(c1: CoTransfection, c2: CoTransfection, path: str):
         f"{path}: Unit count mismatch ({len(c1.units)} vs {len(c2.units)})"
     )
 
-    r1 = c1.ratios or [1.0] * len(c1.units)
-    r2 = c2.ratios or [1.0] * len(c2.units)
+    # Default ratios should be based on unique sources, not total units
+    def get_unique_source_count(cotx):
+        seen = set()
+        for tu in cotx.units:
+            seen.add(tu.source)
+        return len(seen)
+
+    num_sources1 = get_unique_source_count(c1)
+    num_sources2 = get_unique_source_count(c2)
+    r1 = c1.ratios or [1.0] * num_sources1
+    r2 = c2.ratios or [1.0] * num_sources2
 
     assert len(r1) == len(r2), f"{path}: Ratio count mismatch ({len(r1)} vs {len(r2)})"
 

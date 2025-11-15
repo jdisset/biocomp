@@ -236,8 +236,8 @@ class CoTransfection(BaseModel):
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
-        if self.ratios is None:  # equal ratios by default
-            self.ratios = [1.0] * len(self.units)
+        # Don't set default ratios here - they should be based on unique sources,
+        # which requires network context. Defaults are handled in network.py
         # Validate fluo_bias tu_id if present
         if self.fluo_bias is not None:
             if self.fluo_bias.tu_id < 0 or self.fluo_bias.tu_id >= len(self.units):
