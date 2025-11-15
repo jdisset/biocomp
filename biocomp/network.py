@@ -936,11 +936,21 @@ def _build_cdg_dual_from_preprocessed(
 
     for i, cotx in enumerate(recipe or []):
         group_name = cotx.name or f"cotx_{i + 1}"
-        if cotx.ratios and len(cotx.ratios) != len(cotx.units):
+
+        # Build list of unique sources in order of first appearance
+        unique_sources_ordered = []
+        seen = set()
+        for tu in cotx.units:
+            if tu.source not in seen:
+                unique_sources_ordered.append(tu.source)
+                seen.add(tu.source)
+
+        if cotx.ratios and len(cotx.ratios) != len(unique_sources_ordered):
             raise ValueError(
-                f"CoTransfection '{group_name}': ratios count ({len(cotx.ratios)}) must match units count ({len(cotx.units)})"
+                f"CoTransfection '{group_name}': ratios count ({len(cotx.ratios)}) "
+                f"must match number of unique sources ({len(unique_sources_ordered)})"
             )
-        raw_ratios = cotx.ratios or [1.0] * len(cotx.units)
+        raw_ratios = cotx.ratios or [1.0] * len(unique_sources_ordered)
 
         # Track fluo_bias info for this cotx
         if cotx.fluo_bias is not None:
@@ -962,12 +972,18 @@ def _build_cdg_dual_from_preprocessed(
         normalized_ratios = (
             [r / ratio_sum for r in numeric_ratios]
             if ratio_sum > 0
-            else [1.0 / len(cotx.units)] * len(cotx.units)
+            else [1.0 / len(unique_sources_ordered)] * len(unique_sources_ordered)
         )
 
-        for unit_idx, (unit, norm_ratio, orig_ratio) in enumerate(
-            zip(cotx.units, normalized_ratios, raw_ratios)
+        # Map sources to their ratios
+        source_to_norm_ratio_map = {}
+        for source, norm_ratio, orig_ratio in zip(
+            unique_sources_ordered, normalized_ratios, raw_ratios
         ):
+            source_to_norm_ratio_map[source] = (norm_ratio, orig_ratio)
+
+        for unit_idx, unit in enumerate(cotx.units):
+            norm_ratio, orig_ratio = source_to_norm_ratio_map[unit.source]
             # Store both normalized value and original range info (if NumRange)
             range_info = orig_ratio if isinstance(orig_ratio, NumRange) else None
             # Also store param_ref_ids, TU name, position, and cotx_index for roundtrip preservation
