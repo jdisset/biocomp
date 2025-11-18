@@ -1,6 +1,7 @@
 # {{{                          --     imports     --
 # ···············································································
 import numpy as np
+import pandas as pd
 from . import utils as ut
 from .utils import ArbitraryModel, escape
 from pathlib import Path

@@ -603,3 +603,98 @@ def test_topological_order_equivalence(recipes_data, lib):
             assert old_total == new_total, (
                 f"{path.name}: old={old_total} nodes, new={new_total} nodes"
             )
+
+
+def test_network_info_equivalence(recipes_data, lib):
+    """Test that generate_network_info returns compatible information"""
+
+    def strip_tu_suffix(tu_name):
+        """Remove _1, _2, etc. suffixes from TU names"""
+        import re
+        return re.sub(r'_\d+$', '', tu_name)
+
+    def compare_all_parts(old_parts, new_parts):
+        """Compare all_parts ignoring TU name suffixes"""
+        # Strip suffixes from old keys
+        old_stripped = {strip_tu_suffix(k): v for k, v in old_parts.items()}
+        # New system shouldn't have suffixes but strip just in case
+        new_stripped = {strip_tu_suffix(k): v for k, v in new_parts.items()}
+        return set(old_stripped.keys()) == set(new_stripped.keys())
+
+    def compare_uorf_ern_values(old_uorfs, new_uorfs, old_erns, new_erns):
+        """Compare uORF values using ERN names as keys to handle ordering differences"""
+        if len(old_uorfs) != len(new_uorfs) or len(old_erns) != len(new_erns):
+            return False, "Different number of ERNs or uORF values"
+
+        # Build dictionaries mapping ERN name to uORF values
+        old_dict = dict(zip(old_erns, old_uorfs))
+        new_dict = dict(zip(new_erns, new_uorfs))
+
+        # Check that both have the same ERN names
+        if set(old_dict.keys()) != set(new_dict.keys()):
+            return False, f"Different ERN names: old={set(old_dict.keys())}, new={set(new_dict.keys())}"
+
+        # Check that uORF values match for each ERN
+        for ern_name in old_dict:
+            if old_dict[ern_name] != new_dict[ern_name]:
+                return False, f"uORF mismatch for {ern_name}: old={old_dict[ern_name]}, new={new_dict[ern_name]}"
+
+        return True, None
+
+    with LibraryContext.with_library(lib):
+        failed = []
+        for path, recipe_dict, recipe in recipes_data:
+            try:
+                old_net = build_old_network(path, lib)
+                new_compg = build_new_network_compg(recipe, lib)
+                new_net = netn.Network(name="test", compute_graph=new_compg)
+
+                # Get network info from both systems
+                old_info = old_net.generate_network_info()
+                new_info = new_net.generate_network_info()
+
+                # Check key fields match
+                if old_info["sequestron_type"] != new_info["sequestron_type"]:
+                    failed.append(f"{path.name}: sequestron_type mismatch - old={old_info['sequestron_type']}, new={new_info['sequestron_type']}")
+
+                if old_info["architecture"] != new_info["architecture"]:
+                    failed.append(f"{path.name}: architecture mismatch - old={old_info['architecture']}, new={new_info['architecture']}")
+
+                # Check ERN names (order doesn't matter)
+                if sorted(old_info["ern_names"]) != sorted(new_info["ern_names"]):
+                    failed.append(f"{path.name}: ern_names mismatch - old={sorted(old_info['ern_names'])}, new={sorted(new_info['ern_names'])}")
+
+                # Compare uORF values using ERN-based dictionary comparison
+                if old_info["uorf_values"] or new_info["uorf_values"]:  # Only if there are uORFs
+                    match, msg = compare_uorf_ern_values(
+                        old_info["uorf_values"],
+                        new_info["uorf_values"],
+                        old_info["ern_names"],
+                        new_info["ern_names"]
+                    )
+                    if not match:
+                        failed.append(f"{path.name}: {msg}")
+
+                if sorted(old_info["markers"]) != sorted(new_info["markers"]):
+                    failed.append(f"{path.name}: markers mismatch - old={old_info['markers']}, new={new_info['markers']}")
+
+                if sorted(old_info["output_proteins"]) != sorted(new_info["output_proteins"]):
+                    failed.append(f"{path.name}: output_proteins mismatch - old={old_info['output_proteins']}, new={new_info['output_proteins']}")
+
+                if sorted(old_info["dependent_outputs"]) != sorted(new_info["dependent_outputs"]):
+                    failed.append(f"{path.name}: dependent_outputs mismatch - old={old_info['dependent_outputs']}, new={new_info['dependent_outputs']}")
+
+                # Check all_parts has same structure (ignoring TU suffixes)
+                if not compare_all_parts(old_info["all_parts"], new_info["all_parts"]):
+                    old_stripped = {strip_tu_suffix(k) for k in old_info["all_parts"].keys()}
+                    new_stripped = {strip_tu_suffix(k) for k in new_info["all_parts"].keys()}
+                    failed.append(f"{path.name}: all_parts keys mismatch - old_stripped={old_stripped}, new_stripped={new_stripped}")
+
+            except Exception as e:
+                failed.append(f"{path.name}: ERROR - {str(e)}")
+
+        if failed:
+            print(f"\n❌ Network info mismatches for {len(failed)} issues:")
+            for issue in failed:
+                print(f"  - {issue}")
+            pytest.fail(f"Network info compatibility test failed with {len(failed)} issues")
