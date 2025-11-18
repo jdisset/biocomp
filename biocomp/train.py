@@ -544,7 +544,7 @@ def start(
     xb = get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
     yb = get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
 
-    num_z = static["global/number_of_quantile_variables"]
+    num_z = static["global/number_of_random_variables"]
     assert num_z.shape == (training_config.n_replicates,)
     assert jnp.all(num_z == num_z[0]), (
         "All replicates must have the same number of quantile variables"

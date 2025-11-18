@@ -843,7 +843,7 @@ def evaluate_design(
     assert_that(Y).has_shape((dconf.n_replicates, n_eval_samples, dmanager.n_targets, n_networks))
 
     # get quantile variable size
-    num_z = int(final_params["global/number_of_quantile_variables"].ravel()[0])
+    num_z = int(final_params["global/number_of_random_variables"].ravel()[0])
 
     logger.info(
         f"Evaluating design with {dconf.n_replicates} replicates, "
@@ -1149,7 +1149,7 @@ def start(
     initial_optimizer_state = vmap(vmap(dconf.optimizer.init))(dynamic)
 
     # -- get data --
-    num_z = static["global/number_of_quantile_variables"]
+    num_z = static["global/number_of_random_variables"]
     assert_that(num_z.shape[0]).is_equal_to(dconf.n_replicates)
     assert_that(jnp.all(num_z == num_z[0])).is_true()
     num_z = (dmanager.n_targets, int(num_z.ravel()[0].squeeze()))
