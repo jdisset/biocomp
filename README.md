@@ -7,6 +7,13 @@ functions represent cellular processes. The framework is designed for high
 computational efficiency, parallel training, and extensive metadata tracking
 for reproducibility.
 
+Unlike standard neural networks, **Biomorphic Neural Networks (BNNs)** map
+directly to biological processes. A key feature of these circuits is the use of
+**Endoribonucleases (ERNs)**—specific proteins (like CasE or Csy4) that
+recognize and cleave specific RNA hairpins. This cleavage suppresses the
+translation of downstream genes, providing the essential non-linear inhibitory
+mechanism required for complex logic and neuromorphic behavior.
+
 # Overview of the Biocompiler
 
 Neuromorphic circuits in cells represent a categorical jump from the currently
@@ -94,79 +101,64 @@ discrete DNA parts, providing designs for experimental validation.
 
 # Modules
 
-## Turning DNA into a composition of neural functions
+## General Overview
 
-### recipe.py
+The codebase uses a **Graph Rewriting System** to translate biological intent into computation. The system starts with a "Central Dogma Graph" representing the physical flow of genetic information (DNA $\to$ RNA $\to$ Protein). It then iteratively applies declarative rewriting rules (defined in `biorules.py`) to transform this biological topology into a computational graph. This graph is finally compiled into a **Compute Stack**—a flattened, JAX-based structure optimized for highly parallel execution, allowing the simulation and training of thousands of different genetic circuit variations simultaneously.
 
-Handles the importing, parsing, and management of genetic circuit recipes from JSON5 files into computational representations.
+## Module Descriptions
 
-### network.py
+#### 1\. Biological Data & Recipe Definition
 
-Defines the core structures for representing genetic circuits as computational graphs.
+- **`biocomp.recipe`**: This is the user-facing API for describing experiments.
+  - **`Recipe`**: The top-level container for a set of experimental conditions.
+  - **`CoTransfection`**: Represents a specific mixture of plasmids introduced into a cell. It handles `ratios` (stoichiometry) and `fluo_bias` (experimental noise/bias).
+  - **`TranscriptionUnit` (TU)**: Represents a single gene on a DNA strand, composed of a list of **`Slot`s**.
+  - **`Slot`**: A placeholder for a biological part. It can hold a specific part name (e.g., "hEF1a") or a list of options (e.g., `["1x_uORF", "2x_uORF"]`) for design optimization.
+- **`biocomp.library`**: Manages the database of biological parts.
+  - **`PartsLibrary`**: Loads part definitions from a SQL/SQLite database (`models.py`). It resolves hierarchical part definitions (L0 basic parts assembling into L1 genes, assembling into L2 plasmids).
+  - It maintains the registry of **Sequestrons** (the specific ERN/Target pairs) and their types.
+- **`biocomp.part_embeddings`**: Defines the mapping from discrete biological parts to continuous vectors. For example, it maps categorical promoter names to learnable "transcription rate" vectors used by the neural network.
 
-**Key classes:**
+#### 2\. Graph Engine (The Core Transformation Logic)
 
-- `TranscriptionUnit` - Represents genetic elements like promoters and genes
-- `Network` - Manages both the central dogma graph and compute graph
-- `Slot` - Represents a position in a transcription unit that can contain parts
+- **`biocomp.network`**: The orchestrator of the build process.
+  - **`build_central_dogma_graph_direct`**: Converts a `Recipe` into a raw graph of biological entities (DNA nodes connected to RNA nodes, connected to Protein nodes).
+  - **`recipe_to_networks`**: The main entry point. It takes a recipe, builds the biological graph, applies the rewriting rules to create a compute graph, and optionally inverts it (for design tasks).
+- **`biocomp.graphengine`**: A generic graph manipulation framework.
+  - **`GraphState`**: An immutable snapshot of the network containing `nodes` and `edges`.
+  - **`graphs_are_isomorphic`**: A utility to verify that two different recipes produce the exact same computational topology.
+- **`biocomp.graphrules`**: Implements the Domain Specific Language (DSL) for graph rewriting.
+  - **`MatchQuery`**: Allows searching the graph for specific topologies (e.g., "Find all RNA nodes connected to a Translation node").
+  - **`GraphRewritingRule`**: pairs a query with **`Action`s** (like `AddNode`, `RewireEdges`, `DeleteNode`).
+- **`biocomp.biorules`**: The specific biological logic.
+  - It defines rules like `create_aggregation_nodes` (to model plasmids mixing in a cell) or `sequestron_ERN` rules (identifying where an ERN protein creates a feedback loop by cleaving a specific RNA).
 
-## Core implementation
+#### 3\. Computation & JAX Engine
 
-### parameters.py
+- **`biocomp.compute`**: The execution engine.
+  - **`ComputeStack`**: Takes multiple `Network` graphs and "stacks" distinct nodes into layers (`StackLayer`). This allows the system to execute the `transcription` step for 100 different networks in a single JAX operation.
+  - **`_generate_apply_method`**: Compiles the entire stack into a single, JIT-compilable JAX function.
+- **`biocomp.nodes`**: The mathematical implementations of biological steps.
+  - **`transcription` / `translation`**: Neural transformations (MLPs) that map inputs (upstream concentrations + part embeddings) to outputs (downstream concentrations).
+  - **`sequestron_ERN`**: Models the Endoribonuclease non-linearity. It calculates the inhibition of translation based on the affinity between the ERN protein and the target RNA.
+  - **`aggregation`**: Computes the weighted sum of plasmid outputs based on transfection ratios.
+- **`biocomp.parameters`**: A hierarchical parameter manager.
+  - **`ParameterTree`**: A dictionary-like structure compatible with JAX pytrees. It supports "tagging" (e.g., separating `shared` biological constants from `local` experiment-specific variables).
+  - **`ArrayRef`**: A mechanism allowing multiple nodes in the compute graph to reference the same underlying parameter memory (crucial for sharing part embeddings across the stack).
 
-Provides a hierarchical system for managing neural network parameters with tagging and references support (allowing DAG topologies).
+#### 4\. Training, Design & Utils
 
-**Key classes:**
+- **`biocomp.train`**: The training loop.
+  - **`sorting_loss`**: A specialized loss function. Since flow cytometry data is a distribution, this loss encourages the network to learn the _quantiles_ of the fluorescence distribution rather than just the mean.
+- **`biocomp.design`**: Solves the inverse problem.
+  - **`DesignManager`**: Given a target behavior (e.g., a logic gate truth table or a complex curve drawn in an SVG), it freezes the biological constants and optimizes the _input parameters_ (promoters, uORFs) to match the target.
+- **`biocomp.quantization`**: Implements "Variational Quantization." During design, the system explores a continuous "embedding space" for parts. This module handles snapping those continuous values back to the nearest valid discrete part (e.g., "Promoter A" vs "Promoter B") while maintaining differentiability via the Straight-Through Estimator.
 
-- `ParameterTree` - Tree-based parameter storage with tagging capabilities
-- `PTree` - Base implementation of parameter trees
-- `ArrayRef` - References to arrays that can span multiple locations in the tree
-
-### compute.py
-
-Implements the computational core for executing biomorphic neural networks. The
-main idea is to enable parallelization of the execution of many different
-networks by first organizing them into a stack of layers (called a `ComputeStack`)
-
-**Key classes:**
-
-- `ComputeStack` - Manages the execution of multiple networks in parallel
-- `ComputeLayer` - Organizes nodes that can be executed in parallel
-- `VirtualNode` - Represents a computational node in the network
-- `ComputeConfig` - Configuration for network computation
-
-**Key functions:**
-
-- `build()` - Constructs the compute stack from networks
-- `init()` - Initializes parameters for the stack
-- `apply()` - Executes the network computation
-
-### nodes.py
-
-Contains implementations of neural network nodes representing biological processes.
-
-## Training and design
-
-### train.py + trainutils.py
-
-Implementation of the main training loop and many training-related helper functions.
-
-### datautils.py
-
-Handles data processing and preparation for training. `DataManager` also holds the data for multiple networks.
-
-**Key classes:**
-
-- `DataManager` - Manages data for multiple networks and provides sampling utilities
-- `DataRescaler` / `CompressedSymLogRescaler` - Scale data to appropriate ranges
-
-## Plotting and Visualization
-
-### plotting\*
+#### 5\. Visualization
 
 Visualization tools for different plot types.
 
-**Key modules:**
+**Key submodules:**
 
 - `plotting_core.py` - Core visualization utilities
 - `plotting_smooth.py` - Smoothed visualization of network behavior
