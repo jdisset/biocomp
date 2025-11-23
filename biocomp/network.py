@@ -699,6 +699,7 @@ def recipe_to_networks(
     recipe: Recipe,
     rules: Optional[list[GraphRewritingRule]] = None,
     invert=True,
+    inversion_mode: str = "all",
     lib: Optional[PartsLibrary] = None,
 ) -> list[Network]:
     from biocomp.inversion import invert_all_paths
@@ -713,7 +714,7 @@ def recipe_to_networks(
     compg = compg[0]
     compg = br.sort_output_edges(compg)
     compg = assign_ern_layer_ids(compg)
-    graphs = invert_all_paths(compg) if invert else [compg]
+    graphs = invert_all_paths(compg, mode=inversion_mode) if invert else [compg]
 
     result = []
 
