@@ -420,6 +420,7 @@ def start(
     xy_batches: Optional[Tuple] = None,
     async_handler=None,
     enable_jax_tqdm: bool = False,
+    init_params: Optional[ParameterTree] = None,
 ):
     import optax
     import jax
@@ -447,7 +448,11 @@ def start(
         training_config.n_epochs * training_config.n_batches / training_config.batches_per_step
     )
 
-    stack, params = init_stack(compute_config, dman, training_config.n_replicates, init_key)
+    if init_params is None:
+        stack, params = init_stack(compute_config, dman, training_config.n_replicates, init_key)
+    else:
+        stack = dman.build_compute_stack(compute_config)
+        params = init_params
 
     def get_new_batches(rng_key=batch_key):
         xbatches, ybatches = generate_batches(
