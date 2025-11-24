@@ -188,6 +188,16 @@ class PartialFunction(ArbitraryModel, Generic[T, R]):
         super().model_post_init(*a, **kw)
         self._func = None
 
+    def __getstate__(self):
+        # exclude _func from pickling as it may contain unpicklable closures
+        state = self.__dict__.copy()
+        state.pop('_func', None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._func = None
+
     def set_missing_kwargs(self, new_kwargs: dict):
         """only overwrite the kwargs that are not already set, and are in the signature"""
         import inspect

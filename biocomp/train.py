@@ -139,7 +139,6 @@ def sorting_loss(
     out_vs_in_sortmse_weight=1,  # 1 = only dependent outputs count
     use_same_key=False,
 ):
-
     import jax
     import jax.numpy as jnp
     from jax.tree_util import tree_leaves
@@ -294,27 +293,27 @@ def create_counter():
 
 
 DEFAULT_OPTIMIZER = [
-    # PartialFunction(
-    #     # func=optax.clip_by_global_norm,
-    #     func="optax.transforms._clipping.clip_by_global_norm",
-    #     kwargs={"max_norm": 1.0},
-    # ),
-    # PartialFunction(
-    #     # func=optax.adamw,
-    #     func="optax._src.alias.adamw",
-    #     kwargs={
-    #         "learning_rate": PartialFunctionResult(
-    #             func="optax.warmup_cosine_decay_schedule",
-    #             kwargs={
-    #                 "init_value": 1e-7,
-    #                 "peak_value": 1e-3,
-    #                 "warmup_steps": 15,
-    #                 "decay_steps": 130,
-    #                 "end_value": 1e-5,
-    #             },
-    #         )
-    #     },
-    # ),
+    PartialFunction(
+        # func=optax.clip_by_global_norm,
+        func="optax.transforms._clipping.clip_by_global_norm",
+        kwargs={"max_norm": 1.0},
+    ),
+    PartialFunction(
+        # func=optax.adamw,
+        func="optax._src.alias.adamw",
+        kwargs={
+            "learning_rate": PartialFunctionResult(
+                func="optax.warmup_cosine_decay_schedule",
+                kwargs={
+                    "init_value": 1e-7,
+                    "peak_value": 1e-3,
+                    "warmup_steps": 15,
+                    "decay_steps": 130,
+                    "end_value": 1e-5,
+                },
+            )
+        },
+    ),
 ]
 
 
@@ -453,6 +452,27 @@ def start(
     else:
         stack = dman.build_compute_stack(compute_config)
         params = init_params
+
+        n_reps = training_config.n_replicates
+        num_z_check = params["global/number_of_random_variables"]
+        num_z_arr = jnp.asarray(num_z_check)
+
+        if num_z_arr.shape != (n_reps,):
+            logger.info(f"Replicating provided init_params {n_reps} times to match n_replicates.")
+
+            def replicate_leaf(x):
+                if x is None:
+                    return None
+                x_arr = jnp.asarray(x)
+                if x_arr.ndim == 0:
+                    x_arr = x_arr[None]
+                return jnp.repeat(x_arr[None, ...], n_reps, axis=0)
+
+            params = jax.tree.map(replicate_leaf, params)
+        else:
+            logger.info(
+                f"Using provided init_params as is (assumed to be already replicated with size {n_reps})."
+            )
 
     def get_new_batches(rng_key=batch_key):
         xbatches, ybatches = generate_batches(
