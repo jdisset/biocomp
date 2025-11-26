@@ -559,6 +559,96 @@ def distance_loss(
     return loss_func
 
 
+def grid_distance_loss(
+    stack,
+    dconf,
+    dmanager,
+    num_z,
+    ratio_paths=None,
+    w_sinkhorn=1.0,
+    w_lncc=0.5,
+    w_spectral=0.0,
+    eps_sinkhorn=0.1,
+    n_sinkhorn_iters=50,
+    lncc_kernel=7,
+    lambda_over1=0.001,
+):
+    assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
+    resolution = dmanager.grid_resolution
+    assert resolution is not None
+    xres, yres = resolution
+
+    n_targets = dmanager.n_targets
+    n_inputs = stack.get_nb_inputs()
+    n_outputs = stack.get_nb_outputs()
+    n_networks = stack.get_nb_networks()
+    dep_mask = stack.get_dependent_output_mask()
+    nb_dep = np.sum(dep_mask)
+
+    assert n_inputs == 2 * n_networks
+
+    if ratio_paths is None:
+        ratio_paths = []
+
+    def compute_grid_loss_single(y_img, yhat_img):
+        loss = jnp.array(0.0)
+        if w_sinkhorn > 0:
+            y_pos = proj_nonneg_ste(y_img)
+            yhat_pos = proj_nonneg_ste(yhat_img)
+            loss = loss + w_sinkhorn * sinkhorn_divergence_conv(
+                yhat_pos, y_pos, eps_sinkhorn, n_iters=n_sinkhorn_iters
+            )
+        if w_lncc > 0:
+            loss = loss + w_lncc * lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel)
+        if w_spectral > 0:
+            loss = loss + w_spectral * spectral_loss(None, y_img, yhat_img)
+        return loss
+
+    def compute_all_grid_losses(Y_images, yhat_images):
+        # Y_images: (n_targets, n_networks, yres, xres)
+        # yhat_images: (n_targets, n_networks, yres, xres)
+        per_net = vmap(compute_grid_loss_single)  # over networks
+        per_target = vmap(per_net)  # over targets
+        return per_target(Y_images, yhat_images)  # (n_targets, n_networks)
+
+    def loss_func(dynamic, static, X, Y, Z, key, step):
+        # X: (batch_size, n_targets, n_inputs) where batch_size = yres * xres
+        # Y: (n_targets, n_networks, yres, xres) - target images
+        # Z: (batch_size, n_targets, num_z)
+        params = ParameterTree.merge(dynamic, static)
+
+        batch_size = yres * xres
+        assert_that(X.shape).is_equal_to((batch_size, n_targets, n_inputs))
+        assert_that(Y.shape).is_equal_to((n_targets, n_networks, yres, xres))
+        assert_that(Z.shape).is_equal_to((batch_size, n_targets, num_z[-1]))
+
+        keys = jax.random.split(key, (X.shape[0], X.shape[1]))
+        yhat_flat, (apply_aux, full_output) = per_target_apply(params, X, Z, keys, stack)
+        assert_that(yhat_flat.shape).is_equal_to((batch_size, n_targets, n_outputs))
+
+        yhatdep_flat = jnp.compress(dep_mask, yhat_flat, axis=-1, size=nb_dep)
+        assert_that(yhatdep_flat.shape).is_equal_to((batch_size, n_targets, n_networks))
+
+        # reshape predictions to images: (batch_size, n_targets, n_networks) -> (n_targets, n_networks, yres, xres)
+        yhat_images = yhatdep_flat.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
+
+        ratio_leaves = params.get_leaves_by_path(ratio_paths)
+        lo1 = as_schedule(lambda_over1)(step)
+        over1_penalty = lo1 * sum(
+            soft_count_over_one_penalty(p, rel_active=1e-3, width=2e-4) for p in ratio_leaves
+        )
+
+        all_losses = compute_all_grid_losses(Y, yhat_images)
+        avgloss = all_losses.mean()
+        aux = {"apply_aux": apply_aux, "all_losses": all_losses, "yhat_images": yhat_images}
+
+        total_loss = avgloss + over1_penalty
+
+        return total_loss, aux
+
+    return loss_func
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                     --     helper functions     --
@@ -634,6 +724,24 @@ DEFAULT_RESCALE_TARGET = {
 }
 
 
+class SamplingConfig(ArbitraryModel):
+    strategy: Literal["uniform", "lattice"] = "uniform"
+
+
+class UniformSampling(SamplingConfig):
+    strategy: Literal["uniform"] = "uniform"
+    n_samples: int = 5000
+
+
+class LatticeSampling(SamplingConfig):
+    strategy: Literal["lattice"] = "lattice"
+    resolution: tuple[int, int] = (64, 64)
+    jitter_std: float = 0.0
+
+
+SamplingConfigUnion = Union[UniformSampling, LatticeSampling]
+
+
 class Target(BaseModel):
     path: Union[str, Path]
     name: Optional[str] = None
@@ -650,6 +758,7 @@ class DesignManager(BaseModel):
 
     targets: list[Target]
     networks: List[Network]
+    sampling: SamplingConfigUnion = Field(default_factory=UniformSampling, discriminator="strategy")
 
     def model_post_init(self, *a, **kw):
         super().model_post_init(*a, **kw)
@@ -663,20 +772,27 @@ class DesignManager(BaseModel):
         samples: int | tuple[int, ...],
         seed: Optional[int | ArrayLike] = None,
     ) -> tuple[jax.Array, jax.Array]:
-        # returns (x, y) where x and y are arrays of shape (n_samples, n_targets, n_features)
-        xsamples = []
-        ysamples = []
+        if seed is None:
+            seed = random.randint(0, 2**32 - 1)
+        elif isinstance(seed, ArrayLike):
+            seed = int(jax.random.randint(seed, (), 0, jnp.iinfo(jnp.int32).max))
+
+        if isinstance(self.sampling, LatticeSampling):
+            return self._get_lattice_samples(samples, seed)
+        return self._get_uniform_samples(samples, seed)
+
+    def _get_uniform_samples(
+        self,
+        samples: int | tuple[int, ...],
+        seed: int,
+    ) -> tuple[jax.Array, jax.Array]:
+        xsamples, ysamples = [], []
 
         if isinstance(samples, int):
             samples = (samples,)
 
         requested_shape = samples
-
-        n = np.prod(requested_shape)
-        if seed is None:
-            seed = random.randint(0, 2**32 - 1)
-        elif isinstance(seed, ArrayLike):  # it's a JAX PRNG key
-            seed = int(jax.random.randint(seed, (), 0, jnp.iinfo(jnp.int32).max))
+        n = int(np.prod(requested_shape))
 
         for target in self.targets:
             xsample, ysample = sample_from_svg(
@@ -690,20 +806,95 @@ class DesignManager(BaseModel):
                 rescale_to=target.rescale_to,
                 max_is_black=target.max_is_black,
             )
-
             xsamples.append(xsample)
             ysamples.append(ysample)
 
         xsamples = jnp.stack(xsamples, axis=1)
         ysamples = jnp.stack(ysamples, axis=1)
 
-        assert_that(xsamples.shape).is_equal_to((n, len(self.targets), 2))  # 2d inputs
-        assert_that(ysamples.shape).is_equal_to((n, len(self.targets), 1))  # 1d outputs
+        assert_that(xsamples.shape).is_equal_to((n, len(self.targets), 2))
+        assert_that(ysamples.shape).is_equal_to((n, len(self.targets), 1))
 
         xsamples = xsamples.reshape(*requested_shape, len(self.targets), -1)
         ysamples = ysamples.reshape(*requested_shape, len(self.targets), -1)
 
         return xsamples, ysamples
+
+    def _get_lattice_samples(
+        self,
+        samples: int | tuple[int, ...],
+        seed: int,
+    ) -> tuple[jax.Array, jax.Array]:
+        assert isinstance(self.sampling, LatticeSampling)
+        xres, yres = self.sampling.resolution
+        jitter = self.sampling.jitter_std
+
+        if isinstance(samples, int):
+            samples = (samples,)
+
+        requested_shape = samples
+        n = int(np.prod(requested_shape))
+
+        xsamples, ysamples = [], []
+
+        for target in self.targets:
+            X, Y_grid = sample_from_svg(
+                target.path,
+                n=n,
+                seed=seed,
+                log=target.transform_to_log_space,
+                xlim=target.xlim,
+                ylim=target.ylim,
+                outlim=target.outlim,
+                rescale_to=target.rescale_to,
+                max_is_black=target.max_is_black,
+                grid=(xres, yres),
+                grid_jitter_std=jitter,
+            )
+            xsamples.append(X)
+            ysamples.append(Y_grid)
+
+        # X: (n * yres * xres, 2) -> stack across targets
+        xsamples = jnp.stack(xsamples, axis=1)  # (n*yres*xres, n_targets, 2)
+        # Y_grid: (n, yres, xres) -> stack
+        ysamples = jnp.stack(ysamples, axis=1)  # (n, n_targets, yres, xres)
+
+        n_pts = n * yres * xres
+        assert_that(xsamples.shape).is_equal_to((n_pts, len(self.targets), 2))
+        assert_that(ysamples.shape).is_equal_to((n, len(self.targets), yres, xres))
+
+        # reshape X to match batch structure, keep Y as images
+        xsamples = xsamples.reshape(*requested_shape, yres * xres, len(self.targets), 2)
+        # swap axes: (*requested_shape, n_pts_per_sample, n_targets, 2) -> (*requested_shape, n_pts_per_sample, n_targets, 2)
+        # but we want (*requested_shape, n_targets, n_pts_per_sample, 2) for consistency? No, keep flat for BNN input
+        # actually keep as (*requested_shape, n_pts_per_sample, n_targets, 2) then transpose
+        xsamples = jnp.transpose(
+            xsamples,
+            (
+                *range(len(requested_shape)),
+                len(requested_shape) + 1,
+                len(requested_shape),
+                len(requested_shape) + 2,
+            ),
+        )  # (*requested_shape, n_targets, n_pts_per_sample, 2)
+
+        # flatten n_pts dim for network input, but reshape for output convenience
+        # return X flat: (*requested_shape, n_targets, yres*xres, 2) -> (*requested_shape * yres * xres, n_targets, 2)
+        # and Y as image: (*requested_shape, n_targets, yres, xres)
+        xsamples = xsamples.reshape(-1, len(self.targets), 2)
+        ysamples = ysamples.reshape(*requested_shape, len(self.targets), yres, xres)
+
+        return xsamples, ysamples
+
+    @property
+    def is_lattice_mode(self) -> bool:
+        return isinstance(self.sampling, LatticeSampling)
+
+    @property
+    def grid_resolution(self) -> Optional[tuple[int, int]]:
+        if isinstance(self.sampling, LatticeSampling):
+            return self.sampling.resolution
+        return None
 
     def build_stack(self, model: BiocompModel, unlock_ratios=True):
         stack = ComputeStack(networks=self.networks)
