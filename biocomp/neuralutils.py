@@ -72,6 +72,8 @@ INITIALIZERS = {
     "glorot_uniform": glorot_uniform,
     "he_normal": he_normal,
     "he_uniform": he_uniform,
+    "xavier_normal": glorot_normal,  # alias
+    "xavier_uniform": glorot_uniform,  # alias
 }
 
 DEFAULT_ACTIVATION = "leaky_relu"
