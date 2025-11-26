@@ -8,11 +8,12 @@ from pathlib import Path
 from .compute import ComputeStack
 from tqdm import tqdm
 from scipy.stats import gaussian_kde
+from scipy.spatial import cKDTree
 from multiprocessing import Pool
 import itertools
 from .network import Network
 from pydantic import BaseModel, Field
-from typing import Optional, Union, Tuple, Callable
+from typing import Optional, Union, Tuple, Callable, Literal
 from functools import partial
 
 from biocomp.logging_config import get_logger
@@ -502,8 +503,10 @@ def sample_batches_jax(
 
 
 class ResamplingConfig(BaseModel):
+    method: Literal["kde", "knn"] = "knn"
     kde_bw_method: float = 0.02
     kde_samples: int = 4000
+    knn_k: int = 64
     density_chunksize: int = 50000
     density_threshold_quantile: float = 0.025
     density_threshold_coords: float = 0.15
@@ -530,26 +533,37 @@ def worker_init(counter):
 def compute_single_density(args):
     """
     Helper function to compute density for a single file/sample.
-    Recreates the KDE in the worker process.
+    Supports both KDE and kNN methods. Rebuilds estimator in worker process.
     """
-    kde_points, kde_bw, x, chunksize, cache_dir, signature = args
+    method, x, chunksize, cache_dir, signature, method_params = args
 
-    def compute_d(kde_points, kde_bw, x, chunksize):
-        # Recreate the KDE in this process
+    def compute_kde(kde_points, kde_bw, x, chunksize):
         kde = gaussian_kde(kde_points, bw_method=kde_bw)
-
-        # cut in chunks to avoid memory issues
         n = x.shape[0]
         allarr = []
-        i = 0
-        while i < n:
+        for i in range(0, n, chunksize):
             allarr.append(kde.evaluate(x[i : min(i + chunksize, n)].T))
-            i += chunksize
-        res = np.concatenate(allarr)
-        assert res.shape == (n,)
-        return res
+        return np.concatenate(allarr)
 
-    return ut.get_cache(lambda: compute_d(kde_points, kde_bw, x, chunksize), signature, cache_dir)
+    def compute_knn(x, k, chunksize):
+        tree = cKDTree(x)
+        n, dim = x.shape
+        eps = 1e-12
+        result = np.empty(n, dtype=np.float64)
+        for i in range(0, n, chunksize):
+            end = min(i + chunksize, n)
+            d, _ = tree.query(x[i:end], k=k + 1)
+            d_k = d[:, -1]
+            result[i:end] = 1.0 / np.power(d_k + eps, dim)
+        return result
+
+    def compute_d():
+        if method == "kde":
+            return compute_kde(method_params["kde_points"], method_params["kde_bw"], x, chunksize)
+        else:
+            return compute_knn(x, method_params["k"], chunksize)
+
+    return ut.get_cache(compute_d, signature, cache_dir)
 
 
 def compute_selection_probabilities(
@@ -670,15 +684,16 @@ class DataManager:
                     f"Network {n.name} has {n.get_nb_outputs()} outputs, but data has {self._raw_Y[i].shape[1]} features"
                 )
 
-        # generate KDE sample points upfront
+        # generate KDE sample points upfront (only if using KDE method)
         self._kde_points = []
         self._kde_bws = []
-        for x in self._X:
-            npoints = min(x.shape[0], int(self.data_cfg.resampling.kde_samples))
-            xindices = np.random.choice(x.shape[0], size=npoints, replace=False)
-            self._kde_points.append(x[xindices].T)
-            kde = gaussian_kde(x[xindices].T, bw_method=self.data_cfg.resampling.kde_bw_method)
-            self._kde_bws.append(kde.factor)
+        if self.data_cfg.resampling.method == "kde":
+            for x in self._X:
+                npoints = min(x.shape[0], int(self.data_cfg.resampling.kde_samples))
+                xindices = np.random.choice(x.shape[0], size=npoints, replace=False)
+                self._kde_points.append(x[xindices].T)
+                kde = gaussian_kde(x[xindices].T, bw_method=self.data_cfg.resampling.kde_bw_method)
+                self._kde_bws.append(kde.factor)
 
         self.compute_stack = None
         self._densities = None
@@ -694,27 +709,36 @@ class DataManager:
         Compute the densities at each data point in the dataset, for each sample,
         using parallel processing at the file level.
         """
-        logger.debug(f"Computing densities in parallel with {self.n_workers} workers")
+        method = self.data_cfg.resampling.method
+        logger.debug(f"Computing densities ({method}) in parallel with {self.n_workers} workers")
         logger.debug(f"Using cache dir {self.cache_dir}")
 
-        def get_signature(kde_points, kde_bw, x):
+        def get_signature(x, method, method_params):
             n = x.shape[0]
             stepsize = max(n // 100, 1)
             xsig = f"{x.shape}_{x[::stepsize]}"
-            ksig = f"{kde_bw:.20f}_{kde_points.shape[0]}_{kde_points.shape[1]}"
+            if method == "kde":
+                ksig = f"kde_{method_params['kde_bw']:.20f}_{method_params['kde_points'].shape}"
+            else:
+                ksig = f"knn_k{method_params['k']}"
             return f"{xsig}_{ksig}"
 
-        compute_args = [
-            (
-                kde_points,
-                kde_bw,
-                x,
-                self.data_cfg.resampling.density_chunksize,
-                self.cache_dir,
-                get_signature(kde_points, kde_bw, x),
+        compute_args = []
+        for i, x in enumerate(self._X):
+            if method == "kde":
+                method_params = {"kde_points": self._kde_points[i], "kde_bw": self._kde_bws[i]}
+            else:
+                method_params = {"k": self.data_cfg.resampling.knn_k}
+            compute_args.append(
+                (
+                    method,
+                    x,
+                    self.data_cfg.resampling.density_chunksize,
+                    self.cache_dir,
+                    get_signature(x, method, method_params),
+                    method_params,
+                )
             )
-            for kde_points, kde_bw, x in zip(self._kde_points, self._kde_bws, self._X)
-        ]
 
         if self.n_workers <= 1:
             self._densities = [

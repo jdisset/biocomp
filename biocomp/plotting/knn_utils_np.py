@@ -1,6 +1,48 @@
 import numpy as np
 from biocomp.logging_config import get_logger
 from scipy.stats import norm
+from scipy.spatial import cKDTree
+
+
+def knn_density(
+    X: np.ndarray,
+    k: int = 64,
+    eps: float = 1e-12,
+    tree: cKDTree | None = None,
+) -> np.ndarray:
+    """
+    Compute density proxy using k-th nearest neighbor distance.
+    Density ~ 1 / (d_k + eps)^D where D is dimensionality.
+    Returns unnormalized density values suitable for importance sampling.
+    """
+    if tree is None:
+        tree = cKDTree(X)
+    d, _ = tree.query(X, k=k + 1)  # +1 because closest is self
+    d_k = d[:, -1]  # distance to k-th neighbor
+    dim = X.shape[1]
+    return 1.0 / np.power(d_k + eps, dim)
+
+
+def knn_density_chunked(
+    X: np.ndarray,
+    k: int = 64,
+    eps: float = 1e-12,
+    chunksize: int = 50000,
+) -> np.ndarray:
+    """
+    Chunked version for large datasets to control memory usage.
+    Builds tree once, queries in chunks.
+    """
+    tree = cKDTree(X)
+    n = X.shape[0]
+    dim = X.shape[1]
+    result = np.empty(n, dtype=np.float64)
+    for i in range(0, n, chunksize):
+        end = min(i + chunksize, n)
+        d, _ = tree.query(X[i:end], k=k + 1)
+        d_k = d[:, -1]
+        result[i:end] = 1.0 / np.power(d_k + eps, dim)
+    return result
 
 
 # def get_gaussian_weighted_knn(
@@ -30,8 +72,6 @@ from scipy.stats import norm
 #         return indices, normalized_weights
 #
 #     return indices, weights
-
-
 
 
 def get_gaussian_weighted_knn(
