@@ -406,23 +406,15 @@ def per_replicate_step(
     import jax
     import jax.numpy as jnp
 
-    assert_that(xbatches.shape[:2]).is_equal_to(
-        (
-            training_config.batches_per_step,
-            training_config.batch_size,
-        )
-    )
-    assert_that(ybatches.shape[:2]).is_equal_to(
-        (
-            training_config.batches_per_step,
-            training_config.batch_size,
-        )
-    )
+    actual_batches_per_step, actual_batch_size = xbatches.shape[:2]
+    assert_that(actual_batches_per_step).is_equal_to(training_config.batches_per_step)
+    assert_that(xbatches.shape[0]).is_equal_to(ybatches.shape[0])
+    assert_that(xbatches.shape[1]).is_equal_to(ybatches.shape[1])
 
     if isinstance(num_z, int):
         num_z = (num_z,)
     zbatches = jax.random.uniform(
-        key, (training_config.batches_per_step, training_config.batch_size, *num_z)
+        key, (actual_batches_per_step, actual_batch_size, *num_z)
     )
 
     batch_keys = jax.random.split(key, training_config.batches_per_step)
@@ -480,21 +472,11 @@ def optimize(
 ):
     loggers = loggers or []
 
-    assert_that(xbatches.shape[:4]).is_equal_to(
-        (
-            steps_per_epoch,
-            config.n_replicates,
-            config.batches_per_step,
-            config.batch_size,
-        )
+    assert_that(xbatches.shape[:3]).is_equal_to(
+        (steps_per_epoch, config.n_replicates, config.batches_per_step)
     )
-    assert_that(ybatches.shape[:4]).is_equal_to(
-        (
-            steps_per_epoch,
-            config.n_replicates,
-            config.batches_per_step,
-            config.batch_size,
-        )
+    assert_that(ybatches.shape[:3]).is_equal_to(
+        (steps_per_epoch, config.n_replicates, config.batches_per_step)
     )
 
     def prnt(msg):

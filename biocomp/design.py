@@ -13,7 +13,8 @@ from biocomp.utils import (
     ArbitraryModel,
     PartialFunctionResult,
 )
-from biocomp.old_network.network import Network, CoTransfection, Unit, Slot
+from biocomp.network import Network
+from biocomp.recipe import CoTransfection, Unit, Slot
 from biocomp.train import create_counter
 import biocomp.utils
 from assertpy import assert_that
@@ -63,12 +64,11 @@ logger = get_logger(__name__)
 # v \leftarrow b \oslash (K * u),
 # and each “matrix–vector” multiply (K\cdot) is just a Gaussian blur (separable 1D convs) or an FFT convolution. That drops the per-iteration cost from O(n^2) to ~O(n\,k) (finite support kernel) or O(n\log n) (FFT), with n=H\!\times\!W.
 # --- Gaussian blur (separable, reflect padding) ---
-def _gauss1d(sigma, truncate=3.0):
-    radius = int(jnp.ceil(truncate * sigma))
+def _gauss1d(sigma, radius=5):
     x = jnp.arange(-radius, radius + 1, dtype=jnp.float32)
     k = jnp.exp(-(x**2) / (2 * sigma**2))
     k = k / jnp.sum(k)
-    return k
+    return k.reshape(-1)  # Ensure 1D
 
 
 def _conv1d_reflect(x, k, axis):
@@ -76,9 +76,9 @@ def _conv1d_reflect(x, k, axis):
     pads = [(0, 0)] * x.ndim
     pads[axis] = pad
     xpad = jnp.pad(x, pads, mode="reflect")
-    # lax.conv on 1D by reshaping to NCHW and using a 1D kernel
+    # lax.conv on 1D by reshaping to NCHW and using a 1D kernel in OIHW format
     if axis == -1 or axis == x.ndim - 1:
-        w = k[None, None, :]
+        w = k[None, None, None, :]  # OIHW: (1, 1, 1, kernel_size)
         xNCHW = xpad[None, None, :, :]
         y = lax.conv_general_dilated(
             xNCHW,
@@ -90,7 +90,7 @@ def _conv1d_reflect(x, k, axis):
         return y[0, 0]
     else:
         x = jnp.swapaxes(xpad, axis, -1)
-        w = k[None, None, :]
+        w = k[None, None, None, :]  # OIHW: (1, 1, 1, kernel_size)
         xNCHW = x[None, None, :, :]
         y = lax.conv_general_dilated(
             xNCHW,
@@ -102,11 +102,15 @@ def _conv1d_reflect(x, k, axis):
         return jnp.swapaxes(y, -1, axis)
 
 
+def _apply_gauss_blur2d(x, kernel):
+    x = _conv1d_reflect(x, kernel, axis=-1)  # blur along W
+    x = _conv1d_reflect(x, kernel, axis=-2)  # blur along H
+    return x
+
+
 def gauss_blur2d(x, sigma):
     k = _gauss1d(sigma)
-    x = _conv1d_reflect(x, k, axis=-1)  # blur along W
-    x = _conv1d_reflect(x, k, axis=-2)  # blur along H
-    return x
+    return _apply_gauss_blur2d(x, k)
 
 
 # --- Convolutional Sinkhorn (balanced) on grid masses a,b in R^{H×W} ---
@@ -122,11 +126,13 @@ def sinkhorn_divergence_conv(a, b, eps, n_iters=80, tol=1e-6):
     u = jnp.ones_like(a)
     v = jnp.ones_like(b)
 
+    gauss_kernel = _gauss1d(sigma)
+
     def body(carry):
         u, v = carry
-        Kv = gauss_blur2d(v, sigma)
+        Kv = _apply_gauss_blur2d(v, gauss_kernel)
         u = a / (Kv + 1e-12)
-        Ku = gauss_blur2d(u, sigma)
+        Ku = _apply_gauss_blur2d(u, gauss_kernel)
         v = b / (Ku + 1e-12)
         return (u, v)
 
@@ -499,15 +505,11 @@ def distance_loss(
     from ott.solvers import linear
 
     n_targets = dmanager.n_targets
-    n_inputs = stack.get_nb_inputs()
+    n_networks = len(dmanager.networks)
+    n_inputs = 2 * n_networks
     n_outputs = stack.get_nb_outputs()
-    n_networks = stack.get_nb_networks()
     dep_mask = stack.get_dependent_output_mask()
     nb_dep = np.sum(dep_mask)
-
-    assert n_inputs == 2 * n_networks, (
-        f"Expected {2 * n_networks} inputs, got {n_inputs}. Not optimizing a 2D design?"
-    )
 
     def all_losses_func(x, target_y, yhat, epsilon):
         assert_that(x.shape).is_equal_to((dconf.batch_size, n_targets, n_inputs))
@@ -545,7 +547,8 @@ def distance_loss(
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
         lo1 = as_schedule(lambda_over1)(step)
         over1_penalty = lo1 * sum(
-            soft_count_over_one_penalty(p, rel_active=1e-3, width=2e-4) for p in ratio_leaves
+            soft_count_over_one_penalty(p.view() if hasattr(p, 'view') else p, rel_active=1e-3, width=2e-4)
+            for p in ratio_leaves
         )
 
         all_losses = all_losses_func(X, Y, yhatdep, as_schedule(epsilon)(step))
@@ -572,6 +575,8 @@ def grid_distance_loss(
     n_sinkhorn_iters=50,
     lncc_kernel=7,
     lambda_over1=0.001,
+    distance_func=None,
+    epsilon=None,
 ):
     assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
     resolution = dmanager.grid_resolution
@@ -579,13 +584,11 @@ def grid_distance_loss(
     xres, yres = resolution
 
     n_targets = dmanager.n_targets
-    n_inputs = stack.get_nb_inputs()
+    n_networks = len(dmanager.networks)
+    n_inputs = 2 * n_networks
     n_outputs = stack.get_nb_outputs()
-    n_networks = stack.get_nb_networks()
     dep_mask = stack.get_dependent_output_mask()
     nb_dep = np.sum(dep_mask)
-
-    assert n_inputs == 2 * n_networks
 
     if ratio_paths is None:
         ratio_paths = []
@@ -612,15 +615,15 @@ def grid_distance_loss(
         return per_target(Y_images, yhat_images)  # (n_targets, n_networks)
 
     def loss_func(dynamic, static, X, Y, Z, key, step):
-        # X: (batch_size, n_targets, n_inputs) where batch_size = yres * xres
-        # Y: (n_targets, n_networks, yres, xres) - target images
-        # Z: (batch_size, n_targets, num_z)
         params = ParameterTree.merge(dynamic, static)
 
         batch_size = yres * xres
         assert_that(X.shape).is_equal_to((batch_size, n_targets, n_inputs))
-        assert_that(Y.shape).is_equal_to((n_targets, n_networks, yres, xres))
+        assert_that(Y.shape).is_equal_to((batch_size, n_targets, 1))
         assert_that(Z.shape).is_equal_to((batch_size, n_targets, num_z[-1]))
+
+        Y_images = Y.squeeze(-1).transpose(1, 0).reshape(n_targets, yres, xres)
+        Y_images = jnp.tile(Y_images[:, None, :, :], (1, n_networks, 1, 1))
 
         keys = jax.random.split(key, (X.shape[0], X.shape[1]))
         yhat_flat, (apply_aux, full_output) = per_target_apply(params, X, Z, keys, stack)
@@ -635,10 +638,11 @@ def grid_distance_loss(
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
         lo1 = as_schedule(lambda_over1)(step)
         over1_penalty = lo1 * sum(
-            soft_count_over_one_penalty(p, rel_active=1e-3, width=2e-4) for p in ratio_leaves
+            soft_count_over_one_penalty(p.view() if hasattr(p, 'view') else p, rel_active=1e-3, width=2e-4)
+            for p in ratio_leaves
         )
 
-        all_losses = compute_all_grid_losses(Y, yhat_images)
+        all_losses = compute_all_grid_losses(Y_images, yhat_images)
         avgloss = all_losses.mean()
         aux = {"apply_aux": apply_aux, "all_losses": all_losses, "yhat_images": yhat_images}
 
@@ -785,46 +789,52 @@ class DesignManager(BaseModel):
         self,
         samples: int | tuple[int, ...],
         seed: int,
-    ) -> tuple[jax.Array, jax.Array]:
-        xsamples, ysamples = [], []
-
+    ) -> tuple[list[jax.Array], list[jax.Array]]:
         if isinstance(samples, int):
             samples = (samples,)
 
-        requested_shape = samples
+        n_networks = samples[0]
+        requested_shape = samples[1:]
         n = int(np.prod(requested_shape))
 
-        for target in self.targets:
-            xsample, ysample = sample_from_svg(
-                target.path,
-                n=n,
-                seed=seed,
-                log=target.transform_to_log_space,
-                xlim=target.xlim,
-                ylim=target.ylim,
-                outlim=target.outlim,
-                rescale_to=target.rescale_to,
-                max_is_black=target.max_is_black,
-            )
-            xsamples.append(xsample)
-            ysamples.append(ysample)
+        all_xsamples, all_ysamples = [], []
 
-        xsamples = jnp.stack(xsamples, axis=1)
-        ysamples = jnp.stack(ysamples, axis=1)
+        for _ in range(n_networks):
+            xsamples, ysamples = [], []
+            for target in self.targets:
+                xsample, ysample = sample_from_svg(
+                    target.path,
+                    n=n,
+                    seed=seed,
+                    log=target.transform_to_log_space,
+                    xlim=target.xlim,
+                    ylim=target.ylim,
+                    outlim=target.outlim,
+                    rescale_to=target.rescale_to,
+                    max_is_black=target.max_is_black,
+                )
+                xsamples.append(xsample)
+                ysamples.append(ysample)
 
-        assert_that(xsamples.shape).is_equal_to((n, len(self.targets), 2))
-        assert_that(ysamples.shape).is_equal_to((n, len(self.targets), 1))
+            xsamples = jnp.stack(xsamples, axis=1)
+            ysamples = jnp.stack(ysamples, axis=1)
 
-        xsamples = xsamples.reshape(*requested_shape, len(self.targets), -1)
-        ysamples = ysamples.reshape(*requested_shape, len(self.targets), -1)
+            assert_that(xsamples.shape).is_equal_to((n, len(self.targets), 2))
+            assert_that(ysamples.shape).is_equal_to((n, len(self.targets), 1))
 
-        return xsamples, ysamples
+            xsamples = xsamples.reshape(*requested_shape, len(self.targets), 2)
+            ysamples = ysamples.reshape(*requested_shape, len(self.targets), 1)
+
+            all_xsamples.append(xsamples)
+            all_ysamples.append(ysamples)
+
+        return all_xsamples, all_ysamples
 
     def _get_lattice_samples(
         self,
         samples: int | tuple[int, ...],
         seed: int,
-    ) -> tuple[jax.Array, jax.Array]:
+    ) -> tuple[list[jax.Array], list[jax.Array]]:
         assert isinstance(self.sampling, LatticeSampling)
         xres, yres = self.sampling.resolution
         jitter = self.sampling.jitter_std
@@ -832,59 +842,48 @@ class DesignManager(BaseModel):
         if isinstance(samples, int):
             samples = (samples,)
 
-        requested_shape = samples
+        n_networks = samples[0]
+        requested_shape = samples[1:]
         n = int(np.prod(requested_shape))
 
-        xsamples, ysamples = [], []
+        all_xsamples, all_ysamples = [], []
 
-        for target in self.targets:
-            X, Y_grid = sample_from_svg(
-                target.path,
-                n=n,
-                seed=seed,
-                log=target.transform_to_log_space,
-                xlim=target.xlim,
-                ylim=target.ylim,
-                outlim=target.outlim,
-                rescale_to=target.rescale_to,
-                max_is_black=target.max_is_black,
-                grid=(xres, yres),
-                grid_jitter_std=jitter,
-            )
-            xsamples.append(X)
-            ysamples.append(Y_grid)
+        for _ in range(n_networks):
+            xsamples, ysamples = [], []
+            for target in self.targets:
+                X, Y_grid = sample_from_svg(
+                    target.path,
+                    n=n,
+                    seed=seed,
+                    log=target.transform_to_log_space,
+                    xlim=target.xlim,
+                    ylim=target.ylim,
+                    outlim=target.outlim,
+                    rescale_to=target.rescale_to,
+                    max_is_black=target.max_is_black,
+                    grid=(xres, yres),
+                    grid_jitter_std=jitter,
+                )
+                xsamples.append(X)
+                ysamples.append(Y_grid)
 
-        # X: (n * yres * xres, 2) -> stack across targets
-        xsamples = jnp.stack(xsamples, axis=1)  # (n*yres*xres, n_targets, 2)
-        # Y_grid: (n, yres, xres) -> stack
-        ysamples = jnp.stack(ysamples, axis=1)  # (n, n_targets, yres, xres)
+            xsamples = jnp.stack(xsamples, axis=1)
+            ysamples = jnp.stack(ysamples, axis=1)
 
-        n_pts = n * yres * xres
-        assert_that(xsamples.shape).is_equal_to((n_pts, len(self.targets), 2))
-        assert_that(ysamples.shape).is_equal_to((n, len(self.targets), yres, xres))
+            n_pts = n * yres * xres
+            assert_that(xsamples.shape).is_equal_to((n_pts, len(self.targets), 2))
+            assert_that(ysamples.shape).is_equal_to((n, len(self.targets), yres, xres))
 
-        # reshape X to match batch structure, keep Y as images
-        xsamples = xsamples.reshape(*requested_shape, yres * xres, len(self.targets), 2)
-        # swap axes: (*requested_shape, n_pts_per_sample, n_targets, 2) -> (*requested_shape, n_pts_per_sample, n_targets, 2)
-        # but we want (*requested_shape, n_targets, n_pts_per_sample, 2) for consistency? No, keep flat for BNN input
-        # actually keep as (*requested_shape, n_pts_per_sample, n_targets, 2) then transpose
-        xsamples = jnp.transpose(
-            xsamples,
-            (
-                *range(len(requested_shape)),
-                len(requested_shape) + 1,
-                len(requested_shape),
-                len(requested_shape) + 2,
-            ),
-        )  # (*requested_shape, n_targets, n_pts_per_sample, 2)
+            ysamples_flat = ysamples.transpose(0, 2, 3, 1).reshape(n_pts, len(self.targets), 1)
 
-        # flatten n_pts dim for network input, but reshape for output convenience
-        # return X flat: (*requested_shape, n_targets, yres*xres, 2) -> (*requested_shape * yres * xres, n_targets, 2)
-        # and Y as image: (*requested_shape, n_targets, yres, xres)
-        xsamples = xsamples.reshape(-1, len(self.targets), 2)
-        ysamples = ysamples.reshape(*requested_shape, len(self.targets), yres, xres)
+            new_batch_shape = requested_shape[:-1] + (requested_shape[-1] * yres * xres,)
+            xsamples = xsamples.reshape(*new_batch_shape, len(self.targets), 2)
+            ysamples_flat = ysamples_flat.reshape(*new_batch_shape, len(self.targets), 1)
 
-        return xsamples, ysamples
+            all_xsamples.append(xsamples)
+            all_ysamples.append(ysamples_flat)
+
+        return all_xsamples, all_ysamples
 
     @property
     def is_lattice_mode(self) -> bool:
@@ -897,7 +896,10 @@ class DesignManager(BaseModel):
         return None
 
     def build_stack(self, model: BiocompModel, unlock_ratios=True):
+        logger.info(f"Building stack with {len(self.networks)} design networks")
+        logger.info(f"Design network names: {[n.name for n in self.networks]}")
         stack = ComputeStack(networks=self.networks)
+        logger.info(f"Stack after creation has {len(stack.networks)} networks")
         if unlock_ratios:
             assert model.compute_config is not None
             assert model.compute_config.node_functions is not None
@@ -907,6 +909,11 @@ class DesignManager(BaseModel):
             )
 
         stack.build(model.compute_config)
+        logger.info(
+            f"Stack built: {stack.get_nb_networks()} networks, "
+            f"{stack.get_nb_inputs()} inputs, {stack.get_nb_outputs()} outputs"
+        )
+        logger.info(f"Stack network names after build: {[n.name for n in stack.networks]}")
         return stack
 
     @property
@@ -978,8 +985,13 @@ def sample_for_evaluation(
 
     n_networks = len(dmanager.networks)
 
-    # sample evaluation data
-    xraw, yraw = dmanager.get_samples((n_networks, dconf.n_replicates, n_eval_samples), key)
+    # sample evaluation data (use uniform sampling for evaluation, not lattice)
+    original_sampling = dmanager.sampling
+    dmanager.sampling = UniformSampling()
+    xraw_list, yraw_list = dmanager.get_samples((n_networks, dconf.n_replicates, n_eval_samples), key)
+    dmanager.sampling = original_sampling
+    xraw = jnp.stack(xraw_list, axis=0)
+    yraw = jnp.stack(yraw_list, axis=0)
 
     # assertions
     assert_that(xraw).has_shape(
@@ -1355,26 +1367,37 @@ def start(
     assert_that(total_steps).is_greater_than(0)
 
     n_networks = stack.get_nb_networks()
-    xbatches, ybatches = dmanager.get_samples(
-        (n_networks, steps_per_epoch, dconf.n_replicates, dconf.batches_per_step, dconf.batch_size),
+    n_inputs = stack.get_nb_inputs()
+    n_outputs = stack.get_nb_outputs()
+
+    xbatches_list, ybatches_list = dmanager.get_samples(
+        (len(dmanager.networks), steps_per_epoch, dconf.n_replicates, dconf.batches_per_step, dconf.batch_size),
         bkey,
     )
 
-    # glue all networks along the last dimension
-    xbatches = jnp.concatenate(xbatches, axis=-1)
-    ybatches = jnp.concatenate(ybatches, axis=-1)
+    xbatches = jnp.concatenate(xbatches_list, axis=-1)
+    ybatches = ybatches_list[0]
 
-    n_inputs = stack.get_nb_inputs()
-    n_outputs = stack.get_nb_outputs()
+    effective_batch_size = dconf.batch_size
+    if dmanager.is_lattice_mode:
+        xres, yres = dmanager.grid_resolution
+        effective_batch_size *= xres * yres
+
+    n_design_inputs = 2 * len(dmanager.networks)
+
+    logger.info(
+        f"Data generated: {len(dmanager.networks)} design networks, "
+        f"n_design_inputs={n_design_inputs}, xbatches.shape={xbatches.shape}"
+    )
 
     assert_that(xbatches).has_shape(
         (
             steps_per_epoch,
             dconf.n_replicates,
             dconf.batches_per_step,
-            dconf.batch_size,
+            effective_batch_size,
             dmanager.n_targets,
-            n_inputs,
+            n_design_inputs,
         )
     )
 
@@ -1404,18 +1427,19 @@ def start(
             (
                 dconf.n_replicates,
                 dconf.batches_per_step,
-                dconf.batch_size,
+                effective_batch_size,
                 dmanager.n_targets,
-                n_inputs,
+                n_design_inputs,
             )
         )
+        expected_y_last_dim = 1 if dmanager.is_lattice_mode else n_networks
         assert_that(ys).has_shape(
             (
                 dconf.n_replicates,
                 dconf.batches_per_step,
-                dconf.batch_size,
+                effective_batch_size,
                 dmanager.n_targets,
-                n_networks,  # it' only dependent outputs, so one per network
+                expected_y_last_dim,
             )
         )
         assert_tree_shape(params, (dconf.n_replicates, dmanager.n_targets))
