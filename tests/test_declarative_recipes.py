@@ -1217,7 +1217,8 @@ def test_unlocked_ratios_network_builds(lib, unlocked_ratios_network):
     import biocomp.biorules as br
 
     with LibraryContext.with_library(lib):
-        networks = recipe_to_networks(unlocked_ratios_network, br.ALL_RULES, invert=True)
+        # Use inversion_mode="shortest" to get a single network for simpler testing
+        networks = recipe_to_networks(unlocked_ratios_network, br.ALL_RULES, invert=True, inversion_mode="shortest")
         assert len(networks) == 1
         net = networks[0]
         compg = net.compute_graph

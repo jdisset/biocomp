@@ -344,14 +344,21 @@ def test_outputs_match(roundtrip_recipe):
         assert jnp.allclose(y_opt, y_rebuilt)
 
         # Also verify that rebuilding with original key produces original outputs
-        # Only valid for recipes without unlocked ratios (commit locks structure)
-        from biocomp.recipe import NumRange
+        # Only valid for recipes without unlocked ratios or unlocked slots (commit locks structure)
+        from biocomp.recipe import NumRange, Slot
         has_unlocked_ratios = any(
             isinstance(r, NumRange) for cotx in roundtrip_recipe.content
             for r in (cotx.ratios or [])
         )
+        # Check for unlocked slots (Slots with multiple part options)
+        has_unlocked_slots = any(
+            isinstance(slot, Slot) and isinstance(slot.part, list) and len(slot.part) > 1
+            for cotx in roundtrip_recipe.content
+            for tu in cotx.units
+            for slot in tu.slots
+        )
 
-        if not has_unlocked_ratios:
+        if not has_unlocked_ratios and not has_unlocked_slots:
             orig_y, _ = jax.vmap(stack.apply, in_axes=(None, 0, None, None))(orig_params, x, random_variables, eval_key)
             rebuilt_orig_params = rebuilt_stack.init(orig_key)
             rebuilt_orig_shared, rebuilt_orig_nonshared = rebuilt_orig_params.filter_by_tag(['shared'])

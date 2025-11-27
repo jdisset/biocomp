@@ -99,7 +99,8 @@ def build_old_stack(recipe_path, lib):
 
 def build_new_stack(recipe, lib):
     """Build ComputeStack using new system"""
-    new_nets = netn.recipe_to_networks(recipe)
+    # Use inversion_mode="shortest" to match old system behavior (single shortest inversion)
+    new_nets = netn.recipe_to_networks(recipe, inversion_mode="shortest")
     new_stack = NewComputeStack(new_nets)
     new_stack.build(NEW_CONFIG)
     return new_stack
