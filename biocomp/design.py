@@ -120,8 +120,11 @@ def sinkhorn_divergence_conv(a, b, eps, n_iters=80, tol=1e-6):
     a = a.astype(jnp.float32) + 1e-12
     b = b.astype(jnp.float32) + 1e-12
 
-    # Match total mass (balanced); prevents "turn everything to zero"
-    a = a * (b.sum() / a.sum())
+    # normalize to probability distributions (sum to 1)
+    a_sum = jnp.maximum(a.sum(), 1e-10)
+    b_sum = jnp.maximum(b.sum(), 1e-10)
+    a = a / a_sum
+    b = b / b_sum
 
     u = jnp.ones_like(a)
     v = jnp.ones_like(b)
@@ -150,18 +153,19 @@ def sinkhorn_divergence_conv(a, b, eps, n_iters=80, tol=1e-6):
     (u, v), _ = lax.scan(loop, (u, v), None, length=n_iters)
 
     # Dual potentials (balanced): f=eps*log u, g=eps*log v
-    f = eps * jnp.log(u)
-    g = eps * jnp.log(v)
+    u_safe = jnp.maximum(u, 1e-12)
+    v_safe = jnp.maximum(v, 1e-12)
+    f = eps * jnp.log(u_safe)
+    g = eps * jnp.log(v_safe)
 
     def ot_value(a_, b_):
         # Regularized OT value: eps * ( <a_, log u_> + <b_, log v_> )
-        # (with u_, v_ the scalings computed for (a_, b_))
-        return jnp.sum(a_ * jnp.log(u)) * eps + jnp.sum(b_ * jnp.log(v)) * eps
+        return jnp.sum(a_ * jnp.log(u_safe)) * eps + jnp.sum(b_ * jnp.log(v_safe)) * eps
 
     # Compute S_eps(a,b) = OT(a,b) - 0.5(OT(a,a)+OT(b,b))
     ot_ab = ot_value(a, b)
 
-    # Self terms: re-run quickly with (a,a) and (b,b). You can reuse u/v as warm starts.
+    # Self terms: re-run quickly with (a,a) and (b,b)
     def self_term(m):
         u = jnp.ones_like(m)
         v = jnp.ones_like(m)
@@ -175,7 +179,9 @@ def sinkhorn_divergence_conv(a, b, eps, n_iters=80, tol=1e-6):
             return (u, v), None
 
         (u, v), _ = lax.scan(loop_uv, (u, v), None, length=max(20, n_iters // 2))
-        return eps * (jnp.sum(m * jnp.log(u)) + jnp.sum(m * jnp.log(v)))
+        u_safe = jnp.maximum(u, 1e-12)
+        v_safe = jnp.maximum(v, 1e-12)
+        return eps * (jnp.sum(m * jnp.log(u_safe)) + jnp.sum(m * jnp.log(v_safe)))
 
     ot_aa = self_term(a)
     ot_bb = self_term(b)
@@ -389,7 +395,6 @@ def soft_count_over_one_penalty(W, rel_active=1e-3, width=2e-4):
 
 
 def lncc_grid_loss(x, y, yhat, k=7, eps=1e-6, **kw):
-    # cheap boxfilter via cumulative sums (no extra deps)
     def box2d(a, r):
         a = jnp.pad(a, ((r + 1, r), (r + 1, r)), mode="edge")
         s = jnp.cumsum(jnp.cumsum(a, axis=0), axis=1)
@@ -411,9 +416,11 @@ def lncc_grid_loss(x, y, yhat, k=7, eps=1e-6, **kw):
     y1c = y1 - m1
 
     num = box2d(y0c * y1c, r)
-    den = jnp.sqrt(box2d(y0c * y0c, r) * box2d(y1c * y1c, r)) + eps
+    # eps inside sqrt to avoid infinite gradients at zero
+    den = jnp.sqrt(jnp.maximum(box2d(y0c * y0c, r), 0) * jnp.maximum(box2d(y1c * y1c, r), 0) + eps)
     lncc = num / den
-    return 1.0 - jnp.mean(lncc)
+    lncc = jnp.clip(lncc, -1.0, 1.0)
+    return 1.0 - jnp.nanmean(lncc)
 
 
 def simse_loss(x, y, yhat, eps=1e-8, **kw):

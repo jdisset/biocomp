@@ -53,6 +53,28 @@ class Network(BaseModel):
     metadata: dict[str, Any] = {}
     compute_graph: Optional[GraphState] = None
 
+    def __hash__(self):
+        if self.compute_graph is not None:
+            try:
+                return hash(self.to_recipe())
+            except Exception:
+                pass
+        return hash(self.name)
+
+    def __eq__(self, other):
+        if not isinstance(other, Network):
+            return False
+        if self.compute_graph is not None and other.compute_graph is not None:
+            try:
+                return self.to_recipe() == other.to_recipe()
+            except Exception:
+                pass
+        return self.name == other.name
+
+    def to_pretty_recipe(self) -> str:
+        import dracon as dr
+        return dr.dump(self.to_recipe())
+
     def get_output_compute_node(self) -> GraphNode:
         assert self.compute_graph is not None
         output_nodes = [n for n in self.compute_graph.nodes.values() if n.node_type == "output"]
@@ -487,9 +509,17 @@ class Network(BaseModel):
         # Create slots
         slots = []
         for category, name, emb in parts:
+            # unwrap single-element lists to a single value (for committed networks)
+            is_collapsed = isinstance(name, (list, tuple)) and len(name) == 1
+            if is_collapsed:
+                name = name[0]
             slot = Slot(part=name)
             if emb:
                 slot.maps_to_parameter = emb
+            # for collapsed slots, force the part to be a single value, not a list
+            # (overrides Slot.model_post_init which wraps param-mapped parts in lists)
+            if is_collapsed and isinstance(slot.part, list) and len(slot.part) == 1:
+                slot.part = slot.part[0]
             slots.append(slot)
 
         return slots
@@ -623,11 +653,18 @@ class Network(BaseModel):
 
             cotx_group = self._find_cotx_group_for_bias(node)
 
+            # Check if we have a committed bias_value (from stack.commit())
+            committed_value = node.extra.get("bias_value")
+
             # Try to get fluo_bias dict (current format)
             fluo_bias = node.extra.get("fluo_bias")
             if fluo_bias and isinstance(fluo_bias, dict):
-                # Parse value from fluo_bias dict
-                value = self._parse_value_to_numrange_or_float(fluo_bias.get("value"))
+                # Use committed value if available, otherwise parse from dict
+                if committed_value is not None:
+                    import jax.numpy as jnp
+                    value = float(jnp.asarray(committed_value).item())
+                else:
+                    value = self._parse_value_to_numrange_or_float(fluo_bias.get("value"))
                 protein = fluo_bias.get("protein")
                 if protein in ["", "None"]:
                     protein = None
@@ -645,11 +682,19 @@ class Network(BaseModel):
             # Legacy format: try fluo_bias_data dict
             fluo_bias_data = self._parse_fluo_bias_data(node.extra.get("fluo_bias_data"))
             if fluo_bias_data:
+                # Use committed value if available
+                if committed_value is not None:
+                    import jax.numpy as jnp
+                    fluo_bias_data["value"] = float(jnp.asarray(committed_value).item())
                 bias_by_cotx[cotx_group] = self._create_fluo_intensity_from_dict(fluo_bias_data)
                 continue
 
             # Fallback: try to get fields directly from node.extra (oldest format)
-            value = self._parse_value_to_numrange_or_float(node.extra.get("value"))
+            if committed_value is not None:
+                import jax.numpy as jnp
+                value = float(jnp.asarray(committed_value).item())
+            else:
+                value = self._parse_value_to_numrange_or_float(node.extra.get("value"))
             protein = node.extra.get("protein")
             if protein in ["", "None"]:
                 protein = None
@@ -1155,6 +1200,7 @@ def _build_cdg_dual_from_preprocessed(
                 content_type="RNA",
                 content=tuple(Part(name=p, category="RNA") for p in info["RNA_content"]),
                 content_embedding_names={k: tuple(v) for k, v in info["RNA_params"].items()},
+                extra={"tu_id": [tuid]},
             )
         )
 

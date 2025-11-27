@@ -203,7 +203,8 @@ class TranscriptionUnit(BaseModel):
                     default = EMBEDDINGS_BY_NAME[s.maps_to_parameter].default_part
                     self.params[s.maps_to_parameter] = [default if p is None else p for p in s.part]
                 else:
-                    self.params[s.maps_to_parameter] = s.part
+                    # wrap single values in list for consistency (params values should always be lists)
+                    self.params[s.maps_to_parameter] = [s.part] if isinstance(s.part, str) else s.part
                 # track ref_id for this parameter
                 self.param_ref_ids[s.maps_to_parameter] = s.ref_id
 
@@ -315,19 +316,33 @@ class CoTransfection(BaseModel):
         return hash(str(self.model_dump()))
 
 
-def process_cotx_list(cotx_list: list[CoTransfection]) -> list[CoTransfection]:
+def process_cotx_list(cotx_list: list[CoTransfection | dict]) -> list[CoTransfection | dict]:
     """Add names to unnamed cotx groups and sources"""
 
     source_counter = 0
 
     for i, cotx in enumerate(cotx_list):
-        if cotx.name is None:
-            cotx.name = f"cotx_{i + 1}"
+        # handle both dict (from YAML loading) and CoTransfection objects
+        if isinstance(cotx, dict):
+            if cotx.get("name") is None:
+                cotx["name"] = f"cotx_{i + 1}"
+            units = cotx.get("units", [])
+            for unit in units:
+                if isinstance(unit, dict):
+                    if unit.get("source") is None:
+                        source_counter += 1
+                        unit["source"] = f"plsmd_{source_counter}"
+                elif unit.source is None:
+                    source_counter += 1
+                    unit.source = f"plsmd_{source_counter}"
+        else:
+            if cotx.name is None:
+                cotx.name = f"cotx_{i + 1}"
 
-        for unit in cotx.units:
-            if unit.source is None:
-                source_counter += 1
-                unit.source = f"plsmd_{source_counter}"
+            for unit in cotx.units:
+                if unit.source is None:
+                    source_counter += 1
+                    unit.source = f"plsmd_{source_counter}"
 
     return cotx_list
 

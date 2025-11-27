@@ -329,6 +329,22 @@ def transform_nn(
         }
 
     def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack, **_):
+        def update_edges_by_tu_id(graph, tu_ids: list[str], emb_name: str, committed_value: tuple):
+            """Update all edges belonging to the specified TU(s) with the committed embedding value.
+
+            Uses tu_id for matching rather than embedding values, which ensures independent TUs
+            with the same embedding options don't cross-contaminate during commit.
+            """
+            if not tu_ids:
+                return
+            tu_id_set = set(tu_ids)
+            for edge in graph.edges.values():
+                edge_tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+                # check if this edge belongs to any of the TUs we're committing
+                if edge_tu_ids and set(edge_tu_ids) & tu_id_set:
+                    if edge.content_embedding_names and emb_name in edge.content_embedding_names:
+                        edge.content_embedding_names[emb_name] = committed_value
+
         for node_id, node in enumerate(nodelist):
             rates = params[f"{namespace}/{rate_name}"][node_id]
             resolved_parameter_names = qz.get_quantized_part_names(
@@ -344,8 +360,16 @@ def transform_nn(
                 f"Number of incoming edges {len(i_edges)} does not match number of resolved rate names {len(resolved_parameter_names)}"
                 f" for node {node} in namespace {namespace}"
             )
+            # get compute graph for this node
+            network = stack.networks[node.network_id]
+            graph = network.compute_graph
             for e, pname in zip(i_edges, resolved_parameter_names):
-                e.content_embedding_names[rate_name] = (pname,)
+                committed_value = (pname,)
+                # update the incoming edge
+                e.content_embedding_names[rate_name] = committed_value
+                # get tu_id from edge and update all edges belonging to this TU
+                tu_ids = e.extra.get("tu_id", []) if e.extra else []
+                update_edges_by_tu_id(graph, tu_ids, rate_name, committed_value)
 
     output_shape = [(1,)]
 
