@@ -745,12 +745,8 @@ class ArrayRefPath:
         return self.actual_path > other.actual_path
 
 
-# I have to write my own manual (non-recursive) flatten function to handle the references
-# As a result, this is VERY SLOW compared to a normal jax tree flatten
-# (which calls the c++ xla implementation)
-# one way around this would be to wrap the flatten and
-# flag the references in the tree as leaves before postprocessing
-# but for now I'll just use this slow version
+# Optimized PTree flatten/unflatten with object.__new__ bypass for speed.
+# Keeps per-leaf children for vmap compatibility.
 def flatten_PTree(ptree):
     keys, values = [], []
     for k, v in ptree.iter_leaves():
@@ -768,15 +764,20 @@ def flatten_PTree(ptree):
 
 
 def unflatten_PTree(aux_data, content):
-    keys = aux_data[0]
-    read_only = aux_data[1]
-    ptree = PTree(read_only=False)
+    keys, read_only = aux_data
+
+    # bypass __init__ for speed (as recommended for JAX pytrees)
+    ptree = object.__new__(PTree)
+    ptree.value = None
+    ptree.read_only = False
+
     for k, v in zip(keys, content):
         if isinstance(k, ArrayRefPath):
             ptree[k.actual_path] = ArrayRef(ptree, k.paths, k.indices)
         else:
             ptree[k] = v
-    ptree.set_read_only(read_only)
+
+    ptree.read_only = read_only
     return ptree
 
 

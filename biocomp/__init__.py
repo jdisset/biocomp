@@ -1,3 +1,18 @@
+import os as _os
+
+# enable JAX persistent compilation cache for faster repeated runs
+_jax_cache_dir = _os.environ.get(
+    "JAX_COMPILATION_CACHE_DIR",
+    _os.path.expanduser("~/.cache/jax_biocomp")
+)
+if _jax_cache_dir:
+    _os.makedirs(_jax_cache_dir, exist_ok=True)
+    _os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", _jax_cache_dir)
+
+import jax as _jax
+_jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+_jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+
 from .library import PartsLibrary as PartsLibrary
 
 from .network import (
