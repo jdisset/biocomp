@@ -623,12 +623,15 @@ class DataManager:
         X: list[NdArray],
         Y: list[NdArray],
         networks: list[Network],
+        weights: Optional[list[float]] = None,
         data_cfg: DataConfig = DEFAULT_DATA_CONFIG,
         cache_location: Optional[Union[Path, str]] = DEFAULT_DATA_CACHE_DIR,
         n_workers: int = 1,
         jax_sampling: bool = True,
     ):
         assert len(X) == len(Y) == len(networks)
+        self._weights = weights if weights is not None else [1.0] * len(networks)
+        assert len(self._weights) == len(networks)
 
         self.data_cfg = data_cfg
         self.cache_dir = cache_location
@@ -920,7 +923,8 @@ class DataManager:
         sub_x = [self._raw_X[i] for i in network_ids]
         sub_y = [self._raw_Y[i] for i in network_ids]
         sub_networks = [self._networks[i] for i in network_ids]
-        return DataManager(sub_x, sub_y, sub_networks, self.data_cfg)
+        sub_weights = [self._weights[i] for i in network_ids]
+        return DataManager(sub_x, sub_y, sub_networks, sub_weights, self.data_cfg)
 
     def build_compute_stack(self, compute_cfg, **kwargs) -> ComputeStack:
         """Build/Get the composite compute stack of all networks"""
@@ -960,6 +964,9 @@ class DataManager:
 
     def get_raw_Y(self):
         return self._raw_Y
+
+    def get_weights(self):
+        return self._weights
 
     def get_per_network_xy_samples(self, n_samples, only_dependent=False):
         """

@@ -35,6 +35,7 @@ def init_stack(
 
     with ut.timer("Stack initialization", logger):
         params = vmap(stack.init)(jax.random.split(key, n_replicates))
+
     return stack, params
 
 
@@ -71,6 +72,11 @@ def generate_batches(
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                      --     loss functions     --
+
+
+def expand_weights_to_outputs(weights: list[float], networks: list) -> list[float]:
+    """Expand per-network weights to per-output weights."""
+    return [w for w, n in zip(weights, networks) for _ in range(n.nb_outputs)]
 
 
 def check_XYZ(X, Y, Z, stack):
@@ -131,13 +137,14 @@ def stable_sigma(logstd, *, min_std=1e-3):
 def sorting_loss(
     stack,
     training_config,
-    negative_grad_penalty=1.0,  # favor monotonicity
+    negative_grad_penalty=1.0,
     kl_weight=0.1,
     sorting_mse_weight=0.1,
     percent_batch_used=1.0,
-    out_vs_in_mse_weight=0.5,  # 1 = only dependent outputs count
-    out_vs_in_sortmse_weight=1,  # 1 = only dependent outputs count
+    out_vs_in_mse_weight=0.5,
+    out_vs_in_sortmse_weight=1,
     use_same_key=False,
+    per_output_weights=None,
 ):
     import jax
     import jax.numpy as jnp
@@ -194,29 +201,32 @@ def sorting_loss(
             f"dep_out must have the same shape as Y features, got {dep_mask.shape} and {Y.shape}"
         )
 
+        # per-network weights (expanded to per-output)
+        if per_output_weights is not None:
+            output_weights = jnp.asarray(per_output_weights)
+        else:
+            output_weights = jnp.ones(Y.shape[1])
+        assert output_weights.shape == (Y.shape[1],)
+
         # only use a percentage of the batch (allows to vary batch size without recompiling)
         pct = as_schedule(percent_batch_used)(step)
         selected = (jnp.linspace(0, 1, X.shape[0]) <= pct)[:, None]
         eff_batch_size = jnp.maximum(selected.sum(), 1)
 
-        # compute the mse loss
-        sqdiff = (yhat - Y) ** 2 * selected
-        # Check for division by zero in MSE dependent
-        dep_mask_sum = dep_mask.sum()
+        # compute the mse loss (with per-network weights)
+        sqdiff = (yhat - Y) ** 2 * selected * output_weights[None, :]
+        dep_mask_sum = (dep_mask * output_weights).sum()
         mse_dependent = (sqdiff * dep_mask[None, :]).sum() / (eff_batch_size * dep_mask_sum)
-        # Check for division by zero in MSE independent
-        indep_mask_sum = indep_mask.sum()
+        indep_mask_sum = (indep_mask * output_weights).sum()
         mse_independent = (sqdiff * indep_mask[None, :]).sum() / (eff_batch_size * indep_mask_sum)
         out_v_in_mse = as_schedule(out_vs_in_mse_weight)(step)
-        mse = lerp(mse_independent, mse_dependent, out_v_in_mse)  # 0 = full indep, 1 = full dep
+        mse = lerp(mse_independent, mse_dependent, out_v_in_mse)
 
         # sorting loss with pushing masked out values to the end
-
         MAXFLOAT = jnp.finfo(Y.dtype).max
         sorted_yhat = robust_sort(jnp.where(selected, yhat, MAXFLOAT), axis=0)
         sorted_y = robust_sort(jnp.where(selected, Y, MAXFLOAT), axis=0)
-        sort_sqdiff = (sorted_yhat - sorted_y) ** 2
-        # apply the same masks as above
+        sort_sqdiff = (sorted_yhat - sorted_y) ** 2 * output_weights[None, :]
         out_v_in_sortmse = as_schedule(out_vs_in_sortmse_weight)(step)
         sorting_mse_dependent = (sort_sqdiff * dep_mask[None, :]).sum() / (
             eff_batch_size * dep_mask_sum
@@ -262,6 +272,7 @@ def sorting_loss(
             "logstds": logstds,
             "counts": counts,
             "step": step,
+            "output_weights": output_weights,
         }
         aux["apply_aux"] = apply_aux
 
@@ -528,8 +539,9 @@ def start(
 
     # --- loss & update functions
 
+    per_output_weights = expand_weights_to_outputs(dman.get_weights(), stack.networks)
     loss_func_generator = training_config.loss_function.get_impl()
-    loss_func = loss_func_generator(stack, training_config)
+    loss_func = loss_func_generator(stack, training_config, per_output_weights=per_output_weights)
     assert callable(loss_func)
     scannable_step = make_training_step(
         loss_func,
