@@ -701,6 +701,8 @@ class DataManager:
         self.compute_stack = None
         self._densities = None
         self.individual_compute_stacks = {}
+        # cache for padded arrays (populated on first get_batches call)
+        self._padded_cache: dict | None = None
         if self.data_cfg.perform_data_checks:
             logger.debug("Running data checks")
             for x, y, n in zip(self._X, self._Y, self._networks):
@@ -776,6 +778,29 @@ class DataManager:
                 n_batches, batch_size, rng_key, concat_along_feature_axis
             )
 
+    def _ensure_padded_cache(self):
+        """Build and cache padded arrays for JAX batch generation."""
+        if self._padded_cache is not None:
+            return
+        max_pts = max(x.shape[0] for x in self._X)
+
+        def _pad_2d(arr, pad_len):
+            return jnp.pad(arr, ((0, pad_len), (0, 0)))
+
+        def _pad_1d(arr, pad_len):
+            return jnp.pad(arr, (0, pad_len))
+
+        X_pad, Y_pad, D_pad, M_pad = [], [], [], []
+        for x, y, d in zip(self._X, self._Y, self._densities):
+            pad_len = max_pts - x.shape[0]
+            X_pad.append(_pad_2d(jnp.asarray(x), pad_len))
+            Y_pad.append(_pad_2d(jnp.asarray(y), pad_len))
+            D_pad.append(_pad_1d(jnp.asarray(d), pad_len))
+            M_pad.append(
+                jnp.concatenate([jnp.ones(x.shape[0], dtype=bool), jnp.zeros(pad_len, dtype=bool)])
+            )
+        self._padded_cache = {"X": X_pad, "Y": Y_pad, "D": D_pad, "M": M_pad}
+
     def _get_batches_jax(
         self,
         n_batches: int,
@@ -786,42 +811,21 @@ class DataManager:
         q = float(self.data_cfg.resampling.density_threshold_quantile)
         n_nets = len(self._X)
 
-        # -------- pad every array to the maximum number of points --------
-        max_pts = max(x.shape[0] for x in self._X)
-
-        def _pad_2d(arr, pad_len):
-            return jnp.pad(arr, ((0, pad_len), (0, 0)))  # zeros
-
-        def _pad_1d(arr, pad_len):
-            return jnp.pad(arr, (0, pad_len))  # zeros
-
-        X_pad, Y_pad, D_pad, M_pad = [], [], [], []
-        for x, y, d in zip(self._X, self._Y, self._densities):
-            pad_len = max_pts - x.shape[0]  # (x, y, d) share length
-            X_pad.append(_pad_2d(jnp.asarray(x), pad_len))
-            Y_pad.append(_pad_2d(jnp.asarray(y), pad_len))
-            D_pad.append(_pad_1d(jnp.asarray(d), pad_len))
-            M_pad.append(
-                jnp.concatenate([jnp.ones(x.shape[0], dtype=bool), jnp.zeros(pad_len, dtype=bool)])
-            )
+        # use cached padded arrays
+        self._ensure_padded_cache()
+        X_pad = self._padded_cache["X"]
+        Y_pad = self._padded_cache["Y"]
+        D_pad = self._padded_cache["D"]
+        M_pad = self._padded_cache["M"]
 
         keys = jax.random.split(rng_key, n_nets)
 
-        @jax.jit
-        def _sample_one(X, Y, D, M, k):
-            return sample_batches_jax(
-                X,
-                Y,
-                D,
-                M,
-                batch_size=batch_size,
-                n_batches=n_batches,
-                density_threshold_quantile=q,
-                key=k,
-            )
-
+        # sample_batches_jax is already @jax.jit decorated at module level
         xb_list, yb_list = zip(
-            *[_sample_one(x, y, d, m, k) for x, y, d, m, k in zip(X_pad, Y_pad, D_pad, M_pad, keys)]
+            *[
+                sample_batches_jax(x, y, d, m, batch_size, n_batches, q, k)
+                for x, y, d, m, k in zip(X_pad, Y_pad, D_pad, M_pad, keys)
+            ]
         )
 
         if concat_along_feature_axis:
@@ -967,6 +971,11 @@ class DataManager:
 
     def get_weights(self):
         return self._weights
+
+    def set_weights(self, weights: list[float]):
+        """Update network weights without rebuilding the data manager."""
+        assert len(weights) == len(self._networks)
+        self._weights = weights
 
     def get_per_network_xy_samples(self, n_samples, only_dependent=False):
         """

@@ -69,6 +69,136 @@ def generate_batches(
     return xbatches, ybatches
 
 
+class CompiledTrainingStep(NamedTuple):
+    """Pre-compiled training step for reuse across trials with different weights.
+
+    When optimizing dataset weights in hyperopt, the ComputeStack structure is
+    identical across trials - only the weights change. By caching the compiled
+    step and stack, we avoid expensive JIT recompilation each trial.
+    """
+
+    compiled_step: Callable
+    stack: "ComputeStack"  # noqa: F821
+    optimizer: "optax.GradientTransformation"  # noqa: F821
+    num_z: int
+
+
+def compile_training_step(
+    dman: du.DataManager,
+    training_config: "TrainingConfig",
+    compute_config,
+    enable_jax_tqdm: bool = False,
+) -> CompiledTrainingStep:
+    """Compile training step for reuse across trials.
+
+    This function extracts the expensive JIT compilation into a cacheable unit.
+    The resulting CompiledTrainingStep can be reused across hyperopt trials
+    when only the weights (stored in params) change.
+
+    Args:
+        dman: DataManager (used to build the stack)
+        training_config: Training configuration
+        compute_config: Compute configuration
+        enable_jax_tqdm: Whether to enable tqdm in training
+
+    Returns:
+        CompiledTrainingStep containing the compiled step and associated objects
+    """
+    import jax
+    import jax.numpy as jnp
+    from jax.tree_util import Partial
+    import os
+    from jax.experimental import checkify
+    from .jaxutils import get_looped_slice
+
+    BIOCOMP_CHECKIFY = os.environ.get("BIOCOMP_CHECKIFY", "").lower() in ("true", "1", "yes", "on")
+
+    # build stack (this is the key thing we want to cache)
+    stack = dman.build_compute_stack(compute_config)
+
+    # Use learning rate injection if learning_rate is requested in history
+    if "learning_rate" in training_config.keep_in_history:
+        optimizer = training_config.create_optimizer_with_lr_injection()
+    else:
+        optimizer = training_config.optimizer
+
+    # create loss function (captures stack in closure)
+    loss_func_generator = training_config.loss_function.get_impl()
+    loss_func = loss_func_generator(stack, training_config)
+    assert callable(loss_func)
+
+    scannable_step = make_training_step(
+        loss_func,
+        optimizer,
+        fields_to_keep_in_history=training_config.keep_in_history,
+        scannable=True,
+    )
+
+    # init params and batches for compilation
+    key = jax.random.PRNGKey(training_config.seed or 42)
+    key, init_key, batch_key = jax.random.split(key, 3)
+
+    with ut.timer("Stack initialization (for compilation)", logger):
+        sample_params = jax.vmap(stack.init)(jax.random.split(init_key, training_config.n_replicates))
+
+    # generate sample batch
+    xbatches, ybatches = generate_batches(
+        dman,
+        training_config.n_replicates,
+        training_config.n_batches,
+        training_config.batch_size,
+        batch_key,
+    )
+    sample_xb = get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
+    sample_yb = get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
+
+    # init optimizer state (must use same optimizer as the step for pytree matching)
+    static, dynamic = sample_params.filter_by_tag(["non_grad", "local"])
+    sample_opt_state = jax.vmap(optimizer.init)(dynamic)
+
+    # get num_z from sample params
+    num_z = static["global/number_of_random_variables"]
+    assert num_z.shape == (training_config.n_replicates,)
+    assert jnp.all(num_z == num_z[0]), "All replicates must have the same number of quantile variables"
+    num_z = int(num_z[0])
+
+    def step(params: ParameterTree, opt_state, step_key, xs, ys, num_z):
+        keys = jax.random.split(step_key, training_config.n_replicates)
+        return jax.vmap(
+            Partial(
+                per_replicate_step,
+                num_z=num_z,
+                training_config=training_config,
+                scannable_step=scannable_step,
+                enable_jax_tqdm=enable_jax_tqdm,
+            )
+        )(params, opt_state, keys, xs, ys)
+
+    logger.info("Compiling training step (for caching)...")
+    t0 = time.time()
+    jitable_base = Partial(step, num_z=num_z)
+    if not BIOCOMP_CHECKIFY:
+        lowered = jax.jit(jitable_base).lower(sample_params, sample_opt_state, key, sample_xb, sample_yb)
+        compiled_step = lowered.compile()
+        logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
+    else:
+        ckf = jax.jit(checkify.checkify(jitable_base, errors=checkify.all_checks))
+
+        def checkified_step(params, opt_state, step_key, xs, ys):
+            err, data = ckf(params, opt_state, step_key, xs, ys)
+            err.throw()
+            return data
+
+        compiled_step = checkified_step
+
+    return CompiledTrainingStep(
+        compiled_step=compiled_step,
+        stack=stack,
+        optimizer=optimizer,
+        num_z=num_z,
+    )
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                      --     loss functions     --
@@ -144,7 +274,7 @@ def sorting_loss(
     out_vs_in_mse_weight=0.5,
     out_vs_in_sortmse_weight=1,
     use_same_key=False,
-    per_output_weights=None,
+    per_output_weights=None,  # deprecated, use global/per_output_weights in params
 ):
     import jax
     import jax.numpy as jnp
@@ -201,8 +331,11 @@ def sorting_loss(
             f"dep_out must have the same shape as Y features, got {dep_mask.shape} and {Y.shape}"
         )
 
-        # per-network weights (expanded to per-output)
-        if per_output_weights is not None:
+        # per-network weights (expanded to per-output) - read from params for JIT caching
+        if "global/per_output_weights" in params:
+            output_weights = params["global/per_output_weights"]
+        elif per_output_weights is not None:
+            # fallback for backwards compatibility
             output_weights = jnp.asarray(per_output_weights)
         else:
             output_weights = jnp.ones(Y.shape[1])
@@ -431,6 +564,7 @@ def start(
     async_handler=None,
     enable_jax_tqdm: bool = False,
     init_params: Optional[ParameterTree] = None,
+    cached_step: Optional[CompiledTrainingStep] = None,
 ):
     import optax
     import jax
@@ -458,7 +592,16 @@ def start(
         training_config.n_epochs * training_config.n_batches / training_config.batches_per_step
     )
 
-    if init_params is None:
+    # use cached stack if provided (for hyperopt with cached compilation)
+    if cached_step is not None:
+        stack = cached_step.stack
+        if init_params is not None:
+            params = init_params
+        else:
+            # init fresh params using the cached stack
+            with ut.timer("Stack initialization", logger):
+                params = jax.vmap(stack.init)(jax.random.split(init_key, training_config.n_replicates))
+    elif init_params is None:
         stack, params = init_stack(compute_config, dman, training_config.n_replicates, init_key)
     else:
         stack = dman.build_compute_stack(compute_config)
@@ -522,8 +665,10 @@ def start(
 
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
 
-    # Use learning rate injection if learning_rate is requested in history
-    if "learning_rate" in training_config.keep_in_history:
+    # use cached optimizer if available, otherwise create new one
+    if cached_step is not None:
+        optimizer = cached_step.optimizer
+    elif "learning_rate" in training_config.keep_in_history:
         optimizer = training_config.create_optimizer_with_lr_injection()
     else:
         optimizer = training_config.optimizer
@@ -538,72 +683,83 @@ def start(
     )
 
     # --- loss & update functions
-
+    # store per_output_weights in params for JIT caching (weights can change without recompilation)
     per_output_weights = expand_weights_to_outputs(dman.get_weights(), stack.networks)
-    loss_func_generator = training_config.loss_function.get_impl()
-    loss_func = loss_func_generator(stack, training_config, per_output_weights=per_output_weights)
-    assert callable(loss_func)
-    scannable_step = make_training_step(
-        loss_func,
-        optimizer,
-        fields_to_keep_in_history=training_config.keep_in_history,
-        scannable=True,
-    )
+    # add replicate dimension to match params structure (will be sliced by vmap in loss func)
+    weights_arr = jnp.asarray(per_output_weights)
+    weights_replicated = jnp.broadcast_to(weights_arr, (training_config.n_replicates, len(per_output_weights)))
+    params.at("global/per_output_weights", weights_replicated, tags=["non_grad", "local"], overwrite=True)
 
-    non_scannable_step = make_training_step(
-        loss_func,
-        optimizer,
-        fields_to_keep_in_history=training_config.keep_in_history,
-        scannable=False,
-    )
-
-    def step(params: ParameterTree, opt_state: optax.OptState, step_key, xs, ys, num_z):
-        keys = jax.random.split(step_key, training_config.n_replicates)
-        assert (
-            xs.shape[:-1]
-            == ys.shape[:-1]
-            == (
-                training_config.n_replicates,
-                training_config.batches_per_step,
-                training_config.batch_size,
-            )
-        )
-        return jax.vmap(
-            Partial(
-                per_replicate_step,
-                num_z=num_z,
-                training_config=training_config,
-                scannable_step=scannable_step,
-                enable_jax_tqdm=enable_jax_tqdm,
-            )
-        )(params, opt_state, keys, xs, ys)
-
-    xb = get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
-    yb = get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
-
-    num_z = static["global/number_of_random_variables"]
-    assert num_z.shape == (training_config.n_replicates,)
-    assert jnp.all(num_z == num_z[0]), (
-        "All replicates must have the same number of quantile variables"
-    )
-    num_z = int(num_z[0])
-
-    logger.info("Compiling training step...")
-    t0 = time.time()
-    jitable_base = Partial(step, num_z=num_z)
-    if not BIOCOMP_CHECKIFY:
-        lowered = jax.jit(jitable_base).lower(params, opt_state, key, xb, yb)
-        compiled_step = lowered.compile()
-        logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
+    # use cached compiled step if available, otherwise build and compile
+    if cached_step is not None:
+        compiled_step = cached_step.compiled_step
+        num_z = cached_step.num_z
+        logger.info("Using cached compiled training step (no recompilation)")
     else:
-        ckf = jax.jit(checkify.checkify(jitable_base, errors=checkify.all_checks))
+        loss_func_generator = training_config.loss_function.get_impl()
+        loss_func = loss_func_generator(stack, training_config)  # weights read from params now
+        assert callable(loss_func)
+        scannable_step = make_training_step(
+            loss_func,
+            optimizer,
+            fields_to_keep_in_history=training_config.keep_in_history,
+            scannable=True,
+        )
 
-        def checkified_step(params, opt_state, step_key, xs, ys):
-            err, data = ckf(params, opt_state, step_key, xs, ys)
-            err.throw()
-            return data
+        non_scannable_step = make_training_step(
+            loss_func,
+            optimizer,
+            fields_to_keep_in_history=training_config.keep_in_history,
+            scannable=False,
+        )
 
-        compiled_step = checkified_step
+        def step(params: ParameterTree, opt_state: optax.OptState, step_key, xs, ys, num_z):
+            keys = jax.random.split(step_key, training_config.n_replicates)
+            assert (
+                xs.shape[:-1]
+                == ys.shape[:-1]
+                == (
+                    training_config.n_replicates,
+                    training_config.batches_per_step,
+                    training_config.batch_size,
+                )
+            )
+            return jax.vmap(
+                Partial(
+                    per_replicate_step,
+                    num_z=num_z,
+                    training_config=training_config,
+                    scannable_step=scannable_step,
+                    enable_jax_tqdm=enable_jax_tqdm,
+                )
+            )(params, opt_state, keys, xs, ys)
+
+        xb = get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
+        yb = get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
+
+        num_z = static["global/number_of_random_variables"]
+        assert num_z.shape == (training_config.n_replicates,)
+        assert jnp.all(num_z == num_z[0]), (
+            "All replicates must have the same number of quantile variables"
+        )
+        num_z = int(num_z[0])
+
+        logger.info("Compiling training step...")
+        t0 = time.time()
+        jitable_base = Partial(step, num_z=num_z)
+        if not BIOCOMP_CHECKIFY:
+            lowered = jax.jit(jitable_base).lower(params, opt_state, key, xb, yb)
+            compiled_step = lowered.compile()
+            logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
+        else:
+            ckf = jax.jit(checkify.checkify(jitable_base, errors=checkify.all_checks))
+
+            def checkified_step(params, opt_state, step_key, xs, ys):
+                err, data = ckf(params, opt_state, step_key, xs, ys)
+                err.throw()
+                return data
+
+            compiled_step = checkified_step
 
     # --- main training loop
     loggers = loggers or []
