@@ -543,7 +543,6 @@ def knn_stats(
     density_cap_q: float | None = 0.99,  # quantile-based floor/cap if densities are used
     **kw,
 ):
-    print(f"Using {k} nearest neighbors for knn_stats")
     if isinstance(stats, str):
         stats = [stats]
     if use_jax:
