@@ -395,6 +395,18 @@ def soft_count_over_one_penalty(W, rel_active=1e-3, width=2e-4):
     return jnp.sum(row_pen)
 
 
+def get_over1_penalty_for_leaf(p, rel_active=1e-3, width=2e-4):
+    """Get over1 penalty for a ratio leaf. Handle ArrayRef with heterogeneous shapes."""
+    if hasattr(p, "view"):
+        try:
+            return soft_count_over_one_penalty(p.view(), rel_active=rel_active, width=width)
+        except Exception:
+            # ArrayRef with incompatible shapes - compute penalty on each underlying array
+            arrays = [p.tree[path] for path in p.paths]
+            return sum(soft_count_over_one_penalty(a, rel_active=rel_active, width=width) for a in arrays)
+    return soft_count_over_one_penalty(p, rel_active=rel_active, width=width)
+
+
 def lncc_grid_loss(x, y, yhat, k=7, eps=1e-6, **kw):
     def box2d(a, r):
         a = jnp.pad(a, ((r + 1, r), (r + 1, r)), mode="edge")
@@ -554,12 +566,7 @@ def distance_loss(
 
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
         lo1 = as_schedule(lambda_over1)(step)
-        over1_penalty = lo1 * sum(
-            soft_count_over_one_penalty(
-                p.view() if hasattr(p, "view") else p, rel_active=1e-3, width=2e-4
-            )
-            for p in ratio_leaves
-        )
+        over1_penalty = lo1 * sum(get_over1_penalty_for_leaf(p) for p in ratio_leaves)
 
         all_losses = all_losses_func(X, Y, yhatdep, as_schedule(epsilon)(step))
         avgloss = all_losses.mean()
@@ -647,12 +654,7 @@ def grid_distance_loss(
 
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
         lo1 = as_schedule(lambda_over1)(step)
-        over1_penalty = lo1 * sum(
-            soft_count_over_one_penalty(
-                p.view() if hasattr(p, "view") else p, rel_active=1e-3, width=2e-4
-            )
-            for p in ratio_leaves
-        )
+        over1_penalty = lo1 * sum(get_over1_penalty_for_leaf(p) for p in ratio_leaves)
 
         all_losses = compute_all_grid_losses(Y_images, yhat_images)
         avgloss = all_losses.mean()
@@ -787,6 +789,9 @@ class DataTarget(BaseModel):
     outlim: Optional[tuple[float, float]] = None  # if None, use data range
     z_slice: Optional[float] = None  # for 3D data, which z-slice to use
     z_tolerance: float = 0.05
+
+    # Original network that produced this data (for baseline comparison)
+    original_network: Optional[Network] = None
 
     # cached lattice data
     _lattice_X: Optional[np.ndarray] = None
@@ -1476,6 +1481,7 @@ def evaluate_design(
     key: jax.Array,
     max_eval_size: int = 64,
     max_loss_size: int = 64,
+    store_predictions: bool = True,
 ) -> Tuple[Optional[jnp.ndarray], jnp.ndarray]:
     """Evaluate design quality by running predictions and computing losses.
 
@@ -1489,6 +1495,7 @@ def evaluate_design(
         key: Random key
         max_eval_size: Max batch size for forward pass
         max_loss_size: Max batch size for loss computation
+        store_predictions: Whether to store and return full predictions (memory intensive)
 
     Returns:
         yhatdep: Predictions (n_replicates, n_samples, n_targets, n_networks) or None
@@ -1500,6 +1507,8 @@ def evaluate_design(
     n_replicates = dconf.n_replicates
     n_targets = dmanager.n_targets
     n_samples = xraw.shape[2]
+
+    logger.info(f"Starting evaluation: {n_replicates} replicates × {n_targets} targets × {n_samples} samples")
 
     num_z = final_params["global/number_of_random_variables"]
     assert num_z.shape[0] == n_replicates
@@ -1516,9 +1525,17 @@ def evaluate_design(
     y_combined = yraw[0]  # (n_replicates, n_samples, n_targets, 1)
 
     all_losses = []
+    all_predictions = [] if store_predictions else None
+
+    # Pre-compile the apply function for speed
+    apply_batched = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+
+    total_iterations = n_replicates * n_targets
+    pbar = tqdm(total=total_iterations, desc="Evaluating designs", unit="rep×tgt")
 
     for rep_idx in range(n_replicates):
         rep_losses_per_target = []
+        rep_predictions_per_target = [] if store_predictions else None
 
         for tid in range(n_targets):
             # get params for this replicate and target
@@ -1527,10 +1544,10 @@ def evaluate_design(
             x_slice = x_combined[rep_idx, :, tid, :]  # (n_samples, n_inputs)
             y_slice = y_combined[rep_idx, :, tid, :]  # (n_samples, 1)
 
-            # forward pass in chunks (using vmap since stack.apply expects single sample)
-            apply_batched = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+            # forward pass in chunks
             yhats = []
-            for start in range(0, n_samples, max_eval_size):
+            n_chunks = (n_samples + max_eval_size - 1) // max_eval_size
+            for chunk_idx, start in enumerate(range(0, n_samples, max_eval_size)):
                 end = min(start + max_eval_size, n_samples)
                 x_batch = x_slice[start:end]
                 z_batch = jax.random.uniform(key, (end - start, num_z_val))
@@ -1542,22 +1559,135 @@ def evaluate_design(
             yhat_full = jnp.concatenate(yhats, axis=0)
             yhat_dep = jnp.compress(dep_mask, yhat_full, axis=-1)  # (n_samples, n_networks)
 
-            # compute per-network loss
-            net_losses = []
-            for net_idx in range(n_networks):
-                yhat_net = yhat_dep[:, net_idx : net_idx + 1]  # (n_samples, 1)
-                # simple MSE loss
-                loss = jnp.mean((yhat_net - y_slice) ** 2)
-                net_losses.append(float(loss))
+            if store_predictions:
+                rep_predictions_per_target.append(yhat_dep)
 
-            rep_losses_per_target.append(net_losses)
+            # compute per-network loss (vectorized)
+            y_expanded = jnp.tile(y_slice, (1, n_networks))  # (n_samples, n_networks)
+            net_losses = jnp.mean((yhat_dep - y_expanded) ** 2, axis=0)  # (n_networks,)
+            rep_losses_per_target.append(net_losses.tolist())
+
+            pbar.update(1)
 
         all_losses.append(rep_losses_per_target)
+        if store_predictions:
+            # Stack predictions for this replicate: (n_targets, n_samples, n_networks)
+            all_predictions.append(jnp.stack(rep_predictions_per_target, axis=0))
+
+    pbar.close()
 
     losses = jnp.array(all_losses)  # (n_replicates, n_targets, n_networks)
+    logger.info(f"Evaluation complete. Loss range: [{float(losses.min()):.4f}, {float(losses.max()):.4f}]")
 
-    # for now, return None for yhatdep (could be expensive to store full predictions)
+    if store_predictions:
+        # Stack all replicate predictions: (n_replicates, n_targets, n_samples, n_networks)
+        yhatdep = jnp.stack(all_predictions, axis=0)
+        # Transpose to expected shape: (n_replicates, n_samples, n_targets, n_networks)
+        yhatdep = yhatdep.transpose(0, 2, 1, 3)
+        return yhatdep, losses
+
     return None, losses
+
+
+def compute_baseline_loss(
+    dmanager: DesignManager,
+    model,  # BiocompModel
+    n_samples: int = 1000,
+    seed: int = 42,
+    max_batch_size: int = 200,
+) -> dict:
+    """Compute baseline loss for DataTargets that have original_network.
+
+    This runs the model's prediction on the original network (ground truth recipe)
+    and compares it against the actual experimental data. This gives us two baselines:
+    1. Data loss: How well does the experimental data match itself (always 0 for MSE)
+    2. Model loss: How well does the model predict the original network's behavior
+
+    Args:
+        dmanager: Design manager with DataTargets
+        model: Trained biocomp model
+        n_samples: Number of samples to use for evaluation
+        seed: Random seed
+        max_batch_size: Max batch size for forward pass
+
+    Returns:
+        Dict with baseline info per target:
+        {
+            'target_name': {
+                'has_original_network': bool,
+                'model_prediction_loss': float,  # Model prediction vs actual data
+                'original_network_name': str,
+            }
+        }
+    """
+    results = {}
+    rng = np.random.default_rng(seed)
+
+    for tid, target in enumerate(dmanager.targets):
+        target_name = target.name or f"target_{tid}"
+
+        if not isinstance(target, DataTarget):
+            results[target_name] = {'has_original_network': False}
+            continue
+
+        if target.original_network is None:
+            results[target_name] = {'has_original_network': False}
+            continue
+
+        # Build a stack with just the original network
+        original_network = target.original_network
+        stack = ComputeStack(networks=[original_network])
+        stack.build(model.compute_config)
+
+        # Get params for this network from the model
+        params = stack.init(jax.random.key(seed))
+        shared_params = model.shared_params
+        _, nonshared = params.filter_by_tag(["shared"])
+        params = ParameterTree.merge(shared_params, nonshared)
+
+        # Sample from the target data
+        n_data = len(target.X)
+        indices = rng.choice(n_data, size=min(n_samples, n_data), replace=False)
+        X_sample = target.X[indices]  # (n_samples, 2)
+        Y_sample = target.Y[indices]  # (n_samples,) or (n_samples, 1)
+        if Y_sample.ndim == 1:
+            Y_sample = Y_sample[:, None]
+
+        # Get random variables config
+        num_z_val = params["global/number_of_random_variables"]
+        num_z = int(num_z_val.squeeze() if hasattr(num_z_val, 'squeeze') else num_z_val)
+        dep_mask = stack.get_dependent_output_mask()
+
+        # Run forward pass in batches
+        apply_batched = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+        yhats = []
+        key = jax.random.key(seed)
+
+        for start in range(0, len(X_sample), max_batch_size):
+            end = min(start + max_batch_size, len(X_sample))
+            x_batch = jnp.array(X_sample[start:end])
+            z_batch = jax.random.uniform(key, (end - start, num_z))
+            keys_batch = jax.random.split(key, end - start)
+
+            yhat, _ = apply_batched(params, x_batch, z_batch, keys_batch)
+            yhats.append(yhat)
+
+        yhat_full = jnp.concatenate(yhats, axis=0)
+        yhat_dep = jnp.compress(dep_mask, yhat_full, axis=-1)  # (n_samples, 1)
+
+        # Compute MSE loss
+        model_loss = float(jnp.mean((yhat_dep - Y_sample) ** 2))
+
+        results[target_name] = {
+            'has_original_network': True,
+            'model_prediction_loss': model_loss,
+            'original_network_name': original_network.name,
+            'n_samples': len(X_sample),
+        }
+
+        logger.info(f"Baseline for '{target_name}': model_loss={model_loss:.6f} (original network: {original_network.name})")
+
+    return results
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
