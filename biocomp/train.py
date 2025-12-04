@@ -162,6 +162,13 @@ def compile_training_step(
     assert jnp.all(num_z == num_z[0]), "All replicates must have the same number of quantile variables"
     num_z = int(num_z[0])
 
+    # add per_output_weights to sample_params for pytree structure matching
+    # (start() adds this, so we need it during compilation for caching to work)
+    per_output_weights = expand_weights_to_outputs(dman.get_weights(), stack.networks)
+    weights_arr = jnp.asarray(per_output_weights)
+    weights_replicated = jnp.broadcast_to(weights_arr, (training_config.n_replicates, len(per_output_weights)))
+    sample_params.at("global/per_output_weights", weights_replicated, tags=["non_grad", "local"], overwrite=True)
+
     def step(params: ParameterTree, opt_state, step_key, xs, ys, num_z):
         keys = jax.random.split(step_key, training_config.n_replicates)
         return jax.vmap(
@@ -474,6 +481,10 @@ class TrainingConfig(ArbitraryModel):
     n_replicates: int = 1
     keep_in_history: List[str] = ["loss"]
 
+    # memory optimization: generate batches on-demand instead of pre-generating all
+    # reduces GPU memory usage significantly, enabling parallel training processes
+    streaming_batches: bool = False
+
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
         if self.seed is None:
@@ -658,7 +669,23 @@ def start(
 
         return xbatches_arr, ybatches_arr
 
-    if xy_batches is not None:
+    def get_step_batches(rng_key):
+        """Generate batches for a single step only (streaming mode)."""
+        xbatches, ybatches = generate_batches(
+            dman,
+            training_config.n_replicates,
+            training_config.batches_per_step,  # only generate what we need for one step
+            training_config.batch_size,
+            rng_key,
+        )
+        return jnp.asarray(xbatches), jnp.asarray(ybatches)
+
+    streaming_mode = training_config.streaming_batches
+    if streaming_mode:
+        logger.info("Using streaming batch generation (lower GPU memory, slightly slower)")
+        # generate a small batch just for shape inference during compilation
+        xbatches, ybatches = get_step_batches(batch_key)
+    elif xy_batches is not None:
         xbatches, ybatches = xy_batches
     else:
         xbatches, ybatches = get_new_batches()
@@ -786,25 +813,33 @@ def start(
     for i, step_key in enumerate(jax.random.split(loop_key, total_steps), 1):
         if i % max(1, total_steps // 20) == 0:  # Log every 5% progress
             logger.info(f"Training progress: [{i}/{total_steps}] ({i / total_steps * 100:.1f}%)")
-        if i % (step_per_epoch) == 0:
-            epoch += 1
-            logger.info(f"Starting epoch {epoch}")
-            b_key = jax.random.fold_in(step_key, epoch)
-            xbatches, ybatches = get_new_batches(b_key)
 
         t0 = time.time()
-        xb = get_looped_slice(
-            xbatches,
-            i * training_config.batches_per_step,
-            (i + 1) * training_config.batches_per_step,
-            axis=1,
-        )
-        yb = get_looped_slice(
-            ybatches,
-            i * training_config.batches_per_step,
-            (i + 1) * training_config.batches_per_step,
-            axis=1,
-        )
+
+        if streaming_mode:
+            # streaming: generate fresh batches for this step only
+            b_key = jax.random.fold_in(step_key, i)
+            xb, yb = get_step_batches(b_key)
+        else:
+            # pre-generated: slice from full batch array, regenerate each epoch
+            if i % step_per_epoch == 0:
+                epoch += 1
+                logger.info(f"Starting epoch {epoch}")
+                b_key = jax.random.fold_in(step_key, epoch)
+                xbatches, ybatches = get_new_batches(b_key)
+
+            xb = get_looped_slice(
+                xbatches,
+                i * training_config.batches_per_step,
+                (i + 1) * training_config.batches_per_step,
+                axis=1,
+            )
+            yb = get_looped_slice(
+                ybatches,
+                i * training_config.batches_per_step,
+                (i + 1) * training_config.batches_per_step,
+                axis=1,
+            )
 
         params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
 
