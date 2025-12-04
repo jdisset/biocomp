@@ -1,9 +1,16 @@
 import numpy as np
+from numpy.typing import NDArray
 from matplotlib.path import Path as MPath
 from xml.etree import ElementTree as ET
 import re
 from matplotlib.colors import to_rgb
 from pathlib import Path
+from scipy.interpolate import griddata
+from typing import Optional
+from biocomp.logging_config import get_logger
+
+NdArray = np.ndarray
+logger = get_logger(__name__)
 
 
 def _parse_transform(transform_str):
@@ -341,3 +348,149 @@ def sample_from_svg(
         return X, Y
     else:
         return X, Y[:, None]
+
+
+def sample_from_data(
+    X: NdArray,  # input data, already latent-space rescaled (n_samples, n_dims)
+    Y: NdArray,  # corresponding outputs (n_samples,) or (n_samples, 1)
+    n: int = 1,  # how many grids to generate. if grid_jitter_std is 0, they will be duplicates
+    zslice: Optional[NdArray] = None,  # for >2D data, slice value(s) for dims beyond 2
+    xlims: Optional[tuple[float, float]] = None,
+    ylims: Optional[tuple[float, float]] = None,
+    vlims: Optional[tuple[float, float]] = None,  # output value clipping (not used in sampling, but returned for reference)
+    sampling_grid: tuple[int, int] = (48, 48),
+    grid_jitter_std: float = 0.0,
+    k: int = 128,
+    min_points: int = 20,
+) -> tuple[NDArray, NDArray]:
+    """Sample from experimental data by KNN interpolation onto a regular grid.
+
+    Similar to knn_grid in plotting_smooth.py, but designed for design mode.
+
+    Args:
+        X: Input coordinates (n_samples, n_dims), already in latent space
+        Y: Output values (n_samples,) or (n_samples, 1)
+        n: Number of grids to generate (useful for jittered sampling)
+        zslice: For 3D+ data, the z-coordinate to slice at
+        xlims: X-axis limits (min, max). If None, derived from data.
+        ylims: Y-axis limits (min, max). If None, derived from data.
+        vlims: Output value limits (not used for clipping, just metadata)
+        sampling_grid: (xres, yres) resolution of the output grid
+        grid_jitter_std: Std of jitter to add to grid points (as fraction of grid spacing)
+        k: Number of nearest neighbors for KNN interpolation
+        min_points: Minimum number of valid points in neighborhood
+
+    Returns:
+        X_grid: Grid coordinates (n * xres * yres, 2)
+        Y_grid: Interpolated output values (n, yres, xres)
+    """
+    from biocomp.plotting.plotting_core import knn_stats, build_tree
+    from biocomp.plotutils import make_xy_grid
+
+    X = np.asarray(X)
+    Y = np.asarray(Y)
+    if Y.ndim == 1:
+        Y = Y[:, None]  # ensure Y is (n, 1)
+
+    # filter out nan/inf values
+    mask = np.all(np.isfinite(X), axis=1)
+    mask = mask & np.all(np.isfinite(Y), axis=1)
+    X_clean = X[mask]
+    Y_clean = Y[mask]
+
+    if len(X_clean) == 0:
+        raise ValueError("No finite data points available for sampling")
+
+    n_dims = X_clean.shape[1]
+
+    # derive limits from data if not provided
+    if xlims is None:
+        xlims = (float(X_clean[:, 0].min()), float(X_clean[:, 0].max()))
+    if ylims is None:
+        ylims = (float(X_clean[:, 1].min()), float(X_clean[:, 1].max()))
+
+    xres, yres = sampling_grid
+    xmin, xmax = xlims
+    ymin, ymax = ylims
+
+    # build base grid
+    xy_base = make_xy_grid(xmin, xmax, ymin=ymin, ymax=ymax, xres=xres, yres=yres)
+
+    # handle higher dimensions (>2D) by appending z-slice
+    if n_dims > 2:
+        if zslice is None:
+            raise ValueError(f"Data has {n_dims} dimensions but no zslice provided")
+        zslice = np.atleast_1d(zslice)
+        if zslice.shape[0] != n_dims - 2:
+            raise ValueError(f"zslice must have {n_dims - 2} elements, got {zslice.shape[0]}")
+        # we'll append zslice to each query point
+        n_extra_dims = n_dims - 2
+    else:
+        n_extra_dims = 0
+        zslice = None
+
+    # build tree on the full coordinate space
+    tree = build_tree(X_clean)
+
+    all_xgrids = []
+    all_ygrids = []
+
+    rng = np.random.default_rng()
+
+    for i in range(n):
+        xy_query = xy_base.copy()
+
+        # add jitter
+        if grid_jitter_std > 0:
+            x_spacing = (xmax - xmin) / (xres - 1) if xres > 1 else 0
+            y_spacing = (ymax - ymin) / (yres - 1) if yres > 1 else 0
+            jitter_x = rng.normal(0, grid_jitter_std * x_spacing, xy_query.shape[0])
+            jitter_y = rng.normal(0, grid_jitter_std * y_spacing, xy_query.shape[0])
+            xy_query[:, 0] += jitter_x
+            xy_query[:, 1] += jitter_y
+
+        # append z-slice coordinates if needed
+        if n_extra_dims > 0:
+            z_tile = np.tile(zslice, (xy_query.shape[0], 1))
+            xquery_full = np.hstack([xy_query, z_tile])
+        else:
+            xquery_full = xy_query
+
+        # get KNN interpolated values
+        output_values = knn_stats(
+            xquery_full, Y_clean, tree=tree, stats="mean", k=k, min_points=min_points
+        )
+        output_values = np.asarray(output_values).squeeze()
+
+        all_xgrids.append(xy_query)
+        # reshape output to (yres, xres) for grid format
+        all_ygrids.append(output_values.reshape(yres, xres))
+
+    # stack results
+    X_grid = np.concatenate(all_xgrids, axis=0)
+    Y_grid = np.stack(all_ygrids, axis=0)  # (n, yres, xres)
+
+    return X_grid, Y_grid
+
+
+def data_to_lattice_2d(
+    X: NdArray,
+    Y: NdArray,
+    xlims: Optional[tuple[float, float]] = None,
+    ylims: Optional[tuple[float, float]] = None,
+    resolution: tuple[int, int] = (48, 48),
+    k: int = 128,
+    min_points: int = 20,
+) -> tuple[NDArray, NDArray]:
+    """Convert scattered 2D data to a regular lattice using KNN interpolation.
+
+    Convenience wrapper around sample_from_data for single-grid sampling.
+
+    Returns:
+        X_lattice: Grid coordinates (xres * yres, 2)
+        Y_lattice: Interpolated values (yres, xres)
+    """
+    X_grid, Y_grid = sample_from_data(
+        X, Y, n=1, xlims=xlims, ylims=ylims, sampling_grid=resolution, k=k, min_points=min_points
+    )
+    return X_grid, Y_grid[0]  # return single grid (squeeze n dimension)
