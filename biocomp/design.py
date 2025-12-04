@@ -7,6 +7,7 @@ from biocomp.utils import encode_function
 from tqdm import tqdm
 from biocomp.compute import ComputeStack, ComputeConfig
 import biocomp.nodes as nd
+from biocomp.datautils import DataRescaler
 from biocomp.utils import (
     EncodedPartialFunction,
     PartialFunction,
@@ -35,7 +36,7 @@ import os
 from jax.experimental import checkify
 
 from biocomptools.modelmodel import BiocompModel
-from biocomp.designutils import sample_from_svg
+from biocomp.designutils import sample_from_svg, sample_from_data, data_to_lattice_2d
 from biocomp.optimutils import (
     make_training_step,
     per_replicate_step,
@@ -54,7 +55,7 @@ logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
-## {{{                    --     fast ot on a grid:     --
+## {{{                    --     fast ot on a grid:     --{{{
 
 
 # When the cost is squared Euclidean and supports lie on a uniform grid, the entropic kernel is
@@ -190,7 +191,7 @@ def sinkhorn_divergence_conv(a, b, eps, n_iters=80, tol=1e-6):
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
-
+# }}}
 ## {{{                      --     loss functions     --
 
 
@@ -554,7 +555,9 @@ def distance_loss(
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
         lo1 = as_schedule(lambda_over1)(step)
         over1_penalty = lo1 * sum(
-            soft_count_over_one_penalty(p.view() if hasattr(p, 'view') else p, rel_active=1e-3, width=2e-4)
+            soft_count_over_one_penalty(
+                p.view() if hasattr(p, "view") else p, rel_active=1e-3, width=2e-4
+            )
             for p in ratio_leaves
         )
 
@@ -645,7 +648,9 @@ def grid_distance_loss(
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
         lo1 = as_schedule(lambda_over1)(step)
         over1_penalty = lo1 * sum(
-            soft_count_over_one_penalty(p.view() if hasattr(p, 'view') else p, rel_active=1e-3, width=2e-4)
+            soft_count_over_one_penalty(
+                p.view() if hasattr(p, "view") else p, rel_active=1e-3, width=2e-4
+            )
             for p in ratio_leaves
         )
 
@@ -764,19 +769,147 @@ class Target(BaseModel):
     max_is_black: bool = True
 
 
+class DataTarget(BaseModel):
+    """Design target derived from experimental data.
+    Instead of loading a target function from an SVG file, this class uses
+    experimental data (X, Y arrays) and interpolates it to a lattice for design.
+    This is useful for "reconstruction" design tasks where we want to find circuit
+    parameters that reproduce known experimental behavior.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    X: np.ndarray  # input data (n_samples, n_dims)
+    Y: np.ndarray  # output data (n_samples,) or (n_samples, 1)
+    name: Optional[str] = None
+    xlim: Optional[tuple[float, float]] = None  # if None, use data range
+    ylim: Optional[tuple[float, float]] = None  # if None, use data range
+    outlim: Optional[tuple[float, float]] = None  # if None, use data range
+    z_slice: Optional[float] = None  # for 3D data, which z-slice to use
+    z_tolerance: float = 0.05
+
+    # cached lattice data
+    _lattice_X: Optional[np.ndarray] = None
+    _lattice_Y: Optional[np.ndarray] = None
+
+    @classmethod
+    def from_plot_data(cls, plot_data, rescaler=None, **kwargs):
+        """Create a DataTarget from a PlotData object.
+
+        Args:
+            plot_data: PlotData object containing x, y data and metadata
+            rescaler: Optional rescaler to convert data to latent space
+            **kwargs: Additional arguments passed to DataTarget constructor
+        """
+        X = np.asarray(plot_data.x)
+        Y = np.asarray(plot_data.y)
+
+        # optionally convert to latent space
+        if rescaler is not None:
+            X = rescaler.fwd(X)
+            Y = rescaler.fwd(Y)
+
+        name = kwargs.pop("name", plot_data.metadata.get("network_name", "data_target"))
+
+        return cls(X=X, Y=Y, name=name, **kwargs)
+
+    def get_lattice(
+        self, resolution: tuple[int, int] = (48, 48), force_recompute: bool = False
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Get the interpolated lattice representation of the data.
+
+        Returns:
+            X_lattice: Grid coordinates (n_points, 2)
+            Y_lattice: Interpolated values (yres, xres) with NaNs filled
+        """
+        if self._lattice_X is not None and self._lattice_Y is not None and not force_recompute:
+            return self._lattice_X, self._lattice_Y
+
+        X_samples, Y_samples = data_to_lattice_2d(
+            self.X,
+            self.Y,
+            xlims=self.xlim,
+            ylims=self.ylim,
+            resolution=resolution,
+        )
+
+        # Fill NaNs with the mean of valid values to prevent NaN propagation in loss
+        nan_mask = np.isnan(Y_samples)
+        if nan_mask.any():
+            valid_mean = np.nanmean(Y_samples)
+            Y_samples = np.where(nan_mask, valid_mean, Y_samples)
+            logger.debug(f"Filled {nan_mask.sum()} NaN values in lattice with mean={valid_mean:.4f}")
+
+        self._lattice_X = X_samples
+        self._lattice_Y = Y_samples
+
+        return self._lattice_X, self._lattice_Y
+
+
+TargetUnion = Union[Target, DataTarget]
+
+
 class DesignManager(BaseModel):
     """Handles loading and sampling of 2d design target data."""
 
-    targets: list[Target]
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    targets: list[TargetUnion]
     networks: List[Network]
     sampling: SamplingConfigUnion = Field(default_factory=UniformSampling, discriminator="strategy")
 
     def model_post_init(self, *a, **kw):
         super().model_post_init(*a, **kw)
         for target in self.targets:
-            if target.transform_to_log_space:
+            if isinstance(target, Target) and target.transform_to_log_space:
                 target.xlim = (0.1, 1)
                 target.ylim = (0.1, 1)
+
+    @property
+    def has_data_targets(self) -> bool:
+        return any(isinstance(t, DataTarget) for t in self.targets)
+
+    def _sample_from_target(
+        self,
+        target: TargetUnion,
+        n: int,
+        seed: int,
+        grid: Optional[tuple[int, int]] = None,
+        jitter: float = 0.0,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample from either Target or DataTarget."""
+        if isinstance(target, DataTarget):
+            if grid is not None:
+                # Lattice mode: use cached KNN-interpolated grid
+                X_lattice, Y_lattice = target.get_lattice(resolution=grid)
+                X_tiled = np.tile(X_lattice, (n, 1))
+                Y_tiled = np.tile(Y_lattice[None, ...], (n, 1, 1))  # (n, yres, xres)
+                return X_tiled, Y_tiled
+            else:
+                # Uniform mode: randomly sample from stored data
+                rng = np.random.default_rng(seed)
+                n_samples = len(target.X)
+                indices = rng.choice(n_samples, size=n, replace=True)
+                X_sampled = target.X[indices]  # (n, 2)
+                Y_sampled = target.Y[indices]  # (n, 1) or (n,)
+                if Y_sampled.ndim == 1:
+                    Y_sampled = Y_sampled[:, None]
+                return X_sampled, Y_sampled
+        else:
+            # SVG-based Target
+            return sample_from_svg(
+                target.path,
+                n=n,
+                seed=seed,
+                log=target.transform_to_log_space,
+                xlim=target.xlim,
+                ylim=target.ylim,
+                outlim=target.outlim,
+                rescale_to=target.rescale_to,
+                max_is_black=target.max_is_black,
+                grid=grid,
+                grid_jitter_std=jitter,
+            )
 
     def get_samples(
         self,
@@ -785,8 +918,10 @@ class DesignManager(BaseModel):
     ) -> tuple[jax.Array, jax.Array]:
         if seed is None:
             seed = random.randint(0, 2**32 - 1)
-        elif isinstance(seed, ArrayLike):
-            seed = int(jax.random.randint(seed, (), 0, jnp.iinfo(jnp.int32).max))
+        elif not isinstance(seed, int):
+            # Convert JAX array to int seed
+            key_data = jax.random.key_data(seed)
+            seed = int(key_data[0]) % (2**31)
 
         if isinstance(self.sampling, LatticeSampling):
             return self._get_lattice_samples(samples, seed)
@@ -809,17 +944,7 @@ class DesignManager(BaseModel):
         for _ in range(n_networks):
             xsamples, ysamples = [], []
             for target in self.targets:
-                xsample, ysample = sample_from_svg(
-                    target.path,
-                    n=n,
-                    seed=seed,
-                    log=target.transform_to_log_space,
-                    xlim=target.xlim,
-                    ylim=target.ylim,
-                    outlim=target.outlim,
-                    rescale_to=target.rescale_to,
-                    max_is_black=target.max_is_black,
-                )
+                xsample, ysample = self._sample_from_target(target, n=n, seed=seed, grid=None)
                 xsamples.append(xsample)
                 ysamples.append(ysample)
 
@@ -858,18 +983,8 @@ class DesignManager(BaseModel):
         for _ in range(n_networks):
             xsamples, ysamples = [], []
             for target in self.targets:
-                X, Y_grid = sample_from_svg(
-                    target.path,
-                    n=n,
-                    seed=seed,
-                    log=target.transform_to_log_space,
-                    xlim=target.xlim,
-                    ylim=target.ylim,
-                    outlim=target.outlim,
-                    rescale_to=target.rescale_to,
-                    max_is_black=target.max_is_black,
-                    grid=(xres, yres),
-                    grid_jitter_std=jitter,
+                X, Y_grid = self._sample_from_target(
+                    target, n=n, seed=seed, grid=(xres, yres), jitter=jitter
                 )
                 xsamples.append(X)
                 ysamples.append(Y_grid)
@@ -972,183 +1087,6 @@ def assert_tree_shape(tree, expected_shape, only_first_dims=True):
 
 
 ## {{{                   --     evaluation and analysis     --
-
-
-def sample_for_evaluation(
-    dmanager: DesignManager,
-    dconf: DesignConfig,
-    final_params: ParameterTree,
-    n_eval_samples: int = 5000,
-    key: Optional[ArrayLike] = None,
-) -> Tuple[jax.Array, jax.Array]:
-    """Sample data for evaluation of trained design parameters.
-
-    Returns:
-        xraw: shape (n_networks, n_replicates, n_eval_samples, n_targets, 2)
-        yraw: shape (n_networks, n_replicates, n_eval_samples, n_targets, 1)
-    """
-    if key is None:
-        key = jax.random.key(0)
-
-    n_networks = len(dmanager.networks)
-
-    # sample evaluation data (use uniform sampling for evaluation, not lattice)
-    original_sampling = dmanager.sampling
-    dmanager.sampling = UniformSampling()
-    xraw_list, yraw_list = dmanager.get_samples((n_networks, dconf.n_replicates, n_eval_samples), key)
-    dmanager.sampling = original_sampling
-    xraw = jnp.stack(xraw_list, axis=0)
-    yraw = jnp.stack(yraw_list, axis=0)
-
-    # assertions
-    assert_that(xraw).has_shape(
-        (n_networks, dconf.n_replicates, n_eval_samples, dmanager.n_targets, 2)
-    )
-    assert_that(yraw).has_shape(
-        (n_networks, dconf.n_replicates, n_eval_samples, dmanager.n_targets, 1)
-    )
-
-    return xraw, yraw
-
-
-def evaluate_design(
-    dmanager: DesignManager,
-    dconf: DesignConfig,
-    model: BiocompModel,
-    final_params: ParameterTree,
-    xraw: jax.Array,
-    yraw: jax.Array,
-    key: Optional[ArrayLike] = None,
-    max_eval_size: int = 1000,
-    max_loss_size: int = 128,
-) -> Tuple[jax.Array, jax.Array]:
-    """Evaluate design performance on sampled data.
-
-    Args:
-        dmanager: Design manager with networks and targets
-        dconf: Design configuration
-        model: Trained biocomp model
-        final_params: Final optimized parameters
-        xraw: Input samples shape (n_networks, n_replicates, n_eval_samples, n_targets, 2)
-        yraw: Target samples shape (n_networks, n_replicates, n_eval_samples, n_targets, 1)
-        key: JAX random key
-        max_eval_size: Maximum number of samples to process at once (for memory efficiency)
-
-    Returns:
-        yhatdep: Predictions shape (n_replicates, n_eval_samples, n_targets, n_networks)
-        losses: Loss values shape (n_replicates, n_targets, n_networks)
-    """
-    if key is None:
-        key = jax.random.key(0)
-
-    n_networks = len(dmanager.networks)
-    n_eval_samples = xraw.shape[2]
-
-    # reshape inputs for batch processing
-    X = jnp.concatenate(xraw, axis=-1)
-    Y = jnp.concatenate(yraw, axis=-1)
-    assert_that(X).has_shape(
-        (dconf.n_replicates, n_eval_samples, dmanager.n_targets, 2 * n_networks)
-    )
-    assert_that(Y).has_shape((dconf.n_replicates, n_eval_samples, dmanager.n_targets, n_networks))
-
-    # get quantile variable size
-    num_z = int(final_params["global/number_of_random_variables"].ravel()[0])
-
-    logger.info(
-        f"Evaluating design with {dconf.n_replicates} replicates, "
-        f"{n_eval_samples} samples, {dmanager.n_targets} targets, "
-        f"{n_networks} networks, {num_z} quantile variables."
-    )
-    # build stack once
-    stack = dmanager.build_stack(model)
-    n_outputs = stack.get_nb_outputs()
-    dep_mask = stack.get_dependent_output_mask()
-
-    # determine chunk size
-    chunk_size = min(max_eval_size, n_eval_samples)
-    n_chunks = (n_eval_samples + chunk_size - 1) // chunk_size  # ceiling division
-
-    # process in chunks if needed
-    if n_chunks > 1:
-        # we'll accumulate predictions in chunks
-        yhatdep_chunks = []
-
-        for chunk_idx in tqdm(range(n_chunks), desc="Processing chunks"):
-            start_idx = chunk_idx * chunk_size
-            end_idx = min((chunk_idx + 1) * chunk_size, n_eval_samples)
-            actual_chunk_size = end_idx - start_idx
-
-            # slice the data for this chunk
-            X_chunk = X[:, start_idx:end_idx]
-            Y_chunk = Y[:, start_idx:end_idx]
-
-            # generate random quantile variables for this chunk
-            z_shape = (dconf.n_replicates, actual_chunk_size, dmanager.n_targets, num_z)
-            Z_chunk = jax.random.uniform(jax.random.fold_in(key, chunk_idx), z_shape)
-
-            # apply model on chunk
-            chunk_keys = jax.random.split(
-                jax.random.fold_in(key, chunk_idx + 1000), X_chunk.shape[:-1]
-            )
-            YHAT_chunk, _ = per_replicate_apply(final_params, X_chunk, Z_chunk, chunk_keys, stack)
-            assert_that(YHAT_chunk).has_shape(
-                (dconf.n_replicates, actual_chunk_size, dmanager.n_targets, n_outputs)
-            )
-
-            # extract dependent outputs for chunk
-            yhatdep_chunk = jnp.compress(dep_mask, YHAT_chunk, axis=-1, size=sum(dep_mask))
-            assert_that(yhatdep_chunk).has_shape(
-                (dconf.n_replicates, actual_chunk_size, dmanager.n_targets, n_networks)
-            )
-
-            yhatdep_chunks.append(yhatdep_chunk)
-
-        # concatenate all chunks
-        yhatdep = jnp.concatenate(yhatdep_chunks, axis=1)
-        assert_that(yhatdep).has_shape(
-            (dconf.n_replicates, n_eval_samples, dmanager.n_targets, n_networks)
-        )
-
-    else:
-        # process all at once (original implementation)
-        z_shape = (dconf.n_replicates, n_eval_samples, dmanager.n_targets, num_z)
-        Z = jax.random.uniform(key, z_shape)
-
-        YHAT, _ = per_replicate_apply(
-            final_params, X, Z, jax.random.split(key, X.shape[:-1]), stack
-        )
-        assert_that(YHAT).has_shape(
-            (dconf.n_replicates, n_eval_samples, dmanager.n_targets, n_outputs)
-        )
-
-        yhatdep = np.compress(dep_mask, YHAT, axis=-1)
-        assert_that(yhatdep).has_shape(
-            (dconf.n_replicates, n_eval_samples, dmanager.n_targets, n_networks)
-        )
-
-    # compute losses (this should be relatively lightweight)
-    loss_func = dconf.loss_function.kwargs.get("distance_func", huber_zncc_loss)
-
-    # Handle PartialFunction objects
-    if hasattr(loss_func, "get_impl"):
-        loss_func = loss_func.get_impl()
-
-    all_losses_chunks = []
-    avg_over_n_losses = max(1, n_eval_samples // max_loss_size)
-    for i in tqdm(list(range(avg_over_n_losses)), desc="Computing losses"):
-        indices = jax.random.choice(key, n_eval_samples, shape=(max_loss_size,), replace=True)
-        lX = X[:, indices]
-        lY = Y[:, indices]
-        lyhatdep = yhatdep[:, indices]
-        losses = vmap(Partial(compute_all_losses, lossfunc=loss_func))(lX, lY, lyhatdep)
-        all_losses_chunks.append(np.asarray(losses))
-
-    losses = np.mean(np.stack(all_losses_chunks, axis=0), axis=0)
-    assert_that(losses).has_shape((dconf.n_replicates, dmanager.n_targets, n_networks))
-    logger.debug(f"Computed losses shape: {losses.shape}")
-
-    return yhatdep, losses
 
 
 def get_topk_replicate_network_pairs(
@@ -1378,7 +1316,13 @@ def start(
     n_outputs = stack.get_nb_outputs()
 
     xbatches_list, ybatches_list = dmanager.get_samples(
-        (len(dmanager.networks), steps_per_epoch, dconf.n_replicates, dconf.batches_per_step, dconf.batch_size),
+        (
+            len(dmanager.networks),
+            steps_per_epoch,
+            dconf.n_replicates,
+            dconf.batches_per_step,
+            dconf.batch_size,
+        ),
         bkey,
     )
 
@@ -1471,6 +1415,149 @@ def start(
         async_handler=async_handler,
         verbose=True,
     )
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                   --     evaluation functions     --
+
+
+def sample_for_evaluation(
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    final_params: ParameterTree,
+    n_eval_samples: int,
+    key: jax.Array,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Sample evaluation data for design assessment.
+
+    Args:
+        dmanager: Design manager with targets and networks
+        dconf: Design configuration
+        final_params: Optimized parameters
+        n_eval_samples: Number of evaluation samples
+        key: Random key for sampling
+
+    Returns:
+        xraw: Input samples (n_networks, n_replicates, n_eval_samples, n_targets, 2)
+        yraw: Target values (n_networks, n_replicates, n_eval_samples, n_targets, 1)
+    """
+    n_networks = len(dmanager.networks)
+    n_replicates = dconf.n_replicates
+    n_targets = dmanager.n_targets
+
+    # Convert key to seed using a safe method
+    key_data = jax.random.key_data(key)
+    seed = int(key_data[0]) % (2**31)
+
+    # Force uniform sampling for evaluation (not lattice)
+    xlist, ylist = dmanager._get_uniform_samples((n_networks, n_replicates, n_eval_samples), seed)
+
+    # stack network dimension
+    xraw = jnp.stack(xlist, axis=0)
+    yraw = jnp.stack(ylist, axis=0)
+
+    expected_x_shape = (n_networks, n_replicates, n_eval_samples, n_targets, 2)
+    expected_y_shape = (n_networks, n_replicates, n_eval_samples, n_targets, 1)
+
+    assert xraw.shape == expected_x_shape, f"xraw shape {xraw.shape} != expected {expected_x_shape}"
+    assert yraw.shape == expected_y_shape, f"yraw shape {yraw.shape} != expected {expected_y_shape}"
+
+    return xraw, yraw
+
+
+def evaluate_design(
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    model,  # BiocompModel
+    final_params: ParameterTree,
+    xraw: jnp.ndarray,
+    yraw: jnp.ndarray,
+    key: jax.Array,
+    max_eval_size: int = 64,
+    max_loss_size: int = 64,
+) -> Tuple[Optional[jnp.ndarray], jnp.ndarray]:
+    """Evaluate design quality by running predictions and computing losses.
+
+    Args:
+        dmanager: Design manager with targets and networks
+        dconf: Design configuration
+        model: Trained biocomp model
+        final_params: Optimized parameters
+        xraw: Input samples (n_networks, n_replicates, n_samples, n_targets, 2)
+        yraw: Target values (n_networks, n_replicates, n_samples, n_targets, 1)
+        key: Random key
+        max_eval_size: Max batch size for forward pass
+        max_loss_size: Max batch size for loss computation
+
+    Returns:
+        yhatdep: Predictions (n_replicates, n_samples, n_targets, n_networks) or None
+        losses: Per-replicate/target/network losses (n_replicates, n_targets, n_networks)
+    """
+    stack = dmanager.build_stack(model, unlock_ratios=False)
+
+    n_networks = len(dmanager.networks)
+    n_replicates = dconf.n_replicates
+    n_targets = dmanager.n_targets
+    n_samples = xraw.shape[2]
+
+    num_z = final_params["global/number_of_random_variables"]
+    assert num_z.shape[0] == n_replicates
+    num_z_val = int(num_z[0, 0].squeeze())
+
+    dep_mask = stack.get_dependent_output_mask()
+
+    # reshape for evaluation: we need to combine network inputs
+    # xraw shape: (n_networks, n_replicates, n_samples, n_targets, 2)
+    # we need: (n_replicates, n_samples, n_targets, n_networks * 2)
+    x_combined = xraw.transpose(1, 2, 3, 0, 4).reshape(n_replicates, n_samples, n_targets, -1)
+
+    # yraw: just take first network's target (they're all same)
+    y_combined = yraw[0]  # (n_replicates, n_samples, n_targets, 1)
+
+    all_losses = []
+
+    for rep_idx in range(n_replicates):
+        rep_losses_per_target = []
+
+        for tid in range(n_targets):
+            # get params for this replicate and target
+            rep_params = jax.tree.map(lambda x: x[rep_idx, tid], final_params)
+
+            x_slice = x_combined[rep_idx, :, tid, :]  # (n_samples, n_inputs)
+            y_slice = y_combined[rep_idx, :, tid, :]  # (n_samples, 1)
+
+            # forward pass in chunks (using vmap since stack.apply expects single sample)
+            apply_batched = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+            yhats = []
+            for start in range(0, n_samples, max_eval_size):
+                end = min(start + max_eval_size, n_samples)
+                x_batch = x_slice[start:end]
+                z_batch = jax.random.uniform(key, (end - start, num_z_val))
+                keys_batch = jax.random.split(key, end - start)
+
+                yhat, _ = apply_batched(rep_params, x_batch, z_batch, keys_batch)
+                yhats.append(yhat)
+
+            yhat_full = jnp.concatenate(yhats, axis=0)
+            yhat_dep = jnp.compress(dep_mask, yhat_full, axis=-1)  # (n_samples, n_networks)
+
+            # compute per-network loss
+            net_losses = []
+            for net_idx in range(n_networks):
+                yhat_net = yhat_dep[:, net_idx : net_idx + 1]  # (n_samples, 1)
+                # simple MSE loss
+                loss = jnp.mean((yhat_net - y_slice) ** 2)
+                net_losses.append(float(loss))
+
+            rep_losses_per_target.append(net_losses)
+
+        all_losses.append(rep_losses_per_target)
+
+    losses = jnp.array(all_losses)  # (n_replicates, n_targets, n_networks)
+
+    # for now, return None for yhatdep (could be expensive to store full predictions)
+    return None, losses
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
