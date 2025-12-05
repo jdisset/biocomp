@@ -353,6 +353,7 @@ class MergeSpec(ArbitraryModel):
     hspace: int = 10
     vspace: int = 10
     bg_color: str = "white"
+    delete_intermediates: bool = True
 
     @property
     def output_path(self) -> Path:
