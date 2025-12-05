@@ -1071,6 +1071,7 @@ def initialize_params(stack, n_replicates, n_targets, shared_params, key):
 class DesignConfig(OptimConfig):
     loss_function: EncodedPartialFunction = Field(default=distance_loss)
     n_replicates: int = 4
+    keep_in_history: List[str] = ["loss", "all_losses"]
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
