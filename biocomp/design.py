@@ -1290,16 +1290,23 @@ def start(
     loggers: Optional[List[Tuple[int, Callable]]] = None,
     async_handler=None,
 ):
+    import time
+    t0 = time.time()
     pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
 
-    # -- initializations --
+    logger.info("Building compute stack...")
     stack = dmanager.build_stack(model)
+    logger.info(f"Stack built in {time.time() - t0:.2f}s")
+
+    t1 = time.time()
+    logger.info("Initializing parameters...")
     initial_params = initialize_params(
         stack, dconf.n_replicates, dmanager.n_targets, model.shared_params, pkey
     )
     assert_tree_shape(initial_params, (dconf.n_replicates, dmanager.n_targets))
     static, dynamic = initial_params.filter_by_tag(["non_grad", "shared"])
     initial_optimizer_state = vmap(vmap(dconf.optimizer.init))(dynamic)
+    logger.info(f"Parameters initialized in {time.time() - t1:.2f}s")
 
     # -- get data --
     num_z = static["global/number_of_random_variables"]
@@ -1320,6 +1327,8 @@ def start(
     n_inputs = stack.get_nb_inputs()
     n_outputs = stack.get_nb_outputs()
 
+    t2 = time.time()
+    logger.info("Generating training samples...")
     xbatches_list, ybatches_list = dmanager.get_samples(
         (
             len(dmanager.networks),
@@ -1333,6 +1342,7 @@ def start(
 
     xbatches = jnp.concatenate(xbatches_list, axis=-1)
     ybatches = ybatches_list[0]
+    logger.info(f"Samples generated in {time.time() - t2:.2f}s")
 
     effective_batch_size = dconf.batch_size
     if dmanager.is_lattice_mode:
@@ -1361,7 +1371,7 @@ def start(
     ratio_paths = get_ratio_paths(initial_params)
 
     def norm_ratios_hook(params, *a, **kw):
-        print("Normalizing ratios...")
+        logger.debug("Normalizing ratios...")
         return params.update_leaves_by_path(ratio_paths, normalize_ratios_prune)
 
     loss_func = dconf.loss_function.get_impl()(

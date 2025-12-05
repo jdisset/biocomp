@@ -480,8 +480,7 @@ def optimize(
     )
 
     def prnt(msg):
-        if verbose:
-            print(msg)
+        logger.info(msg)
 
     BIOCOMP_CHECKIFY = os.environ.get("BIOCOMP_CHECKIFY", "").lower() in ("true", "1", "yes", "on")
 
@@ -492,9 +491,7 @@ def optimize(
         prnt("Compiling training step...")
         lowered = jax.jit(step).lower(params, opt_state, key, xb, yb)
         compiled_step = lowered.compile()
-        msg = f"Compiled training step in {time.time() - t0:.2f} seconds"
-        logger.debug(msg)
-        prnt(msg)
+        logger.info(f"Compiled training step in {time.time() - t0:.2f}s")
     else:
         ckf = jax.jit(checkify.checkify(step, errors=checkify.all_checks))
 
@@ -524,16 +521,20 @@ def optimize(
 
     prnt(f"Starting training for {config.n_epochs} epochs with {n_total_steps} total steps.")
 
+    last_log_time = time.time()
     for i, step_key in enumerate(jax.random.split(key, n_total_steps), 1):
         if i % (steps_per_epoch) == 0:
             epoch += 1
             b_key = jax.random.fold_in(step_key, epoch)
             if config.reshuffle_batches and i > 0:
-                logger.info(f"Reshuffling batches at epoch {epoch + 1}")
+                logger.debug(f"Reshuffling batches at epoch {epoch + 1}")
                 xbatches, ybatches = reshuffle_batches_jax(xbatches, ybatches, b_key)
+            current_loss = loss_history[-1] if loss_history else float('nan')
+            if hasattr(current_loss, 'mean'):
+                current_loss = float(current_loss.mean())
+            logger.info(f"Epoch {epoch + 1}/{config.n_epochs} | Step {i}/{n_total_steps} | Loss: {current_loss:.4f}")
 
         t0 = time.time()
-        prnt(f"Sarting step {i}/{n_total_steps} (epoch {epoch + 1})")
 
         xb, yb = xbatches[i % steps_per_epoch], ybatches[i % steps_per_epoch]
         params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)

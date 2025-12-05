@@ -576,9 +576,7 @@ def extract_lazy_plot_data_from_network(
         network, input_order, protein_aliases, only_dependent_outputs
     )
 
-    print(
-        f"Extracting lazy plot data from network {network.name} with input order {input_order} and output position {output_pos}, input names {input_names} and output name {output_name}"
-    )
+    logger.debug(f"extract_lazy_plot_data: {network.name} input_order={input_order} inputs={input_names} output={output_name}")
 
     def get_xy(pdata: PlotData) -> Tuple[NdArray, NdArray]:
         logger.debug("get_xy({pdata}) called")
@@ -589,7 +587,7 @@ def extract_lazy_plot_data_from_network(
         # make sure y is a column vector if 1d
         if y.ndim == 1:
             y = y.reshape(-1, 1)
-        print(f"get_xy got x with shape {x.shape} and y with shape {y.shape}")
+        logger.debug(f"get_xy: x{x.shape} y{y.shape}")
         return x, y
 
     d = LazyPlotData(
