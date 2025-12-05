@@ -152,6 +152,12 @@ def compile_training_step(
     sample_xb = get_looped_slice(xbatches, 0, training_config.batches_per_step, axis=1)
     sample_yb = get_looped_slice(ybatches, 0, training_config.batches_per_step, axis=1)
 
+    # add per_output_weights to sample_params BEFORE filter_by_tag (filter creates copies)
+    per_output_weights = expand_weights_to_outputs(dman.get_weights(), stack.networks)
+    weights_arr = jnp.asarray(per_output_weights)
+    weights_replicated = jnp.broadcast_to(weights_arr, (training_config.n_replicates, len(per_output_weights)))
+    sample_params.at("global/per_output_weights", weights_replicated, tags=["non_grad", "local"], overwrite=True)
+
     # init optimizer state (must use same optimizer as the step for pytree matching)
     static, dynamic = sample_params.filter_by_tag(["non_grad", "local"])
     sample_opt_state = jax.vmap(optimizer.init)(dynamic)
@@ -161,13 +167,6 @@ def compile_training_step(
     assert num_z.shape == (training_config.n_replicates,)
     assert jnp.all(num_z == num_z[0]), "All replicates must have the same number of quantile variables"
     num_z = int(num_z[0])
-
-    # add per_output_weights to sample_params for pytree structure matching
-    # (start() adds this, so we need it during compilation for caching to work)
-    per_output_weights = expand_weights_to_outputs(dman.get_weights(), stack.networks)
-    weights_arr = jnp.asarray(per_output_weights)
-    weights_replicated = jnp.broadcast_to(weights_arr, (training_config.n_replicates, len(per_output_weights)))
-    sample_params.at("global/per_output_weights", weights_replicated, tags=["non_grad", "local"], overwrite=True)
 
     def step(params: ParameterTree, opt_state, step_key, xs, ys, num_z):
         keys = jax.random.split(step_key, training_config.n_replicates)
@@ -690,6 +689,12 @@ def start(
     else:
         xbatches, ybatches = get_new_batches()
 
+    # store per_output_weights in params BEFORE filter_by_tag (filter creates copies)
+    per_output_weights = expand_weights_to_outputs(dman.get_weights(), stack.networks)
+    weights_arr = jnp.asarray(per_output_weights)
+    weights_replicated = jnp.broadcast_to(weights_arr, (training_config.n_replicates, len(per_output_weights)))
+    params.at("global/per_output_weights", weights_replicated, tags=["non_grad", "local"], overwrite=True)
+
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
 
     # use cached optimizer if available, otherwise create new one
@@ -710,13 +715,6 @@ def start(
     )
 
     # --- loss & update functions
-    # store per_output_weights in params for JIT caching (weights can change without recompilation)
-    per_output_weights = expand_weights_to_outputs(dman.get_weights(), stack.networks)
-    # add replicate dimension to match params structure (will be sliced by vmap in loss func)
-    weights_arr = jnp.asarray(per_output_weights)
-    weights_replicated = jnp.broadcast_to(weights_arr, (training_config.n_replicates, len(per_output_weights)))
-    params.at("global/per_output_weights", weights_replicated, tags=["non_grad", "local"], overwrite=True)
-
     # use cached compiled step if available, otherwise build and compile
     if cached_step is not None:
         compiled_step = cached_step.compiled_step
