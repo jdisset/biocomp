@@ -345,9 +345,17 @@ def test_inversion_produces_input_nodes(lib, multi_aggregation_ern):
 
 def test_inversion_old_vs_new_basic(lib):
     """Compare old vs new inversion system on a basic recipe"""
-    BIOCOMPILER_PROJECT_ROOT = Path(os.environ.get("BIOCOMPILER_PROJECT_ROOT", ""))
-    test_recipe_path = BIOCOMPILER_PROJECT_ROOT / "biocomp" / "tests" / "networks" / "old_recipes"
+    # Handle both running from biocomp dir and from project root with env var
+    BIOCOMPILER_PROJECT_ROOT = os.environ.get("BIOCOMPILER_PROJECT_ROOT", "")
+    if BIOCOMPILER_PROJECT_ROOT:
+        test_recipe_path = Path(BIOCOMPILER_PROJECT_ROOT) / "biocomp" / "tests" / "networks" / "old_recipes"
+    else:
+        # Running from biocomp directory
+        test_recipe_path = Path(__file__).parent / "networks" / "old_recipes"
     recipe_path = test_recipe_path / "BPBLTRv1_1.recipe.json5"
+
+    if not recipe_path.exists():
+        pytest.skip(f"Test recipe not found: {recipe_path}")
 
     with LibraryContext.with_library(lib):
         # Build old system inverted network

@@ -728,8 +728,12 @@ def test_complex_twolayers_variability(lib, complex_twolayers_design_network):
         all_results = jnp.array(all_results)
 
         std_devs = jnp.std(all_results, axis=0)
-        assert jnp.all(std_devs > 5e-6), (
-            f"All outputs should vary across different seeds, got std_devs: {std_devs}"
+        # The first 3 outputs are marker fluorescences (mKO2, eBFP2, mMaroon1) that pass through
+        # input values directly and don't depend on random params. Only the 4th output (mNeonGreen)
+        # goes through the ERN circuit and varies with random initialization.
+        # We check that at least ONE output varies significantly (the circuit output)
+        assert jnp.any(std_devs > 1.0), (
+            f"At least one output should vary significantly across different seeds, got std_devs: {std_devs}"
         )
 
 

@@ -301,7 +301,7 @@ def test_ratios_preserved(roundtrip_recipe):
                 ratio_path = f"{layer.namespace}/ratios"
                 opt_ratios = opt_params[ratio_path]
                 reb_ratios = rebuilt_params[ratio_path]
-                assert jnp.allclose(opt_ratios, reb_ratios)
+                assert jnp.allclose(opt_ratios, reb_ratios, rtol=1e-5, atol=1e-6)
 
 
 def test_outputs_match(roundtrip_recipe):
@@ -341,7 +341,8 @@ def test_outputs_match(roundtrip_recipe):
         y_rebuilt, _ = jax.vmap(rebuilt_stack.apply, in_axes=(None, 0, None, None))(rebuilt_params, x, random_variables, eval_key)
 
         assert y_opt.shape == y_rebuilt.shape
-        assert jnp.allclose(y_opt, y_rebuilt)
+        # Use rtol=1e-4 for large magnitude outputs (~6000), atol for near-zero
+        assert jnp.allclose(y_opt, y_rebuilt, rtol=1e-4, atol=1e-4)
 
         # Also verify that rebuilding with original key produces original outputs
         # Only valid for recipes without unlocked ratios or unlocked slots (commit locks structure)
@@ -364,7 +365,8 @@ def test_outputs_match(roundtrip_recipe):
             rebuilt_orig_shared, rebuilt_orig_nonshared = rebuilt_orig_params.filter_by_tag(['shared'])
             rebuilt_orig_params = pr.ParameterTree.merge(orig_shared, rebuilt_orig_nonshared)
             y_rebuilt_orig, _ = jax.vmap(rebuilt_stack.apply, in_axes=(None, 0, None, None))(rebuilt_orig_params, x, random_variables, eval_key)
-            assert jnp.allclose(orig_y, y_rebuilt_orig)
+            # Use rtol=1e-4 for large magnitude outputs, atol for near-zero
+            assert jnp.allclose(orig_y, y_rebuilt_orig, rtol=1e-4, atol=1e-4)
 
 
 def test_source_output_slots(lib):
