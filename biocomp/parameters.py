@@ -816,6 +816,9 @@ class ParameterTree:
     def __getitem__(self, path):
         return self.data[path]
 
+    def __contains__(self, path):
+        return path in self.data
+
     def at(self, path, value=None, tags=None, overwrite: Optional[bool] = False):
         """
         overwrite = True -> overwrite existing value
