@@ -198,6 +198,16 @@ class PartialFunction(ArbitraryModel, Generic[T, R]):
         self.__dict__.update(state)
         self._func = None
 
+    def __deepcopy__(self, memo):
+        # Create a new instance with copied data to avoid pydantic deepcopy issues
+        import copy
+        return self.__class__(
+            func=self.func,  # str or callable - don't deepcopy
+            args=copy.deepcopy(self.args, memo),
+            kwargs=copy.deepcopy(self.kwargs, memo),
+            modules=list(self.modules),
+        )
+
     def set_missing_kwargs(self, new_kwargs: dict):
         """only overwrite the kwargs that are not already set, and are in the signature"""
         import inspect

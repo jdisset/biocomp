@@ -341,6 +341,24 @@ class GridLayout(FigureLayout):
 FIGURE_METADATA_KEY = "FigureMetadata"
 
 
+class MergeSpec(ArbitraryModel):
+    """Specification for merging multiple subfigures into one output."""
+    rows: int = 1
+    cols: int = 1
+    row_heights: Optional[List[float]] = None
+    col_widths: Optional[List[float]] = None
+    output_dir: str = "./"
+    output_file: str = "merged.png"
+    title: Optional[str] = None
+    hspace: int = 10
+    vspace: int = 10
+    bg_color: str = "white"
+
+    @property
+    def output_path(self) -> Path:
+        return Path(self.output_dir) / self.output_file
+
+
 class FigureSpec(ArbitraryModel):
     title: Optional[str] = None
     title_kwargs: Dict[str, Any] = {}
