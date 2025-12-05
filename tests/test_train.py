@@ -8,13 +8,8 @@ import pytest
 import jax
 import jax.numpy as jnp
 import optax
-from biocomp.train import (
-    TrainingConfig, 
-    make_training_step, 
-    sorting_loss,
-    create_counter,
-    as_schedule
-)
+from biocomp.train import TrainingConfig, sorting_loss
+from biocomp.optimutils import make_training_step, create_counter, as_schedule
 from biocomp.parameters import ParameterTree
 from biocomp.utils import PartialFunction, PartialFunctionResult
 

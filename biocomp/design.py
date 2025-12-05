@@ -1,54 +1,36 @@
 ### {{{                          --     imports     --
 import random
 from functools import partial
+from pathlib import Path
+from typing import List, Tuple, Callable, Optional, Union, Literal
+
 import numpy as np
-from . import datautils as du
-from biocomp.utils import encode_function
-from tqdm import tqdm
-from biocomp.compute import ComputeStack, ComputeConfig
-import biocomp.nodes as nd
-from biocomp.datautils import DataRescaler
-from biocomp.utils import (
-    EncodedPartialFunction,
-    PartialFunction,
-    ArbitraryModel,
-    PartialFunctionResult,
-)
-from biocomp.network import Network
-from biocomp.recipe import CoTransfection, Unit, Slot
-from biocomp.train import create_counter
-import biocomp.utils
-from assertpy import assert_that
-from . import nodes as nodes
-from .parameters import ParameterTree, ParamPath
-from . import utils as ut
-import time
-from typing import List, Tuple, Callable, Optional, NamedTuple, Union, Literal
-from pydantic import Field, BaseModel, ConfigDict
-from biocomp.logging_config import get_logger
 import optax
 import jax
 import jax.numpy as jnp
-from jax.tree_util import Partial
 from jax import vmap, jit, lax
-from .jaxutils import get_looped_slice
-import os
-from jax.experimental import checkify
+from jax.tree_util import Partial
+from jax.typing import ArrayLike
 
+from assertpy import assert_that
+from pydantic import Field, BaseModel, ConfigDict
+from tqdm import tqdm
+
+from biocomp.utils import encode_function, EncodedPartialFunction, ArbitraryModel
+from biocomp.compute import ComputeStack
+import biocomp.nodes as nd
+from biocomp.network import Network
+from .parameters import ParameterTree
+from biocomp.logging_config import get_logger
 from biocomptools.modelmodel import BiocompModel
-from biocomp.designutils import sample_from_svg, sample_from_data, data_to_lattice_2d
+from biocomp.designutils import sample_from_svg, data_to_lattice_2d
 from biocomp.optimutils import (
     make_training_step,
     per_replicate_step,
-    per_replicate_step_nonscan,
     optimize,
     as_schedule,
-    OptimConfig,
-    DEFAULT_OPTIMIZER,
+    DesignOptimConfig,
 )
-
-from pathlib import Path
-from jax.typing import ArrayLike
 
 logger = get_logger(__name__)
 
@@ -153,11 +135,8 @@ def sinkhorn_divergence_conv(a, b, eps, n_iters=80, tol=1e-6):
 
     (u, v), _ = lax.scan(loop, (u, v), None, length=n_iters)
 
-    # Dual potentials (balanced): f=eps*log u, g=eps*log v
     u_safe = jnp.maximum(u, 1e-12)
     v_safe = jnp.maximum(v, 1e-12)
-    f = eps * jnp.log(u_safe)
-    g = eps * jnp.log(v_safe)
 
     def ot_value(a_, b_):
         # Regularized OT value: eps * ( <a_, log u_> + <b_, log v_> )
@@ -232,7 +211,7 @@ def sinkhorn_divergence_unbalanced(
         epsilon = _epsilon_from_x_median(xn)
 
     # forward masses are nonnegative; grads flow via STE
-    a = _proj_nonneg_ste(yh, cap=cap)
+    a = proj_nonneg_ste(yh, cap=cap)
     b = jnp.clip(y, 0.0, cap)  # target can be hard-clipped
 
     geom = pointcloud.PointCloud(xn, xn, epsilon=epsilon)
@@ -403,7 +382,9 @@ def get_over1_penalty_for_leaf(p, rel_active=1e-3, width=2e-4):
         except Exception:
             # ArrayRef with incompatible shapes - compute penalty on each underlying array
             arrays = [p.tree[path] for path in p.paths]
-            return sum(soft_count_over_one_penalty(a, rel_active=rel_active, width=width) for a in arrays)
+            return sum(
+                soft_count_over_one_penalty(a, rel_active=rel_active, width=width) for a in arrays
+            )
     return soft_count_over_one_penalty(p, rel_active=rel_active, width=width)
 
 
@@ -521,9 +502,6 @@ def distance_loss(
     lambda_over1=0.001,
     distance_func=huber_zncc_loss,
 ):
-    from ott.geometry import pointcloud
-    from ott.solvers import linear
-
     n_targets = dmanager.n_targets
     n_networks = len(dmanager.networks)
     n_inputs = 2 * n_networks
@@ -705,7 +683,7 @@ def plot_prediction(
     t_yhatdep = t_yhat[..., dep_output_mask]
     assert_that(t_yhatdep.shape).is_equal_to(t_y.shape)
 
-    loss_value = single_l2loss(t_yhatdep[:, net_id], t_y[:, net_id])
+    loss_value = float(jnp.mean((t_yhatdep[:, net_id] - t_y[:, net_id]) ** 2))
 
     t_x_net = t_x[:, 2 * net_id : 2 * net_id + 2]
 
@@ -843,7 +821,9 @@ class DataTarget(BaseModel):
         if nan_mask.any():
             valid_mean = np.nanmean(Y_samples)
             Y_samples = np.where(nan_mask, valid_mean, Y_samples)
-            logger.debug(f"Filled {nan_mask.sum()} NaN values in lattice with mean={valid_mean:.4f}")
+            logger.debug(
+                f"Filled {nan_mask.sum()} NaN values in lattice with mean={valid_mean:.4f}"
+            )
 
         self._lattice_X = X_samples
         self._lattice_Y = Y_samples
@@ -1068,7 +1048,7 @@ def initialize_params(stack, n_replicates, n_targets, shared_params, key):
     return vmap(init_target_params)(jax.random.split(key, n_replicates))
 
 
-class DesignConfig(OptimConfig):
+class DesignConfig(DesignOptimConfig):
     loss_function: EncodedPartialFunction = Field(default=distance_loss)
     n_replicates: int = 4
     keep_in_history: List[str] = ["loss", "all_losses"]
@@ -1292,6 +1272,7 @@ def start(
     async_handler=None,
 ):
     import time
+
     t0 = time.time()
     pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
 
@@ -1325,8 +1306,6 @@ def start(
     assert_that(total_steps).is_greater_than(0)
 
     n_networks = stack.get_nb_networks()
-    n_inputs = stack.get_nb_inputs()
-    n_outputs = stack.get_nb_outputs()
 
     t2 = time.time()
     logger.info("Generating training samples...")
@@ -1519,7 +1498,9 @@ def evaluate_design(
     n_targets = dmanager.n_targets
     n_samples = xraw.shape[2]
 
-    logger.info(f"Starting evaluation: {n_replicates} replicates × {n_targets} targets × {n_samples} samples")
+    logger.info(
+        f"Starting evaluation: {n_replicates} replicates × {n_targets} targets × {n_samples} samples"
+    )
 
     num_z = final_params["global/number_of_random_variables"]
     assert num_z.shape[0] == n_replicates
@@ -1557,8 +1538,7 @@ def evaluate_design(
 
             # forward pass in chunks
             yhats = []
-            n_chunks = (n_samples + max_eval_size - 1) // max_eval_size
-            for chunk_idx, start in enumerate(range(0, n_samples, max_eval_size)):
+            for start in range(0, n_samples, max_eval_size):
                 end = min(start + max_eval_size, n_samples)
                 x_batch = x_slice[start:end]
                 z_batch = jax.random.uniform(key, (end - start, num_z_val))
@@ -1588,7 +1568,9 @@ def evaluate_design(
     pbar.close()
 
     losses = jnp.array(all_losses)  # (n_replicates, n_targets, n_networks)
-    logger.info(f"Evaluation complete. Loss range: [{float(losses.min()):.4f}, {float(losses.max()):.4f}]")
+    logger.info(
+        f"Evaluation complete. Loss range: [{float(losses.min()):.4f}, {float(losses.max()):.4f}]"
+    )
 
     if store_predictions:
         # Stack all replicate predictions: (n_replicates, n_targets, n_samples, n_networks)
@@ -1638,11 +1620,11 @@ def compute_baseline_loss(
         target_name = target.name or f"target_{tid}"
 
         if not isinstance(target, DataTarget):
-            results[target_name] = {'has_original_network': False}
+            results[target_name] = {"has_original_network": False}
             continue
 
         if target.original_network is None:
-            results[target_name] = {'has_original_network': False}
+            results[target_name] = {"has_original_network": False}
             continue
 
         # Build a stack with just the original network
@@ -1666,7 +1648,7 @@ def compute_baseline_loss(
 
         # Get random variables config
         num_z_val = params["global/number_of_random_variables"]
-        num_z = int(num_z_val.squeeze() if hasattr(num_z_val, 'squeeze') else num_z_val)
+        num_z = int(num_z_val.squeeze() if hasattr(num_z_val, "squeeze") else num_z_val)
         dep_mask = stack.get_dependent_output_mask()
 
         # Run forward pass in batches
@@ -1690,13 +1672,15 @@ def compute_baseline_loss(
         model_loss = float(jnp.mean((yhat_dep - Y_sample) ** 2))
 
         results[target_name] = {
-            'has_original_network': True,
-            'model_prediction_loss': model_loss,
-            'original_network_name': original_network.name,
-            'n_samples': len(X_sample),
+            "has_original_network": True,
+            "model_prediction_loss": model_loss,
+            "original_network_name": original_network.name,
+            "n_samples": len(X_sample),
         }
 
-        logger.info(f"Baseline for '{target_name}': model_loss={model_loss:.6f} (original network: {original_network.name})")
+        logger.info(
+            f"Baseline for '{target_name}': model_loss={model_loss:.6f} (original network: {original_network.name})"
+        )
 
     return results
 

@@ -1,8 +1,10 @@
 ### {{{                          --     imports     --
 from assertpy import assert_that
-from . import datautils as du
 import optax
 import random
+import os
+import time
+from typing import List, Tuple, Callable, Optional, NamedTuple
 
 from biocomp.utils import (
     EncodedPartialFunction,
@@ -10,19 +12,12 @@ from biocomp.utils import (
     ArbitraryModel,
     PartialFunctionResult,
 )
-import os
-from . import nodes as nodes
-from .parameters import ParameterTree, ParamPath
-from . import utils as ut
-import time
-from typing import List, Tuple, Callable, Optional, NamedTuple
-from pydantic import Field
+from .parameters import ParameterTree
 from biocomp.logging_config import get_logger
 from biocomp.compute import ComputeStack
 
-
 import jax
-from jax import jit, vmap, lax
+from jax import vmap
 from jax import numpy as jnp
 from jax.typing import ArrayLike
 from jax.experimental import checkify
@@ -35,12 +30,10 @@ logger = get_logger(__name__)
 DEFAULT_OPTIMIZER = [
     PartialFunction(
         func="optax.clip_by_global_norm",
-        # func="optax.transforms._clipping.clip_by_global_norm",
         kwargs={"max_norm": 1.0},
     ),
     PartialFunction(
         func="optax.adamw",
-        # func="optax._src.alias.adamw",
         kwargs={
             "learning_rate": PartialFunctionResult(
                 func="optax.warmup_cosine_decay_schedule",
@@ -63,8 +56,6 @@ class CounterState(NamedTuple):
 
 def create_counter():
     """Creates a no-op gradient transformation that just counts steps."""
-    import jax.numpy as jnp
-    import optax
 
     def init_fn(params):
         return CounterState(count=jnp.zeros([], jnp.int32))
@@ -75,19 +66,56 @@ def create_counter():
     return optax.GradientTransformation(init_fn, update_fn)
 
 
-class OptimConfig(ArbitraryModel):
-    loss_function: EncodedPartialFunction
-    optimizer_stack: list[EncodedPartialFunction] = DEFAULT_OPTIMIZER
+def build_optimizer_chain(optimizer_stack: list, with_lr_injection: bool = False):
+    """Build optimizer chain from stack, optionally with learning rate injection."""
+    import importlib
 
+    main_chain = []
+    for comp in optimizer_stack:
+        if not with_lr_injection or not (
+            hasattr(comp, "kwargs") and "learning_rate" in comp.kwargs
+        ):
+            main_chain.append(comp())
+            continue
+
+        original_func = getattr(comp, "func", getattr(comp, "_func", None))
+        if original_func is None:
+            main_chain.append(comp())
+            continue
+
+        if isinstance(original_func, str):
+            try:
+                module_name, func_name = original_func.rsplit(".", 1)
+                func = getattr(importlib.import_module(module_name), func_name)
+            except (ValueError, ImportError, AttributeError):
+                main_chain.append(comp())
+                continue
+        else:
+            func = original_func
+
+        try:
+            lr_value = comp.kwargs["learning_rate"]
+            lr_schedule = lr_value.get_impl()() if hasattr(lr_value, "get_impl") else lr_value
+            wrapped_func = optax.inject_hyperparams(func)
+            other_kwargs = {k: v for k, v in comp.kwargs.items() if k != "learning_rate"}
+            main_chain.append(wrapped_func(learning_rate=lr_schedule, **other_kwargs))
+        except Exception:
+            logger.warning(f"Failed to inject learning rate for {comp.func}. Falling back.")
+            main_chain.append(comp())
+
+    return optax.chain(create_counter(), *main_chain)
+
+
+class OptimConfig(ArbitraryModel):
+    """Base config for optimization-based training/design."""
+
+    optimizer_stack: list[EncodedPartialFunction] = DEFAULT_OPTIMIZER
     seed: Optional[int] = None
-    batches_per_step: int = 4  # how many batches to process in one scan step
+    batches_per_step: int = 4
     batch_size: int = 32
     n_epochs: float = 3
-    n_batches_per_epoch: int = 128  # number of batches per epoch to draw from the data source
-    n_replicates: int = 16  # aka population size
+    n_replicates: int = 16
     keep_in_history: List[str] = ["loss"]
-
-    reshuffle_batches: bool = True  # whether to reshuffle batches at the end of each epoch
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
@@ -102,67 +130,71 @@ class OptimConfig(ArbitraryModel):
 
     @property
     def optimizer(self):
-        main_chain = [comp() for comp in self.optimizer_stack]
-        return optax.chain(create_counter(), *main_chain)
+        return build_optimizer_chain(self.optimizer_stack, with_lr_injection=False)
 
     def create_optimizer_with_lr_injection(self):
-        """Create optimizer with learning rate injection for debugging purposes."""
-        import optax
+        """Create optimizer with learning rate injection for tracking."""
+        return build_optimizer_chain(self.optimizer_stack, with_lr_injection=True)
 
-        main_chain = []
 
-        for comp in self.optimizer_stack:
-            # check if this component has a learning_rate parameter
-            if hasattr(comp, "kwargs") and "learning_rate" in comp.kwargs:
-                if hasattr(comp, "func"):
-                    original_func = comp.func
-                elif hasattr(comp, "_func"):
-                    original_func = comp._func
-                else:
-                    # Fallback to regular instantiation
-                    main_chain.append(comp())
-                    continue
+# Design-specific config (adds loss_function, design-specific fields)
+class DesignOptimConfig(OptimConfig):
+    loss_function: EncodedPartialFunction
+    n_batches_per_epoch: int = 128
+    reshuffle_batches: bool = True
 
-                # handle string function references
-                if isinstance(original_func, str):
-                    import importlib
 
-                    try:
-                        module_name, func_name = original_func.rsplit(".", 1)
-                        module = importlib.import_module(module_name)
-                        func = getattr(module, func_name)
-                    except (ValueError, ImportError, AttributeError):
-                        # Fallback if we can't resolve the string
-                        main_chain.append(comp())
-                        continue
-                else:
-                    func = original_func
+def get_checkify_enabled():
+    """Check if BIOCOMP_CHECKIFY environment variable is set."""
+    return os.environ.get("BIOCOMP_CHECKIFY", "").lower() in ("true", "1", "yes", "on")
 
-                try:
-                    # for learning rate injection to work, we need to resolve PartialFunctionResult first
-                    lr_value = comp.kwargs["learning_rate"]
-                    if hasattr(lr_value, "get_impl"):
-                        # it's a PartialFunctionResult, resolve it to get the actual schedule
-                        lr_schedule = lr_value.get_impl()()
-                    else:
-                        lr_schedule = lr_value
 
-                    wrapped_func = optax.inject_hyperparams(func)
+def compile_step(step_fn, sample_args, use_checkify=None):
+    """Compile a step function, optionally with checkify for debugging.
 
-                    other_kwargs = {k: v for k, v in comp.kwargs.items() if k != "learning_rate"}
+    Args:
+        step_fn: The function to compile
+        sample_args: Tuple of sample arguments for lowering
+        use_checkify: If None, uses BIOCOMP_CHECKIFY env var
 
-                    optimizer_instance = wrapped_func(learning_rate=lr_schedule, **other_kwargs)
-                    main_chain.append(optimizer_instance)
-                except Exception:
-                    logger.warning(
-                        f"Failed to inject learning rate for {comp.func}. "
-                        "Falling back to original component."
-                    )
-                    main_chain.append(comp())
-            else:
-                main_chain.append(comp())
+    Returns:
+        Compiled step function
+    """
+    if use_checkify is None:
+        use_checkify = get_checkify_enabled()
 
-        return optax.chain(create_counter(), *main_chain)
+    if not use_checkify:
+        lowered = jax.jit(step_fn).lower(*sample_args)
+        return lowered.compile()
+
+    ckf = jax.jit(checkify.checkify(step_fn, errors=checkify.all_checks))
+
+    def checkified_step(*args):
+        err, data = ckf(*args)
+        err.throw()
+        return data
+
+    return checkified_step
+
+
+def run_logger_callbacks(loggers, step, config, step_history, stack, period_filter):
+    """Run logger callbacks matching the period filter.
+
+    Args:
+        loggers: List of (period, callback) tuples
+        step: Current step number
+        config: Training/design config
+        step_history: Step history dict
+        stack: ComputeStack
+        period_filter: Function (period, step) -> bool to filter which loggers to run
+    """
+    for period, callback in loggers:
+        if period_filter(period, step):
+            try:
+                callback(step, config, step_history=step_history, stack=stack)
+            except Exception as e:
+                logger.error(f"Logger callback failed at step {step}: {e}")
+                logger.exception(e)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -221,8 +253,6 @@ def make_training_step(
     post_update_hook: Optional[Callable] = None,
 ):
     from jax import value_and_grad
-    import optax
-    import jax.numpy as jnp
 
     if static_tags is None:
         static_tags = ["non_grad", "local"]
@@ -413,9 +443,7 @@ def per_replicate_step(
 
     if isinstance(num_z, int):
         num_z = (num_z,)
-    zbatches = jax.random.uniform(
-        key, (actual_batches_per_step, actual_batch_size, *num_z)
-    )
+    zbatches = jax.random.uniform(key, (actual_batches_per_step, actual_batch_size, *num_z))
 
     batch_keys = jax.random.split(key, training_config.batches_per_step)
     if enable_jax_tqdm:
@@ -461,7 +489,7 @@ def optimize(
     opt_state,
     xbatches: jax.Array,
     ybatches: jax.Array,
-    config: OptimConfig,
+    config: DesignOptimConfig,
     n_total_steps: int,
     steps_per_epoch: int,
     key: ArrayLike,
@@ -479,63 +507,38 @@ def optimize(
         (steps_per_epoch, config.n_replicates, config.batches_per_step)
     )
 
-    def prnt(msg):
-        logger.info(msg)
-
-    BIOCOMP_CHECKIFY = os.environ.get("BIOCOMP_CHECKIFY", "").lower() in ("true", "1", "yes", "on")
-
     xb, yb = xbatches[0], ybatches[0]
     logger.info("Compiling training step...")
-    if not BIOCOMP_CHECKIFY:
-        t0 = time.time()
-        prnt("Compiling training step...")
-        lowered = jax.jit(step).lower(params, opt_state, key, xb, yb)
-        compiled_step = lowered.compile()
+    t0 = time.time()
+    compiled_step = compile_step(step, (params, opt_state, key, xb, yb))
+    if not get_checkify_enabled():
         logger.info(f"Compiled training step in {time.time() - t0:.2f}s")
-    else:
-        ckf = jax.jit(checkify.checkify(step, errors=checkify.all_checks))
 
-        def checkified_step(params, opt_state, step_key, xs, ys):
-            err, data = ckf(params, opt_state, step_key, xs, ys)
-            err.throw()
-            return data
-
-        compiled_step = checkified_step
-
-    # call start-of-training loggers (period=0)
     if async_handler:
         async_handler.process_start_loggers(config, stack)
     else:
-        for period, callback in loggers:
-            if period == 0:
-                try:
-                    callback(0, config, step_history={}, stack=stack)
-                except Exception as e:
-                    logger.error(f"Start logger callback failed: {e}")
-                    logger.exception(e)
+        run_logger_callbacks(loggers, 0, config, {}, stack, lambda p, s: p == 0)
 
     step_history, loss_history = {}, []
     epoch = -1
-    assert xbatches.shape[0] == steps_per_epoch
-    assert ybatches.shape[0] == steps_per_epoch
 
-    prnt(f"Starting training for {config.n_epochs} epochs with {n_total_steps} total steps.")
+    logger.info(f"Starting training for {config.n_epochs} epochs with {n_total_steps} total steps.")
 
-    last_log_time = time.time()
     for i, step_key in enumerate(jax.random.split(key, n_total_steps), 1):
-        if i % (steps_per_epoch) == 0:
+        if i % steps_per_epoch == 0:
             epoch += 1
             b_key = jax.random.fold_in(step_key, epoch)
             if config.reshuffle_batches and i > 0:
                 logger.debug(f"Reshuffling batches at epoch {epoch + 1}")
                 xbatches, ybatches = reshuffle_batches_jax(xbatches, ybatches, b_key)
-            current_loss = loss_history[-1] if loss_history else float('nan')
-            if hasattr(current_loss, 'mean'):
+            current_loss = loss_history[-1] if loss_history else float("nan")
+            if hasattr(current_loss, "mean"):
                 current_loss = float(current_loss.mean())
-            logger.info(f"Epoch {epoch + 1}/{config.n_epochs} | Step {i}/{n_total_steps} | Loss: {current_loss:.4f}")
+            logger.info(
+                f"Epoch {epoch + 1}/{config.n_epochs} | Step {i}/{n_total_steps} | Loss: {current_loss:.4f}"
+            )
 
         t0 = time.time()
-
         xb, yb = xbatches[i % steps_per_epoch], ybatches[i % steps_per_epoch]
         params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
 
@@ -543,35 +546,17 @@ def optimize(
         step_history["latest_params"] = params
         step_history["opt_state"] = opt_state
 
-        # prnt(f"Step {i} completed in {step_history['step_time']:.2f} seconds")
-        # prnt(
-        #     f"Loss: {step_history.get('loss', 'N/A')} \n"
-        #     f"Learning Rate: {step_history.get('learning_rate', 'N/A')}"
-        # )
-
         if "loss" in step_history:
             loss_history.append(step_history["loss"])
 
-        # call logger callbacks at their specified periods
-        for period, callback in loggers:
-            if period > 0 and i % period == 0:
-                try:
-                    callback(i, config, step_history=step_history, stack=stack)
-                except Exception as e:
-                    logger.error(f"Logger callback failed at step {i}: {e}")
-                    logger.exception(e)
+        run_logger_callbacks(
+            loggers, i, config, step_history, stack, lambda p, s: p > 0 and s % p == 0
+        )
 
-    # call end-of-training loggers (period=None or -1)
-    if not async_handler:  # end loggers handled separately for async mode
-        for period, callback in loggers:
-            if period is None or period == -1:
-                try:
-                    callback(n_total_steps, config, step_history=step_history, stack=stack)
-                except Exception as e:
-                    logger.error(f"End logger callback failed: {e}")
-                    logger.exception(e)
+    if not async_handler:
+        run_logger_callbacks(
+            loggers, n_total_steps, config, step_history, stack, lambda p, s: p is None or p == -1
+        )
 
     logger.info(f"End of training for {config.n_epochs} epochs")
-    prnt("Training completed.")
-
     return params, loss_history, step_history
