@@ -387,7 +387,16 @@ class FigureSpec(ArbitraryModel):
         import xml.etree.ElementTree as ET
 
         assert self.output_file is not None
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        parent_dir = self.output_path.parent
+        parent_dir.mkdir(parents=True, exist_ok=True)
+        # Force filesystem sync for cloud-synced directories (Dropbox, etc.)
+        if not parent_dir.exists():
+            import time
+            for _ in range(5):
+                time.sleep(0.1)
+                parent_dir.mkdir(parents=True, exist_ok=True)
+                if parent_dir.exists():
+                    break
 
         try:
             # metadata_json = json.dumps({FIGURE_METADATA_KEY: self.metadata}, indent=2)
