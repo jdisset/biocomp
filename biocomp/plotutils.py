@@ -6,7 +6,7 @@ from biocomp.datautils import DataRescaler, IdentityRescaler
 import matplotlib.pyplot as plt
 from biocomp.old_network.network import Network
 from biocomp.utils import ArbitraryModel
-from dracon.utils import dracontainer_aware_json
+from dracon.utils import dict_like, list_like
 import string
 import os
 from typing import (
@@ -341,8 +341,45 @@ class GridLayout(FigureLayout):
 FIGURE_METADATA_KEY = "FigureMetadata"
 
 
+def sanitize_for_json(obj, max_depth: int = 50, _depth: int = 0):
+    """Recursively convert objects to JSON-serializable form, including tuple keys."""
+    if _depth > max_depth:
+        return str(obj)
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, tuple):
+        return [sanitize_for_json(v, max_depth, _depth + 1) for v in obj]
+    if dict_like(obj):
+        return {
+            (
+                str(k) if not isinstance(k, (str, int, float, bool, type(None))) else k
+            ): sanitize_for_json(v, max_depth, _depth + 1)
+            for k, v in obj.items()
+        }
+    if list_like(obj):
+        return [sanitize_for_json(v, max_depth, _depth + 1) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.integer, np.floating)):
+        return obj.item()
+    if hasattr(obj, "__dict__"):
+        return {
+            k: sanitize_for_json(v, max_depth, _depth + 1)
+            for k, v in obj.__dict__.items()
+            if not k.startswith("_")
+        }
+    return str(obj)
+
+
 class MergeSpec(ArbitraryModel):
-    """Specification for merging multiple subfigures into one output."""
+    """Specification for merging multiple subfigures into one output.
+
+    Modes:
+        - "grid": Arrange figures in a grid layout (default)
+        - "pages": Each figure becomes a separate page in a PDF
+    """
+
+    mode: Literal["grid", "pages"] = "grid"
     rows: int = 1
     cols: int = 1
     row_heights: Optional[List[float]] = None
@@ -392,27 +429,16 @@ class FigureSpec(ArbitraryModel):
         # Force filesystem sync for cloud-synced directories (Dropbox, etc.)
         if not parent_dir.exists():
             import time
+
             for _ in range(5):
                 time.sleep(0.1)
                 parent_dir.mkdir(parents=True, exist_ok=True)
                 if parent_dir.exists():
                     break
 
-        try:
-            # metadata_json = json.dumps({FIGURE_METADATA_KEY: self.metadata}, indent=2)
-            # use a custom encoder to handle non-serializable objects
-            metadata_json = json.dumps(
-                {FIGURE_METADATA_KEY: self.metadata},
-                indent=2,
-                default=dracontainer_aware_json,
-            )
-        except TypeError as e:
-            logger.error(f"Error serializing metadata: {e}")
-            as_str = str(self.metadata)
-            logger.warning(
-                f"Metadata is not JSON serializable, using string representation: {as_str}"
-            )
-            metadata_json = json.dumps({FIGURE_METADATA_KEY: as_str}, indent=2)
+        # sanitize metadata to handle tuple keys, numpy arrays, etc.
+        sanitized_metadata = sanitize_for_json(self.metadata)
+        metadata_json = json.dumps({FIGURE_METADATA_KEY: sanitized_metadata}, indent=2)
 
         timestamp = datetime.now().isoformat()
 
@@ -604,7 +630,9 @@ def extract_lazy_plot_data_from_network(
         network, input_order, protein_aliases, only_dependent_outputs
     )
 
-    logger.debug(f"extract_lazy_plot_data: {network.name} input_order={input_order} inputs={input_names} output={output_name}")
+    logger.debug(
+        f"extract_lazy_plot_data: {network.name} input_order={input_order} inputs={input_names} output={output_name}"
+    )
 
     def get_xy(pdata: PlotData) -> Tuple[NdArray, NdArray]:
         logger.debug("get_xy({pdata}) called")
