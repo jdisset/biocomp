@@ -82,6 +82,7 @@ def get_gaussian_weighted_knn(
     radius: float = 0.1,  # fixed-kernel options (used when adaptive_sigma=False)
     sigma_in_radius: float = 3.0,  # radius ≈ sigma_in_radius * sigma
     adaptive_sigma: bool = False,  # per-query adaptive bandwidth (balloon estimator)
+    max_radius: float | None = None,  # hard cutoff for adaptive_sigma
     # optional density reweighting
     densities: np.ndarray | None = None,  # len == n_observations
     density_power: float = 0.0,  # alpha in dens^-alpha; 0 disables, 1 = uniform
@@ -97,6 +98,7 @@ def get_gaussian_weighted_knn(
     If adaptive_sigma:
         - Query the k nearest neighbors (no radius cut).
         - Set sigma per query as (dist to k-th neighbor)/sigma_in_radius.
+        - If max_radius is set, zero out weights for neighbors beyond max_radius.
     Else:
         - Query up to k neighbors within 'radius' and set sigma = radius/sigma_in_radius.
         - Neighbors beyond radius get weight 0.
@@ -110,7 +112,6 @@ def get_gaussian_weighted_knn(
     if adaptive_sigma:
         distances, indices = tree.query(x, k=k)
         empty_neighbor_mask = ~np.isfinite(distances)
-        nb_points = (~empty_neighbor_mask).sum(axis=1)
 
         # per-query sigma from the distance to the k-th neighbor
         # use the largest finite distance in the row if the k-th is inf
@@ -119,6 +120,12 @@ def get_gaussian_weighted_knn(
         max_finite = np.where(np.isfinite(kth), kth, -np.inf).max(axis=1)
         sigma = (max_finite / sigma_in_radius).reshape(-1, 1) + eps
         # if a row has no finite neighbors, sigma will be eps (we'll NaN it below)
+
+        if max_radius is not None:
+            beyond_max = distances > max_radius
+            empty_neighbor_mask = empty_neighbor_mask | beyond_max
+
+        nb_points = (~empty_neighbor_mask).sum(axis=1)
     else:
         # fixed-radius
         distances, indices = tree.query(x, k=k, distance_upper_bound=radius)
