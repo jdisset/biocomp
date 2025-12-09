@@ -46,47 +46,31 @@ class StackNode:
         n_outputs = graph.get_nb_outgoing_slots(node_id)
         return f"{node.node_type}_{n_inputs}_{n_outputs}"
 
-    def get(self, stack: "ComputeStack") -> GraphNode:
-        """Get the actual ComputeNode object from the stack"""
+    def _get_compute_graph(self, stack: "ComputeStack") -> GraphState:
         assert stack.networks is not None, "Stack has no networks"
-        assert self.network_id < len(stack.networks)
+        assert self.network_id < len(stack.networks), f"network_id {self.network_id} >= {len(stack.networks)}"
         cg = stack.networks[self.network_id].compute_graph
-        assert cg is not None
-        n = cg.get_node(self.node_id)
+        assert cg is not None, f"compute_graph is None for network {self.network_id}"
+        return cg
+
+    def get(self, stack: "ComputeStack") -> GraphNode:
+        n = self._get_compute_graph(stack).get_node(self.node_id)
         assert n is not None, f"Node {self.node_id} not found in network {self.network_id}"
         return n
 
     def get_forward_stacknode(self, stack: "ComputeStack") -> "StackNode":
-        """Get the stack node that this node is an inverse of"""
         node = self.get(stack)
         assert node.is_inverse_of is not None, "Node has no inverse"
-        assert stack.networks is not None, "Stack has no networks"
-        assert self.network_id < len(stack.networks)
         return stack.get_node_from_net_and_compute_id(self.network_id, node.is_inverse_of.node_id)
 
     def get_outgoing_edges(self, stack: "ComputeStack") -> list[GraphEdge]:
-        """Get the outgoing edges of the node from the stack"""
-        assert stack.networks is not None, "Stack has no networks"
-        assert self.network_id < len(stack.networks)
-        cg = stack.networks[self.network_id].compute_graph
-        assert cg is not None
-        return cg.get_outgoing_edges(self.node_id)
+        return self._get_compute_graph(stack).get_outgoing_edges(self.node_id)
 
     def get_incoming_edges(self, stack: "ComputeStack") -> list[GraphEdge]:
-        """Get the incoming edges of the node from the stack"""
-        assert stack.networks is not None, "Stack has no networks"
-        assert self.network_id < len(stack.networks)
-        cg = stack.networks[self.network_id].compute_graph
-        assert cg is not None
-        return cg.get_incoming_edges(self.node_id)
+        return self._get_compute_graph(stack).get_incoming_edges(self.node_id)
 
     def get_nb_outputs(self, stack: "ComputeStack") -> int:
-        assert stack.networks is not None, "Stack has no networks"
-        assert self.network_id < len(stack.networks)
-        cg = stack.networks[self.network_id].compute_graph
-        assert cg is not None
-        # return number of unique output slots (not edges, as one slot can have multiple edges)
-        return cg.get_nb_outgoing_slots(self.node_id)
+        return self._get_compute_graph(stack).get_nb_outgoing_slots(self.node_id)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

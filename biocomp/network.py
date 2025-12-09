@@ -757,6 +757,7 @@ def recipe_to_networks(
     compg = apply_rule_sequence(rules, cdg)
     assert len(compg) == 1, "Multiple computation graphs generated before inversion"
     compg = compg[0]
+    _check_for_split_sequestron(compg, recipe.name)
     compg = br.sort_output_edges(compg)
     compg = assign_ern_layer_ids(compg)
     graphs = invert_all_paths(compg, mode=inversion_mode) if invert else [compg]
@@ -778,6 +779,19 @@ class NetworkConstructionError(Exception):
     """Exception for errors during network construction"""
 
     pass
+
+
+def _check_for_split_sequestron(graph: GraphState, recipe_name: Optional[str] = None):
+    """Raise NotImplementedError if orphan transcription nodes exist (split sequestron case)."""
+    orphans = [nid for nid, n in graph.nodes.items()
+               if n.node_type == "transcription" and not graph.get_outgoing_edges(nid)]
+    if orphans:
+        ctx = f" in recipe '{recipe_name}'" if recipe_name else ""
+        raise NotImplementedError(
+            f"Split sequestron_ERN detected{ctx}: orphan transcription node(s) {orphans}. "
+            f"This occurs when multiple RNAs with the same ERN recognition site but different "
+            f"parameters (e.g., different uORFs) would need to share the same sequestron."
+        )
 
 
 def graphstate_to_cdg_df(graph: GraphState) -> pd.DataFrame:
