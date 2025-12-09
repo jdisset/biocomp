@@ -416,25 +416,40 @@ class FigureSpec(ArbitraryModel):
         return fax
 
     def save_figure(self, figax: FigAx) -> None:
-        import json
         import io
+        import json
+        import shutil
+        import tempfile
+        import time
+        from datetime import datetime
+
         from PIL import Image
         from PIL.PngImagePlugin import PngInfo
-        from datetime import datetime
-        import xml.etree.ElementTree as ET
 
         assert self.output_file is not None
-        parent_dir = self.output_path.parent
-        parent_dir.mkdir(parents=True, exist_ok=True)
-        # Force filesystem sync for cloud-synced directories (Dropbox, etc.)
-        if not parent_dir.exists():
-            import time
+        output_path = self.output_path
+        parent_dir = output_path.parent
 
-            for _ in range(5):
-                time.sleep(0.1)
+        # For cloud-synced dirs (Dropbox, etc.), save to temp then move atomically
+        is_cloud_sync = "dropbox" in str(parent_dir).lower()
+        if is_cloud_sync:
+            temp_dir = Path(tempfile.mkdtemp(prefix="biocomp_plot_"))
+            temp_path = temp_dir / output_path.name
+        else:
+            temp_dir = None
+            temp_path = output_path
+
+        # Ensure directory exists (only needed if not using temp)
+        if not is_cloud_sync:
+            for attempt in range(10):
                 parent_dir.mkdir(parents=True, exist_ok=True)
-                if parent_dir.exists():
+                try:
+                    list(parent_dir.iterdir())
                     break
+                except OSError:
+                    time.sleep(0.2 * (attempt + 1))
+            else:
+                raise FileNotFoundError(f"Could not create directory: {parent_dir}")
 
         # sanitize metadata to handle tuple keys, numpy arrays, etc.
         sanitized_metadata = sanitize_for_json(self.metadata)
@@ -450,7 +465,7 @@ class FigureSpec(ArbitraryModel):
             "CreationDate": timestamp,
         }
 
-        if str(self.output_path).lower().endswith(".png"):
+        if str(output_path).lower().endswith(".png"):
             buf = io.BytesIO()
             figax.figure.savefig(buf, format="png", bbox_inches="tight")
             buf.seek(0)
@@ -458,22 +473,32 @@ class FigureSpec(ArbitraryModel):
                 metadata = PngInfo()
                 for key, value in full_metadata.items():
                     metadata.add_text(key, value)
-                img.save(self.output_path, pnginfo=metadata)
-        elif str(self.output_path).lower().endswith(".pdf"):
+                img.save(temp_path, pnginfo=metadata)
+        elif str(output_path).lower().endswith(".pdf"):
             full_metadata["CreationDate"] = datetime.now()  # type: ignore
-            figax.figure.savefig(self.output_path, metadata=full_metadata, bbox_inches="tight")
-        elif str(self.output_path).lower().endswith(".svg"):
-            # Save as SVG
-            figax.figure.savefig(self.output_path, format="svg", bbox_inches="tight")
-
-            # Post-process SVG to add custom metadata
-            self._postprocess_svg(self.output_path, full_metadata)
+            figax.figure.savefig(temp_path, metadata=full_metadata, bbox_inches="tight")
+        elif str(output_path).lower().endswith(".svg"):
+            figax.figure.savefig(temp_path, format="svg", bbox_inches="tight")
+            self._postprocess_svg(temp_path, full_metadata)
         else:
             logger.warning(
-                f"Saving figure to {self.output_path} in {self.output_path.suffix} format. "
+                f"Saving figure to {output_path} in {output_path.suffix} format. "
                 f"Only PNG, PDF, and SVG formats have full metadata support."
             )
-            figax.figure.savefig(self.output_path, metadata=full_metadata, bbox_inches="tight")
+            figax.figure.savefig(temp_path, metadata=full_metadata, bbox_inches="tight")
+
+        # Move from temp to final destination for cloud-synced directories
+        if is_cloud_sync:
+            for attempt in range(10):
+                parent_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.move(str(temp_path), str(output_path))
+                    break
+                except OSError:
+                    time.sleep(0.5 * (attempt + 1))
+            else:
+                raise FileNotFoundError(f"Could not save to cloud-synced directory: {output_path}")
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _postprocess_svg(self, svg_path: Path, full_metadata: Dict[str, Any]) -> None:
         """Post-process SVG file to add custom metadata and attributes"""
