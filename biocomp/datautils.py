@@ -518,6 +518,8 @@ class DataConfig(BaseModel):
     perform_data_checks: bool = True
     resampling: ResamplingConfig = Field(default_factory=ResamplingConfig)
     rescaler: DataRescaler = Field(default_factory=CompressedSymLogRescaler)
+    calibration_artifact_threshold_low: float = -700.0
+    calibration_artifact_threshold_high: float = 2e7
 
 
 DEFAULT_DATA_CONFIG = DataConfig(rescaler=CompressedSymLogRescaler())
@@ -639,6 +641,45 @@ class DataManager:
         self._raw_X = [np.array(x) for x in X]
         self._raw_Y = [np.array(y) for y in Y]
         self.n_workers = n_workers
+
+        # detect and remove calibration artifacts (severely negative or excessively high raw values)
+        low_threshold = data_cfg.calibration_artifact_threshold_low
+        high_threshold = data_cfg.calibration_artifact_threshold_high
+        low_artifact_networks = []
+        high_artifact_networks = []
+        for i in range(len(self._raw_X)):
+            low_mask = (self._raw_X[i] < low_threshold).any(axis=1) | (self._raw_Y[i] < low_threshold).any(axis=1)
+            high_mask = (self._raw_X[i] > high_threshold).any(axis=1) | (self._raw_Y[i] > high_threshold).any(axis=1)
+            n_low = int(low_mask.sum())
+            n_high = int(high_mask.sum())
+            net = networks[i]
+            net_name = net.name or f"network_{i}"
+            xp_name = net.metadata.get("experiment_name", "")
+            label = f"{net_name} ({xp_name})" if xp_name else net_name
+            if n_low > 0:
+                low_artifact_networks.append((label, n_low))
+            if n_high > 0:
+                high_artifact_networks.append((label, n_high))
+            artifact_mask = low_mask | high_mask
+            if artifact_mask.sum() > 0:
+                self._raw_X[i] = self._raw_X[i][~artifact_mask]
+                self._raw_Y[i] = self._raw_Y[i][~artifact_mask]
+        if low_artifact_networks:
+            total = sum(n for _, n in low_artifact_networks)
+            sorted_low = sorted(low_artifact_networks, key=lambda x: x[1], reverse=True)
+            details = ", ".join(f"{name}: {n}" for name, n in sorted_low)
+            logger.warning(
+                f"Removed {total} points with raw values below {low_threshold} "
+                f"(likely calibration artifacts). Affected: [{details}]"
+            )
+        if high_artifact_networks:
+            total = sum(n for _, n in high_artifact_networks)
+            sorted_high = sorted(high_artifact_networks, key=lambda x: x[1], reverse=True)
+            details = ", ".join(f"{name}: {n}" for name, n in sorted_high)
+            logger.warning(
+                f"Removed {total} points with raw values above {high_threshold:.2e} "
+                f"(likely calibration artifacts). Affected: [{details}]"
+            )
 
         # remove invalid values (NaNs, out of range)
         for i in range(len(self._raw_X)):
