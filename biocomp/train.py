@@ -370,6 +370,7 @@ def start(
     enable_jax_tqdm: bool = False,
     init_params: Optional[ParameterTree] = None,
     cached_step: Optional[CompiledTrainingStep] = None,
+    skip_weight_init: bool = False,
 ):
     import jax
     import jax.numpy as jnp
@@ -478,14 +479,15 @@ def start(
         xbatches, ybatches = get_new_batches()
 
     # store per_output_weights in params BEFORE filter_by_tag (filter creates copies)
-    per_output_weights = expand_weights_to_outputs(dman.get_weights(), stack.networks)
-    weights_arr = jnp.asarray(per_output_weights)
-    weights_replicated = jnp.broadcast_to(
-        weights_arr, (training_config.n_replicates, len(per_output_weights))
-    )
-    params.at(
-        "global/per_output_weights", weights_replicated, tags=["non_grad", "local"], overwrite=True
-    )
+    if not skip_weight_init:
+        per_output_weights = expand_weights_to_outputs(dman.get_weights(), stack.networks)
+        weights_arr = jnp.asarray(per_output_weights)
+        weights_replicated = jnp.broadcast_to(
+            weights_arr, (training_config.n_replicates, len(per_output_weights))
+        )
+        params.at(
+            "global/per_output_weights", weights_replicated, tags=["non_grad", "local"], overwrite=True
+        )
 
     if training_config.clear_source_data and not streaming_mode:
         dman.clear_source_data()
