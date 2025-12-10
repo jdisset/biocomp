@@ -767,38 +767,39 @@ class DataManager:
         Generate batches of data from the dataset.
         Uses JAX sampling if jax_sampling=True for improved performance.
         """
-        if self._densities is None:
+        if not self._densities:
             self.compute_densities()
-            assert self._densities is not None
 
         if self.jax_sampling:
             return self._get_batches_jax(n_batches, batch_size, rng_key, concat_along_feature_axis)
         else:
+            if not self._X:
+                raise RuntimeError("NumPy batch generation unavailable after clear_source_data()")
             return self._get_batches_numpy(
                 n_batches, batch_size, rng_key, concat_along_feature_axis
             )
 
     def _ensure_padded_cache(self):
-        """Build and cache padded arrays for JAX batch generation."""
+        """Build and cache padded arrays for JAX batch generation on CPU."""
         if self._padded_cache is not None:
             return
         max_pts = max(x.shape[0] for x in self._X)
+        cpu = jax.devices("cpu")[0]
 
         def _pad_2d(arr, pad_len):
-            return jnp.pad(arr, ((0, pad_len), (0, 0)))
+            return np.pad(arr, ((0, pad_len), (0, 0)))
 
         def _pad_1d(arr, pad_len):
-            return jnp.pad(arr, (0, pad_len))
+            return np.pad(arr, (0, pad_len))
 
         X_pad, Y_pad, D_pad, M_pad = [], [], [], []
         for x, y, d in zip(self._X, self._Y, self._densities):
             pad_len = max_pts - x.shape[0]
-            X_pad.append(_pad_2d(jnp.asarray(x), pad_len))
-            Y_pad.append(_pad_2d(jnp.asarray(y), pad_len))
-            D_pad.append(_pad_1d(jnp.asarray(d), pad_len))
-            M_pad.append(
-                jnp.concatenate([jnp.ones(x.shape[0], dtype=bool), jnp.zeros(pad_len, dtype=bool)])
-            )
+            X_pad.append(jax.device_put(_pad_2d(np.asarray(x), pad_len), cpu))
+            Y_pad.append(jax.device_put(_pad_2d(np.asarray(y), pad_len), cpu))
+            D_pad.append(jax.device_put(_pad_1d(np.asarray(d), pad_len), cpu))
+            mask = np.concatenate([np.ones(x.shape[0], dtype=bool), np.zeros(pad_len, dtype=bool)])
+            M_pad.append(jax.device_put(mask, cpu))
         self._padded_cache = {"X": X_pad, "Y": Y_pad, "D": D_pad, "M": M_pad}
 
     def _get_batches_jax(
@@ -809,18 +810,18 @@ class DataManager:
         concat_along_feature_axis: bool,
     ):
         q = float(self.data_cfg.resampling.density_threshold_quantile)
-        n_nets = len(self._X)
 
-        # use cached padded arrays
+        # padded cache lives on CPU to save GPU memory
         self._ensure_padded_cache()
         X_pad = self._padded_cache["X"]
         Y_pad = self._padded_cache["Y"]
         D_pad = self._padded_cache["D"]
         M_pad = self._padded_cache["M"]
 
+        n_nets = len(X_pad)
         keys = jax.random.split(rng_key, n_nets)
 
-        # sample_batches_jax is already @jax.jit decorated at module level
+        # sample_batches_jax runs on CPU (where padded data lives)
         xb_list, yb_list = zip(
             *[
                 sample_batches_jax(x, y, d, m, batch_size, n_batches, q, k)
@@ -831,15 +832,15 @@ class DataManager:
         if concat_along_feature_axis:
             xbatches = jnp.concatenate(xb_list, axis=2)
             ybatches = jnp.concatenate(yb_list, axis=2)
-
-            exp_x = sum(x.shape[1] for x in self._X)
-            exp_y = sum(y.shape[1] for y in self._Y)
-            assert xbatches.shape == (n_batches, batch_size, exp_x)
-            assert ybatches.shape == (n_batches, batch_size, exp_y)
             assert xbatches.shape[2] == sum(n.get_nb_inputs() for n in self._networks)
             assert ybatches.shape[2] == sum(n.get_nb_outputs() for n in self._networks)
         else:
             xbatches, ybatches = xb_list, yb_list  # tuple per network
+
+        # move batches to GPU for training (computation follows data)
+        gpu = jax.devices("gpu")[0] if jax.devices("gpu") else jax.devices()[0]
+        xbatches = jax.device_put(xbatches, gpu)
+        ybatches = jax.device_put(ybatches, gpu)
 
         return xbatches, ybatches
 
@@ -976,6 +977,20 @@ class DataManager:
         """Update network weights without rebuilding the data manager."""
         assert len(weights) == len(self._networks)
         self._weights = weights
+
+    def clear_source_data(self):
+        """
+        Release source data arrays to free memory.
+        Preserves _padded_cache (needed for batch regeneration each epoch) and _networks.
+        """
+        self._raw_X = []
+        self._raw_Y = []
+        self._X = []
+        self._Y = []
+        self._densities = []
+        self._kde_points = []
+        self._kde_bws = []
+        logger.debug("DataManager source data cleared")
 
     def get_per_network_xy_samples(self, n_samples, only_dependent=False):
         """

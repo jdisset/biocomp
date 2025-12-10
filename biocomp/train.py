@@ -352,6 +352,7 @@ class TrainingConfig(OptimConfig):
     n_replicates: int = 1  # override default
     n_batches: int = 2048
     streaming_batches: bool = False  # generate batches on-demand to reduce memory
+    clear_source_data: bool = True  # clear DataManager data after batch generation
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -485,6 +486,9 @@ def start(
     params.at(
         "global/per_output_weights", weights_replicated, tags=["non_grad", "local"], overwrite=True
     )
+
+    if training_config.clear_source_data and not streaming_mode:
+        dman.clear_source_data()
 
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
 
