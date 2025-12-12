@@ -553,6 +553,12 @@ def optimize(
             loggers, i, config, step_history, stack, lambda p, s: p > 0 and s % p == 0
         )
 
+    t_sync = time.time()
+    jax.block_until_ready(params)
+    sync_time = time.time() - t_sync
+    if sync_time > 1.0:
+        logger.info(f"GPU sync took {sync_time:.1f}s (async backlog)")
+
     if not async_handler:
         run_logger_callbacks(
             loggers, n_total_steps, config, step_history, stack, lambda p, s: p is None or p == -1

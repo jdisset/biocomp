@@ -371,6 +371,7 @@ def start(
     init_params: Optional[ParameterTree] = None,
     cached_step: Optional[CompiledTrainingStep] = None,
     skip_weight_init: bool = False,
+    skip_loss_history: bool = False,
 ):
     import jax
     import jax.numpy as jnp
@@ -469,6 +470,7 @@ def start(
         return jnp.asarray(xbatches), jnp.asarray(ybatches)
 
     streaming_mode = training_config.streaming_batches
+    t_batch = time.time()
     if streaming_mode:
         logger.info("Using streaming batch generation (lower GPU memory, slightly slower)")
         # generate a small batch just for shape inference during compilation
@@ -477,6 +479,9 @@ def start(
         xbatches, ybatches = xy_batches
     else:
         xbatches, ybatches = get_new_batches()
+    batch_time = time.time() - t_batch
+    if batch_time > 1.0:
+        logger.info(f"Batch generation took {batch_time:.1f}s")
 
     # store per_output_weights in params BEFORE filter_by_tag (filter creates copies)
     if not skip_weight_init:
@@ -486,7 +491,10 @@ def start(
             weights_arr, (training_config.n_replicates, len(per_output_weights))
         )
         params.at(
-            "global/per_output_weights", weights_replicated, tags=["non_grad", "local"], overwrite=True
+            "global/per_output_weights",
+            weights_replicated,
+            tags=["non_grad", "local"],
+            overwrite=True,
         )
 
     if training_config.clear_source_data and not streaming_mode:
@@ -504,11 +512,8 @@ def start(
     opt_state = jax.vmap(optimizer.init)(dynamic)
 
     logger.info(
-        f"""Done initializing optimizer,
-        n_replicates: {training_config.n_replicates}
-        batches: {xbatches.shape[1]}
-        batch per step: {training_config.batches_per_step}
-        random seed: {training_config.seed}"""
+        f"Done initializing optimizer, n_replicates: {training_config.n_replicates}, "
+        f"batches: {xbatches.shape[1]}, batch_per_step: {training_config.batches_per_step}"
     )
 
     # --- loss & update functions
@@ -575,8 +580,7 @@ def start(
             b_key = jax.random.fold_in(step_key, i)
             xb, yb = get_step_batches(b_key)
         else:
-            # pre-generated: slice from full batch array, regenerate each epoch
-            if i % step_per_epoch == 0:
+            if i > 1 and (i - 1) % step_per_epoch == 0:
                 epoch += 1
                 logger.info(f"Starting epoch {epoch}")
                 b_key = jax.random.fold_in(step_key, epoch)
@@ -601,13 +605,25 @@ def start(
         step_history["latest_params"] = params
         step_history["opt_state"] = opt_state
 
-        if "loss" in step_history:
+        if "loss" in step_history and not skip_loss_history:
             loss_history.append(step_history["loss"])
 
         run_logger_callbacks(
             loggers, i, training_config, step_history, stack, lambda p, s: p > 0 and s % p == 0
         )
 
+    logger.info("Training loop finished, starting cleanup...")
+
+    t_sync = time.time()
+    jax.block_until_ready(params)
+    logger.info(f"GPU sync (params) took {time.time() - t_sync:.2f}s")
+
+    if loss_history:
+        t_sync = time.time()
+        jax.block_until_ready(loss_history)
+        logger.info(f"GPU sync (loss_history) took {time.time() - t_sync:.2f}s")
+
+    t_callbacks = time.time()
     if not async_handler:
         run_logger_callbacks(
             loggers,
@@ -617,6 +633,7 @@ def start(
             stack,
             lambda p, s: p is None or p == -1,
         )
+    logger.info(f"End callbacks took {time.time() - t_callbacks:.2f}s")
 
     logger.info(f"End of training for {training_config.n_epochs} epochs")
 
