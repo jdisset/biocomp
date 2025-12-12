@@ -554,23 +554,6 @@ def find_matches(
     return matches
 
 
-def sorted_with_indices(items):
-    """Sort items and return the sorted list along with original indices."""
-    indexed_items = list(enumerate(items))
-    indexed_items.sort(key=lambda x: x[1])  # Sort by item value
-    return [item for index, item in indexed_items], [index for index, item in indexed_items]
-
-
-def reorder_list(source_list, indices):
-    """Reorder source_list according to the given indices."""
-    return [source_list[i] for i in indices]
-
-
-def find_index(lst, item):
-    """Find the index of item in list."""
-    return lst.index(item)
-
-
 def sorted_with_indices(lst):
     """Return (sorted_list, indices_for_reordering).
 
