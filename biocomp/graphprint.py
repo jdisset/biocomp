@@ -1,10 +1,17 @@
-"""Interactive graph visualization for GraphState objects using Dash Cytoscape."""
+"""Graph visualization for GraphState objects.
 
-import dash
-from dash import html, dcc, Input, Output
-import dash_cytoscape as cyto
-import webbrowser
-import threading
+Interactive HTML visualization using Dash Cytoscape and text-based ASCII visualization
+for console debugging.
+"""
+
+from __future__ import annotations
+from pathlib import Path
+from typing import Optional, TYPE_CHECKING
+from collections import defaultdict
+
+if TYPE_CHECKING:
+    from .network import Network
+
 from .graphengine import GraphState, GraphNode, GraphEdge
 
 NODE_COLORS = {
@@ -221,6 +228,12 @@ def show_graph(
     layout_name: str = "horizontal",
 ) -> None:
     """Show interactive graph visualization using Dash Cytoscape."""
+    import webbrowser
+    import threading
+
+    import dash
+    from dash import html, dcc, Input, Output
+    import dash_cytoscape as cyto
 
     # Create elements with horizontal positioning if needed
     use_horizontal = layout_name == "horizontal"
@@ -523,3 +536,519 @@ def show_graph(
 
 
 plot_graph = show_graph
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TEXT-BASED GRAPH PRINTING (ASCII visualization for console/logging)
+# ════════════════════════════════════════════════════════════════════════════════
+
+TYPE_SHORTNAMES = {
+    "source": "src",
+    "transcription": "tc",
+    "translation": "tl",
+    "sequestron_ERN": "ern",
+    "aggregation": "agg",
+    "output": "out",
+    "bias": "bias",
+    "numeric": "num",
+    "input": "inp",
+    "inv_source": "i_src",
+    "inv_transcription": "i_tc",
+    "inv_translation": "i_tl",
+    "inv_aggregation": "i_agg",
+}
+
+
+def _get_type_short(node_type: str) -> str:
+    return TYPE_SHORTNAMES.get(node_type, node_type[:4])
+
+
+def _get_tu_name(node: GraphNode, graph: GraphState) -> str:
+    """Generate TU name: {cotx_name}::{tu_name}::{position}"""
+    cotx = node.extra.get("cotx_group", "")
+    tu = node.extra.get("tu_name") or node.extra.get("name", "")
+    if not cotx and not tu:
+        return ""
+    name = f"{cotx}::{tu}" if cotx else tu
+    return name
+
+
+def _build_layer_info(network: "Network") -> tuple[list[dict], dict[int, int]]:
+    """Build layer information from a single network using topological ordering.
+
+    Returns:
+        (layers, node_to_layer): layers is a list of dicts with 'type', 'nodes'
+        node_to_layer maps node_id -> layer_index
+    """
+    from .stack_builder import topological_order
+
+    graph = network.compute_graph
+    if graph is None:
+        return [], {}
+
+    batches = topological_order(graph)
+
+    # group nodes by type within each batch, then merge same-type groups across batches
+    layers = []
+    node_to_layer = {}
+
+    for batch in batches:
+        # group by node type
+        type_groups: dict[str, list[int]] = defaultdict(list)
+        for node_id in batch:
+            node = graph.nodes[node_id]
+            type_groups[node.node_type].append(node_id)
+
+        # each type group becomes a layer
+        for node_type, node_ids in type_groups.items():
+            layer_idx = len(layers)
+            layers.append({"type": node_type, "nodes": sorted(node_ids)})
+            for nid in node_ids:
+                node_to_layer[nid] = layer_idx
+
+    return layers, node_to_layer
+
+
+def _format_embedding_value(value) -> str:
+    """Format an embedding value for display."""
+    if isinstance(value, tuple):
+        if len(value) == 1:
+            return str(value[0])
+        return f"({len(value)} opts)"
+    return str(value)
+
+
+def _is_unlocked(value) -> bool:
+    """Check if an embedding value is unlocked (multiple options)."""
+    return isinstance(value, (list, tuple)) and len(value) > 1
+
+
+class GraphPrinter:
+    """ASCII graph printer for Network objects."""
+
+    def __init__(self, network: "Network"):
+        self.network = network
+        self.graph = network.compute_graph
+        self.layers, self.node_to_layer = _build_layer_info(network)
+
+    def format_header(self) -> str:
+        """Format the header box."""
+        if self.graph is None:
+            return "Empty graph"
+
+        name = self.network.name or "unnamed"
+        n_nodes = len(self.graph.nodes)
+        n_edges = len(self.graph.edges)
+
+        inner = f" COMPUTE GRAPH: {name}"
+        stats = f"{n_nodes} nodes │ {n_edges} edges "
+        width = max(80, len(inner) + len(stats) + 4)
+
+        lines = [
+            "┏" + "━" * (width - 2) + "┓",
+            f"┃{inner}{' ' * (width - len(inner) - len(stats) - 2)}{stats}┃",
+            "┗" + "━" * (width - 2) + "┛",
+        ]
+        return "\n".join(lines)
+
+    def format_column_headers(self) -> str:
+        """Format the layer column headers."""
+        if not self.layers:
+            return ""
+
+        headers = []
+        for i, layer in enumerate(self.layers):
+            short = _get_type_short(layer["type"])
+            headers.append(f"L{i}:{short}")
+
+        # compute column width
+        col_width = max(self.min_col_width, max(len(h) for h in headers) + 2)
+
+        label_width = max(len(lbl) for lbl in self.row_labels) if self.row_labels else 0
+        label_width = max(label_width, 20)
+
+        header_line = " " * label_width + "  "
+        underline = " " * label_width + "  "
+
+        for h in headers:
+            header_line += h.center(col_width)
+            underline += "─" * len(h).center(col_width) if len(h) < col_width else "─" * col_width
+
+        return header_line + "\n" + underline
+
+    def format_node_table(self) -> str:
+        """Format the node table."""
+        if self.graph is None:
+            return ""
+
+        lines = [
+            f"\nNODES ({len(self.graph.nodes)} total)",
+            "─" * 100,
+            f" {'ID':>3} │ {'Type':<15} │ {'Name':<25} │ {'Layer':^5} │ {'Cotx':<8} │ Extra",
+            "─" * 100,
+        ]
+
+        # Sort by layer index first, then by node_id
+        sorted_nodes = sorted(
+            self.graph.nodes.values(),
+            key=lambda n: (self.node_to_layer.get(n.node_id, 999), n.node_id),
+        )
+
+        for node in sorted_nodes:
+            # Get name based on node type
+            name = node.extra.get("name", "")
+            if not name and node.extra.get("seq_name"):
+                name = node.extra["seq_name"]
+            name = name[:25]
+
+            layer_idx = self.node_to_layer.get(node.node_id, -1)
+            layer_str = f"L{layer_idx}" if layer_idx >= 0 else "-"
+            cotx = node.extra.get("cotx_group", "-")[:8]
+
+            # Build extra info based on node type
+            extra_parts = []
+            if node.node_type == "source":
+                # Show ratio with range if unlocked
+                ratio_range = node.extra.get("ratio_range")
+                if ratio_range:
+                    rmin = ratio_range.get("min", "?")
+                    rmax = ratio_range.get("max", "?")
+                    extra_parts.append(f"ratio=[{rmin}-{rmax}]")
+                elif "ratio" in node.extra:
+                    extra_parts.append(f"ratio={node.extra['ratio']:.2f}")
+                if "source_id" in node.extra:
+                    extra_parts.append(f"src={node.extra['source_id']}")
+            elif node.node_type == "aggregation":
+                # Show ratios with unlocked indicator
+                ratios = node.extra.get("ratios", [])
+                ratio_ranges = node.extra.get("ratio_ranges", [])
+                if ratios:
+                    ratio_strs = []
+                    for i, r in enumerate(ratios):
+                        rng = ratio_ranges[i] if i < len(ratio_ranges) else None
+                        if rng:
+                            ratio_strs.append(f"[{rng.get('min', '?')}-{rng.get('max', '?')}]")
+                        else:
+                            ratio_strs.append(f"{r:.2f}")
+                    extra_parts.append(f"ratios=[{','.join(ratio_strs)}]")
+                # Show bias if present
+                bias = node.extra.get("fluo_bias")
+                if bias is not None:
+                    if isinstance(bias, dict):
+                        if "min" in bias or "max" in bias:
+                            extra_parts.append(f"bias=[{bias.get('min', '?')}-{bias.get('max', '?')}]")
+                        elif "value" in bias:
+                            extra_parts.append(f"bias={bias['value']:.2f}")
+                    else:
+                        extra_parts.append(f"bias={bias}")
+            elif node.node_type == "sequestron_ERN":
+                if "layer_id" in node.extra:
+                    extra_parts.append(f"layer={node.extra['layer_id']}")
+            elif node.node_type == "numeric":
+                if "role" in node.extra:
+                    extra_parts.append(f"role={node.extra['role']}")
+
+            extra_str = ", ".join(extra_parts)[:45]
+
+            lines.append(
+                f" {node.node_id:>3} │ {node.node_type:<15} │ {name:<25} │ {layer_str:^5} │ {cotx:<8} │ {extra_str}"
+            )
+
+        lines.append("─" * 100)
+        return "\n".join(lines)
+
+    def format_edge_table(
+        self,
+        embedding: Optional[str] = None,
+        unlocked_only: bool = False,
+    ) -> str:
+        """Format the edge table with optional filtering."""
+        if self.graph is None:
+            return ""
+
+        edges = list(self.graph.edges.values())
+
+        # filter by embedding if specified
+        if embedding:
+            edges = [e for e in edges if embedding in e.content_embedding_names]
+
+        # filter unlocked only
+        if unlocked_only:
+            edges = [
+                e for e in edges if any(_is_unlocked(v) for v in e.content_embedding_names.values())
+            ]
+
+        if not edges:
+            return "\nNo edges match the filter criteria."
+
+        lines = [
+            f"\nEDGES ({len(edges)} total)",
+            "─" * 110,
+            f" {'From → To':<20} │ {'Embeddings':<50} │ tu_id",
+            "─" * 110,
+        ]
+
+        for edge in sorted(edges, key=lambda e: (e.source_id, e.target_id)):
+            src_node = self.graph.nodes.get(edge.source_id)
+            tgt_node = self.graph.nodes.get(edge.target_id)
+            src_short = _get_type_short(src_node.node_type) if src_node else "?"
+            tgt_short = _get_type_short(tgt_node.node_type) if tgt_node else "?"
+            from_to = f"{src_short}:{edge.source_id} → {tgt_short}:{edge.target_id}"
+
+            # Format all embeddings
+            emb_parts = []
+            for emb_name, emb_value in edge.content_embedding_names.items():
+                emb_parts.append(f"{emb_name}={_format_embedding_value(emb_value)}")
+            emb_str = ", ".join(emb_parts) if emb_parts else "-"
+
+            # Get tu_id
+            tu_id = edge.extra.get("tu_id", "-")
+            if isinstance(tu_id, list):
+                tu_id = tu_id[0] if tu_id else "-"
+
+            lines.append(f" {from_to:<20} │ {emb_str:<50} │ {tu_id}")
+
+        lines.append("─" * 110)
+        return "\n".join(lines)
+
+    def format_full(
+        self,
+        show_nodes: bool = True,
+        show_edges: bool = True,
+    ) -> str:
+        """Format the complete graph output."""
+        parts = [self.format_header()]
+
+        if show_nodes:
+            parts.append(self.format_node_table())
+
+        if show_edges:
+            parts.append(self.format_edge_table())
+
+        return "\n".join(parts)
+
+
+def print_graph(
+    network: "Network",
+    show_nodes: bool = True,
+    show_edges: bool = True,
+    output: Optional[Path] = None,
+    return_string: bool = False,
+) -> Optional[str]:
+    """Print node and edge tables for a network's compute graph.
+
+    Args:
+        network: Network to visualize
+        show_nodes: Show node table
+        show_edges: Show edge table
+        output: Write to file instead of stdout
+        return_string: Return string instead of printing
+
+    Returns:
+        String if return_string=True, else None
+    """
+    printer = GraphPrinter(network)
+    result = printer.format_full(show_nodes=show_nodes, show_edges=show_edges)
+
+    if return_string:
+        return result
+
+    if output:
+        output.write_text(result)
+        print(f"Graph written to {output}")
+    else:
+        print(result)
+
+    return None
+
+
+def print_paths(
+    network: "Network",
+    to_node: Optional[int] = None,
+    from_node: Optional[int] = None,
+    max_length: int = 10,
+    show_edge_details: bool = True,
+    return_string: bool = False,
+) -> Optional[str]:
+    """Print all paths to or from a specific node.
+
+    Args:
+        network: Network to analyze
+        to_node: Find all paths TO this node
+        from_node: Find all paths FROM this node
+        max_length: Maximum path length to search
+        show_edge_details: Show edge info on paths
+        return_string: Return string instead of printing
+    """
+    graph = network.compute_graph
+    if graph is None:
+        msg = "Network has no compute graph"
+        return msg if return_string else print(msg)
+
+    if to_node is None and from_node is None:
+        msg = "Must specify either to_node or from_node"
+        return msg if return_string else print(msg)
+
+    lines = []
+
+    if to_node is not None:
+        target = graph.nodes.get(to_node)
+        if target is None:
+            msg = f"Node {to_node} not found"
+            return msg if return_string else print(msg)
+
+        lines.append(f"PATHS TO NODE [{target.node_type}:{to_node}]")
+        lines.append("═" * 40)
+        lines.append("")
+
+        # find all paths using BFS with path tracking
+        paths = []
+        queue = [([to_node], set([to_node]))]
+
+        while queue:
+            path, visited = queue.pop(0)
+            if len(path) > max_length:
+                continue
+
+            current = path[-1]
+            incoming = graph.get_incoming_edges(current)
+
+            if not incoming:
+                # reached a root, save path (reversed)
+                paths.append(list(reversed(path)))
+            else:
+                for edge in incoming:
+                    if edge.source_id not in visited:
+                        new_path = path + [edge.source_id]
+                        new_visited = visited | {edge.source_id}
+                        queue.append((new_path, new_visited))
+
+        if not paths:
+            lines.append("No paths found.")
+        else:
+            for i, path in enumerate(paths, 1):
+                via = ""
+                if any(
+                    graph.nodes.get(nid).node_type == "sequestron_ERN"
+                    for nid in path
+                    if graph.nodes.get(nid)
+                ):
+                    via = ", via ERN"
+
+                lines.append(f"Path {i} (length {len(path)}{via}):")
+
+                for j, node_id in enumerate(path):
+                    node = graph.nodes[node_id]
+                    short = _get_type_short(node.node_type)
+                    tu = _get_tu_name(node, graph)
+                    extra = ""
+                    if node.node_type == "sequestron_ERN" and node.extra.get("ern_type"):
+                        extra = f" {node.extra['ern_type']}"
+
+                    lines.append(f"  [{short}:{node_id}]{extra} {tu}")
+
+                    if j < len(path) - 1 and show_edge_details:
+                        # find edge to next node
+                        next_id = path[j + 1]
+                        edge = None
+                        for e in graph.get_outgoing_edges(node_id):
+                            if e.target_id == next_id:
+                                edge = e
+                                break
+
+                        if edge:
+                            edge_info = f"      │ edge ({edge.source_id},{edge.target_id},{edge.from_output_slot},{edge.to_input_slot})"
+                            if edge.content_embedding_names:
+                                emb_parts = []
+                                for k, v in edge.content_embedding_names.items():
+                                    emb_parts.append(f"{k}={_format_embedding_value(v)}")
+                                edge_info += f": {', '.join(emb_parts)}"
+                            lines.append(edge_info)
+                            lines.append("      ▼")
+
+                lines.append("")
+
+            lines.append(f"{len(paths)} path(s) found.")
+
+    elif from_node is not None:
+        source = graph.nodes.get(from_node)
+        if source is None:
+            msg = f"Node {from_node} not found"
+            return msg if return_string else print(msg)
+
+        lines.append(f"PATHS FROM NODE [{source.node_type}:{from_node}]")
+        lines.append("═" * 40)
+        lines.append("")
+
+        # find all paths using BFS
+        paths = []
+        queue = [([from_node], set([from_node]))]
+
+        while queue:
+            path, visited = queue.pop(0)
+            if len(path) > max_length:
+                continue
+
+            current = path[-1]
+            outgoing = graph.get_outgoing_edges(current)
+
+            if not outgoing:
+                # reached a leaf, save path
+                paths.append(path)
+            else:
+                for edge in outgoing:
+                    if edge.target_id not in visited:
+                        new_path = path + [edge.target_id]
+                        new_visited = visited | {edge.target_id}
+                        queue.append((new_path, new_visited))
+
+        if not paths:
+            lines.append("No paths found.")
+        else:
+            for i, path in enumerate(paths, 1):
+                lines.append(f"Path {i} (length {len(path)}):")
+
+                for j, node_id in enumerate(path):
+                    node = graph.nodes[node_id]
+                    short = _get_type_short(node.node_type)
+                    tu = _get_tu_name(node, graph)
+                    lines.append(f"  [{short}:{node_id}] {tu}")
+
+                    if j < len(path) - 1:
+                        lines.append("      ▼")
+
+                lines.append("")
+
+            lines.append(f"{len(paths)} path(s) found.")
+
+    result = "\n".join(lines)
+
+    if return_string:
+        return result
+    print(result)
+    return None
+
+
+def print_edges(
+    network: "Network",
+    embedding: Optional[str] = None,
+    unlocked_only: bool = False,
+    tu_filter: Optional[list[int]] = None,
+    return_string: bool = False,
+) -> Optional[str]:
+    """Print edge information with optional filtering.
+
+    Args:
+        network: Network to analyze
+        embedding: Only edges with this embedding name
+        unlocked_only: Only show edges with unlocked (multi-value) embeddings
+        tu_filter: Only these tu_ids
+        return_string: Return string instead of printing
+    """
+    printer = GraphPrinter(network)
+    result = printer.format_edge_table(embedding=embedding, unlocked_only=unlocked_only)
+
+    if return_string:
+        return result
+    print(result)
+    return None
