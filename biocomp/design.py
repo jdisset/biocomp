@@ -503,15 +503,20 @@ class DesignManager(BaseModel):
         logger.info(f"Design network names: {[n.name for n in self.networks]}")
         stack = ComputeStack(networks=self.networks)
         logger.info(f"Stack after creation has {len(stack.networks)} networks")
-        if unlock_ratios:
-            assert model.compute_config is not None
-            assert model.compute_config.node_functions is not None
 
-            model.compute_config.node_functions["aggregation"] = encode_function(
+        # Deep copy compute_config to avoid mutating the original model
+        # (mutation would change model.signature since it's computed from compute_config)
+        compute_config = model.compute_config.model_copy(deep=True)
+
+        if unlock_ratios:
+            assert compute_config is not None
+            assert compute_config.node_functions is not None
+
+            compute_config.node_functions["aggregation"] = encode_function(
                 partial(nd.aggregation, random_init=True)
             )
 
-        stack.build(model.compute_config)
+        stack.build(compute_config)
         logger.info(
             f"Stack built: {stack.get_nb_networks()} networks, "
             f"{stack.get_nb_inputs()} inputs, {stack.get_nb_outputs()} outputs"
@@ -744,7 +749,16 @@ def plot_design_results(
 ### {{{                       --     main design function     --
 
 
-def normalize_ratios_prune(current_ratios, rel_off=1e-3, eps=1e-12):
+def normalize_ratios_prune(current_ratios, rel_off=0.01, eps=1e-12):
+    """Normalize ratios to max=1 and prune small values.
+
+    Args:
+        current_ratios: Array of shape (n_aggregations, n_ratios)
+        rel_off: Relative threshold - values below rel_off * max are pruned to 0.
+                 Default 0.01 means anything <1% of max is pruned, limiting
+                 the max ratio spread to ~100:1.
+        eps: Small constant for numerical stability
+    """
     A = jnp.abs(current_ratios)
     m = jnp.maximum(jnp.max(A, axis=1, keepdims=True), eps)
     norm = A / m
