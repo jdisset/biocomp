@@ -1,6 +1,6 @@
 from .library import PartsLibrary as PartsLibrary
 import jax
-from jax import vmap, jit
+from jax import vmap
 import jax.numpy as jnp
 import numpy as np
 from .parameters import ParameterTree

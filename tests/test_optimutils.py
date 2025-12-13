@@ -226,22 +226,22 @@ class TestRunLoggerCallbacks:
         assert called == ["end", "end"]
 
     def test_callback_error_handling(self):
-        """Test that callback errors are caught and logged."""
+        """Test that callback errors are logged and re-raised."""
 
         def failing_callback(step, config, step_history, stack):
             raise ValueError("Test error")
 
         loggers = [(1, failing_callback)]
 
-        # Should not raise
-        run_logger_callbacks(
-            loggers,
-            step=1,
-            config=None,
-            step_history={},
-            stack=None,
-            period_filter=lambda p, s: p > 0 and s % p == 0,
-        )
+        with pytest.raises(ValueError, match="Test error"):
+            run_logger_callbacks(
+                loggers,
+                step=1,
+                config=None,
+                step_history={},
+                stack=None,
+                period_filter=lambda p, s: p > 0 and s % p == 0,
+            )
 
 
 class TestAsSchedule:

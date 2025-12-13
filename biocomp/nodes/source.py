@@ -4,9 +4,8 @@ import jax
 from jax.tree_util import Partial as partial
 from jax.typing import ArrayLike
 import jax.numpy as jnp
-from jax import vmap
 import numpy as np
-from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
+from biocomp.parameters import ParameterTree, init_if_needed
 
 from biocomp.nodeutils import (
     LayerInstance,
@@ -26,7 +25,6 @@ from biocomp.neuralutils import (
     DEFAULT_INITIALIZER,
     dense_mlp,
 )
-import biocomp.quantization as qz
 
 
 PRNGKey = ArrayLike
@@ -253,7 +251,7 @@ def simple_source_with_pos(
     def apply(value: ArrayLike, **_) -> tuple[ArrayLike, dict]:
         # compute position scaling factors: 0.9^p for p in [0, n_outputs)
         positions = np.arange(n_outputs)
-        scale_factors = 0.9 ** positions
+        scale_factors = 0.9**positions
 
         # apply scaling to each output position
         result = jnp.array([value * scale for scale in scale_factors])
@@ -284,10 +282,12 @@ def simple_inv_source_with_pos(
         )
         params.at(f"{namespace}/original_positions", positions, tags=[NON_GRAD_TAG])
 
-    def apply(value: ArrayLike, params: ParameterTree, node_id: ArrayLike, **_) -> tuple[ArrayLike, dict]:
+    def apply(
+        value: ArrayLike, params: ParameterTree, node_id: ArrayLike, **_
+    ) -> tuple[ArrayLike, dict]:
         # get the original position this node is inverting
         original_position = params.at(f"{namespace}/original_positions")[node_id]
-        scale_factor = 0.9 ** original_position
+        scale_factor = 0.9**original_position
 
         # invert: x = y_p / 0.9^p
         result = value / scale_factor

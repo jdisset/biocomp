@@ -1,6 +1,4 @@
 import numpy as np
-from biocomp.logging_config import get_logger
-from scipy.stats import norm
 from scipy.spatial import cKDTree
 
 

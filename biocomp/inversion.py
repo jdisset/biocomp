@@ -19,9 +19,9 @@ def invert_all_paths(graph: GraphState, mode: str = "shortest") -> list[GraphSta
         incoming_count[edge.target_id] += 1
 
     invertible_types = {"numeric", "bias", "aggregation", "source", "transcription", "translation"}
-    is_invertible = (
-        lambda nid: nodes_by_id[nid].node_type in invertible_types and incoming_count[nid] <= 1
-    )
+
+    def is_invertible(nid):
+        return nodes_by_id[nid].node_type in invertible_types and incoming_count[nid] <= 1
 
     def find_paths(start_id):
         paths = []

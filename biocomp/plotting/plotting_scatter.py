@@ -23,6 +23,7 @@ def scatter_3d_interactive(
     y,
     network,
     rescaler,
+    *,
     xlims=(0, 1),
     title=None,
     size=10,
@@ -31,7 +32,10 @@ def scatter_3d_interactive(
     filename=None,
     **kw,
 ):
-    xmin, xmax = xlims
+    import plotly.graph_objects as go
+    import plotly.offline as pyo
+
+    xmin, xmax = xlims  # noqa: F841
 
     protein_order, protein_names = get_reordered_protein_names(network, **kw)
     input_order, output_pos = protein_order[:-1], protein_order[-1]
@@ -139,7 +143,7 @@ def scatter_3d(
 
     for i, azim in enumerate(azim_values):
         ax = fig.add_subplot(1, n_views, i + 1, projection="3d")
-        sc = ax.scatter(x[:, 0], x[:, 1], x[:, 2], c=y, cmap=cmap, s=size, lw=lw, edgecolor="k")
+        ax.scatter(x[:, 0], x[:, 1], x[:, 2], c=y, cmap=cmap, s=size, lw=lw, edgecolor="k")
         ax.set_xlabel(input_names[0])
         ax.set_ylabel(input_names[1])
         ax.set_zlabel(input_names[2])
@@ -261,8 +265,6 @@ def grid_histogram(
         rescaler=rescaler,
         margins=0.0,
     )
-
-    from matplotlib.colors import Normalize
 
     im = ax.imshow(
         h.T,

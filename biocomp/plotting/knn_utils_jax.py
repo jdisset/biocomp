@@ -1,5 +1,4 @@
 from functools import partial
-import numpy as np
 from biocomp.logging_config import get_logger
 import jax
 import jax.numpy as jnp

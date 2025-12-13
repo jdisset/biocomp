@@ -5,9 +5,7 @@ from biocomp.library import LibraryContext, PartsLibrary, get_l0_parts, get_l1_p
 from pydantic import (
     BaseModel,
     BeforeValidator,
-    model_validator,
     Field,
-    field_serializer,
     model_serializer,
 )
 
@@ -204,7 +202,9 @@ class TranscriptionUnit(BaseModel):
                     self.params[s.maps_to_parameter] = [default if p is None else p for p in s.part]
                 else:
                     # wrap single values in list for consistency (params values should always be lists)
-                    self.params[s.maps_to_parameter] = [s.part] if isinstance(s.part, str) else s.part
+                    self.params[s.maps_to_parameter] = (
+                        [s.part] if isinstance(s.part, str) else s.part
+                    )
                 # track ref_id for this parameter
                 self.param_ref_ids[s.maps_to_parameter] = s.ref_id
 

@@ -733,9 +733,9 @@ scformat = ShortScientificFormatter()
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                          --     main smooth dispatcher (route to 1D, 2D, 3D)    --
 
-from .plotting.plotting_3d import smooth_3d
-from .plotting.plotting_smooth import smooth_2d, smooth_1d
-from .plotting.plotting_scatter import grid_histogram
+from .plotting.plotting_3d import smooth_3d  # noqa: E402
+from .plotting.plotting_smooth import smooth_2d, smooth_1d  # noqa: E402
+from .plotting.plotting_scatter import grid_histogram  # noqa: E402
 
 
 def combine_dicts(*kwarg_lists):
@@ -876,21 +876,21 @@ def violin_style(
     cmedian_color="#222",
     alpha=0.5,
 ):
-    for pc in parts["bodies"]:
-        pc.set_facecolor(facecolor)
-        pc.set_edgecolor(edgecolor)
-        pc.set_linewidth(linewidth)
-        pc.set_alpha(alpha)
+    for body in parts["bodies"]:
+        body.set_facecolor(facecolor)
+        body.set_edgecolor(edgecolor)
+        body.set_linewidth(linewidth)
+        body.set_alpha(alpha)
 
     if "cmeans" in parts:
-        for pc in ut.as_list(parts["cmeans"]):
-            pc.set_color(cmean_color)
-            pc.set_linewidth(linewidth)
+        for part in ut.as_list(parts["cmeans"]):
+            part.set_color(cmean_color)
+            part.set_linewidth(linewidth)
 
     if "cmedians" in parts:
-        for pc in ut.as_list(parts["cmedians"]):
-            pc.set_color(cmedian_color)
-            pc.set_linewidth(linewidth)
+        for part in ut.as_list(parts["cmedians"]):
+            part.set_color(cmedian_color)
+            part.set_linewidth(linewidth)
 
 
 @configurable

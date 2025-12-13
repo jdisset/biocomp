@@ -6,7 +6,6 @@ from biocomp.graphrules import (
     AddNode,
     AddEdge,
     DeleteNode,
-    DeleteEdge,
     EditEdge,
     CopyEdge,
     RewireEdgesFrom,

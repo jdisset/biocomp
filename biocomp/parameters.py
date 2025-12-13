@@ -4,15 +4,10 @@ from typing import (
     Union,
     Tuple,
     Any,
-    Dict,
     List,
     Sequence,
-    Iterable,
     Self,
-    TypeVar,
-    Type,
 )
-import traceback
 import jax
 import jax.numpy as jnp
 import h5py
@@ -22,12 +17,10 @@ from jaxlib.xla_extension import ArrayImpl
 import numpy as np
 
 from dataclasses import dataclass
-from jax.tree_util import register_pytree_node_class
 from copy import deepcopy
 from . import utils as ut
 
 import base64
-import re
 
 logger = ut.get_logger(__name__)
 
@@ -143,6 +136,14 @@ def serialize(x):
         return serializers[type(x).__name__](x)
     else:
         raise ValueError(f"Cannot serialize type {type(x)}")
+
+
+def deserialize(x):
+    if isinstance(x, dict) and "type" in x:
+        type_name = x["type"]
+        if type_name in deserializers:
+            return deserializers[type_name](x)
+    return x  # return as-is if not a serialized object
 
 
 # ArrayLike
@@ -438,7 +439,7 @@ class PTree:
         if not isinstance(path, ParamPath):
             path = ParamPath(path)
         if len(path) == 0:
-            raise KeyError(f"PTree get_at called with empty path")
+            raise KeyError("PTree get_at called with empty path")
         if self.is_empty():
             raise KeyError(f"PTree is empty, cannot get {path}")
         if self.is_leaf(self):
@@ -473,7 +474,7 @@ class PTree:
         if not isinstance(path, ParamPath):
             path = ParamPath(path)
         if len(path) == 0:
-            raise KeyError(f"Path is empty")
+            raise KeyError("Path is empty")
 
         p, rest = path[0], path[1:]
         if self.value is None:
@@ -485,7 +486,7 @@ class PTree:
         else:
             if self.is_leaf_at(p, count_empty_as_leaf=False):
                 raise KeyError(
-                    f"Trying to expand leaf node into branch is not allowed, delete leaf first"
+                    "Trying to expand leaf node into branch is not allowed, delete leaf first"
                 )
             self.value[p].get(False).set_at(rest, value)
 
@@ -513,7 +514,7 @@ class PTree:
         if not isinstance(path, ParamPath):
             path = ParamPath(path)
         if len(path) == 0:
-            raise KeyError(f"Path is empty")
+            raise KeyError("Path is empty")
         p, rest = path[0], path[1:]
         if self.value is None:
             raise KeyError(f"Path {path} not found in ParamTree")
@@ -540,12 +541,12 @@ class PTree:
 
     def getpretty(self, levels=None, key=None):
         s = ""
-        if levels == None:
+        if levels is None:
             if self.is_leaf(count_empty_as_leaf=False):
                 return f"{self.get(get_leaf_value=True)}\n"
             if self.is_empty():
                 return " ∅\n"
-            s += f"\n ▼"
+            s += "\n ▼"
             s += self.getpretty([]) + "\n\n"
         else:
             other_branches = [" │  " if l else "    " for l in levels]
@@ -924,7 +925,6 @@ class ParameterTree:
             return
         self.tagnames = sorted(self.tagnames + [tag])
         self.__tagdict = {name: i for i, name in enumerate(self.tagnames)}
-        is_leaf = lambda x: PTree.is_leaf(x) and not isinstance(x, ParameterTree)
 
         if self.tags is None or self.tags.is_empty():
             for p, _ in self.data.iter_leaves():
@@ -1055,13 +1055,20 @@ class ParameterTree:
             read_only=False,
         )
 
-        match_f = lambda x: np.any(x[tag_ids])
         if mode == "all":
-            match_f = lambda x: np.all(x[tag_ids])
+
+            def match_f(x):
+                return np.all(x[tag_ids])
         elif mode == "exact":
             target_tag_flags = np.zeros(len(self.tagnames), dtype=bool)
             target_tag_flags[tag_ids] = True
-            match_f = lambda x: np.all(x == target_tag_flags)
+
+            def match_f(x):
+                return np.all(x == target_tag_flags)
+        else:  # default: "any"
+
+            def match_f(x):
+                return np.any(x[tag_ids])
 
         def setval(tree, path, value, tags):
             if isArrayRef(value):

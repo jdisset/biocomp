@@ -153,6 +153,9 @@ def get_reordered_protein_names(
 
 
 def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):
+    from biocomp.plotutils import ShortScientificFormatter
+
+    scformat = ShortScientificFormatter()
     unscaled_ticks = np.logspace(0, 12, 13)
     ticks = np.array(rescaler.fwd(unscaled_ticks))
     valid_ticks = (ticks <= xmax) & (ticks >= xmin)

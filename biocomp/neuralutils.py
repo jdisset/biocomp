@@ -80,6 +80,7 @@ DEFAULT_ACTIVATION = "leaky_relu"
 DEFAULT_OUT_ACTIVATION = "sigmoid"
 DEFAULT_INITIALIZER = "he_normal"
 
+
 def dense_layer(
     input_values: ArrayLike,
     output_size: ArrayLike,

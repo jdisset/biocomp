@@ -1,12 +1,11 @@
-from biocomp.jaxutils import flat_concat
 from biocomp.compute import StackNode, ComputeStack
 from jax.tree_util import Partial as partial
 from jax.typing import ArrayLike
 import jax.numpy as jnp
 from jax import vmap
 import numpy as np
-from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
-from biocomp.nodeutils import LayerInstance, add_random_var_ids
+from biocomp.parameters import ParameterTree, init_if_needed
+from biocomp.nodeutils import LayerInstance
 
 from biocomp.neuralutils import (
     ACTIVATION_FUNCTIONS,

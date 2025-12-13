@@ -4,15 +4,12 @@ import jax
 from jax.tree_util import Partial as partial
 from jax.typing import ArrayLike
 import jax.numpy as jnp
-from jax import vmap
 import numpy as np
-from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
+from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, get_param
 from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
     NON_GRAD_TAG,
-    get_prev_num_random_vars,
-    reference_forward_random_var_ids,
 )
 from biocomp.utils import get_logger
 from biocomp.neuralutils import (
@@ -25,7 +22,6 @@ from biocomp.neuralutils import (
     dummy_mlp,
     uniform_initializer,
 )
-import biocomp.quantization as qz
 from typing import Callable
 
 

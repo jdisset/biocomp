@@ -1,6 +1,6 @@
 from jax.experimental import checkify
 import jax
-from jax import jit, lax
+from jax import jit
 from jax import tree_util as jtu
 import jax.numpy as jnp
 import numpy as np
@@ -111,7 +111,7 @@ def get_xla(fun, *args, static_argnums=(), **kwargs):
     from rich.console import Console
     import rich
 
-    console = Console(highlighter=rich.highlighter.ReprHighlighter())
+    _console = Console(highlighter=rich.highlighter.ReprHighlighter())  # noqa: F841
     c = jax.xla_computation(fun, static_argnums=static_argnums)(*args, **kwargs)
     backend = jax.lib.xla_bridge.get_backend()
     e = backend.compile(c)

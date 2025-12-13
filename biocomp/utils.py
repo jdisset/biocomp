@@ -24,11 +24,9 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
 from typing import (
-    List,
     Dict,
     Any,
     Optional,
-    Callable,
     Sequence,
     TypeVar,
     Generic,
@@ -191,7 +189,7 @@ class PartialFunction(ArbitraryModel, Generic[T, R]):
     def __getstate__(self):
         # exclude _func from pickling as it may contain unpicklable closures
         state = self.__dict__.copy()
-        state.pop('_func', None)
+        state.pop("_func", None)
         return state
 
     def __setstate__(self, state):
@@ -201,6 +199,7 @@ class PartialFunction(ArbitraryModel, Generic[T, R]):
     def __deepcopy__(self, memo):
         # Create a new instance with copied data to avoid pydantic deepcopy issues
         import copy
+
         return self.__class__(
             func=self.func,  # str or callable - don't deepcopy
             args=copy.deepcopy(self.args, memo),

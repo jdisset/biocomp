@@ -73,6 +73,7 @@ class Network(BaseModel):
 
     def to_pretty_recipe(self) -> str:
         import dracon as dr
+
         return dr.dump(self.to_recipe())
 
     def get_output_compute_node(self) -> GraphNode:
@@ -137,10 +138,6 @@ class Network(BaseModel):
                     # Skip bias nodes without input_from_output (non-inverted networks)
                     continue
                 # For bias nodes, use a special position (after regular inputs)
-                # Count existing inputs to determine position
-                bias_position = len(
-                    [n for n in inputs if n.node_type == "input" and n.node_id < node.node_id]
-                )
                 # Add number of regular inputs to get the bias position
                 regular_input_count = len([n for n in inputs if n.node_type == "input"])
                 bias_input_pos = regular_input_count + len(
@@ -420,7 +417,6 @@ class Network(BaseModel):
                     seen_sources.add(source_id)
 
             for position, source_id, source_node, output_slot in tu_specs:
-
                 param_ref_ids = source_node.extra.get("param_ref_ids", {})
                 slots = self._extract_slots_from_source(source_node, param_ref_ids, output_slot)
 
@@ -458,7 +454,9 @@ class Network(BaseModel):
         """Get DNA edge from source node for specific output slot, or None if not found"""
         assert self.compute_graph is not None
         outgoing = self.compute_graph.get_outgoing_edges(source_node.node_id)
-        dna_edges = [e for e in outgoing if e.content_type == "DNA" and e.from_output_slot == output_slot]
+        dna_edges = [
+            e for e in outgoing if e.content_type == "DNA" and e.from_output_slot == output_slot
+        ]
         return dna_edges[0] if dna_edges else None
 
     def _should_include_embedding(
@@ -470,7 +468,9 @@ class Network(BaseModel):
         has_ref_id = emb_name in param_ref_ids and param_ref_ids[emb_name] is not None
         return has_real_parts or has_ref_id
 
-    def _extract_slots_from_source(self, source_node, param_ref_ids: dict = None, output_slot: int = 0) -> list[Slot]:
+    def _extract_slots_from_source(
+        self, source_node, param_ref_ids: dict = None, output_slot: int = 0
+    ) -> list[Slot]:
         """Reconstruct slots by sorting all parts by their biological category"""
         param_ref_ids = param_ref_ids or {}
         lib = LibraryContext.get_library()
@@ -660,6 +660,7 @@ class Network(BaseModel):
                 # Use committed value if available, otherwise parse from dict
                 if committed_value is not None:
                     import jax.numpy as jnp
+
                     value = float(jnp.asarray(committed_value).item())
                 else:
                     value = self._parse_value_to_numrange_or_float(fluo_bias.get("value"))
@@ -683,6 +684,7 @@ class Network(BaseModel):
                 # Use committed value if available
                 if committed_value is not None:
                     import jax.numpy as jnp
+
                     fluo_bias_data["value"] = float(jnp.asarray(committed_value).item())
                 bias_by_cotx[cotx_group] = self._create_fluo_intensity_from_dict(fluo_bias_data)
                 continue
@@ -690,6 +692,7 @@ class Network(BaseModel):
             # Fallback: try to get fields directly from node.extra (oldest format)
             if committed_value is not None:
                 import jax.numpy as jnp
+
                 value = float(jnp.asarray(committed_value).item())
             else:
                 value = self._parse_value_to_numrange_or_float(node.extra.get("value"))
@@ -781,8 +784,11 @@ class NetworkConstructionError(Exception):
 
 def _check_for_split_sequestron(graph: GraphState, recipe_name: Optional[str] = None):
     """Raise NotImplementedError if orphan transcription nodes exist (split sequestron case)."""
-    orphans = [nid for nid, n in graph.nodes.items()
-               if n.node_type == "transcription" and not graph.get_outgoing_edges(nid)]
+    orphans = [
+        nid
+        for nid, n in graph.nodes.items()
+        if n.node_type == "transcription" and not graph.get_outgoing_edges(nid)
+    ]
     if orphans:
         ctx = f" in recipe '{recipe_name}'" if recipe_name else ""
         raise NotImplementedError(
@@ -1503,9 +1509,14 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
 
 ##                      --     network info generation     --
 
+
 def get_uorf_value(params):
     if "tl_rate" in params:
-        u = params["tl_rate"][0].split("_")[0] if isinstance(params["tl_rate"], (list, tuple)) else params["tl_rate"].split("_")[0]
+        u = (
+            params["tl_rate"][0].split("_")[0]
+            if isinstance(params["tl_rate"], (list, tuple))
+            else params["tl_rate"].split("_")[0]
+        )
         try:
             v = int(u[:-1]) * 10
         except ValueError:
@@ -1515,6 +1526,7 @@ def get_uorf_value(params):
         return v
     else:
         return 0
+
 
 UORF_DICT = {
     0: "No uORF",
@@ -1529,10 +1541,14 @@ UORF_DICT = {
     80: "8x uORF",
 }
 
+
 def get_all_ERN_ids(network):
     assert network.compute_graph is not None
-    ERN_ids = [n.node_id for n in network.compute_graph.nodes.values() if n.node_type == "sequestron_ERN"]
+    ERN_ids = [
+        n.node_id for n in network.compute_graph.nodes.values() if n.node_type == "sequestron_ERN"
+    ]
     return ERN_ids
+
 
 def get_all_ERNs_names(network):
     ERN_ids = get_all_ERN_ids(network)
@@ -1544,6 +1560,7 @@ def get_all_ERNs_names(network):
             ERN_names.append(name)
     return ERN_names
 
+
 def get_uorf_names(uorf_values, ern_names):
     uorf_names = []
     for uorf, ern_name in zip(uorf_values, ern_names):
@@ -1553,6 +1570,7 @@ def get_uorf_names(uorf_values, ern_names):
         uorf_names.append((f"{ern_name} ERN: {ERN_uorf}", f"{ern_name} REC: {REC_uorf}"))
     return uorf_names
 
+
 def get_all_uorf_values(network):
     assert network.compute_graph is not None
     ERN_ids = get_all_ERN_ids(network)
@@ -1560,7 +1578,6 @@ def get_all_uorf_values(network):
     values = []
 
     for ern_id in ERN_ids:
-        node = network.compute_graph.nodes[ern_id]
         incoming_edges = [e for e in network.compute_graph.edges.values() if e.target_id == ern_id]
         incoming_edges = sorted(incoming_edges, key=lambda e: e.to_input_slot)
 
@@ -1578,37 +1595,51 @@ def get_all_uorf_values(network):
     names = get_uorf_names(values, ERN_names)
     return tuple(values), tuple(names)
 
+
 def _get_uorf_value_from_edge_or_source(graph, edge):
     """Get uORF value from edge's content_embedding_names, or trace back to find it."""
     # First try direct embedding names on the edge
-    if hasattr(edge, 'content_embedding_names') and edge.content_embedding_names:
+    if hasattr(edge, "content_embedding_names") and edge.content_embedding_names:
         return get_uorf_value(edge.content_embedding_names)
 
     # If edge has no embedding info, trace back through the source node
     source_node = graph.nodes.get(edge.source_id)
-    if source_node and source_node.node_type == 'translation':
+    if source_node and source_node.node_type == "translation":
         # Find the incoming edge to this translation node
         incoming_to_tl = [e for e in graph.edges.values() if e.target_id == source_node.node_id]
         if incoming_to_tl:
             # Get the first incoming edge (should be from transcription)
             tl_input_edge = incoming_to_tl[0]
-            if hasattr(tl_input_edge, 'content_embedding_names') and tl_input_edge.content_embedding_names:
+            if (
+                hasattr(tl_input_edge, "content_embedding_names")
+                and tl_input_edge.content_embedding_names
+            ):
                 return get_uorf_value(tl_input_edge.content_embedding_names)
 
     return 0
 
+
 def get_ERN_ids(network):
     return get_all_ERN_ids(network)
 
+
 def get_RCB_ids(network):
     assert network.compute_graph is not None
-    return [n.node_id for n in network.compute_graph.nodes.values()
-            if n.node_type and n.node_type.startswith("sequestron_R")]
+    return [
+        n.node_id
+        for n in network.compute_graph.nodes.values()
+        if n.node_type and n.node_type.startswith("sequestron_R")
+    ]
+
 
 def get_sequestron_ids(network):
     assert network.compute_graph is not None
-    return [n.node_id for n in network.compute_graph.nodes.values()
-            if n.node_type and n.node_type.startswith("sequestron_")]
+    return [
+        n.node_id
+        for n in network.compute_graph.nodes.values()
+        if n.node_type and n.node_type.startswith("sequestron_")
+    ]
+
 
 def get_network_family(network):
     erns = get_ERN_ids(network)
@@ -1645,6 +1676,7 @@ def get_network_family(network):
 
     return family, seqtype
 
+
 def get_ratio(agg_node, network):
     assert network.compute_graph is not None
     if agg_node.extra and "ratios" in agg_node.extra:
@@ -1660,7 +1692,9 @@ def get_ratio(agg_node, network):
 
     normed_ratios = [str(int(r)) if is_round(r) else str(r) for r in normed_ratios]
 
-    incoming_edges = [e for e in network.compute_graph.edges.values() if e.target_id == agg_node.node_id]
+    incoming_edges = [
+        e for e in network.compute_graph.edges.values() if e.target_id == agg_node.node_id
+    ]
     incoming_edges = sorted(incoming_edges, key=lambda e: e.to_input_slot)
 
     tu_names = []
@@ -1673,10 +1707,11 @@ def get_ratio(agg_node, network):
         else:
             tu_names.append("unknown")
 
-    sorted_pairs = sorted(zip(tu_names, normed_ratios[:len(tu_names)]))
+    sorted_pairs = sorted(zip(tu_names, normed_ratios[: len(tu_names)]))
     sorted_tu_names, sorted_ratios = zip(*sorted_pairs) if sorted_pairs else ([], [])
 
     return (tuple(sorted_tu_names), tuple(sorted_ratios))
+
 
 def get_ratios(network):
     assert network.compute_graph is not None
@@ -1684,11 +1719,13 @@ def get_ratios(network):
     all_ratios = [get_ratio(a, network) for a in agg_nodes]
     return all_ratios
 
+
 def cotx_ratios_str(cotx):
     lines = []
     for tus, ratios in cotx:
         lines.append(":".join(tus) + " -> " + ":".join(ratios))
     return "\n".join(lines)
+
 
 def get_parts_categories(parts, lib):
     res = {}
@@ -1699,8 +1736,10 @@ def get_parts_categories(parts, lib):
             res[part] = "unknown"
     return res
 
+
 def get_tu_parts(tu, lib):
     from biocomp.library import load_lib
+
     if lib is None:
         lib = load_lib()
     parts = []
@@ -1711,13 +1750,15 @@ def get_tu_parts(tu, lib):
             parts.append(slot.part[0])
     return get_parts_categories(parts, lib)
 
+
 def get_all_parts(network, lib=None):
     from biocomp.library import load_lib
+
     if lib is None:
         lib = load_lib()
 
     # Try to get transcription_units if they exist (old system compatibility)
-    if hasattr(network, 'transcription_units') and network.transcription_units:
+    if hasattr(network, "transcription_units") and network.transcription_units:
         return {tname: get_tu_parts(t, lib) for tname, t in network.transcription_units.items()}
 
     # Otherwise, extract from the graph (new system)
@@ -1731,20 +1772,24 @@ def get_all_parts(network, lib=None):
             for edge in edges:
                 # Get TU name from edge's extra.tu_id if available, otherwise from source node
                 tu_name = None
-                if hasattr(edge, 'extra') and edge.extra and 'tu_id' in edge.extra:
+                if hasattr(edge, "extra") and edge.extra and "tu_id" in edge.extra:
                     # Extract TU name from tu_id (e.g., 'L1-CasER1w_eYFP_cotx2' -> 'L1-CasER1w_eYFP')
-                    tu_id_full = edge.extra['tu_id'][0] if isinstance(edge.extra['tu_id'], list) else edge.extra['tu_id']
+                    tu_id_full = (
+                        edge.extra["tu_id"][0]
+                        if isinstance(edge.extra["tu_id"], list)
+                        else edge.extra["tu_id"]
+                    )
                     # Remove the _cotxN suffix
-                    tu_name = tu_id_full.rsplit('_cotx', 1)[0]
+                    tu_name = tu_id_full.rsplit("_cotx", 1)[0]
                 elif node.extra and "name" in node.extra:
                     tu_name = node.extra["name"]
 
                 if tu_name:
                     parts = {}
                     # Check for Part objects in content
-                    if hasattr(edge, 'content') and edge.content:
+                    if hasattr(edge, "content") and edge.content:
                         for item in edge.content:
-                            if hasattr(item, 'name'):
+                            if hasattr(item, "name"):
                                 # It's a Part object
                                 part_name = item.name
                                 if part_name in lib.parts.index:
@@ -1766,6 +1811,7 @@ def get_all_parts(network, lib=None):
 
     return result
 
+
 def flatten(lst):
     result = []
     for item in lst:
@@ -1775,8 +1821,10 @@ def flatten(lst):
             result.append(item)
     return result
 
+
 def generate_network_info(network, lib=None):
     from biocomp.library import load_lib
+
     if lib is None:
         lib = load_lib()
 

@@ -456,8 +456,8 @@ def sample_batches(
     return Xbatches, Ybatches
 
 
-import jax
-import jax.numpy as jnp
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
 
 
 @partial(

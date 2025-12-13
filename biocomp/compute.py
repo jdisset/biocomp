@@ -48,7 +48,9 @@ class StackNode:
 
     def _get_compute_graph(self, stack: "ComputeStack") -> GraphState:
         assert stack.networks is not None, "Stack has no networks"
-        assert self.network_id < len(stack.networks), f"network_id {self.network_id} >= {len(stack.networks)}"
+        assert self.network_id < len(stack.networks), (
+            f"network_id {self.network_id} >= {len(stack.networks)}"
+        )
         cg = stack.networks[self.network_id].compute_graph
         assert cg is not None, f"compute_graph is None for network {self.network_id}"
         return cg
@@ -429,8 +431,8 @@ class ComputeStack:
         from biocomp.network import IMPLICIT_EMPTY
 
         embedding_configs = {
-            'tl_rate': EMBEDDINGS_BY_NAME['tl_rate'].available_parts,
-            'tc_rate': EMBEDDINGS_BY_NAME['tc_rate'].available_parts,
+            "tl_rate": EMBEDDINGS_BY_NAME["tl_rate"].available_parts,
+            "tc_rate": EMBEDDINGS_BY_NAME["tc_rate"].available_parts,
         }
         for net in network_copies:
             if net.compute_graph is None:
@@ -678,7 +680,6 @@ class ComputeStack:
             starts = input_start_indices[input_slot]
             shape = input_shapes[input_slot]
             length = input_lengths[input_slot]
-            indices = np.array([np.arange(st, st + length) for st in starts])
 
             # Use dynamic slicing which works with JAX tracing
             def get_inputs_dyn(all_outputs):

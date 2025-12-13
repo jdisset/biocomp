@@ -671,8 +671,8 @@ def smooth_line_slices(
     innerslices = slices[0] if len(slices) > 0 else []
 
     protein_order, protein_names = get_reordered_protein_names(network, input_order=input_order)
-    input_order, output_pos = protein_order[:-1], protein_order[-1]
-    input_names, output_name = protein_names[:-1], protein_names[-1]
+    input_order, _output_pos = protein_order[:-1], protein_order[-1]
+    input_names, _output_name = protein_names[:-1], protein_names[-1]
 
     x = x[:, input_order]
 

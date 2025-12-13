@@ -812,8 +812,10 @@ def start(
     steps_per_epoch = max(1, dconf.n_batches_per_epoch // dconf.batches_per_step)
     total_steps = int(dconf.n_epochs * steps_per_epoch)
 
-    logger.info(f"  Config: {total_steps} total steps, {steps_per_epoch} steps/epoch, "
-                f"batch_size={dconf.batch_size}, batches_per_step={dconf.batches_per_step}")
+    logger.info(
+        f"  Config: {total_steps} total steps, {steps_per_epoch} steps/epoch, "
+        f"batch_size={dconf.batch_size}, batches_per_step={dconf.batches_per_step}"
+    )
     assert_that(total_steps).is_greater_than(0)
 
     n_networks = stack.get_nb_networks()
@@ -916,11 +918,21 @@ def start(
     timings["total_init"] = time.perf_counter() - t_total
     logger.info("-" * 60)
     logger.info(f"INITIALIZATION COMPLETE in {timings['total_init']:.2f}s")
-    logger.info(f"  Stack build:     {timings['stack_build']:.2f}s ({timings['stack_build']/timings['total_init']*100:.1f}%)")
-    logger.info(f"  Param init:      {timings['param_init']:.2f}s ({timings['param_init']/timings['total_init']*100:.1f}%)")
-    logger.info(f"  Optimizer init:  {timings['opt_init']:.2f}s ({timings['opt_init']/timings['total_init']*100:.1f}%)")
-    logger.info(f"  Sample gen:      {timings['sample_gen']:.2f}s ({timings['sample_gen']/timings['total_init']*100:.1f}%)")
-    logger.info(f"  Loss/step fn:    {timings['loss_step_fn']:.2f}s ({timings['loss_step_fn']/timings['total_init']*100:.1f}%)")
+    logger.info(
+        f"  Stack build:     {timings['stack_build']:.2f}s ({timings['stack_build'] / timings['total_init'] * 100:.1f}%)"
+    )
+    logger.info(
+        f"  Param init:      {timings['param_init']:.2f}s ({timings['param_init'] / timings['total_init'] * 100:.1f}%)"
+    )
+    logger.info(
+        f"  Optimizer init:  {timings['opt_init']:.2f}s ({timings['opt_init'] / timings['total_init'] * 100:.1f}%)"
+    )
+    logger.info(
+        f"  Sample gen:      {timings['sample_gen']:.2f}s ({timings['sample_gen'] / timings['total_init'] * 100:.1f}%)"
+    )
+    logger.info(
+        f"  Loss/step fn:    {timings['loss_step_fn']:.2f}s ({timings['loss_step_fn'] / timings['total_init'] * 100:.1f}%)"
+    )
     logger.info("=" * 60)
     logger.info("STARTING OPTIMIZATION LOOP")
     logger.info("=" * 60)

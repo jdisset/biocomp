@@ -4,9 +4,8 @@ import jax
 from jax.tree_util import Partial as partial
 from jax.typing import ArrayLike
 import jax.numpy as jnp
-from jax import vmap
 import numpy as np
-from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, make_view, get_param
+from biocomp.parameters import ParameterTree, init_if_needed, make_view
 from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
@@ -376,7 +375,7 @@ def transform_nn(
     return LayerInstance(prepare, apply, output_shape, commit=commit)
 
 
-from biocomp.part_embeddings import EMBEDDINGS_BY_NAME
+from biocomp.part_embeddings import EMBEDDINGS_BY_NAME  # noqa: E402
 
 transcription = partial(
     transform_nn,

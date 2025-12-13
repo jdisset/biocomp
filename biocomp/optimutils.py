@@ -577,7 +577,9 @@ def optimize(
             elapsed = time.perf_counter() - t_loop_start
             pct = i / n_total_steps * 100
             eta = (elapsed / i) * (n_total_steps - i) if i > 0 else 0
-            logger.info(f"[PROGRESS] Step {i}/{n_total_steps} ({pct:.0f}%) | Elapsed: {elapsed:.1f}s | ETA: {eta:.1f}s")
+            logger.info(
+                f"[PROGRESS] Step {i}/{n_total_steps} ({pct:.0f}%) | Elapsed: {elapsed:.1f}s | ETA: {eta:.1f}s"
+            )
 
         xb, yb = xbatches[i % steps_per_epoch], ybatches[i % steps_per_epoch]
 
@@ -627,7 +629,7 @@ def optimize(
     logger.info(f"  Compilation:    {compile_time:.2f}s")
     logger.info(f"  Loop time:      {total_loop_time:.2f}s ({n_total_steps} steps)")
     logger.info(f"  Final sync:     {sync_time:.2f}s")
-    logger.info(f"  Avg step time:  {total_loop_time/n_total_steps*1000:.2f}ms")
+    logger.info(f"  Avg step time:  {total_loop_time / n_total_steps * 1000:.2f}ms")
     if loss_history:
         logger.info(f"  Final loss:     {loss_history[-1]:.4f}")
     logger.info("=" * 60)
