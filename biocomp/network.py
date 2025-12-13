@@ -57,7 +57,7 @@ class Network(BaseModel):
         if self.compute_graph is not None:
             try:
                 return hash(self.to_recipe())
-            except Exception:
+            except (ValueError, KeyError, AttributeError, TypeError):
                 pass
         return hash(self.name)
 
@@ -67,7 +67,7 @@ class Network(BaseModel):
         if self.compute_graph is not None and other.compute_graph is not None:
             try:
                 return self.to_recipe() == other.to_recipe()
-            except Exception:
+            except (ValueError, KeyError, AttributeError, TypeError):
                 pass
         return self.name == other.name
 
@@ -532,14 +532,13 @@ class Network(BaseModel):
         if not value_raw or value_raw == "":
             return None
 
-        # parse string to dict if needed
         if isinstance(value_raw, str):
             try:
                 value_raw = ast.literal_eval(value_raw)
-            except:
+            except (ValueError, SyntaxError):
                 try:
                     return float(value_raw)
-                except:
+                except ValueError:
                     return None
 
         # convert dict to NumRange, otherwise return as float
@@ -593,11 +592,10 @@ class Network(BaseModel):
             if target and target.node_type == "aggregation" and "fluo_bias" in target.extra:
                 fb = target.extra["fluo_bias"]
 
-                # parse string representation if needed
                 if isinstance(fb, str):
                     try:
                         fb = ast.literal_eval(fb)
-                    except:
+                    except (ValueError, SyntaxError):
                         continue
 
                 if isinstance(fb, dict):
@@ -1433,7 +1431,6 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
         if cdg is None or len(cdg) == 0:
             return None
 
-        # First try to use the output slot to select from source's cdg_output
         src_outputs = to_list(src_row.get("cdg_output"))
         if src_outputs and out_slot < len(src_outputs):
             try:
@@ -1441,21 +1438,20 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
                 crow = cdg.loc[cid]
                 if str(crow.get("type")) == ctype:
                     return crow
-            except Exception:
+            except (ValueError, TypeError, KeyError):
                 pass
 
-        # Fallback to original logic
         candidate_ids: list[int] = []
         for key, r in (("cdg_output", src_row), ("cdg_input", dst_row)):
             for x in to_list(r.get(key)):
                 try:
                     candidate_ids.append(int(x))
-                except Exception:
+                except (ValueError, TypeError):
                     pass
         for cid in candidate_ids:
             try:
                 crow = cdg.loc[cid]
-            except Exception:
+            except KeyError:
                 continue
             if str(crow.get("type")) == ctype:
                 return crow
@@ -1469,7 +1465,7 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
         for out_slot, pair in enumerate(outputs):
             try:
                 dst_id, in_slot = pair
-            except Exception:
+            except (ValueError, TypeError):
                 dst_id, in_slot = pair[0], 0
             dst_row = cg.loc[dst_id]
             ctype = desired_content_type(str(src_row.get("type")), str(dst_row.get("type")))
