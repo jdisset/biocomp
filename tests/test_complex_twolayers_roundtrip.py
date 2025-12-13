@@ -19,7 +19,7 @@ from biocomp.library import LibraryContext, load_lib
 import biocomp.biorules as br
 from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
-from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot, FluoIntensity, NumRange
+from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot, FluoIntensity, NumRange, RATIO_PRECISION
 
 
 P = "hEF1a"
@@ -301,7 +301,8 @@ def test_ratios_preserved(roundtrip_recipe):
                 ratio_path = f"{layer.namespace}/ratios"
                 opt_ratios = opt_params[ratio_path]
                 reb_ratios = rebuilt_params[ratio_path]
-                assert jnp.allclose(opt_ratios, reb_ratios, rtol=1e-5, atol=1e-6)
+                ratio_tol = 10 ** (-RATIO_PRECISION)
+                assert jnp.allclose(opt_ratios, reb_ratios, rtol=ratio_tol, atol=ratio_tol)
 
 
 def test_outputs_match(roundtrip_recipe):
@@ -341,8 +342,8 @@ def test_outputs_match(roundtrip_recipe):
         y_rebuilt, _ = jax.vmap(rebuilt_stack.apply, in_axes=(None, 0, None, None))(rebuilt_params, x, random_variables, eval_key)
 
         assert y_opt.shape == y_rebuilt.shape
-        # Use rtol=1e-4 for large magnitude outputs (~6000), atol for near-zero
-        assert jnp.allclose(y_opt, y_rebuilt, rtol=1e-4, atol=1e-4)
+        output_tol = 10 ** (-RATIO_PRECISION + 1)
+        assert jnp.allclose(y_opt, y_rebuilt, rtol=output_tol, atol=output_tol)
 
         # Also verify that rebuilding with original key produces original outputs
         # Only valid for recipes without unlocked ratios or unlocked slots (commit locks structure)

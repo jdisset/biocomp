@@ -383,3 +383,184 @@ def test_l1_plasmid_roundtrip(lib):  # noqa: F811
         assert recipe_equals(original, reconstructed)
         assert len(reconstructed.content) == 1
         assert len(reconstructed.content[0].units) == 2
+
+
+# ============================================================================
+# position_in_source tests
+# ============================================================================
+
+
+def test_position_in_source_different_plasmids(lib):  # noqa: F811
+    """TUs on different plasmids should all have position_in_source=0 after roundtrip."""
+    P = Slot(part="hEF1a")
+    T = Slot(part="L0.T_4560")
+
+    with LibraryContext.with_library(lib):
+        original = Recipe(
+            name="different_plasmids_test",
+            content=[
+                CoTransfection(
+                    name="cotx1",
+                    units=[
+                        TranscriptionUnit(slots=[P, "mNeonGreen", T], name="tu_A", source="plasmid_A"),
+                        TranscriptionUnit(slots=[P, "tdTomato", T], name="tu_B", source="plasmid_B"),
+                        TranscriptionUnit(slots=[P, "mKO2", T], name="tu_C", source="plasmid_C"),
+                    ],
+                    ratios=[0.33, 0.34, 0.33],
+                )
+            ],
+        )
+
+        for tu in original.content[0].units:
+            assert tu.position_in_source is None
+
+        networks = recipe_to_networks(original, invert=False)
+        reconstructed = networks[0].to_recipe()
+
+        for node in networks[0].compute_graph.get_nodes_by_type("source"):
+            assert node.extra.get("position_in_source") == 0
+
+        for tu in reconstructed.content[0].units:
+            assert tu.position_in_source == 0
+
+
+def test_position_in_source_same_plasmid(lib):  # noqa: F811
+    """TUs on same plasmid should have incrementing position_in_source values."""
+    P = Slot(part="hEF1a")
+    T = Slot(part="L0.T_4560")
+
+    with LibraryContext.with_library(lib):
+        original = Recipe(
+            name="same_plasmid_test",
+            content=[
+                CoTransfection(
+                    name="cotx1",
+                    units=[
+                        TranscriptionUnit(slots=[P, "mNeonGreen", T], name="tu_first", source="shared_plasmid"),
+                        TranscriptionUnit(slots=[P, "tdTomato", T], name="tu_second", source="shared_plasmid"),
+                        TranscriptionUnit(slots=[P, "mKO2", T], name="tu_third", source="shared_plasmid"),
+                    ],
+                    ratios=[1.0],  # single source = single ratio
+                )
+            ],
+        )
+
+        networks = recipe_to_networks(original, invert=False)
+        network = networks[0]
+
+        source_nodes = [n for n in network.compute_graph.get_nodes_by_type("source")
+                        if n.extra.get("source_id") == "shared_plasmid"]
+        assert len(source_nodes) == 1
+
+        source_node = source_nodes[0]
+        outgoing_edges = network.compute_graph.get_outgoing_edges(source_node.node_id)
+        output_slots = sorted(set(e.from_output_slot for e in outgoing_edges))
+        assert output_slots == [0, 1, 2]
+
+        reconstructed = network.to_recipe()
+        tus = reconstructed.content[0].units
+
+        for i, tu in enumerate(tus):
+            assert tu.source == "shared_plasmid"
+            assert tu.position_in_source == i
+
+
+def test_position_in_source_mixed_plasmids(lib):  # noqa: F811
+    """Test mix of TUs on same and different plasmids."""
+    P = Slot(part="hEF1a")
+    T = Slot(part="L0.T_4560")
+
+    with LibraryContext.with_library(lib):
+        original = Recipe(
+            name="mixed_plasmids_test",
+            content=[
+                CoTransfection(
+                    name="cotx1",
+                    units=[
+                        TranscriptionUnit(slots=[P, "mNeonGreen", T], name="tu_A1", source="plasmid_A"),
+                        TranscriptionUnit(slots=[P, "tdTomato", T], name="tu_B1", source="plasmid_B"),
+                        TranscriptionUnit(slots=[P, "mKO2", T], name="tu_A2", source="plasmid_A"),
+                    ],
+                    ratios=[0.5, 0.5],  # 2 unique sources
+                )
+            ],
+        )
+
+        networks = recipe_to_networks(original, invert=False)
+        network = networks[0]
+
+        source_positions = {}
+        for node in network.compute_graph.get_nodes_by_type("source"):
+            source_positions[node.extra.get("source_id")] = node.extra.get("position_in_source")
+
+        assert source_positions["plasmid_A"] == 0
+        assert source_positions["plasmid_B"] == 0
+
+        reconstructed = network.to_recipe()
+
+        tus_by_source = {}
+        for tu in reconstructed.content[0].units:
+            tus_by_source.setdefault(tu.source, []).append(tu)
+
+        plasmid_a_tus = sorted(tus_by_source["plasmid_A"], key=lambda t: t.position_in_source)
+        assert len(plasmid_a_tus) == 2
+        assert plasmid_a_tus[0].position_in_source == 0
+        assert plasmid_a_tus[1].position_in_source == 1
+
+        assert len(tus_by_source["plasmid_B"]) == 1
+        assert tus_by_source["plasmid_B"][0].position_in_source == 0
+
+
+def test_position_in_source_explicit_values(lib):  # noqa: F811
+    """Test explicit position_in_source values are preserved through roundtrip."""
+    P = Slot(part="hEF1a")
+    T = Slot(part="L0.T_4560")
+
+    with LibraryContext.with_library(lib):
+        original = Recipe(
+            name="explicit_positions_test",
+            content=[
+                CoTransfection(
+                    name="cotx1",
+                    units=[
+                        TranscriptionUnit(
+                            slots=[P, "mNeonGreen", T], name="tu_first",
+                            source="plasmid_A", position_in_source=0
+                        ),
+                        TranscriptionUnit(
+                            slots=[P, "tdTomato", T], name="tu_alone",
+                            source="plasmid_B", position_in_source=0
+                        ),
+                        TranscriptionUnit(
+                            slots=[P, "mKO2", T], name="tu_second",
+                            source="plasmid_A", position_in_source=1
+                        ),
+                    ],
+                    ratios=[0.5, 0.5],
+                )
+            ],
+        )
+
+        networks = recipe_to_networks(original, invert=False)
+        network = networks[0]
+
+        source_positions = {}
+        for node in network.compute_graph.get_nodes_by_type("source"):
+            source_positions[node.extra.get("source_id")] = node.extra.get("position_in_source")
+
+        assert source_positions["plasmid_A"] == 0
+        assert source_positions["plasmid_B"] == 0
+
+        reconstructed = network.to_recipe()
+
+        tus_by_source = {}
+        for tu in reconstructed.content[0].units:
+            tus_by_source.setdefault(tu.source, []).append(tu)
+
+        plasmid_a_tus = sorted(tus_by_source["plasmid_A"], key=lambda t: t.position_in_source)
+        assert len(plasmid_a_tus) == 2
+        assert plasmid_a_tus[0].position_in_source == 0
+        assert plasmid_a_tus[1].position_in_source == 1
+
+        assert len(tus_by_source["plasmid_B"]) == 1
+        assert tus_by_source["plasmid_B"][0].position_in_source == 0

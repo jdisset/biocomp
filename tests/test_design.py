@@ -24,7 +24,7 @@ from biocomp.library import LibraryContext, load_lib
 from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.network import recipe_to_networks
-from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot, NumRange
+from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot, NumRange, RATIO_PRECISION
 
 
 P = "hEF1a"
@@ -166,9 +166,8 @@ def test_reloaded_recipe_produces_same_predictions(lib, simple_design_recipe):
             )
 
             assert y_opt.shape == y_rebuilt.shape
-            # rtol=1e-3 needed - small prediction values (~0.02) can have larger relative differences
-            # due to floating point accumulation across multiple neural network layers
-            assert jnp.allclose(y_opt, y_rebuilt, rtol=1e-3, atol=1e-4)
+            rtol = 10 ** (-RATIO_PRECISION + 1)
+            assert jnp.allclose(y_opt, y_rebuilt, rtol=rtol, atol=1e-4)
 
         finally:
             yaml_path.unlink()

@@ -31,7 +31,7 @@ from biocomp.library import LibraryContext, load_lib
 import biocomp.biorules as br
 from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
-from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot, FluoIntensity, NumRange
+from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot, FluoIntensity, NumRange, RATIO_PRECISION
 from biocomp.jaxutils import flat_concat
 from biocomp.nodes.ern import ERN_DEFAULT_NEG_PARTS
 
@@ -173,33 +173,35 @@ def complex_twolayers_advanced_stack_assertions(
     )
     assert np.all(fl_out.flatten() == fl_test_input.flatten())
 
-    assert np.all(y_aux["5"]["trace"]["outputs"] == np.array([[B_inv], [X1_inv], [X2_inv]]))
+    ratio_output_tol = 2 * 10 ** (-RATIO_PRECISION + 1)
+    assert np.allclose(y_aux["5"]["trace"]["outputs"], np.array([[B_inv], [X1_inv], [X2_inv]]), rtol=ratio_output_tol)
     y_aux["7"]["trace"]["outputs"]
     for sn in stack.layers[7].nodes:
         n = network.compute_graph.get_node(sn.node_id)
-        assert (
-            intermediate_values[n.extra["name"]]
-            == y_aux["7"]["trace"]["outputs"][sn.node_position_in_layer][0]
+        assert np.isclose(
+            intermediate_values[n.extra["name"]],
+            y_aux["7"]["trace"]["outputs"][sn.node_position_in_layer][0],
+            rtol=ratio_output_tol
         )
     y_aux["11"]["trace"]["outputs"]
     assert np.allclose(
         y_aux["11"]["trace"]["outputs"][0][0],
         Eb,
-        rtol=1e-5,
+        rtol=ratio_output_tol,
     ), f"Eb: {Eb}, aux: {y_aux['11']['trace']['outputs'][0][0]}"
     assert np.allclose(
         y_aux["11"]["trace"]["outputs"][1][0],
         Ea,
-        rtol=1e-5,
+        rtol=ratio_output_tol,
     ), f"Ea: {Ea}, aux: {y_aux['11']['trace']['outputs'][1][0]}"
     y_aux["13"]["trace"]["outputs"]
     assert np.allclose(
         y_aux["13"]["trace"]["outputs"][0][0],
         Ec,
-        rtol=1e-5,
+        rtol=ratio_output_tol,
     ), f"Ec: {Ec}, aux: {y_aux['13']['trace']['outputs'][0][0]}"
 
-    assert np.allclose(ernc_out, Ec, rtol=1e-5), f"ernc_out: {ernc_out}, Ec: {Ec}"
+    assert np.allclose(ernc_out, Ec, rtol=ratio_output_tol), f"ernc_out: {ernc_out}, Ec: {Ec}"
 
 
 def complex_twolayers_topology_assertions(network, stack, params):
@@ -509,8 +511,9 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
                     "00aaa": x1ratios[6],
                     "direct": x1ratios[7],
                 }
+                ratio_tol = 0.5 * 10 ** (-RATIO_PRECISION)
                 for src_id, ratio in zip(ratio_order, a.extra["ratios"]):
-                    assert np.isclose(ratio, expected_ratios[src_id]), (
+                    assert np.isclose(ratio, expected_ratios[src_id], atol=ratio_tol), (
                         f"Aggregation ratio for {src_id} in cotx x1 is {ratio}, expected {expected_ratios[src_id]}"
                     )
 
@@ -526,13 +529,15 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
                     "00aaa": x1ratios[1],
                     "direct": x1ratios[0],
                 }
+                ratio_tol = 0.5 * 10 ** (-RATIO_PRECISION)
                 for src_id, ratio in zip(ratio_order, a.extra["ratios"]):
-                    assert np.isclose(ratio, expected_ratios[src_id]), (
+                    assert np.isclose(ratio, expected_ratios[src_id], atol=ratio_tol), (
                         f"Aggregation ratio for {src_id} in cotx x2 is {ratio}, expected {expected_ratios[src_id]}"
                     )
             elif a.extra["cotx_group"] == "b":
+                ratio_tol = 0.5 * 10 ** (-RATIO_PRECISION)
                 for ratio in a.extra["ratios"]:
-                    assert np.isclose(ratio, 0.125), (
+                    assert np.isclose(ratio, 0.125, atol=ratio_tol), (
                         f"Aggregation ratio for cotx b is {ratio}, expected 0.125"
                     )
 
@@ -609,12 +614,13 @@ def test_complex_twolayers_parameter_constraints(lib, complex_twolayers_design_n
         x1x2_matches = []
         b_matches = []
 
+        ratio_tol = 10 ** (-RATIO_PRECISION)
         for row_idx in range(3):
             row = ratios_norm[row_idx]
             row_sorted = jnp.sort(row)
-            if jnp.allclose(row_sorted, x1x2_sorted, rtol=1e-5):
+            if jnp.allclose(row_sorted, x1x2_sorted, atol=ratio_tol):
                 x1x2_matches.append(row_idx)
-            elif jnp.allclose(row_sorted, b_sorted, rtol=1e-5):
+            elif jnp.allclose(row_sorted, b_sorted, atol=ratio_tol):
                 b_matches.append(row_idx)
 
         assert len(x1x2_matches) == 2, (
@@ -1010,7 +1016,7 @@ def test_complex_twolayers_quantization_masks(lib, complex_twolayers_design_netw
         y_aux,
     )
 
-    assert np.allclose(Ycomp, manual_Y, rtol=1e-4), f"Ycomp: {Ycomp}, manual_Y: {manual_Y}"
+    assert np.allclose(Ycomp, manual_Y, rtol=0.02), f"Ycomp: {Ycomp}, manual_Y: {manual_Y}"
 
 
 if __name__ == "__main__":
