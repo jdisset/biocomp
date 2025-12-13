@@ -151,7 +151,7 @@ def inv_aggregation(
 
         params.at(f"{namespace}/ratios", ref, overwrite=None)
 
-    EPSILON = 1e-9
+    DISABLED_THRESHOLD = 1.0 / 120.0
 
     def apply(
         input: NDArray,
@@ -161,10 +161,10 @@ def inv_aggregation(
         key,
     ) -> tuple[ArrayLike, dict]:
         ratio = jnp.abs(params[f"{namespace}/ratios"][node_id])
-        clamped_ratio = jnp.maximum(ratio, EPSILON)
-        result = input / clamped_ratio
-
-        return result, {"ratio": ratio, "clamped_ratio": clamped_ratio, "epsilon": EPSILON}
+        is_enabled = ratio >= DISABLED_THRESHOLD
+        safe_ratio = jnp.maximum(ratio, DISABLED_THRESHOLD)
+        result = jnp.where(is_enabled, input / safe_ratio, 0.0)
+        return result, {"ratio": ratio, "is_enabled": is_enabled}
 
     output_shape = input_shapes
     return LayerInstance(prepare, apply, output_shape)

@@ -407,7 +407,7 @@ def compute_all_losses(x, y, yhatdep, lossfunc, n_inputs_per_network=2):
 
 def _make_loss_func(
     stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses_fn,
-    lambda_spread=0.01, max_ratio=100.0,
+    lambda_spread=0.01, max_ratio=100.0, max_prediction=1e6,
 ):
     """Shared loss function factory logic.
 
@@ -417,6 +417,7 @@ def _make_loss_func(
         lambda_spread: Weight for ratio spread penalty (encourages ratios to stay
                        within max_ratio:1 range). Default 0.01.
         max_ratio: Maximum allowed ratio spread (default 100:1)
+        max_prediction: Maximum allowed prediction value before clamping. Default 1e6.
     """
     n_targets, n_networks = dmanager.n_targets, len(dmanager.networks)
     dep_mask = stack.get_dependent_output_mask()
@@ -429,8 +430,9 @@ def _make_loss_func(
         yhat, (apply_aux, full_output) = per_target_apply(params, X, Z, keys, stack)
         yhatdep = jnp.compress(dep_mask, yhat, axis=-1, size=nb_dep)
 
-        # Sanitize model output before loss computation
+        # Sanitize and clamp model output to prevent explosion
         yhatdep = _sanitize(yhatdep)
+        yhatdep = jnp.clip(yhatdep, -max_prediction, max_prediction)
 
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
 
@@ -452,8 +454,7 @@ def _make_loss_func(
         # Final loss computation with NaN guard
         loss = all_losses.mean() + over1_penalty + spread_penalty
 
-        # If loss is NaN/inf, return a large but finite value to allow recovery
-        # Using 100.0 as a reasonable "bad but recoverable" loss value
+        # NaN/inf guard - substitute finite value to allow recovery
         loss = jnp.where(jnp.isfinite(loss), loss, 100.0)
 
         return loss, aux
@@ -509,6 +510,7 @@ def grid_distance_loss(
     ratio_paths=None,
     w_sinkhorn=1.0,
     w_lncc=0.5,
+    w_mse=0.0,
     w_spectral=0.0,
     eps_sinkhorn=0.1,
     n_sinkhorn_iters=50,
@@ -520,9 +522,11 @@ def grid_distance_loss(
 ):
     """Factory for grid-based distance loss using fast Sinkhorn.
 
-    Made numerically robust with NaN/inf sanitization at each step.
-
     Args:
+        w_sinkhorn: Weight for Sinkhorn divergence (distribution matching)
+        w_lncc: Weight for local NCC (shape correlation)
+        w_mse: Weight for MSE (absolute error - helps with NRE)
+        w_spectral: Weight for spectral loss
         lambda_spread: Weight for ratio spread penalty (default 0.01)
         max_ratio: Maximum allowed ratio spread (default 100:1)
     """
@@ -531,7 +535,6 @@ def grid_distance_loss(
     n_networks = len(dmanager.networks)
 
     def compute_grid_loss_single(y_img, yhat_img):
-        # Sanitize inputs to handle any NaN from forward pass
         y_img = _sanitize(y_img)
         yhat_img = _sanitize(yhat_img)
 
@@ -547,10 +550,12 @@ def grid_distance_loss(
         if w_lncc > 0:
             lncc = lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel)
             loss = loss + w_lncc * lncc
+        if w_mse > 0:
+            mse = jnp.mean((y_img - yhat_img) ** 2)
+            loss = loss + w_mse * mse
         if w_spectral > 0:
             loss = loss + w_spectral * spectral_loss(None, y_img, yhat_img)
 
-        # Final sanitization - use MSE fallback if loss is still NaN/inf
         mse_fallback = jnp.mean((y_img - yhat_img) ** 2)
         return jnp.where(jnp.isfinite(loss), loss, mse_fallback)
 
