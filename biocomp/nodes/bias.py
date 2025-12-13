@@ -4,7 +4,7 @@ from jax.typing import ArrayLike
 import jax.numpy as jnp
 import numpy as np
 from biocomp.parameters import ParameterTree
-from biocomp.nodeutils import LayerInstance
+from biocomp.nodeutils import LayerInstance, NON_GRAD_TAG
 from biocomp.utils import get_logger
 
 
@@ -63,8 +63,9 @@ def hard_bias(
             max_values.append(jnp.asarray(max_v, dtype=jnp.float32))
 
         params[f"{namespace}/raw_value"] = jnp.stack(raw_values)
-        params[f"{namespace}/min_value"] = jnp.stack(min_values)
-        params[f"{namespace}/max_value"] = jnp.stack(max_values)
+        # min/max values are constraints, not learnable - tag them to exclude from optimization
+        params.at(f"{namespace}/min_value", jnp.stack(min_values), tags=[NON_GRAD_TAG])
+        params.at(f"{namespace}/max_value", jnp.stack(max_values), tags=[NON_GRAD_TAG])
 
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> tuple[ArrayLike, dict]:
         bias_value = get_bias_value(params, node_id)
@@ -138,8 +139,9 @@ def bias(
             scales.append(jnp.array(0.0, dtype=jnp.float32))
 
         params[f"{namespace}/raw_value"] = jnp.stack(raw_values)
-        params[f"{namespace}/min_value"] = jnp.stack(min_values)
-        params[f"{namespace}/max_value"] = jnp.stack(max_values)
+        # min/max values are constraints, not learnable - tag them to exclude from optimization
+        params.at(f"{namespace}/min_value", jnp.stack(min_values), tags=[NON_GRAD_TAG])
+        params.at(f"{namespace}/max_value", jnp.stack(max_values), tags=[NON_GRAD_TAG])
         params[f"{namespace}/scale"] = jnp.stack(scales)
 
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> tuple[ArrayLike, dict]:

@@ -422,33 +422,7 @@ class ComputeStack:
 
         for layer in self.layers:
             layer.commit(params, stack=temp_stack, **kwargs)
-        self._commit_remaining_embeddings(network_copies, params)
         return network_copies
-
-    def _commit_remaining_embeddings(self, network_copies: list, params: ParameterTree):
-        """Commit unlocked embeddings on edges not handled by layer commits (e.g. ERN TUs)."""
-        from biocomp.part_embeddings import EMBEDDINGS_BY_NAME
-        from biocomp.network import IMPLICIT_EMPTY
-
-        embedding_configs = {
-            "tl_rate": EMBEDDINGS_BY_NAME["tl_rate"].available_parts,
-            "tc_rate": EMBEDDINGS_BY_NAME["tc_rate"].available_parts,
-        }
-        for net in network_copies:
-            if net.compute_graph is None:
-                continue
-            for edge in net.compute_graph.edges.values():
-                if not edge.content_embedding_names:
-                    continue
-                for emb_name, emb_value in list(edge.content_embedding_names.items()):
-                    if emb_name not in embedding_configs:
-                        continue
-                    if isinstance(emb_value, (list, tuple)) and len(emb_value) > 1:
-                        qnames = embedding_configs[emb_name]
-                        implicit_empty = IMPLICIT_EMPTY.get(emb_name)
-                        available = [v for v in emb_value if v in qnames and v != implicit_empty]
-                        if available:
-                            edge.content_embedding_names[emb_name] = (available[0],)
 
     def __repr__(self):
         # layers with line breaks

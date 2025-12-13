@@ -328,21 +328,58 @@ def transform_nn(
         }
 
     def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack, **_):
-        def update_edges_by_tu_id(graph, tu_ids: list[str], emb_name: str, committed_value: tuple):
+        def _build_ref_id_mapping(graph, emb_name: str) -> tuple[dict, dict]:
+            """Build mappings: tu_id -> ref_id and ref_id -> set of tu_ids.
+
+            Source nodes store param_ref_ids which link slots across cotransfections.
+            """
+            tu_id_to_ref_id = {}
+            ref_id_to_tu_ids = {}
+            for node in graph.nodes.values():
+                if node.node_type == "source" and node.extra:
+                    param_ref_ids = node.extra.get("param_ref_ids", {})
+                    ref_id = param_ref_ids.get(emb_name)
+                    tu_name = node.extra.get("name", "")
+                    cotx = node.extra.get("cotx_group", "")
+                    if tu_name and cotx:
+                        tu_id = f"{tu_name}_{cotx}"
+                        if ref_id:
+                            tu_id_to_ref_id[tu_id] = ref_id
+                            if ref_id not in ref_id_to_tu_ids:
+                                ref_id_to_tu_ids[ref_id] = set()
+                            ref_id_to_tu_ids[ref_id].add(tu_id)
+            return tu_id_to_ref_id, ref_id_to_tu_ids
+
+        def update_edges_by_tu_id(
+            graph, tu_ids: list[str], emb_name: str, committed_value: tuple, ref_id_mappings=None
+        ):
             """Update all edges belonging to the specified TU(s) with the committed embedding value.
 
-            Uses tu_id for matching rather than embedding values, which ensures independent TUs
-            with the same embedding options don't cross-contaminate during commit.
+            Uses tu_id for matching, and also propagates to edges sharing the same ref_id.
+            This ensures that design mode slots linked across cotransfections (via ref_id)
+            all receive the same committed value.
             """
             if not tu_ids:
                 return
             tu_id_set = set(tu_ids)
+
+            # expand tu_id_set to include all tu_ids sharing the same ref_id
+            if ref_id_mappings:
+                tu_id_to_ref_id, ref_id_to_tu_ids = ref_id_mappings
+                for tu_id in list(tu_id_set):
+                    ref_id = tu_id_to_ref_id.get(tu_id)
+                    if ref_id:
+                        tu_id_set.update(ref_id_to_tu_ids.get(ref_id, set()))
+
             for edge in graph.edges.values():
                 edge_tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
                 # check if this edge belongs to any of the TUs we're committing
                 if edge_tu_ids and set(edge_tu_ids) & tu_id_set:
                     if edge.content_embedding_names and emb_name in edge.content_embedding_names:
                         edge.content_embedding_names[emb_name] = committed_value
+
+        # cache ref_id mappings per network to avoid rebuilding
+        network_ref_id_cache = {}
 
         for node_id, node in enumerate(nodelist):
             rates = params[f"{namespace}/{rate_name}"][node_id]
@@ -362,13 +399,19 @@ def transform_nn(
             # get compute graph for this node
             network = stack.networks[node.network_id]
             graph = network.compute_graph
+
+            # build ref_id mapping for this network (cached)
+            if node.network_id not in network_ref_id_cache:
+                network_ref_id_cache[node.network_id] = _build_ref_id_mapping(graph, rate_name)
+            ref_id_mappings = network_ref_id_cache[node.network_id]
+
             for e, pname in zip(i_edges, resolved_parameter_names):
                 committed_value = (pname,)
                 # update the incoming edge
                 e.content_embedding_names[rate_name] = committed_value
-                # get tu_id from edge and update all edges belonging to this TU
+                # get tu_id from edge and update all edges belonging to this TU (and linked ref_ids)
                 tu_ids = e.extra.get("tu_id", []) if e.extra else []
-                update_edges_by_tu_id(graph, tu_ids, rate_name, committed_value)
+                update_edges_by_tu_id(graph, tu_ids, rate_name, committed_value, ref_id_mappings)
 
     output_shape = [(1,)]
 
