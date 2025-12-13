@@ -35,7 +35,7 @@ logger = ut.get_logger(__name__)
 
 
 def isArrayRef(x):
-    return str(type(x)) == str(ArrayRef)
+    return isinstance(x, ArrayRef)
 
 
 def is_equal(a, b, close_ok=False):
@@ -63,11 +63,9 @@ def pretty_str(x):
         else:
             with np.printoptions(precision=3, edgeitems=4, threshold=8):
                 typestr = "jax" if isinstance(x, jnp.ndarray) else "numpy"
-                # avoid converting to numpy during tracing
                 try:
                     array_str = str(np.asarray(x))
-                except Exception:
-                    # during tracing, just show shape/dtype
+                except (jax.errors.TracerArrayConversionError, jax.errors.ConcretizationTypeError):
                     array_str = f"<{typestr} tracer>"
                 msg = f"{x.shape} {x.dtype} {typestr} array:\n{array_str}"
 
