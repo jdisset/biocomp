@@ -99,8 +99,8 @@ def build_optimizer_chain(optimizer_stack: list, with_lr_injection: bool = False
             wrapped_func = optax.inject_hyperparams(func)
             other_kwargs = {k: v for k, v in comp.kwargs.items() if k != "learning_rate"}
             main_chain.append(wrapped_func(learning_rate=lr_schedule, **other_kwargs))
-        except Exception:
-            logger.warning(f"Failed to inject learning rate for {comp.func}. Falling back.")
+        except (KeyError, TypeError, AttributeError) as e:
+            logger.warning(f"Failed to inject learning rate for {comp.func}: {e}. Falling back.")
             main_chain.append(comp())
 
     return optax.chain(create_counter(), *main_chain)
@@ -195,6 +195,7 @@ def run_logger_callbacks(loggers, step, config, step_history, stack, period_filt
             except Exception as e:
                 logger.error(f"Logger callback failed at step {step}: {e}")
                 logger.exception(e)
+                raise
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -206,7 +207,6 @@ def extract_learning_rate(opt_state):
     """Extract learning rate from the optimizer state."""
     learning_rate = None
     try:
-        # check for hyperparams in individual state components
         if isinstance(opt_state, tuple):
             for state_component in opt_state:
                 if (
@@ -216,7 +216,6 @@ def extract_learning_rate(opt_state):
                     learning_rate = state_component.hyperparams["learning_rate"]
                     break
 
-        # check direct hyperparams access
         if (
             learning_rate is None
             and hasattr(opt_state, "hyperparams")
@@ -224,7 +223,6 @@ def extract_learning_rate(opt_state):
         ):
             learning_rate = opt_state.hyperparams["learning_rate"]
 
-        # try tree_get
         if learning_rate is None:
             try:
                 learning_rate = optax.tree_utils.tree_get(
@@ -234,10 +232,10 @@ def extract_learning_rate(opt_state):
                     filtering=lambda path, value: isinstance(value, (float, int))
                     or (hasattr(value, "shape") and hasattr(value, "dtype")),
                 )
-            except (KeyError, ValueError):
+            except (KeyError, ValueError, TypeError):
                 pass
 
-    except Exception:
+    except (AttributeError, TypeError, KeyError):
         pass
 
     return learning_rate
@@ -497,6 +495,8 @@ def optimize(
     loggers: Optional[List[Tuple[int, Callable]]] = None,
     async_handler=None,
     verbose=False,
+    defer_sync: bool = True,
+    sync_every: int = 0,
 ):
     loggers = loggers or []
 
@@ -508,11 +508,12 @@ def optimize(
     )
 
     xb, yb = xbatches[0], ybatches[0]
-    logger.info("Compiling training step...")
-    t0 = time.time()
+    logger.info("[COMPILE] Compiling training step (AOT)...")
+    t_compile = time.perf_counter()
     compiled_step = compile_step(step, (params, opt_state, key, xb, yb))
+    compile_time = time.perf_counter() - t_compile
     if not get_checkify_enabled():
-        logger.info(f"Compiled training step in {time.time() - t0:.2f}s")
+        logger.info(f"[COMPILE] Step compiled in {compile_time:.2f}s")
 
     if async_handler:
         async_handler.process_start_loggers(config, stack)
@@ -521,48 +522,114 @@ def optimize(
 
     step_history, loss_history = {}, []
     epoch = -1
+    pending_losses = []  # collect losses without forcing sync
 
-    logger.info(f"Starting training for {config.n_epochs} epochs with {n_total_steps} total steps.")
+    # sync_every=0 means sync at epoch boundaries only
+    effective_sync_every = sync_every if sync_every > 0 else steps_per_epoch
+
+    # Progress reporting frequency
+    progress_every = max(1, n_total_steps // 20)  # ~5% progress updates
+
+    logger.info(f"[OPTIMIZE] Starting {config.n_epochs} epochs, {n_total_steps} total steps")
+    logger.info(f"[OPTIMIZE] Config: {steps_per_epoch} steps/epoch, defer_sync={defer_sync}")
+
+    t_loop_start = time.perf_counter()
+    epoch_start_time = t_loop_start
+    epoch_step_count = 0
 
     for i, step_key in enumerate(jax.random.split(key, n_total_steps), 1):
-        if i % steps_per_epoch == 0:
+        is_epoch_boundary = i % steps_per_epoch == 0
+        should_sync = not defer_sync or (i % effective_sync_every == 0) or is_epoch_boundary
+
+        if is_epoch_boundary:
+            # End of epoch timing
+            epoch_time = time.perf_counter() - epoch_start_time
             epoch += 1
             b_key = jax.random.fold_in(step_key, epoch)
             if config.reshuffle_batches and i > 0:
-                logger.debug(f"Reshuffling batches at epoch {epoch + 1}")
                 xbatches, ybatches = reshuffle_batches_jax(xbatches, ybatches, b_key)
+
+            # sync and report loss at epoch boundaries
+            if pending_losses:
+                jax.block_until_ready(params)
+                loss_history.extend([float(jnp.mean(l)) for l in pending_losses])
+                pending_losses = []
+
             current_loss = loss_history[-1] if loss_history else float("nan")
             if hasattr(current_loss, "mean"):
                 current_loss = float(current_loss.mean())
+            elif hasattr(current_loss, "__float__"):
+                current_loss = float(current_loss)
+
+            steps_per_sec = steps_per_epoch / epoch_time if epoch_time > 0 else 0
             logger.info(
-                f"Epoch {epoch + 1}/{config.n_epochs} | Step {i}/{n_total_steps} | Loss: {current_loss:.4f}"
+                f"[EPOCH {epoch + 1}/{int(config.n_epochs)}] "
+                f"Step {i}/{n_total_steps} | Loss: {current_loss:.4f} | "
+                f"{epoch_time:.1f}s ({steps_per_sec:.1f} steps/s)"
             )
 
-        t0 = time.time()
+            # Reset for next epoch
+            epoch_start_time = time.perf_counter()
+            epoch_step_count = 0
+
+        # Progress update mid-epoch
+        elif i % progress_every == 0:
+            elapsed = time.perf_counter() - t_loop_start
+            pct = i / n_total_steps * 100
+            eta = (elapsed / i) * (n_total_steps - i) if i > 0 else 0
+            logger.info(f"[PROGRESS] Step {i}/{n_total_steps} ({pct:.0f}%) | Elapsed: {elapsed:.1f}s | ETA: {eta:.1f}s")
+
         xb, yb = xbatches[i % steps_per_epoch], ybatches[i % steps_per_epoch]
-        params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
 
-        step_history["step_time"] = time.time() - t0
-        step_history["latest_params"] = params
-        step_history["opt_state"] = opt_state
+        if defer_sync:
+            params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
+            if "loss" in step_history:
+                pending_losses.append(step_history["loss"])
+            # only populate full step_history at sync points
+            if should_sync:
+                jax.block_until_ready(params)
+                step_history["latest_params"] = params
+                step_history["opt_state"] = opt_state
+        else:
+            t0 = time.perf_counter()
+            params, opt_state, step_history = compiled_step(params, opt_state, step_key, xb, yb)
+            step_history["step_time"] = time.perf_counter() - t0
+            step_history["latest_params"] = params
+            step_history["opt_state"] = opt_state
+            if "loss" in step_history:
+                loss_history.append(step_history["loss"])
 
-        if "loss" in step_history:
-            loss_history.append(step_history["loss"])
+        epoch_step_count += 1
 
         run_logger_callbacks(
             loggers, i, config, step_history, stack, lambda p, s: p > 0 and s % p == 0
         )
 
-    t_sync = time.time()
+    t_sync = time.perf_counter()
     jax.block_until_ready(params)
-    sync_time = time.time() - t_sync
-    if sync_time > 1.0:
-        logger.info(f"GPU sync took {sync_time:.1f}s (async backlog)")
+    sync_time = time.perf_counter() - t_sync
+
+    # flush any remaining pending losses
+    if pending_losses:
+        loss_history.extend([float(jnp.mean(l)) for l in pending_losses])
+        pending_losses = []
+
+    total_loop_time = time.perf_counter() - t_loop_start
 
     if not async_handler:
         run_logger_callbacks(
             loggers, n_total_steps, config, step_history, stack, lambda p, s: p is None or p == -1
         )
 
-    logger.info(f"End of training for {config.n_epochs} epochs")
+    # Final summary
+    logger.info("=" * 60)
+    logger.info("OPTIMIZATION COMPLETE")
+    logger.info(f"  Compilation:    {compile_time:.2f}s")
+    logger.info(f"  Loop time:      {total_loop_time:.2f}s ({n_total_steps} steps)")
+    logger.info(f"  Final sync:     {sync_time:.2f}s")
+    logger.info(f"  Avg step time:  {total_loop_time/n_total_steps*1000:.2f}ms")
+    if loss_history:
+        logger.info(f"  Final loss:     {loss_history[-1]:.4f}")
+    logger.info("=" * 60)
+
     return params, loss_history, step_history

@@ -63,34 +63,53 @@ def _gauss_blur2d(x, kernel):
 
 
 def sinkhorn_divergence_conv(a, b, eps, n_iters=80):
-    """Grid-based Sinkhorn divergence using fast Gaussian convolutions."""
+    """Grid-based Sinkhorn divergence using fast Gaussian convolutions.
+
+    Made numerically robust by:
+    - Sanitizing inputs (NaN/inf -> 0)
+    - Clamping Sinkhorn scaling factors to prevent divergence
+    - Sanitizing output (NaN/inf -> fallback MSE-based loss)
+    """
+    # Sanitize inputs - replace NaN/inf with 0
+    a = _sanitize(a.astype(jnp.float32)) + 1e-12
+    b = _sanitize(b.astype(jnp.float32)) + 1e-12
+
     sigma = jnp.sqrt(eps / 2.0)
     kernel = _gauss1d(sigma)
 
     # Normalize to probability distributions
-    a = (a.astype(jnp.float32) + 1e-12)
-    b = (b.astype(jnp.float32) + 1e-12)
     a, b = a / jnp.maximum(a.sum(), 1e-10), b / jnp.maximum(b.sum(), 1e-10)
+
+    # Clamp bounds to prevent Sinkhorn divergence
+    UV_MIN, UV_MAX = 1e-8, 1e8
 
     def sinkhorn_iters(m1, m2, n):
         u, v = jnp.ones_like(m1), jnp.ones_like(m2)
         def step(carry, _):
             u, v = carry
-            u = m1 / (_gauss_blur2d(v, kernel) + 1e-12)
-            v = m2 / (_gauss_blur2d(u, kernel) + 1e-12)
-            return (u, v), None
+            u_new = m1 / (_gauss_blur2d(v, kernel) + 1e-12)
+            v_new = m2 / (_gauss_blur2d(u_new, kernel) + 1e-12)
+            # Clamp to prevent numerical explosion
+            u_new = jnp.clip(u_new, UV_MIN, UV_MAX)
+            v_new = jnp.clip(v_new, UV_MIN, UV_MAX)
+            return (u_new, v_new), None
         (u, v), _ = lax.scan(step, (u, v), None, length=n)
         return u, v
 
     def ot_cost(m1, m2, n):
         u, v = sinkhorn_iters(m1, m2, n)
-        u_s, v_s = jnp.maximum(u, 1e-12), jnp.maximum(v, 1e-12)
-        return eps * (jnp.sum(m1 * jnp.log(u_s)) + jnp.sum(m2 * jnp.log(v_s)))
+        u_s, v_s = jnp.clip(u, 1e-12, UV_MAX), jnp.clip(v, 1e-12, UV_MAX)
+        cost = eps * (jnp.sum(m1 * jnp.log(u_s)) + jnp.sum(m2 * jnp.log(v_s)))
+        return _sanitize(jnp.atleast_1d(cost))[0]
 
     ot_ab = ot_cost(a, b, n_iters)
     ot_aa = ot_cost(a, a, max(20, n_iters // 2))
     ot_bb = ot_cost(b, b, max(20, n_iters // 2))
-    return jnp.maximum(0.0, ot_ab - 0.5 * (ot_aa + ot_bb))
+    result = jnp.maximum(0.0, ot_ab - 0.5 * (ot_aa + ot_bb))
+
+    # Fallback: if result is NaN/inf, use simple MSE as backup
+    mse_fallback = jnp.mean((a - b) ** 2)
+    return jnp.where(jnp.isfinite(result), result, mse_fallback)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -151,18 +170,25 @@ def sinkhorn_divergence_balanced(x, y, yhat, epsilon=0.01, cap=None, mass_floor=
 
 def zncc_loss(x, y, yhat, eps=1e-6, **kw):
     """Zero-mean normalized cross-correlation loss."""
+    y, yhat = _sanitize(y), _sanitize(yhat)
     y0, yhat0 = y - jnp.mean(y), yhat - jnp.mean(yhat)
     num = jnp.mean(y0 * yhat0)
-    return 1.0 - num / (jnp.sqrt(jnp.maximum(jnp.mean(y0**2) * jnp.mean(yhat0**2), eps)) + eps)
+    var_y = jnp.maximum(jnp.mean(y0**2), eps)
+    var_yhat = jnp.maximum(jnp.mean(yhat0**2), eps)
+    result = 1.0 - num / (jnp.sqrt(var_y * var_yhat) + eps)
+    return jnp.where(jnp.isfinite(result), result, jnp.mean((y - yhat) ** 2))
 
 
 def huber_loss(x, y, yhat, delta=0.01, **kw):
+    y, yhat = _sanitize(y), _sanitize(yhat)
     r = jnp.abs(yhat - y)
-    return jnp.mean(jnp.where(r <= delta, 0.5 * r**2, delta * (r - 0.5 * delta)))
+    result = jnp.mean(jnp.where(r <= delta, 0.5 * r**2, delta * (r - 0.5 * delta)))
+    return jnp.where(jnp.isfinite(result), result, jnp.mean(r**2))
 
 
 def huber_zncc_loss(x, y, yhat, delta=0.01, zncc_weight=0.1, **kw):
-    return zncc_weight * zncc_loss(x, y, yhat) + (1 - zncc_weight) * huber_loss(x, y, yhat, delta=delta)
+    result = zncc_weight * zncc_loss(x, y, yhat) + (1 - zncc_weight) * huber_loss(x, y, yhat, delta=delta)
+    return jnp.where(jnp.isfinite(result), result, jnp.mean((_sanitize(y) - _sanitize(yhat)) ** 2))
 
 
 def wasserstein_zncc_loss(x, y, yhat, zncc_weight=0.4, **kw):
@@ -203,7 +229,14 @@ def lncc_loss(x, y, yhat, target_neighbors=12, eps=1e-6, **kw):
 
 
 def lncc_grid_loss(x, y, yhat, k=7, eps=1e-6, **kw):
-    """Local NCC on 2D grid using box filter (integral image)."""
+    """Local NCC on 2D grid using box filter (integral image).
+
+    Made numerically robust by sanitizing inputs and using safe fallback.
+    """
+    # Sanitize inputs
+    y = _sanitize(y)
+    yhat = _sanitize(yhat)
+
     r, N = k // 2, k * k
     def box2d(a):
         a = jnp.pad(a, ((r + 1, r), (r + 1, r)), mode="edge")
@@ -211,8 +244,15 @@ def lncc_grid_loss(x, y, yhat, k=7, eps=1e-6, **kw):
         return s[:-2*r-1, :-2*r-1] - s[:-2*r-1, 2*r+1:] - s[2*r+1:, :-2*r-1] + s[2*r+1:, 2*r+1:]
     m0, m1 = box2d(y) / N, box2d(yhat) / N
     y0c, y1c = y - m0, yhat - m1
-    lncc = jnp.clip(box2d(y0c * y1c) / (jnp.sqrt(jnp.maximum(box2d(y0c**2), 0) * jnp.maximum(box2d(y1c**2), 0)) + eps), -1, 1)
-    return 1.0 - jnp.nanmean(lncc)
+    var_y = jnp.maximum(box2d(y0c**2), eps)
+    var_yhat = jnp.maximum(box2d(y1c**2), eps)
+    cov = box2d(y0c * y1c)
+    lncc = jnp.clip(cov / (jnp.sqrt(var_y * var_yhat) + eps), -1, 1)
+    result = 1.0 - jnp.nanmean(lncc)
+
+    # Fallback if result is NaN
+    mse_fallback = jnp.mean((y - yhat) ** 2)
+    return jnp.where(jnp.isfinite(result), result, mse_fallback)
 
 
 def simse_lncc_loss(x, y, yhat, simse_weight=0.3, **kw):
@@ -279,7 +319,10 @@ def compute_all_losses(x, y, yhatdep, lossfunc, n_inputs_per_network=2):
 
 
 def _make_loss_func(stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses_fn):
-    """Shared loss function factory logic."""
+    """Shared loss function factory logic.
+
+    Includes final NaN/inf guard to ensure loss is always finite.
+    """
     n_targets, n_networks = dmanager.n_targets, len(dmanager.networks)
     dep_mask = stack.get_dependent_output_mask()
     nb_dep = int(np.sum(dep_mask))
@@ -291,46 +334,85 @@ def _make_loss_func(stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, co
         yhat, (apply_aux, full_output) = per_target_apply(params, X, Z, keys, stack)
         yhatdep = jnp.compress(dep_mask, yhat, axis=-1, size=nb_dep)
 
+        # Sanitize model output before loss computation
+        yhatdep = _sanitize(yhatdep)
+
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
         over1_penalty = as_schedule(lambda_over1)(step) * sum(get_over1_penalty_for_leaf(p) for p in ratio_leaves)
+        over1_penalty = _sanitize(jnp.atleast_1d(over1_penalty))[0]
 
         all_losses, extra_aux = compute_losses_fn(X, Y, yhatdep, step, n_targets, n_networks)
         aux = {"apply_aux": apply_aux, "all_losses": all_losses, "yhatdep": yhatdep, **extra_aux}
-        return all_losses.mean() + over1_penalty, aux
+
+        # Final loss computation with NaN guard
+        loss = all_losses.mean() + over1_penalty
+
+        # If loss is NaN/inf, return a large but finite value to allow recovery
+        # Using 100.0 as a reasonable "bad but recoverable" loss value
+        loss = jnp.where(jnp.isfinite(loss), loss, 100.0)
+
+        return loss, aux
 
     return loss_func
 
 
 def distance_loss(stack, dconf, dmanager, num_z, ratio_paths=None, epsilon=0.01, lambda_over1=0.001, distance_func=huber_zncc_loss):
-    """Factory for point-cloud distance loss."""
+    """Factory for point-cloud distance loss.
+
+    Made numerically robust with NaN/inf sanitization.
+    """
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks):
+        # Sanitize predictions
+        yhatdep = _sanitize(yhatdep)
+
         all_losses = compute_all_losses(X, Y, yhatdep, Partial(distance_func, epsilon=as_schedule(epsilon)(step)))
         assert_that(all_losses).has_shape((n_targets, n_networks))
+
+        # Sanitize final losses
+        all_losses = _sanitize(all_losses)
         return all_losses, {}
     return _make_loss_func(stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses)
 
 
 def grid_distance_loss(stack, dconf, dmanager, num_z, ratio_paths=None, w_sinkhorn=1.0, w_lncc=0.5, w_spectral=0.0,
                        eps_sinkhorn=0.1, n_sinkhorn_iters=50, lncc_kernel=7, lambda_over1=0.001, **kw):
-    """Factory for grid-based distance loss using fast Sinkhorn."""
+    """Factory for grid-based distance loss using fast Sinkhorn.
+
+    Made numerically robust with NaN/inf sanitization at each step.
+    """
     assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
     xres, yres = dmanager.grid_resolution
     n_networks = len(dmanager.networks)
 
     def compute_grid_loss_single(y_img, yhat_img):
+        # Sanitize inputs to handle any NaN from forward pass
+        y_img = _sanitize(y_img)
+        yhat_img = _sanitize(yhat_img)
+
         loss = jnp.array(0.0)
         if w_sinkhorn > 0:
-            loss = loss + w_sinkhorn * sinkhorn_divergence_conv(proj_nonneg_ste(yhat_img), proj_nonneg_ste(y_img), eps_sinkhorn, n_iters=n_sinkhorn_iters)
+            sink = sinkhorn_divergence_conv(proj_nonneg_ste(yhat_img), proj_nonneg_ste(y_img), eps_sinkhorn, n_iters=n_sinkhorn_iters)
+            loss = loss + w_sinkhorn * sink
         if w_lncc > 0:
-            loss = loss + w_lncc * lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel)
+            lncc = lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel)
+            loss = loss + w_lncc * lncc
         if w_spectral > 0:
             loss = loss + w_spectral * spectral_loss(None, y_img, yhat_img)
-        return loss
+
+        # Final sanitization - use MSE fallback if loss is still NaN/inf
+        mse_fallback = jnp.mean((y_img - yhat_img) ** 2)
+        return jnp.where(jnp.isfinite(loss), loss, mse_fallback)
 
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks_):
+        # Sanitize predictions before loss computation
+        yhatdep = _sanitize(yhatdep)
+
         Y_images = jnp.tile(Y.squeeze(-1).T.reshape(n_targets, 1, yres, xres), (1, n_networks, 1, 1))
         yhat_images = yhatdep.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
         all_losses = vmap(vmap(compute_grid_loss_single))(Y_images, yhat_images)
+
+        # Sanitize final losses
+        all_losses = _sanitize(all_losses)
         return all_losses, {"yhat_images": yhat_images}
 
     return _make_loss_func(stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses)

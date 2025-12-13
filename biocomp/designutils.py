@@ -5,7 +5,6 @@ from xml.etree import ElementTree as ET
 import re
 from matplotlib.colors import to_rgb
 from pathlib import Path
-from scipy.interpolate import griddata
 from typing import Optional
 from biocomp.logging_config import get_logger
 
@@ -206,66 +205,75 @@ def _extract_shapes_from_svg(svg_path, max_is_black):
     return paths, np.asarray(greys), (vx, vy, vw, vh)
 
 
-def _generate_sample_points(
-    n, xlim, ylim, vx, vy, vw, vh, rng, log, grid=None, grid_jitter_std=None
+def _generate_svg_sample_points(
+    n, lattice_extent, img_latent_lim, vx, vy, vw, vh, rng, log, grid=None, grid_jitter_std=None
 ):
+    """Generate sample points in SVG coordinate space and return latent coordinates.
+
+    Args:
+        lattice_extent: (x_extent, y_extent) - final latent space bounds
+        img_latent_lim: (x_lim, y_lim) - SVG-to-latent mapping parameters
+    """
+    x_extent, y_extent = lattice_extent
+    x_lim, y_lim = img_latent_lim
+
     if grid:
         xres, yres = grid
         if log:
             eps = 1e-6
-            x_vals = np.logspace(np.log10(eps + xlim[0] * vw), np.log10(xlim[1] * vw), xres) + vx
+            x_vals = (
+                np.logspace(np.log10(eps + x_extent[0] * vw), np.log10(x_extent[1] * vw), xres) + vx
+            )
             y_vals = (
-                vh - np.logspace(np.log10(eps + ylim[0] * vh), np.log10(ylim[1] * vh), yres) + vy
+                vh
+                - np.logspace(np.log10(eps + y_extent[0] * vh), np.log10(y_extent[1] * vh), yres)
+                + vy
             )
         else:
-            x_vals = np.linspace(xlim[0] * vw + vx, xlim[1] * vw + vx, xres)
-            y_vals = np.linspace((1 - ylim[1]) * vh + vy, (1 - ylim[0]) * vh + vy, yres)
+            x_vals = np.linspace(x_extent[0] * vw + vx, x_extent[1] * vw + vx, xres)
+            y_vals = np.linspace((1 - y_extent[1]) * vh + vy, (1 - y_extent[0]) * vh + vy, yres)
 
         sx_grid, sy_grid = np.meshgrid(x_vals, y_vals)
-
         sx_list, sy_list = [], []
-        for _ in range(n):
-            sx_sample = sx_grid.copy()
-            sy_sample = sy_grid.copy()
 
-            if grid_jitter_std is not None and grid_jitter_std > 0:
+        for _ in range(n):
+            sx_sample, sy_sample = sx_grid.copy(), sy_grid.copy()
+            if grid_jitter_std and grid_jitter_std > 0:
                 x_spacing = (x_vals[-1] - x_vals[0]) / (xres - 1) if xres > 1 else 0
                 y_spacing = (y_vals[-1] - y_vals[0]) / (yres - 1) if yres > 1 else 0
                 sx_sample += rng.normal(0, grid_jitter_std * x_spacing, sx_sample.shape)
                 sy_sample += rng.normal(0, grid_jitter_std * y_spacing, sy_sample.shape)
-
             sx_list.append(sx_sample.flatten())
             sy_list.append(sy_sample.flatten())
 
-        sx = np.concatenate(sx_list)
-        sy = np.concatenate(sy_list)
-
-        if log:
-            X = np.column_stack((np.log10(sx - vx), np.log10(vh - (sy - vy))))
-        else:
-            X = np.column_stack(
-                (
-                    (sx - vx) / vw * (xlim[1] - xlim[0]) + xlim[0],
-                    (vh - (sy - vy)) / vh * (ylim[1] - ylim[0]) + ylim[0],
-                )
-            )
+        sx, sy = np.concatenate(sx_list), np.concatenate(sy_list)
     else:
         if log:
             eps = 1e-6
-            sx = 10 ** rng.uniform(np.log10(eps + xlim[0] * vw), np.log10(xlim[1] * vw), n) + vx
+            sx = (
+                10 ** rng.uniform(np.log10(eps + x_extent[0] * vw), np.log10(x_extent[1] * vw), n)
+                + vx
+            )
             sy = (
-                vh - 10 ** rng.uniform(np.log10(eps + ylim[0] * vh), np.log10(ylim[1] * vh), n) + vy
+                vh
+                - 10 ** rng.uniform(np.log10(eps + y_extent[0] * vh), np.log10(y_extent[1] * vh), n)
+                + vy
             )
-            X = np.column_stack((np.log10(sx - vx), np.log10(vh - (sy - vy))))
         else:
-            sx = rng.uniform(xlim[0] * vw + vx, xlim[1] * vw + vx, n)
-            sy = rng.uniform((1 - ylim[1]) * vh + vy, (1 - ylim[0]) * vh + vy, n)
-            X = np.column_stack(
-                (
-                    (sx - vx) / vw * (xlim[1] - xlim[0]) + xlim[0],
-                    (vh - (sy - vy)) / vh * (ylim[1] - ylim[0]) + ylim[0],
-                )
-            )
+            sx = rng.uniform(x_extent[0] * vw + vx, x_extent[1] * vw + vx, n)
+            sy = rng.uniform((1 - y_extent[1]) * vh + vy, (1 - y_extent[0]) * vh + vy, n)
+
+    # Convert SVG coordinates to latent space
+    if log:
+        X = np.column_stack((np.log10(sx - vx), np.log10(vh - (sy - vy))))
+    else:
+        # Map SVG coords to [0,1] normalized, then scale by img_latent_lim
+        x_norm = (sx - vx) / vw
+        y_norm = (vh - (sy - vy)) / vh
+        x_latent = x_norm * (x_lim[1] - x_lim[0]) + x_lim[0]
+        y_latent = y_norm * (y_lim[1] - y_lim[0]) + y_lim[0]
+        X = np.column_stack((x_latent, y_latent))
+
     return X, sx, sy
 
 
@@ -275,56 +283,75 @@ def _assign_greyscale_values(sx, sy, paths, greys, max_is_black, outlim, grid_sh
     pts = np.column_stack((sx, sy))
     for p, g in zip(paths, greys):
         Y[p.contains_points(pts)] = g
+    # Map grayscale [0,1] to latent output range
     Y = Y * (outlim[1] - outlim[0]) + outlim[0]
-
     if grid_shape:
         n, yres, xres = grid_shape
         Y = Y.reshape(n, yres, xres)
-
     return Y
-
-
-def _rescale_outputs(X, Y, xlim, ylim, outlim, rescale_to):
-    xrescale = rescale_to.get("x", (0, 1))
-    yrescale = rescale_to.get("y", (0, 1))
-    outrescale = rescale_to.get("out", (0, 1))
-
-    X[:, 0] = (X[:, 0] - xlim[0]) / (xlim[1] - xlim[0]) * (xrescale[1] - xrescale[0]) + xrescale[0]
-    X[:, 1] = (X[:, 1] - ylim[0]) / (ylim[1] - ylim[0]) * (yrescale[1] - yrescale[0]) + yrescale[0]
-
-    Y_flat = Y.flatten() if Y.ndim > 1 else Y
-    Y_flat = (Y_flat - outlim[0]) / (outlim[1] - outlim[0]) * (
-        outrescale[1] - outrescale[0]
-    ) + outrescale[0]
-
-    if Y.ndim > 1:
-        Y = Y_flat.reshape(Y.shape)
-    else:
-        Y = Y_flat
-
-    return X, Y
 
 
 def sample_from_svg(
     svg_path,
     n=None,
-    rescale_to=None,
-    xlim=None,
-    ylim=None,
-    outlim=(0, 1),
     *,
     seed=None,
     log=False,
     max_is_black=True,
     grid=None,
     grid_jitter_std=None,
+    # New API parameters
+    lattice_x_extent: tuple[float, float] = None,
+    lattice_y_extent: tuple[float, float] = None,
+    img_latent_xlim: tuple[float, float] = (0.0, 1.0),
+    img_latent_ylim: tuple[float, float] = (0.0, 1.0),
+    img_latent_outlim: tuple[float, float] = (0.0, 1.0),
+    # Legacy parameters (deprecated)
+    rescale_to=None,
+    xlim=None,
+    ylim=None,
+    outlim=None,
 ):
-    svg_path = Path(svg_path).expanduser().resolve()
+    """Sample points from an SVG file and return latent coordinates + values.
 
-    xlim = xlim or ((0.1, 1) if log else (0, 1))
-    ylim = ylim or ((0.1, 1) if log else (0, 1))
-    rescale_to = rescale_to or {}
+    New API:
+        lattice_x_extent, lattice_y_extent: Final latent space bounds for sampling
+        img_latent_xlim, img_latent_ylim: How SVG viewBox maps to latent coordinates
+        img_latent_outlim: How SVG grayscale maps to latent output values
+
+    Legacy API (deprecated):
+        xlim, ylim, outlim, rescale_to: Old parameter names, will emit warnings
+    """
+    import warnings
+
+    svg_path = Path(svg_path).expanduser().resolve()
     seed = seed or np.random.randint(0, 2**32 - 1)
+
+    # Handle legacy parameters
+    if xlim is not None or ylim is not None or outlim is not None or rescale_to is not None:
+        warnings.warn(
+            "sample_from_svg: xlim/ylim/outlim/rescale_to are deprecated. "
+            "Use lattice_*_extent and img_latent_*lim instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # Legacy mode: xlim/ylim were used for both extent and mapping, rescale_to for final coords
+        if rescale_to:
+            lattice_x_extent = lattice_x_extent or tuple(rescale_to.get("x", (0, 1)))
+            lattice_y_extent = lattice_y_extent or tuple(rescale_to.get("y", (0, 1)))
+            img_latent_outlim = outlim or tuple(rescale_to.get("out", (0, 1)))
+        else:
+            # Without rescale_to, xlim/ylim were both extent and mapping
+            lattice_x_extent = lattice_x_extent or xlim
+            lattice_y_extent = lattice_y_extent or ylim
+            img_latent_outlim = outlim or (0, 1)
+        img_latent_xlim = xlim or (0, 1)
+        img_latent_ylim = ylim or (0, 1)
+
+    # Apply defaults
+    default_extent = (0.1, 1.0) if log else (0.0, 1.0)
+    lattice_x_extent = lattice_x_extent or default_extent
+    lattice_y_extent = lattice_y_extent or default_extent
 
     if grid:
         n = n or 1
@@ -336,18 +363,24 @@ def sample_from_svg(
         grid_shape = None
 
     rng = np.random.default_rng(seed)
-
     paths, greys, (vx, vy, vw, vh) = _extract_shapes_from_svg(svg_path, max_is_black)
-    X, sx, sy = _generate_sample_points(
-        n, xlim, ylim, vx, vy, vw, vh, rng, log, grid, grid_jitter_std
-    )
-    Y = _assign_greyscale_values(sx, sy, paths, greys, max_is_black, outlim, grid_shape)
-    X, Y = _rescale_outputs(X, Y, xlim, ylim, outlim, rescale_to)
 
-    if grid:
-        return X, Y
-    else:
-        return X, Y[:, None]
+    X, sx, sy = _generate_svg_sample_points(
+        n,
+        (lattice_x_extent, lattice_y_extent),
+        (img_latent_xlim, img_latent_ylim),
+        vx,
+        vy,
+        vw,
+        vh,
+        rng,
+        log,
+        grid,
+        grid_jitter_std,
+    )
+    Y = _assign_greyscale_values(sx, sy, paths, greys, max_is_black, img_latent_outlim, grid_shape)
+
+    return (X, Y) if grid else (X, Y[:, None])
 
 
 def sample_from_data(
@@ -357,7 +390,9 @@ def sample_from_data(
     zslice: Optional[NdArray] = None,  # for >2D data, slice value(s) for dims beyond 2
     xlims: Optional[tuple[float, float]] = None,
     ylims: Optional[tuple[float, float]] = None,
-    vlims: Optional[tuple[float, float]] = None,  # output value clipping (not used in sampling, but returned for reference)
+    vlims: Optional[
+        tuple[float, float]
+    ] = None,  # output value clipping (not used in sampling, but returned for reference)
     sampling_grid: tuple[int, int] = (48, 48),
     grid_jitter_std: float = 0.0,
     k: int = 128,

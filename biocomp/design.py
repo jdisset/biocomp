@@ -1,5 +1,7 @@
 ### {{{                          --     imports     --
 import random
+import warnings
+from abc import ABC, abstractmethod
 from functools import partial
 from pathlib import Path
 from typing import List, Tuple, Callable, Optional, Union, Literal
@@ -13,7 +15,7 @@ from jax.tree_util import Partial
 from jax.typing import ArrayLike
 
 from assertpy import assert_that
-from pydantic import Field, BaseModel, ConfigDict
+from pydantic import Field, BaseModel, ConfigDict, model_validator
 from tqdm import tqdm
 
 from biocomp.utils import encode_function, EncodedPartialFunction, ArbitraryModel
@@ -97,6 +99,8 @@ def plot_prediction(
 
 
 ## {{{                          --     design manager   --
+
+# Legacy default for backward compatibility
 DEFAULT_RESCALE_TARGET = {
     "x": (0.0, 0.5),
     "y": (0.0, 0.5),
@@ -122,100 +126,240 @@ class LatticeSampling(SamplingConfig):
 SamplingConfigUnion = Union[UniformSampling, LatticeSampling]
 
 
-class Target(BaseModel):
-    path: Union[str, Path]
-    name: Optional[str] = None
-    rescale_to: dict = DEFAULT_RESCALE_TARGET
-    xlim: tuple[float, float] = (0.0, 1.0)
-    ylim: tuple[float, float] = (0.0, 1.0)
-    outlim: tuple[float, float] = (0.0, 1.0)
-    transform_to_log_space: bool = False
-    max_is_black: bool = True
+## {{{                          --     target classes   --
 
 
-class DataTarget(BaseModel):
-    """Design target derived from experimental data.
-    Instead of loading a target function from an SVG file, this class uses
-    experimental data (X, Y arrays) and interpolates it to a lattice for design.
-    This is useful for "reconstruction" design tasks where we want to find circuit
-    parameters that reproduce known experimental behavior.
-    """
+class TargetBase(BaseModel, ABC):
+    """Base class for design targets. Defines lattice extent for sampling."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    X: np.ndarray  # input data (n_samples, n_dims)
-    Y: np.ndarray  # output data (n_samples,) or (n_samples, 1)
     name: Optional[str] = None
-    xlim: Optional[tuple[float, float]] = None  # if None, use data range
-    ylim: Optional[tuple[float, float]] = None  # if None, use data range
-    outlim: Optional[tuple[float, float]] = None  # if None, use data range
-    z_slice: Optional[float] = None  # for 3D data, which z-slice to use
-    z_tolerance: float = 0.05
+    lattice_x_extent: tuple[float, float] = (0.0, 1.0)
+    lattice_y_extent: tuple[float, float] = (0.0, 1.0)
 
-    # Original network that produced this data (for baseline comparison)
-    original_network: Optional[Network] = None
-
-    # cached lattice data
-    _lattice_X: Optional[np.ndarray] = None
-    _lattice_Y: Optional[np.ndarray] = None
-
-    @classmethod
-    def from_plot_data(cls, plot_data, rescaler=None, **kwargs):
-        """Create a DataTarget from a PlotData object.
-
-        Args:
-            plot_data: PlotData object containing x, y data and metadata
-            rescaler: Optional rescaler to convert data to latent space
-            **kwargs: Additional arguments passed to DataTarget constructor
-        """
-        X = np.asarray(plot_data.x)
-        Y = np.asarray(plot_data.y)
-
-        # optionally convert to latent space
-        if rescaler is not None:
-            X = rescaler.fwd(X)
-            Y = rescaler.fwd(Y)
-
-        name = kwargs.pop("name", plot_data.metadata.get("network_name", "data_target"))
-
-        return cls(X=X, Y=Y, name=name, **kwargs)
-
+    @abstractmethod
     def get_lattice(
-        self, resolution: tuple[int, int] = (48, 48), force_recompute: bool = False
+        self, resolution: tuple[int, int], seed: int = 0
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Get the interpolated lattice representation of the data.
+        """Sample target onto a regular lattice grid.
 
         Returns:
             X_lattice: Grid coordinates (n_points, 2)
-            Y_lattice: Interpolated values (yres, xres) with NaNs filled
+            Y_lattice: Target values (yres, xres), may contain NaN for out-of-data regions
         """
+        ...
+
+    @abstractmethod
+    def sample_uniform(self, n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+        """Sample n random points from the target."""
+        ...
+
+
+class SVGTarget(TargetBase):
+    """Design target from SVG image file.
+
+    The img_latent_* parameters control how SVG coordinates map to latent space.
+    The lattice_*_extent parameters control which region of latent space to sample.
+    """
+
+    path: Union[str, Path]
+
+    # SVG-to-latent coordinate mapping
+    img_latent_xlim: tuple[float, float] = (0.0, 1.0)
+    img_latent_ylim: tuple[float, float] = (0.0, 1.0)
+    img_latent_outlim: tuple[float, float] = (0.0, 1.0)
+
+    transform_to_log_space: bool = False
+    max_is_black: bool = True
+
+    @model_validator(mode="after")
+    def _auto_log_extent(self):
+        if self.transform_to_log_space:
+            if self.lattice_x_extent == (0.0, 1.0):
+                self.lattice_x_extent = (0.1, 1.0)
+            if self.lattice_y_extent == (0.0, 1.0):
+                self.lattice_y_extent = (0.1, 1.0)
+        return self
+
+    def get_lattice(
+        self, resolution: tuple[int, int], seed: int = 0
+    ) -> tuple[np.ndarray, np.ndarray]:
+        X, Y = sample_from_svg(
+            self.path,
+            n=1,
+            seed=seed,
+            log=self.transform_to_log_space,
+            lattice_x_extent=self.lattice_x_extent,
+            lattice_y_extent=self.lattice_y_extent,
+            img_latent_xlim=self.img_latent_xlim,
+            img_latent_ylim=self.img_latent_ylim,
+            img_latent_outlim=self.img_latent_outlim,
+            max_is_black=self.max_is_black,
+            grid=resolution,
+            grid_jitter_std=0.0,
+        )
+        return X, Y[0]  # Y shape is (1, yres, xres) in grid mode
+
+    def sample_uniform(self, n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+        return sample_from_svg(
+            self.path,
+            n=n,
+            seed=seed,
+            log=self.transform_to_log_space,
+            lattice_x_extent=self.lattice_x_extent,
+            lattice_y_extent=self.lattice_y_extent,
+            img_latent_xlim=self.img_latent_xlim,
+            img_latent_ylim=self.img_latent_ylim,
+            img_latent_outlim=self.img_latent_outlim,
+            max_is_black=self.max_is_black,
+            grid=None,
+        )
+
+
+class Target(SVGTarget):
+    """Legacy alias for SVGTarget. Use SVGTarget for new code."""
+
+    # Legacy fields for backward compatibility
+    xlim: Optional[tuple[float, float]] = None
+    ylim: Optional[tuple[float, float]] = None
+    outlim: Optional[tuple[float, float]] = None
+    rescale_to: Optional[dict] = None
+
+    @model_validator(mode="after")
+    def _migrate_legacy_params(self):
+        # Migrate old xlim/ylim to lattice extents
+        if self.xlim is not None:
+            warnings.warn(
+                "Target.xlim is deprecated, use lattice_x_extent instead",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            self.lattice_x_extent = self.xlim
+        if self.ylim is not None:
+            warnings.warn(
+                "Target.ylim is deprecated, use lattice_y_extent instead",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            self.lattice_y_extent = self.ylim
+        if self.outlim is not None:
+            warnings.warn(
+                "Target.outlim is deprecated, use img_latent_outlim instead",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            self.img_latent_outlim = self.outlim
+        if self.rescale_to is not None:
+            warnings.warn(
+                "Target.rescale_to is deprecated. Use lattice_*_extent and img_latent_*lim instead.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            # Best-effort migration: use rescale_to as the final latent extent
+            if "x" in self.rescale_to:
+                self.lattice_x_extent = tuple(self.rescale_to["x"])
+            if "y" in self.rescale_to:
+                self.lattice_y_extent = tuple(self.rescale_to["y"])
+            if "out" in self.rescale_to:
+                self.img_latent_outlim = tuple(self.rescale_to["out"])
+        return self
+
+
+class DataTarget(TargetBase):
+    """Design target from experimental data.
+
+    Data is expected to already be in latent space. The lattice extent parameters
+    define where to build the interpolation grid; data outside this range is masked.
+    """
+
+    X: np.ndarray  # (n_samples, n_dims) - already in latent space
+    Y: np.ndarray  # (n_samples,) or (n_samples, 1)
+
+    z_slice: Optional[float] = None
+    z_tolerance: float = 0.05
+    original_network: Optional[Network] = None
+
+    # Legacy fields for backward compatibility
+    xlim: Optional[tuple[float, float]] = None
+    ylim: Optional[tuple[float, float]] = None
+    outlim: Optional[tuple[float, float]] = None  # unused, kept for compat
+
+    _lattice_X: Optional[np.ndarray] = None
+    _lattice_Y: Optional[np.ndarray] = None
+
+    @model_validator(mode="after")
+    def _migrate_legacy_params(self):
+        if self.xlim is not None:
+            warnings.warn(
+                "DataTarget.xlim is deprecated, use lattice_x_extent instead",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            self.lattice_x_extent = self.xlim
+        if self.ylim is not None:
+            warnings.warn(
+                "DataTarget.ylim is deprecated, use lattice_y_extent instead",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            self.lattice_y_extent = self.ylim
+        if self.outlim is not None:
+            warnings.warn(
+                "DataTarget.outlim is deprecated and ignored for DataTarget",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        return self
+
+    @classmethod
+    def from_plot_data(cls, plot_data, rescaler=None, **kwargs):
+        """Create from PlotData object."""
+        X = np.asarray(plot_data.x)
+        Y = np.asarray(plot_data.y)
+        if rescaler is not None:
+            X = rescaler.fwd(X)
+            Y = rescaler.fwd(Y)
+        name = kwargs.pop("name", plot_data.metadata.get("network_name", "data_target"))
+        return cls(X=X, Y=Y, name=name, **kwargs)
+
+    def get_lattice(
+        self, resolution: tuple[int, int], seed: int = 0, force_recompute: bool = False
+    ) -> tuple[np.ndarray, np.ndarray]:
         if self._lattice_X is not None and self._lattice_Y is not None and not force_recompute:
             return self._lattice_X, self._lattice_Y
 
         X_samples, Y_samples = data_to_lattice_2d(
             self.X,
             self.Y,
-            xlims=self.xlim,
-            ylims=self.ylim,
+            xlims=self.lattice_x_extent,
+            ylims=self.lattice_y_extent,
             resolution=resolution,
         )
 
-        # Fill NaNs with the mean of valid values to prevent NaN propagation in loss
         nan_mask = np.isnan(Y_samples)
         if nan_mask.any():
             valid_mean = np.nanmean(Y_samples)
             Y_samples = np.where(nan_mask, valid_mean, Y_samples)
-            logger.debug(
-                f"Filled {nan_mask.sum()} NaN values in lattice with mean={valid_mean:.4f}"
-            )
+            logger.debug(f"Filled {nan_mask.sum()} NaN values with mean={valid_mean:.4f}")
 
         self._lattice_X = X_samples
         self._lattice_Y = Y_samples
-
         return self._lattice_X, self._lattice_Y
 
+    def sample_uniform(self, n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+        rng = np.random.default_rng(seed)
+        indices = rng.choice(len(self.X), size=n, replace=True)
+        X_sampled = self.X[indices]
+        Y_sampled = self.Y[indices]
+        if Y_sampled.ndim == 1:
+            Y_sampled = Y_sampled[:, None]
+        return X_sampled, Y_sampled
 
-TargetUnion = Union[Target, DataTarget]
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+TargetUnion = Union[Target, SVGTarget, DataTarget]
 
 
 class DesignManager(BaseModel):
@@ -226,13 +370,6 @@ class DesignManager(BaseModel):
     targets: list[TargetUnion]
     networks: List[Network]
     sampling: SamplingConfigUnion = Field(default_factory=UniformSampling, discriminator="strategy")
-
-    def model_post_init(self, *a, **kw):
-        super().model_post_init(*a, **kw)
-        for target in self.targets:
-            if isinstance(target, Target) and target.transform_to_log_space:
-                target.xlim = (0.1, 1)
-                target.ylim = (0.1, 1)
 
     @property
     def has_data_targets(self) -> bool:
@@ -246,39 +383,14 @@ class DesignManager(BaseModel):
         grid: Optional[tuple[int, int]] = None,
         jitter: float = 0.0,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Sample from either Target or DataTarget."""
-        if isinstance(target, DataTarget):
-            if grid is not None:
-                # Lattice mode: use cached KNN-interpolated grid
-                X_lattice, Y_lattice = target.get_lattice(resolution=grid)
-                X_tiled = np.tile(X_lattice, (n, 1))
-                Y_tiled = np.tile(Y_lattice[None, ...], (n, 1, 1))  # (n, yres, xres)
-                return X_tiled, Y_tiled
-            else:
-                # Uniform mode: randomly sample from stored data
-                rng = np.random.default_rng(seed)
-                n_samples = len(target.X)
-                indices = rng.choice(n_samples, size=n, replace=True)
-                X_sampled = target.X[indices]  # (n, 2)
-                Y_sampled = target.Y[indices]  # (n, 1) or (n,)
-                if Y_sampled.ndim == 1:
-                    Y_sampled = Y_sampled[:, None]
-                return X_sampled, Y_sampled
+        """Sample from target using its interface methods."""
+        if grid is not None:
+            X_lattice, Y_lattice = target.get_lattice(resolution=grid, seed=seed)
+            X_tiled = np.tile(X_lattice, (n, 1))
+            Y_tiled = np.tile(Y_lattice[None, ...], (n, 1, 1))
+            return X_tiled, Y_tiled
         else:
-            # SVG-based Target
-            return sample_from_svg(
-                target.path,
-                n=n,
-                seed=seed,
-                log=target.transform_to_log_space,
-                xlim=target.xlim,
-                ylim=target.ylim,
-                outlim=target.outlim,
-                rescale_to=target.rescale_to,
-                max_is_black=target.max_is_black,
-                grid=grid,
-                grid_jitter_std=jitter,
-            )
+            return target.sample_uniform(n=n, seed=seed)
 
     def get_samples(
         self,
@@ -657,22 +769,39 @@ def start(
 ):
     import time
 
-    t0 = time.time()
+    timings = {}
+    t_total = time.perf_counter()
+
+    logger.info("=" * 60)
+    logger.info("DESIGN OPTIMIZATION - INITIALIZATION PHASE")
+    logger.info("=" * 60)
+
     pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
 
-    logger.info("Building compute stack...")
+    # Phase 1: Build compute stack
+    t0 = time.perf_counter()
+    logger.info("[1/5] Building compute stack...")
     stack = dmanager.build_stack(model)
-    logger.info(f"Stack built in {time.time() - t0:.2f}s")
+    timings["stack_build"] = time.perf_counter() - t0
+    logger.info(f"  -> Stack built in {timings['stack_build']:.2f}s")
 
-    t1 = time.time()
-    logger.info("Initializing parameters...")
+    # Phase 2: Initialize parameters
+    t1 = time.perf_counter()
+    logger.info("[2/5] Initializing parameters...")
     initial_params = initialize_params(
         stack, dconf.n_replicates, dmanager.n_targets, model.shared_params, pkey
     )
     assert_tree_shape(initial_params, (dconf.n_replicates, dmanager.n_targets))
+    timings["param_init"] = time.perf_counter() - t1
+    logger.info(f"  -> Parameters initialized in {timings['param_init']:.2f}s")
+
+    # Phase 3: Initialize optimizer state
+    t2 = time.perf_counter()
+    logger.info("[3/5] Initializing optimizer state...")
     static, dynamic = initial_params.filter_by_tag(["non_grad", "shared"])
     initial_optimizer_state = vmap(vmap(dconf.optimizer.init))(dynamic)
-    logger.info(f"Parameters initialized in {time.time() - t1:.2f}s")
+    timings["opt_init"] = time.perf_counter() - t2
+    logger.info(f"  -> Optimizer state initialized in {timings['opt_init']:.2f}s")
 
     # -- get data --
     num_z = static["global/number_of_random_variables"]
@@ -683,16 +812,15 @@ def start(
     steps_per_epoch = max(1, dconf.n_batches_per_epoch // dconf.batches_per_step)
     total_steps = int(dconf.n_epochs * steps_per_epoch)
 
-    logger.debug(
-        f"Total steps: {total_steps}, Steps per epoch: {steps_per_epoch}, \n"
-        f"Batch size: {dconf.batch_size}, Batches per step: {dconf.batches_per_step}"
-    )
+    logger.info(f"  Config: {total_steps} total steps, {steps_per_epoch} steps/epoch, "
+                f"batch_size={dconf.batch_size}, batches_per_step={dconf.batches_per_step}")
     assert_that(total_steps).is_greater_than(0)
 
     n_networks = stack.get_nb_networks()
 
-    t2 = time.time()
-    logger.info("Generating training samples...")
+    # Phase 4: Generate samples
+    t3 = time.perf_counter()
+    logger.info("[4/5] Generating training samples...")
     xbatches_list, ybatches_list = dmanager.get_samples(
         (
             len(dmanager.networks),
@@ -706,7 +834,8 @@ def start(
 
     xbatches = jnp.concatenate(xbatches_list, axis=-1)
     ybatches = ybatches_list[0]
-    logger.info(f"Samples generated in {time.time() - t2:.2f}s")
+    timings["sample_gen"] = time.perf_counter() - t3
+    logger.info(f"  -> Samples generated in {timings['sample_gen']:.2f}s")
 
     effective_batch_size = dconf.batch_size
     if dmanager.is_lattice_mode:
@@ -716,7 +845,7 @@ def start(
     n_design_inputs = 2 * len(dmanager.networks)
 
     logger.info(
-        f"Data generated: {len(dmanager.networks)} design networks, "
+        f"  Data: {len(dmanager.networks)} design networks, "
         f"n_design_inputs={n_design_inputs}, xbatches.shape={xbatches.shape}"
     )
 
@@ -731,11 +860,12 @@ def start(
         )
     )
 
-    # -- step function --
+    # Phase 5: Create loss and step functions
+    t4 = time.perf_counter()
+    logger.info("[5/5] Creating loss and step functions...")
     ratio_paths = get_ratio_paths(initial_params)
 
     def norm_ratios_hook(params, *a, **kw):
-        logger.debug("Normalizing ratios...")
         return params.update_leaves_by_path(ratio_paths, normalize_ratios_prune)
 
     loss_func = dconf.loss_function.get_impl()(
@@ -778,6 +908,22 @@ def start(
         return jax.vmap(
             Partial(per_replicate_step, num_z=num_z, training_config=dconf, scannable_step=step_fn)
         )(params, opt_state, keys, xs, ys)
+
+    timings["loss_step_fn"] = time.perf_counter() - t4
+    logger.info(f"  -> Loss/step functions created in {timings['loss_step_fn']:.2f}s")
+
+    # Summary of initialization
+    timings["total_init"] = time.perf_counter() - t_total
+    logger.info("-" * 60)
+    logger.info(f"INITIALIZATION COMPLETE in {timings['total_init']:.2f}s")
+    logger.info(f"  Stack build:     {timings['stack_build']:.2f}s ({timings['stack_build']/timings['total_init']*100:.1f}%)")
+    logger.info(f"  Param init:      {timings['param_init']:.2f}s ({timings['param_init']/timings['total_init']*100:.1f}%)")
+    logger.info(f"  Optimizer init:  {timings['opt_init']:.2f}s ({timings['opt_init']/timings['total_init']*100:.1f}%)")
+    logger.info(f"  Sample gen:      {timings['sample_gen']:.2f}s ({timings['sample_gen']/timings['total_init']*100:.1f}%)")
+    logger.info(f"  Loss/step fn:    {timings['loss_step_fn']:.2f}s ({timings['loss_step_fn']/timings['total_init']*100:.1f}%)")
+    logger.info("=" * 60)
+    logger.info("STARTING OPTIMIZATION LOOP")
+    logger.info("=" * 60)
 
     return optimize(
         step,
@@ -903,8 +1049,7 @@ def evaluate_design(
     all_losses = []
     all_predictions = [] if store_predictions else None
 
-    # Pre-compile the apply function for speed
-    apply_batched = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+    apply_batched = jax.jit(jax.vmap(stack.apply, in_axes=(None, 0, 0, 0)))
 
     total_iterations = n_replicates * n_targets
     pbar = tqdm(total=total_iterations, desc="Evaluating designs", unit="rep×tgt")
