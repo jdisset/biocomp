@@ -383,7 +383,7 @@ class Network(BaseModel):
         return cotx_groups
 
     def _build_transcription_units(
-        self, cotx_groups: dict
+        self, cotx_groups: dict, prune_zero_ratios: bool = True
     ) -> dict[str, tuple[list[TranscriptionUnit], list]]:
         tus_and_ratios_by_cotx = {}
         for group_id, info in cotx_groups.items():
@@ -391,32 +391,39 @@ class Network(BaseModel):
             # Create mapping from source_id to ratio (both are in aggregation order, e.g. alphabetically sorted)
             source_id_to_ratio = dict(zip(info["source_ids"], info["ratios"]))
 
-            # Collect source node with their output slots (one TU per output slot)
-            tu_specs = []  # (position, source_id, source_node, output_slot)
+            if prune_zero_ratios:
+                source_id_to_ratio = {
+                    sid: ratio for sid, ratio in source_id_to_ratio.items()
+                    if not (isinstance(ratio, (int, float)) and ratio == 0)
+                }
+
+            tu_specs = []
             assert self.compute_graph is not None
             for node in self.compute_graph.get_nodes_by_type("source"):
                 if node.extra.get("cotx_group") == group_id:
                     source_id = node.extra.get("source_id")
-                    # Count output slots from outgoing edges
+                    if prune_zero_ratios and source_id not in source_id_to_ratio:
+                        continue
                     outgoing = self.compute_graph.get_outgoing_edges(node.node_id)
                     output_slots = sorted(set(e.from_output_slot for e in outgoing))
+                    global_indices = node.extra.get("tu_global_indices_by_slot", {})
 
                     for output_slot in output_slots:
                         position = node.extra.get("position_in_source", 0) + output_slot
-                        tu_specs.append((position, source_id, node, output_slot))
+                        global_index = global_indices.get(output_slot, position)
+                        tu_specs.append((global_index, position, source_id, node, output_slot))
 
-            # Sort by position to restore original TU order
             tu_specs.sort(key=lambda x: x[0])
 
             # Build ratios list (one per unique source in TU order)
             seen_sources = set()
             reordered_ratios = []
-            for position, source_id, source_node, output_slot in tu_specs:
+            for global_index, position, source_id, source_node, output_slot in tu_specs:
                 if source_id not in seen_sources:
                     reordered_ratios.append(source_id_to_ratio.get(source_id, 1.0))
                     seen_sources.add(source_id)
 
-            for position, source_id, source_node, output_slot in tu_specs:
+            for global_index, position, source_id, source_node, output_slot in tu_specs:
                 param_ref_ids = source_node.extra.get("param_ref_ids", {})
                 slots = self._extract_slots_from_source(source_node, param_ref_ids, output_slot)
 
@@ -425,8 +432,11 @@ class Network(BaseModel):
                         if slot.maps_to_parameter and slot.maps_to_parameter in param_ref_ids:
                             slot.ref_id = param_ref_ids[slot.maps_to_parameter]
 
+                tu_names_by_slot = source_node.extra.get("tu_names_by_slot", {})
+                tu_name = tu_names_by_slot.get(output_slot, source_node.extra.get("name", ""))
+
                 tu = TranscriptionUnit(
-                    name=source_node.extra.get("name", ""),
+                    name=tu_name,
                     slots=slots,
                     source=source_id,
                     position_in_source=position,
@@ -1073,25 +1083,27 @@ def _build_cdg_dual_from_preprocessed(
         ):
             source_to_norm_ratio_map[source] = (norm_ratio, orig_ratio)
 
-        for unit_idx, unit in enumerate(cotx.units):
+        source_position_counter: dict[str, int] = {}
+        for unit in cotx.units:
             norm_ratio, orig_ratio = source_to_norm_ratio_map[unit.source]
-            # Store both normalized value and original range info (if NumRange)
             range_info = orig_ratio if isinstance(orig_ratio, NumRange) else None
-            # Also store param_ref_ids, TU name, position, and cotx_index for roundtrip preservation
-            # Use position_in_source if explicitly set (non-zero), otherwise use unit_idx
-            position = (
-                unit.position_in_source
-                if (hasattr(unit, "position_in_source") and unit.position_in_source != 0)
-                else unit_idx
-            )
-            source_cotx_to_ratio_map[(unit.source, group_name)] = (
-                float(norm_ratio),
-                range_info,
-                dict(unit.param_ref_ids),  # copy to avoid mutation
-                unit.name,  # TU name for roundtrip
-                position,  # position in cotx for ordering
-                i,  # cotx index for ordering CoTransfections
-            )
+            if unit.position_in_source is not None:
+                position = unit.position_in_source
+            else:
+                position = source_position_counter.get(unit.source, 0)
+            source_position_counter[unit.source] = position + 1
+
+            # Only store first TU's info per source (others become output slots)
+            source_key = (unit.source, group_name)
+            if source_key not in source_cotx_to_ratio_map:
+                source_cotx_to_ratio_map[source_key] = (
+                    float(norm_ratio),
+                    range_info,
+                    dict(unit.param_ref_ids),
+                    unit.name,
+                    position,
+                    i,
+                )
 
     source_nodes, tx_nodes, tl_nodes = {}, {}, {}
     output_node, dead_end_nodes = None, {}
@@ -1114,9 +1126,11 @@ def _build_cdg_dual_from_preprocessed(
                 "cotx_group": cotx_group,
                 "ratio": ratio,
                 "param_ref_ids": param_ref_ids,  # store for roundtrip preservation
-                "name": tu_name,  # store TU name for roundtrip
-                "position_in_source": position,  # store position for ordering units
-                "cotx_index": cotx_index,  # store index for ordering CoTransfections
+                "name": tu_name,
+                "position_in_source": position,
+                "cotx_index": cotx_index,
+                "tu_names_by_slot": {},
+                "tu_global_indices_by_slot": {}
             }
             # Add range info if ratio is unlocked
             if range_info is not None:
@@ -1168,7 +1182,9 @@ def _build_cdg_dual_from_preprocessed(
     source_output_slot_counters = {}
     output_slot_counter = 0
 
-    for tuid, info in tu_info.items():
+    node_id_to_node = {n.node_id: n for n in nodes}
+
+    for global_tu_index, (tuid, info) in enumerate(tu_info.items()):
         tu = info["tu"]
 
         cotx_group = info["cotx_group"]
@@ -1186,6 +1202,10 @@ def _build_cdg_dual_from_preprocessed(
             source_output_slot_counters[source_key] = 0
         source_output_slot = source_output_slot_counters[source_key]
         source_output_slot_counters[source_key] += 1
+
+        source_node = node_id_to_node[src_id]
+        source_node.extra["tu_names_by_slot"][source_output_slot] = tu.name or ""
+        source_node.extra["tu_global_indices_by_slot"][source_output_slot] = global_tu_index
 
         edges.append(
             GraphEdge(
