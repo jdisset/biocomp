@@ -322,6 +322,50 @@ def get_over1_penalty_for_leaf(p, rel_active=1e-3, width=2e-4):
     return soft_count_over_one_penalty(p, rel_active=rel_active, width=width)
 
 
+def ratio_spread_penalty(W, max_ratio=100.0, eps=1e-9):
+    """Penalty for ratio spread exceeding max_ratio.
+
+    Encourages ratios to stay within a reasonable range (e.g., 1:100).
+    This prevents designs with extreme ratio spreads like 1:300 that are
+    biologically implausible.
+
+    Args:
+        W: Ratio array shape (n_aggregations, n_ratios)
+        max_ratio: Maximum allowed ratio between largest and smallest non-zero
+        eps: Small constant for numerical stability
+    """
+    A = jnp.abs(W)
+    # Per-row: find spread of active ratios in log-space
+    log_max_ratio = jnp.log(max_ratio + eps)
+
+    # For each row, compute log-spread of positive ratios
+    # Use safe log with masking for zero values
+    pos_mask = A > eps
+    log_A = jnp.where(pos_mask, jnp.log(A + eps), -jnp.inf)
+
+    # Per-row max and min of log ratios (only among positive values)
+    log_max = jnp.max(jnp.where(pos_mask, log_A, -jnp.inf), axis=1)
+    log_min = jnp.min(jnp.where(pos_mask, log_A, jnp.inf), axis=1)
+    log_spread = log_max - log_min
+
+    # Penalize spread exceeding log(max_ratio)
+    excess = jax.nn.relu(log_spread - log_max_ratio)
+    return jnp.sum(jnp.square(excess))
+
+
+def get_spread_penalty_for_leaf(p, max_ratio=100.0):
+    """Get ratio spread penalty for a ratio leaf."""
+    if hasattr(p, "view"):
+        try:
+            return ratio_spread_penalty(p.view(), max_ratio=max_ratio)
+        except Exception:
+            return sum(
+                ratio_spread_penalty(p.tree[path], max_ratio=max_ratio)
+                for path in p.paths
+            )
+    return ratio_spread_penalty(p, max_ratio=max_ratio)
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                      --     apply helpers     --
@@ -361,10 +405,18 @@ def compute_all_losses(x, y, yhatdep, lossfunc, n_inputs_per_network=2):
 ## {{{                      --     loss factories     --
 
 
-def _make_loss_func(stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses_fn):
+def _make_loss_func(
+    stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses_fn,
+    lambda_spread=0.01, max_ratio=100.0,
+):
     """Shared loss function factory logic.
 
     Includes final NaN/inf guard to ensure loss is always finite.
+
+    Args:
+        lambda_spread: Weight for ratio spread penalty (encourages ratios to stay
+                       within max_ratio:1 range). Default 0.01.
+        max_ratio: Maximum allowed ratio spread (default 100:1)
     """
     n_targets, n_networks = dmanager.n_targets, len(dmanager.networks)
     dep_mask = stack.get_dependent_output_mask()
@@ -381,16 +433,24 @@ def _make_loss_func(stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, co
         yhatdep = _sanitize(yhatdep)
 
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
+
+        # Sparsity penalty (encourages one active TU per cotransfection)
         over1_penalty = as_schedule(lambda_over1)(step) * sum(
             get_over1_penalty_for_leaf(p) for p in ratio_leaves
         )
         over1_penalty = _sanitize(jnp.atleast_1d(over1_penalty))[0]
 
+        # Spread penalty (encourages ratios to stay within max_ratio:1)
+        spread_penalty = as_schedule(lambda_spread)(step) * sum(
+            get_spread_penalty_for_leaf(p, max_ratio=max_ratio) for p in ratio_leaves
+        )
+        spread_penalty = _sanitize(jnp.atleast_1d(spread_penalty))[0]
+
         all_losses, extra_aux = compute_losses_fn(X, Y, yhatdep, step, n_targets, n_networks)
         aux = {"apply_aux": apply_aux, "all_losses": all_losses, "yhatdep": yhatdep, **extra_aux}
 
         # Final loss computation with NaN guard
-        loss = all_losses.mean() + over1_penalty
+        loss = all_losses.mean() + over1_penalty + spread_penalty
 
         # If loss is NaN/inf, return a large but finite value to allow recovery
         # Using 100.0 as a reasonable "bad but recoverable" loss value
@@ -409,11 +469,17 @@ def distance_loss(
     ratio_paths=None,
     epsilon=0.01,
     lambda_over1=0.001,
+    lambda_spread=0.01,
+    max_ratio=100.0,
     distance_func=huber_zncc_loss,
 ):
     """Factory for point-cloud distance loss.
 
     Made numerically robust with NaN/inf sanitization.
+
+    Args:
+        lambda_spread: Weight for ratio spread penalty (default 0.01)
+        max_ratio: Maximum allowed ratio spread (default 100:1)
     """
 
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks):
@@ -429,7 +495,10 @@ def distance_loss(
         all_losses = _sanitize(all_losses)
         return all_losses, {}
 
-    return _make_loss_func(stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses)
+    return _make_loss_func(
+        stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses,
+        lambda_spread=lambda_spread, max_ratio=max_ratio,
+    )
 
 
 def grid_distance_loss(
@@ -445,11 +514,17 @@ def grid_distance_loss(
     n_sinkhorn_iters=50,
     lncc_kernel=7,
     lambda_over1=0.001,
+    lambda_spread=0.01,
+    max_ratio=100.0,
     **kw,
 ):
     """Factory for grid-based distance loss using fast Sinkhorn.
 
     Made numerically robust with NaN/inf sanitization at each step.
+
+    Args:
+        lambda_spread: Weight for ratio spread penalty (default 0.01)
+        max_ratio: Maximum allowed ratio spread (default 100:1)
     """
     assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
     xres, yres = dmanager.grid_resolution
@@ -493,7 +568,10 @@ def grid_distance_loss(
         all_losses = _sanitize(all_losses)
         return all_losses, {"yhat_images": yhat_images}
 
-    return _make_loss_func(stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses)
+    return _make_loss_func(
+        stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses,
+        lambda_spread=lambda_spread, max_ratio=max_ratio,
+    )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
