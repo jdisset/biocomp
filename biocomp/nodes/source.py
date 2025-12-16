@@ -14,6 +14,7 @@ from biocomp.nodeutils import (
     reference_forward_random_var_ids,
     empty_prepare,
 )
+from typing import Optional
 
 from .passthrough import single_passthrough
 from biocomp.utils import get_logger
@@ -103,6 +104,7 @@ def source_with_pos(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
+        tu_enabled_random_vars: Optional[ArrayLike] = None,  # unused for source
     ) -> tuple[ArrayLike, dict]:
         qid = params[f"{namespace}/random_variable_id"][node_id]
         random_var = random_vars[qid]
@@ -196,6 +198,7 @@ def inv_source_with_pos(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
+        tu_enabled_random_vars: Optional[ArrayLike] = None,  # unused for inverse nodes
     ) -> tuple[ArrayLike, dict]:
         assert value.shape == input_shapes[0], f"Invalid input shape {value.shape}"
 

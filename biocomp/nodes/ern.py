@@ -9,9 +9,11 @@ from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, get_para
 from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
+    add_tu_input_mapping,
     NON_GRAD_TAG,
 )
 from biocomp.utils import get_logger
+from typing import Optional
 from biocomp.neuralutils import (
     ACTIVATION_FUNCTIONS,
     INITIALIZERS,
@@ -127,6 +129,7 @@ def sequestron_ERN(
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
         # --------- random_var var
         add_random_var_ids(params, len(nodelist), 1, namespace)
+        add_tu_input_mapping(params, stack, nodelist, namespace)
 
         init_if_needed(
             params,
@@ -199,6 +202,7 @@ def sequestron_ERN(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
+        tu_enabled_random_vars: Optional[ArrayLike] = None,
     ) -> tuple[ArrayLike, dict]:
         assert len(values) == len(input_shapes)
 
@@ -214,23 +218,45 @@ def sequestron_ERN(
             node_layer_id = params[f"{namespace}/node_layer_ids"][node_id]
             layer_id_onehot = jax.nn.one_hot(node_layer_id, max_ern_layers)
 
-        result = o_activation(
-            MLP(
-                *values,
-                affinity=affinity,
-                random_var=random_vars[qid],
-                param_f=partial(get_param, params, base_path="shared"),
-                key=key,
-                layer_id_onehot=layer_id_onehot,
+        input_tu_indices_path = f"{namespace}/input_tu_indices"
+        if input_tu_indices_path in params:
+            from biocomp.tumasking import compute_input_masks
+
+            tu_indices = params[input_tu_indices_path][node_id]
+            tu_log_alpha = params["design/tu_log_alpha"] if "design/tu_log_alpha" in params else None
+            input_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
+        else:
+            input_masks = jnp.ones(2)
+
+        neg_val, pos_val = values
+        neg_enabled, pos_enabled = input_masks[0], input_masks[1]
+
+        def normal_ern():
+            return o_activation(
+                MLP(
+                    neg_val,
+                    pos_val,
+                    affinity=affinity,
+                    random_var=random_vars[qid],
+                    param_f=partial(get_param, params, base_path="shared"),
+                    key=key,
+                    layer_id_onehot=layer_id_onehot,
+                )
             )
+
+        def passthrough_pos():
+            return jnp.sum(pos_val).reshape(1)
+
+        def zero_output():
+            return jnp.zeros(1)
+
+        result = jnp.where(
+            pos_enabled > 0.5,
+            jnp.where(neg_enabled > 0.5, normal_ern(), passthrough_pos()),
+            zero_output(),
         )
 
-        # calculate input difference for debug
-        neg_val, pos_val = values
         input_diff = jnp.sum(pos_val) - jnp.sum(neg_val)
-
-        # if dummy:
-        #     result = input_diff * (0.9**node_layer_id)  # just a dummy decreasing function
 
         aux_dict = {
             "affinity": affinity,
@@ -240,6 +266,9 @@ def sequestron_ERN(
             "neg_input": neg_val,
             "pos_input": pos_val,
             "input_diff": input_diff,
+            "input_masks": input_masks,
+            "neg_enabled": neg_enabled,
+            "pos_enabled": pos_enabled,
         }
 
         if use_ern_layer_id:

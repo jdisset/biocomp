@@ -9,11 +9,13 @@ from biocomp.parameters import ParameterTree, init_if_needed, make_view
 from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
+    add_tu_input_mapping,
     NON_GRAD_TAG,
     get_prev_num_random_vars,
     reference_forward_random_var_ids,
 )
 from biocomp.utils import get_logger
+from typing import Optional
 
 from biocomp.neuralutils import (
     ACTIVATION_FUNCTIONS,
@@ -221,6 +223,7 @@ def transform_nn(
             reference_forward_random_var_ids(stack, params, nodelist, namespace)
         else:
             add_random_var_ids(params, len(nodelist), len(input_shapes) + 1, namespace)
+            add_tu_input_mapping(params, stack, nodelist, namespace)
 
         fake_vals = [np.zeros(s) for s in input_shapes]
 
@@ -259,6 +262,7 @@ def transform_nn(
         params: ParameterTree,
         node_id: ArrayLike,
         key: PRNGKey,
+        tu_enabled_random_vars: Optional[ArrayLike] = None,
     ) -> tuple[ArrayLike, dict]:
         k1, k2, k3 = jax.random.split(key, 3)
 
@@ -284,32 +288,52 @@ def transform_nn(
             disable_variational=dummy,
         )
 
-        # first we apply the inner head to all inputs and sum them:
-        inner_keys = jax.random.split(k1, val.shape[0])
+        input_tu_indices_path = f"{namespace}/input_tu_indices"
+        if not is_inverse and input_tu_indices_path in params:
+            from biocomp.tumasking import compute_input_masks
 
-        inner_out = sum(
+            tu_indices = params[input_tu_indices_path][node_id]
+            tu_log_alpha = params["design/tu_log_alpha"] if "design/tu_log_alpha" in params else None
+            input_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
+        else:
+            input_masks = jnp.ones(len(input_shapes))
+
+        inner_keys = jax.random.split(k1, val.shape[0])
+        inner_outputs = [
             inner(params, value=v, random_var=random_var[i], rate_embedding=r, key=k)
             for i, (v, r, k) in enumerate(zip(val, qrates, inner_keys))
-        )
+        ]
+        masked_inner_outputs = [
+            out * input_masks[i] for i, out in enumerate(inner_outputs)
+        ]
+        inner_out = sum(masked_inner_outputs)
 
         inner_out = flat_concat(inner_out, random_var[len(input_shapes)])
 
         assert inner_out.shape == (inner_outsize + 1,)
 
-        # then we apply a final outer layer to the summed output:
         ans = outer(inner_out, params, k2)
 
-        # residual connection
-        input_sum = jnp.sum(val, axis=0)
+        masked_val = val * input_masks.reshape(-1, *([1] * len(input_shapes[0])))
+        input_sum = jnp.sum(masked_val, axis=0)
+        n_enabled = jnp.sum(input_masks)
+
         if not dummy:
             alpha = params[f"shared/{shared_layer_name}/residual_alpha"]
             beta = params[f"shared/{shared_layer_name}/residual_beta"]
-            # apply softmax normalization to alpha and beta
             alpha_norm = jnp.exp(alpha) / (jnp.exp(alpha) + jnp.exp(beta))
             beta_norm = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
-            final_output = alpha_norm * input_sum + beta_norm * ans
+            final_output = jnp.where(
+                n_enabled > 0,
+                alpha_norm * input_sum + beta_norm * ans,
+                jnp.zeros_like(ans),
+            )
         else:
-            final_output = ans
+            final_output = jnp.where(
+                n_enabled > 0,
+                ans,
+                jnp.zeros_like(ans),
+            )
             alpha_norm = jnp.array(0.0)
             beta_norm = jnp.array(0.0)
 
@@ -324,6 +348,8 @@ def transform_nn(
             "beta_norm": beta_norm,
             "is_inverse": is_inverse,
             "n_inputs": len(input_shapes),
+            "input_masks": input_masks,
+            "n_enabled": n_enabled,
             **qaux,
         }
 

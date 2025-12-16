@@ -4,10 +4,9 @@ from jax.typing import ArrayLike
 import jax.numpy as jnp
 import numpy as np
 from biocomp.parameters import ArrayRef, ParameterTree
-from biocomp.nodeutils import (
-    LayerInstance,
-)
+from biocomp.nodeutils import LayerInstance, add_tu_output_mapping
 from biocomp.utils import get_logger
+from typing import Optional
 
 
 PRNGKey = ArrayLike
@@ -85,33 +84,59 @@ def aggregation(
         assert ratios.shape == (len(nodelist), n_outputs), f"Invalid ratio shape {ratios.shape}"
         params[f"{namespace}/{PNAME}"] = ratios
 
+        add_tu_output_mapping(params, stack, nodelist, namespace, n_outputs)
+
     def apply(
         input: NDArray,
         random_vars: NDArray,
         params: ParameterTree,
         node_id: ArrayLike,
         key: PRNGKey,
+        tu_enabled_random_vars: Optional[ArrayLike] = None,
     ) -> tuple[ArrayLike, dict]:
         assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
         ratios = params[f"{namespace}/{PNAME}"][node_id][:n_outputs]
         abs_ratios = jnp.abs(jnp.array(ratios))
-        result = abs_ratios * input
-        return result, {"ratios": ratios, "abs_ratios": abs_ratios, "n_outputs": n_outputs}
+
+        output_tu_indices_path = f"{namespace}/output_tu_indices"
+        if output_tu_indices_path in params:
+            from biocomp.tumasking import compute_input_masks
+
+            tu_indices = params[output_tu_indices_path][node_id]
+            tu_log_alpha = params["design/tu_log_alpha"] if "design/tu_log_alpha" in params else None
+            output_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
+        else:
+            output_masks = jnp.ones(n_outputs)
+
+        masked_ratios = abs_ratios * output_masks
+        masked_sum = jnp.sum(masked_ratios)
+        normalized_ratios = jnp.where(
+            masked_sum > 1e-8,
+            masked_ratios / masked_sum,
+            jnp.zeros_like(masked_ratios)
+        )
+        result = normalized_ratios * input
+
+        return result, {
+            "ratios": ratios,
+            "abs_ratios": abs_ratios,
+            "n_outputs": n_outputs,
+            "output_masks": output_masks,
+            "masked_ratios": masked_ratios,
+            "normalized_ratios": normalized_ratios,
+        }
 
     def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack = None, **_):
         for i, n in enumerate(nodelist):
             updt = {}
             ratios = params[f"{namespace}/{PNAME}"][i]
 
-            # normalize absolute ratios so that the minimum is 1
-            ratios_array = jnp.abs(jnp.array(ratios))  # use absolute values like in apply
-            # find the minimum non-zero ratio
+            ratios_array = jnp.abs(jnp.array(ratios))
             positive_ratios = ratios_array[ratios_array > 0]
             min_ratio = jnp.min(positive_ratios) if len(positive_ratios) > 0 else 1.0
-            min_ratio = jnp.maximum(min_ratio, 1e-9)  # avoid division by zero
+            min_ratio = jnp.maximum(min_ratio, 1e-9)
             normalized_ratios = ratios_array / min_ratio
 
-            # update extra dict
             updt["ratios"] = normalized_ratios.tolist()[:n_outputs]
 
             # After commit, ratios are locked - remove ratio_ranges
@@ -135,21 +160,32 @@ def inv_aggregation(
     assert len(input_shapes) == 1, f"inverse_Aggregation expects 1 input, got {len(input_shapes)}"
     assert n_outputs == 1, f"inverse_Aggregation expects 1 output, got {n_outputs}"
 
+    fwd_namespace: list[str] = []
+
     def prepare(params: ParameterTree, nodelist: list[StackNode], **_):
         ref = ArrayRef(params.data)
+        original_slots = []
+        fwd_node_positions = []
+
         for node in nodelist:
             extra = node.get(stack).extra
             assert extra["original_output_slot"] < extra["original_output_len"]
             original_slot = extra["original_output_slot"]
+            original_slots.append(original_slot)
 
             fwd_node = node.get_forward_stacknode(stack)
             assert fwd_node.layer_number is not None
-            fwd_namespace = stack.get_layer_namespace(fwd_node.layer_number)
-            ref.push_back(
-                f"{fwd_namespace}/ratios", (fwd_node.node_position_in_layer, original_slot)
-            )
+            fwd_ns = stack.get_layer_namespace(fwd_node.layer_number)
+
+            if not fwd_namespace:
+                fwd_namespace.append(fwd_ns)
+
+            ref.push_back(f"{fwd_ns}/ratios", (fwd_node.node_position_in_layer, original_slot))
+            fwd_node_positions.append(fwd_node.node_position_in_layer)
 
         params.at(f"{namespace}/ratios", ref, overwrite=None)
+        params.at(f"{namespace}/original_slots", jnp.array(original_slots))
+        params.at(f"{namespace}/fwd_node_positions", jnp.array(fwd_node_positions))
 
     DISABLED_THRESHOLD = 1.0 / 120.0
 
@@ -159,12 +195,45 @@ def inv_aggregation(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
+        tu_enabled_random_vars: Optional[ArrayLike] = None,
     ) -> tuple[ArrayLike, dict]:
-        ratio = jnp.abs(params[f"{namespace}/ratios"][node_id])
-        is_enabled = ratio >= DISABLED_THRESHOLD
-        safe_ratio = jnp.maximum(ratio, DISABLED_THRESHOLD)
+        original_ratio = jnp.abs(params[f"{namespace}/ratios"][node_id])
+        original_slot = params[f"{namespace}/original_slots"][node_id]
+        fwd_node_pos = params[f"{namespace}/fwd_node_positions"][node_id]
+
+        fwd_ns = fwd_namespace[0] if fwd_namespace else namespace.replace("inv_", "")
+        fwd_ratios_path = f"{fwd_ns}/ratios"
+        fwd_tu_path = f"{fwd_ns}/output_tu_indices"
+
+        all_fwd_ratios = jnp.abs(params[fwd_ratios_path][fwd_node_pos])
+
+        if fwd_tu_path in params and tu_enabled_random_vars is not None:
+            from biocomp.tumasking import compute_input_masks
+            tu_indices = params[fwd_tu_path][fwd_node_pos]
+            tu_log_alpha = params["design/tu_log_alpha"] if "design/tu_log_alpha" in params else None
+            all_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
+        else:
+            all_masks = jnp.ones_like(all_fwd_ratios)
+
+        masked_ratios = all_fwd_ratios * all_masks
+        masked_sum = jnp.sum(masked_ratios)
+        this_mask = all_masks[original_slot]
+        normalized_ratio = jnp.where(
+            masked_sum > 1e-8,
+            original_ratio * this_mask / masked_sum,
+            0.0
+        )
+
+        is_enabled = normalized_ratio >= DISABLED_THRESHOLD
+        safe_ratio = jnp.maximum(normalized_ratio, DISABLED_THRESHOLD)
         result = jnp.where(is_enabled, input / safe_ratio, 0.0)
-        return result, {"ratio": ratio, "is_enabled": is_enabled}
+
+        return result, {
+            "original_ratio": original_ratio,
+            "normalized_ratio": normalized_ratio,
+            "is_enabled": is_enabled,
+            "masked_sum": masked_sum,
+        }
 
     output_shape = input_shapes
     return LayerInstance(prepare, apply, output_shape)
