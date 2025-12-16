@@ -28,6 +28,7 @@ from biocomptools.modelmodel import BiocompModel
 from biocomp.designutils import sample_from_svg, data_to_lattice_2d
 from biocomp.optimutils import make_training_step, per_replicate_step, optimize, DesignOptimConfig
 from biocomp.designloss import distance_loss, grid_distance_loss  # noqa: F401 - re-exported for config compatibility
+from biocomp.tumasking import build_tu_id_mapping, TU_LOG_ALPHA_PATH
 
 logger = get_logger(__name__)
 
@@ -371,9 +372,31 @@ class DesignManager(BaseModel):
     networks: List[Network]
     sampling: SamplingConfigUnion = Field(default_factory=UniformSampling, discriminator="strategy")
 
+    enable_tu_masking: bool = False
+    _tu_ids: Optional[list[str]] = None
+    _tu_id_to_idx: Optional[dict[str, int]] = None
+
     @property
     def has_data_targets(self) -> bool:
         return any(isinstance(t, DataTarget) for t in self.targets)
+
+    def _ensure_tu_mapping(self):
+        """Build TU ID mapping if not already built."""
+        if self._tu_id_to_idx is None:
+            self._tu_ids, self._tu_id_to_idx = build_tu_id_mapping(self.networks)
+            logger.info(f"Built TU mapping: {len(self._tu_ids)} TUs")
+
+    @property
+    def n_tus(self) -> int:
+        """Number of unique TUs across all networks."""
+        self._ensure_tu_mapping()
+        return len(self._tu_ids)
+
+    @property
+    def tu_id_to_idx(self) -> dict[str, int]:
+        """Mapping from TU ID string to index."""
+        self._ensure_tu_mapping()
+        return self._tu_id_to_idx
 
     def _sample_from_target(
         self,
@@ -516,7 +539,12 @@ class DesignManager(BaseModel):
                 partial(nd.aggregation, random_init=True)
             )
 
-        stack.build(compute_config)
+        stack.build(compute_config, enable_tu_masking=self.enable_tu_masking)
+
+        if self.enable_tu_masking:
+            self._ensure_tu_mapping()
+            logger.info(f"TU masking enabled: {len(self._tu_ids)} TUs")
+
         logger.info(
             f"Stack built: {stack.get_nb_networks()} networks, "
             f"{stack.get_nb_inputs()} inputs, {stack.get_nb_outputs()} outputs"
@@ -534,9 +562,13 @@ class DesignManager(BaseModel):
 ## {{{                   --     param initialization     --
 
 
-def initialize_params(stack, n_replicates, n_targets, shared_params, key):
-    # could be faster if we stacked copies of the shared parameters and did the merge on the whole stack...
-    # good enough for now
+def initialize_params(
+    stack, n_replicates, n_targets, shared_params, key,
+    n_tus: int = 0, tu_log_alpha_init_mean: float = 2.0, tu_log_alpha_init_std: float = 0.5,
+):
+    """Initialize parameters for design optimization."""
+    tu_key, init_key = jax.random.split(key)
+
     def init_single(k):
         params = stack.init(k)
         _, nonshared = params.filter_by_tag(["shared"])
@@ -546,7 +578,17 @@ def initialize_params(stack, n_replicates, n_targets, shared_params, key):
         params = vmap(init_single)(jax.random.split(k, n_targets))
         return params
 
-    return vmap(init_target_params)(jax.random.split(key, n_replicates))
+    params = vmap(init_target_params)(jax.random.split(init_key, n_replicates))
+
+    if n_tus > 0:
+        tu_log_alpha = (
+            tu_log_alpha_init_mean
+            + tu_log_alpha_init_std * jax.random.normal(tu_key, shape=(n_replicates, n_targets, n_tus))
+        )
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=None)
+        logger.info(f"Initialized TU log_alpha for {n_tus} TUs (mean={tu_log_alpha_init_mean})")
+
+    return params
 
 
 class DesignConfig(DesignOptimConfig):
@@ -819,8 +861,10 @@ def start(
     # Phase 2: Initialize parameters
     t1 = time.perf_counter()
     logger.info("[2/5] Initializing parameters...")
+    n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
     initial_params = initialize_params(
-        stack, dconf.n_replicates, dmanager.n_targets, model.shared_params, pkey
+        stack, dconf.n_replicates, dmanager.n_targets, model.shared_params, pkey,
+        n_tus=n_tus,
     )
     assert_tree_shape(initial_params, (dconf.n_replicates, dmanager.n_targets))
     timings["param_init"] = time.perf_counter() - t1
@@ -1080,7 +1124,13 @@ def compute_baseline_loss(
     seed: int = 42,
     max_batch_size: int = 200,
 ) -> dict:
-    """Compute baseline loss for DataTargets with original_network (model prediction vs actual data)."""
+    """Compute baseline loss for DataTargets with original_network."""
+    try:
+        from biocomptools.modelmodel import NetworkModel
+    except ImportError:
+        logger.warning("biocomptools not available, cannot compute baseline")
+        return {}
+
     results, rng = {}, np.random.default_rng(seed)
 
     for tid, target in enumerate(dmanager.targets):
@@ -1090,31 +1140,16 @@ def compute_baseline_loss(
             continue
 
         original_network = target.original_network
-        stack = ComputeStack(networks=[original_network])
-        stack.build(model.compute_config)
-
-        params = stack.init(jax.random.key(seed))
-        _, nonshared = params.filter_by_tag(["shared"])
-        params = ParameterTree.merge(model.shared_params, nonshared)
-
         indices = rng.choice(len(target.X), size=min(n_samples, len(target.X)), replace=False)
-        X_sample, Y_sample = target.X[indices], target.Y[indices]
+        X_sample, Y_sample = np.asarray(target.X[indices]), np.asarray(target.Y[indices])
         if Y_sample.ndim == 1:
             Y_sample = Y_sample[:, None]
 
-        num_z = int(params["global/number_of_random_variables"].squeeze())
-        dep_mask, key = stack.get_dependent_output_mask(), jax.random.key(seed)
-        apply_batched = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+        nm = NetworkModel(model=model, network=original_network, max_points_per_batch=max_batch_size)
+        yhat, _ = nm.predict(X_sample)
+        yhat_mean = np.mean(yhat, axis=-1, keepdims=True) if yhat.shape[-1] > 1 else yhat
 
-        yhats = []
-        for start in range(0, len(X_sample), max_batch_size):
-            end = min(start + max_batch_size, len(X_sample))
-            z_batch = jax.random.uniform(key, (end - start, num_z))
-            yhat, _ = apply_batched(params, jnp.array(X_sample[start:end]), z_batch, jax.random.split(key, end - start))
-            yhats.append(yhat)
-
-        yhat_dep = jnp.compress(dep_mask, jnp.concatenate(yhats, axis=0), axis=-1)
-        model_loss = float(jnp.mean((yhat_dep - Y_sample) ** 2))
+        model_loss = float(np.mean((yhat_mean - Y_sample) ** 2))
 
         results[target_name] = {
             "has_original_network": True,

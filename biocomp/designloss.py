@@ -17,7 +17,7 @@ from assertpy import assert_that
 
 from .parameters import ParameterTree
 from .optimutils import as_schedule
-from .hard_concrete import l0_loss, TU_LOG_ALPHA_PATH
+from .tumasking import l0_loss, TU_LOG_ALPHA_PATH
 
 
 # Common utilities
