@@ -80,12 +80,13 @@ connect_sources_to_aggregation = GraphRewritingRule(
             properties={
                 "content_type": None,
                 "from_output_slot": "{{ len(aggregation.extra.get('members', [])) }}",
+                "tu_id": "{{ [source.extra.get('name', '') + '_' + source.extra.get('cotx_group', '')] if source.extra.get('name') else [] }}",
             },
         ),
         SetProperties(
             node_var="aggregation",
             properties={
-                "ratios": "{{ aggregation.extra.get('ratios', []) + [source.extra.get('ratio') if source.extra.get('ratio') else 1.0] }}",
+                "ratios": "{{ aggregation.extra.get('ratios', []) + [source.extra.get('ratio') if source.extra.get('ratio') is not None else 1.0] }}",
                 "members": "{{ aggregation.extra.get('members', []) + [source.extra.get('source_id')] }}",
                 "ratio_ranges": "{{ (aggregation.extra.get('ratio_ranges') if aggregation.extra.get('ratio_ranges') else []) + ([source.extra.get('ratio_range')] if source.extra.get('ratio_range') else [None]) }}",
             },

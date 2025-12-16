@@ -271,9 +271,14 @@ class ComputeStack:
 
     post_process_callbacks: Optional[list[Callable]] = None
 
+    # TU masking support (for design mode)
+    tu_id_to_idx: Optional[dict[str, int]] = None
+    n_tus: int = 0
+    inverse_tu_ids: Optional[set[str]] = None  # TUs feeding inverse nodes (never disabled)
+
     ### {{{                     --     public interface     --
 
-    def build(self, config: ComputeConfig, **kwargs):
+    def build(self, config: ComputeConfig, enable_tu_masking: bool = False, **kwargs):
         """
         Split apart all the networks into their constituent nodes
         and put these nodes into ordered layers, maximizing parallelism by ensuring same-type nodes
@@ -281,9 +286,17 @@ class ComputeStack:
         Then generates the apply method for the stack, which will handle the parallel execution
         of all nodes in each layers, as well as the correct mapping and chaining of
         their inputs and outputs.
+
+        Args:
+            config: ComputeConfig with node implementations
+            enable_tu_masking: If True, build TU-to-index mapping for design mode TU masking
         """
         with ut.timer("Building compute stack", logger):
             self.config = config
+
+            if enable_tu_masking:
+                self._build_tu_mapping()
+
             self._assemble_stack(**kwargs)
             self._refresh()
             assert self.layers is not None, "No layers"
@@ -293,6 +306,18 @@ class ComputeStack:
             self._generate_apply_method()
             self.check()
             self.is_built = True
+
+    def _build_tu_mapping(self):
+        """Build TU ID to index mapping for all networks."""
+        from biocomp.tumasking import build_tu_id_mapping_excluding_inverse
+
+        sorted_tu_ids, tu_id_to_idx, inverse_tu_ids = build_tu_id_mapping_excluding_inverse(
+            self.networks
+        )
+        self.tu_id_to_idx = tu_id_to_idx
+        self.n_tus = len(sorted_tu_ids)
+        self.inverse_tu_ids = inverse_tu_ids
+        logger.debug(f"Built TU mapping: {self.n_tus} TUs, {len(inverse_tu_ids)} feeding inverse nodes")
 
     def init(self, rng_key: PRNGKey) -> ParameterTree:
         """
@@ -777,6 +802,7 @@ class ComputeStack:
             key: PRNGKey,
             overwrite_values: Optional[NdArray] = None,
             overwrite_at: Optional[NdArray] = None,
+            tu_enabled_random_vars: Optional[NdArray] = None,
         ) -> tuple[NdArray, NdArray]:
             """
             The core of the apply method. Jittable. Applies the entire stack.
@@ -785,6 +811,11 @@ class ComputeStack:
                 - allows feeding whatever values we want to some specific nodes
                 - overwrite_values is a 1d array of values to inject
                 - overwrite_at is a 1d array of indices where to inject the values
+
+            TU masking (for design mode):
+                - tu_enabled_random_vars: uniform samples for each TU, shape (n_tus,)
+                - During design: pass fresh uniform samples each forward pass
+                - During inference: pass None -> defaults to 0.5 (all enabled)
             """
 
             if len(inputs) != self.total_nb_of_inputs:
@@ -829,7 +860,12 @@ class ComputeStack:
 
                 def node_apply(node_id: ArrayLike, key: PRNGKey, *inputs: ArrayLike):
                     res, node_aux = apply_f(
-                        *inputs, params=params, random_vars=random_vars, node_id=node_id, key=key
+                        *inputs,
+                        params=params,
+                        random_vars=random_vars,
+                        node_id=node_id,
+                        key=key,
+                        tu_enabled_random_vars=tu_enabled_random_vars,
                     )
                     if w_grads[lid]:
                         # using jax.jacfwd, we can just grab the first output wrt the first input
@@ -839,6 +875,7 @@ class ComputeStack:
                             random_vars=random_vars,
                             node_id=node_id,
                             key=key,
+                            tu_enabled_random_vars=tu_enabled_random_vars,
                         )
                         first_output_grad = grad[0]
                         grad = first_output_grad.reshape(-1)

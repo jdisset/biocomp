@@ -90,5 +90,48 @@ def reference_forward_random_var_ids(stack, params, nodelist, inv_namespace):
     params.at(f"{inv_namespace}/random_variable_id", ref, overwrite=None)
 
 
+def add_tu_input_mapping(
+    params: ParameterTree,
+    stack: ComputeStack,
+    nodelist: list[StackNode],
+    namespace: str,
+):
+    """Add TU index mapping for inputs at {namespace}/input_tu_indices. -1 = always enabled."""
+    if stack.tu_id_to_idx is None:
+        return
+
+    from biocomp.tumasking import build_input_tu_indices
+
+    tu_indices = build_input_tu_indices(stack, nodelist, stack.tu_id_to_idx)
+    params.at(
+        f"{namespace}/input_tu_indices",
+        tu_indices,
+        tags=[NON_GRAD_TAG],
+        overwrite=None,
+    )
+
+
+def add_tu_output_mapping(
+    params: ParameterTree,
+    stack: ComputeStack,
+    nodelist: list[StackNode],
+    namespace: str,
+    n_outputs: int,
+):
+    """Add TU index mapping for outputs at {namespace}/output_tu_indices. -1 = always enabled."""
+    if stack.tu_id_to_idx is None:
+        return
+
+    from biocomp.tumasking import build_output_tu_indices
+
+    tu_indices = build_output_tu_indices(stack, nodelist, stack.tu_id_to_idx, n_outputs)
+    params.at(
+        f"{namespace}/output_tu_indices",
+        tu_indices,
+        tags=[NON_GRAD_TAG],
+        overwrite=None,
+    )
+
+
 def empty_prepare(*_, **__):
     pass

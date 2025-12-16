@@ -1275,6 +1275,7 @@ def _build_cdg_dual_from_preprocessed(
                 content_type="PRT",
                 content=tuple(Part(name=p, category="PRT") for p in info["PRT_content"]),
                 content_embedding_names={k: tuple(v) for k, v in info["PRT_params"].items()},
+                extra={"tu_id": [tuid]},
             )
         )
 
@@ -1286,6 +1287,14 @@ def _build_cdg_dual_from_preprocessed(
             key = (e.source_id, e.target_id, e.content_type)
         if key not in unique_edges_dict:
             unique_edges_dict[key] = e
+        else:
+            existing = unique_edges_dict[key]
+            existing_tu_ids = existing.extra.get('tu_id', []) if existing.extra else []
+            new_tu_ids = e.extra.get('tu_id', []) if e.extra else []
+            merged = sorted(set(existing_tu_ids + new_tu_ids))
+            if merged != existing_tu_ids:
+                merged_extra = {**(existing.extra or {}), 'tu_id': merged}
+                unique_edges_dict[key] = existing.model_copy(update={'extra': merged_extra})
 
     nodes_dict = {n.node_id: n for n in nodes}
     edges_dict = {
