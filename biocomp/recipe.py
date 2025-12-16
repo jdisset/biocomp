@@ -16,8 +16,7 @@ from biocomp.part_embeddings import EMBEDDINGS_BY_NAME, EMBEDDINGS_BY_CATEGORY
 logger = get_logger(__name__)
 PathLike = Union[str, Path]
 
-# Precision for ratio rounding (number of decimal places)
-RATIO_PRECISION = 3
+RATIO_PRECISION = 5  # precision for ratio rounding (number of decimal places)
 
 
 ## {{{                      --     NumRange & FluoIntensity     --
@@ -203,11 +202,15 @@ class TranscriptionUnit(BaseModel):
                 if s.maps_to_parameter in EMBEDDINGS_BY_NAME:
                     default = EMBEDDINGS_BY_NAME[s.maps_to_parameter].default_part
                     if isinstance(s.part, list):
-                        self.params[s.maps_to_parameter] = [default if p is None else p for p in s.part]
+                        self.params[s.maps_to_parameter] = [
+                            default if p is None else p for p in s.part
+                        ]
                     else:
                         self.params[s.maps_to_parameter] = [default if s.part is None else s.part]
                 else:
-                    self.params[s.maps_to_parameter] = [s.part] if not isinstance(s.part, list) else s.part
+                    self.params[s.maps_to_parameter] = (
+                        [s.part] if not isinstance(s.part, list) else s.part
+                    )
                 # track ref_id for this parameter
                 self.param_ref_ids[s.maps_to_parameter] = s.ref_id
 
@@ -238,12 +241,17 @@ class CoTransfection(BaseModel):
     ratios: Optional[list[Union[NumRange, float]]] = None
     fluo_bias: Optional[FluoIntensity] = None  # if None, normal input (not a bias)
 
-    @field_validator('ratios', mode='before')
+    @field_validator("ratios", mode="before")
     @classmethod
     def round_ratios(cls, v):
         if v is None:
             return v
-        return [round(float(r), RATIO_PRECISION) if isinstance(r, (int, float)) and not isinstance(r, NumRange) else r for r in v]
+        return [
+            round(float(r), RATIO_PRECISION)
+            if isinstance(r, (int, float)) and not isinstance(r, NumRange)
+            else r
+            for r in v
+        ]
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
