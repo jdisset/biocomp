@@ -4,7 +4,7 @@ from jax.typing import ArrayLike
 import jax.numpy as jnp
 import numpy as np
 from biocomp.parameters import ArrayRef, ParameterTree
-from biocomp.nodeutils import LayerInstance, add_tu_output_mapping
+from biocomp.nodeutils import LayerInstance, add_tu_output_mapping, NON_GRAD_TAG
 from biocomp.utils import get_logger
 from typing import Optional
 
@@ -156,14 +156,11 @@ def inv_aggregation(
     namespace: str,
     **_,
 ) -> LayerInstance:
-    # an inverse aggregation node always has 1 input and 1 output
     assert len(input_shapes) == 1, f"inverse_Aggregation expects 1 input, got {len(input_shapes)}"
     assert n_outputs == 1, f"inverse_Aggregation expects 1 output, got {n_outputs}"
 
-    fwd_namespace: list[str] = []
-
     def prepare(params: ParameterTree, nodelist: list[StackNode], **_):
-        ref = ArrayRef(params.data)
+        ratio_ref = ArrayRef(params.data)
         original_slots = []
         fwd_node_positions = []
 
@@ -175,17 +172,15 @@ def inv_aggregation(
 
             fwd_node = node.get_forward_stacknode(stack)
             assert fwd_node.layer_number is not None
-            fwd_ns = stack.get_layer_namespace(fwd_node.layer_number)
+            node_fwd_ns = stack.get_layer_namespace(fwd_node.layer_number)
+            fwd_pos = fwd_node.node_position_in_layer
 
-            if not fwd_namespace:
-                fwd_namespace.append(fwd_ns)
+            ratio_ref.push_back(f"{node_fwd_ns}/ratios", (fwd_pos, original_slot))
+            fwd_node_positions.append(fwd_pos)
 
-            ref.push_back(f"{fwd_ns}/ratios", (fwd_node.node_position_in_layer, original_slot))
-            fwd_node_positions.append(fwd_node.node_position_in_layer)
-
-        params.at(f"{namespace}/ratios", ref, overwrite=None)
-        params.at(f"{namespace}/original_slots", jnp.array(original_slots))
-        params.at(f"{namespace}/fwd_node_positions", jnp.array(fwd_node_positions))
+        params.at(f"{namespace}/ratios", ratio_ref, overwrite=None)
+        params.at(f"{namespace}/original_slots", jnp.array(original_slots), tags=[NON_GRAD_TAG])
+        params.at(f"{namespace}/fwd_node_positions", jnp.array(fwd_node_positions), tags=[NON_GRAD_TAG])
 
     DISABLED_THRESHOLD = 1.0 / 120.0
 
@@ -201,12 +196,12 @@ def inv_aggregation(
         original_slot = params[f"{namespace}/original_slots"][node_id]
         fwd_node_pos = params[f"{namespace}/fwd_node_positions"][node_id]
 
-        fwd_ns = fwd_namespace[0] if fwd_namespace else namespace.replace("inv_", "")
-        fwd_ratios_path = f"{fwd_ns}/ratios"
-        fwd_tu_path = f"{fwd_ns}/output_tu_indices"
-
+        ratio_ref = params.data.get_at(f"{namespace}/ratios", get_leaf_value=False).value
+        fwd_ratios_path = ratio_ref.paths[0]
+        fwd_ns = fwd_ratios_path.rsplit("/ratios", 1)[0]
         all_fwd_ratios = jnp.abs(params[fwd_ratios_path][fwd_node_pos])
 
+        fwd_tu_path = f"{fwd_ns}/output_tu_indices"
         if fwd_tu_path in params and tu_enabled_random_vars is not None:
             from biocomp.tumasking import compute_input_masks
             tu_indices = params[fwd_tu_path][fwd_node_pos]
