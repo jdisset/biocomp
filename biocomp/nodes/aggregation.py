@@ -136,19 +136,64 @@ def aggregation(
         }
 
     def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack = None, **_):
+        from biocomp.tumasking import get_final_mask, TU_ALWAYS_ENABLED
+
+        output_tu_indices_path = f"{namespace}/output_tu_indices"
+        has_tu_masking = output_tu_indices_path in params and TU_LOG_ALPHA_PATH in params
+
+        if has_tu_masking:
+            tu_log_alpha = params[TU_LOG_ALPHA_PATH]
+            assert tu_log_alpha.ndim == 2, (
+                f"COMMIT BUG: tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D. "
+                f"Shape: {tu_log_alpha.shape}. This likely means params were not sliced for (rep, target)."
+            )
+            n_networks_in_alpha = tu_log_alpha.shape[0]
+            assert n_networks_in_alpha >= max(n.network_id for n in nodelist) + 1, (
+                f"COMMIT BUG: tu_log_alpha has {n_networks_in_alpha} networks but nodelist has "
+                f"network_ids up to {max(n.network_id for n in nodelist)}. Shape mismatch!"
+            )
+
         for i, n in enumerate(nodelist):
             updt = {}
             ratios = params[f"{namespace}/{PNAME}"][i]
-
             ratios_array = jnp.abs(jnp.array(ratios))
+            original_ratios = ratios_array.copy()  # for assertion
+
+            # apply TU mask - set ratio=0 for disabled TUs
+            n_masked = 0
+            if has_tu_masking:
+                tu_indices = params[output_tu_indices_path][i]
+                network_id = n.network_id
+                tu_log_alpha = params[TU_LOG_ALPHA_PATH]
+                network_tu_log_alpha = tu_log_alpha[network_id]
+
+                for j in range(n_outputs):
+                    tu_idx = int(tu_indices[j])
+                    if tu_idx != TU_ALWAYS_ENABLED:
+                        assert 0 <= tu_idx < network_tu_log_alpha.shape[0], (
+                            f"COMMIT BUG: tu_idx {tu_idx} out of bounds for tu_log_alpha "
+                            f"with {network_tu_log_alpha.shape[0]} TUs"
+                        )
+                        mask = get_final_mask(network_tu_log_alpha[tu_idx : tu_idx + 1])[0]
+                        assert mask in (0.0, 1.0), f"COMMIT BUG: mask should be binary, got {mask}"
+                        if mask == 0.0:
+                            n_masked += 1
+                        ratios_array = ratios_array.at[j].set(ratios_array[j] * mask)
+
             positive_ratios = ratios_array[ratios_array > 0]
             min_ratio = jnp.min(positive_ratios) if len(positive_ratios) > 0 else 1.0
             min_ratio = jnp.maximum(min_ratio, 1e-9)
             normalized_ratios = ratios_array / min_ratio
 
-            updt["ratios"] = normalized_ratios.tolist()[:n_outputs]
+            # verify TU masking was actually applied
+            if has_tu_masking and n_masked > 0:
+                n_zeros = sum(1 for r in normalized_ratios.tolist() if abs(r) < 1e-8)
+                assert n_zeros >= n_masked, (
+                    f"COMMIT BUG: {n_masked} TUs should be masked but only {n_zeros} ratios are zero. "
+                    f"Original: {original_ratios.tolist()}, Final: {normalized_ratios.tolist()}"
+                )
 
-            # After commit, ratios are locked - remove ratio_ranges
+            updt["ratios"] = normalized_ratios.tolist()[:n_outputs]
             updt["ratio_ranges"] = [None] * n_outputs
 
             n.get(stack).extra.update(updt)

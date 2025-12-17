@@ -440,6 +440,8 @@ class ComputeStack:
         return ComputeStack(self.networks, deepcopy(self.layers))
 
     def commit(self, params: ParameterTree, **kwargs):
+        from biocomp.tumasking import TU_LOG_ALPHA_PATH, get_final_mask
+
         # create copies of all networks
         network_copies = [deepcopy(net) for net in self.networks]
 
@@ -447,8 +449,42 @@ class ComputeStack:
         temp_stack = ComputeStack(network_copies, self.layers)
         temp_stack.node_map = self.node_map
 
+        # first, run node-level commits (they need edges to exist)
         for layer in self.layers:
             layer.commit(params, stack=temp_stack, **kwargs)
+
+        # AFTER node commits, remove disabled TU edges from network graphs
+        if TU_LOG_ALPHA_PATH in params:
+            tu_log_alpha = params[TU_LOG_ALPHA_PATH]
+            assert tu_log_alpha.ndim == 2, (
+                f"COMMIT: tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D"
+            )
+            tu_id_to_idx = getattr(self, 'tu_id_to_idx', None)
+            if tu_id_to_idx:
+                for net_idx, net in enumerate(network_copies):
+                    network_tu_log_alpha = tu_log_alpha[net_idx]
+                    edges_to_remove = []
+                    for edge_id, edge in net.compute_graph.edges.items():
+                        tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                        if not tu_ids:
+                            continue
+                        # check if ALL TUs on this edge are disabled
+                        all_disabled = True
+                        for tu_id in tu_ids:
+                            if tu_id not in tu_id_to_idx:
+                                all_disabled = False
+                                break
+                            tu_idx = tu_id_to_idx[tu_id]
+                            mask = get_final_mask(network_tu_log_alpha[tu_idx:tu_idx + 1])[0]
+                            if float(mask) > 0:
+                                all_disabled = False
+                                break
+                        if all_disabled and tu_ids:
+                            edges_to_remove.append(edge_id)
+                    # remove disabled edges
+                    for edge_id in edges_to_remove:
+                        del net.compute_graph.edges[edge_id]
+
         return network_copies
 
     def __repr__(self):

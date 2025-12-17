@@ -28,7 +28,12 @@ from biocomptools.modelmodel import BiocompModel
 from biocomp.designutils import sample_from_svg, data_to_lattice_2d
 from biocomp.optimutils import make_training_step, per_replicate_step, optimize, DesignOptimConfig
 from biocomp.designloss import distance_loss, grid_distance_loss  # noqa: F401 - re-exported for config compatibility
-from biocomp.tumasking import build_tu_id_mapping, TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
+from biocomp.tumasking import (
+    build_tu_id_mapping,
+    TU_LOG_ALPHA_PATH,
+    LOG_ALPHA_MIN,
+    LOG_ALPHA_MAX,
+)
 
 logger = get_logger(__name__)
 
@@ -1118,7 +1123,11 @@ def evaluate_design(
     max_loss_size: int = 64,
     store_predictions: bool = True,
 ) -> Tuple[Optional[jnp.ndarray], jnp.ndarray]:
-    """Evaluate design quality. Returns (predictions, losses) where losses has shape (n_replicates, n_targets, n_networks)."""
+    """Evaluate design quality. Returns (predictions, losses) where losses has shape (n_replicates, n_targets, n_networks).
+
+    CRITICAL: This function MUST apply TU masks to be consistent with training.
+    Without TU masks, evaluation loss will NOT reflect actual design performance.
+    """
     stack = dmanager.build_stack(model, unlock_ratios=False)
     n_networks, n_replicates, n_targets, n_samples = (
         len(dmanager.networks),
@@ -1133,8 +1142,35 @@ def evaluate_design(
     x_combined = xraw.transpose(1, 2, 3, 0, 4).reshape(n_replicates, n_samples, n_targets, -1)
     y_combined = yraw[0]
 
+    # check if TU masking is enabled
+    has_tu_masking = TU_LOG_ALPHA_PATH in final_params
+
+    # validate TU masking params shape
+    if has_tu_masking:
+        tu_log_alpha_full = final_params[TU_LOG_ALPHA_PATH]
+        assert tu_log_alpha_full.ndim == 4, (
+            f"EVALUATE BUG: tu_log_alpha should be 4D (n_reps, n_targets, n_networks, n_tus), "
+            f"got {tu_log_alpha_full.ndim}D with shape {tu_log_alpha_full.shape}"
+        )
+        assert tu_log_alpha_full.shape[0] >= n_replicates, (
+            f"EVALUATE BUG: tu_log_alpha has {tu_log_alpha_full.shape[0]} replicates "
+            f"but n_replicates={n_replicates}"
+        )
+        assert tu_log_alpha_full.shape[1] >= n_targets, (
+            f"EVALUATE BUG: tu_log_alpha has {tu_log_alpha_full.shape[1]} targets "
+            f"but n_targets={n_targets}"
+        )
+        logger.debug(f"TU masking enabled: {tu_log_alpha_full.shape[-1]} TUs")
+
     all_losses, all_predictions = [], [] if store_predictions else None
-    apply_batched = jax.jit(jax.vmap(stack.apply, in_axes=(None, 0, 0, 0)))
+
+    def apply_with_tu_mask(params, x_batch, z_batch, keys, tu_mask):
+        def apply_single(x, z, k):
+            return stack.apply(params, x, z, k, tu_enabled_random_vars=tu_mask)
+
+        return vmap(apply_single)(x_batch, z_batch, keys)
+
+    apply_batched = jax.jit(apply_with_tu_mask)
     pbar = tqdm(total=n_replicates * n_targets, desc="Evaluating", unit="rep×tgt")
 
     for rep_idx in range(n_replicates):
@@ -1143,12 +1179,35 @@ def evaluate_design(
             rep_params = jax.tree.map(lambda x: x[rep_idx, tid], final_params)
             x_slice, y_slice = x_combined[rep_idx, :, tid, :], y_combined[rep_idx, :, tid, :]
 
+            # compute deterministic TU mask for evaluation
+            # CRITICAL: This ensures evaluation uses same TU masking as training
+            if has_tu_masking:
+                tu_log_alpha = rep_params[TU_LOG_ALPHA_PATH]
+                assert tu_log_alpha.ndim == 2, (
+                    f"EVALUATE BUG: sliced tu_log_alpha should be 2D (n_networks, n_tus), "
+                    f"got {tu_log_alpha.ndim}D with shape {tu_log_alpha.shape}"
+                )
+                assert tu_log_alpha.shape[0] == n_networks, (
+                    f"EVALUATE BUG: tu_log_alpha has {tu_log_alpha.shape[0]} networks "
+                    f"but stack has {n_networks}"
+                )
+                # use sigmoid(log_alpha) as the "uniform sample" which gives deterministic output
+                # sigmoid(log_alpha) >= 0.5 means TU is enabled (same as get_final_mask threshold)
+                tu_mask = jax.nn.sigmoid(tu_log_alpha)
+                assert tu_mask.shape == tu_log_alpha.shape, "tu_mask shape mismatch"
+            else:
+                tu_mask = None
+
             yhats = []
             for start in range(0, n_samples, max_eval_size):
                 end = min(start + max_eval_size, n_samples)
                 z_batch = jax.random.uniform(key, (end - start, num_z_val))
                 yhat, _ = apply_batched(
-                    rep_params, x_slice[start:end], z_batch, jax.random.split(key, end - start)
+                    rep_params,
+                    x_slice[start:end],
+                    z_batch,
+                    jax.random.split(key, end - start),
+                    tu_mask,
                 )
                 yhats.append(yhat)
 

@@ -317,12 +317,22 @@ class Network(BaseModel):
         content = []
         for group_id in sorted_group_ids:
             tus, reordered_ratios = tus_and_ratios_by_cotx[group_id]
+
+            # skip empty CoTransfections (all TUs removed due to zero ratios)
+            if not tus:
+                continue
+
+            # validate fluo_bias tu_id is still in range after TU pruning
+            fluo_bias = bias_by_cotx.get(group_id)
+            if fluo_bias is not None and fluo_bias.tu_id >= len(tus):
+                fluo_bias = None  # invalid reference, remove it
+
             content.append(
                 CoTransfection(
                     name=group_id if group_id != "cotx_1" or len(cotx_groups) > 1 else None,
                     units=tus,
                     ratios=reordered_ratios if len(reordered_ratios) > 1 else None,
-                    fluo_bias=bias_by_cotx.get(group_id),
+                    fluo_bias=fluo_bias,
                 )
             )
 

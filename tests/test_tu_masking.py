@@ -442,3 +442,630 @@ def test_1d_tu_uniform_rejected(lib, design_stack):
         tu_uniform_1d = jnp.full((n_tus,), 0.5)
         with pytest.raises(AssertionError, match="must be 2D"):
             stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_1d)
+
+
+# ============== Commit TU Masking Tests ==============
+
+
+def test_commit_applies_tu_masks(lib, design_stack):
+    """Verify that commit sets ratio=0 for TUs with log_alpha < 0 (disabled)."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
+
+        # set half TUs to disabled (negative log_alpha) and half enabled (positive)
+        tu_log_alpha = jnp.zeros((n_networks, n_tus))
+        half = n_tus // 2
+        tu_log_alpha = tu_log_alpha.at[:, :half].set(-3.0)  # disabled (sigmoid(-3) ≈ 0.05)
+        tu_log_alpha = tu_log_alpha.at[:, half:].set(3.0)   # enabled (sigmoid(3) ≈ 0.95)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        # commit the stack
+        committed_networks = stack.commit(params)
+
+        # check that at least one aggregation node has ratio=0 for disabled TUs
+        found_zero_ratio = False
+        for net in committed_networks:
+            for node in net.compute_graph.nodes.values():
+                if 'aggregation' in node.node_type.lower():
+                    ratios = node.extra.get('ratios', [])
+                    for r in ratios:
+                        if abs(r) < 1e-6:  # effectively zero
+                            found_zero_ratio = True
+                            break
+                if found_zero_ratio:
+                    break
+            if found_zero_ratio:
+                break
+
+        assert found_zero_ratio, (
+            "Expected at least one ratio=0 for disabled TUs after commit. "
+            f"TU log_alpha: first {half} TUs disabled (-3.0), rest enabled (3.0)"
+        )
+
+
+def test_commit_preserves_enabled_tus(lib, design_stack):
+    """Verify that commit preserves ratios for TUs with log_alpha > 0 (enabled)."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
+
+        # set all TUs to enabled (high log_alpha)
+        tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)  # sigmoid(5) ≈ 0.99
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        # commit the stack
+        committed_networks = stack.commit(params)
+
+        # check that no aggregation node has all-zero ratios
+        for net in committed_networks:
+            for node in net.compute_graph.nodes.values():
+                if 'aggregation' in node.node_type.lower():
+                    ratios = node.extra.get('ratios', [])
+                    if ratios:
+                        all_zero = all(abs(r) < 1e-6 for r in ratios)
+                        assert not all_zero, (
+                            f"Node {node.id} has all-zero ratios but all TUs should be enabled"
+                        )
+
+
+# ============== Comprehensive TU Masking Tests ==============
+
+
+def test_commit_removes_fully_disabled_tu_edges(lib, design_stack):
+    """Edges where ALL TUs are disabled should be removed from committed networks.
+
+    When ALL TUs on an edge are disabled, the edge contributes nothing and should
+    be physically removed. Edges with mixed enabled/disabled TUs stay.
+    """
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
+
+        if n_tus == 0:
+            pytest.skip("No TUs in network")
+
+        # disable ALL TUs to ensure edges with only TUs get removed
+        tu_log_alpha = jnp.full((n_networks, n_tus), -10.0)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        # count edges that have TUs (they should all be removed)
+        edges_with_any_tu_before = 0
+        for net in stack.networks:
+            for edge in net.compute_graph.edges.values():
+                edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                if edge_tu_ids:
+                    edges_with_any_tu_before += 1
+
+        committed_networks = stack.commit(params)
+
+        # count edges with TUs after (should be 0 since all TUs disabled)
+        edges_with_tu_after = 0
+        for net in committed_networks:
+            for edge in net.compute_graph.edges.values():
+                edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                if edge_tu_ids:
+                    edges_with_tu_after += 1
+
+        assert edges_with_tu_after == 0, (
+            f"When all TUs disabled, all TU-carrying edges should be removed!\n"
+            f"Before: {edges_with_any_tu_before} edges with TUs\n"
+            f"After: {edges_with_tu_after} edges with TUs"
+        )
+        assert edges_with_any_tu_before > 0, "Test setup issue: no TU edges found"
+
+
+def test_single_tu_edge_removed_when_disabled(lib, design_stack):
+    """Verify that edges with ONLY ONE TU get removed when that TU is disabled.
+
+    Edges with multiple TUs may stay if some are enabled. But single-TU edges
+    should definitely be removed when their TU is disabled.
+    """
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
+
+        if n_tus == 0:
+            pytest.skip("No TUs in network")
+
+        # find a TU that has a single-TU edge
+        single_tu_edges = []
+        for net in stack.networks:
+            for edge in net.compute_graph.edges.values():
+                edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                if len(edge_tu_ids) == 1:
+                    single_tu_edges.append(edge_tu_ids[0])
+
+        if not single_tu_edges:
+            pytest.skip("No single-TU edges found")
+
+        # pick a TU that appears in single-TU edges
+        target_tu_id = single_tu_edges[0]
+        target_tu_idx = tu_id_to_idx[target_tu_id]
+
+        # disable ONLY that TU, enable all others
+        tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)
+        tu_log_alpha = tu_log_alpha.at[:, target_tu_idx].set(-10.0)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        committed_networks = stack.commit(params)
+
+        # verify single-TU edges with the disabled TU are removed
+        found_single_tu_edge_after = False
+        for net in committed_networks:
+            for edge in net.compute_graph.edges.values():
+                edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                if edge_tu_ids == [target_tu_id]:
+                    found_single_tu_edge_after = True
+                    break
+            if found_single_tu_edge_after:
+                break
+
+        assert not found_single_tu_edge_after, (
+            f"Single-TU edge with disabled TU '{target_tu_id}' should be removed"
+        )
+
+
+def test_all_tus_disabled_produces_different_commit(lib, design_stack):
+    """When all TUs are disabled, committed network should produce different output than all enabled."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+
+        n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
+
+        # commit with all TUs enabled
+        params_enabled = stack.init(key)
+        tu_log_alpha_enabled = jnp.full((n_networks, n_tus), 5.0)
+        params_enabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_enabled)
+        committed_enabled = stack.commit(params_enabled)
+
+        # commit with all TUs disabled
+        params_disabled = stack.init(key)
+        tu_log_alpha_disabled = jnp.full((n_networks, n_tus), -5.0)
+        params_disabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_disabled)
+        committed_disabled = stack.commit(params_disabled)
+
+        # check that at least one aggregation node has different ratios
+        found_difference = False
+        for net_e, net_d in zip(committed_enabled, committed_disabled):
+            for node_e in net_e.compute_graph.nodes.values():
+                if 'aggregation' in node_e.node_type.lower():
+                    node_d = net_d.compute_graph.nodes.get(node_e.node_id)
+                    if node_d:
+                        ratios_e = node_e.extra.get('ratios', [])
+                        ratios_d = node_d.extra.get('ratios', [])
+                        if ratios_e and ratios_d:
+                            diff = sum(abs(re - rd) for re, rd in zip(ratios_e, ratios_d))
+                            if diff > 1e-6:
+                                found_difference = True
+                                break
+            if found_difference:
+                break
+
+        assert found_difference, (
+            "FAILED: Committed networks with all TUs enabled vs disabled have identical ratios.\n"
+            "This indicates commit() is NOT applying TU masks!"
+        )
+
+
+def test_tu_mask_boundary_threshold(lib, design_stack):
+    """Test TU masking at the sigmoid threshold (0.5 = log_alpha of 0)."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
+
+        if n_tus < 2:
+            pytest.skip("Need at least 2 TUs")
+
+        # set TUs at boundary: first at -0.1 (disabled), second at +0.1 (enabled)
+        tu_log_alpha = jnp.zeros((n_networks, n_tus))
+        tu_log_alpha = tu_log_alpha.at[:, 0].set(-0.1)  # sigmoid ≈ 0.475 < 0.5 → disabled
+        tu_log_alpha = tu_log_alpha.at[:, 1].set(0.1)   # sigmoid ≈ 0.525 > 0.5 → enabled
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        # commit to verify it works, but we're testing the threshold behavior
+        stack.commit(params)
+
+        # verify the boundary behavior
+        from biocomp.tumasking import get_final_mask
+        mask_0 = get_final_mask(jnp.array([-0.1]))[0]
+        mask_1 = get_final_mask(jnp.array([0.1]))[0]
+
+        assert float(mask_0) == 0.0, f"TU at log_alpha=-0.1 should be disabled, got mask={mask_0}"
+        assert float(mask_1) == 1.0, f"TU at log_alpha=+0.1 should be enabled, got mask={mask_1}"
+
+
+def test_commit_without_tu_masking_unchanged(lib):
+    """Verify that commit works correctly when TU masking is NOT enabled."""
+    from biocomp.recipe import Recipe
+    scaffold_path = (
+        Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
+    )
+
+    with LibraryContext.with_library(lib):
+        data = dr.load(scaffold_path, context={"Recipe": Recipe})
+        recipes = data["recipes"] if "recipes" in data else data.recipes
+        networks = recipe_to_networks(recipes[0], br.ALL_RULES, invert=True)
+
+        # build stack WITHOUT TU masking
+        stack = ComputeStack(networks)
+        from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+        stack.build(SIMPLE_NODES_COMPUTE_CONFIG)  # no tu_id_to_idx
+
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        # verify no TU_LOG_ALPHA_PATH in params
+        assert TU_LOG_ALPHA_PATH not in params, "TU masking should not be initialized"
+
+        # commit should still work
+        committed_networks = stack.commit(params)
+        assert len(committed_networks) == len(networks)
+
+        # verify ratios are preserved (not zeroed out)
+        for net in committed_networks:
+            for node in net.compute_graph.nodes.values():
+                if 'aggregation' in node.node_type.lower():
+                    ratios = node.extra.get('ratios', [])
+                    if ratios:
+                        assert any(r > 0 for r in ratios), "Ratios should not all be zero"
+
+
+def test_per_network_tu_mask_commit_independence(lib, multi_network_stack):
+    """Each network's TU mask should be applied independently during commit."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx, n_networks = multi_network_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        if n_networks < 2 or n_tus == 0:
+            pytest.skip("Need at least 2 networks and 1 TU")
+
+        # disable all TUs in network 0, enable in network 1
+        tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)  # all enabled
+        tu_log_alpha = tu_log_alpha.at[0, :].set(-5.0)  # network 0: all disabled
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        committed_networks = stack.commit(params)
+
+        # check network 0 has more zero ratios than network 1
+        def count_zero_ratios(net):
+            count = 0
+            for node in net.compute_graph.nodes.values():
+                if 'aggregation' in node.node_type.lower():
+                    ratios = node.extra.get('ratios', [])
+                    count += sum(1 for r in ratios if abs(r) < 1e-6)
+            return count
+
+        zeros_net0 = count_zero_ratios(committed_networks[0])
+        zeros_net1 = count_zero_ratios(committed_networks[1]) if n_networks > 1 else 0
+
+        assert zeros_net0 > zeros_net1, (
+            f"Network 0 (all TUs disabled) should have more zero ratios than network 1.\n"
+            f"Network 0 zeros: {zeros_net0}, Network 1 zeros: {zeros_net1}\n"
+            f"This indicates per-network TU masking is not working in commit!"
+        )
+
+
+def test_evaluate_design_uses_tu_masks():
+    """Verify evaluate_design applies TU masks (would fail with old buggy code)."""
+    # this is a smoke test that imports the function and checks it has tu_mask logic
+    from biocomp.design import evaluate_design
+    import inspect
+    source = inspect.getsource(evaluate_design)
+
+    assert 'tu_mask' in source, (
+        "evaluate_design does not contain 'tu_mask' - TU masking may not be applied!"
+    )
+    assert 'TU_LOG_ALPHA_PATH' in source, (
+        "evaluate_design does not check TU_LOG_ALPHA_PATH - TU masking may not be applied!"
+    )
+    assert 'sigmoid' in source.lower() or 'tu_enabled_random_vars' in source, (
+        "evaluate_design does not compute TU mask - TU masking may not be applied!"
+    )
+
+
+def test_committed_recipe_excludes_disabled_tus(lib, design_stack):
+    """CRITICAL: Recipes exported from committed networks should not contain disabled TUs.
+
+    When a TU is disabled during design optimization, the committed network should
+    produce a recipe where that TU simply doesn't exist.
+    """
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
+
+        if n_tus == 0:
+            pytest.skip("No TUs in network")
+
+        # disable first TU, enable all others
+        tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)
+        tu_log_alpha = tu_log_alpha.at[:, 0].set(-10.0)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        first_tu_id = tu_ids[0]
+        # TU ID format: cotx_name_cotx (e.g. b_a+_b), recipe name: cotx_name (e.g. b_a+)
+        first_tu_recipe_name = '_'.join(first_tu_id.split('_')[:-1])
+
+        # count TUs before commit
+        tus_before = []
+        for net in stack.networks:
+            r = net.to_recipe()
+            tus_before.extend([tu.name for cotx in r.content for tu in cotx.units])
+        tus_before = set(tus_before)
+
+        # commit and count TUs after
+        committed_networks = stack.commit(params)
+        tus_after = []
+        for net in committed_networks:
+            r = net.to_recipe()
+            tus_after.extend([tu.name for cotx in r.content for tu in cotx.units])
+        tus_after = set(tus_after)
+
+        assert first_tu_recipe_name in tus_before, (
+            f"Test setup issue: TU '{first_tu_recipe_name}' not found in recipes before commit"
+        )
+        assert first_tu_recipe_name not in tus_after, (
+            f"FAILED: TU '{first_tu_recipe_name}' (from ID '{first_tu_id}') was disabled "
+            f"but still appears in committed recipe!"
+        )
+
+
+def test_disabled_tu_ratio_is_zero_after_commit(lib, design_stack):
+    """Verify that disabled TUs have their aggregation ratios set to 0 after commit."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
+
+        if n_tus == 0:
+            pytest.skip("No TUs in network")
+
+        # disable first TU
+        tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)
+        tu_log_alpha = tu_log_alpha.at[:, 0].set(-10.0)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        committed_networks = stack.commit(params)
+
+        # verify at least one aggregation has a zero ratio (from disabled TU)
+        found_zero = False
+        for net in committed_networks:
+            for node in net.compute_graph.nodes.values():
+                if 'aggregation' in node.node_type.lower():
+                    ratios = node.extra.get('ratios', [])
+                    if any(abs(r) < 1e-6 for r in ratios):
+                        found_zero = True
+                        break
+            if found_zero:
+                break
+
+        assert found_zero, (
+            "No zero ratios found after disabling a TU.\n"
+            "Commit should set ratio=0 for disabled TUs."
+        )
+
+
+def test_all_tus_disabled_empty_cotx_skipped(lib, design_stack):
+    """When all TUs in a CoTransfection are disabled, that CoTransfection should be skipped in the recipe."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
+
+        if n_tus == 0:
+            pytest.skip("No TUs in network")
+
+        # count cotx before commit
+        recipes_before = [net.to_recipe() for net in stack.networks]
+        cotx_count_before = sum(len(r.content) for r in recipes_before)
+
+        # disable ALL TUs
+        tu_log_alpha = jnp.full((n_networks, n_tus), -10.0)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        committed = stack.commit(params)
+
+        # count cotx after commit - should be less (empty ones skipped)
+        recipes_after = [net.to_recipe() for net in committed]
+        cotx_count_after = sum(len(r.content) for r in recipes_after)
+
+        # when all TUs disabled, all cotx should be empty and skipped
+        assert cotx_count_after < cotx_count_before, (
+            f"Empty CoTransfections should be skipped.\n"
+            f"Before: {cotx_count_before} CoTransfections\n"
+            f"After: {cotx_count_after} CoTransfections"
+        )
+
+
+def test_fluo_bias_invalid_tu_id_handled(lib):
+    """When fluo_bias.tu_id becomes invalid after TU pruning, it should be removed gracefully."""
+    from biocomp.recipe import Recipe
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    scaffold_path = (
+        Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
+    )
+
+    with LibraryContext.with_library(lib):
+        data = dr.load(scaffold_path, context={"Recipe": Recipe})
+        recipes = data["recipes"] if "recipes" in data else data.recipes
+        networks = recipe_to_networks(recipes[0], br.ALL_RULES, invert=True)
+
+        tu_ids, tu_id_to_idx = build_tu_id_mapping(networks)
+        stack = ComputeStack(networks)
+        from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+        stack.build(SIMPLE_NODES_COMPUTE_CONFIG, enable_tu_masking=True)
+        stack.tu_id_to_idx = tu_id_to_idx
+
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_networks = len(networks)
+
+        # disable all TUs
+        tu_log_alpha = jnp.full((n_networks, n_tus), -10.0)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        committed = stack.commit(params)
+
+        # this should NOT raise an exception - fluo_bias with invalid tu_id should be handled
+        for net in committed:
+            try:
+                recipe = net.to_recipe()
+                # verify no empty cotx and no invalid fluo_bias
+                for cotx in recipe.content:
+                    assert len(cotx.units) > 0, "Empty CoTransfection should be skipped"
+                    if cotx.fluo_bias is not None:
+                        assert cotx.fluo_bias.tu_id < len(cotx.units), (
+                            f"fluo_bias.tu_id {cotx.fluo_bias.tu_id} >= len(units) {len(cotx.units)}"
+                        )
+            except ValueError as e:
+                if "tu_id" in str(e) and "out of range" in str(e):
+                    pytest.fail(f"fluo_bias.tu_id out of range error should be handled: {e}")
+                raise
+
+
+def test_multi_network_independent_tu_removal(lib):
+    """CRITICAL: Multiple networks with different TUs disabled should commit independently.
+
+    This tests the full flow with:
+    - Multiple networks (sharing TU ID space)
+    - Different TUs disabled per network
+    - Verifies each committed network has only its disabled TUs removed
+    """
+    from biocomp.recipe import Recipe
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    scaffold_path = (
+        Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
+    )
+
+    with LibraryContext.with_library(lib):
+        data = dr.load(scaffold_path, context={"Recipe": Recipe})
+        recipes = data["recipes"] if "recipes" in data else data.recipes
+        scaffold_recipe = recipes[0]
+
+        # create multiple networks from the same scaffold (simulates design replicates)
+        networks = []
+        for i in range(3):
+            nets = recipe_to_networks(scaffold_recipe, br.ALL_RULES, invert=True)
+            networks.extend(nets)
+
+        n_networks = len(networks)
+        assert n_networks >= 3, f"Expected at least 3 networks, got {n_networks}"
+
+        tu_ids, tu_id_to_idx = build_tu_id_mapping(networks)
+        n_tus = len(tu_ids)
+
+        stack = ComputeStack(networks)
+        from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+        stack.build(SIMPLE_NODES_COMPUTE_CONFIG, enable_tu_masking=True)
+        stack.tu_id_to_idx = tu_id_to_idx
+
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        # set different TU masks for each network:
+        # - network 0: disable first 2 TUs
+        # - network 1: disable TUs 2,3,4
+        # - network 2: enable all
+        tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)  # all enabled
+        tu_log_alpha = tu_log_alpha.at[0, :2].set(-10.0)  # net 0: disable first 2
+        if n_tus > 4:
+            tu_log_alpha = tu_log_alpha.at[1, 2:5].set(-10.0)  # net 1: disable 2,3,4
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        # get recipe TUs before commit
+        def get_recipe_tus(net):
+            r = net.to_recipe()
+            return set(tu.name for cotx in r.content for tu in cotx.units)
+
+        tus_before = [get_recipe_tus(net) for net in networks]
+
+        # commit
+        committed = stack.commit(params)
+
+        # get recipe TUs after commit
+        tus_after = [get_recipe_tus(net) for net in committed]
+
+        # verify network 0 lost exactly the first 2 disabled TUs
+        disabled_0 = {tu_ids[0], tu_ids[1]}
+        expected_names_0 = {'_'.join(tid.split('_')[:-1]) for tid in disabled_0}
+        removed_0 = tus_before[0] - tus_after[0]
+        assert expected_names_0 == removed_0, (
+            f"Network 0 should have removed {expected_names_0}, but removed {removed_0}"
+        )
+
+        # verify network 1 lost TUs 2,3,4 (if enough TUs)
+        if n_tus > 4:
+            disabled_1 = {tu_ids[2], tu_ids[3], tu_ids[4]}
+            expected_names_1 = {'_'.join(tid.split('_')[:-1]) for tid in disabled_1}
+            removed_1 = tus_before[1] - tus_after[1]
+            assert expected_names_1 == removed_1, (
+                f"Network 1 should have removed {expected_names_1}, but removed {removed_1}"
+            )
+
+        # verify network 2 (all enabled) has same TUs
+        if n_networks > 2:
+            assert tus_before[2] == tus_after[2], (
+                f"Network 2 (all enabled) should have same TUs.\n"
+                f"Before: {len(tus_before[2])}, After: {len(tus_after[2])}\n"
+                f"Removed: {tus_before[2] - tus_after[2]}"
+            )
+
+        # verify each network's edges match its disabled TUs
+        for net_idx, net in enumerate(committed):
+            if net_idx == 0:
+                # disabled TUs 0,1 - their single-TU edges should be gone
+                for edge in net.compute_graph.edges.values():
+                    edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                    # for single-TU edges, if the TU is disabled, edge should be gone
+                    if len(edge_tu_ids) == 1:
+                        assert edge_tu_ids[0] not in disabled_0, (
+                            f"Net 0: single-TU edge with disabled TU {edge_tu_ids[0]} should be removed"
+                        )
+            elif net_idx == 1 and n_tus > 4:
+                disabled_1 = {tu_ids[2], tu_ids[3], tu_ids[4]}
+                for edge in net.compute_graph.edges.values():
+                    edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                    if len(edge_tu_ids) == 1:
+                        assert edge_tu_ids[0] not in disabled_1, (
+                            f"Net 1: single-TU edge with disabled TU {edge_tu_ids[0]} should be removed"
+                        )

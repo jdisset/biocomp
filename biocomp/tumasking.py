@@ -57,8 +57,19 @@ def sample_hard_concrete_deterministic(
 
 
 def get_final_mask(log_alpha: ArrayLike, threshold: float = 0.5) -> jnp.ndarray:
-    """Get binary mask at commit time (1 = keep, 0 = remove)."""
-    return (jax.nn.sigmoid(log_alpha) >= threshold).astype(jnp.float32)
+    """Get binary mask at commit time (1 = keep, 0 = remove).
+
+    CRITICAL: This function determines which TUs are kept after optimization.
+    The mask is binary: 1.0 (keep) or 0.0 (remove).
+    """
+    log_alpha = jnp.asarray(log_alpha)
+    sigmoid_values = jax.nn.sigmoid(log_alpha)
+    mask = (sigmoid_values >= threshold).astype(jnp.float32)
+    # verify binary output
+    assert jnp.all((mask == 0.0) | (mask == 1.0)), (
+        f"get_final_mask BUG: mask should be binary but got values: {jnp.unique(mask)}"
+    )
+    return mask
 
 
 def l0_penalty(
@@ -158,10 +169,33 @@ def compute_input_masks(
     tu_log_alpha: Optional[ArrayLike],
     temperature: float = DEFAULT_TEMPERATURE,
 ) -> jnp.ndarray:
-    """Compute masks for all inputs. Handles 1D (single TU) or 2D (multi-TU) indices."""
+    """Compute masks for all inputs. Handles 1D (single TU) or 2D (multi-TU) indices.
+
+    CRITICAL: This is the core TU masking function used during forward pass.
+    tu_uniform_samples and tu_log_alpha must have compatible shapes.
+    """
+    tu_indices = jnp.asarray(tu_indices)
     n_inputs = tu_indices.shape[0]
+
     if tu_uniform_samples is None or tu_log_alpha is None:
         return jnp.ones(n_inputs)
+
+    tu_uniform_samples = jnp.asarray(tu_uniform_samples)
+    tu_log_alpha = jnp.asarray(tu_log_alpha)
+
+    # shape validation - these should be 1D arrays indexed by TU
+    assert tu_uniform_samples.ndim == 1, (
+        f"tu_uniform_samples must be 1D (n_tus,), got {tu_uniform_samples.ndim}D. "
+        f"Shape: {tu_uniform_samples.shape}. Did you forget to slice for network_id?"
+    )
+    assert tu_log_alpha.ndim == 1, (
+        f"tu_log_alpha must be 1D (n_tus,), got {tu_log_alpha.ndim}D. "
+        f"Shape: {tu_log_alpha.shape}. Did you forget to slice for network_id?"
+    )
+    assert tu_uniform_samples.shape == tu_log_alpha.shape, (
+        f"Shape mismatch: tu_uniform_samples {tu_uniform_samples.shape} vs "
+        f"tu_log_alpha {tu_log_alpha.shape}"
+    )
 
     if tu_indices.ndim == 1:
         return jax.vmap(

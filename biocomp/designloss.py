@@ -289,6 +289,7 @@ def ratio_spread_penalty(W, max_ratio=100.0, eps=1e-9):
 
 
 def get_spread_penalty_for_leaf(p, max_ratio=100.0):
+    print("enforcing max aggregation ratio of", max_ratio)
     if hasattr(p, "view"):
         try:
             return ratio_spread_penalty(p.view(), max_ratio=max_ratio)
@@ -336,13 +337,28 @@ def compute_all_losses(x, y, yhatdep, lossfunc, n_inputs_per_network=2):
     return vmap(vmap(lossfunc, in_axes=(1, 1, 1)), in_axes=(1, 1, 1))(xsplit, yhatdep, y)
 
 
-def _sample_tu_uniform(params, key):
+def _sample_tu_uniform(params, key, n_samples=1):
+    """Sample TU uniform random variables for Hard Concrete masking.
+
+    Args:
+        params: Parameter tree containing tu_log_alpha
+        key: JAX random key
+        n_samples: Number of independent samples for variance reduction
+
+    Returns:
+        If n_samples=1: shape (n_targets, n_networks, n_tus)
+        If n_samples>1: shape (n_samples, n_targets, n_networks, n_tus)
+    """
     if TU_LOG_ALPHA_PATH not in params:
         return None
     log_alpha = params[TU_LOG_ALPHA_PATH]
     # shape is (n_targets, n_networks, n_tus) after vmap over replicates
     assert log_alpha.ndim == 3, f"expected 3D tu_log_alpha, got {log_alpha.shape}"
-    return jax.random.uniform(key, log_alpha.shape, minval=1e-6, maxval=1.0 - 1e-6)
+    if n_samples == 1:
+        return jax.random.uniform(key, log_alpha.shape, minval=1e-6, maxval=1.0 - 1e-6)
+    # multiple samples for variance reduction
+    shape = (n_samples,) + log_alpha.shape
+    return jax.random.uniform(key, shape, minval=1e-6, maxval=1.0 - 1e-6)
 
 
 def _make_loss_func(
@@ -358,32 +374,41 @@ def _make_loss_func(
     max_prediction=1e6,
     lambda_l0=0.0,
     tu_temperature=0.5,
+    tu_n_samples=4,
 ):
+    """Create the loss function with optional TU sample averaging for variance reduction.
+
+    Args:
+        tu_n_samples: Number of TU mask samples to average over (default 4).
+            Higher values reduce variance but increase compute cost.
+    """
     n_targets, n_networks = dmanager.n_targets, len(dmanager.networks)
     dep_mask = stack.get_dependent_output_mask()
     nb_dep = int(np.sum(dep_mask))
     ratio_paths = ratio_paths or []
 
-    def loss_func(dynamic, static, X, Y, Z, key, step):
-        params = ParameterTree.merge(dynamic, static)
-        mask_key, forward_key = jax.random.split(key)
-        tu_uniform = _sample_tu_uniform(params, mask_key)
-
-        keys = jax.random.split(forward_key, (X.shape[0], X.shape[1]))
+    def single_forward_pass(params, X, Z, key, tu_uniform):
+        """Single forward pass with specific TU mask."""
+        keys = jax.random.split(key, (X.shape[0], X.shape[1]))
         yhat, (apply_aux, full_output) = per_target_apply(
             params, X, Z, keys, stack, tu_uniform=tu_uniform
         )
         yhatdep = jnp.compress(dep_mask, yhat, axis=-1, size=nb_dep)
         yhatdep = _sanitize(yhatdep)
         yhatdep = jnp.clip(yhatdep, -max_prediction, max_prediction)
+        return yhatdep, apply_aux
+
+    def loss_func(dynamic, static, X, Y, Z, key, step):
+        params = ParameterTree.merge(dynamic, static)
+        mask_key, forward_key = jax.random.split(key)
 
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
 
+        # regularization penalties (independent of TU samples)
         over1_penalty = as_schedule(lambda_over1)(step) * sum(
             get_over1_penalty_for_leaf(p) for p in ratio_leaves
         )
         over1_penalty = _sanitize(jnp.atleast_1d(over1_penalty))[0]
-
         spread_penalty = as_schedule(lambda_spread)(step) * sum(
             get_spread_penalty_for_leaf(p, max_ratio=max_ratio) for p in ratio_leaves
         )
@@ -396,14 +421,35 @@ def _make_loss_func(
             l0_penalty = as_schedule(lambda_l0)(step) * l0_loss(log_alpha, temperature=tu_temp)
             l0_penalty = _sanitize(jnp.atleast_1d(l0_penalty))[0]
 
-        all_losses, extra_aux = compute_losses_fn(X, Y, yhatdep, step, n_targets, n_networks)
+        # TU sample averaging for variance reduction
+        if tu_n_samples > 1 and TU_LOG_ALPHA_PATH in params:
+            tu_uniforms = _sample_tu_uniform(params, mask_key, n_samples=tu_n_samples)
+            forward_keys = jax.random.split(forward_key, tu_n_samples)
+
+            def forward_with_tu(tu_u, fwd_key):
+                yhatdep, _ = single_forward_pass(params, X, Z, fwd_key, tu_u)
+                losses, _ = compute_losses_fn(X, Y, yhatdep, step, n_targets, n_networks)
+                return losses, yhatdep
+
+            all_losses_stack, yhatdep_stack = vmap(forward_with_tu)(tu_uniforms, forward_keys)
+            # average losses over TU samples
+            all_losses = jnp.mean(all_losses_stack, axis=0)
+            # use last sample's yhatdep for aux (just for logging)
+            yhatdep = yhatdep_stack[-1]
+            tu_uniform = tu_uniforms[-1]
+            apply_aux = None
+        else:
+            tu_uniform = _sample_tu_uniform(params, mask_key, n_samples=1)
+            yhatdep, apply_aux = single_forward_pass(params, X, Z, forward_key, tu_uniform)
+            all_losses, extra_aux_inner = compute_losses_fn(X, Y, yhatdep, step, n_targets, n_networks)
+
+        all_losses = _sanitize(all_losses)
         aux = {
             "apply_aux": apply_aux,
             "all_losses": all_losses,
             "yhatdep": yhatdep,
             "l0_penalty": l0_penalty,
             "tu_uniform": tu_uniform,
-            **extra_aux,
         }
 
         loss = all_losses.mean() + over1_penalty + spread_penalty + l0_penalty
@@ -424,6 +470,7 @@ def distance_loss(
     max_ratio=100.0,
     lambda_l0=0.0,
     tu_temperature=0.5,
+    tu_n_samples=4,
     distance_func=huber_zncc_loss,
 ):
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks):
@@ -446,6 +493,7 @@ def distance_loss(
         max_ratio=max_ratio,
         lambda_l0=lambda_l0,
         tu_temperature=tu_temperature,
+        tu_n_samples=tu_n_samples,
     )
 
 
@@ -467,6 +515,7 @@ def grid_distance_loss(
     max_ratio=100.0,
     lambda_l0=0.0,
     tu_temperature=0.5,
+    tu_n_samples=4,
     **kw,
 ):
     assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
@@ -512,4 +561,5 @@ def grid_distance_loss(
         max_ratio=max_ratio,
         lambda_l0=lambda_l0,
         tu_temperature=tu_temperature,
+        tu_n_samples=tu_n_samples,
     )
