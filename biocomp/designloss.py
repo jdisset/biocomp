@@ -51,10 +51,12 @@ def _gauss_blur2d(x, kernel):
     return conv1d(conv1d(x, -1), -2)
 
 
-def sinkhorn_divergence_conv(a, b, eps, n_iters=80, uniform_mix=1e-9):
+def sinkhorn_divergence_conv(a, b, eps, n_iters=80, uniform_mix=1e-9, min_mass=1e-6):
     """Grid-based Sinkhorn divergence using fast Gaussian convolutions."""
     a = jnp.maximum(_sanitize(a.astype(jnp.float32)), 1e-24)
     b = jnp.maximum(_sanitize(b.astype(jnp.float32)), 1e-24)
+    a = a + min_mass / a.size  # uniform mass floor prevents grad explosion
+    b = b + min_mass / b.size
     a = a / a.sum()
     b = b / b.sum()
 
@@ -127,14 +129,20 @@ def sinkhorn_divergence_unbalanced(x, y, yhat, epsilon=0.01, tau=0.9, cap=0.5, *
     b = jnp.clip(_sanitize(y), 0.0, cap)
     eps = epsilon if epsilon else _epsilon_from_x_median(xn)
     div = _ott_sinkhorn_div(
-        xn, a, b, eps, tau=tau,
+        xn,
+        a,
+        b,
+        eps,
+        tau=tau,
         threshold=kw.get("threshold", 1e-3),
         max_iterations=kw.get("max_iterations", 300),
     )
     return jnp.maximum(_sanitize(div), 0.0)
 
 
-def sinkhorn_divergence_balanced(x, y, yhat, epsilon=0.01, cap=None, mass_floor=1e-8, lambda_neg=1e-4, **kw):
+def sinkhorn_divergence_balanced(
+    x, y, yhat, epsilon=0.01, cap=None, mass_floor=1e-8, lambda_neg=1e-4, **kw
+):
     xn = _normalize_coords(x)
     eps = epsilon if epsilon else 0.03 * jnp.mean(jnp.sum((xn[:, None] - xn[None]) ** 2, -1))
     a, b = proj_nonneg_ste(yhat, cap=cap), proj_nonneg_ste(y, cap=cap)
@@ -162,11 +170,15 @@ def huber_loss(x, y, yhat, delta=0.01, **kw):
 
 
 def huber_zncc_loss(x, y, yhat, delta=0.01, zncc_weight=0.1, **kw):
-    return zncc_weight * zncc_loss(x, y, yhat) + (1 - zncc_weight) * huber_loss(x, y, yhat, delta=delta)
+    return zncc_weight * zncc_loss(x, y, yhat) + (1 - zncc_weight) * huber_loss(
+        x, y, yhat, delta=delta
+    )
 
 
 def wasserstein_zncc_loss(x, y, yhat, zncc_weight=0.4, **kw):
-    return zncc_weight * zncc_loss(x, y, yhat) + (1 - zncc_weight) * sinkhorn_divergence_balanced(x, y, yhat, **kw)
+    return zncc_weight * zncc_loss(x, y, yhat) + (1 - zncc_weight) * sinkhorn_divergence_balanced(
+        x, y, yhat, **kw
+    )
 
 
 def spectral_loss(x, y, yhat, **kw):
@@ -182,26 +194,36 @@ def simse_loss(x, y, yhat, eps=1e-8, **kw):
     y0, yhat0 = _sanitize(y - jnp.mean(y)), _sanitize(yhat - jnp.mean(yhat))
     vy, vyhat = jnp.sum(y0**2), jnp.sum(yhat0**2)
     alpha = jnp.where(vyhat > eps, jnp.sum(y0 * yhat0) / (vyhat + eps), 0.0)
-    return jnp.nan_to_num(jnp.sum((y0 - alpha * yhat0) ** 2) / jnp.maximum(vy, eps), nan=1.0, posinf=1.0, neginf=1.0)
+    return jnp.nan_to_num(
+        jnp.sum((y0 - alpha * yhat0) ** 2) / jnp.maximum(vy, eps), nan=1.0, posinf=1.0, neginf=1.0
+    )
 
 
 def lncc_loss(x, y, yhat, target_neighbors=12, eps=1e-6, **kw):
     """Local normalized cross-correlation loss."""
-    x, y, yhat = _sanitize(x), _sanitize(jnp.asarray(y).reshape(-1)), _sanitize(jnp.asarray(yhat).reshape(-1))
+    x, y, yhat = (
+        _sanitize(x),
+        _sanitize(jnp.asarray(y).reshape(-1)),
+        _sanitize(jnp.asarray(yhat).reshape(-1)),
+    )
     B = x.shape[0]
     if B <= 1:
         return jnp.array(0.0, dtype=x.dtype)
 
     d2 = jnp.sum((x[:, None] - x[None]) ** 2, axis=-1)
     sigma = jnp.maximum(
-        0.5 * (target_neighbors ** (1.0 / x.shape[-1])) * jnp.sqrt(jnp.maximum(jnp.median(jnp.min(d2 + jnp.eye(B) * 1e9, axis=1)), 0) + eps),
+        0.5
+        * (target_neighbors ** (1.0 / x.shape[-1]))
+        * jnp.sqrt(jnp.maximum(jnp.median(jnp.min(d2 + jnp.eye(B) * 1e9, axis=1)), 0) + eps),
         eps,
     )
     K = jnp.where(jnp.isfinite(K := jnp.exp(-d2 / (2 * sigma**2 + eps))), K, 0.0)
     W = jnp.where((rs := jnp.sum(K, 1, keepdims=True)) > 0, K / (rs + eps), 0.0)
 
     Ey, Eyh, Ey2, Eyh2, Eyyh = W @ y, W @ yhat, W @ (y * y), W @ (yhat * yhat), W @ (y * yhat)
-    ncc = (Eyyh - Ey * Eyh) / (jnp.sqrt(jnp.maximum(Ey2 - Ey**2, 0) * jnp.maximum(Eyh2 - Eyh**2, 0)) + eps)
+    ncc = (Eyyh - Ey * Eyh) / (
+        jnp.sqrt(jnp.maximum(Ey2 - Ey**2, 0) * jnp.maximum(Eyh2 - Eyh**2, 0)) + eps
+    )
     return 1.0 - jnp.mean(jnp.where(jnp.isfinite(ncc), ncc, 0.0))
 
 
@@ -213,7 +235,12 @@ def lncc_grid_loss(x, y, yhat, k=7, eps=1e-6, **kw):
     def box2d(a):
         a = jnp.pad(a, ((r + 1, r), (r + 1, r)), mode="edge")
         s = jnp.cumsum(jnp.cumsum(a, 0), 1)
-        return s[:-2*r-1, :-2*r-1] - s[:-2*r-1, 2*r+1:] - s[2*r+1:, :-2*r-1] + s[2*r+1:, 2*r+1:]
+        return (
+            s[: -2 * r - 1, : -2 * r - 1]
+            - s[: -2 * r - 1, 2 * r + 1 :]
+            - s[2 * r + 1 :, : -2 * r - 1]
+            + s[2 * r + 1 :, 2 * r + 1 :]
+        )
 
     m0, m1 = box2d(y) / N, box2d(yhat) / N
     y0c, y1c = y - m0, yhat - m1
@@ -241,7 +268,10 @@ def get_over1_penalty_for_leaf(p, rel_active=1e-3, width=2e-4):
         try:
             return soft_count_over_one_penalty(p.view(), rel_active=rel_active, width=width)
         except Exception:
-            return sum(soft_count_over_one_penalty(p.tree[path], rel_active=rel_active, width=width) for path in p.paths)
+            return sum(
+                soft_count_over_one_penalty(p.tree[path], rel_active=rel_active, width=width)
+                for path in p.paths
+            )
     return soft_count_over_one_penalty(p, rel_active=rel_active, width=width)
 
 
@@ -270,20 +300,25 @@ def get_spread_penalty_for_leaf(p, max_ratio=100.0):
 def per_batch_apply(params, X, Z, keys, stack, tu_uniform=None):
     def apply_single(x, z, key):
         return stack.apply(params, x, z, key, tu_enabled_random_vars=tu_uniform)
+
     return vmap(apply_single)(X, Z, keys)
 
 
 def per_target_apply(params, X, Z, keys, stack, tu_uniform=None):
     def apply_target(p, x, z, k, tu_u):
         return per_batch_apply(p, x, z, k, stack, tu_uniform=tu_u)
+
     tu_uniform_axes = 0 if tu_uniform is not None else None
-    return vmap(apply_target, in_axes=(0, 1, 1, 1, tu_uniform_axes), out_axes=1)(params, X, Z, keys, tu_uniform)
+    return vmap(apply_target, in_axes=(0, 1, 1, 1, tu_uniform_axes), out_axes=1)(
+        params, X, Z, keys, tu_uniform
+    )
 
 
 @Partial(jax.jit, static_argnames=["stack"])
 def per_replicate_apply(params, X, Z, keys, stack, tu_uniform=None):
     def apply_rep(p, x, z, k, tu_u):
         return per_target_apply(p, x, z, k, stack, tu_uniform=tu_u)
+
     tu_uniform_axes = 0 if tu_uniform is not None else None
     return vmap(apply_rep, in_axes=(0, 0, 0, 0, tu_uniform_axes))(params, X, Z, keys, tu_uniform)
 
@@ -305,13 +340,24 @@ def _sample_tu_uniform(params, key):
     if TU_LOG_ALPHA_PATH not in params:
         return None
     log_alpha = params[TU_LOG_ALPHA_PATH]
-    assert log_alpha.ndim == 2, f"tu_log_alpha should be 2D (networks, tus) at this point, got {log_alpha.ndim}D"
+    # shape is (n_targets, n_networks, n_tus) after vmap over replicates
+    assert log_alpha.ndim == 3, f"expected 3D tu_log_alpha, got {log_alpha.shape}"
     return jax.random.uniform(key, log_alpha.shape, minval=1e-6, maxval=1.0 - 1e-6)
 
 
 def _make_loss_func(
-    stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses_fn,
-    lambda_spread=0.01, max_ratio=100.0, max_prediction=1e6, lambda_l0=0.0, tu_temperature=0.5,
+    stack,
+    dconf,
+    dmanager,
+    num_z,
+    ratio_paths,
+    lambda_over1,
+    compute_losses_fn,
+    lambda_spread=0.01,
+    max_ratio=100.0,
+    max_prediction=1e6,
+    lambda_l0=0.0,
+    tu_temperature=0.5,
 ):
     n_targets, n_networks = dmanager.n_targets, len(dmanager.networks)
     dep_mask = stack.get_dependent_output_mask()
@@ -324,17 +370,23 @@ def _make_loss_func(
         tu_uniform = _sample_tu_uniform(params, mask_key)
 
         keys = jax.random.split(forward_key, (X.shape[0], X.shape[1]))
-        yhat, (apply_aux, full_output) = per_target_apply(params, X, Z, keys, stack, tu_uniform=tu_uniform)
+        yhat, (apply_aux, full_output) = per_target_apply(
+            params, X, Z, keys, stack, tu_uniform=tu_uniform
+        )
         yhatdep = jnp.compress(dep_mask, yhat, axis=-1, size=nb_dep)
         yhatdep = _sanitize(yhatdep)
         yhatdep = jnp.clip(yhatdep, -max_prediction, max_prediction)
 
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
 
-        over1_penalty = as_schedule(lambda_over1)(step) * sum(get_over1_penalty_for_leaf(p) for p in ratio_leaves)
+        over1_penalty = as_schedule(lambda_over1)(step) * sum(
+            get_over1_penalty_for_leaf(p) for p in ratio_leaves
+        )
         over1_penalty = _sanitize(jnp.atleast_1d(over1_penalty))[0]
 
-        spread_penalty = as_schedule(lambda_spread)(step) * sum(get_spread_penalty_for_leaf(p, max_ratio=max_ratio) for p in ratio_leaves)
+        spread_penalty = as_schedule(lambda_spread)(step) * sum(
+            get_spread_penalty_for_leaf(p, max_ratio=max_ratio) for p in ratio_leaves
+        )
         spread_penalty = _sanitize(jnp.atleast_1d(spread_penalty))[0]
 
         tu_temp = as_schedule(tu_temperature)(step)
@@ -346,8 +398,12 @@ def _make_loss_func(
 
         all_losses, extra_aux = compute_losses_fn(X, Y, yhatdep, step, n_targets, n_networks)
         aux = {
-            "apply_aux": apply_aux, "all_losses": all_losses, "yhatdep": yhatdep,
-            "l0_penalty": l0_penalty, "tu_uniform": tu_uniform, **extra_aux,
+            "apply_aux": apply_aux,
+            "all_losses": all_losses,
+            "yhatdep": yhatdep,
+            "l0_penalty": l0_penalty,
+            "tu_uniform": tu_uniform,
+            **extra_aux,
         }
 
         loss = all_losses.mean() + over1_penalty + spread_penalty + l0_penalty
@@ -357,25 +413,61 @@ def _make_loss_func(
 
 
 def distance_loss(
-    stack, dconf, dmanager, num_z, ratio_paths=None, epsilon=0.01, lambda_over1=0.001,
-    lambda_spread=0.01, max_ratio=100.0, lambda_l0=0.0, tu_temperature=0.5, distance_func=huber_zncc_loss,
+    stack,
+    dconf,
+    dmanager,
+    num_z,
+    ratio_paths=None,
+    epsilon=0.01,
+    lambda_over1=0.001,
+    lambda_spread=0.01,
+    max_ratio=100.0,
+    lambda_l0=0.0,
+    tu_temperature=0.5,
+    distance_func=huber_zncc_loss,
 ):
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks):
         yhatdep = _sanitize(yhatdep)
-        all_losses = compute_all_losses(X, Y, yhatdep, Partial(distance_func, epsilon=as_schedule(epsilon)(step)))
+        all_losses = compute_all_losses(
+            X, Y, yhatdep, Partial(distance_func, epsilon=as_schedule(epsilon)(step))
+        )
         assert_that(all_losses).has_shape((n_targets, n_networks))
         return _sanitize(all_losses), {}
 
     return _make_loss_func(
-        stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses,
-        lambda_spread=lambda_spread, max_ratio=max_ratio, lambda_l0=lambda_l0, tu_temperature=tu_temperature,
+        stack,
+        dconf,
+        dmanager,
+        num_z,
+        ratio_paths,
+        lambda_over1,
+        compute_losses,
+        lambda_spread=lambda_spread,
+        max_ratio=max_ratio,
+        lambda_l0=lambda_l0,
+        tu_temperature=tu_temperature,
     )
 
 
 def grid_distance_loss(
-    stack, dconf, dmanager, num_z, ratio_paths=None, w_sinkhorn=1.0, w_lncc=0.5, w_mse=0.0, w_spectral=0.0,
-    eps_sinkhorn=0.1, n_sinkhorn_iters=50, lncc_kernel=7, lambda_over1=0.001, lambda_spread=0.01,
-    max_ratio=100.0, lambda_l0=0.0, tu_temperature=0.5, **kw,
+    stack,
+    dconf,
+    dmanager,
+    num_z,
+    ratio_paths=None,
+    w_sinkhorn=1.0,
+    w_lncc=0.5,
+    w_mse=0.0,
+    w_spectral=0.0,
+    eps_sinkhorn=0.1,
+    n_sinkhorn_iters=50,
+    lncc_kernel=7,
+    lambda_over1=0.001,
+    lambda_spread=0.01,
+    max_ratio=100.0,
+    lambda_l0=0.0,
+    tu_temperature=0.5,
+    **kw,
 ):
     assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
     xres, yres = dmanager.grid_resolution
@@ -385,7 +477,12 @@ def grid_distance_loss(
         y_img, yhat_img = _sanitize(y_img), _sanitize(yhat_img)
         loss = jnp.array(0.0)
         if w_sinkhorn > 0:
-            loss = loss + w_sinkhorn * sinkhorn_divergence_conv(proj_nonneg_ste(yhat_img), proj_nonneg_ste(y_img), eps_sinkhorn, n_iters=n_sinkhorn_iters)
+            loss = loss + w_sinkhorn * sinkhorn_divergence_conv(
+                proj_nonneg_ste(yhat_img),
+                proj_nonneg_ste(y_img),
+                eps_sinkhorn,
+                n_iters=n_sinkhorn_iters,
+            )
         if w_lncc > 0:
             loss = loss + w_lncc * lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel)
         if w_mse > 0:
@@ -396,12 +493,23 @@ def grid_distance_loss(
 
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks_):
         yhatdep = _sanitize(yhatdep)
-        Y_images = jnp.tile(Y.squeeze(-1).T.reshape(n_targets, 1, yres, xres), (1, n_networks, 1, 1))
+        Y_images = jnp.tile(
+            Y.squeeze(-1).T.reshape(n_targets, 1, yres, xres), (1, n_networks, 1, 1)
+        )
         yhat_images = yhatdep.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
         all_losses = vmap(vmap(compute_grid_loss_single))(Y_images, yhat_images)
         return _sanitize(all_losses), {"yhat_images": yhat_images}
 
     return _make_loss_func(
-        stack, dconf, dmanager, num_z, ratio_paths, lambda_over1, compute_losses,
-        lambda_spread=lambda_spread, max_ratio=max_ratio, lambda_l0=lambda_l0, tu_temperature=tu_temperature,
+        stack,
+        dconf,
+        dmanager,
+        num_z,
+        ratio_paths,
+        lambda_over1,
+        compute_losses,
+        lambda_spread=lambda_spread,
+        max_ratio=max_ratio,
+        lambda_l0=lambda_l0,
+        tu_temperature=tu_temperature,
     )

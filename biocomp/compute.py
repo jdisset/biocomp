@@ -317,7 +317,9 @@ class ComputeStack:
         self.tu_id_to_idx = tu_id_to_idx
         self.n_tus = len(sorted_tu_ids)
         self.inverse_tu_ids = inverse_tu_ids
-        logger.debug(f"Built TU mapping: {self.n_tus} TUs, {len(inverse_tu_ids)} feeding inverse nodes")
+        logger.debug(
+            f"Built TU mapping: {self.n_tus} TUs, {len(inverse_tu_ids)} feeding inverse nodes"
+        )
 
     def init(self, rng_key: PRNGKey) -> ParameterTree:
         """
@@ -804,7 +806,7 @@ class ComputeStack:
             # Verify all network_ids are valid
             for nid in network_ids:
                 assert 0 <= nid < n_networks_total, (
-                    f"Invalid network_id {nid} in layer {l.layer_id}, expected 0..{n_networks_total-1}"
+                    f"Invalid network_id {nid} in layer {l.layer_id}, expected 0..{n_networks_total - 1}"
                 )
             layer_network_ids.append(network_ids)
 
@@ -826,10 +828,9 @@ class ComputeStack:
                 - overwrite_at is a 1d array of indices where to inject the values
 
             TU masking (for design mode):
-                - tu_enabled_random_vars: uniform samples for each TU
-                  Shape: (n_networks, n_tus) for per-network masking, or (n_tus,) for shared
+                - tu_enabled_random_vars: uniform samples, shape (n_networks, n_tus)
                 - During design: pass fresh uniform samples each forward pass
-                - During inference: pass None -> defaults to 0.5 (all enabled)
+                - During inference: pass None (all enabled)
             """
 
             if len(inputs) != self.total_nb_of_inputs:
@@ -842,13 +843,13 @@ class ComputeStack:
             assert self.node_map is not None, "No node map"
 
             if tu_enabled_random_vars is not None:
-                assert tu_enabled_random_vars.ndim in (1, 2), (
-                    f"tu_enabled_random_vars must be 1D (shared) or 2D (per-network), got {tu_enabled_random_vars.ndim}D"
+                assert tu_enabled_random_vars.ndim == 2, (
+                    f"tu_enabled_random_vars must be 2D (n_networks, n_tus), got {tu_enabled_random_vars.ndim}D. "
+                    "Per-network TU masking is required."
                 )
-                if tu_enabled_random_vars.ndim == 2:
-                    assert tu_enabled_random_vars.shape[0] == len(self.networks), (
-                        f"tu_enabled_random_vars.shape[0]={tu_enabled_random_vars.shape[0]} != n_networks={len(self.networks)}"
-                    )
+                assert tu_enabled_random_vars.shape[0] == len(self.networks), (
+                    f"tu_enabled_random_vars.shape[0]={tu_enabled_random_vars.shape[0]} != n_networks={len(self.networks)}"
+                )
 
             running_output = inputs.reshape(-1)
             stack_aux = {}
@@ -882,14 +883,14 @@ class ComputeStack:
                     out, _aux = apply_f(*node_args, **node_kwargs)
                     return out  # drop the aux
 
-                def node_apply(node_id: ArrayLike, network_id: ArrayLike, key: PRNGKey, *inputs: ArrayLike):
-                    node_tu_uniform = None
-                    if tu_enabled_random_vars is not None:
-                        if tu_enabled_random_vars.ndim == 2:
-                            node_tu_uniform = tu_enabled_random_vars[network_id]
-                        else:
-                            node_tu_uniform = tu_enabled_random_vars
-
+                def node_apply(
+                    node_id: ArrayLike, network_id: ArrayLike, key: PRNGKey, *inputs: ArrayLike
+                ):
+                    node_tu_uniform = (
+                        tu_enabled_random_vars[network_id]
+                        if tu_enabled_random_vars is not None
+                        else None
+                    )
                     res, node_aux = apply_f(
                         *inputs,
                         params=params,

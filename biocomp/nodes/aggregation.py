@@ -109,20 +109,20 @@ def aggregation(
             tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
             tu_log_alpha = None
             if tu_log_alpha_full is not None:
-                if tu_log_alpha_full.ndim > 1 and network_id is not None:
-                    tu_log_alpha = tu_log_alpha_full[network_id]
-                else:
-                    tu_log_alpha = tu_log_alpha_full
+                assert tu_log_alpha_full.ndim == 2, (
+                    f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha_full.ndim}D"
+                )
+                assert network_id is not None, "network_id required for per-network TU masking"
+                tu_log_alpha = tu_log_alpha_full[network_id]
             output_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
         else:
             output_masks = jnp.ones(n_outputs)
 
         masked_ratios = abs_ratios * output_masks
         masked_sum = jnp.sum(masked_ratios)
+        safe_sum = jnp.maximum(masked_sum, 1e-8)  # jnp.where evals both branches
         normalized_ratios = jnp.where(
-            masked_sum > 1e-8,
-            masked_ratios / masked_sum,
-            jnp.zeros_like(masked_ratios)
+            masked_sum > 1e-8, masked_ratios / safe_sum, jnp.zeros_like(masked_ratios)
         )
         result = normalized_ratios * input
 
@@ -189,7 +189,9 @@ def inv_aggregation(
 
         params.at(f"{namespace}/ratios", ratio_ref, overwrite=None)
         params.at(f"{namespace}/original_slots", jnp.array(original_slots), tags=[NON_GRAD_TAG])
-        params.at(f"{namespace}/fwd_node_positions", jnp.array(fwd_node_positions), tags=[NON_GRAD_TAG])
+        params.at(
+            f"{namespace}/fwd_node_positions", jnp.array(fwd_node_positions), tags=[NON_GRAD_TAG]
+        )
 
     DISABLED_THRESHOLD = 1.0 / 120.0
 
@@ -215,26 +217,25 @@ def inv_aggregation(
         fwd_tu_path = f"{fwd_ns}/output_tu_indices"
         if fwd_tu_path in params and tu_enabled_random_vars is not None:
             from biocomp.tumasking import compute_input_masks
+
             tu_indices = params[fwd_tu_path][fwd_node_pos]
             tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
             tu_log_alpha = None
             if tu_log_alpha_full is not None:
-                if tu_log_alpha_full.ndim > 1 and network_id is not None:
-                    tu_log_alpha = tu_log_alpha_full[network_id]
-                else:
-                    tu_log_alpha = tu_log_alpha_full
+                assert tu_log_alpha_full.ndim == 2, (
+                    f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha_full.ndim}D"
+                )
+                assert network_id is not None, "network_id required for per-network TU masking"
+                tu_log_alpha = tu_log_alpha_full[network_id]
             all_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
         else:
             all_masks = jnp.ones_like(all_fwd_ratios)
 
         masked_ratios = all_fwd_ratios * all_masks
         masked_sum = jnp.sum(masked_ratios)
+        safe_sum = jnp.maximum(masked_sum, 1e-8)  # jnp.where evals both branches
         this_mask = all_masks[original_slot]
-        normalized_ratio = jnp.where(
-            masked_sum > 1e-8,
-            original_ratio * this_mask / masked_sum,
-            0.0
-        )
+        normalized_ratio = jnp.where(masked_sum > 1e-8, original_ratio * this_mask / safe_sum, 0.0)
 
         is_enabled = normalized_ratio >= DISABLED_THRESHOLD
         safe_ratio = jnp.maximum(normalized_ratio, DISABLED_THRESHOLD)

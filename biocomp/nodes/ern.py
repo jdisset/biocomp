@@ -227,13 +227,13 @@ def sequestron_ERN(
 
             tu_indices = params[input_tu_indices_path][node_id]
             tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
-            # Per-network indexing: if tu_log_alpha has network dimension, index by network_id
             tu_log_alpha = None
             if tu_log_alpha_full is not None:
-                if tu_log_alpha_full.ndim > 1 and network_id is not None:
-                    tu_log_alpha = tu_log_alpha_full[network_id]
-                else:
-                    tu_log_alpha = tu_log_alpha_full
+                assert tu_log_alpha_full.ndim == 2, (
+                    f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha_full.ndim}D"
+                )
+                assert network_id is not None, "network_id required for per-network TU masking"
+                tu_log_alpha = tu_log_alpha_full[network_id]
             input_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
         else:
             input_masks = jnp.ones(2)

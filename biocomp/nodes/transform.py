@@ -299,10 +299,11 @@ def transform_nn(
             tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
             tu_log_alpha = None
             if tu_log_alpha_full is not None:
-                if tu_log_alpha_full.ndim > 1 and network_id is not None:
-                    tu_log_alpha = tu_log_alpha_full[network_id]
-                else:
-                    tu_log_alpha = tu_log_alpha_full
+                assert tu_log_alpha_full.ndim == 2, (
+                    f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha_full.ndim}D"
+                )
+                assert network_id is not None, "network_id required for per-network TU masking"
+                tu_log_alpha = tu_log_alpha_full[network_id]
             input_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
         else:
             input_masks = jnp.ones(len(input_shapes))
@@ -312,9 +313,7 @@ def transform_nn(
             inner(params, value=v, random_var=random_var[i], rate_embedding=r, key=k)
             for i, (v, r, k) in enumerate(zip(val, qrates, inner_keys))
         ]
-        masked_inner_outputs = [
-            out * input_masks[i] for i, out in enumerate(inner_outputs)
-        ]
+        masked_inner_outputs = [out * input_masks[i] for i, out in enumerate(inner_outputs)]
         inner_out = sum(masked_inner_outputs)
 
         inner_out = flat_concat(inner_out, random_var[len(input_shapes)])

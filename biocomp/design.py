@@ -563,9 +563,15 @@ class DesignManager(BaseModel):
 
 
 def initialize_params(
-    stack, n_replicates, n_targets, shared_params, key,
-    n_tus: int = 0, n_networks: int = 1,
-    tu_log_alpha_init_mean: float = 2.0, tu_log_alpha_init_std: float = 0.5,
+    stack,
+    n_replicates,
+    n_targets,
+    shared_params,
+    key,
+    n_tus: int = 0,
+    n_networks: int = 1,
+    tu_log_alpha_init_mean: float = 2.0,
+    tu_log_alpha_init_std: float = 0.5,
 ):
     """Initialize parameters for design optimization.
 
@@ -589,13 +595,16 @@ def initialize_params(
     if n_tus > 0:
         assert n_networks > 0, f"n_tus={n_tus} but n_networks={n_networks}"
         expected_shape = (n_replicates, n_targets, n_networks, n_tus)
-        tu_log_alpha = (
-            tu_log_alpha_init_mean
-            + tu_log_alpha_init_std * jax.random.normal(tu_key, shape=expected_shape)
+        tu_log_alpha = tu_log_alpha_init_mean + tu_log_alpha_init_std * jax.random.normal(
+            tu_key, shape=expected_shape
         )
-        assert tu_log_alpha.shape == expected_shape, f"tu_log_alpha shape {tu_log_alpha.shape} != {expected_shape}"
+        assert tu_log_alpha.shape == expected_shape, (
+            f"tu_log_alpha shape {tu_log_alpha.shape} != {expected_shape}"
+        )
         params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=None)
-        logger.info(f"Initialized TU log_alpha: {n_tus} TUs × {n_networks} networks (mean={tu_log_alpha_init_mean}, std={tu_log_alpha_init_std})")
+        logger.info(
+            f"Initialized TU log_alpha: {n_tus} TUs × {n_networks} networks (mean={tu_log_alpha_init_mean}, std={tu_log_alpha_init_std})"
+        )
 
     return params
 
@@ -606,7 +615,7 @@ class DesignConfig(DesignOptimConfig):
     keep_in_history: List[str] = ["loss", "all_losses"]
     # TU masking initialization - diverse init helps exploration
     tu_log_alpha_init_mean: float = 0.0  # 0 = 50/50 enabled/disabled starting point
-    tu_log_alpha_init_std: float = 2.0   # high std = diverse configs across TUs/replicates
+    tu_log_alpha_init_std: float = 2.0  # high std = diverse configs across TUs/replicates
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -815,6 +824,7 @@ def normalize_ratios_prune(current_ratios, threshold=RATIO_PRUNE_THRESHOLD, eps=
 
 def get_ratio_paths_and_sources(params):
     from biocomp.parameters import isArrayRef
+
     direct_paths, aref_sources, aref_count = [], set(), 0
     for path, value in params.data.iter_leaves():
         path_str = str(path)
@@ -835,6 +845,7 @@ def get_ratio_paths(params):
 
 def normalize_ratio_source_arrays(params, source_paths, normalize_func):
     from biocomp.parameters import flatten_PTree, unflatten_PTree, ParamPath, ParameterTree
+
     source_set = set(source_paths)
     flat_leaves, (keys, read_only) = flatten_PTree(params.data)
     new_leaves = list(flat_leaves)
@@ -842,7 +853,9 @@ def normalize_ratio_source_arrays(params, source_paths, normalize_func):
         if isinstance(key, ParamPath) and str(key) in source_set and flat_leaves[i] is not None:
             new_leaves[i] = normalize_func(flat_leaves[i])
     new_data = unflatten_PTree((keys, read_only), tuple(new_leaves))
-    return ParameterTree(data=new_data, tags=params.tags, tagnames=params.tagnames, read_only=params.read_only)
+    return ParameterTree(
+        data=new_data, tags=params.tags, tagnames=params.tagnames, read_only=params.read_only
+    )
 
 
 def start(
@@ -876,7 +889,11 @@ def start(
     n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
     n_networks = len(dmanager.networks)
     initial_params = initialize_params(
-        stack, dconf.n_replicates, dmanager.n_targets, model.shared_params, pkey,
+        stack,
+        dconf.n_replicates,
+        dmanager.n_targets,
+        model.shared_params,
+        pkey,
         n_tus=n_tus,
         n_networks=n_networks,
         tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
@@ -958,7 +975,9 @@ def start(
     logger.info("[5/5] Creating loss and step functions...")
     direct_ratio_paths, source_ratio_paths = get_ratio_paths_and_sources(initial_params)
     ratio_paths = direct_ratio_paths
-    logger.debug(f"Ratio normalization: {len(direct_ratio_paths)} direct + {len(source_ratio_paths)} ArrayRef source paths")
+    logger.debug(
+        f"Ratio normalization: {len(direct_ratio_paths)} direct + {len(source_ratio_paths)} ArrayRef source paths"
+    )
 
     def norm_ratios_hook(params, *a, **kw):
         # First, normalize direct ratio paths (non-ArrayRef)
@@ -966,12 +985,13 @@ def start(
             params = params.update_leaves_by_path(direct_ratio_paths, normalize_ratios_prune)
         # Then, normalize source arrays that back ArrayRef ratios
         if source_ratio_paths:
-            params = normalize_ratio_source_arrays(params, source_ratio_paths, normalize_ratios_prune)
-        # Clamp tu_log_alpha to prevent gradient explosion
+            params = normalize_ratio_source_arrays(
+                params, source_ratio_paths, normalize_ratios_prune
+            )
+        # clamp tu_log_alpha (hard_concrete has soft clamp, this is a safety bound)
         if TU_LOG_ALPHA_PATH in params:
             params = params.update_leaves_by_path(
-                [TU_LOG_ALPHA_PATH],
-                lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
+                [TU_LOG_ALPHA_PATH], lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
             )
         return params
 
@@ -986,7 +1006,7 @@ def start(
         post_update_hook=norm_ratios_hook,
         updates_need_vmap=True,
         static_tags=["non_grad", "shared"],
-        sanitize_grads=False,
+        sanitize_grads=True,
     )
 
     def step(params: ParameterTree, opt_state: optax.OptState, step_key, xs, ys):
@@ -1073,7 +1093,11 @@ def sample_for_evaluation(
     key: jax.Array,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Sample evaluation data. Returns (xraw, yraw) with shapes (n_networks, n_replicates, n_samples, n_targets, 2/1)."""
-    n_networks, n_replicates, n_targets = len(dmanager.networks), dconf.n_replicates, dmanager.n_targets
+    n_networks, n_replicates, n_targets = (
+        len(dmanager.networks),
+        dconf.n_replicates,
+        dmanager.n_targets,
+    )
     seed = int(jax.random.key_data(key)[0]) % (2**31)
     xlist, ylist = dmanager._get_uniform_samples((n_networks, n_replicates, n_eval_samples), seed)
     xraw, yraw = jnp.stack(xlist, axis=0), jnp.stack(ylist, axis=0)
@@ -1096,7 +1120,12 @@ def evaluate_design(
 ) -> Tuple[Optional[jnp.ndarray], jnp.ndarray]:
     """Evaluate design quality. Returns (predictions, losses) where losses has shape (n_replicates, n_targets, n_networks)."""
     stack = dmanager.build_stack(model, unlock_ratios=False)
-    n_networks, n_replicates, n_targets, n_samples = len(dmanager.networks), dconf.n_replicates, dmanager.n_targets, xraw.shape[2]
+    n_networks, n_replicates, n_targets, n_samples = (
+        len(dmanager.networks),
+        dconf.n_replicates,
+        dmanager.n_targets,
+        xraw.shape[2],
+    )
     logger.info(f"Evaluating: {n_replicates} reps × {n_targets} targets × {n_samples} samples")
 
     num_z_val = int(final_params["global/number_of_random_variables"][0, 0].squeeze())
@@ -1118,13 +1147,17 @@ def evaluate_design(
             for start in range(0, n_samples, max_eval_size):
                 end = min(start + max_eval_size, n_samples)
                 z_batch = jax.random.uniform(key, (end - start, num_z_val))
-                yhat, _ = apply_batched(rep_params, x_slice[start:end], z_batch, jax.random.split(key, end - start))
+                yhat, _ = apply_batched(
+                    rep_params, x_slice[start:end], z_batch, jax.random.split(key, end - start)
+                )
                 yhats.append(yhat)
 
             yhat_dep = jnp.compress(dep_mask, jnp.concatenate(yhats, axis=0), axis=-1)
             if store_predictions:
                 rep_preds.append(yhat_dep)
-            rep_losses.append(jnp.mean((yhat_dep - jnp.tile(y_slice, (1, n_networks))) ** 2, axis=0).tolist())
+            rep_losses.append(
+                jnp.mean((yhat_dep - jnp.tile(y_slice, (1, n_networks))) ** 2, axis=0).tolist()
+            )
             pbar.update(1)
 
         all_losses.append(rep_losses)
@@ -1133,7 +1166,9 @@ def evaluate_design(
 
     pbar.close()
     losses = jnp.array(all_losses)
-    logger.info(f"Evaluation complete. Loss: [{float(losses.min()):.4f}, {float(losses.max()):.4f}]")
+    logger.info(
+        f"Evaluation complete. Loss: [{float(losses.min()):.4f}, {float(losses.max()):.4f}]"
+    )
 
     if store_predictions:
         return jnp.stack(all_predictions, axis=0).transpose(0, 2, 1, 3), losses
@@ -1168,7 +1203,9 @@ def compute_baseline_loss(
         if Y_sample.ndim == 1:
             Y_sample = Y_sample[:, None]
 
-        nm = NetworkModel(model=model, network=original_network, max_points_per_batch=max_batch_size)
+        nm = NetworkModel(
+            model=model, network=original_network, max_points_per_batch=max_batch_size
+        )
         yhat, _ = nm.predict(X_sample)
         yhat_mean = np.mean(yhat, axis=-1, keepdims=True) if yhat.shape[-1] > 1 else yhat
 
