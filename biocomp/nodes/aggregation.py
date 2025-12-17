@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 from biocomp.parameters import ArrayRef, ParameterTree
 from biocomp.nodeutils import LayerInstance, add_tu_output_mapping, NON_GRAD_TAG
+from biocomp.tumasking import TU_LOG_ALPHA_PATH
 from biocomp.utils import get_logger
 from typing import Optional
 
@@ -93,6 +94,8 @@ def aggregation(
         node_id: ArrayLike,
         key: PRNGKey,
         tu_enabled_random_vars: Optional[ArrayLike] = None,
+        network_id: Optional[ArrayLike] = None,
+        **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
         ratios = params[f"{namespace}/{PNAME}"][node_id][:n_outputs]
@@ -103,7 +106,13 @@ def aggregation(
             from biocomp.tumasking import compute_input_masks
 
             tu_indices = params[output_tu_indices_path][node_id]
-            tu_log_alpha = params["design/tu_log_alpha"] if "design/tu_log_alpha" in params else None
+            tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
+            tu_log_alpha = None
+            if tu_log_alpha_full is not None:
+                if tu_log_alpha_full.ndim > 1 and network_id is not None:
+                    tu_log_alpha = tu_log_alpha_full[network_id]
+                else:
+                    tu_log_alpha = tu_log_alpha_full
             output_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
         else:
             output_masks = jnp.ones(n_outputs)
@@ -191,6 +200,8 @@ def inv_aggregation(
         node_id: ArrayLike,
         key,
         tu_enabled_random_vars: Optional[ArrayLike] = None,
+        network_id: Optional[ArrayLike] = None,
+        **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         original_ratio = jnp.abs(params[f"{namespace}/ratios"][node_id])
         original_slot = params[f"{namespace}/original_slots"][node_id]
@@ -205,7 +216,13 @@ def inv_aggregation(
         if fwd_tu_path in params and tu_enabled_random_vars is not None:
             from biocomp.tumasking import compute_input_masks
             tu_indices = params[fwd_tu_path][fwd_node_pos]
-            tu_log_alpha = params["design/tu_log_alpha"] if "design/tu_log_alpha" in params else None
+            tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
+            tu_log_alpha = None
+            if tu_log_alpha_full is not None:
+                if tu_log_alpha_full.ndim > 1 and network_id is not None:
+                    tu_log_alpha = tu_log_alpha_full[network_id]
+                else:
+                    tu_log_alpha = tu_log_alpha_full
             all_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
         else:
             all_masks = jnp.ones_like(all_fwd_ratios)

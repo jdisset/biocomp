@@ -305,6 +305,7 @@ def _sample_tu_uniform(params, key):
     if TU_LOG_ALPHA_PATH not in params:
         return None
     log_alpha = params[TU_LOG_ALPHA_PATH]
+    assert log_alpha.ndim == 2, f"tu_log_alpha should be 2D (networks, tus) at this point, got {log_alpha.ndim}D"
     return jax.random.uniform(key, log_alpha.shape, minval=1e-6, maxval=1.0 - 1e-6)
 
 

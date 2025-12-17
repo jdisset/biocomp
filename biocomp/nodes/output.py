@@ -6,6 +6,7 @@ from jax import vmap
 import numpy as np
 from biocomp.parameters import ParameterTree, init_if_needed
 from biocomp.nodeutils import LayerInstance, add_tu_input_mapping
+from biocomp.tumasking import TU_LOG_ALPHA_PATH
 from typing import Optional
 
 from biocomp.neuralutils import (
@@ -73,6 +74,8 @@ def grouped_output(
         node_id: ArrayLike,
         key,
         tu_enabled_random_vars: Optional[ArrayLike] = None,
+        network_id: Optional[ArrayLike] = None,
+        **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         inputs_arr = jnp.array(inputs)
         assert len(inputs_arr) == len(input_shapes)
@@ -82,7 +85,13 @@ def grouped_output(
             from biocomp.tumasking import compute_input_masks
 
             tu_indices = params[input_tu_indices_path][node_id]
-            tu_log_alpha = params["design/tu_log_alpha"] if "design/tu_log_alpha" in params else None
+            tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
+            tu_log_alpha = None
+            if tu_log_alpha_full is not None:
+                if tu_log_alpha_full.ndim > 1 and network_id is not None:
+                    tu_log_alpha = tu_log_alpha_full[network_id]
+                else:
+                    tu_log_alpha = tu_log_alpha_full
             input_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
         else:
             input_masks = jnp.ones(len(input_shapes))

@@ -564,9 +564,15 @@ class DesignManager(BaseModel):
 
 def initialize_params(
     stack, n_replicates, n_targets, shared_params, key,
-    n_tus: int = 0, tu_log_alpha_init_mean: float = 2.0, tu_log_alpha_init_std: float = 0.5,
+    n_tus: int = 0, n_networks: int = 1,
+    tu_log_alpha_init_mean: float = 2.0, tu_log_alpha_init_std: float = 0.5,
 ):
-    """Initialize parameters for design optimization."""
+    """Initialize parameters for design optimization.
+
+    When TU masking is enabled (n_tus > 0), tu_log_alpha has shape
+    (n_replicates, n_targets, n_networks, n_tus) to allow independent
+    TU masking per network/scaffold.
+    """
     tu_key, init_key = jax.random.split(key)
 
     def init_single(k):
@@ -581,12 +587,15 @@ def initialize_params(
     params = vmap(init_target_params)(jax.random.split(init_key, n_replicates))
 
     if n_tus > 0:
+        assert n_networks > 0, f"n_tus={n_tus} but n_networks={n_networks}"
+        expected_shape = (n_replicates, n_targets, n_networks, n_tus)
         tu_log_alpha = (
             tu_log_alpha_init_mean
-            + tu_log_alpha_init_std * jax.random.normal(tu_key, shape=(n_replicates, n_targets, n_tus))
+            + tu_log_alpha_init_std * jax.random.normal(tu_key, shape=expected_shape)
         )
+        assert tu_log_alpha.shape == expected_shape, f"tu_log_alpha shape {tu_log_alpha.shape} != {expected_shape}"
         params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=None)
-        logger.info(f"Initialized TU log_alpha for {n_tus} TUs (mean={tu_log_alpha_init_mean}, std={tu_log_alpha_init_std})")
+        logger.info(f"Initialized TU log_alpha: {n_tus} TUs × {n_networks} networks (mean={tu_log_alpha_init_mean}, std={tu_log_alpha_init_std})")
 
     return params
 
@@ -865,9 +874,11 @@ def start(
     t1 = time.perf_counter()
     logger.info("[2/5] Initializing parameters...")
     n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
+    n_networks = len(dmanager.networks)
     initial_params = initialize_params(
         stack, dconf.n_replicates, dmanager.n_targets, model.shared_params, pkey,
         n_tus=n_tus,
+        n_networks=n_networks,
         tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
         tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
     )

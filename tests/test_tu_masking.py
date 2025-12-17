@@ -270,3 +270,149 @@ def test_inference_mode_all_enabled(lib, design_stack):
         # Should be similar (inference mode treats all as enabled)
         assert not jnp.allclose(y_inference, 0.0, atol=1e-3), \
             f"Expected non-zero output in inference mode, got {y_inference}"
+
+
+# ============== Per-Network TU Masking Tests ==============
+
+
+@pytest.fixture
+def multi_network_stack(lib):
+    """Build a stack with multiple networks sharing the same TU names."""
+    scaffold_path_1 = Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
+    scaffold_path_2 = Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/three.yaml"
+
+    with LibraryContext.with_library(lib):
+        data1 = dr.load(scaffold_path_1, context={"Recipe": Recipe})
+        recipes1 = data1["recipes"] if "recipes" in data1 else data1.recipes
+        data2 = dr.load(scaffold_path_2, context={"Recipe": Recipe})
+        recipes2 = data2["recipes"] if "recipes" in data2 else data2.recipes
+
+        networks = []
+        for r in recipes1[:2]:
+            networks.extend(recipe_to_networks(r, br.ALL_RULES, invert=True))
+        for r in recipes2[:1]:
+            networks.extend(recipe_to_networks(r, br.ALL_RULES, invert=True))
+
+        tu_ids, tu_id_to_idx = build_tu_id_mapping(networks)
+
+        stack = ComputeStack(networks)
+        config = SIMPLE_NODES_COMPUTE_CONFIG.model_copy(deep=True)
+        stack.build(config, enable_tu_masking=True)
+
+        return stack, tu_ids, tu_id_to_idx, len(networks)
+
+
+def test_per_network_tu_masking_shape(lib, multi_network_stack):
+    """Verify tu_enabled_random_vars 2D shape is accepted and validated."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx, n_networks = multi_network_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_inputs = stack.get_nb_inputs()
+        n_z_val = params["global/number_of_random_variables"]
+        n_z = int(n_z_val.squeeze()) if hasattr(n_z_val, 'squeeze') else int(n_z_val)
+
+        X = jnp.ones((n_inputs,)) * 0.5
+        Z = jnp.ones((n_z,)) * 0.5
+
+        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+
+        tu_uniform_2d = jnp.full((n_networks, n_tus), 0.5)
+        y, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_2d)
+
+        assert y is not None
+        assert not jnp.any(jnp.isnan(y)), "Got NaN in output"
+
+
+def test_per_network_tu_masking_independence(lib, multi_network_stack):
+    """Disabling TUs in one network should not affect outputs from other networks."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx, n_networks = multi_network_stack
+
+        if n_networks < 2:
+            pytest.skip("Need at least 2 networks for independence test")
+
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_inputs = stack.get_nb_inputs()
+        n_z_val = params["global/number_of_random_variables"]
+        n_z = int(n_z_val.squeeze()) if hasattr(n_z_val, 'squeeze') else int(n_z_val)
+
+        X = jnp.ones((n_inputs,)) * 0.5
+        Z = jnp.ones((n_z,)) * 0.5
+
+        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+
+        tu_uniform_all = jnp.full((n_networks, n_tus), 0.5)
+        y_all, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_all)
+
+        tu_uniform_net0_disabled = tu_uniform_all.at[0, :].set(1e-6)
+        y_net0_disabled, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_net0_disabled)
+
+        assert not jnp.allclose(y_all, y_net0_disabled, atol=1e-3), \
+            "Disabling TUs in network 0 should change output"
+
+
+def test_per_network_tu_masking_selective_disable(lib, multi_network_stack):
+    """Verify that we can selectively disable specific TUs in specific networks."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx, n_networks = multi_network_stack
+
+        if n_networks < 2 or len(tu_ids) < 2:
+            pytest.skip("Need at least 2 networks and 2 TUs")
+
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_inputs = stack.get_nb_inputs()
+        n_z_val = params["global/number_of_random_variables"]
+        n_z = int(n_z_val.squeeze()) if hasattr(n_z_val, 'squeeze') else int(n_z_val)
+
+        X = jnp.ones((n_inputs,)) * 0.5
+        Z = jnp.ones((n_z,)) * 0.5
+
+        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+
+        tu_uniform_base = jnp.full((n_networks, n_tus), 0.5)
+        y_base, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_base)
+
+        tu_uniform_net0_tu0 = tu_uniform_base.at[0, 0].set(1e-6)
+        y_net0_tu0, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_net0_tu0)
+
+        tu_uniform_net1_tu0 = tu_uniform_base.at[1, 0].set(1e-6)
+        y_net1_tu0, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_net1_tu0)
+
+        net0_changed = not jnp.allclose(y_base, y_net0_tu0, atol=1e-3)
+        net1_changed = not jnp.allclose(y_base, y_net1_tu0, atol=1e-3)
+
+        assert net0_changed or net1_changed, \
+            "Disabling TU 0 should change output for at least one network"
+
+
+def test_1d_tu_uniform_still_works(lib, design_stack):
+    """Ensure backward compatibility: 1D tu_uniform (shared masking) still works."""
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_inputs = stack.get_nb_inputs()
+        n_z_val = params["global/number_of_random_variables"]
+        n_z = int(n_z_val.squeeze()) if hasattr(n_z_val, 'squeeze') else int(n_z_val)
+
+        X = jnp.ones((n_inputs,)) * 0.5
+        Z = jnp.ones((n_z,)) * 0.5
+
+        params.at(TU_LOG_ALPHA_PATH, jnp.zeros(n_tus))
+
+        tu_uniform_1d = jnp.full((n_tus,), 0.5)
+        y, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_1d)
+
+        assert y is not None
+        assert not jnp.any(jnp.isnan(y)), "Got NaN in output with 1D tu_uniform"

@@ -795,6 +795,19 @@ class ComputeStack:
 
         w_grads = [l.f_type in get_grads_for for l in self.layers]
 
+        # Pre-build network_ids arrays for each layer (node_position -> network_id)
+        # Used for per-network TU masking
+        n_networks_total = len(self.networks)
+        layer_network_ids = []
+        for l in self.layers:
+            network_ids = jnp.array([n.network_id for n in l.nodes], dtype=jnp.int32)
+            # Verify all network_ids are valid
+            for nid in network_ids:
+                assert 0 <= nid < n_networks_total, (
+                    f"Invalid network_id {nid} in layer {l.layer_id}, expected 0..{n_networks_total-1}"
+                )
+            layer_network_ids.append(network_ids)
+
         def apply_impl(
             params: ParameterTree,
             inputs: NdArray,
@@ -813,7 +826,8 @@ class ComputeStack:
                 - overwrite_at is a 1d array of indices where to inject the values
 
             TU masking (for design mode):
-                - tu_enabled_random_vars: uniform samples for each TU, shape (n_tus,)
+                - tu_enabled_random_vars: uniform samples for each TU
+                  Shape: (n_networks, n_tus) for per-network masking, or (n_tus,) for shared
                 - During design: pass fresh uniform samples each forward pass
                 - During inference: pass None -> defaults to 0.5 (all enabled)
             """
@@ -826,6 +840,15 @@ class ComputeStack:
             assert self.layers is not None, "No layers"
             assert self.layers_start_index is not None, "No layers start index"
             assert self.node_map is not None, "No node map"
+
+            if tu_enabled_random_vars is not None:
+                assert tu_enabled_random_vars.ndim in (1, 2), (
+                    f"tu_enabled_random_vars must be 1D (shared) or 2D (per-network), got {tu_enabled_random_vars.ndim}D"
+                )
+                if tu_enabled_random_vars.ndim == 2:
+                    assert tu_enabled_random_vars.shape[0] == len(self.networks), (
+                        f"tu_enabled_random_vars.shape[0]={tu_enabled_random_vars.shape[0]} != n_networks={len(self.networks)}"
+                    )
 
             running_output = inputs.reshape(-1)
             stack_aux = {}
@@ -853,19 +876,28 @@ class ComputeStack:
                 keys = jax.random.split(key, n_nodes)
 
                 apply_f = self.layers[lid].f_apply
+                net_ids = layer_network_ids[lid]  # shape (n_nodes,)
 
                 def single_out_apply(*node_args, **node_kwargs):
                     out, _aux = apply_f(*node_args, **node_kwargs)
                     return out  # drop the aux
 
-                def node_apply(node_id: ArrayLike, key: PRNGKey, *inputs: ArrayLike):
+                def node_apply(node_id: ArrayLike, network_id: ArrayLike, key: PRNGKey, *inputs: ArrayLike):
+                    node_tu_uniform = None
+                    if tu_enabled_random_vars is not None:
+                        if tu_enabled_random_vars.ndim == 2:
+                            node_tu_uniform = tu_enabled_random_vars[network_id]
+                        else:
+                            node_tu_uniform = tu_enabled_random_vars
+
                     res, node_aux = apply_f(
                         *inputs,
                         params=params,
                         random_vars=random_vars,
                         node_id=node_id,
                         key=key,
-                        tu_enabled_random_vars=tu_enabled_random_vars,
+                        tu_enabled_random_vars=node_tu_uniform,
+                        network_id=network_id,
                     )
                     if w_grads[lid]:
                         # using jax.jacfwd, we can just grab the first output wrt the first input
@@ -875,7 +907,8 @@ class ComputeStack:
                             random_vars=random_vars,
                             node_id=node_id,
                             key=key,
-                            tu_enabled_random_vars=tu_enabled_random_vars,
+                            tu_enabled_random_vars=node_tu_uniform,
+                            network_id=network_id,
                         )
                         first_output_grad = grad[0]
                         grad = first_output_grad.reshape(-1)
@@ -888,7 +921,7 @@ class ComputeStack:
                     return res, node_aux
 
                 def layer_apply(*inputs):
-                    return vmap(node_apply)(jnp.arange(n_nodes), keys, *inputs)
+                    return vmap(node_apply)(jnp.arange(n_nodes), net_ids, keys, *inputs)
 
                 layer_out, layer_aux = layer_apply(*layer_inputs)
                 layer_grad_wrt_inputs = layer_aux.get("grads_wrt_inputs", jnp.array([])).ravel()
