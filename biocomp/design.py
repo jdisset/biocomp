@@ -28,7 +28,7 @@ from biocomptools.modelmodel import BiocompModel
 from biocomp.designutils import sample_from_svg, data_to_lattice_2d
 from biocomp.optimutils import make_training_step, per_replicate_step, optimize, DesignOptimConfig
 from biocomp.designloss import distance_loss, grid_distance_loss  # noqa: F401 - re-exported for config compatibility
-from biocomp.tumasking import build_tu_id_mapping, TU_LOG_ALPHA_PATH
+from biocomp.tumasking import build_tu_id_mapping, TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
 
 logger = get_logger(__name__)
 
@@ -586,7 +586,7 @@ def initialize_params(
             + tu_log_alpha_init_std * jax.random.normal(tu_key, shape=(n_replicates, n_targets, n_tus))
         )
         params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=None)
-        logger.info(f"Initialized TU log_alpha for {n_tus} TUs (mean={tu_log_alpha_init_mean})")
+        logger.info(f"Initialized TU log_alpha for {n_tus} TUs (mean={tu_log_alpha_init_mean}, std={tu_log_alpha_init_std})")
 
     return params
 
@@ -595,6 +595,9 @@ class DesignConfig(DesignOptimConfig):
     loss_function: EncodedPartialFunction = Field(default=distance_loss)
     n_replicates: int = 4
     keep_in_history: List[str] = ["loss", "all_losses"]
+    # TU masking initialization - diverse init helps exploration
+    tu_log_alpha_init_mean: float = 0.0  # 0 = 50/50 enabled/disabled starting point
+    tu_log_alpha_init_std: float = 2.0   # high std = diverse configs across TUs/replicates
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -865,6 +868,8 @@ def start(
     initial_params = initialize_params(
         stack, dconf.n_replicates, dmanager.n_targets, model.shared_params, pkey,
         n_tus=n_tus,
+        tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
+        tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
     )
     assert_tree_shape(initial_params, (dconf.n_replicates, dmanager.n_targets))
     timings["param_init"] = time.perf_counter() - t1
@@ -951,6 +956,12 @@ def start(
         # Then, normalize source arrays that back ArrayRef ratios
         if source_ratio_paths:
             params = normalize_ratio_source_arrays(params, source_ratio_paths, normalize_ratios_prune)
+        # Clamp tu_log_alpha to prevent gradient explosion
+        if TU_LOG_ALPHA_PATH in params:
+            params = params.update_leaves_by_path(
+                [TU_LOG_ALPHA_PATH],
+                lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
+            )
         return params
 
     loss_func = dconf.loss_function.get_impl()(
@@ -964,6 +975,7 @@ def start(
         post_update_hook=norm_ratios_hook,
         updates_need_vmap=True,
         static_tags=["non_grad", "shared"],
+        sanitize_grads=False,
     )
 
     def step(params: ParameterTree, opt_state: optax.OptState, step_key, xs, ys):

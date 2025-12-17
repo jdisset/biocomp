@@ -55,8 +55,7 @@ class CounterState(NamedTuple):
 
 
 def create_counter():
-    """Creates a no-op gradient transformation that just counts steps."""
-
+    """No-op gradient transformation that counts steps."""
     def init_fn(params):
         return CounterState(count=jnp.zeros([], jnp.int32))
 
@@ -67,7 +66,6 @@ def create_counter():
 
 
 def build_optimizer_chain(optimizer_stack: list, with_lr_injection: bool = False):
-    """Build optimizer chain from stack, optionally with learning rate injection."""
     import importlib
 
     main_chain = []
@@ -107,8 +105,6 @@ def build_optimizer_chain(optimizer_stack: list, with_lr_injection: bool = False
 
 
 class OptimConfig(ArbitraryModel):
-    """Base config for optimization-based training/design."""
-
     optimizer_stack: list[EncodedPartialFunction] = DEFAULT_OPTIMIZER
     seed: Optional[int] = None
     batches_per_step: int = 4
@@ -133,7 +129,6 @@ class OptimConfig(ArbitraryModel):
         return build_optimizer_chain(self.optimizer_stack, with_lr_injection=False)
 
     def create_optimizer_with_lr_injection(self):
-        """Create optimizer with learning rate injection for tracking."""
         return build_optimizer_chain(self.optimizer_stack, with_lr_injection=True)
 
 
@@ -145,21 +140,10 @@ class DesignOptimConfig(OptimConfig):
 
 
 def get_checkify_enabled():
-    """Check if BIOCOMP_CHECKIFY environment variable is set."""
     return os.environ.get("BIOCOMP_CHECKIFY", "").lower() in ("true", "1", "yes", "on")
 
 
 def compile_step(step_fn, sample_args, use_checkify=None):
-    """Compile a step function, optionally with checkify for debugging.
-
-    Args:
-        step_fn: The function to compile
-        sample_args: Tuple of sample arguments for lowering
-        use_checkify: If None, uses BIOCOMP_CHECKIFY env var
-
-    Returns:
-        Compiled step function
-    """
     if use_checkify is None:
         use_checkify = get_checkify_enabled()
 
@@ -178,16 +162,6 @@ def compile_step(step_fn, sample_args, use_checkify=None):
 
 
 def run_logger_callbacks(loggers, step, config, step_history, stack, period_filter):
-    """Run logger callbacks matching the period filter.
-
-    Args:
-        loggers: List of (period, callback) tuples
-        step: Current step number
-        config: Training/design config
-        step_history: Step history dict
-        stack: ComputeStack
-        period_filter: Function (period, step) -> bool to filter which loggers to run
-    """
     for period, callback in loggers:
         if period_filter(period, step):
             try:
@@ -204,7 +178,6 @@ def run_logger_callbacks(loggers, step, config, step_history, stack, period_filt
 
 
 def extract_learning_rate(opt_state):
-    """Extract learning rate from the optimizer state."""
     learning_rate = None
     try:
         if isinstance(opt_state, tuple):
@@ -241,6 +214,13 @@ def extract_learning_rate(opt_state):
     return learning_rate
 
 
+def sanitize_gradients(grads):
+    return jax.tree.map(
+        lambda g: jnp.where(jnp.isfinite(g), g, 0.0) if g is not None else g,
+        grads
+    )
+
+
 def make_training_step(
     loss_func,
     optimizer,
@@ -249,6 +229,7 @@ def make_training_step(
     updates_need_vmap=False,
     static_tags=None,
     post_update_hook: Optional[Callable] = None,
+    sanitize_grads: bool = False,
 ):
     from jax import value_and_grad
 
@@ -261,10 +242,16 @@ def make_training_step(
 
     def base_training_step(params, opt_state, x, y, z, key):
         static, dynamic = params.filter_by_tag(static_tags)
+        # extract scalar step (opt_state may be vmapped, giving count shape (n_targets,))
+        step_count = opt_state[0].count
+        step = step_count.ravel()[0] if jnp.ndim(step_count) > 0 else step_count
 
         (loss, aux), grads = value_and_grad(loss_func, has_aux=True)(
-            dynamic, static, x, y, z, key, opt_state[0].count
+            dynamic, static, x, y, z, key, step
         )
+
+        if sanitize_grads:
+            grads = sanitize_gradients(grads)
 
         updates, opt_state = opt_updt(grads, opt_state, dynamic)
         dynamic = optax.apply_updates(dynamic, updates)
@@ -319,21 +306,6 @@ def per_replicate_step_nonscan(
     training_config,
     non_scannable_step,
 ):
-    """Non-scannable version of per-replicate training step.
-
-    Args:
-        start_params: Initial parameters
-        start_opt_state: Initial optimizer state
-        key: JAX random key
-        xbatches: Input batches of shape (batches_per_step, batch_size, features)
-        ybatches: Target batches of shape (batches_per_step, batch_size, outputs)
-        num_z: Number of quantile variables
-        training_config: Training configuration containing batches_per_step and batch_size
-        non_scannable_step: Non-scannable training step function
-    """
-    import jax
-    import jax.numpy as jnp
-
     assert xbatches.shape[:-1] == (
         training_config.batches_per_step,
         training_config.batch_size,
@@ -342,21 +314,14 @@ def per_replicate_step_nonscan(
         training_config.batches_per_step,
         training_config.batch_size,
     )
-    if isinstance(num_z, int):
-        num_z = (num_z,)
+    num_z = (num_z,) if isinstance(num_z, int) else num_z
     zbatches = jax.random.uniform(
         key, (training_config.batches_per_step, training_config.batch_size, *num_z)
     )
     batch_keys = jax.random.split(key, training_config.batches_per_step)
-    xs = (
-        jnp.arange(training_config.batches_per_step),
-        xbatches,
-        ybatches,
-        zbatches,
-        batch_keys,
-    )
+    xs = (jnp.arange(training_config.batches_per_step), xbatches, ybatches, zbatches, batch_keys)
     history = {"loss": []}
-    params, opt_state = (start_params, start_opt_state)
+    params, opt_state = start_params, start_opt_state
     for i, x, y, z, k in zip(*xs):
         updt = non_scannable_step(params, opt_state, x, y, z, k)
         params, opt_state = updt["params"], updt["opt"]
@@ -365,46 +330,29 @@ def per_replicate_step_nonscan(
 
 
 def reshuffle_batches_jax(xbatches, ybatches, key, axes=(0, 1, 2, 3)):
-    """Full permutation of the given axes of xbatches and ybatches, after flattening them."""
     assert xbatches.shape[:-1] == ybatches.shape[:-1], (
         "xbatches and ybatches must have the same shape"
     )
 
     axes = tuple(sorted(axes))
-    batch_shape = xbatches.shape[:-1]
-    feature_dim_x = xbatches.shape[-1]
-    feature_dim_y = ybatches.shape[-1]
-
-    # dimensions of the axes to flatten
+    batch_shape, feat_x, feat_y = xbatches.shape[:-1], xbatches.shape[-1], ybatches.shape[-1]
     axes_sizes = jnp.asarray([batch_shape[i] for i in axes], dtype=jnp.int32)
-    flattened_size = int(jnp.prod(axes_sizes))
+    flat_size = int(jnp.prod(axes_sizes))
+    remaining = [i for i in range(len(batch_shape)) if i not in axes]
+    remaining_sizes = [batch_shape[i] for i in remaining]
 
-    remaining_axes = [i for i in range(len(batch_shape)) if i not in axes]
-    remaining_sizes = [batch_shape[i] for i in remaining_axes]
+    perm = jnp.asarray(list(axes) + remaining + [len(batch_shape)], dtype=jnp.int32)
+    xb, yb = xbatches.transpose(perm), ybatches.transpose(perm)
+    xb = xb.reshape((flat_size, *remaining_sizes, feat_x))
+    yb = yb.reshape((flat_size, *remaining_sizes, feat_y))
 
-    # permute so that flatten-axes come first, then remaining, then features
-    permute_order = jnp.asarray(list(axes) + remaining_axes + [len(batch_shape)], dtype=jnp.int32)
-    xb = xbatches.transpose(permute_order)
-    yb = ybatches.transpose(permute_order)
+    idx = jax.random.permutation(key, jnp.arange(flat_size))
+    xb, yb = xb[idx], yb[idx]
 
-    xb = xb.reshape((flattened_size, *remaining_sizes, feature_dim_x))
-    yb = yb.reshape((flattened_size, *remaining_sizes, feature_dim_y))
-
-    # shuffle along the flattened axis
-    idx = jax.random.permutation(key, jnp.arange(flattened_size))
-    xb = xb[idx]
-    yb = yb[idx]
-
-    # restore original grouped axes shape
-    xb = xb.reshape((*axes_sizes, *remaining_sizes, feature_dim_x))
-    yb = yb.reshape((*axes_sizes, *remaining_sizes, feature_dim_y))
-
-    # invert the initial permutation to return to original order
-    inv_permute = jnp.argsort(permute_order)
-    xb = xb.transpose(inv_permute)
-    yb = yb.transpose(inv_permute)
-
-    return xb, yb
+    xb = xb.reshape((*axes_sizes, *remaining_sizes, feat_x))
+    yb = yb.reshape((*axes_sizes, *remaining_sizes, feat_y))
+    inv = jnp.argsort(perm)
+    return xb.transpose(inv), yb.transpose(inv)
 
 
 def per_replicate_step(
@@ -418,31 +366,13 @@ def per_replicate_step(
     scannable_step,
     enable_jax_tqdm=False,
 ):
-    """Scannable version of per-replicate training step.
-
-    Args:
-        start_params: Initial parameters
-        start_opt_state: Initial optimizer state
-        key: JAX random key
-        xbatches: Input batches of shape (batches_per_step, batch_size, features)
-        ybatches: Target batches of shape (batches_per_step, batch_size, outputs)
-        num_z: Number of quantile variables
-        training_config: Training configuration containing batches_per_step and batch_size
-        scannable_step: Scannable training step function
-        enable_jax_tqdm: Whether to enable jax_tqdm progress bar
-    """
-    import jax
-    import jax.numpy as jnp
-
     actual_batches_per_step, actual_batch_size = xbatches.shape[:2]
     assert_that(actual_batches_per_step).is_equal_to(training_config.batches_per_step)
     assert_that(xbatches.shape[0]).is_equal_to(ybatches.shape[0])
     assert_that(xbatches.shape[1]).is_equal_to(ybatches.shape[1])
 
-    if isinstance(num_z, int):
-        num_z = (num_z,)
+    num_z = (num_z,) if isinstance(num_z, int) else num_z
     zbatches = jax.random.uniform(key, (actual_batches_per_step, actual_batch_size, *num_z))
-
     batch_keys = jax.random.split(key, training_config.batches_per_step)
     if enable_jax_tqdm:
         from jax_tqdm import scan_tqdm
@@ -470,15 +400,9 @@ def per_replicate_step(
 
 
 def as_schedule(value_or_callable):
-    """Convert a value or callable to an optax-like schedule function."""
-
     if callable(value_or_callable):
         return value_or_callable
-
-    def f(step):
-        return jnp.asarray(value_or_callable)
-
-    return f
+    return lambda step: jnp.asarray(value_or_callable)
 
 
 def optimize(

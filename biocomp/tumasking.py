@@ -1,7 +1,4 @@
-"""Hard Concrete distribution for learnable TU masking in design mode.
-
-Based on Louizos et al. (2018) "Learning Sparse Neural Networks through L0 Regularization".
-https://arxiv.org/abs/1712.01312
+"""Hard Concrete distribution for learnable TU masking (Louizos et al. 2018).
 
 TU index convention: -1 = always enabled, >= 0 = index into tu_log_alpha array.
 """
@@ -12,42 +9,49 @@ from jax.typing import ArrayLike
 from typing import Optional
 import numpy as np
 
-# Hard Concrete hyperparameters (Louizos et al. defaults)
-DEFAULT_GAMMA = -0.1  # Left stretch point (s=0 maps to gamma)
-DEFAULT_ZETA = 1.1  # Right stretch point (s=1 maps to zeta)
+DEFAULT_GAMMA = -0.1
+DEFAULT_ZETA = 1.1
 DEFAULT_TEMPERATURE = 0.5
-
-# TU index convention
+MIN_TEMPERATURE = 0.1
+LOG_ALPHA_MIN = -3.0
+LOG_ALPHA_MAX = 4.0
 TU_ALWAYS_ENABLED = -1
-
-# Design parameter paths
 TU_LOG_ALPHA_PATH = "design/tu_log_alpha"
+
+
+def clamp_log_alpha(log_alpha: ArrayLike) -> jnp.ndarray:
+    """Soft clamp log_alpha to prevent gradient death at boundaries."""
+    center = (LOG_ALPHA_MAX + LOG_ALPHA_MIN) / 2
+    scale = (LOG_ALPHA_MAX - LOG_ALPHA_MIN) / 2
+    return center + scale * jnp.tanh((log_alpha - center) / scale)
 
 
 def sample_hard_concrete(
     log_alpha: ArrayLike,
     key: ArrayLike,
-    temperature: float = 0.5,
+    temperature: float = DEFAULT_TEMPERATURE,
     gamma: float = DEFAULT_GAMMA,
     zeta: float = DEFAULT_ZETA,
 ) -> jnp.ndarray:
     """Sample from Hard Concrete distribution. Returns values in [0, 1]."""
     u = jax.random.uniform(key, shape=jnp.asarray(log_alpha).shape, minval=1e-8, maxval=1 - 1e-8)
     temp_safe = jnp.maximum(temperature, MIN_TEMPERATURE)
-    s = jax.nn.sigmoid((jnp.log(u) - jnp.log(1 - u) + log_alpha) / temp_safe)
+    la = clamp_log_alpha(log_alpha)
+    s = jax.nn.sigmoid((jnp.log(u) - jnp.log(1 - u) + la) / temp_safe)
     s_bar = s * (zeta - gamma) + gamma
     return jnp.clip(s_bar, 0.0, 1.0)
 
 
 def sample_hard_concrete_deterministic(
     log_alpha: ArrayLike,
-    temperature: float = 0.5,
+    temperature: float = DEFAULT_TEMPERATURE,
     gamma: float = DEFAULT_GAMMA,
     zeta: float = DEFAULT_ZETA,
 ) -> jnp.ndarray:
     """Deterministic Hard Concrete using median (u=0.5)."""
     temp_safe = jnp.maximum(temperature, MIN_TEMPERATURE)
-    s = jax.nn.sigmoid(log_alpha / temp_safe)
+    la = clamp_log_alpha(log_alpha)
+    s = jax.nn.sigmoid(la / temp_safe)
     s_bar = s * (zeta - gamma) + gamma
     return jnp.clip(s_bar, 0.0, 1.0)
 
@@ -57,24 +61,21 @@ def get_final_mask(log_alpha: ArrayLike, threshold: float = 0.5) -> jnp.ndarray:
     return (jax.nn.sigmoid(log_alpha) >= threshold).astype(jnp.float32)
 
 
-# Minimum temperature to prevent singularities in log/exp operations
-MIN_TEMPERATURE = 0.1
-
-
 def l0_penalty(
     log_alpha: ArrayLike,
-    temperature: float = 0.5,
+    temperature: float = DEFAULT_TEMPERATURE,
     gamma: float = DEFAULT_GAMMA,
     zeta: float = DEFAULT_ZETA,
 ) -> jnp.ndarray:
-    """Compute expected L0 penalty P(z > 0), differentiable w.r.t. log_alpha."""
+    """Expected L0 penalty P(z > 0), differentiable w.r.t. log_alpha."""
     temp_safe = jnp.maximum(temperature, MIN_TEMPERATURE)
-    return jax.nn.sigmoid(log_alpha - temp_safe * jnp.log(-gamma / zeta))
+    la = clamp_log_alpha(log_alpha)
+    return jax.nn.sigmoid(la - temp_safe * jnp.log(-gamma / zeta))
 
 
 def l0_loss(
     log_alpha: ArrayLike,
-    temperature: float = 0.5,
+    temperature: float = DEFAULT_TEMPERATURE,
     gamma: float = DEFAULT_GAMMA,
     zeta: float = DEFAULT_ZETA,
 ) -> jnp.ndarray:
@@ -82,57 +83,13 @@ def l0_loss(
     return jnp.sum(l0_penalty(log_alpha, temperature, gamma, zeta))
 
 
-def get_tu_mask_for_node(
-    tu_ids: list[str],
-    tu_id_to_idx: dict[str, int],
-    log_alpha_all: ArrayLike,
-    key: ArrayLike,
-    temperature: float = 0.5,
-) -> jnp.ndarray:
-    """Get mask for a node: 0 if ANY TU is masked, 1 otherwise."""
-    if not tu_ids:
-        return jnp.array(1.0)
-
-    mask = jnp.array(1.0)
-    for tu_id in tu_ids:
-        if tu_id in tu_id_to_idx:
-            idx = tu_id_to_idx[tu_id]
-            log_alpha = log_alpha_all[idx]
-            tu_key = jax.random.fold_in(key, hash(tu_id) % (2**31))
-            z = sample_hard_concrete(log_alpha, tu_key, temperature)
-            tu_mask = (z >= 0.5).astype(jnp.float32)
-            mask = mask * tu_mask
-
-    return mask
-
-
-def extract_tu_ids_from_network(network) -> list[str]:
-    """Extract all unique TU IDs from a network's edges."""
-    tu_ids = set()
-    for edge in network.compute_graph.edges.values():
-        if edge.extra:
-            edge_tu_ids = edge.extra.get("tu_id", [])
-            tu_ids.update(edge_tu_ids)
-    return sorted(tu_ids)
-
-
-def build_tu_id_mapping(networks: list) -> tuple[list[str], dict[str, int]]:
-    """Build TU ID mapping from multiple networks. Returns (sorted_tu_ids, tu_id_to_idx)."""
-    all_tu_ids = set()
-    for net in networks:
-        all_tu_ids.update(extract_tu_ids_from_network(net))
-    sorted_tu_ids = sorted(all_tu_ids)
-    return sorted_tu_ids, {tu_id: i for i, tu_id in enumerate(sorted_tu_ids)}
-
-
-def init_tu_log_alpha(
-    n_tus: int,
-    key: ArrayLike,
-    init_mean: float = 2.0,
-    init_std: float = 0.5,
-) -> jnp.ndarray:
-    """Initialize TU log_alpha parameters (positive = mostly enabled)."""
-    return init_mean + init_std * jax.random.normal(key, shape=(n_tus,))
+def soft_clip(x: ArrayLike, low: float = 0.0, high: float = 1.0) -> jnp.ndarray:
+    """Soft clip using tanh - maintains gradients everywhere."""
+    mid = (low + high) / 2
+    scale = (high - low) / 2
+    normalized = (x - mid) / scale
+    soft = jnp.tanh(normalized * 2) / 2 + 0.5
+    return low + (high - low) * soft
 
 
 def hard_concrete_from_uniform(
@@ -145,13 +102,14 @@ def hard_concrete_from_uniform(
     """Transform uniform sample to Hard Concrete: u ~ Uniform(0,1) -> z ~ HardConcrete."""
     u = jnp.clip(u, 1e-8, 1 - 1e-8)
     temp_safe = jnp.maximum(temperature, MIN_TEMPERATURE)
-    s = jax.nn.sigmoid((jnp.log(u) - jnp.log(1 - u) + log_alpha) / temp_safe)
+    la = clamp_log_alpha(log_alpha)
+    logit = (jnp.log(u) - jnp.log(1 - u) + la) / temp_safe
+    s = jax.nn.sigmoid(logit)
     s_bar = s * (zeta - gamma) + gamma
-    return jnp.clip(s_bar, 0.0, 1.0)
+    return soft_clip(s_bar, 0.0, 1.0)
 
 
 def is_enabled(z: ArrayLike, threshold: float = 0.5) -> jnp.ndarray:
-    """Check if hard concrete sample indicates enabled (z >= threshold)."""
     return z >= threshold
 
 
@@ -161,19 +119,15 @@ def compute_input_mask(
     tu_log_alpha: ArrayLike,
     temperature: float = DEFAULT_TEMPERATURE,
 ) -> jnp.ndarray:
-    """Compute mask for single input: 1.0 if enabled, 0.0 if disabled. tu_idx=-1 always enabled."""
-
+    """Compute mask for single input using Straight-Through Estimator."""
     def when_has_tu():
         u = tu_uniform_samples[tu_idx]
         la = tu_log_alpha[tu_idx]
         z = hard_concrete_from_uniform(u, la, temperature)
-        return jnp.where(is_enabled(z), 1.0, 0.0)
+        hard_mask = jnp.where(is_enabled(z), 1.0, 0.0)
+        return z + jax.lax.stop_gradient(hard_mask - z)
 
-    return jax.lax.cond(
-        tu_idx >= 0,
-        when_has_tu,
-        lambda: 1.0,  # always enabled if tu_idx < 0
-    )
+    return jax.lax.cond(tu_idx >= 0, when_has_tu, lambda: 1.0)
 
 
 def compute_input_mask_multi(
@@ -192,8 +146,10 @@ def compute_input_mask_multi(
 
     masks = jax.vmap(single_mask)(tu_indices)
     all_padding = jnp.all(tu_indices < 0)
-    any_enabled = jnp.max(masks) > 0.5
-    return jnp.where(all_padding, 1.0, jnp.where(any_enabled, 1.0, 0.0))
+    max_mask = jnp.max(masks)
+    hard_any = jnp.where(max_mask > 0.5, 1.0, 0.0)
+    ste_result = max_mask + jax.lax.stop_gradient(hard_any - max_mask)
+    return jnp.where(all_padding, 1.0, ste_result)
 
 
 def compute_input_masks(
@@ -218,13 +174,63 @@ def compute_input_masks(
 
 
 def get_default_tu_uniform_samples(n_tus: int) -> jnp.ndarray:
-    """Get default uniform samples (0.5) for inference mode (all enabled)."""
     return jnp.full((n_tus,), 0.5)
 
 
 def get_default_tu_log_alpha(n_tus: int) -> jnp.ndarray:
-    """Get default log_alpha (0.0) for inference mode (all enabled at 0.5 threshold)."""
     return jnp.zeros(n_tus)
+
+
+def extract_tu_ids_from_network(network) -> list[str]:
+    """Extract all unique TU IDs from a network's edges."""
+    tu_ids = set()
+    for edge in network.compute_graph.edges.values():
+        if edge.extra:
+            tu_ids.update(edge.extra.get("tu_id", []))
+    return sorted(tu_ids)
+
+
+def build_tu_id_mapping(networks: list) -> tuple[list[str], dict[str, int]]:
+    """Build TU ID mapping from multiple networks."""
+    all_tu_ids = set()
+    for net in networks:
+        all_tu_ids.update(extract_tu_ids_from_network(net))
+    sorted_tu_ids = sorted(all_tu_ids)
+    return sorted_tu_ids, {tu_id: i for i, tu_id in enumerate(sorted_tu_ids)}
+
+
+def init_tu_log_alpha(
+    n_tus: int,
+    key: ArrayLike,
+    init_mean: float = 2.0,
+    init_std: float = 0.5,
+) -> jnp.ndarray:
+    """Initialize TU log_alpha parameters (positive = mostly enabled)."""
+    return init_mean + init_std * jax.random.normal(key, shape=(n_tus,))
+
+
+def get_tu_mask_for_node(
+    tu_ids: list[str],
+    tu_id_to_idx: dict[str, int],
+    log_alpha_all: ArrayLike,
+    key: ArrayLike,
+    temperature: float = DEFAULT_TEMPERATURE,
+) -> jnp.ndarray:
+    """Get mask for a node: 0 if ANY TU is masked, 1 otherwise."""
+    if not tu_ids:
+        return jnp.array(1.0)
+
+    mask = jnp.array(1.0)
+    for tu_id in tu_ids:
+        if tu_id in tu_id_to_idx:
+            idx = tu_id_to_idx[tu_id]
+            log_alpha = log_alpha_all[idx]
+            tu_key = jax.random.fold_in(key, hash(tu_id) % (2**31))
+            z = sample_hard_concrete(log_alpha, tu_key, temperature)
+            tu_mask = (z >= 0.5).astype(jnp.float32)
+            mask = mask * tu_mask
+
+    return mask
 
 
 def build_input_tu_indices(
@@ -240,7 +246,6 @@ def build_input_tu_indices(
     if max_inputs == 0:
         return jnp.full((len(nodelist), 1, 1), TU_ALWAYS_ENABLED, dtype=jnp.int32)
 
-    # First pass: find max TUs per input
     max_tus = 1
     for node in nodelist:
         for edge in node.get_incoming_edges(stack):
@@ -248,7 +253,6 @@ def build_input_tu_indices(
             valid_tu_ids = [tid for tid in tu_ids if tid in tu_id_to_idx]
             max_tus = max(max_tus, len(valid_tu_ids))
 
-    # Second pass: build indices array
     tu_indices = np.full((len(nodelist), max_inputs, max_tus), TU_ALWAYS_ENABLED, dtype=np.int32)
 
     for i, node in enumerate(nodelist):
