@@ -12,11 +12,18 @@ import numpy as np
 DEFAULT_GAMMA = -0.1
 DEFAULT_ZETA = 1.1
 DEFAULT_TEMPERATURE = 0.5
-MIN_TEMPERATURE = 0.1
+MIN_TEMPERATURE = 1e-5
 LOG_ALPHA_MIN = -3.0
 LOG_ALPHA_MAX = 4.0
 TU_ALWAYS_ENABLED = -1
 TU_LOG_ALPHA_PATH = "design/tu_log_alpha"
+
+
+def _validate_hard_concrete_params(gamma: float, zeta: float, temperature: float) -> None:
+    """fail fast if Hard Concrete params are invalid"""
+    assert gamma < 0, f"gamma must be negative (stretch below 0), got {gamma}"
+    assert zeta > 1, f"zeta must be > 1 (stretch above 1), got {zeta}"
+    assert temperature >= 0, f"temperature must be non-negative, got {temperature}"
 
 
 def clamp_log_alpha(log_alpha: ArrayLike) -> jnp.ndarray:
@@ -34,7 +41,10 @@ def sample_hard_concrete(
     zeta: float = DEFAULT_ZETA,
 ) -> jnp.ndarray:
     """Sample from Hard Concrete distribution. Returns values in [0, 1]."""
-    u = jax.random.uniform(key, shape=jnp.asarray(log_alpha).shape, minval=1e-8, maxval=1 - 1e-8)
+    _validate_hard_concrete_params(gamma, zeta, temperature)
+    log_alpha = jnp.asarray(log_alpha)
+    assert jnp.all(jnp.isfinite(log_alpha)), "NaN/Inf in log_alpha will poison gradients"
+    u = jax.random.uniform(key, shape=log_alpha.shape, minval=1e-8, maxval=1 - 1e-8)
     temp_safe = jnp.maximum(temperature, MIN_TEMPERATURE)
     la = clamp_log_alpha(log_alpha)
     s = jax.nn.sigmoid((jnp.log(u) - jnp.log(1 - u) + la) / temp_safe)
@@ -49,6 +59,7 @@ def sample_hard_concrete_deterministic(
     zeta: float = DEFAULT_ZETA,
 ) -> jnp.ndarray:
     """Deterministic Hard Concrete using median (u=0.5)."""
+    _validate_hard_concrete_params(gamma, zeta, temperature)
     temp_safe = jnp.maximum(temperature, MIN_TEMPERATURE)
     la = clamp_log_alpha(log_alpha)
     s = jax.nn.sigmoid(la / temp_safe)
@@ -79,6 +90,7 @@ def l0_penalty(
     zeta: float = DEFAULT_ZETA,
 ) -> jnp.ndarray:
     """Expected L0 penalty P(z > 0), differentiable w.r.t. log_alpha."""
+    _validate_hard_concrete_params(gamma, zeta, temperature)
     temp_safe = jnp.maximum(temperature, MIN_TEMPERATURE)
     la = clamp_log_alpha(log_alpha)
     return jax.nn.sigmoid(la - temp_safe * jnp.log(-gamma / zeta))
@@ -111,6 +123,7 @@ def hard_concrete_from_uniform(
     zeta: float = DEFAULT_ZETA,
 ) -> jnp.ndarray:
     """Transform uniform sample to Hard Concrete: u ~ Uniform(0,1) -> z ~ HardConcrete."""
+    _validate_hard_concrete_params(gamma, zeta, temperature)
     u = jnp.clip(u, 1e-8, 1 - 1e-8)
     temp_safe = jnp.maximum(temperature, MIN_TEMPERATURE)
     la = clamp_log_alpha(log_alpha)
@@ -131,6 +144,7 @@ def compute_input_mask(
     temperature: float = DEFAULT_TEMPERATURE,
 ) -> jnp.ndarray:
     """Compute mask for single input using Straight-Through Estimator."""
+
     def when_has_tu():
         u = tu_uniform_samples[tu_idx]
         la = tu_log_alpha[tu_idx]
@@ -148,6 +162,7 @@ def compute_input_mask_multi(
     temperature: float = DEFAULT_TEMPERATURE,
 ) -> jnp.ndarray:
     """Compute mask for input with MULTIPLE TU indices. Enabled if ANY TU enabled."""
+
     def single_mask(tu_idx):
         return jax.lax.cond(
             tu_idx >= 0,
@@ -203,7 +218,9 @@ def compute_input_masks(
         )(tu_indices)
     else:
         return jax.vmap(
-            lambda indices: compute_input_mask_multi(indices, tu_uniform_samples, tu_log_alpha, temperature)
+            lambda indices: compute_input_mask_multi(
+                indices, tu_uniform_samples, tu_log_alpha, temperature
+            )
         )(tu_indices)
 
 

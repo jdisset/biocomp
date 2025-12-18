@@ -335,6 +335,9 @@ def build_layers(networks: list[Network], stack: ComputeStack, **kwargs) -> list
     Returns:
         List of ComputeLayer objects with stack references set
     """
+    # count total nodes across all networks for validation
+    total_graph_nodes = sum(len(net.compute_graph.nodes) for net in networks)
+
     # flatten all (NodeKey, batch_order, type_signature) tuples from all networks
     # make_all_topo_nodes returns list[list[list[tuple]]] - we need to flatten twice
     n_list = ut.flatten_single(ut.flatten_single(make_all_topo_nodes(networks)))
@@ -349,5 +352,13 @@ def build_layers(networks: list[Network], stack: ComputeStack, **kwargs) -> list
     if layers:
         for layer in layers:
             layer.stack = stack
+
+    # verify all nodes ended up in the stack
+    total_stack_nodes = sum(len(layer.nodes) for layer in layers) if layers else 0
+    assert total_stack_nodes == total_graph_nodes, (
+        f"Graph compilation dropped nodes! Graph nodes: {total_graph_nodes}, "
+        f"Stack nodes: {total_stack_nodes}. Likely caused by disconnected components "
+        "or cycle detection failure."
+    )
 
     return layers

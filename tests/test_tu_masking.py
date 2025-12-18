@@ -42,12 +42,12 @@ SCAFFOLD_PATH = (
 )
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def lib():
     return load_lib()
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def scaffold_recipe(lib):
     with LibraryContext.with_library(lib):
         data = dr.load(SCAFFOLD_PATH, context={"Recipe": Recipe})
@@ -55,17 +55,29 @@ def scaffold_recipe(lib):
         return recipes[0]
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def design_stack(lib, scaffold_recipe):
-    """Build a stack with integrated TU masking enabled."""
+    """Build a stack with integrated TU masking enabled. Module-scoped for speed."""
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(scaffold_recipe, br.ALL_RULES, invert=True)
         tu_ids, tu_id_to_idx = build_tu_id_mapping(networks)
 
         stack = ComputeStack(networks)
         config = SIMPLE_NODES_COMPUTE_CONFIG.model_copy(deep=True)
-        # Enable TU masking during build (no wrapper functions needed)
         stack.build(config, enable_tu_masking=True)
+
+        # JIT warmup: trigger compilation once so all tests use pre-compiled function
+        key = jax.random.key(0)
+        params = stack.init(key)
+        n_tus = len(tu_ids)
+        n_networks = len(networks)
+        n_inputs = stack.get_nb_inputs()
+        n_z = int(params["global/number_of_random_variables"])
+        dummy_x = jnp.zeros((n_inputs,))
+        dummy_z = jnp.zeros((n_z,))
+        dummy_tu_uniform = jnp.full((n_networks, n_tus), 0.5)
+        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+        stack.apply(params, dummy_x, dummy_z, key, tu_enabled_random_vars=dummy_tu_uniform)
 
         return stack, tu_ids, tu_id_to_idx
 
@@ -295,9 +307,9 @@ def test_inference_mode_all_enabled(lib, design_stack):
 # ============== Per-Network TU Masking Tests ==============
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def multi_network_stack(lib):
-    """Build a stack with multiple networks sharing the same TU names."""
+    """Build a stack with multiple networks. Module-scoped for speed."""
     scaffold_path_1 = (
         Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
     )
@@ -322,6 +334,17 @@ def multi_network_stack(lib):
         stack = ComputeStack(networks)
         config = SIMPLE_NODES_COMPUTE_CONFIG.model_copy(deep=True)
         stack.build(config, enable_tu_masking=True)
+
+        # JIT warmup
+        key = jax.random.key(0)
+        params = stack.init(key)
+        n_tus = len(tu_ids)
+        n_networks = len(networks)
+        n_inputs = stack.get_nb_inputs()
+        n_z = int(params["global/number_of_random_variables"])
+        dummy_tu_uniform = jnp.full((n_networks, n_tus), 0.5)
+        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+        stack.apply(params, jnp.zeros((n_inputs,)), jnp.zeros((n_z,)), key, tu_enabled_random_vars=dummy_tu_uniform)
 
         return stack, tu_ids, tu_id_to_idx, len(networks)
 

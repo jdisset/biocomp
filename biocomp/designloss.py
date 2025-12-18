@@ -326,12 +326,17 @@ def per_replicate_apply(params, X, Z, keys, stack, tu_uniform=None):
 
 @Partial(jax.jit, static_argnames=["lossfunc", "n_inputs_per_network"])
 def compute_all_losses(x, y, yhatdep, lossfunc, n_inputs_per_network=2):
+    assert x.shape[-1] % n_inputs_per_network == 0, (
+        f"x.shape[-1]={x.shape[-1]} not divisible by n_inputs_per_network={n_inputs_per_network}. "
+        "This would cause silent truncation in n_networks calculation."
+    )
     n_networks = int(x.shape[-1] / n_inputs_per_network)
     batch_size, n_targets = y.shape[0], y.shape[1]
 
     assert_that(x).has_shape((batch_size, n_targets, n_networks * n_inputs_per_network))
     assert_that(yhatdep).has_shape((batch_size, n_targets, n_networks))
     assert_that(y).has_same_shape(yhatdep)
+    assert jnp.all(jnp.isfinite(yhatdep)), "NaN/Inf in predictions will poison loss"
 
     xsplit = jnp.reshape(x, (batch_size, n_targets, n_networks, n_inputs_per_network))
     return vmap(vmap(lossfunc, in_axes=(1, 1, 1)), in_axes=(1, 1, 1))(xsplit, yhatdep, y)
@@ -441,7 +446,9 @@ def _make_loss_func(
         else:
             tu_uniform = _sample_tu_uniform(params, mask_key, n_samples=1)
             yhatdep, apply_aux = single_forward_pass(params, X, Z, forward_key, tu_uniform)
-            all_losses, extra_aux_inner = compute_losses_fn(X, Y, yhatdep, step, n_targets, n_networks)
+            all_losses, extra_aux_inner = compute_losses_fn(
+                X, Y, yhatdep, step, n_targets, n_networks
+            )
 
         all_losses = _sanitize(all_losses)
         aux = {
@@ -542,6 +549,15 @@ def grid_distance_loss(
 
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks_):
         yhatdep = _sanitize(yhatdep)
+        # Y shape: (batch_size, n_targets, 1) - validate before squeeze
+        assert Y.ndim == 3 and Y.shape[-1] == 1, (
+            f"grid_distance_loss expects Y shape (batch_size, n_targets, 1), got {Y.shape}. "
+            "The last dim must be 1 for proper squeeze+reshape to grid."
+        )
+        batch_size = Y.shape[0]
+        assert batch_size == xres * yres, (
+            f"batch_size={batch_size} must equal xres*yres={xres * yres} for grid reshape"
+        )
         Y_images = jnp.tile(
             Y.squeeze(-1).T.reshape(n_targets, 1, yres, xres), (1, n_networks, 1, 1)
         )

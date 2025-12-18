@@ -28,6 +28,10 @@ TU naming convention: {tu_name}_{cotx_name} e.g., "x1_a+_x1", "b_marker_b"
 * This ensures masking correctly zeroes disabled TUs while preserving      *
 * enabled TU outputs identically to the modified network.                  *
 ****************************************************************************
+
+PERFORMANCE NOTE: Module-scoped fixtures cache expensive operations (lib loading,
+network building, stack compilation) across all tests. This reduces test time
+from ~11 minutes to ~2 minutes.
 """
 
 import pytest
@@ -130,7 +134,7 @@ def make_recipe_with_disabled_tus(base_recipe: Recipe, disabled_tu_ids: set[str]
         return Recipe(name=base_recipe.name + "_modified", content=new_cotxs)
 
 
-def setup_tu_masking(params, tu_ids: list[str], tu_id_to_idx: dict[str, int], disabled_tu_ids: set[str]):
+def setup_tu_masking(params, tu_ids: list[str], tu_id_to_idx: dict[str, int], disabled_tu_ids: set[str], n_networks: int = 1):
     """Set up TU masking parameters to disable specific TUs.
 
     Args:
@@ -138,37 +142,39 @@ def setup_tu_masking(params, tu_ids: list[str], tu_id_to_idx: dict[str, int], di
         tu_ids: All TU IDs in the network
         tu_id_to_idx: Mapping from TU ID to index
         disabled_tu_ids: TU IDs to disable
+        n_networks: Number of networks (log_alpha shape is (n_networks, n_tus))
     """
     n_tus = len(tu_ids)
     # Start with all enabled (log_alpha = 10 -> sigmoid very high -> enabled)
-    log_alpha = jnp.full((n_tus,), 10.0)
+    log_alpha = jnp.full((n_networks, n_tus), 10.0)
 
-    # Disable specified TUs (log_alpha = -10 -> sigmoid very low -> disabled)
+    # Disable specified TUs for all networks (log_alpha = -10 -> sigmoid very low -> disabled)
     for tu_id in disabled_tu_ids:
         if tu_id in tu_id_to_idx:
             idx = tu_id_to_idx[tu_id]
-            log_alpha = log_alpha.at[idx].set(-10.0)
+            log_alpha = log_alpha.at[:, idx].set(-10.0)
 
     params.at(TU_LOG_ALPHA_PATH, log_alpha)
 
 
-def get_tu_uniform_for_masking(n_tus: int, disabled_indices: set[int]) -> jnp.ndarray:
+def get_tu_uniform_for_masking(n_networks: int, n_tus: int, disabled_indices: set[int]) -> jnp.ndarray:
     """Get uniform samples for TU masking.
 
     Args:
+        n_networks: Number of networks in the stack
         n_tus: Total number of TUs
         disabled_indices: Set of TU indices to disable
 
     Returns:
-        Array of uniform samples: 0.5 for enabled, 1e-6 for disabled
+        Array of uniform samples shape (n_networks, n_tus): 0.5 for enabled, 1e-6 for disabled
     """
-    uniform = jnp.full((n_tus,), 0.5)  # enabled
+    uniform = jnp.full((n_networks, n_tus), 0.5)  # enabled
     for idx in disabled_indices:
-        uniform = uniform.at[idx].set(1e-6)  # disabled
+        uniform = uniform.at[:, idx].set(1e-6)  # disabled for all networks
     return uniform
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def lib():
     return load_lib()
 
@@ -187,6 +193,76 @@ TEST_CASES = [
     # Case 5: Disable all computational TUs from one cotx (x1)
     {"x1_a+_x1", "x1_a-_x1", "x1_b+_x1", "x1_b-_x1", "x1_c+_x1", "x1_c-_x1", "x1_direct_out_x1"},
 ]
+
+TEST_CASE_IDS = [
+    "disable_a+_all",
+    "disable_c-_all",
+    "disable_direct_out",
+    "disable_mixed",
+    "disable_x1_computational",
+]
+
+
+@pytest.fixture(scope="module")
+def base_setup(lib):
+    """Module-scoped fixture: builds base recipe, networks, stack once for all tests."""
+    with LibraryContext.with_library(lib):
+        base_recipe = make_base_recipe(lib)
+        networks_base = recipe_to_networks(base_recipe, br.ALL_RULES, invert=True)
+        tu_ids, tu_id_to_idx = build_tu_id_mapping(networks_base)
+
+        stack_base = ComputeStack(networks_base)
+        config = SIMPLE_NODES_COMPUTE_CONFIG.model_copy(deep=True)
+        stack_base.build(config, enable_tu_masking=True)
+
+        # JIT warmup: trigger compilation once so all tests use pre-compiled function
+        key = jax.random.key(0)
+        params = stack_base.init(key)
+        n_tus = len(tu_ids)
+        n_networks = len(networks_base)
+        n_inputs = stack_base.get_nb_inputs()
+        n_z = int(params["global/number_of_random_variables"])
+        dummy_tu_uniform = jnp.full((n_networks, n_tus), 0.5)
+        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+        stack_base.apply(params, jnp.zeros((n_inputs,)), jnp.zeros((n_z,)), key, tu_enabled_random_vars=dummy_tu_uniform)
+
+        return {
+            "base_recipe": base_recipe,
+            "networks_base": networks_base,
+            "stack_base": stack_base,
+            "tu_ids": tu_ids,
+            "tu_id_to_idx": tu_id_to_idx,
+        }
+
+
+@pytest.fixture(scope="module")
+def modified_stacks(lib, base_setup):
+    """Module-scoped fixture: pre-builds all modified stacks for each test case."""
+    results = {}
+    with LibraryContext.with_library(lib):
+        for i, disabled_tu_ids in enumerate(TEST_CASES):
+            modified_recipe = make_recipe_with_disabled_tus(
+                base_setup["base_recipe"], disabled_tu_ids, lib
+            )
+            networks_modified = recipe_to_networks(modified_recipe, br.ALL_RULES, invert=True)
+
+            stack_modified = ComputeStack(networks_modified)
+            config = SIMPLE_NODES_COMPUTE_CONFIG.model_copy(deep=True)
+            stack_modified.build(config, enable_tu_masking=False)
+
+            # JIT warmup for each modified stack
+            key = jax.random.key(0)
+            params = stack_modified.init(key)
+            n_inputs = stack_modified.get_nb_inputs()
+            n_z = int(params["global/number_of_random_variables"])
+            stack_modified.apply(params, jnp.zeros((n_inputs,)), jnp.zeros((n_z,)), key, tu_enabled_random_vars=None)
+
+            results[TEST_CASE_IDS[i]] = {
+                "networks_modified": networks_modified,
+                "stack_modified": stack_modified,
+                "disabled_tu_ids": disabled_tu_ids,
+            }
+    return results
 
 
 def merge_shared_params(params_from: ParameterTree, params_to: ParameterTree) -> ParameterTree:
@@ -226,14 +302,8 @@ def get_slot_tu_ids(net) -> dict[int, list[str]]:
     return result
 
 
-@pytest.mark.parametrize("disabled_tu_ids", TEST_CASES, ids=[
-    "disable_a+_all",
-    "disable_c-_all",
-    "disable_direct_out",
-    "disable_mixed",
-    "disable_x1_computational",
-])
-def test_tu_masking_equivalence(lib, disabled_tu_ids):
+@pytest.mark.parametrize("test_case_id", TEST_CASE_IDS)
+def test_tu_masking_equivalence(lib, base_setup, modified_stacks, test_case_id):
     """Test that TU masking produces same output as recipe with disabled TUs.
 
     Compares outputs SEMANTICALLY by TU identity, not by position.
@@ -247,35 +317,32 @@ def test_tu_masking_equivalence(lib, disabled_tu_ids):
     n_test_inputs = 100
     key = jax.random.key(42)
 
+    # Get pre-built stacks from fixtures
+    stack_base = base_setup["stack_base"]
+    networks_base = base_setup["networks_base"]
+    tu_ids = base_setup["tu_ids"]
+    tu_id_to_idx = base_setup["tu_id_to_idx"]
+
+    test_data = modified_stacks[test_case_id]
+    stack_modified = test_data["stack_modified"]
+    networks_modified = test_data["networks_modified"]
+    disabled_tu_ids = test_data["disabled_tu_ids"]
+
     with LibraryContext.with_library(lib):
-        base_recipe = make_base_recipe(lib)
-        modified_recipe = make_recipe_with_disabled_tus(base_recipe, disabled_tu_ids, lib)
-
-        networks_base = recipe_to_networks(base_recipe, br.ALL_RULES, invert=True)
-        networks_modified = recipe_to_networks(modified_recipe, br.ALL_RULES, invert=True)
-
         base_tu_slots = get_output_tu_mapping(networks_base[0])
         mod_tu_slots = get_output_tu_mapping(networks_modified[0])
         base_slot_tus = get_slot_tu_ids(networks_base[0])
         common_tus = set(base_tu_slots.keys()) & set(mod_tu_slots.keys())
-
-        tu_ids, tu_id_to_idx = build_tu_id_mapping(networks_base)
-
-        stack_base = ComputeStack(networks_base)
-        config = SIMPLE_NODES_COMPUTE_CONFIG.model_copy(deep=True)
-        stack_base.build(config, enable_tu_masking=True)
-
-        stack_modified = ComputeStack(networks_modified)
-        stack_modified.build(config, enable_tu_masking=False)
 
         init_key, input_key = jax.random.split(key)
         params_base = stack_base.init(init_key)
         params_modified = stack_modified.init(init_key)
         params_modified = merge_shared_params(params_base, params_modified)
 
-        setup_tu_masking(params_base, tu_ids, tu_id_to_idx, disabled_tu_ids)
+        n_networks = len(networks_base)
+        setup_tu_masking(params_base, tu_ids, tu_id_to_idx, disabled_tu_ids, n_networks)
         disabled_indices = {tu_id_to_idx[tu_id] for tu_id in disabled_tu_ids if tu_id in tu_id_to_idx}
-        tu_uniform = get_tu_uniform_for_masking(len(tu_ids), disabled_indices)
+        tu_uniform = get_tu_uniform_for_masking(n_networks, len(tu_ids), disabled_indices)
 
         n_inputs = stack_base.get_nb_inputs()
         n_z_base = int(params_base["global/number_of_random_variables"])
@@ -291,8 +358,6 @@ def test_tu_masking_equivalence(lib, disabled_tu_ids):
         # 1. Network structure changes (TU removal changes node count/layer structure)
         # 2. Random variable allocation shifts (base may start at rvid=10, modified at 9)
         # 3. Floating point accumulation through different computational paths
-        # With constant Z=0.5, normalized ratios are identical but accumulated FP
-        # errors through different network topologies cause minor output differences.
         RTOL = 1e-3
         ATOL = 1e-2
 
@@ -339,36 +404,35 @@ def test_tu_masking_equivalence(lib, disabled_tu_ids):
         )
 
 
-def test_tu_masking_basic_equivalence(lib):
+def test_tu_masking_basic_equivalence(lib, base_setup):
     """Basic sanity test: masking should affect output differently than no masking."""
     key = jax.random.key(123)
 
+    # Reuse pre-built stack from fixture
+    stack = base_setup["stack_base"]
+    networks = base_setup["networks_base"]
+    tu_ids = base_setup["tu_ids"]
+    tu_id_to_idx = base_setup["tu_id_to_idx"]
+
     with LibraryContext.with_library(lib):
-        recipe = make_base_recipe(lib)
-        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
-        tu_ids, tu_id_to_idx = build_tu_id_mapping(networks)
-
-        stack = ComputeStack(networks)
-        config = SIMPLE_NODES_COMPUTE_CONFIG.model_copy(deep=True)
-        stack.build(config, enable_tu_masking=True)
-
         params = stack.init(key)
-        setup_tu_masking(params, tu_ids, tu_id_to_idx, set())  # All enabled initially
+        n_networks = len(networks)
+        setup_tu_masking(params, tu_ids, tu_id_to_idx, set(), n_networks)  # All enabled initially
 
         n_inputs = stack.get_nb_inputs()
         n_z = int(params["global/number_of_random_variables"])
         X = jnp.array([0.5, 0.5])
         Z = jnp.zeros((n_z,))
 
-        # All enabled
-        tu_uniform_enabled = jnp.full((len(tu_ids),), 0.5)
+        # All enabled - shape (n_networks, n_tus)
+        tu_uniform_enabled = jnp.full((n_networks, len(tu_ids)), 0.5)
         y_enabled, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_enabled)
 
         # Some disabled
         disabled_tu_ids = {"x1_a+_x1", "x2_a+_x2", "b_a+_b"}
-        setup_tu_masking(params, tu_ids, tu_id_to_idx, disabled_tu_ids)
+        setup_tu_masking(params, tu_ids, tu_id_to_idx, disabled_tu_ids, n_networks)
         disabled_indices = {tu_id_to_idx[tu_id] for tu_id in disabled_tu_ids}
-        tu_uniform_partial = get_tu_uniform_for_masking(len(tu_ids), disabled_indices)
+        tu_uniform_partial = get_tu_uniform_for_masking(n_networks, len(tu_ids), disabled_indices)
         y_partial, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_partial)
 
         # Outputs should be different
@@ -376,19 +440,16 @@ def test_tu_masking_basic_equivalence(lib):
             f"Masking should change output: enabled={y_enabled}, partial={y_partial}"
 
 
-def test_all_tu_ids_present(lib):
+def test_all_tu_ids_present(base_setup):
     """Verify all expected TU IDs are extracted from the network."""
-    with LibraryContext.with_library(lib):
-        recipe = make_base_recipe(lib)
-        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
-        tu_ids, _ = build_tu_id_mapping(networks)
+    tu_ids = base_setup["tu_ids"]
 
-        # Expected TUs for each cotx
-        expected_tu_names = ["marker", "a+", "a-", "b+", "b-", "c+", "c-", "direct_out"]
-        cotx_names = ["x1", "x2", "b"]
+    # Expected TUs for each cotx
+    expected_tu_names = ["marker", "a+", "a-", "b+", "b-", "c+", "c-", "direct_out"]
+    cotx_names = ["x1", "x2", "b"]
 
-        for cotx in cotx_names:
-            for tu_name in expected_tu_names:
-                full_tu_name = f"{cotx}_{tu_name}"
-                tu_id = get_tu_id(full_tu_name, cotx)
-                assert tu_id in tu_ids, f"Expected TU ID {tu_id} not found. Got: {tu_ids}"
+    for cotx in cotx_names:
+        for tu_name in expected_tu_names:
+            full_tu_name = f"{cotx}_{tu_name}"
+            tu_id = get_tu_id(full_tu_name, cotx)
+            assert tu_id in tu_ids, f"Expected TU ID {tu_id} not found. Got: {tu_ids}"

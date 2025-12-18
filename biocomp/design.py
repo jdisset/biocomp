@@ -614,9 +614,9 @@ class DesignConfig(DesignOptimConfig):
     loss_function: EncodedPartialFunction = Field(default=distance_loss)
     n_replicates: int = 4
     keep_in_history: List[str] = ["loss", "all_losses"]
-    # TU masking initialization - diverse init helps exploration
+    # TU masking initialization - small std keeps init in sigmoid's active gradient region
     tu_log_alpha_init_mean: float = 0.0  # 0 = 50/50 enabled/disabled starting point
-    tu_log_alpha_init_std: float = 2.0  # high std = diverse configs across TUs/replicates
+    tu_log_alpha_init_std: float = 0.5  # small std prevents gradient death at sigmoid tails
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

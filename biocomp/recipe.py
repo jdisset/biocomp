@@ -263,6 +263,8 @@ class CoTransfection(BaseModel):
                 raise ValueError(
                     f"fluo_bias.tu_id {self.fluo_bias.tu_id} out of range [0, {len(self.units)})"
                 )
+        # Note: ratios are NOT required to sum to 1.0 at recipe level - they represent
+        # relative weights that get normalized during network building/aggregation
 
     def has_unlocked_ratios(self) -> bool:
         """Check if any ratio is unlocked (NumRange)"""

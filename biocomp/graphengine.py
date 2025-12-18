@@ -178,6 +178,29 @@ class GraphState(BaseModel):
 
         return batches
 
+    def validate_integrity(self) -> None:
+        """Validate graph integrity - check for dangling edges.
+
+        Raises AssertionError if:
+        - An edge references a source_id that doesn't exist in nodes
+        - An edge references a target_id that doesn't exist in nodes
+
+        This is a defensive check to catch bugs in graph rewriting rules
+        that delete nodes without properly rewiring or deleting edges.
+        """
+        node_ids = set(self.nodes.keys())
+        for edge_key, edge in self.edges.items():
+            assert edge.source_id in node_ids, (
+                f"Dangling edge: source_id {edge.source_id} not in nodes. "
+                f"Edge {edge_key} references non-existent source node. "
+                "Likely caused by DeleteNode without proper edge cleanup."
+            )
+            assert edge.target_id in node_ids, (
+                f"Dangling edge: target_id {edge.target_id} not in nodes. "
+                f"Edge {edge_key} references non-existent target node. "
+                "Likely caused by DeleteNode without proper edge cleanup."
+            )
+
 
 class GraphBuilder:
     def __init__(self, graph: GraphState):
@@ -1000,8 +1023,16 @@ def apply_rule_sequence(
     rules: list[GraphRewritingRule],
     graphs: Union[GraphState, list[GraphState]],
     debug: bool = False,
+    validate: bool = True,
 ) -> list[GraphState]:
-    """Apply a sequence of rules to a list of graphs, returning all resulting graphs."""
+    """Apply a sequence of rules to a list of graphs, returning all resulting graphs.
+
+    Args:
+        rules: List of GraphRewritingRules to apply in sequence
+        graphs: Input graph(s)
+        debug: If True, print debug info during rule application
+        validate: If True, validate graph integrity after each rule (defensive)
+    """
     if not isinstance(graphs, list):
         graphs = [graphs]
 
@@ -1010,6 +1041,9 @@ def apply_rule_sequence(
         current_graphs = list(
             chain.from_iterable(apply_rule(rule, g, debug=debug) for g in current_graphs)
         )
+        if validate:
+            for g in current_graphs:
+                g.validate_integrity()
 
     return current_graphs
 

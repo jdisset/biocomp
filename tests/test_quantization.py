@@ -10,8 +10,10 @@ from biocomp.quantization import (
     quantize_all_values_to_nearest_masked_embeddings,
     get_variational_quantized,
     get_quantized,
+    get_nearest_masked_id,
 )
 from biocomp.parameters import ParameterTree, ArrayRef
+from biocomp import jaxutils
 
 
 @pytest.mark.parametrize(
@@ -139,3 +141,45 @@ def test_get_variational_quantized():
 
     assert jnp.allclose(mean_result, expected_means, atol=0.05)
     assert jnp.allclose(std_result, expected_stds, atol=0.05)
+
+
+def test_get_nearest_masked_id_empty_mask_raises():
+    """Empty mask (all False) should raise AssertionError - design is impossible."""
+    x = jnp.array([0.5])
+    qvalues = jnp.array([[0.1], [0.5], [1.0]])
+    empty_mask = jnp.array([False, False, False])
+
+    with pytest.raises(AssertionError, match="no valid options"):
+        get_nearest_masked_id(x, qvalues, empty_mask)
+
+
+def test_get_nearest_masked_id_empty_mask_with_checkify():
+    """Empty mask should raise CheckError when checkify is enabled."""
+    from jax.experimental import checkify
+
+    x = jnp.array([0.5])
+    qvalues = jnp.array([[0.1], [0.5], [1.0]])
+    empty_mask = jnp.array([False, False, False])
+
+    jaxutils.set_enable_checks(True)
+    try:
+        checkified_fn = checkify.checkify(
+            lambda: get_nearest_masked_id(x, qvalues, empty_mask),
+            errors=checkify.user_checks,
+        )
+        err, _ = jax.jit(checkified_fn)()
+        # err.throw() should raise because mask is empty
+        with pytest.raises(checkify.JaxRuntimeError, match="no valid options"):
+            err.throw()
+    finally:
+        jaxutils.set_enable_checks(False)
+
+
+def test_get_nearest_masked_id_single_valid_option():
+    """With only one valid option, should always select it."""
+    x = jnp.array([0.5])
+    qvalues = jnp.array([[0.1], [0.5], [1.0]])
+    single_mask = jnp.array([False, False, True])
+
+    idx = get_nearest_masked_id(x, qvalues, single_mask)
+    assert idx == 2

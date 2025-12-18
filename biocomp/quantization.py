@@ -6,6 +6,7 @@ import numpy as np
 from .parameters import ParameterTree
 from jax import random as random
 from biocomp.logging_config import get_logger
+from biocomp.jaxutils import check as jax_check
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -34,6 +35,8 @@ def quantization_mask_str(names, mask) -> str:
 def get_nearest_masked_id(x, qvalues, mask):
     """Quantize a single x continuous value, of shape (embedding_dim,),
     to the nearest quantization value in qvalues that has a corresponding True in mask.
+
+    Raises AssertionError (or checkify error if enabled) if mask is all False.
     """
     assert mask.ndim == 1, (
         f"Quantization mask must be 1D, got {mask.ndim}D array with shape {mask.shape}"
@@ -43,12 +46,17 @@ def get_nearest_masked_id(x, qvalues, mask):
         f"Quantization values shape {qvalues.shape} does not match input value shape {x.shape} and mask shape {mask.shape}"
     )
 
-    # Compute the distance to each quantization value
     distances = jnp.linalg.norm(qvalues - x, axis=-1)
     masked_dist = jnp.where(mask, distances, jnp.inf)
     assert masked_dist.shape == mask.shape, (
         f"Masked distances shape {masked_dist.shape} does not match mask shape {mask.shape}"
     )
+
+    # CRITICAL: Check for empty mask (all False) - design is impossible if no valid options
+    # This check works with JAX checkify when enabled, catching the error at runtime in JIT code
+    has_valid_option = jnp.any(mask)
+    jax_check(has_valid_option, "Quantization mask has no valid options (all False). Design is impossible.")
+
     closest_idx = jnp.argmin(masked_dist)
     return closest_idx
 

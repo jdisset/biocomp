@@ -205,13 +205,28 @@ def set_enable_checks(value: bool):
     enable_checks = value
 
 
-def check(*args, **kwargs):
+def check(cond, msg, *fmt_args):
+    """Runtime check that works with JAX checkify when enabled.
+
+    Args:
+        cond: Boolean scalar condition that should be True
+        msg: Error message (can contain {} placeholders for fmt_args)
+        *fmt_args: Format arguments for the message
+
+    When enable_checks is True, uses checkify.check (works in JIT/vmap).
+    When False and cond is concrete (not traced), uses standard assert.
+    When False and cond is traced (inside JIT/vmap), check is skipped.
+    """
     global enable_checks
     if enable_checks:
-        checkify.check(*args, **kwargs)
+        checkify.check(cond, msg, *fmt_args)
     else:
-        # replace by an assert of the same thing
-        assert args[0](*args[1:], **kwargs)
+        # Only assert on concrete values; traced values can't be checked without checkify
+        try:
+            cond_concrete = bool(cond)
+            assert cond_concrete, msg.format(*fmt_args) if fmt_args else msg
+        except jax.errors.TracerBoolConversionError:
+            pass  # Inside JIT/vmap without checkify - skip runtime check
 
 
 def checkwrap(func, errors=(checkify.user_checks | checkify.index_checks | checkify.float_checks)):
