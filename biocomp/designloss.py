@@ -10,7 +10,7 @@ from assertpy import assert_that
 
 from .parameters import ParameterTree
 from .optimutils import as_schedule
-from .tumasking import l0_loss, TU_LOG_ALPHA_PATH
+from .tumasking import l0_loss, TU_LOG_ALPHA_PATH, MIN_TEMPERATURE
 
 
 def _sanitize(x):
@@ -366,6 +366,29 @@ def _sample_tu_uniform(params, key, n_samples=1):
     return jax.random.uniform(key, shape, minval=1e-6, maxval=1.0 - 1e-6)
 
 
+def _validate_temperature_schedule(tu_temperature, total_steps: int = 10000) -> None:
+    """Validate tu_temperature schedule at config time (before tracing).
+
+    This catches config bugs early - before we enter JIT/scan where Python
+    assertions don't work. Runtime safety is provided by jnp.maximum() clamping.
+    """
+    sched = as_schedule(tu_temperature)
+    # check schedule at endpoints and midpoint
+    for step in [0, total_steps // 2, total_steps]:
+        temp = float(sched(step))
+        assert temp >= 0, (
+            f"tu_temperature schedule returns negative value {temp} at step {step}. "
+            f"Temperature must be >= 0 for Hard Concrete distribution."
+        )
+        if temp < MIN_TEMPERATURE:
+            import warnings
+            warnings.warn(
+                f"tu_temperature={temp} at step {step} is below MIN_TEMPERATURE={MIN_TEMPERATURE}. "
+                f"Will be clamped to {MIN_TEMPERATURE} at runtime.",
+                stacklevel=3,
+            )
+
+
 def _make_loss_func(
     stack,
     dconf,
@@ -387,6 +410,9 @@ def _make_loss_func(
         tu_n_samples: Number of TU mask samples to average over (default 4).
             Higher values reduce variance but increase compute cost.
     """
+    # config-time validation (Python assertions) - catches config bugs early
+    _validate_temperature_schedule(tu_temperature, total_steps=100000)
+
     n_targets, n_networks = dmanager.n_targets, len(dmanager.networks)
     dep_mask = stack.get_dependent_output_mask()
     nb_dep = int(np.sum(dep_mask))

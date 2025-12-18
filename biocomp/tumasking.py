@@ -4,6 +4,7 @@ TU index convention: -1 = always enabled, >= 0 = index into tu_log_alpha array.
 """
 
 import jax
+import jax.core
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 from typing import Optional
@@ -20,7 +21,17 @@ TU_LOG_ALPHA_PATH = "design/tu_log_alpha"
 
 
 def _validate_hard_concrete_params(gamma: float, zeta: float, temperature: float) -> None:
-    """fail fast if Hard Concrete params are invalid"""
+    """fail fast if Hard Concrete params are invalid.
+
+    For traced values (inside JIT/scan), we skip Python assertions but runtime
+    safety is guaranteed by jnp.maximum(temperature, MIN_TEMPERATURE) in callers.
+    Config-time validation happens in designloss._validate_temperature_schedule().
+    """
+    # traced arrays can't be used in Python assertions - validation happens:
+    # 1. at config time via _validate_temperature_schedule() in designloss.py
+    # 2. at runtime via jnp.maximum(temperature, MIN_TEMPERATURE) clamping
+    if isinstance(temperature, jax.core.Tracer):
+        return
     assert gamma < 0, f"gamma must be negative (stretch below 0), got {gamma}"
     assert zeta > 1, f"zeta must be > 1 (stretch above 1), got {zeta}"
     assert temperature >= 0, f"temperature must be non-negative, got {temperature}"

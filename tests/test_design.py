@@ -14,7 +14,6 @@ import tempfile
 from pathlib import Path
 import jax
 import jax.numpy as jnp
-import numpy as np
 import dracon as dr
 from collections import Counter
 
@@ -257,7 +256,6 @@ def test_real_multi_network_selection_unbiased(lib):
     2. Selection based on actual computed losses is correct
     3. Network index doesn't correlate with selection when losses are similar
     """
-    from biocomp.design import get_topk_replicate_network_pairs
     from scipy import stats
 
     with LibraryContext.with_library(lib):
@@ -286,7 +284,6 @@ def test_real_multi_network_selection_unbiased(lib):
         if len(networks) < 2:
             pytest.skip(f"Recipe only produced {len(networks)} network(s), need >= 2 for this test")
 
-        n_networks = len(networks)
         stack = ComputeStack(networks)
         stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
 
@@ -406,6 +403,165 @@ def test_real_network_topk_correctness(lib):
                     assert abs(loss_val - expected_loss) < 1e-5, f"Trial {trial}, target {tid}, rank {rank}: loss mismatch"
 
 
+def test_topk_with_ties():
+    """Test that topk handles ties (identical loss values) correctly."""
+    from biocomp.design import get_topk_replicate_network_pairs
+
+    class MockDM:
+        pass
+    class MockDC:
+        pass
+
+    n_replicates, n_targets, n_networks = 3, 2, 4
+    mock_dm, mock_dc = MockDM(), MockDC()
+    mock_dm.n_targets = n_targets
+    mock_dm.networks = [type('Net', (), {'name': f'net{i}'})() for i in range(n_networks)]
+    mock_dc.n_replicates = n_replicates
+
+    # create losses with ties: multiple pairs have same loss
+    losses = jnp.array([
+        [[0.5, 0.3, 0.3, 0.7], [0.2, 0.2, 0.4, 0.2]],  # rep 0: ties at 0.3 for target 0, ties at 0.2 for target 1
+        [[0.3, 0.6, 0.3, 0.8], [0.5, 0.2, 0.3, 0.4]],  # rep 1: more ties
+        [[0.9, 0.3, 0.1, 0.3], [0.6, 0.1, 0.5, 0.3]],  # rep 2
+    ])
+
+    topk = get_topk_replicate_network_pairs(losses, mock_dm, mock_dc, k=5)
+
+    # verify we get k results per target
+    for tid, target_results in enumerate(topk):
+        assert len(target_results) == 5, f"Expected 5 results for target {tid}"
+        # verify losses are sorted (non-decreasing)
+        prev_loss = -float('inf')
+        for rep_id, net_id, loss_val in target_results:
+            assert loss_val >= prev_loss - 1e-9, f"Losses not sorted for target {tid}"
+            # verify the loss value matches what's in the array
+            assert abs(losses[rep_id, tid, net_id] - loss_val) < 1e-9
+            prev_loss = loss_val
+
+
+def test_topk_k_larger_than_total():
+    """Test that k larger than total pairs is handled correctly."""
+    from biocomp.design import get_topk_replicate_network_pairs
+
+    class MockDM:
+        pass
+    class MockDC:
+        pass
+
+    n_replicates, n_targets, n_networks = 2, 1, 3
+    mock_dm, mock_dc = MockDM(), MockDC()
+    mock_dm.n_targets = n_targets
+    mock_dm.networks = [type('Net', (), {'name': f'net{i}'})() for i in range(n_networks)]
+    mock_dc.n_replicates = n_replicates
+
+    losses = jax.random.uniform(jax.random.PRNGKey(42), (n_replicates, n_targets, n_networks))
+    total_pairs = n_replicates * n_networks  # = 6
+
+    # request more than available
+    topk = get_topk_replicate_network_pairs(losses, mock_dm, mock_dc, k=100)
+
+    # should return only total_pairs
+    assert len(topk[0]) == total_pairs, f"Expected {total_pairs} results, got {len(topk[0])}"
+
+    # all pairs should be present (no duplicates)
+    pairs = set((r, n) for r, n, _ in topk[0])
+    assert len(pairs) == total_pairs, "Duplicate pairs found"
+
+
+def test_topk_single_replicate_network():
+    """Test topk with minimal dimensions (1 replicate, 1 network)."""
+    from biocomp.design import get_topk_replicate_network_pairs
+
+    class MockDM:
+        pass
+    class MockDC:
+        pass
+
+    mock_dm, mock_dc = MockDM(), MockDC()
+    mock_dm.n_targets = 3
+    mock_dm.networks = [type('Net', (), {'name': 'net0'})()]
+    mock_dc.n_replicates = 1
+
+    losses = jnp.array([[[0.5], [0.3], [0.7]]])  # shape: (1, 3, 1)
+
+    topk = get_topk_replicate_network_pairs(losses, mock_dm, mock_dc, k=5)
+
+    assert len(topk) == 3, "Should have results for 3 targets"
+    for tid, target_results in enumerate(topk):
+        assert len(target_results) == 1, "Only 1 pair possible"
+        rep_id, net_id, loss_val = target_results[0]
+        assert rep_id == 0 and net_id == 0
+        assert abs(loss_val - float(losses[0, tid, 0])) < 1e-9
+
+
+def test_topk_preserves_exact_indices():
+    """Test that topk returns exact indices matching the minimum losses."""
+    from biocomp.design import get_topk_replicate_network_pairs
+
+    class MockDM:
+        pass
+    class MockDC:
+        pass
+
+    n_replicates, n_targets, n_networks = 4, 3, 5
+    mock_dm, mock_dc = MockDM(), MockDC()
+    mock_dm.n_targets = n_targets
+    mock_dm.networks = [type('Net', (), {'name': f'net{i}'})() for i in range(n_networks)]
+    mock_dc.n_replicates = n_replicates
+
+    # create known minimum positions
+    losses = jnp.ones((n_replicates, n_targets, n_networks)) * 10.0
+    # set specific minimums
+    losses = losses.at[2, 0, 3].set(0.01)  # target 0: min at rep=2, net=3
+    losses = losses.at[0, 1, 4].set(0.02)  # target 1: min at rep=0, net=4
+    losses = losses.at[3, 2, 1].set(0.03)  # target 2: min at rep=3, net=1
+
+    topk = get_topk_replicate_network_pairs(losses, mock_dm, mock_dc, k=1)
+
+    # verify exact indices
+    assert topk[0][0][:2] == (2, 3), f"Target 0: expected (2,3), got {topk[0][0][:2]}"
+    assert topk[1][0][:2] == (0, 4), f"Target 1: expected (0,4), got {topk[1][0][:2]}"
+    assert topk[2][0][:2] == (3, 1), f"Target 2: expected (3,1), got {topk[2][0][:2]}"
+
+
+def test_topk_full_ranking_correctness():
+    """Test that getting all pairs returns them in correct sorted order."""
+    from biocomp.design import get_topk_replicate_network_pairs
+
+    class MockDM:
+        pass
+    class MockDC:
+        pass
+
+    n_replicates, n_targets, n_networks = 3, 2, 4
+    mock_dm, mock_dc = MockDM(), MockDC()
+    mock_dm.n_targets = n_targets
+    mock_dm.networks = [type('Net', (), {'name': f'net{i}'})() for i in range(n_networks)]
+    mock_dc.n_replicates = n_replicates
+
+    key = jax.random.PRNGKey(123)
+    losses = jax.random.uniform(key, (n_replicates, n_targets, n_networks))
+
+    # get ALL pairs
+    k = n_replicates * n_networks
+    topk = get_topk_replicate_network_pairs(losses, mock_dm, mock_dc, k=k)
+
+    for tid in range(n_targets):
+        target_losses = losses[:, tid, :].reshape(-1)
+        sorted_indices = jnp.argsort(target_losses)
+
+        for rank, (rep_id, net_id, loss_val) in enumerate(topk[tid]):
+            flat_idx = rep_id * n_networks + net_id
+            expected_flat_idx = int(sorted_indices[rank])
+            assert flat_idx == expected_flat_idx, (
+                f"Target {tid}, rank {rank}: flat_idx {flat_idx} != expected {expected_flat_idx}"
+            )
+            expected_loss = float(target_losses[expected_flat_idx])
+            assert abs(loss_val - expected_loss) < 1e-9, (
+                f"Target {tid}, rank {rank}: loss {loss_val} != expected {expected_loss}"
+            )
+
+
 def test_multi_network_stack_output_independence(lib):
     """Test that different networks in a stack produce genuinely different outputs.
 
@@ -470,7 +626,7 @@ def test_multi_network_stack_output_independence(lib):
             # Off-diagonal elements should not all be 1.0 (perfect correlation)
             off_diag = corr_matrix[jnp.triu_indices(y.shape[1], k=1)]
             assert not jnp.all(jnp.abs(off_diag) > 0.999), (
-                f"Outputs are nearly perfectly correlated, suggesting redundant networks"
+                "Outputs are nearly perfectly correlated, suggesting redundant networks"
             )
 
 
@@ -559,7 +715,6 @@ def test_independent_uorf_slots_not_cross_committed(lib):
         # Set node 0 close to -1.0 (index 0, 00_empty_tc)
         # Set node 1 close to -0.333 (index 4, 3x_uORF)
         tl_rate_path = 'local/8/translation/tl_rate'
-        old_tl_rate = params[tl_rate_path]
         new_tl_rate = jnp.array([[[-0.95]], [[-0.35]]])  # node 0 -> index 0, node 1 -> index 4
         params[tl_rate_path] = new_tl_rate
 
@@ -672,7 +827,6 @@ def test_different_replicates_produce_different_commits(lib, simple_design_recip
     from jax import vmap
 
     N_REPLICATES = 2
-    N_TARGETS = 1
 
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(simple_design_recipe, br.ALL_RULES, invert=True)
