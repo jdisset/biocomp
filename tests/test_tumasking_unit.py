@@ -224,5 +224,76 @@ def test_coordinated_sampling():
     np.testing.assert_equal(mask1, mask2)
 
 
+# --- Tests for compute_input_masks with explicit is_multi_tu flag ---
+
+from biocomp.tumasking import compute_input_masks
+
+
+def test_compute_input_masks_single_tu_requires_1d():
+    """is_multi_tu=False requires 1D tu_indices."""
+    tu_indices = jnp.array([0, 1, 2])  # 1D - single TU per input
+    tu_uniform = jnp.full((4,), 0.5)
+    tu_log_alpha = jnp.zeros(4)
+
+    masks = compute_input_masks(
+        tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=False
+    )
+    assert masks.shape == (3,), f"Expected (3,), got {masks.shape}"
+
+
+def test_compute_input_masks_multi_tu_requires_2d():
+    """is_multi_tu=True requires 2D tu_indices."""
+    tu_indices = jnp.array([[0, 1], [1, 2], [2, 3]])  # 2D - multi TU per input
+    tu_uniform = jnp.full((4,), 0.5)
+    tu_log_alpha = jnp.zeros(4)
+
+    masks = compute_input_masks(
+        tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=True
+    )
+    assert masks.shape == (3,), f"Expected (3,), got {masks.shape}"
+
+
+def test_compute_input_masks_single_tu_rejects_2d():
+    """is_multi_tu=False must reject 2D tu_indices."""
+    tu_indices = jnp.array([[0, 1], [1, 2]])  # 2D - wrong for single TU
+    tu_uniform = jnp.full((4,), 0.5)
+    tu_log_alpha = jnp.zeros(4)
+
+    with pytest.raises(AssertionError, match=r"is_multi_tu=False but tu_indices.ndim=2"):
+        compute_input_masks(
+            tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=False
+        )
+
+
+def test_compute_input_masks_multi_tu_rejects_1d():
+    """is_multi_tu=True must reject 1D tu_indices."""
+    tu_indices = jnp.array([0, 1, 2])  # 1D - wrong for multi TU
+    tu_uniform = jnp.full((4,), 0.5)
+    tu_log_alpha = jnp.zeros(4)
+
+    with pytest.raises(AssertionError, match=r"is_multi_tu=True but tu_indices.ndim=1"):
+        compute_input_masks(
+            tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=True
+        )
+
+
+def test_compute_input_masks_none_inputs_returns_ones():
+    """When tu_uniform or tu_log_alpha is None, returns all ones."""
+    tu_indices_1d = jnp.array([0, 1, 2])
+    tu_indices_2d = jnp.array([[0, 1], [1, 2], [2, 3]])
+
+    # None tu_uniform
+    masks = compute_input_masks(
+        tu_indices_1d, None, jnp.zeros(4), is_multi_tu=False
+    )
+    np.testing.assert_array_equal(masks, jnp.ones(3))
+
+    # None tu_log_alpha
+    masks = compute_input_masks(
+        tu_indices_2d, jnp.full((4,), 0.5), None, is_multi_tu=True
+    )
+    np.testing.assert_array_equal(masks, jnp.ones(3))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -258,6 +258,49 @@ def test_gradual_disabling(lib, design_stack):
         )
 
 
+def test_per_network_tu_mask(lib, design_stack):
+    """Test that get_per_network_tu_mask returns correct per-network TU usage masks.
+
+    This is critical for per-network L0 penalty: each network should only be
+    penalized for TUs it actually uses, not for TUs used by other networks.
+    """
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        n_networks = len(stack.networks)
+        n_tus = len(tu_ids)
+
+        # test the new method exists and has correct shape
+        mask = stack.get_per_network_tu_mask()
+        assert mask.shape == (n_networks, n_tus), (
+            f"Per-network TU mask shape {mask.shape} != expected ({n_networks}, {n_tus})"
+        )
+
+        # mask should be binary (0 or 1)
+        assert jnp.all((mask == 0) | (mask == 1)), "TU mask should be binary (0 or 1)"
+
+        # verify mask matches direct TU extraction for each network
+        from biocomp.tumasking import extract_tu_ids_from_network
+        for net_idx, net in enumerate(stack.networks):
+            net_tu_ids = extract_tu_ids_from_network(net)
+            expected_tus = {tid for tid in net_tu_ids if tid in tu_id_to_idx}
+
+            # count TUs in mask for this network
+            mask_tus = {tu_ids[i] for i in range(n_tus) if mask[net_idx, i] > 0}
+            assert mask_tus == expected_tus, (
+                f"Network {net_idx}: mask TUs {mask_tus} != expected {expected_tus}"
+            )
+
+        # each network should use at least 1 TU (sanity check)
+        for net_idx in range(n_networks):
+            n_used = int(mask[net_idx].sum())
+            assert n_used > 0, f"Network {net_idx} has no TUs (mask sum=0)"
+
+        # total TUs used (union) should match n_tus
+        union_mask = jnp.any(mask > 0, axis=0)
+        n_union = int(union_mask.sum())
+        assert n_union == n_tus, f"Union of TUs {n_union} != total TUs {n_tus}"
+
+
 def test_hard_concrete_transformation():
     """Verify hard concrete transformation matches expected behavior."""
     # uniform=0.5, log_alpha=0 -> s=0.5 -> s_bar=0.5*1.2-0.1=0.5 -> z=0.5
@@ -471,7 +514,11 @@ def test_1d_tu_uniform_rejected(lib, design_stack):
 
 
 def test_commit_applies_tu_masks(lib, design_stack):
-    """Verify that commit sets ratio=0 for TUs with log_alpha < 0 (disabled)."""
+    """Verify that commit removes disabled TUs (prunes zero-ratio members).
+
+    With single-source-of-truth approach: disabled TUs are REMOVED from the
+    aggregation members list, not kept with ratio=0.
+    """
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx = design_stack
         key = jax.random.key(42)
@@ -479,6 +526,14 @@ def test_commit_applies_tu_masks(lib, design_stack):
 
         n_tus = len(tu_ids)
         n_networks = len(stack.networks)
+
+        # count total members before commit
+        total_members_before = 0
+        for net in stack.networks:
+            for node in net.compute_graph.nodes.values():
+                if 'aggregation' in node.node_type.lower():
+                    members = node.extra.get('members', [])
+                    total_members_before += len(members)
 
         # set half TUs to disabled (negative log_alpha) and half enabled (positive)
         tu_log_alpha = jnp.zeros((n_networks, n_tus))
@@ -490,24 +545,17 @@ def test_commit_applies_tu_masks(lib, design_stack):
         # commit the stack
         committed_networks = stack.commit(params)
 
-        # check that at least one aggregation node has ratio=0 for disabled TUs
-        found_zero_ratio = False
+        # count total members after commit - should be fewer due to pruned disabled TUs
+        total_members_after = 0
         for net in committed_networks:
             for node in net.compute_graph.nodes.values():
                 if 'aggregation' in node.node_type.lower():
-                    ratios = node.extra.get('ratios', [])
-                    for r in ratios:
-                        if abs(r) < 1e-6:  # effectively zero
-                            found_zero_ratio = True
-                            break
-                if found_zero_ratio:
-                    break
-            if found_zero_ratio:
-                break
+                    members = node.extra.get('members', [])
+                    total_members_after += len(members)
 
-        assert found_zero_ratio, (
-            "Expected at least one ratio=0 for disabled TUs after commit. "
-            f"TU log_alpha: first {half} TUs disabled (-3.0), rest enabled (3.0)"
+        assert total_members_after < total_members_before, (
+            f"Expected fewer members after commit due to disabled TU pruning. "
+            f"Before: {total_members_before}, After: {total_members_after}"
         )
 
 
@@ -646,7 +694,10 @@ def test_single_tu_edge_removed_when_disabled(lib, design_stack):
 
 
 def test_all_tus_disabled_produces_different_commit(lib, design_stack):
-    """When all TUs are disabled, committed network should produce different output than all enabled."""
+    """When all TUs are disabled, committed network should have fewer members than all enabled.
+
+    With single-source-of-truth: disabled TUs are REMOVED, not zeroed.
+    """
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx = design_stack
         key = jax.random.key(42)
@@ -666,25 +717,23 @@ def test_all_tus_disabled_produces_different_commit(lib, design_stack):
         params_disabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_disabled)
         committed_disabled = stack.commit(params_disabled)
 
-        # check that at least one aggregation node has different ratios
-        found_difference = False
-        for net_e, net_d in zip(committed_enabled, committed_disabled):
-            for node_e in net_e.compute_graph.nodes.values():
-                if 'aggregation' in node_e.node_type.lower():
-                    node_d = net_d.compute_graph.nodes.get(node_e.node_id)
-                    if node_d:
-                        ratios_e = node_e.extra.get('ratios', [])
-                        ratios_d = node_d.extra.get('ratios', [])
-                        if ratios_e and ratios_d:
-                            diff = sum(abs(re - rd) for re, rd in zip(ratios_e, ratios_d))
-                            if diff > 1e-6:
-                                found_difference = True
-                                break
-            if found_difference:
-                break
+        # count total members in enabled vs disabled commits
+        def count_members(networks):
+            total = 0
+            for net in networks:
+                for node in net.compute_graph.nodes.values():
+                    if 'aggregation' in node.node_type.lower():
+                        members = node.extra.get('members', [])
+                        total += len(members)
+            return total
 
-        assert found_difference, (
-            "FAILED: Committed networks with all TUs enabled vs disabled have identical ratios.\n"
+        members_enabled = count_members(committed_enabled)
+        members_disabled = count_members(committed_disabled)
+
+        # disabled should have fewer members (pruned)
+        assert members_disabled < members_enabled, (
+            f"FAILED: Disabled commit should have fewer members than enabled.\n"
+            f"Enabled: {members_enabled}, Disabled: {members_disabled}\n"
             "This indicates commit() is NOT applying TU masks!"
         )
 
@@ -757,7 +806,10 @@ def test_commit_without_tu_masking_unchanged(lib):
 
 
 def test_per_network_tu_mask_commit_independence(lib, multi_network_stack):
-    """Each network's TU mask should be applied independently during commit."""
+    """Each network's TU mask should be applied independently during commit.
+
+    With single-source-of-truth: disabled TUs are REMOVED (pruned), not zeroed.
+    """
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx, n_networks = multi_network_stack
         key = jax.random.key(42)
@@ -774,21 +826,22 @@ def test_per_network_tu_mask_commit_independence(lib, multi_network_stack):
 
         committed_networks = stack.commit(params)
 
-        # check network 0 has more zero ratios than network 1
-        def count_zero_ratios(net):
+        # count members (disabled TUs are pruned, so fewer members)
+        def count_members(net):
             count = 0
             for node in net.compute_graph.nodes.values():
                 if 'aggregation' in node.node_type.lower():
-                    ratios = node.extra.get('ratios', [])
-                    count += sum(1 for r in ratios if abs(r) < 1e-6)
+                    members = node.extra.get('members', [])
+                    count += len(members)
             return count
 
-        zeros_net0 = count_zero_ratios(committed_networks[0])
-        zeros_net1 = count_zero_ratios(committed_networks[1]) if n_networks > 1 else 0
+        members_net0 = count_members(committed_networks[0])
+        members_net1 = count_members(committed_networks[1]) if n_networks > 1 else 0
 
-        assert zeros_net0 > zeros_net1, (
-            f"Network 0 (all TUs disabled) should have more zero ratios than network 1.\n"
-            f"Network 0 zeros: {zeros_net0}, Network 1 zeros: {zeros_net1}\n"
+        # network 0 (all disabled) should have fewer members than network 1 (all enabled)
+        assert members_net0 < members_net1, (
+            f"Network 0 (all TUs disabled) should have fewer members than network 1.\n"
+            f"Network 0 members: {members_net0}, Network 1 members: {members_net1}\n"
             f"This indicates per-network TU masking is not working in commit!"
         )
 
@@ -861,8 +914,11 @@ def test_committed_recipe_excludes_disabled_tus(lib, design_stack):
         )
 
 
-def test_disabled_tu_ratio_is_zero_after_commit(lib, design_stack):
-    """Verify that disabled TUs have their aggregation ratios set to 0 after commit."""
+def test_disabled_tu_removed_after_commit(lib, design_stack):
+    """Verify that disabled TUs are removed (pruned) from aggregation after commit.
+
+    With single-source-of-truth: disabled TUs are REMOVED, not kept with ratio=0.
+    """
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx = design_stack
         key = jax.random.key(42)
@@ -874,28 +930,36 @@ def test_disabled_tu_ratio_is_zero_after_commit(lib, design_stack):
         if n_tus == 0:
             pytest.skip("No TUs in network")
 
-        # disable first TU
-        tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)
-        tu_log_alpha = tu_log_alpha.at[:, 0].set(-10.0)
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        # count members before commit (all enabled)
+        params_all_enabled = stack.init(key)
+        tu_log_alpha_all = jnp.full((n_networks, n_tus), 5.0)
+        params_all_enabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_all)
+        committed_all_enabled = stack.commit(params_all_enabled)
 
-        committed_networks = stack.commit(params)
-
-        # verify at least one aggregation has a zero ratio (from disabled TU)
-        found_zero = False
-        for net in committed_networks:
+        total_members_all = 0
+        for net in committed_all_enabled:
             for node in net.compute_graph.nodes.values():
                 if 'aggregation' in node.node_type.lower():
-                    ratios = node.extra.get('ratios', [])
-                    if any(abs(r) < 1e-6 for r in ratios):
-                        found_zero = True
-                        break
-            if found_zero:
-                break
+                    members = node.extra.get('members', [])
+                    total_members_all += len(members)
 
-        assert found_zero, (
-            "No zero ratios found after disabling a TU.\n"
-            "Commit should set ratio=0 for disabled TUs."
+        # disable first TU
+        params_one_disabled = stack.init(key)
+        tu_log_alpha_one = jnp.full((n_networks, n_tus), 5.0)
+        tu_log_alpha_one = tu_log_alpha_one.at[:, 0].set(-10.0)
+        params_one_disabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_one)
+        committed_one_disabled = stack.commit(params_one_disabled)
+
+        total_members_one_disabled = 0
+        for net in committed_one_disabled:
+            for node in net.compute_graph.nodes.values():
+                if 'aggregation' in node.node_type.lower():
+                    members = node.extra.get('members', [])
+                    total_members_one_disabled += len(members)
+
+        assert total_members_one_disabled < total_members_all, (
+            f"Disabling a TU should reduce member count.\n"
+            f"All enabled: {total_members_all}, One disabled: {total_members_one_disabled}"
         )
 
 
@@ -1092,3 +1156,126 @@ def test_multi_network_independent_tu_removal(lib):
                         assert edge_tu_ids[0] not in disabled_1, (
                             f"Net 1: single-TU edge with disabled TU {edge_tu_ids[0]} should be removed"
                         )
+
+
+def test_committed_network_rebuilds_equivalent(lib, design_stack):
+    """CRITICAL: A committed network with disabled TUs should be equivalent to a fresh network
+    built from its exported recipe.
+
+    This is the key invariant for the commit system: after commit, the network's graph structure
+    should match what you'd get from building a new network from the committed recipe.
+
+    Specifically tests that:
+    1. The exported recipe can be rebuilt into a network
+    2. The rebuilt network has the same graph structure (nodes, edges)
+    3. The rebuilt network can be stacked with the committed network
+    4. The aggregation ratios match between committed and rebuilt networks
+    """
+    with LibraryContext.with_library(lib):
+        stack, tu_ids, tu_id_to_idx = design_stack
+        key = jax.random.key(42)
+        params = stack.init(key)
+
+        n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
+
+        if n_tus == 0:
+            pytest.skip("No TUs in network")
+
+        # disable half the TUs to create a meaningful pruning scenario
+        n_to_disable = max(1, n_tus // 2)
+        tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)
+        for i in range(n_to_disable):
+            tu_log_alpha = tu_log_alpha.at[:, i].set(-10.0)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+
+        # commit the network
+        committed_networks = stack.commit(params)
+
+        for net_idx, committed_net in enumerate(committed_networks):
+            # export the recipe
+            exported_recipe = committed_net.to_recipe()
+
+            # rebuild a fresh network from the exported recipe
+            rebuilt_networks = recipe_to_networks(exported_recipe, br.ALL_RULES, invert=True)
+            assert len(rebuilt_networks) == 1, (
+                f"Expected 1 rebuilt network, got {len(rebuilt_networks)}"
+            )
+            rebuilt_net = rebuilt_networks[0]
+
+            # compare graph structure
+            committed_graph = committed_net.compute_graph
+            rebuilt_graph = rebuilt_net.compute_graph
+
+            # verify node counts match
+            assert len(committed_graph.nodes) == len(rebuilt_graph.nodes), (
+                f"Network {net_idx}: Node count mismatch.\n"
+                f"Committed: {len(committed_graph.nodes)} nodes\n"
+                f"Rebuilt: {len(rebuilt_graph.nodes)} nodes"
+            )
+
+            # verify edge counts match
+            assert len(committed_graph.edges) == len(rebuilt_graph.edges), (
+                f"Network {net_idx}: Edge count mismatch.\n"
+                f"Committed: {len(committed_graph.edges)} edges\n"
+                f"Rebuilt: {len(rebuilt_graph.edges)} edges"
+            )
+
+            # verify node types match
+            committed_types = sorted([n.node_type for n in committed_graph.nodes.values()])
+            rebuilt_types = sorted([n.node_type for n in rebuilt_graph.nodes.values()])
+            assert committed_types == rebuilt_types, (
+                f"Network {net_idx}: Node types mismatch.\n"
+                f"Committed: {committed_types}\n"
+                f"Rebuilt: {rebuilt_types}"
+            )
+
+            # verify aggregation nodes have matching member counts
+            committed_aggs = [n for n in committed_graph.nodes.values() if n.node_type == "aggregation"]
+            rebuilt_aggs = [n for n in rebuilt_graph.nodes.values() if n.node_type == "aggregation"]
+
+            for c_agg, r_agg in zip(
+                sorted(committed_aggs, key=lambda x: x.node_id),
+                sorted(rebuilt_aggs, key=lambda x: x.node_id)
+            ):
+                c_members = c_agg.extra.get('members', [])
+                r_members = r_agg.extra.get('members', [])
+                c_ratios = c_agg.extra.get('ratios', [])
+                r_ratios = r_agg.extra.get('ratios', [])
+                c_out_edges = len(committed_graph.get_outgoing_edges(c_agg.node_id))
+                r_out_edges = len(rebuilt_graph.get_outgoing_edges(r_agg.node_id))
+
+                assert len(c_members) == len(r_members), (
+                    f"Network {net_idx}, Agg {c_agg.node_id}: member count mismatch.\n"
+                    f"Committed: {len(c_members)} members: {c_members}\n"
+                    f"Rebuilt: {len(r_members)} members: {r_members}"
+                )
+
+                assert len(c_ratios) == len(r_ratios), (
+                    f"Network {net_idx}, Agg {c_agg.node_id}: ratio count mismatch.\n"
+                    f"Committed: {len(c_ratios)} ratios\n"
+                    f"Rebuilt: {len(r_ratios)} ratios"
+                )
+
+                assert c_out_edges == r_out_edges, (
+                    f"Network {net_idx}, Agg {c_agg.node_id}: outgoing edge count mismatch.\n"
+                    f"Committed: {c_out_edges} edges\n"
+                    f"Rebuilt: {r_out_edges} edges"
+                )
+
+                # CRITICAL: ratios should match outgoing edges (the original bug!)
+                assert len(c_ratios) == c_out_edges, (
+                    f"Network {net_idx}, Agg {c_agg.node_id}: COMMITTED network has mismatched ratios/edges!\n"
+                    f"Ratios: {len(c_ratios)}, Outgoing edges: {c_out_edges}"
+                )
+                assert len(r_ratios) == r_out_edges, (
+                    f"Network {net_idx}, Agg {c_agg.node_id}: REBUILT network has mismatched ratios/edges!\n"
+                    f"Ratios: {len(r_ratios)}, Outgoing edges: {r_out_edges}"
+                )
+
+        # verify networks can be stacked together
+        from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+        combined_stack = ComputeStack(committed_networks)
+        combined_stack.build(SIMPLE_NODES_COMPUTE_CONFIG)
+        combined_params = combined_stack.init(key)
+        assert combined_params is not None, "Combined stack should initialize successfully"

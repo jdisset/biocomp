@@ -4,7 +4,7 @@ from jax.typing import ArrayLike
 import jax.numpy as jnp
 import numpy as np
 from biocomp.parameters import ArrayRef, ParameterTree
-from biocomp.nodeutils import LayerInstance, add_tu_output_mapping, NON_GRAD_TAG
+from biocomp.nodeutils import LayerInstance, add_tu_output_mapping, add_node_network_ids, NON_GRAD_TAG
 from biocomp.tumasking import TU_LOG_ALPHA_PATH
 from biocomp.utils import get_logger
 from typing import Optional
@@ -34,7 +34,11 @@ def aggregation(
         for i, node in enumerate(nodelist):
             extra = node.get(stack).extra
             if "ratios" in extra and not random_init:
-                assert len(extra["ratios"]) == n_outputs
+                assert len(extra["ratios"]) == n_outputs, (
+                    f"Aggregation ratios length mismatch: got {len(extra['ratios'])}, expected {n_outputs}. "
+                    f"This usually means the network was committed but graph structure wasn't pruned to match. "
+                    f"Members: {extra.get('members', [])}"
+                )
 
                 # Check if this node has unlocked ratios (ratio_ranges with non-None values)
                 ranges = extra.get("ratio_ranges", [])
@@ -86,6 +90,7 @@ def aggregation(
         params[f"{namespace}/{PNAME}"] = ratios
 
         add_tu_output_mapping(params, stack, nodelist, namespace, n_outputs)
+        add_node_network_ids(params, nodelist, namespace)
 
     def apply(
         input: NDArray,
@@ -114,7 +119,9 @@ def aggregation(
                 )
                 assert network_id is not None, "network_id required for per-network TU masking"
                 tu_log_alpha = tu_log_alpha_full[network_id]
-            output_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
+            output_masks = compute_input_masks(
+                tu_indices, tu_enabled_random_vars, tu_log_alpha, is_multi_tu=False
+            )
         else:
             output_masks = jnp.ones(n_outputs)
 
@@ -193,10 +200,14 @@ def aggregation(
                     f"Original: {original_ratios.tolist()}, Final: {normalized_ratios.tolist()}"
                 )
 
-            updt["ratios"] = normalized_ratios.tolist()[:n_outputs]
-            updt["ratio_ranges"] = [None] * n_outputs
-
-            n.get(stack).extra.update(updt)
+            # Update ratios in extra dict - keep full array with zeros
+            # Graph pruning (prune_disabled_tus) will remove disabled source nodes/edges
+            # based on zero ratios, so we must NOT prune the list here
+            extra = n.get(stack).extra
+            ratios_list = normalized_ratios.tolist()[:n_outputs]
+            updt["ratios"] = ratios_list
+            updt["ratio_ranges"] = [None] * len(updt["ratios"])
+            extra.update(updt)
 
     output_shape = input_shapes * n_outputs
 
@@ -272,7 +283,9 @@ def inv_aggregation(
                 )
                 assert network_id is not None, "network_id required for per-network TU masking"
                 tu_log_alpha = tu_log_alpha_full[network_id]
-            all_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
+            all_masks = compute_input_masks(
+                tu_indices, tu_enabled_random_vars, tu_log_alpha, is_multi_tu=False
+            )
         else:
             all_masks = jnp.ones_like(all_fwd_ratios)
 

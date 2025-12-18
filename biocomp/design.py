@@ -277,10 +277,17 @@ class DataTarget(TargetBase):
 
     Data is expected to already be in latent space. The lattice extent parameters
     define where to build the interpolation grid; data outside this range is masked.
+
+    IMPORTANT: X columns are in alphabetical order of input_names. When predicting
+    with a different network, use get_reordered_X() to map columns correctly.
     """
 
-    X: np.ndarray  # (n_samples, n_dims) - already in latent space
+    X: np.ndarray  # (n_samples, n_dims) - already in latent space, alphabetical column order
     Y: np.ndarray  # (n_samples,) or (n_samples, 1)
+
+    # input_names: alphabetical protein names corresponding to X columns
+    # Required for correct column alignment when predicting with different networks
+    input_names: Optional[list[str]] = None
 
     z_slice: Optional[float] = None
     z_tolerance: float = 0.05
@@ -361,6 +368,37 @@ class DataTarget(TargetBase):
         if Y_sampled.ndim == 1:
             Y_sampled = Y_sampled[:, None]
         return X_sampled, Y_sampled
+
+    def get_reordered_X(self, target_network: Network) -> np.ndarray:
+        """Reorder X columns to match target_network's expected input order.
+
+        X columns are stored in alphabetical order of input_names. Different networks
+        may have different internal orderings. This method maps columns from this
+        DataTarget's order to target_network's expected alphabetical order.
+
+        Returns X unchanged if input_names match or can't be determined.
+        """
+        if self.input_names is None:
+            if self.original_network is not None:
+                self.input_names = sorted(self.original_network.get_inverted_input_proteins())
+            else:
+                return self.X
+
+        target_input_names = sorted(target_network.get_inverted_input_proteins())
+
+        if self.input_names == target_input_names:
+            return self.X
+
+        # Build mapping: target column index -> source column index
+        try:
+            source_name_to_idx = {name: i for i, name in enumerate(self.input_names)}
+            reorder = [source_name_to_idx[name] for name in target_input_names]
+            return self.X[:, reorder]
+        except KeyError as e:
+            logger.warning(
+                f"Cannot reorder X: target network has input {e} not in source names {self.input_names}"
+            )
+            return self.X
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

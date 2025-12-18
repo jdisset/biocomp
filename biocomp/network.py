@@ -304,6 +304,129 @@ class Network(BaseModel):
                 extra=new_extra,
             )
 
+    def get_zero_ratio_source_ids(self) -> set[str]:
+        """Get source_ids that have zero ratio in their aggregation node.
+
+        NOTE: This is a FALLBACK method. Prefer get_disabled_tu_source_ids() with
+        hard-concrete masks for single source of truth.
+        """
+        assert self.compute_graph is not None, "compute_graph must exist"
+        zero_ratio_sources = set()
+        for agg in self.compute_graph.get_nodes_by_type("aggregation"):
+            members = agg.extra.get("members", [])
+            ratios = agg.extra.get("ratios", [])
+            if len(members) == len(ratios):
+                for sid, r in zip(members, ratios):
+                    if isinstance(r, (int, float)) and r == 0:
+                        zero_ratio_sources.add(sid)
+        return zero_ratio_sources
+
+    def get_disabled_tu_source_ids(
+        self,
+        tu_log_alpha,
+        tu_id_to_idx: dict[str, int],
+    ) -> set[str]:
+        """Get source_ids for TUs disabled by hard-concrete masks.
+
+        This is the SINGLE SOURCE OF TRUTH for TU disabling. Uses hard-concrete
+        masks (sigmoid(tu_log_alpha) < 0.5) to determine which TUs are disabled.
+
+        Args:
+            tu_log_alpha: TU log_alpha array for this network, shape (n_tus,)
+            tu_id_to_idx: Mapping from TU ID string to index in tu_log_alpha
+
+        Returns:
+            Set of source_ids that should be removed
+        """
+        from biocomp.tumasking import get_final_mask
+        import jax.numpy as jnp
+
+        assert self.compute_graph is not None, "compute_graph must exist"
+        assert tu_log_alpha is not None, "tu_log_alpha required for hard-concrete check"
+        assert tu_log_alpha.ndim == 1, (
+            f"tu_log_alpha must be 1D (n_tus,), got {tu_log_alpha.ndim}D with shape {tu_log_alpha.shape}"
+        )
+
+        disabled_sources = set()
+
+        # check each edge's TU IDs
+        for edge in self.compute_graph.edges.values():
+            tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+            if not tu_ids:
+                continue
+
+            # check if ALL TUs on this edge are disabled
+            all_disabled = True
+            for tu_id in tu_ids:
+                if tu_id not in tu_id_to_idx:
+                    all_disabled = False
+                    break
+                tu_idx = tu_id_to_idx[tu_id]
+                assert 0 <= tu_idx < tu_log_alpha.shape[0], (
+                    f"tu_idx {tu_idx} out of bounds for tu_log_alpha shape {tu_log_alpha.shape}"
+                )
+                mask = get_final_mask(tu_log_alpha[tu_idx : tu_idx + 1])[0]
+                if float(mask) > 0:  # TU is enabled
+                    all_disabled = False
+                    break
+
+            if all_disabled and tu_ids:
+                # find source node connected to this edge
+                source_node = self.compute_graph.nodes.get(edge.source_id)
+                if source_node and source_node.node_type == "source":
+                    source_id = source_node.extra.get("source_id")
+                    if source_id:
+                        disabled_sources.add(source_id)
+
+        return disabled_sources
+
+    def prune_disabled_tus(
+        self,
+        tu_log_alpha=None,
+        tu_id_to_idx: dict[str, int] | None = None,
+    ):
+        """Remove source nodes and edges for disabled TUs. Modifies graph in place.
+
+        SINGLE SOURCE OF TRUTH: Uses hard-concrete masks if tu_log_alpha provided,
+        falls back to zero ratio check otherwise.
+
+        Args:
+            tu_log_alpha: Optional TU log_alpha array for this network, shape (n_tus,)
+            tu_id_to_idx: Optional mapping from TU ID to index (required if tu_log_alpha provided)
+        """
+        assert self.compute_graph is not None, "compute_graph must exist"
+
+        # SINGLE SOURCE OF TRUTH: prefer hard-concrete masks
+        if tu_log_alpha is not None:
+            assert tu_id_to_idx is not None, (
+                "tu_id_to_idx required when tu_log_alpha is provided"
+            )
+            disabled_sources = self.get_disabled_tu_source_ids(tu_log_alpha, tu_id_to_idx)
+        else:
+            # fallback to zero ratio check (for non-design contexts)
+            disabled_sources = self.get_zero_ratio_source_ids()
+
+        if not disabled_sources:
+            return
+
+        # find source nodes to remove
+        nodes_to_remove = set()
+        for node in self.compute_graph.get_nodes_by_type("source"):
+            if node.extra.get("source_id") in disabled_sources:
+                nodes_to_remove.add(node.node_id)
+
+        # remove edges connected to removed nodes
+        edges_to_remove = [
+            eid for eid, e in self.compute_graph.edges.items()
+            if e.source_id in nodes_to_remove or e.target_id in nodes_to_remove
+        ]
+        for eid in edges_to_remove:
+            del self.compute_graph.edges[eid]
+
+        # remove nodes
+        for nid in nodes_to_remove:
+            del self.compute_graph.nodes[nid]
+
     def to_recipe(self) -> Recipe:
         """Converts the network back to a Recipe object"""
 
@@ -395,24 +518,22 @@ class Network(BaseModel):
     def _build_transcription_units(
         self, cotx_groups: dict, prune_zero_ratios: bool = True
     ) -> dict[str, tuple[list[TranscriptionUnit], list]]:
+        zero_ratio_sources = self.get_zero_ratio_source_ids() if prune_zero_ratios else set()
+
         tus_and_ratios_by_cotx = {}
         for group_id, info in cotx_groups.items():
             tus = []
-            # Create mapping from source_id to ratio (both are in aggregation order, e.g. alphabetically sorted)
-            source_id_to_ratio = dict(zip(info["source_ids"], info["ratios"]))
-
-            if prune_zero_ratios:
-                source_id_to_ratio = {
-                    sid: ratio for sid, ratio in source_id_to_ratio.items()
-                    if not (isinstance(ratio, (int, float)) and ratio == 0)
-                }
+            source_id_to_ratio = {
+                sid: r for sid, r in zip(info["source_ids"], info["ratios"])
+                if not (prune_zero_ratios and sid in zero_ratio_sources)
+            }
 
             tu_specs = []
             assert self.compute_graph is not None
             for node in self.compute_graph.get_nodes_by_type("source"):
                 if node.extra.get("cotx_group") == group_id:
                     source_id = node.extra.get("source_id")
-                    if prune_zero_ratios and source_id not in source_id_to_ratio:
+                    if prune_zero_ratios and source_id in zero_ratio_sources:
                         continue
                     outgoing = self.compute_graph.get_outgoing_edges(node.node_id)
                     output_slots = sorted(set(e.from_output_slot for e in outgoing))

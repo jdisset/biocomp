@@ -205,11 +205,24 @@ def compute_input_masks(
     tu_uniform_samples: Optional[ArrayLike],
     tu_log_alpha: Optional[ArrayLike],
     temperature: float = DEFAULT_TEMPERATURE,
+    *,
+    is_multi_tu: bool,
 ) -> jnp.ndarray:
-    """Compute masks for all inputs. Handles 1D (single TU) or 2D (multi-TU) indices.
+    """Compute masks for all inputs.
 
     CRITICAL: This is the core TU masking function used during forward pass.
     tu_uniform_samples and tu_log_alpha must have compatible shapes.
+
+    Args:
+        tu_indices: TU indices array.
+            - For single-TU (is_multi_tu=False): shape (n_inputs,), each input maps to one TU
+            - For multi-TU (is_multi_tu=True): shape (n_inputs, max_tus), each input can come
+              from multiple TUs (uses max reduction)
+        tu_uniform_samples: Uniform samples for hard concrete, shape (n_tus,)
+        tu_log_alpha: Log-alpha params for hard concrete, shape (n_tus,)
+        temperature: Hard concrete temperature
+        is_multi_tu: REQUIRED. True for input_tu_indices (multi-TU per input),
+            False for output_tu_indices (single TU per output). No silent shape detection.
     """
     tu_indices = jnp.asarray(tu_indices)
     n_inputs = tu_indices.shape[0]
@@ -234,15 +247,25 @@ def compute_input_masks(
         f"tu_log_alpha {tu_log_alpha.shape}"
     )
 
-    if tu_indices.ndim == 1:
-        return jax.vmap(
-            lambda idx: compute_input_mask(idx, tu_uniform_samples, tu_log_alpha, temperature)
-        )(tu_indices)
-    else:
+    if is_multi_tu:
+        assert tu_indices.ndim == 2, (
+            f"is_multi_tu=True but tu_indices.ndim={tu_indices.ndim}. "
+            f"Expected 2D (n_inputs, max_tus), got shape {tu_indices.shape}. "
+            f"Multi-TU indices come from input_tu_indices (each input can have multiple TU sources)."
+        )
         return jax.vmap(
             lambda indices: compute_input_mask_multi(
                 indices, tu_uniform_samples, tu_log_alpha, temperature
             )
+        )(tu_indices)
+    else:
+        assert tu_indices.ndim == 1, (
+            f"is_multi_tu=False but tu_indices.ndim={tu_indices.ndim}. "
+            f"Expected 1D (n_inputs,), got shape {tu_indices.shape}. "
+            f"Single-TU indices come from output_tu_indices (each output maps to one TU)."
+        )
+        return jax.vmap(
+            lambda idx: compute_input_mask(idx, tu_uniform_samples, tu_log_alpha, temperature)
         )(tu_indices)
 
 

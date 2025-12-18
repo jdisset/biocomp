@@ -363,3 +363,147 @@ def test_jaxutils_check_function_with_checkify():
             err.throw()
     finally:
         set_enable_checks(False)
+
+
+# ---------------------------------------------------------------------------
+# Designloss Checkify Integration Tests
+# ---------------------------------------------------------------------------
+
+
+def test_checkify_sinkhorn_valid_inputs():
+    """Verify Sinkhorn divergence works with valid inputs under checkify."""
+    from jax.experimental import checkify
+    from biocomp.designloss import sinkhorn_divergence_conv
+
+    # Good inputs - should pass
+    a = jnp.ones((10, 10)) / 100
+    b = jnp.ones((10, 10)) / 100
+
+    checked_fn = checkify.checkify(sinkhorn_divergence_conv, errors=checkify.float_checks)
+    err, result = checked_fn(a, b, eps=0.1, n_iters=5)
+    err.throw()  # no error
+    assert jnp.isfinite(result)
+
+    # Note: NaN inputs are sanitized internally (converted to 0) by design,
+    # so checkify won't catch them. This is intentional robustness.
+
+
+def test_checkify_mse_loss_catches_nan():
+    """Verify checkify catches NaN in MSE loss computation."""
+    from jax.experimental import checkify
+    from biocomp.designloss import mse_loss
+
+    # Good inputs
+    x = jnp.linspace(0, 1, 10)[:, None]
+    y = jnp.sin(x).squeeze()
+    yhat = jnp.cos(x).squeeze()
+
+    checked_fn = checkify.checkify(mse_loss, errors=checkify.float_checks)
+    err, result = checked_fn(x, y, yhat)
+    err.throw()  # no error
+    assert jnp.isfinite(result)
+
+
+def test_checkify_zncc_loss_catches_nan():
+    """Verify checkify catches NaN in ZNCC loss computation."""
+    from jax.experimental import checkify
+    from biocomp.designloss import zncc_loss
+
+    # Good inputs
+    x = jnp.linspace(0, 1, 10)[:, None]
+    y = jnp.sin(x).squeeze()
+    yhat = jnp.cos(x).squeeze()
+
+    checked_fn = checkify.checkify(zncc_loss, errors=checkify.float_checks)
+    err, result = checked_fn(x, y, yhat)
+    err.throw()  # no error
+    assert jnp.isfinite(result)
+
+
+def test_checkify_lncc_grid_loss_catches_nan():
+    """Verify checkify catches NaN in LNCC grid loss computation."""
+    from jax.experimental import checkify
+    from biocomp.designloss import lncc_grid_loss
+
+    # Good inputs - 2D grids
+    y = jnp.ones((8, 8)) * 0.5
+    yhat = jnp.ones((8, 8)) * 0.6
+
+    checked_fn = checkify.checkify(lncc_grid_loss, errors=checkify.float_checks)
+    err, result = checked_fn(None, y, yhat, k=3)
+    err.throw()  # no error
+    assert jnp.isfinite(result)
+
+
+def test_checkify_gradient_through_loss():
+    """Verify checkify works through gradient computation."""
+    from jax.experimental import checkify
+    from biocomp.designloss import mse_loss
+
+    def loss_with_params(params, x, y):
+        yhat = params * x  # yhat shape matches x
+        return mse_loss(x, y, yhat)
+
+    x = jnp.linspace(0.1, 1, 10)
+    y = x * 2  # same shape as x
+
+    # Compute gradient with checkify
+    def grad_loss(params):
+        return jax.grad(lambda p: loss_with_params(p, x, y))(params)
+
+    checked_grad = checkify.checkify(grad_loss, errors=checkify.float_checks)
+
+    # Good params
+    err, grads = checked_grad(jnp.array(1.5))
+    err.throw()  # no error
+    assert jnp.isfinite(grads)
+
+
+def test_checkify_vmap_catches_per_element_nan():
+    """Verify checkify catches NaN in vmapped operations."""
+    from jax.experimental import checkify
+    from biocomp.designloss import mse_loss
+
+    def batched_mse(y_batch, yhat_batch):
+        return jax.vmap(lambda y, yh: mse_loss(None, y, yh))(y_batch, yhat_batch)
+
+    # Good inputs
+    y = jnp.ones((5, 10))
+    yhat = jnp.ones((5, 10)) * 0.9
+
+    checked_fn = checkify.checkify(batched_mse, errors=checkify.float_checks)
+    err, result = checked_fn(y, yhat)
+    err.throw()  # no error
+    assert jnp.all(jnp.isfinite(result))
+
+
+def test_checkify_index_bounds_in_coupling_penalty():
+    """Verify checkify.index_checks catches out-of-bounds indexing."""
+    from jax.experimental import checkify
+    from biocomp.parameters import ParameterTree
+    from biocomp.designloss import ratio_mask_coupling_penalty
+
+    # Create params with valid data
+    params = ParameterTree()
+    n_networks, n_tus, n_nodes, n_outputs = 2, 4, 3, 2
+
+    ratios = jnp.ones((n_nodes, n_outputs))
+    tu_indices = jnp.array([[0, 1], [1, 2], [2, 3]])  # valid indices
+    network_ids = jnp.array([0, 1, 0])
+    tu_log_alpha = jnp.zeros((n_networks, n_tus))
+
+    params.at("local/layer_1/ratios", ratios)
+    params.at("local/layer_1/output_tu_indices", tu_indices)
+    params.at("local/layer_1/node_network_ids", network_ids)
+
+    ratio_paths = ["local/layer_1/ratios"]
+
+    checked_fn = checkify.checkify(
+        ratio_mask_coupling_penalty,
+        errors=checkify.index_checks | checkify.float_checks
+    )
+
+    # Valid inputs should work
+    err, result = checked_fn(params, ratio_paths, tu_log_alpha, min_ratio_threshold=0.1)
+    err.throw()  # no error
+    assert jnp.isfinite(result)

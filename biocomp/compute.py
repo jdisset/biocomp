@@ -321,6 +321,27 @@ class ComputeStack:
             f"Built TU mapping: {self.n_tus} TUs, {len(inverse_tu_ids)} feeding inverse nodes"
         )
 
+    def get_per_network_tu_mask(self) -> jnp.ndarray:
+        """Returns (n_networks, n_tus) mask: 1 if network uses TU, 0 otherwise.
+
+        This enables per-network L0 penalty: each network is only penalized for
+        TUs it actually uses, not for TUs used by other networks.
+        """
+        from biocomp.tumasking import extract_tu_ids_from_network
+
+        assert self.is_built, "Stack must be built before getting TU masks"
+        assert hasattr(self, 'tu_id_to_idx'), "TU mapping not built"
+        assert self.n_tus > 0, "No TUs in stack"
+
+        mask = np.zeros((len(self.networks), self.n_tus), dtype=np.float32)
+        for net_idx, net in enumerate(self.networks):
+            net_tu_ids = extract_tu_ids_from_network(net)
+            for tu_id in net_tu_ids:
+                if tu_id in self.tu_id_to_idx:
+                    tu_idx = self.tu_id_to_idx[tu_id]
+                    mask[net_idx, tu_idx] = 1.0
+        return jnp.array(mask)
+
     def init(self, rng_key: PRNGKey) -> ParameterTree:
         """
         Generates a randomly initilized parameter tree for the stack
@@ -441,6 +462,8 @@ class ComputeStack:
 
     def commit(self, params: ParameterTree, **kwargs):
         from biocomp.tumasking import TU_LOG_ALPHA_PATH, get_final_mask
+        from biocomp.network import recipe_to_networks
+        import biocomp.biorules as br
 
         # create copies of all networks
         network_copies = [deepcopy(net) for net in self.networks]
@@ -453,37 +476,96 @@ class ComputeStack:
         for layer in self.layers:
             layer.commit(params, stack=temp_stack, **kwargs)
 
-        # AFTER node commits, remove disabled TU edges from network graphs
-        if TU_LOG_ALPHA_PATH in params:
+        # AFTER node commits, remove disabled TU edges and source nodes
+        # SINGLE SOURCE OF TRUTH: hard-concrete masks (tu_log_alpha) determine what's disabled
+        tu_id_to_idx = getattr(self, 'tu_id_to_idx', None)
+        if TU_LOG_ALPHA_PATH in params and tu_id_to_idx:
             tu_log_alpha = params[TU_LOG_ALPHA_PATH]
             assert tu_log_alpha.ndim == 2, (
                 f"COMMIT: tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D"
             )
-            tu_id_to_idx = getattr(self, 'tu_id_to_idx', None)
-            if tu_id_to_idx:
-                for net_idx, net in enumerate(network_copies):
-                    network_tu_log_alpha = tu_log_alpha[net_idx]
-                    edges_to_remove = []
-                    for edge_id, edge in net.compute_graph.edges.items():
-                        tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
-                        if not tu_ids:
-                            continue
-                        # check if ALL TUs on this edge are disabled
-                        all_disabled = True
-                        for tu_id in tu_ids:
-                            if tu_id not in tu_id_to_idx:
-                                all_disabled = False
-                                break
-                            tu_idx = tu_id_to_idx[tu_id]
-                            mask = get_final_mask(network_tu_log_alpha[tu_idx:tu_idx + 1])[0]
-                            if float(mask) > 0:
-                                all_disabled = False
-                                break
-                        if all_disabled and tu_ids:
-                            edges_to_remove.append(edge_id)
-                    # remove disabled edges
-                    for edge_id in edges_to_remove:
-                        del net.compute_graph.edges[edge_id]
+            assert tu_log_alpha.shape[0] >= len(network_copies), (
+                f"tu_log_alpha has {tu_log_alpha.shape[0]} networks but we have {len(network_copies)}"
+            )
+
+            for net_idx, net in enumerate(network_copies):
+                network_tu_log_alpha = tu_log_alpha[net_idx]
+
+                # prune source nodes based on disabled TUs
+                net.prune_disabled_tus(network_tu_log_alpha, tu_id_to_idx)
+
+                # remove any remaining edges for disabled TUs
+                edges_to_remove = []
+                for edge_id, edge in net.compute_graph.edges.items():
+                    tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                    if not tu_ids:
+                        continue
+                    all_disabled = True
+                    for tu_id in tu_ids:
+                        if tu_id not in tu_id_to_idx:
+                            all_disabled = False
+                            break
+                        tu_idx = tu_id_to_idx[tu_id]
+                        assert 0 <= tu_idx < network_tu_log_alpha.shape[0], (
+                            f"tu_idx {tu_idx} out of bounds for tu_log_alpha shape {network_tu_log_alpha.shape}"
+                        )
+                        mask = get_final_mask(network_tu_log_alpha[tu_idx:tu_idx + 1])[0]
+                        if float(mask) > 0:
+                            all_disabled = False
+                            break
+                    if all_disabled and tu_ids:
+                        edges_to_remove.append(edge_id)
+                for edge_id in edges_to_remove:
+                    del net.compute_graph.edges[edge_id]
+        else:
+            # fallback: prune based on zero ratios (non-design contexts)
+            for net in network_copies:
+                net.prune_disabled_tus()
+
+        # ROUNDTRIP: export to recipe and rebuild to ensure clean graph structure
+        # This is needed when TU masking is enabled (design context) to properly
+        # prune disabled TUs and ensure graph consistency
+        # For non-TU-masking contexts, skip roundtrip to preserve exact network structure
+        if TU_LOG_ALPHA_PATH in params and tu_id_to_idx:
+            final_networks = []
+            for net in network_copies:
+                recipe = net.to_recipe()
+
+                # handle networks with empty recipes (all TUs disabled)
+                if not recipe.content:
+                    # create an empty network to maintain index correspondence
+                    from biocomp.network import Network
+                    from biocomp.graphengine import GraphState
+                    empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
+                    empty_net.name = net.name
+                    empty_net.metadata = net.metadata
+                    final_networks.append(empty_net)
+                    continue
+
+                # rebuild from recipe
+                rebuilt = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="all")
+
+                if len(rebuilt) == 1:
+                    rebuilt_net = rebuilt[0]
+                else:
+                    # find the matching inversion by dependent output proteins
+                    original_outputs = tuple(sorted(net.get_dependent_output_proteins()))
+                    matching = [
+                        r for r in rebuilt
+                        if tuple(sorted(r.get_dependent_output_proteins())) == original_outputs
+                    ]
+                    assert len(matching) == 1, (
+                        f"COMMIT ERROR: Recipe '{recipe.name}' produced {len(rebuilt)} inversions, "
+                        f"but {len(matching)} match the original network's dependent outputs {original_outputs}. "
+                        f"Rebuilt outputs: {[tuple(sorted(r.get_dependent_output_proteins())) for r in rebuilt]}"
+                    )
+                    rebuilt_net = matching[0]
+                # preserve original network metadata and name
+                rebuilt_net.name = net.name
+                rebuilt_net.metadata = net.metadata
+                final_networks.append(rebuilt_net)
+
+            return final_networks
 
         return network_copies
 

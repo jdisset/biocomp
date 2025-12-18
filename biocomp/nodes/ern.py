@@ -234,7 +234,9 @@ def sequestron_ERN(
                 )
                 assert network_id is not None, "network_id required for per-network TU masking"
                 tu_log_alpha = tu_log_alpha_full[network_id]
-            input_masks = compute_input_masks(tu_indices, tu_enabled_random_vars, tu_log_alpha)
+            input_masks = compute_input_masks(
+                tu_indices, tu_enabled_random_vars, tu_log_alpha, is_multi_tu=True
+            )
         else:
             input_masks = jnp.ones(2)
 

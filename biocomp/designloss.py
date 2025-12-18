@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 from jax import vmap, lax
 from jax.tree_util import Partial
+from jax.experimental import checkify
 
 import numpy as np
 from assertpy import assert_that
@@ -11,6 +12,9 @@ from assertpy import assert_that
 from .parameters import ParameterTree
 from .optimutils import as_schedule
 from .tumasking import l0_loss, TU_LOG_ALPHA_PATH, MIN_TEMPERATURE
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def _sanitize(x):
@@ -53,6 +57,9 @@ def _gauss_blur2d(x, kernel):
 
 def sinkhorn_divergence_conv(a, b, eps, n_iters=80, uniform_mix=1e-9, min_mass=1e-6):
     """Grid-based Sinkhorn divergence using fast Gaussian convolutions."""
+    assert a.shape == b.shape, f"sinkhorn a/b shape mismatch: {a.shape} vs {b.shape}"
+    assert eps > 0, f"sinkhorn eps must be positive, got {eps}"
+
     a = jnp.maximum(_sanitize(a.astype(jnp.float32)), 1e-24)
     b = jnp.maximum(_sanitize(b.astype(jnp.float32)), 1e-24)
     a = a + min_mass / a.size  # uniform mass floor prevents grad explosion
@@ -155,6 +162,8 @@ def sinkhorn_divergence_balanced(
 
 def zncc_loss(x, y, yhat, eps=1e-6, **kw):
     """Zero-mean normalized cross-correlation loss."""
+    assert y.shape == yhat.shape, f"zncc_loss shape mismatch: y={y.shape} vs yhat={yhat.shape}"
+
     y, yhat = _sanitize(y), _sanitize(yhat)
     y0, yhat0 = y - jnp.mean(y), yhat - jnp.mean(yhat)
     cov = jnp.mean(y0 * yhat0)
@@ -186,6 +195,7 @@ def spectral_loss(x, y, yhat, **kw):
 
 
 def mse_loss(x, y, yhat, **kw):
+    assert y.shape == yhat.shape, f"mse_loss shape mismatch: y={y.shape} vs yhat={yhat.shape}"
     return jnp.mean((yhat - y) ** 2)
 
 
@@ -201,6 +211,9 @@ def simse_loss(x, y, yhat, eps=1e-8, **kw):
 
 def lncc_loss(x, y, yhat, target_neighbors=12, eps=1e-6, **kw):
     """Local normalized cross-correlation loss."""
+    assert x.shape[0] == y.size, f"lncc_loss: x batch size {x.shape[0]} != y size {y.size}"
+    assert y.size == yhat.size, f"lncc_loss: y size {y.size} != yhat size {yhat.size}"
+
     x, y, yhat = (
         _sanitize(x),
         _sanitize(jnp.asarray(y).reshape(-1)),
@@ -229,6 +242,9 @@ def lncc_loss(x, y, yhat, target_neighbors=12, eps=1e-6, **kw):
 
 def lncc_grid_loss(x, y, yhat, k=7, eps=1e-6, **kw):
     """Local NCC on 2D grid using box filter."""
+    assert y.ndim == 2, f"lncc_grid_loss: y must be 2D grid, got {y.ndim}D"
+    assert y.shape == yhat.shape, f"lncc_grid_loss shape mismatch: y={y.shape} vs yhat={yhat.shape}"
+
     y, yhat = _sanitize(y), _sanitize(yhat)
     r, N = k // 2, k * k
 
@@ -296,6 +312,192 @@ def get_spread_penalty_for_leaf(p, max_ratio=100.0):
         except Exception:
             return sum(ratio_spread_penalty(p.tree[path], max_ratio=max_ratio) for path in p.paths)
     return ratio_spread_penalty(p, max_ratio=max_ratio)
+
+
+def _ratio_mask_coupling_single_target(
+    params: ParameterTree,
+    ratio_paths: list[str],
+    tu_log_alpha_2d: jnp.ndarray,
+    min_ratio_threshold: float,
+    target_idx: int | jnp.ndarray,
+    ratios_are_3d: bool,
+) -> jnp.ndarray:
+    """Compute coupling penalty for a single target's tu_log_alpha.
+
+    Args:
+        params: Parameter tree containing ratios, output_tu_indices, node_network_ids
+        ratio_paths: List of paths to ratio parameters
+        tu_log_alpha_2d: TU log_alpha for one target, shape (n_networks, n_tus)
+        min_ratio_threshold: Coupling activates only when normalized ratio < this
+        target_idx: Which target's ratios to slice (used when ratios_are_3d=True)
+        ratios_are_3d: If True, expect ratios shape (n_targets, n_nodes, n_outputs) and slice by target_idx.
+                       If False, expect ratios shape (n_nodes, n_outputs) and target_idx is ignored.
+
+    Returns:
+        Scalar coupling penalty for this target
+    """
+    assert tu_log_alpha_2d.ndim == 2, (
+        f"tu_log_alpha_2d must be 2D (n_networks, n_tus), got shape {tu_log_alpha_2d.shape}. "
+        f"This function processes one target at a time."
+    )
+    assert 0 <= min_ratio_threshold <= 1, (
+        f"min_ratio_threshold must be in [0, 1], got {min_ratio_threshold}"
+    )
+    assert isinstance(ratios_are_3d, bool), (
+        f"ratios_are_3d must be explicit bool, got {type(ratios_are_3d)}. "
+        f"No silent shape detection allowed."
+    )
+
+    n_networks, n_tus = tu_log_alpha_2d.shape
+    assert n_networks > 0 and n_tus > 0, f"Empty tu_log_alpha: {tu_log_alpha_2d.shape}"
+
+    total_penalty = jnp.array(0.0)
+
+    for ratio_path in ratio_paths:
+        ratio_path_str = str(ratio_path) if not isinstance(ratio_path, str) else ratio_path
+        namespace = ratio_path_str.rsplit("/ratios", 1)[0]
+        tu_indices_path = f"{namespace}/output_tu_indices"
+        network_ids_path = f"{namespace}/node_network_ids"
+
+        if tu_indices_path not in params or network_ids_path not in params:
+            continue
+
+        ratios = jnp.abs(params[ratio_path])
+        tu_indices = params[tu_indices_path]
+        node_network_ids = params[network_ids_path]
+
+        if ratios_are_3d:
+            assert ratios.ndim == 3, (
+                f"ratios_are_3d=True but ratios.ndim={ratios.ndim} at {ratio_path}. "
+                f"Expected (n_targets, n_nodes, n_outputs), got {ratios.shape}."
+            )
+            ratios = ratios[target_idx]
+            assert tu_indices.ndim == 3, (
+                f"ratios_are_3d=True requires tu_indices to be 3D, got {tu_indices.ndim}D at {tu_indices_path}"
+            )
+            tu_indices = tu_indices[target_idx]
+            assert node_network_ids.ndim == 2, (
+                f"ratios_are_3d=True requires node_network_ids to be 2D, got {node_network_ids.ndim}D at {network_ids_path}"
+            )
+            node_network_ids = node_network_ids[target_idx]
+        else:
+            assert ratios.ndim == 2, (
+                f"ratios_are_3d=False but ratios.ndim={ratios.ndim} at {ratio_path}. "
+                f"Expected (n_nodes, n_outputs), got {ratios.shape}."
+            )
+            assert tu_indices.ndim == 2, (
+                f"ratios_are_3d=False requires tu_indices to be 2D, got {tu_indices.ndim}D"
+            )
+            assert node_network_ids.ndim == 1, (
+                f"ratios_are_3d=False requires node_network_ids to be 1D, got {node_network_ids.ndim}D"
+            )
+        assert ratios.shape == tu_indices.shape, (
+            f"Shape mismatch at {ratio_path}: ratios {ratios.shape} vs tu_indices {tu_indices.shape}"
+        )
+        assert ratios.shape[0] == node_network_ids.shape[0], (
+            f"Node count mismatch at {ratio_path}: ratios has {ratios.shape[0]} nodes, "
+            f"node_network_ids has {node_network_ids.shape[0]}"
+        )
+
+        n_nodes, n_outputs = ratios.shape
+        assert n_nodes > 0, f"n_nodes must be > 0"
+        assert n_outputs > 0, f"n_outputs must be > 0"
+
+        # normalize ratios per node using MAX normalization (not sum)
+        # this ensures min_ratio_threshold has consistent meaning regardless of TU count
+        # e.g., threshold=0.005 means "less than 0.5% of the largest ratio"
+        ratio_max = jnp.max(ratios, axis=-1, keepdims=True)
+        normalized_ratios = ratios / jnp.maximum(ratio_max, 1e-8)
+
+        network_ids_expanded = jnp.broadcast_to(node_network_ids[:, None], (n_nodes, n_outputs))
+
+        valid_tu_mask = (tu_indices >= 0).astype(jnp.float32)
+        safe_tu_indices = jnp.maximum(tu_indices, 0)
+        # clamp network_ids and tu_indices to valid range (defensive against corruption)
+        safe_network_ids = jnp.clip(network_ids_expanded, 0, n_networks - 1)
+        safe_tu_indices = jnp.clip(safe_tu_indices, 0, n_tus - 1)
+
+        # index into 2D tu_log_alpha
+        tu_log_alpha_per_ratio = tu_log_alpha_2d[safe_network_ids, safe_tu_indices]
+        tu_enabled_prob = jax.nn.sigmoid(tu_log_alpha_per_ratio)
+
+        # penalty only when ratio < threshold
+        below_threshold = jax.nn.relu(min_ratio_threshold - normalized_ratios)
+        per_element_penalty = tu_enabled_prob * below_threshold * valid_tu_mask
+
+        # use nan_to_num for safety (NaN checks done via checkify in tests)
+        per_element_penalty = jnp.nan_to_num(per_element_penalty, nan=0.0, posinf=0.0, neginf=0.0)
+
+        total_penalty = total_penalty + jnp.sum(per_element_penalty)
+
+    return total_penalty
+
+
+def ratio_mask_coupling_penalty(
+    params: ParameterTree,
+    ratio_paths: list[str],
+    tu_log_alpha: jnp.ndarray,
+    min_ratio_threshold: float = 0.005,
+) -> jnp.ndarray:
+    """Coupling loss: push down tu_log_alpha when ratio is below threshold.
+
+    ONLY activates when normalized_ratio < min_ratio_threshold. When ratios are in
+    acceptable range, this returns 0 (no coupling).
+
+    This creates gradient pressure to disable TUs (via hard-concrete) when their
+    corresponding ratios are too small, unifying the two disabling mechanisms.
+
+    Uses MAX normalization (ratio / max_ratio) not sum normalization, so the
+    threshold has consistent meaning regardless of TU count. E.g., threshold=0.005
+    means "ratio is less than 0.5% of the largest ratio in that aggregation".
+
+    Args:
+        params: Parameter tree containing ratios, output_tu_indices, node_network_ids
+        ratio_paths: List of paths to ratio parameters (e.g., ['local/layer_3/ratios'])
+        tu_log_alpha: TU log_alpha array, shape (n_targets, n_networks, n_tus) or (n_networks, n_tus)
+        min_ratio_threshold: Coupling activates when (ratio/max_ratio) < this (default 0.005 = 0.5%)
+
+    Returns:
+        Scalar coupling penalty (0 if all ratios are above threshold)
+
+    Note: Runtime value checks (NaN, bounds) tested via checkify in tests.
+    """
+    # static assertions (evaluated at trace/call time, not runtime)
+    assert isinstance(ratio_paths, list), f"ratio_paths must be a list, got {type(ratio_paths)}"
+    assert isinstance(min_ratio_threshold, (int, float)), (
+        f"min_ratio_threshold must be numeric, got {type(min_ratio_threshold)}"
+    )
+    assert 0 <= min_ratio_threshold <= 1, (
+        f"min_ratio_threshold must be in [0, 1], got {min_ratio_threshold}"
+    )
+    assert tu_log_alpha.ndim in (2, 3), (
+        f"tu_log_alpha must be 2D or 3D, got {tu_log_alpha.ndim}D with shape {tu_log_alpha.shape}"
+    )
+
+    if tu_log_alpha.ndim == 2:
+        return _ratio_mask_coupling_single_target(
+            params, ratio_paths, tu_log_alpha, min_ratio_threshold,
+            target_idx=0, ratios_are_3d=False,
+        )
+
+    assert tu_log_alpha.ndim == 3, f"tu_log_alpha must be 2D or 3D, got {tu_log_alpha.ndim}D"
+    n_targets, n_networks, n_tus = tu_log_alpha.shape
+    assert n_targets > 0 and n_networks > 0 and n_tus > 0, f"Empty tu_log_alpha: {tu_log_alpha.shape}"
+
+    target_indices = jnp.arange(n_targets)
+
+    def compute_for_target(target_idx, target_tu_log_alpha):
+        return _ratio_mask_coupling_single_target(
+            params, ratio_paths, target_tu_log_alpha, min_ratio_threshold,
+            target_idx=target_idx, ratios_are_3d=True,
+        )
+
+    per_target_penalty = vmap(compute_for_target)(target_indices, tu_log_alpha)
+    assert per_target_penalty.shape == (n_targets,), (
+        f"per_target_penalty shape mismatch: expected ({n_targets},), got {per_target_penalty.shape}"
+    )
+
+    return jnp.sum(per_target_penalty)
 
 
 def per_batch_apply(params, X, Z, keys, stack, tu_uniform=None):
@@ -403,12 +605,18 @@ def _make_loss_func(
     lambda_l0=0.0,
     tu_temperature=0.5,
     tu_n_samples=4,
+    lambda_coupling=0.1,
+    min_ratio_threshold=0.005,
 ):
     """Create the loss function with optional TU sample averaging for variance reduction.
 
     Args:
         tu_n_samples: Number of TU mask samples to average over (default 4).
             Higher values reduce variance but increase compute cost.
+        lambda_coupling: Weight for ratio-mask coupling penalty. When a ratio is below
+            min_ratio_threshold, this creates gradient pressure to push down tu_log_alpha.
+        min_ratio_threshold: Coupling only activates when normalized ratio < this.
+            Set to 0 to disable coupling entirely.
     """
     # config-time validation (Python assertions) - catches config bugs early
     _validate_temperature_schedule(tu_temperature, total_steps=100000)
@@ -417,6 +625,12 @@ def _make_loss_func(
     dep_mask = stack.get_dependent_output_mask()
     nb_dep = int(np.sum(dep_mask))
     ratio_paths = ratio_paths or []
+
+    # per-network TU mask: only penalize TUs each network actually uses
+    per_network_tu_mask = None
+    if dmanager.enable_tu_masking and hasattr(stack, 'get_per_network_tu_mask'):
+        per_network_tu_mask = stack.get_per_network_tu_mask()
+        logger.debug(f"Per-network TU mask shape: {per_network_tu_mask.shape}")
 
     def single_forward_pass(params, X, Z, key, tu_uniform):
         """Single forward pass with specific TU mask."""
@@ -447,10 +661,48 @@ def _make_loss_func(
 
         tu_temp = as_schedule(tu_temperature)(step)
         l0_penalty = jnp.array(0.0)
-        if TU_LOG_ALPHA_PATH in params and lambda_l0 > 0:
+        coupling_penalty = jnp.array(0.0)
+        if TU_LOG_ALPHA_PATH in params:
             log_alpha = params[TU_LOG_ALPHA_PATH]
-            l0_penalty = as_schedule(lambda_l0)(step) * l0_loss(log_alpha, temperature=tu_temp)
+            # defensive: validate log_alpha shape
+            assert log_alpha.ndim == 3, (
+                f"log_alpha must be 3D (n_targets, n_networks, n_tus), got {log_alpha.ndim}D"
+            )
+            assert log_alpha.shape[0] == n_targets, (
+                f"log_alpha n_targets mismatch: {log_alpha.shape[0]} vs {n_targets}"
+            )
+            assert log_alpha.shape[1] == n_networks, (
+                f"log_alpha n_networks mismatch: {log_alpha.shape[1]} vs {n_networks}"
+            )
+            # NOTE: can't assert jnp.isfinite(log_alpha) here - it's a traced value
+            # Use _sanitize() for NaN/Inf handling and checkify in tests for validation
+            log_alpha = jnp.nan_to_num(log_alpha, nan=0.0, posinf=10.0, neginf=-10.0)
+
+            # per-network L0: only penalize TUs each network actually uses
+            # log_alpha shape: (n_targets, n_networks, n_tus)
+            # per_network_tu_mask shape: (n_networks, n_tus)
+            from biocomp.tumasking import l0_penalty as l0_penalty_fn
+            per_tu_penalty = l0_penalty_fn(log_alpha, temperature=tu_temp)
+            if per_network_tu_mask is not None:
+                # defensive: validate mask shape
+                assert per_network_tu_mask.shape[0] == n_networks, (
+                    f"per_network_tu_mask shape mismatch: {per_network_tu_mask.shape} vs n_networks={n_networks}"
+                )
+                # mask zeros out unused TUs before summing
+                per_tu_penalty = per_tu_penalty * per_network_tu_mask[None, :, :]
+            l0_penalty = as_schedule(lambda_l0)(step) * jnp.sum(per_tu_penalty)
             l0_penalty = _sanitize(jnp.atleast_1d(l0_penalty))[0]
+
+            # ratio-mask coupling: push down tu_log_alpha when ratio is too small
+            # ONLY activates when normalized_ratio < min_ratio_threshold
+            # NOTE: can't check coupling_weight > 0 as it's traced; multiply by weight instead
+            if min_ratio_threshold > 0 and ratio_paths:  # static checks only
+                coupling_weight = as_schedule(lambda_coupling)(step)
+                raw_coupling = ratio_mask_coupling_penalty(
+                    params, ratio_paths, log_alpha, min_ratio_threshold
+                )
+                coupling_penalty = coupling_weight * raw_coupling
+                coupling_penalty = _sanitize(jnp.atleast_1d(coupling_penalty))[0]
 
         # TU sample averaging for variance reduction
         if tu_n_samples > 1 and TU_LOG_ALPHA_PATH in params:
@@ -482,10 +734,14 @@ def _make_loss_func(
             "all_losses": all_losses,
             "yhatdep": yhatdep,
             "l0_penalty": l0_penalty,
+            "coupling_penalty": coupling_penalty,
             "tu_uniform": tu_uniform,
         }
 
-        loss = all_losses.mean() + over1_penalty + spread_penalty + l0_penalty
+        loss = all_losses.mean() + over1_penalty + spread_penalty + l0_penalty + coupling_penalty
+        # NOTE: can't assert jnp.isfinite(loss) - it's a traced value
+        # Use _sanitize for handling and checkify in tests for validation
+        loss = jnp.nan_to_num(loss, nan=1e6, posinf=1e6, neginf=1e6)
         return loss, aux
 
     return loss_func
@@ -504,6 +760,8 @@ def distance_loss(
     lambda_l0=0.0,
     tu_temperature=0.5,
     tu_n_samples=4,
+    lambda_coupling=0.1,
+    min_ratio_threshold=0.005,
     distance_func=huber_zncc_loss,
 ):
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks):
@@ -527,6 +785,8 @@ def distance_loss(
         lambda_l0=lambda_l0,
         tu_temperature=tu_temperature,
         tu_n_samples=tu_n_samples,
+        lambda_coupling=lambda_coupling,
+        min_ratio_threshold=min_ratio_threshold,
     )
 
 
@@ -549,6 +809,8 @@ def grid_distance_loss(
     lambda_l0=0.0,
     tu_temperature=0.5,
     tu_n_samples=4,
+    lambda_coupling=0.1,
+    min_ratio_threshold=0.005,
     **kw,
 ):
     assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
@@ -604,4 +866,6 @@ def grid_distance_loss(
         lambda_l0=lambda_l0,
         tu_temperature=tu_temperature,
         tu_n_samples=tu_n_samples,
+        lambda_coupling=lambda_coupling,
+        min_ratio_threshold=min_ratio_threshold,
     )

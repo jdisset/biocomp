@@ -133,5 +133,20 @@ def add_tu_output_mapping(
     )
 
 
+def add_node_network_ids(
+    params: ParameterTree,
+    nodelist: list[StackNode],
+    namespace: str,
+):
+    """Add network_id for each node at {namespace}/node_network_ids."""
+    network_ids = jnp.array([node.network_id for node in nodelist], dtype=jnp.int32)
+    params.at(
+        f"{namespace}/node_network_ids",
+        network_ids,
+        tags=[NON_GRAD_TAG],
+        overwrite=None,
+    )
+
+
 def empty_prepare(*_, **__):
     pass
