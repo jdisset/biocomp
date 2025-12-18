@@ -172,7 +172,7 @@ def make_smallest_stack_dfs(
     type_dict: dict[str, list[tuple]],
     path=None,
     depth=0,
-    max_depth=70,
+    max_depth=200,
     max_t=1,
 ) -> list[StackLayer]:
     """Build stack using depth-first search"""
@@ -205,6 +205,21 @@ def make_smallest_stack_dfs(
         possible_next_types = possible_next_types[:max_t]
 
     assert possible_next_types, "No possible next type"
+
+    if depth >= max_depth:
+        # raise a detailed error BEFORE recursing to prevent stack overflow
+        msg = f"Max depth reached: {max_depth}\n"
+        msg += f"Depth: {depth}\n"
+        msg += f"Number of networks: {len(networks)}\n"
+        msg += "Remaining nodes by type:\n"
+        for t, nodes in type_dict.items():
+            msg += f"  {t}: {len(nodes)} nodes\n"
+        msg += f"Possible next types: {possible_next_types}\n"
+        msg += "Path so far:\n"
+        for i, p in enumerate(path[-10:]):  # show last 10 steps
+            msg += f"  {i}: {p}\n"
+        raise RuntimeError(msg)
+
     candidate_stacks = []
     # we try every possible type for the next layer
     for t, _ in possible_next_types:
@@ -227,16 +242,6 @@ def make_smallest_stack_dfs(
         )
 
     assert candidate_stacks, "No candidate stack"
-
-    if depth >= max_depth:
-        # raise a detailed error
-        msg = f"Max depth reached: {max_depth}\n"
-        msg += f"Current stack:\n{stack}\n"
-        msg += f"Current type_dict:\n{type_dict}\n"
-        msg += f"Current batches:\n{current_batches}\n"
-        msg += f"Possible next types:\n{possible_next_types}\n"
-        msg += f"Candidate stacks:\n{candidate_stacks}\n"
-        raise RuntimeError(msg)
 
     # and we only keep the smallest stack
     minstack_layers = min(candidate_stacks, key=lambda s: len(s))
