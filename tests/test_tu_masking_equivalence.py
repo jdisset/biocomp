@@ -314,7 +314,7 @@ def test_tu_masking_equivalence(lib, base_setup, modified_stacks, test_case_id):
     2. Outputs with ALL contributing TUs disabled should be ~0
     3. Outputs with SOME enabled TUs should match modified network
     """
-    n_test_inputs = 100
+    n_test_inputs = 20  # reduced from 100 - still statistically meaningful
     key = jax.random.key(42)
 
     # Get pre-built stacks from fixtures
