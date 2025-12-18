@@ -133,6 +133,17 @@ class GraphState(BaseModel):
         edges = self.get_outgoing_edges(node_id)
         return len(set(e.from_output_slot for e in edges))
 
+    def get_max_output_slot(self, node_id: int) -> int:
+        """Returns the maximum output slot index + 1 (i.e., required number of outputs).
+
+        This differs from get_nb_outgoing_slots which counts unique slots.
+        For sparse slots (e.g., 0, 7), this returns 8 while get_nb_outgoing_slots returns 2.
+        """
+        edges = self.get_outgoing_edges(node_id)
+        if not edges:
+            return 0
+        return max(e.from_output_slot for e in edges) + 1
+
     def get_nb_incoming_edges(self, node_id: int) -> int:
         return len(self.get_incoming_edges(node_id))
 

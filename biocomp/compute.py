@@ -40,10 +40,14 @@ class StackNode:
 
     @staticmethod
     def generate_type_signature(graph: GraphState, node_id: int) -> str:
-        """Generate a type signature for a node based on its type and number of inputs/outputs"""
+        """Generate a type signature for a node based on its type and number of inputs/outputs.
+
+        Uses get_max_output_slot() to determine required outputs, not unique slot count.
+        This handles sparse slots correctly (e.g., slots 0,7 requires 8 outputs, not 2).
+        """
         node = graph.nodes[node_id]
         n_inputs = len(graph.get_incoming_edges(node_id))
-        n_outputs = graph.get_nb_outgoing_slots(node_id)
+        n_outputs = graph.get_max_output_slot(node_id)
         return f"{node.node_type}_{n_inputs}_{n_outputs}"
 
     def _get_compute_graph(self, stack: "ComputeStack") -> GraphState:
@@ -72,7 +76,8 @@ class StackNode:
         return self._get_compute_graph(stack).get_incoming_edges(self.node_id)
 
     def get_nb_outputs(self, stack: "ComputeStack") -> int:
-        return self._get_compute_graph(stack).get_nb_outgoing_slots(self.node_id)
+        """Get required number of outputs based on max slot index, not unique slot count."""
+        return self._get_compute_graph(stack).get_max_output_slot(self.node_id)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -175,7 +180,11 @@ class StackLayer:
                 assert stack.layers[input_layer_id].is_built, "Input layer is not built"
                 input_layer_output_shapes = stack.layers[input_layer_id].f_out_shapes
                 assert input_slot_id < len(input_layer_output_shapes), (
-                    f"Input slot {input_slot_id} is out of range"
+                    f"Input slot {input_slot_id} is out of range for layer {input_layer_id} "
+                    f"with {len(input_layer_output_shapes)} outputs. "
+                    f"Source node {input_compute_node_id} in network {input_net_id} "
+                    f"({stack.networks[input_net_id].name}). "
+                    f"Edge from source node to this layer's node."
                 )
                 shape = (
                     tuple(input_layer_output_shapes[input_slot_id])
@@ -207,15 +216,21 @@ class StackLayer:
         self.is_built = True
 
     def get_n_outputs(self) -> int:
-        """Get the number of outputs for nodes in this layer (all nodes in a layer have the same type signature)"""
+        """Get the number of outputs for nodes in this layer (all nodes in a layer have the same type signature).
+
+        Uses get_max_output_slot() to determine required outputs, matching signature generation.
+        This handles sparse slots correctly (e.g., slots 0,7 requires 8 outputs).
+        """
         first_key = self.nodes[0]
         graph = self.stack.networks[first_key.network_id].compute_graph
-        return len(graph.get_outgoing_edges(first_key.node_id))
+        return graph.get_max_output_slot(first_key.node_id)
 
     def flattened_output_shape(self) -> int:
         return int(len(self.nodes) * np.sum([np.prod(s) for s in self.f_out_shapes]))
 
     def type_str(self) -> str:
+        if self.stack is None:
+            return "<unbound>"
         first_key = self.nodes[0]
         return (
             self.stack.networks[first_key.network_id]
@@ -225,7 +240,8 @@ class StackLayer:
 
     def __repr__(self):
         ftype = self.type_str()
-        return f"Layer {self.layer_id} ({ftype}) with {len(self.nodes)} nodes"
+        layer_id = self.layer_id if self.layer_id is not None else "?"
+        return f"Layer {layer_id} ({ftype}) with {len(self.nodes)} nodes"
 
     def __hash__(self):
         return hash(tuple(self.nodes))
@@ -465,6 +481,11 @@ class ComputeStack:
         from biocomp.network import recipe_to_networks
         import biocomp.biorules as br
 
+        tu_id_to_idx = getattr(self, 'tu_id_to_idx', None)
+        will_roundtrip = TU_LOG_ALPHA_PATH in params and tu_id_to_idx
+        logger.debug(f"COMMIT: TU_LOG_ALPHA in params={TU_LOG_ALPHA_PATH in params}, "
+                     f"tu_id_to_idx={tu_id_to_idx is not None}, will_roundtrip={will_roundtrip}")
+
         # create copies of all networks
         network_copies = [deepcopy(net) for net in self.networks]
 
@@ -478,7 +499,6 @@ class ComputeStack:
 
         # AFTER node commits, remove disabled TU edges and source nodes
         # SINGLE SOURCE OF TRUTH: hard-concrete masks (tu_log_alpha) determine what's disabled
-        tu_id_to_idx = getattr(self, 'tu_id_to_idx', None)
         if TU_LOG_ALPHA_PATH in params and tu_id_to_idx:
             tu_log_alpha = params[TU_LOG_ALPHA_PATH]
             assert tu_log_alpha.ndim == 2, (
@@ -523,51 +543,76 @@ class ComputeStack:
                 net.prune_disabled_tus()
 
         # ROUNDTRIP: export to recipe and rebuild to ensure clean graph structure
-        # This is needed when TU masking is enabled (design context) to properly
-        # prune disabled TUs and ensure graph consistency
-        # For non-TU-masking contexts, skip roundtrip to preserve exact network structure
-        if TU_LOG_ALPHA_PATH in params and tu_id_to_idx:
-            final_networks = []
-            for net in network_copies:
-                recipe = net.to_recipe()
+        # This ensures orphan nodes (e.g., transcription nodes with no source) are removed
+        # and the graph is consistent. Always performed for robustness.
+        final_networks = []
+        for net in network_copies:
+            recipe = net.to_recipe()
 
-                # handle networks with empty recipes (all TUs disabled)
-                if not recipe.content:
-                    # create an empty network to maintain index correspondence
-                    from biocomp.network import Network
-                    from biocomp.graphengine import GraphState
-                    empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
-                    empty_net.name = net.name
-                    empty_net.metadata = net.metadata
-                    final_networks.append(empty_net)
-                    continue
+            # handle networks with empty recipes (all TUs disabled)
+            if not recipe.content:
+                # create an empty network to maintain index correspondence
+                from biocomp.network import Network
+                from biocomp.graphengine import GraphState
+                empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
+                empty_net.name = net.name
+                empty_net.metadata = net.metadata
+                final_networks.append(empty_net)
+                continue
 
-                # rebuild from recipe
-                rebuilt = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="all")
+            # rebuild from recipe
+            rebuilt = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="all")
 
-                if len(rebuilt) == 1:
-                    rebuilt_net = rebuilt[0]
-                else:
-                    # find the matching inversion by dependent output proteins
-                    original_outputs = tuple(sorted(net.get_dependent_output_proteins()))
-                    matching = [
-                        r for r in rebuilt
-                        if tuple(sorted(r.get_dependent_output_proteins())) == original_outputs
-                    ]
-                    assert len(matching) == 1, (
-                        f"COMMIT ERROR: Recipe '{recipe.name}' produced {len(rebuilt)} inversions, "
-                        f"but {len(matching)} match the original network's dependent outputs {original_outputs}. "
-                        f"Rebuilt outputs: {[tuple(sorted(r.get_dependent_output_proteins())) for r in rebuilt]}"
-                    )
-                    rebuilt_net = matching[0]
-                # preserve original network metadata and name
-                rebuilt_net.name = net.name
-                rebuilt_net.metadata = net.metadata
-                final_networks.append(rebuilt_net)
+            if len(rebuilt) == 1:
+                rebuilt_net = rebuilt[0]
+            else:
+                # find the matching inversion by dependent output proteins
+                original_outputs = tuple(sorted(net.get_dependent_output_proteins()))
+                matching = [
+                    r for r in rebuilt
+                    if tuple(sorted(r.get_dependent_output_proteins())) == original_outputs
+                ]
+                assert len(matching) == 1, (
+                    f"COMMIT ERROR: Recipe '{recipe.name}' produced {len(rebuilt)} inversions, "
+                    f"but {len(matching)} match the original network's dependent outputs {original_outputs}. "
+                    f"Rebuilt outputs: {[tuple(sorted(r.get_dependent_output_proteins())) for r in rebuilt]}"
+                )
+                rebuilt_net = matching[0]
+            # preserve original network metadata and name
+            rebuilt_net.name = net.name
+            rebuilt_net.metadata = net.metadata
+            final_networks.append(rebuilt_net)
 
-            return final_networks
+        # verify all committed networks have valid edge slots
+        for i, net in enumerate(final_networks):
+            self._assert_valid_edge_slots(net, f"committed network[{i}]")
 
-        return network_copies
+        return final_networks
+
+    def _assert_valid_edge_slots(self, network, context: str):
+        """Assert all edges reference valid slot indices on their source/target nodes."""
+        print(f"DEBUG _assert_valid_edge_slots: {context}, network={network.name}")
+        cg = network.compute_graph
+        for eid, edge in cg.edges.items():
+            src = cg.nodes.get(edge.source_id)
+            tgt = cg.nodes.get(edge.target_id)
+
+            assert src is not None, (
+                f"{context}: Edge {eid} references missing source node {edge.source_id}"
+            )
+            assert tgt is not None, (
+                f"{context}: Edge {eid} references missing target node {edge.target_id}"
+            )
+
+            # aggregation outputs are determined by ratios/members length
+            if src.node_type == "aggregation":
+                n_outputs = len(src.extra.get("ratios", []))
+                assert edge.from_output_slot < n_outputs, (
+                    f"{context}: Edge {eid} from aggregation[{edge.source_id}] has "
+                    f"from_output_slot={edge.from_output_slot} but aggregation only has "
+                    f"{n_outputs} outputs (ratios={src.extra.get('ratios', [])}, "
+                    f"members={src.extra.get('members', [])})"
+                )
 
     def __repr__(self):
         # layers with line breaks
