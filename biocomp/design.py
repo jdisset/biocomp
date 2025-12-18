@@ -546,10 +546,6 @@ class DesignManager(BaseModel):
 
         stack.build(compute_config, enable_tu_masking=self.enable_tu_masking)
 
-        if self.enable_tu_masking:
-            self._ensure_tu_mapping()
-            logger.info(f"TU masking enabled: {len(self._tu_ids)} TUs")
-
         logger.info(
             f"Stack built: {stack.get_nb_networks()} networks, "
             f"{stack.get_nb_inputs()} inputs, {stack.get_nb_outputs()} outputs"

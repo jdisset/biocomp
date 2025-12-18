@@ -225,7 +225,14 @@ def extract_tu_ids_from_network(network) -> list[str]:
 
 
 def build_tu_id_mapping(networks: list) -> tuple[list[str], dict[str, int]]:
-    """Build TU ID mapping from multiple networks."""
+    """Build TU ID mapping from multiple networks.
+
+    Args:
+        networks: List of networks to extract TU IDs from
+
+    Returns:
+        Tuple of (sorted_tu_ids, tu_id_to_idx mapping)
+    """
     all_tu_ids = set()
     for net in networks:
         all_tu_ids.update(extract_tu_ids_from_network(net))
