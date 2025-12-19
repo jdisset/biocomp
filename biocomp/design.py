@@ -1,10 +1,9 @@
 ### {{{                          --     imports     --
 import random
-import warnings
-from abc import ABC, abstractmethod
 from functools import partial
 from pathlib import Path
-from typing import List, Tuple, Callable, Optional, Union, Literal
+from typing import List, Tuple, Callable, Optional
+import warnings
 
 import numpy as np
 import optax
@@ -15,28 +14,33 @@ from jax.tree_util import Partial
 from jax.typing import ArrayLike
 
 from assertpy import assert_that
-from pydantic import Field, BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from tqdm import tqdm
 
-from biocomp.utils import encode_function, EncodedPartialFunction, ArbitraryModel
+from biocomp.utils import encode_function, EncodedPartialFunction
 from biocomp.compute import ComputeStack
 import biocomp.nodes as nd
 from biocomp.network import Network
 from .parameters import ParameterTree
 from biocomp.logging_config import get_logger
 from biocomptools.modelmodel import BiocompModel
-from biocomp.designutils import sample_from_svg, data_to_lattice_2d
 from biocomp.optimutils import make_training_step, per_replicate_step, optimize, DesignOptimConfig
-from biocomp.designloss import distance_loss, grid_distance_loss  # noqa: F401 - re-exported for config compatibility
-from biocomp.tumasking import (
-    build_tu_id_mapping,
-    TU_LOG_ALPHA_PATH,
-    LOG_ALPHA_MIN,
-    LOG_ALPHA_MAX,
-)
-from biocomp.designdebug import (
-    save_debug_state,
-    is_design_debug_enabled,
+from biocomp.designloss import distance_loss, grid_distance_loss  # noqa: F401 - re-exported
+from biocomp.tumasking import build_tu_id_mapping, TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
+from biocomp.designdebug import save_debug_state, is_design_debug_enabled
+
+# re-export target classes and sampling configs for backward compatibility
+from biocomp.design_targets import (  # noqa: F401
+    SamplingConfig,
+    UniformSampling,
+    LatticeSampling,
+    SamplingConfigUnion,
+    TargetBase,
+    SVGTarget,
+    Target,
+    DataTarget,
+    TargetUnion,
+    DEFAULT_RESCALE_TARGET,
 )
 
 logger = get_logger(__name__)
@@ -55,427 +59,11 @@ def get_design_debug_output_dir() -> str | None:
     """Get the current design debug output directory."""
     return _debug_output_dir
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{                     --     helper functions     --
-
-
-def get_ind_params(params, target_id, ind_id):
-    return jax.tree.map(lambda x: x[target_id, ind_id], params)
-
-
-def plot_prediction(
-    design_config,
-    params,
-    target_id,
-    ind_id,
-    net_id,
-    target_x,
-    target_y,
-    key,
-    stack,
-    num_z,
-    dep_output_mask,
-    max_evals=30000,
-):
-    """Plot the prediction for a given target and individual."""
-    import matplotlib.pyplot as plt
-
-    params_ind = get_ind_params(params, target_id, ind_id)
-    t_x = target_x[:, target_id]
-    t_x = t_x.reshape(-1, t_x.shape[-1])[:max_evals]
-    t_y = target_y[:, target_id]
-    t_y = t_y.reshape(-1, t_y.shape[-1])[:max_evals]
-
-    z = jax.random.uniform(key, (*t_x.shape[:-1], num_z))
-
-    t_yhat = design_config.forward(params_ind, t_x, z, key, stack)
-    t_yhatdep = t_yhat[..., dep_output_mask]
-    assert_that(t_yhatdep.shape).is_equal_to(t_y.shape)
-
-    loss_value = float(jnp.mean((t_yhatdep[:, net_id] - t_y[:, net_id]) ** 2))
-
-    t_x_net = t_x[:, 2 * net_id : 2 * net_id + 2]
-
-    # 2 subplots (ground truth and prediction)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 5))
-    scatter1 = ax1.scatter(
-        t_x_net[:, 0], t_x_net[:, 1], c=t_y[:, net_id], s=1, cmap="viridis", vmin=0, vmax=1
-    )
-    ax1.set_xlabel("x")
-    ax1.set_ylabel("y")
-    ax1.set_title("Ground Truth")
-    ax1.set_aspect("equal")
-    plt.colorbar(scatter1, ax=ax1)
-    scatter2 = ax2.scatter(
-        t_x_net[:, 0], t_x_net[:, 1], c=t_yhatdep[:, net_id], s=1, cmap="viridis", vmin=0, vmax=1
-    )
-    ax2.set_title("Prediction")
-    ax2.set_xlabel("x")
-    ax2.set_ylabel("y")
-    ax2.set_aspect("equal")
-    plt.colorbar(scatter2, ax=ax2)
-    ax2.set_title(f"Prediction (Loss: {loss_value:.4f})")
-    plt.tight_layout()
-
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
 ## {{{                          --     design manager   --
-
-# Legacy default for backward compatibility
-DEFAULT_RESCALE_TARGET = {
-    "x": (0.0, 0.5),
-    "y": (0.0, 0.5),
-    "out": (0.09, 0.42),
-}
-
-
-class SamplingConfig(ArbitraryModel):
-    strategy: Literal["uniform", "lattice"] = "uniform"
-
-
-class UniformSampling(SamplingConfig):
-    strategy: Literal["uniform"] = "uniform"
-    n_samples: int = 5000
-
-
-class LatticeSampling(SamplingConfig):
-    strategy: Literal["lattice"] = "lattice"
-    resolution: tuple[int, int] = (64, 64)
-    jitter_std: float = 0.0
-
-
-SamplingConfigUnion = Union[UniformSampling, LatticeSampling]
-
-
-## {{{                          --     target classes   --
-
-
-class TargetBase(BaseModel, ABC):
-    """Base class for design targets. Defines lattice extent for sampling."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    name: Optional[str] = None
-    lattice_x_extent: tuple[float, float] = (0.0, 1.0)
-    lattice_y_extent: tuple[float, float] = (0.0, 1.0)
-
-    @abstractmethod
-    def get_lattice(
-        self, resolution: tuple[int, int], seed: int = 0
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Sample target onto a regular lattice grid.
-
-        Returns:
-            X_lattice: Grid coordinates (n_points, 2)
-            Y_lattice: Target values (yres, xres), may contain NaN for out-of-data regions
-        """
-        ...
-
-    @abstractmethod
-    def sample_uniform(self, n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
-        """Sample n random points from the target."""
-        ...
-
-
-class SVGTarget(TargetBase):
-    """Design target from SVG image file.
-
-    The img_latent_* parameters control how SVG coordinates map to latent space.
-    The lattice_*_extent parameters control which region of latent space to sample.
-    """
-
-    path: Union[str, Path]
-
-    # SVG-to-latent coordinate mapping
-    img_latent_xlim: tuple[float, float] = (0.0, 1.0)
-    img_latent_ylim: tuple[float, float] = (0.0, 1.0)
-    img_latent_outlim: tuple[float, float] = (0.0, 1.0)
-
-    transform_to_log_space: bool = False
-    max_is_black: bool = True
-
-    @model_validator(mode="after")
-    def _auto_log_extent(self):
-        if self.transform_to_log_space:
-            if self.lattice_x_extent == (0.0, 1.0):
-                self.lattice_x_extent = (0.1, 1.0)
-            if self.lattice_y_extent == (0.0, 1.0):
-                self.lattice_y_extent = (0.1, 1.0)
-        return self
-
-    def get_lattice(
-        self, resolution: tuple[int, int], seed: int = 0
-    ) -> tuple[np.ndarray, np.ndarray]:
-        X, Y = sample_from_svg(
-            self.path,
-            n=1,
-            seed=seed,
-            log=self.transform_to_log_space,
-            lattice_x_extent=self.lattice_x_extent,
-            lattice_y_extent=self.lattice_y_extent,
-            img_latent_xlim=self.img_latent_xlim,
-            img_latent_ylim=self.img_latent_ylim,
-            img_latent_outlim=self.img_latent_outlim,
-            max_is_black=self.max_is_black,
-            grid=resolution,
-            grid_jitter_std=0.0,
-        )
-        return X, Y[0]  # Y shape is (1, yres, xres) in grid mode
-
-    def sample_uniform(self, n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
-        return sample_from_svg(
-            self.path,
-            n=n,
-            seed=seed,
-            log=self.transform_to_log_space,
-            lattice_x_extent=self.lattice_x_extent,
-            lattice_y_extent=self.lattice_y_extent,
-            img_latent_xlim=self.img_latent_xlim,
-            img_latent_ylim=self.img_latent_ylim,
-            img_latent_outlim=self.img_latent_outlim,
-            max_is_black=self.max_is_black,
-            grid=None,
-        )
-
-
-class Target(SVGTarget):
-    """Legacy alias for SVGTarget. Use SVGTarget for new code."""
-
-    # Legacy fields for backward compatibility
-    xlim: Optional[tuple[float, float]] = None
-    ylim: Optional[tuple[float, float]] = None
-    outlim: Optional[tuple[float, float]] = None
-    rescale_to: Optional[dict] = None
-
-    @model_validator(mode="after")
-    def _migrate_legacy_params(self):
-        # Migrate old xlim/ylim to lattice extents
-        if self.xlim is not None:
-            warnings.warn(
-                "Target.xlim is deprecated, use lattice_x_extent instead",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            self.lattice_x_extent = self.xlim
-        if self.ylim is not None:
-            warnings.warn(
-                "Target.ylim is deprecated, use lattice_y_extent instead",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            self.lattice_y_extent = self.ylim
-        if self.outlim is not None:
-            warnings.warn(
-                "Target.outlim is deprecated, use img_latent_outlim instead",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            self.img_latent_outlim = self.outlim
-        if self.rescale_to is not None:
-            warnings.warn(
-                "Target.rescale_to is deprecated. Use lattice_*_extent and img_latent_*lim instead.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            # Best-effort migration: use rescale_to as the final latent extent
-            if "x" in self.rescale_to:
-                self.lattice_x_extent = tuple(self.rescale_to["x"])
-            if "y" in self.rescale_to:
-                self.lattice_y_extent = tuple(self.rescale_to["y"])
-            if "out" in self.rescale_to:
-                self.img_latent_outlim = tuple(self.rescale_to["out"])
-        return self
-
-
-class DataTarget(TargetBase):
-    """Design target from experimental data.
-
-    Data is expected to already be in latent space. The lattice extent parameters
-    define where to build the interpolation grid; data outside this range is masked.
-
-    IMPORTANT: X columns are in alphabetical order of input_names. When predicting
-    with a different network, use get_reordered_X() to map columns correctly.
-    """
-
-    X: np.ndarray  # (n_samples, n_dims) - already in latent space, alphabetical column order
-    Y: np.ndarray  # (n_samples,) or (n_samples, 1)
-
-    # input_names: alphabetical protein names corresponding to X columns
-    # Required for correct column alignment when predicting with different networks
-    input_names: Optional[list[str]] = None
-
-    z_slice: Optional[float] = None
-    z_tolerance: float = 0.05
-    original_network: Optional[Network] = None
-
-    # Legacy fields for backward compatibility
-    xlim: Optional[tuple[float, float]] = None
-    ylim: Optional[tuple[float, float]] = None
-    outlim: Optional[tuple[float, float]] = None  # unused, kept for compat
-
-    _lattice_X: Optional[np.ndarray] = None
-    _lattice_Y: Optional[np.ndarray] = None
-
-    @model_validator(mode="after")
-    def _migrate_legacy_params(self):
-        if self.xlim is not None:
-            warnings.warn(
-                "DataTarget.xlim is deprecated, use lattice_x_extent instead",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            self.lattice_x_extent = self.xlim
-        if self.ylim is not None:
-            warnings.warn(
-                "DataTarget.ylim is deprecated, use lattice_y_extent instead",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            self.lattice_y_extent = self.ylim
-        if self.outlim is not None:
-            warnings.warn(
-                "DataTarget.outlim is deprecated and ignored for DataTarget",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-        return self
-
-    @classmethod
-    def from_plot_data(cls, plot_data, rescaler=None, **kwargs):
-        """Create from PlotData object."""
-        X = np.asarray(plot_data.x)
-        Y = np.asarray(plot_data.y)
-        if rescaler is not None:
-            X = rescaler.fwd(X)
-            Y = rescaler.fwd(Y)
-        name = kwargs.pop("name", plot_data.metadata.get("network_name", "data_target"))
-        return cls(X=X, Y=Y, name=name, **kwargs)
-
-    def get_lattice(
-        self, resolution: tuple[int, int], seed: int = 0, force_recompute: bool = False
-    ) -> tuple[np.ndarray, np.ndarray]:
-        if self._lattice_X is not None and self._lattice_Y is not None and not force_recompute:
-            return self._lattice_X, self._lattice_Y
-
-        X_samples, Y_samples = data_to_lattice_2d(
-            self.X,
-            self.Y,
-            xlims=self.lattice_x_extent,
-            ylims=self.lattice_y_extent,
-            resolution=resolution,
-        )
-
-        nan_mask = np.isnan(Y_samples)
-        if nan_mask.any():
-            valid_mean = np.nanmean(Y_samples)
-            Y_samples = np.where(nan_mask, valid_mean, Y_samples)
-            logger.debug(f"Filled {nan_mask.sum()} NaN values with mean={valid_mean:.4f}")
-
-        self._lattice_X = X_samples
-        self._lattice_Y = Y_samples
-        return self._lattice_X, self._lattice_Y
-
-    def sample_uniform(self, n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
-        rng = np.random.default_rng(seed)
-        indices = rng.choice(len(self.X), size=n, replace=True)
-        X_sampled = self.X[indices]
-        Y_sampled = self.Y[indices]
-        if Y_sampled.ndim == 1:
-            Y_sampled = Y_sampled[:, None]
-        return X_sampled, Y_sampled
-
-    def get_reordered_X(self, target_network: Network) -> np.ndarray:
-        """Reorder X columns to match target_network's expected input order.
-
-        X columns are stored in alphabetical order of input_names. Different networks
-        may expect inputs in different orders (determined by their graph structure).
-
-        IMPORTANT: If target_network has axis_mapping (i.e., it's a scaffold network),
-        we use POSITIONAL mapping: X[:,0] is x-axis, X[:,1] is y-axis, matching the
-        axis_mapping specification. This is because scaffold networks have different
-        proteins than the target data.
-
-        For networks WITHOUT axis_mapping (reconstruction case), we use protein-name
-        matching to reorder columns.
-
-        Returns X unchanged if no reordering is needed.
-        """
-        # CASE 1: Scaffold network with axis_mapping - use positional mapping
-        # During design, X is passed positionally (X[:,0] → input 0, X[:,1] → input 1)
-        # The axis_mapping in the scaffold recipe defines: x1 → x-axis, x2 → y-axis
-        # So X[:,0] is x, X[:,1] is y - no reordering needed for scaffold networks
-        if target_network.has_axis_mapping():
-            logger.debug(
-                f"Network '{target_network.name}' has axis_mapping - using positional X (no reorder)"
-            )
-            X_result = self.X
-            reorder = list(range(self.X.shape[1]))
-            reorder_reason = "axis_mapping_positional"
-        # CASE 2: Reconstruction case - use protein-name matching
-        else:
-            if self.input_names is None:
-                if self.original_network is not None:
-                    self.input_names = sorted(self.original_network.get_inverted_input_proteins())
-                else:
-                    return self.X
-
-            # Use ACTUAL network input order, not sorted! The network expects inputs in this order.
-            target_input_names = target_network.get_inverted_input_proteins()
-
-            if self.input_names == target_input_names:
-                reorder = list(range(len(self.input_names)))
-                X_result = self.X
-                reorder_reason = "names_match"
-            else:
-                # Build mapping: target column index -> source column index
-                try:
-                    source_name_to_idx = {name: i for i, name in enumerate(self.input_names)}
-                    reorder = [source_name_to_idx[name] for name in target_input_names]
-                    X_result = self.X[:, reorder]
-                    reorder_reason = "protein_name_reorder"
-                except KeyError as e:
-                    logger.warning(
-                        f"Cannot reorder X: target network has input {e} not in source names {self.input_names}. "
-                        f"Consider adding axis_mapping to the scaffold recipe."
-                    )
-                    return self.X
-
-        # Debug: comprehensive snapshot of reordering operation
-        if is_design_debug_enabled():
-            target_input_names = target_network.get_inverted_input_proteins()
-            save_debug_state(
-                "DataTarget_get_reordered_X",
-                {
-                    "X_original": self.X,
-                    "X_result": X_result,
-                    "Y": self.Y,
-                },
-                {
-                    "target_name": self.name,
-                    "target_input_names": self.input_names,
-                    "network_name": getattr(target_network, "name", "unknown"),
-                    "network_input_order": target_input_names,
-                    "network_has_axis_mapping": target_network.has_axis_mapping(),
-                    "network_axis_mapping": target_network.get_axis_mapping(),
-                    "reorder_indices": reorder,
-                    "reorder_reason": reorder_reason,
-                    "was_reordered": not np.array_equal(self.X, X_result),
-                    "lattice_x_extent": self.lattice_x_extent,
-                    "lattice_y_extent": self.lattice_y_extent,
-                },
-                output_dir=get_design_debug_output_dir(),
-                mode="design",
-            )
-
-        return X_result
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-TargetUnion = Union[Target, SVGTarget, DataTarget]
 
 
 class DesignManager(BaseModel):
@@ -491,34 +79,31 @@ class DesignManager(BaseModel):
     _tu_ids: Optional[list[str]] = None
     _tu_id_to_idx: Optional[dict[str, int]] = None
 
-    @model_validator(mode='after')
-    def _validate_axis_mapping_consistency(self) -> 'DesignManager':
-        """Warn if scaffold networks lack axis_mapping with DataTargets.
+    @model_validator(mode="after")
+    def _validate_input_order_consistency(self) -> "DesignManager":
+        """Warn if scaffold networks lack input_order with DataTargets.
 
-        For design with DataTargets, scaffold networks should have explicit axis_mapping
+        For design with DataTargets, scaffold networks should have explicit input_order
         to ensure correct alignment between target data X columns and network inputs.
-        Without axis_mapping, protein-name matching is attempted which may fail or give
+        Without input_order, protein-name matching is attempted which may fail or give
         incorrect results when scaffold proteins differ from target proteins.
         """
         if not self.has_data_targets:
             return self
 
-        networks_without_mapping = [
-            n.name for n in self.networks
-            if not n.has_axis_mapping()
-        ]
+        networks_without_order = [n.name for n in self.networks if not n.has_input_order()]
 
-        if networks_without_mapping:
+        if networks_without_order:
             target_with_different_proteins = []
             for t in self.targets:
                 if not isinstance(t, DataTarget):
                     continue
-                t_names = getattr(t, 'input_names', None)
+                t_names = getattr(t, "input_names", None)
                 if t_names is None and t.original_network is not None:
                     t_names = sorted(t.original_network.get_inverted_input_proteins())
                 if t_names:
                     for net in self.networks:
-                        if not net.has_axis_mapping():
+                        if not net.has_input_order():
                             net_proteins = net.get_inverted_input_proteins()
                             if set(t_names) != set(net_proteins):
                                 target_with_different_proteins.append(
@@ -527,8 +112,8 @@ class DesignManager(BaseModel):
 
             if target_with_different_proteins:
                 warnings.warn(
-                    f"Design networks without axis_mapping have different proteins than DataTargets. "
-                    f"This may cause axis alignment issues. Consider adding axis_mapping to scaffold recipes. "
+                    f"Design networks without input_order have different proteins than DataTargets. "
+                    f"This may cause axis alignment issues. Consider adding input_order to scaffold recipes. "
                     f"Mismatches: {target_with_different_proteins[:3]}",
                     stacklevel=3,
                 )
@@ -581,7 +166,6 @@ class DesignManager(BaseModel):
         if seed is None:
             seed = random.randint(0, 2**32 - 1)
         elif not isinstance(seed, int):
-            # Convert JAX array to int seed
             key_data = jax.random.key_data(seed)
             seed = int(key_data[0]) % (2**31)
 
@@ -680,7 +264,9 @@ class DesignManager(BaseModel):
                     "jitter": jitter,
                     "n_networks": n_networks,
                     "n_targets": len(self.targets),
-                    "target_names": [getattr(t, "name", f"target_{i}") for i, t in enumerate(self.targets)],
+                    "target_names": [
+                        getattr(t, "name", f"target_{i}") for i, t in enumerate(self.targets)
+                    ],
                     "target_input_names": [getattr(t, "input_names", None) for t in self.targets],
                     "xsamples_shape": all_xsamples[0].shape,
                     "ysamples_shape": all_ysamples[0].shape,
@@ -790,11 +376,15 @@ class DesignConfig(DesignOptimConfig):
     n_replicates: int = 4
     # aux fields saved per step - extend for richer analysis
     keep_in_history: List[str] = [
-        "loss", "all_losses",
+        "loss",
+        "all_losses",
         "sublosses",  # individual loss components (sinkhorn, lncc, mse, etc.)
         "tu_stats",  # TU masking statistics (enabled_count, mean_prob, etc.)
         "ratio_stats",  # ratio parameter statistics (min, max, mean)
-        "l0_penalty", "tucount_penalty", "spread_penalty", "coupling_penalty",  # regularization
+        "l0_penalty",
+        "tucount_penalty",
+        "spread_penalty",
+        "coupling_penalty",  # regularization
     ]
     # TU masking initialization - small std keeps init in sigmoid's active gradient region
     tu_log_alpha_init_mean: float = 0.0  # 0 = 50/50 enabled/disabled starting point

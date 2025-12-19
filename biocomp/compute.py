@@ -564,12 +564,17 @@ class ComputeStack:
                 final_networks.append(empty_net)
                 continue
 
-            # check if network was over-pruned (no output nodes or empty dependent outputs)
+            # check if network was over-pruned (no output nodes, empty dependent outputs,
+            # or corrupted input/output mappings from cotransfection removal)
             output_nodes = [n for n in net.compute_graph.nodes.values() if n.node_type == "output"]
             if len(output_nodes) != 1:
                 original_outputs = ()
             else:
-                original_outputs = tuple(sorted(net.get_dependent_output_proteins()))
+                try:
+                    original_outputs = tuple(sorted(net.get_dependent_output_proteins()))
+                except AssertionError:
+                    # corrupted input/output mapping (e.g., cotransfections removed)
+                    original_outputs = ()
 
             if len(original_outputs) == 0:
                 # over-pruned network: only marker TUs remain (all outputs are also inputs)
