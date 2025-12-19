@@ -122,7 +122,6 @@ class Network(BaseModel):
         """
         assert self.compute_graph is not None
         mapping = {}
-        # Input nodes have input_position/input_from_output (from inversion)
         mask_types = ["input"]
 
         # If including biases, add bias nodes to the types
@@ -131,11 +130,9 @@ class Network(BaseModel):
 
         inputs = [n for n in self.compute_graph.nodes.values() if n.node_type in mask_types]
         for node in inputs:
-            # Bias nodes don't have input_position, they map directly via input_from_output
             if node.node_type == "bias":
-                # Bias nodes only have input_from_output in inverted networks
                 if "input_from_output" not in node.extra:
-                    # Skip bias nodes without input_from_output (non-inverted networks)
+                    # non-inverted networks
                     continue
                 # For bias nodes, use a special position (after regular inputs)
                 # Add number of regular inputs to get the bias position
@@ -172,24 +169,6 @@ class Network(BaseModel):
                 if protein:
                     bias_proteins.append(protein)
         return bias_proteins
-
-    def has_axis_mapping(self) -> bool:
-        """Check if network has explicit axis mapping from its source recipe."""
-        return "axis_mapping" in self.metadata and self.metadata["axis_mapping"] is not None
-
-    def get_axis_mapping(self) -> Optional[dict[str, str]]:
-        """Get axis mapping if available (from source recipe metadata).
-
-        Returns dict mapping cotx names to axis roles ("x" or "y"), or None.
-        """
-        return self.metadata.get("axis_mapping")
-
-    def get_axis_order(self) -> Optional[list[int]]:
-        """Get pre-computed axis order if available.
-
-        Returns list of cotx indices ordered by axis role [x_idx, y_idx, ...], or None.
-        """
-        return self.metadata.get("axis_order")
 
     def get_output_proteins(self, only_dependent_outputs: bool = False) -> list[str]:
         """Returns the names of all proteins that are outputs of the network"""
@@ -322,6 +301,63 @@ class Network(BaseModel):
                 extra=new_extra,
             )
 
+    def apply_input_order(self, input_order: list[str]) -> None:
+        """Reorder input positions to match the specified protein order.
+
+        This modifies the input_position values in the compute graph so that
+        get_inverted_input_proteins() returns proteins in the specified order.
+
+        Args:
+            input_order: List of protein names in the desired input order.
+                         Must contain exactly the proteins that are inputs.
+        """
+        assert self.compute_graph is not None, "compute_graph required"
+        inputs = self.compute_graph.get_nodes_by_type("input")
+        assert len(inputs) > 0, "no input nodes found"
+
+        # build mapping: protein name -> input node
+        output_proteins = self.get_output_proteins()
+        protein_to_input_node: dict[str, GraphNode] = {}
+        for node in inputs:
+            assert "input_from_output" in node.extra, f"input_from_output not in {node.extra}"
+            output_pos = node.extra["input_from_output"]
+            protein_name = output_proteins[output_pos]
+            assert protein_name not in protein_to_input_node, (
+                f"duplicate protein '{protein_name}' in inputs"
+            )
+            protein_to_input_node[protein_name] = node
+
+        # validate input_order contains exactly the input proteins
+        current_input_proteins = set(protein_to_input_node.keys())
+        requested_proteins = set(input_order)
+        assert current_input_proteins == requested_proteins, (
+            f"input_order mismatch: have {sorted(current_input_proteins)}, "
+            f"requested {sorted(requested_proteins)}"
+        )
+
+        # assign new input positions based on order in input_order
+        for new_pos, protein_name in enumerate(input_order):
+            node = protein_to_input_node[protein_name]
+            new_extra = dict(node.extra)
+            new_extra["input_position"] = new_pos
+            self.compute_graph.nodes[node.node_id] = GraphNode(
+                node_id=node.node_id,
+                node_type=node.node_type,
+                is_inverse_of=node.is_inverse_of,
+                extra=new_extra,
+            )
+
+        # store input_order in metadata for reference
+        self.metadata["input_order"] = input_order
+
+    def get_input_order(self) -> Optional[list[str]]:
+        """Get the explicit input order if one was set, None otherwise."""
+        return self.metadata.get("input_order")
+
+    def has_input_order(self) -> bool:
+        """Check if network has explicit input order defined."""
+        return "input_order" in self.metadata and self.metadata["input_order"] is not None
+
     def get_zero_ratio_source_ids(self) -> set[str]:
         """Get source_ids that have zero ratio in their aggregation node.
 
@@ -357,7 +393,6 @@ class Network(BaseModel):
             Set of source_ids that should be removed
         """
         from biocomp.tumasking import get_final_mask
-        import jax.numpy as jnp
 
         assert self.compute_graph is not None, "compute_graph must exist"
         assert tu_log_alpha is not None, "tu_log_alpha required for hard-concrete check"
@@ -416,9 +451,7 @@ class Network(BaseModel):
 
         # SINGLE SOURCE OF TRUTH: prefer hard-concrete masks
         if tu_log_alpha is not None:
-            assert tu_id_to_idx is not None, (
-                "tu_id_to_idx required when tu_log_alpha is provided"
-            )
+            assert tu_id_to_idx is not None, "tu_id_to_idx required when tu_log_alpha is provided"
             disabled_sources = self.get_disabled_tu_source_ids(tu_log_alpha, tu_id_to_idx)
         else:
             # fallback to zero ratio check (for non-design contexts)
@@ -435,7 +468,8 @@ class Network(BaseModel):
 
         # remove edges connected to removed nodes
         edges_to_remove = [
-            eid for eid, e in self.compute_graph.edges.items()
+            eid
+            for eid, e in self.compute_graph.edges.items()
             if e.source_id in nodes_to_remove or e.target_id in nodes_to_remove
         ]
         for eid in edges_to_remove:
@@ -477,16 +511,18 @@ class Network(BaseModel):
                 )
             )
 
-        axis_mapping = self.metadata.get("axis_mapping")
-        excluded = {"name", "description", "axis_mapping", "axis_order"}
+        excluded = {"name", "description", "input_order"}
         metadata_dict = {k: v for k, v in self.metadata.items() if k not in excluded}
+
+        # propagate input_order if set
+        input_order = self.metadata.get("input_order")
 
         return Recipe(
             name=self.name or self.metadata.get("name"),
             description=self.metadata.get("description"),
             metadata=metadata_dict if metadata_dict else None,
             content=content,
-            axis_mapping=axis_mapping,
+            input_order=input_order,
         )
 
     def _extract_cotx_groups(self) -> dict[str, dict]:
@@ -545,7 +581,8 @@ class Network(BaseModel):
         for group_id, info in cotx_groups.items():
             tus = []
             source_id_to_ratio = {
-                sid: r for sid, r in zip(info["source_ids"], info["ratios"])
+                sid: r
+                for sid, r in zip(info["source_ids"], info["ratios"])
                 if not (prune_zero_ratios and sid in zero_ratio_sources)
             }
 
@@ -934,10 +971,22 @@ def recipe_to_networks(
         base_name = recipe.name or "network"
         net.name = f"{base_name}_{dependent_outputs_names}"
 
-        # Propagate axis_mapping from recipe to network metadata
-        if recipe.has_axis_mapping():
-            net.metadata["axis_mapping"] = recipe.axis_mapping
-            net.metadata["axis_order"] = recipe.get_input_axis_order()
+        # Apply input_order if specified (only for inverted networks with inputs)
+        if recipe.input_order is not None and invert:
+            input_proteins = net.get_inverted_input_proteins()
+            if len(input_proteins) > 0:
+                # validate that input_order covers all input proteins
+                missing = set(input_proteins) - set(recipe.input_order)
+                assert not missing, (
+                    f"input_order missing proteins: {missing}. "
+                    f"Network has inputs: {input_proteins}, recipe specifies: {recipe.input_order}"
+                )
+                extra = set(recipe.input_order) - set(input_proteins)
+                assert not extra, (
+                    f"input_order contains extra proteins not in network inputs: {extra}. "
+                    f"Network has inputs: {input_proteins}, recipe specifies: {recipe.input_order}"
+                )
+                net.apply_input_order(recipe.input_order)
 
         result.append(net)
 
@@ -1288,7 +1337,7 @@ def _build_cdg_dual_from_preprocessed(
                 "position_in_source": position,
                 "cotx_index": cotx_index,
                 "tu_names_by_slot": {},
-                "tu_global_indices_by_slot": {}
+                "tu_global_indices_by_slot": {},
             }
             # Add range info if ratio is unlocked
             if range_info is not None:
@@ -1447,12 +1496,12 @@ def _build_cdg_dual_from_preprocessed(
             unique_edges_dict[key] = e
         else:
             existing = unique_edges_dict[key]
-            existing_tu_ids = existing.extra.get('tu_id', []) if existing.extra else []
-            new_tu_ids = e.extra.get('tu_id', []) if e.extra else []
+            existing_tu_ids = existing.extra.get("tu_id", []) if existing.extra else []
+            new_tu_ids = e.extra.get("tu_id", []) if e.extra else []
             merged = sorted(set(existing_tu_ids + new_tu_ids))
             if merged != existing_tu_ids:
-                merged_extra = {**(existing.extra or {}), 'tu_id': merged}
-                unique_edges_dict[key] = existing.model_copy(update={'extra': merged_extra})
+                merged_extra = {**(existing.extra or {}), "tu_id": merged}
+                unique_edges_dict[key] = existing.model_copy(update={"extra": merged_extra})
 
     nodes_dict = {n.node_id: n for n in nodes}
     edges_dict = {

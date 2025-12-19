@@ -1,6 +1,6 @@
 from biocomp.utils import flatten
 from pathlib import Path
-from typing import Union, Optional, Annotated, Literal
+from typing import Union, Optional, Annotated
 from biocomp.library import LibraryContext, PartsLibrary, get_l0_parts, get_l1_parts, get_l1_from_l2
 from pydantic import (
     BaseModel,
@@ -374,82 +374,25 @@ CoTxList = Annotated[list[CoTransfection], BeforeValidator(process_cotx_list)]
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
-AxisRole = Literal["x", "y"]
-
-
 class Recipe(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     metadata: Optional[dict] = None
     content: CoTxList = []
-    axis_mapping: Optional[dict[str, AxisRole]] = None  # cotx_name -> "x" or "y"
+    input_order: Optional[list[str]] = None  # ordered list of input protein names
 
-    @model_validator(mode='after')
-    def _validate_axis_mapping(self) -> 'Recipe':
-        if self.axis_mapping is None:
+    @model_validator(mode="after")
+    def _validate_input_order(self) -> "Recipe":
+        if self.input_order is None:
             return self
-        cotx_names = {c.name for c in self.content if c.name}
-        for cotx_name in self.axis_mapping:
-            assert cotx_name in cotx_names, (
-                f"axis_mapping references unknown cotx '{cotx_name}', "
-                f"available: {cotx_names}"
-            )
-        roles = list(self.axis_mapping.values())
-        x_count = roles.count("x")
-        y_count = roles.count("y")
-        assert x_count <= 1, f"axis_mapping has {x_count} 'x' roles, expected at most 1"
-        assert y_count <= 1, f"axis_mapping has {y_count} 'y' roles, expected at most 1"
+        assert len(self.input_order) == len(set(self.input_order)), (
+            f"input_order contains duplicates: {self.input_order}"
+        )
         return self
 
-    def get_input_axis_order(self) -> list[int]:
-        """Get cotx indices ordered by axis role: [x_idx, y_idx, ...remaining].
-
-        For 2D networks, returns [x_cotx_index, y_cotx_index].
-        If axis_mapping is not set, falls back to non-bias cotx order.
-
-        Returns indices into self.content (excluding bias cotx).
-        """
-        non_bias_indices = [i for i, c in enumerate(self.content) if not c.has_bias()]
-        if not self.axis_mapping:
-            return non_bias_indices
-
-        x_idx = y_idx = None
-        for i, cotx in enumerate(self.content):
-            if cotx.name and cotx.name in self.axis_mapping:
-                role = self.axis_mapping[cotx.name]
-                if role == "x":
-                    x_idx = i
-                elif role == "y":
-                    y_idx = i
-
-        result = []
-        if x_idx is not None:
-            result.append(x_idx)
-        if y_idx is not None:
-            result.append(y_idx)
-        for i in non_bias_indices:
-            if i not in result:
-                result.append(i)
-        return result
-
-    def get_axis_cotx_names(self) -> tuple[Optional[str], Optional[str]]:
-        """Get (x_cotx_name, y_cotx_name) based on axis_mapping.
-
-        Returns (None, None) if axis_mapping is not set.
-        """
-        if not self.axis_mapping:
-            return (None, None)
-        x_name = y_name = None
-        for cotx_name, role in self.axis_mapping.items():
-            if role == "x":
-                x_name = cotx_name
-            elif role == "y":
-                y_name = cotx_name
-        return (x_name, y_name)
-
-    def has_axis_mapping(self) -> bool:
-        """Check if recipe has explicit axis mapping defined."""
-        return self.axis_mapping is not None and len(self.axis_mapping) > 0
+    def has_input_order(self) -> bool:
+        """Check if recipe has explicit input order defined."""
+        return self.input_order is not None and len(self.input_order) > 0
 
 
 ## {{{                      --     recipe loading     --
