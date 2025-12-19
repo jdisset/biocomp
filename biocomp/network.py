@@ -173,6 +173,24 @@ class Network(BaseModel):
                     bias_proteins.append(protein)
         return bias_proteins
 
+    def has_axis_mapping(self) -> bool:
+        """Check if network has explicit axis mapping from its source recipe."""
+        return "axis_mapping" in self.metadata and self.metadata["axis_mapping"] is not None
+
+    def get_axis_mapping(self) -> Optional[dict[str, str]]:
+        """Get axis mapping if available (from source recipe metadata).
+
+        Returns dict mapping cotx names to axis roles ("x" or "y"), or None.
+        """
+        return self.metadata.get("axis_mapping")
+
+    def get_axis_order(self) -> Optional[list[int]]:
+        """Get pre-computed axis order if available.
+
+        Returns list of cotx indices ordered by axis role [x_idx, y_idx, ...], or None.
+        """
+        return self.metadata.get("axis_order")
+
     def get_output_proteins(self, only_dependent_outputs: bool = False) -> list[str]:
         """Returns the names of all proteins that are outputs of the network"""
         assert self.compute_graph is not None
@@ -459,13 +477,16 @@ class Network(BaseModel):
                 )
             )
 
-        metadata_dict = {k: v for k, v in self.metadata.items() if k not in ["name", "description"]}
+        axis_mapping = self.metadata.get("axis_mapping")
+        excluded = {"name", "description", "axis_mapping", "axis_order"}
+        metadata_dict = {k: v for k, v in self.metadata.items() if k not in excluded}
 
         return Recipe(
             name=self.name or self.metadata.get("name"),
             description=self.metadata.get("description"),
             metadata=metadata_dict if metadata_dict else None,
             content=content,
+            axis_mapping=axis_mapping,
         )
 
     def _extract_cotx_groups(self) -> dict[str, dict]:
@@ -912,6 +933,12 @@ def recipe_to_networks(
         dependent_outputs_names = "_".join(net.get_dependent_output_proteins())
         base_name = recipe.name or "network"
         net.name = f"{base_name}_{dependent_outputs_names}"
+
+        # Propagate axis_mapping from recipe to network metadata
+        if recipe.has_axis_mapping():
+            net.metadata["axis_mapping"] = recipe.axis_mapping
+            net.metadata["axis_order"] = recipe.get_input_axis_order()
+
         result.append(net)
 
     return result
