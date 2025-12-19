@@ -34,8 +34,26 @@ from biocomp.tumasking import (
     LOG_ALPHA_MIN,
     LOG_ALPHA_MAX,
 )
+from biocomp.designdebug import (
+    save_debug_state,
+    is_design_debug_enabled,
+)
 
 logger = get_logger(__name__)
+
+# Module-level context for debug output directory (set by run_design.py)
+_debug_output_dir: str | None = None
+
+
+def set_design_debug_output_dir(output_dir: str | None):
+    """Set the output directory for design debug saves."""
+    global _debug_output_dir
+    _debug_output_dir = output_dir
+
+
+def get_design_debug_output_dir() -> str | None:
+    """Get the current design debug output directory."""
+    return _debug_output_dir
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -373,32 +391,86 @@ class DataTarget(TargetBase):
         """Reorder X columns to match target_network's expected input order.
 
         X columns are stored in alphabetical order of input_names. Different networks
-        may have different internal orderings. This method maps columns from this
-        DataTarget's order to target_network's expected alphabetical order.
+        may expect inputs in different orders (determined by their graph structure).
 
-        Returns X unchanged if input_names match or can't be determined.
+        IMPORTANT: If target_network has axis_mapping (i.e., it's a scaffold network),
+        we use POSITIONAL mapping: X[:,0] is x-axis, X[:,1] is y-axis, matching the
+        axis_mapping specification. This is because scaffold networks have different
+        proteins than the target data.
+
+        For networks WITHOUT axis_mapping (reconstruction case), we use protein-name
+        matching to reorder columns.
+
+        Returns X unchanged if no reordering is needed.
         """
-        if self.input_names is None:
-            if self.original_network is not None:
-                self.input_names = sorted(self.original_network.get_inverted_input_proteins())
-            else:
-                return self.X
-
-        target_input_names = sorted(target_network.get_inverted_input_proteins())
-
-        if self.input_names == target_input_names:
-            return self.X
-
-        # Build mapping: target column index -> source column index
-        try:
-            source_name_to_idx = {name: i for i, name in enumerate(self.input_names)}
-            reorder = [source_name_to_idx[name] for name in target_input_names]
-            return self.X[:, reorder]
-        except KeyError as e:
-            logger.warning(
-                f"Cannot reorder X: target network has input {e} not in source names {self.input_names}"
+        # CASE 1: Scaffold network with axis_mapping - use positional mapping
+        # During design, X is passed positionally (X[:,0] → input 0, X[:,1] → input 1)
+        # The axis_mapping in the scaffold recipe defines: x1 → x-axis, x2 → y-axis
+        # So X[:,0] is x, X[:,1] is y - no reordering needed for scaffold networks
+        if target_network.has_axis_mapping():
+            logger.debug(
+                f"Network '{target_network.name}' has axis_mapping - using positional X (no reorder)"
             )
-            return self.X
+            X_result = self.X
+            reorder = list(range(self.X.shape[1]))
+            reorder_reason = "axis_mapping_positional"
+        # CASE 2: Reconstruction case - use protein-name matching
+        else:
+            if self.input_names is None:
+                if self.original_network is not None:
+                    self.input_names = sorted(self.original_network.get_inverted_input_proteins())
+                else:
+                    return self.X
+
+            # Use ACTUAL network input order, not sorted! The network expects inputs in this order.
+            target_input_names = target_network.get_inverted_input_proteins()
+
+            if self.input_names == target_input_names:
+                reorder = list(range(len(self.input_names)))
+                X_result = self.X
+                reorder_reason = "names_match"
+            else:
+                # Build mapping: target column index -> source column index
+                try:
+                    source_name_to_idx = {name: i for i, name in enumerate(self.input_names)}
+                    reorder = [source_name_to_idx[name] for name in target_input_names]
+                    X_result = self.X[:, reorder]
+                    reorder_reason = "protein_name_reorder"
+                except KeyError as e:
+                    logger.warning(
+                        f"Cannot reorder X: target network has input {e} not in source names {self.input_names}. "
+                        f"Consider adding axis_mapping to the scaffold recipe."
+                    )
+                    return self.X
+
+        # Debug: comprehensive snapshot of reordering operation
+        if is_design_debug_enabled():
+            target_input_names = target_network.get_inverted_input_proteins()
+            save_debug_state(
+                "DataTarget_get_reordered_X",
+                {
+                    "X_original": self.X,
+                    "X_result": X_result,
+                    "Y": self.Y,
+                },
+                {
+                    "target_name": self.name,
+                    "target_input_names": self.input_names,
+                    "network_name": getattr(target_network, "name", "unknown"),
+                    "network_input_order": target_input_names,
+                    "network_has_axis_mapping": target_network.has_axis_mapping(),
+                    "network_axis_mapping": target_network.get_axis_mapping(),
+                    "reorder_indices": reorder,
+                    "reorder_reason": reorder_reason,
+                    "was_reordered": not np.array_equal(self.X, X_result),
+                    "lattice_x_extent": self.lattice_x_extent,
+                    "lattice_y_extent": self.lattice_y_extent,
+                },
+                output_dir=get_design_debug_output_dir(),
+                mode="design",
+            )
+
+        return X_result
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -418,6 +490,49 @@ class DesignManager(BaseModel):
     enable_tu_masking: bool = False
     _tu_ids: Optional[list[str]] = None
     _tu_id_to_idx: Optional[dict[str, int]] = None
+
+    @model_validator(mode='after')
+    def _validate_axis_mapping_consistency(self) -> 'DesignManager':
+        """Warn if scaffold networks lack axis_mapping with DataTargets.
+
+        For design with DataTargets, scaffold networks should have explicit axis_mapping
+        to ensure correct alignment between target data X columns and network inputs.
+        Without axis_mapping, protein-name matching is attempted which may fail or give
+        incorrect results when scaffold proteins differ from target proteins.
+        """
+        if not self.has_data_targets:
+            return self
+
+        networks_without_mapping = [
+            n.name for n in self.networks
+            if not n.has_axis_mapping()
+        ]
+
+        if networks_without_mapping:
+            target_with_different_proteins = []
+            for t in self.targets:
+                if not isinstance(t, DataTarget):
+                    continue
+                t_names = getattr(t, 'input_names', None)
+                if t_names is None and t.original_network is not None:
+                    t_names = sorted(t.original_network.get_inverted_input_proteins())
+                if t_names:
+                    for net in self.networks:
+                        if not net.has_axis_mapping():
+                            net_proteins = net.get_inverted_input_proteins()
+                            if set(t_names) != set(net_proteins):
+                                target_with_different_proteins.append(
+                                    f"{t.name}: target={t_names}, network={net_proteins}"
+                                )
+
+            if target_with_different_proteins:
+                warnings.warn(
+                    f"Design networks without axis_mapping have different proteins than DataTargets. "
+                    f"This may cause axis alignment issues. Consider adding axis_mapping to scaffold recipes. "
+                    f"Mismatches: {target_with_different_proteins[:3]}",
+                    stacklevel=3,
+                )
+        return self
 
     @property
     def has_data_targets(self) -> bool:
@@ -527,7 +642,7 @@ class DesignManager(BaseModel):
 
         all_xsamples, all_ysamples = [], []
 
-        for _ in range(n_networks):
+        for net_idx in range(n_networks):
             xsamples, ysamples = [], []
             for target in self.targets:
                 X, Y_grid = self._sample_from_target(
@@ -551,6 +666,28 @@ class DesignManager(BaseModel):
 
             all_xsamples.append(xsamples)
             all_ysamples.append(ysamples_flat)
+
+        # Debug: comprehensive snapshot of lattice sampling
+        if is_design_debug_enabled() and all_xsamples:
+            save_debug_state(
+                "DesignManager_lattice_samples",
+                {
+                    "xsamples": all_xsamples[0],
+                    "ysamples": all_ysamples[0],
+                },
+                {
+                    "resolution": (xres, yres),
+                    "jitter": jitter,
+                    "n_networks": n_networks,
+                    "n_targets": len(self.targets),
+                    "target_names": [getattr(t, "name", f"target_{i}") for i, t in enumerate(self.targets)],
+                    "target_input_names": [getattr(t, "input_names", None) for t in self.targets],
+                    "xsamples_shape": all_xsamples[0].shape,
+                    "ysamples_shape": all_ysamples[0].shape,
+                },
+                output_dir=get_design_debug_output_dir(),
+                mode="design",
+            )
 
         return all_xsamples, all_ysamples
 
@@ -651,7 +788,14 @@ def initialize_params(
 class DesignConfig(DesignOptimConfig):
     loss_function: EncodedPartialFunction = Field(default=distance_loss)
     n_replicates: int = 4
-    keep_in_history: List[str] = ["loss", "all_losses"]
+    # aux fields saved per step - extend for richer analysis
+    keep_in_history: List[str] = [
+        "loss", "all_losses",
+        "sublosses",  # individual loss components (sinkhorn, lncc, mse, etc.)
+        "tu_stats",  # TU masking statistics (enabled_count, mean_prob, etc.)
+        "ratio_stats",  # ratio parameter statistics (min, max, mean)
+        "l0_penalty", "tucount_penalty", "spread_penalty", "coupling_penalty",  # regularization
+    ]
     # TU masking initialization - small std keeps init in sigmoid's active gradient region
     tu_log_alpha_init_mean: float = 0.0  # 0 = 50/50 enabled/disabled starting point
     tu_log_alpha_init_std: float = 0.5  # small std prevents gradient death at sigmoid tails

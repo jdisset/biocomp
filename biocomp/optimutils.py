@@ -405,6 +405,54 @@ def as_schedule(value_or_callable):
     return lambda step: jnp.asarray(value_or_callable)
 
 
+def three_phase_schedule(
+    total_steps: int,
+    phase1_frac: float,
+    phase2_frac: float,
+    phase1_value: float,
+    phase2_end_value: float,
+    phase3_end_value: float,
+    phase2_power: float = 1.0,
+    phase3_power: float = 2.0,
+) -> optax.Schedule:
+    """Create a three-phase schedule for TU masking temperature or L0 penalty.
+
+    Phases:
+        1. Constant at phase1_value (exploration)
+        2. Polynomial decay from phase1_value to phase2_end_value (mask formation)
+        3. Polynomial decay from phase2_end_value to phase3_end_value (commitment)
+
+    The power parameter controls decay shape: 1=linear, 2=quadratic (slower start, faster end).
+    """
+    assert 0 < phase1_frac < phase2_frac < 1, (
+        f"phase fractions must be 0 < phase1 < phase2 < 1, got {phase1_frac}, {phase2_frac}"
+    )
+
+    phase1_steps = int(phase1_frac * total_steps)
+    phase2_steps = int(phase2_frac * total_steps)
+    phase2_duration = phase2_steps - phase1_steps
+    phase3_duration = total_steps - phase2_steps
+
+    return optax.join_schedules(
+        schedules=[
+            optax.constant_schedule(phase1_value),
+            optax.polynomial_schedule(
+                init_value=phase1_value,
+                end_value=phase2_end_value,
+                power=phase2_power,
+                transition_steps=phase2_duration,
+            ),
+            optax.polynomial_schedule(
+                init_value=phase2_end_value,
+                end_value=phase3_end_value,
+                power=phase3_power,
+                transition_steps=phase3_duration,
+            ),
+        ],
+        boundaries=[phase1_steps, phase2_steps],
+    )
+
+
 def optimize(
     step: Callable,
     params,

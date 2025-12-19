@@ -17,6 +17,7 @@ from .graphengine import GraphState
 
 from biocomp.logging_config import get_logger
 from biocomp.graphengine import GraphNode, GraphEdge
+from biocomp.designdebug import is_design_debug_enabled, save_debug_state
 import dracon as dr
 
 
@@ -346,7 +347,7 @@ class ComputeStack:
         from biocomp.tumasking import extract_tu_ids_from_network
 
         assert self.is_built, "Stack must be built before getting TU masks"
-        assert hasattr(self, 'tu_id_to_idx'), "TU mapping not built"
+        assert hasattr(self, "tu_id_to_idx"), "TU mapping not built"
         assert self.n_tus > 0, "No TUs in stack"
 
         mask = np.zeros((len(self.networks), self.n_tus), dtype=np.float32)
@@ -481,10 +482,12 @@ class ComputeStack:
         from biocomp.network import recipe_to_networks
         import biocomp.biorules as br
 
-        tu_id_to_idx = getattr(self, 'tu_id_to_idx', None)
+        tu_id_to_idx = getattr(self, "tu_id_to_idx", None)
         will_roundtrip = TU_LOG_ALPHA_PATH in params and tu_id_to_idx
-        logger.debug(f"COMMIT: TU_LOG_ALPHA in params={TU_LOG_ALPHA_PATH in params}, "
-                     f"tu_id_to_idx={tu_id_to_idx is not None}, will_roundtrip={will_roundtrip}")
+        logger.debug(
+            f"COMMIT: TU_LOG_ALPHA in params={TU_LOG_ALPHA_PATH in params}, "
+            f"tu_id_to_idx={tu_id_to_idx is not None}, will_roundtrip={will_roundtrip}"
+        )
 
         # create copies of all networks
         network_copies = [deepcopy(net) for net in self.networks]
@@ -517,7 +520,7 @@ class ComputeStack:
                 # remove any remaining edges for disabled TUs
                 edges_to_remove = []
                 for edge_id, edge in net.compute_graph.edges.items():
-                    tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                    tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
                     if not tu_ids:
                         continue
                     all_disabled = True
@@ -529,7 +532,7 @@ class ComputeStack:
                         assert 0 <= tu_idx < network_tu_log_alpha.shape[0], (
                             f"tu_idx {tu_idx} out of bounds for tu_log_alpha shape {network_tu_log_alpha.shape}"
                         )
-                        mask = get_final_mask(network_tu_log_alpha[tu_idx:tu_idx + 1])[0]
+                        mask = get_final_mask(network_tu_log_alpha[tu_idx : tu_idx + 1])[0]
                         if float(mask) > 0:
                             all_disabled = False
                             break
@@ -554,6 +557,26 @@ class ComputeStack:
                 # create an empty network to maintain index correspondence
                 from biocomp.network import Network
                 from biocomp.graphengine import GraphState
+
+                empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
+                empty_net.name = net.name
+                empty_net.metadata = net.metadata
+                final_networks.append(empty_net)
+                continue
+
+            # check if network was over-pruned (no output nodes or empty dependent outputs)
+            output_nodes = [n for n in net.compute_graph.nodes.values() if n.node_type == "output"]
+            if len(output_nodes) != 1:
+                original_outputs = ()
+            else:
+                original_outputs = tuple(sorted(net.get_dependent_output_proteins()))
+
+            if len(original_outputs) == 0:
+                # over-pruned network: only marker TUs remain (all outputs are also inputs)
+                # create empty network to maintain index correspondence
+                from biocomp.network import Network
+                from biocomp.graphengine import GraphState
+
                 empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
                 empty_net.name = net.name
                 empty_net.metadata = net.metadata
@@ -567,9 +590,9 @@ class ComputeStack:
                 rebuilt_net = rebuilt[0]
             else:
                 # find the matching inversion by dependent output proteins
-                original_outputs = tuple(sorted(net.get_dependent_output_proteins()))
                 matching = [
-                    r for r in rebuilt
+                    r
+                    for r in rebuilt
                     if tuple(sorted(r.get_dependent_output_proteins())) == original_outputs
                 ]
                 assert len(matching) == 1, (
@@ -591,7 +614,6 @@ class ComputeStack:
 
     def _assert_valid_edge_slots(self, network, context: str):
         """Assert all edges reference valid slot indices on their source/target nodes."""
-        print(f"DEBUG _assert_valid_edge_slots: {context}, network={network.name}")
         cg = network.compute_graph
         for eid, edge in cg.edges.items():
             src = cg.nodes.get(edge.source_id)
@@ -909,6 +931,57 @@ class ComputeStack:
             self.output_shape = (int(start_id),)
 
         self.is_assembled = allbuilt
+
+        # Debug: dump input node order for axis alignment analysis
+        if is_design_debug_enabled() and allbuilt and self.networks:
+            self._dump_input_node_order()
+
+    def _dump_input_node_order(self):
+        """Dump input node ordering for each network to help debug axis alignment issues.
+
+        During design optimization, X columns are passed positionally to network inputs.
+        This dump records which stack position each network's input nodes occupy,
+        which determines the X column -> network input mapping.
+        """
+        # Lazy import to avoid circular dependency (design imports compute)
+        from biocomp.design import get_design_debug_output_dir
+
+        for net_idx, network in enumerate(self.networks):
+            # Find all input-type nodes in this network
+            input_nodes_info = []
+            for (n_idx, node_id), (layer_id, node_pos) in self.node_map.items():
+                if n_idx != net_idx:
+                    continue
+                node = network.compute_graph.nodes.get(node_id)
+                if node is None:
+                    continue
+                if node.node_type in ("input", "bias"):
+                    protein_name = node.extra.get("protein_name", node.extra.get("name", "unknown"))
+                    input_nodes_info.append(
+                        {
+                            "node_id": node_id,
+                            "node_type": node.node_type,
+                            "layer_id": layer_id,
+                            "node_pos_in_layer": node_pos,
+                            "protein_name": protein_name,
+                        }
+                    )
+
+            # Sort by layer position to get the actual input order
+            input_nodes_info.sort(key=lambda x: (x["layer_id"], x["node_pos_in_layer"]))
+
+            save_debug_state(
+                "ComputeStack_input_order",
+                {"input_nodes": input_nodes_info},
+                {
+                    "network_idx": net_idx,
+                    "network_name": getattr(network, "name", f"network_{net_idx}"),
+                    "n_input_nodes": len(input_nodes_info),
+                    "input_proteins_in_order": [n["protein_name"] for n in input_nodes_info],
+                },
+                output_dir=get_design_debug_output_dir(),
+                mode="design",
+            )
 
     def _generate_apply_method(
         self,

@@ -4,15 +4,15 @@ import jax
 import jax.numpy as jnp
 from jax import vmap, lax
 from jax.tree_util import Partial
-from jax.experimental import checkify
 
 import numpy as np
 from assertpy import assert_that
 
 from .parameters import ParameterTree
 from .optimutils import as_schedule
-from .tumasking import l0_loss, TU_LOG_ALPHA_PATH, MIN_TEMPERATURE
+from .tumasking import TU_LOG_ALPHA_PATH, MIN_TEMPERATURE
 from .logging_config import get_logger
+from .designdebug import is_design_debug_enabled, save_debug_state
 
 logger = get_logger(__name__)
 
@@ -271,24 +271,34 @@ def simse_lncc_loss(x, y, yhat, simse_weight=0.3, **kw):
     return simse_weight * simse_loss(x, y, yhat) + (1 - simse_weight) * lncc_loss(x, y, yhat)
 
 
-def soft_count_over_one_penalty(W, rel_active=1e-3, width=2e-4):
+def soft_tucount_penalty(W, max_tus=5, rel_active=1e-3, width=2e-4):
+    """Penalty for having more than max_tus active TUs per co-transfection (aggregation row).
+
+    Args:
+        W: Ratio matrix with shape (n_aggregation_nodes, n_members)
+        max_tus: Maximum allowed active TUs per row before penalty kicks in (default 5)
+        rel_active: Threshold - ratio/max_ratio above this counts as "active" (default 1e-3)
+        width: Sigmoid sharpness for soft counting (default 2e-4)
+
+    Returns:
+        Penalty value: sum of squared excesses over max_tus across all rows
+    """
     A = jnp.abs(W)
     m = jnp.max(A, axis=1, keepdims=True)
     norm = jnp.where(m > 0, A / (m + 1e-12), 0.0)
     soft_count = jnp.sum(jax.nn.sigmoid((norm - rel_active) / (width + 1e-12)), axis=1)
-    return jnp.sum(jnp.square(jax.nn.relu(soft_count - 1.0)))
+    return jnp.sum(jnp.square(jax.nn.relu(soft_count - max_tus)))
 
 
-def get_over1_penalty_for_leaf(p, rel_active=1e-3, width=2e-4):
+def get_tucount_penalty_for_leaf(p, max_tus=5, rel_active=1e-3, width=2e-4):
+    """Get TU count penalty for a parameter leaf (handles ArrayRef and raw arrays)."""
+    kw = dict(max_tus=max_tus, rel_active=rel_active, width=width)
     if hasattr(p, "view"):
         try:
-            return soft_count_over_one_penalty(p.view(), rel_active=rel_active, width=width)
+            return soft_tucount_penalty(p.view(), **kw)
         except Exception:
-            return sum(
-                soft_count_over_one_penalty(p.tree[path], rel_active=rel_active, width=width)
-                for path in p.paths
-            )
-    return soft_count_over_one_penalty(p, rel_active=rel_active, width=width)
+            return sum(soft_tucount_penalty(p.tree[path], **kw) for path in p.paths)
+    return soft_tucount_penalty(p, **kw)
 
 
 def ratio_spread_penalty(W, max_ratio=100.0, eps=1e-9):
@@ -400,8 +410,8 @@ def _ratio_mask_coupling_single_target(
         )
 
         n_nodes, n_outputs = ratios.shape
-        assert n_nodes > 0, f"n_nodes must be > 0"
-        assert n_outputs > 0, f"n_outputs must be > 0"
+        assert n_nodes > 0, "n_nodes must be > 0"
+        assert n_outputs > 0, "n_outputs must be > 0"
 
         # normalize ratios per node using MAX normalization (not sum)
         # this ensures min_ratio_threshold has consistent meaning regardless of TU count
@@ -597,10 +607,11 @@ def _make_loss_func(
     dmanager,
     num_z,
     ratio_paths,
-    lambda_over1,
+    lambda_tucount,
     compute_losses_fn,
     lambda_spread=0.01,
     max_ratio=100.0,
+    max_tus_per_cotx=5,
     max_prediction=1e6,
     lambda_l0=0.0,
     tu_temperature=0.5,
@@ -632,6 +643,46 @@ def _make_loss_func(
         per_network_tu_mask = stack.get_per_network_tu_mask()
         logger.debug(f"Per-network TU mask shape: {per_network_tu_mask.shape}")
 
+    # Debug: dump axis assignment for each target-network pair
+    # This documents how X columns map to network inputs, crucial for visualization
+    if is_design_debug_enabled():
+        # Lazy import to avoid circular dependency
+        from .design import get_design_debug_output_dir
+
+        axis_assignments = []
+        for tid, target in enumerate(dmanager.targets):
+            target_name = getattr(target, 'name', f'target_{tid}')
+            target_input_names = getattr(target, 'input_names', None)
+            for net_idx, network in enumerate(dmanager.networks):
+                network_name = getattr(network, 'name', f'network_{net_idx}')
+                try:
+                    network_input_proteins = network.get_inverted_input_proteins()
+                except Exception:
+                    network_input_proteins = None
+                axis_assignments.append({
+                    'target_id': tid,
+                    'target_name': target_name,
+                    'target_input_names': target_input_names,  # alphabetical order = X columns
+                    'network_id': net_idx,
+                    'network_name': network_name,
+                    'network_input_proteins': network_input_proteins,
+                    # During optimization: X[:,0] -> network input slot 0 (positional)
+                    # target_input_names[0] = what X[:,0] represents (e.g., 'eBFP2')
+                    # network_input_proteins[0] = what network slot 0 is called (may differ)
+                })
+        save_debug_state(
+            "axis_assignment_mapping",
+            {'assignments': axis_assignments},
+            {
+                'n_targets': n_targets,
+                'n_networks': n_networks,
+                'note': 'X columns are in alphabetical order of target.input_names. '
+                        'During optimization, X[:,i] goes to network input slot i positionally.',
+            },
+            output_dir=get_design_debug_output_dir(),
+            mode="design",
+        )
+
     def single_forward_pass(params, X, Z, key, tu_uniform):
         """Single forward pass with specific TU mask."""
         keys = jax.random.split(key, (X.shape[0], X.shape[1]))
@@ -650,10 +701,10 @@ def _make_loss_func(
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
 
         # regularization penalties (independent of TU samples)
-        over1_penalty = as_schedule(lambda_over1)(step) * sum(
-            get_over1_penalty_for_leaf(p) for p in ratio_leaves
+        tucount_penalty = as_schedule(lambda_tucount)(step) * sum(
+            get_tucount_penalty_for_leaf(p, max_tus=max_tus_per_cotx) for p in ratio_leaves
         )
-        over1_penalty = _sanitize(jnp.atleast_1d(over1_penalty))[0]
+        tucount_penalty = _sanitize(jnp.atleast_1d(tucount_penalty))[0]
         spread_penalty = as_schedule(lambda_spread)(step) * sum(
             get_spread_penalty_for_leaf(p, max_ratio=max_ratio) for p in ratio_leaves
         )
@@ -705,22 +756,28 @@ def _make_loss_func(
                 coupling_penalty = _sanitize(jnp.atleast_1d(coupling_penalty))[0]
 
         # TU sample averaging for variance reduction
+        extra_aux_inner = {}
         if tu_n_samples > 1 and TU_LOG_ALPHA_PATH in params:
             tu_uniforms = _sample_tu_uniform(params, mask_key, n_samples=tu_n_samples)
             forward_keys = jax.random.split(forward_key, tu_n_samples)
 
             def forward_with_tu(tu_u, fwd_key):
                 yhatdep, _ = single_forward_pass(params, X, Z, fwd_key, tu_u)
-                losses, _ = compute_losses_fn(X, Y, yhatdep, step, n_targets, n_networks)
-                return losses, yhatdep
+                losses, inner_aux = compute_losses_fn(X, Y, yhatdep, step, n_targets, n_networks)
+                return losses, yhatdep, inner_aux
 
-            all_losses_stack, yhatdep_stack = vmap(forward_with_tu)(tu_uniforms, forward_keys)
+            all_losses_stack, yhatdep_stack, inner_aux_stack = vmap(forward_with_tu)(
+                tu_uniforms, forward_keys
+            )
             # average losses over TU samples
             all_losses = jnp.mean(all_losses_stack, axis=0)
-            # use last sample's yhatdep for aux (just for logging)
+            # use last sample's yhatdep and aux for logging
             yhatdep = yhatdep_stack[-1]
             tu_uniform = tu_uniforms[-1]
             apply_aux = None
+            # extract last sample's inner aux (sublosses etc.)
+            if inner_aux_stack:
+                extra_aux_inner = jax.tree.map(lambda x: x[-1], inner_aux_stack)
         else:
             tu_uniform = _sample_tu_uniform(params, mask_key, n_samples=1)
             yhatdep, apply_aux = single_forward_pass(params, X, Z, forward_key, tu_uniform)
@@ -729,16 +786,64 @@ def _make_loss_func(
             )
 
         all_losses = _sanitize(all_losses)
+
+        # compute TU statistics if masking is enabled
+        tu_stats = {}
+        if TU_LOG_ALPHA_PATH in params:
+            log_alpha = params[TU_LOG_ALPHA_PATH]
+            tu_probs = jax.nn.sigmoid(log_alpha)
+            tu_enabled_mask = tu_probs > 0.5
+            tu_stats = {
+                "enabled_count": jnp.sum(tu_enabled_mask),
+                "total_count": jnp.array(log_alpha.size),
+                "mean_prob": jnp.mean(tu_probs),
+                "min_log_alpha": jnp.min(log_alpha),
+                "max_log_alpha": jnp.max(log_alpha),
+                "log_alpha_std": jnp.std(log_alpha),
+            }
+
+        # compute ratio statistics
+        ratio_stats = {}
+        if ratio_leaves:
+            all_ratios = []
+            for p in ratio_leaves:
+                if hasattr(p, 'view'):
+                    try:
+                        all_ratios.append(jnp.abs(p.view()).ravel())
+                    except Exception:
+                        pass
+                elif hasattr(p, 'shape'):
+                    all_ratios.append(jnp.abs(p).ravel())
+            if all_ratios:
+                ratios_flat = jnp.concatenate(all_ratios)
+                ratio_stats = {
+                    "min": jnp.min(ratios_flat),
+                    "max": jnp.max(ratios_flat),
+                    "mean": jnp.mean(ratios_flat),
+                    "std": jnp.std(ratios_flat),
+                    "nonzero_count": jnp.sum(ratios_flat > 1e-6),
+                    "total_count": jnp.array(ratios_flat.size),
+                }
+
+        # extract sublosses from inner aux if available
+        sublosses = extra_aux_inner.get("sublosses", {}) if extra_aux_inner else {}
+
         aux = {
             "apply_aux": apply_aux,
             "all_losses": all_losses,
             "yhatdep": yhatdep,
             "l0_penalty": l0_penalty,
             "coupling_penalty": coupling_penalty,
+            "tucount_penalty": tucount_penalty,
+            "spread_penalty": spread_penalty,
             "tu_uniform": tu_uniform,
+            "tu_stats": tu_stats,
+            "ratio_stats": ratio_stats,
+            "tu_temperature": tu_temp,
+            "sublosses": sublosses,
         }
 
-        loss = all_losses.mean() + over1_penalty + spread_penalty + l0_penalty + coupling_penalty
+        loss = all_losses.mean() + tucount_penalty + spread_penalty + l0_penalty + coupling_penalty
         # NOTE: can't assert jnp.isfinite(loss) - it's a traced value
         # Use _sanitize for handling and checkify in tests for validation
         loss = jnp.nan_to_num(loss, nan=1e6, posinf=1e6, neginf=1e6)
@@ -754,7 +859,8 @@ def distance_loss(
     num_z,
     ratio_paths=None,
     epsilon=0.01,
-    lambda_over1=0.001,
+    lambda_tucount=0.0,
+    max_tus_per_cotx=5,
     lambda_spread=0.01,
     max_ratio=100.0,
     lambda_l0=0.0,
@@ -778,10 +884,11 @@ def distance_loss(
         dmanager,
         num_z,
         ratio_paths,
-        lambda_over1,
+        lambda_tucount,
         compute_losses,
         lambda_spread=lambda_spread,
         max_ratio=max_ratio,
+        max_tus_per_cotx=max_tus_per_cotx,
         lambda_l0=lambda_l0,
         tu_temperature=tu_temperature,
         tu_n_samples=tu_n_samples,
@@ -803,7 +910,8 @@ def grid_distance_loss(
     eps_sinkhorn=0.1,
     n_sinkhorn_iters=50,
     lncc_kernel=7,
-    lambda_over1=0.001,
+    lambda_tucount=0.0,
+    max_tus_per_cotx=5,
     lambda_spread=0.01,
     max_ratio=100.0,
     lambda_l0=0.0,
@@ -817,23 +925,30 @@ def grid_distance_loss(
     xres, yres = dmanager.grid_resolution
     n_networks = len(dmanager.networks)
 
-    def compute_grid_loss_single(y_img, yhat_img):
+    def compute_grid_loss_single_with_breakdown(y_img, yhat_img):
+        """Compute loss with individual component breakdown for aux data."""
         y_img, yhat_img = _sanitize(y_img), _sanitize(yhat_img)
-        loss = jnp.array(0.0)
-        if w_sinkhorn > 0:
-            loss = loss + w_sinkhorn * sinkhorn_divergence_conv(
-                proj_nonneg_ste(yhat_img),
-                proj_nonneg_ste(y_img),
-                eps_sinkhorn,
-                n_iters=n_sinkhorn_iters,
-            )
-        if w_lncc > 0:
-            loss = loss + w_lncc * lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel)
-        if w_mse > 0:
-            loss = loss + w_mse * jnp.mean((y_img - yhat_img) ** 2)
-        if w_spectral > 0:
-            loss = loss + w_spectral * spectral_loss(None, y_img, yhat_img)
-        return loss
+
+        # compute individual losses (unweighted)
+        sinkhorn_l = sinkhorn_divergence_conv(
+            proj_nonneg_ste(yhat_img),
+            proj_nonneg_ste(y_img),
+            eps_sinkhorn,
+            n_iters=n_sinkhorn_iters,
+        ) if w_sinkhorn > 0 else jnp.array(0.0)
+
+        lncc_l = lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel) if w_lncc > 0 else jnp.array(0.0)
+        mse_l = jnp.mean((y_img - yhat_img) ** 2) if w_mse > 0 else jnp.array(0.0)
+        spectral_l = spectral_loss(None, y_img, yhat_img) if w_spectral > 0 else jnp.array(0.0)
+
+        # weighted total
+        total = (
+            w_sinkhorn * sinkhorn_l
+            + w_lncc * lncc_l
+            + w_mse * mse_l
+            + w_spectral * spectral_l
+        )
+        return total, (sinkhorn_l, lncc_l, mse_l, spectral_l)
 
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks_):
         yhatdep = _sanitize(yhatdep)
@@ -850,8 +965,22 @@ def grid_distance_loss(
             Y.squeeze(-1).T.reshape(n_targets, 1, yres, xres), (1, n_networks, 1, 1)
         )
         yhat_images = yhatdep.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
-        all_losses = vmap(vmap(compute_grid_loss_single))(Y_images, yhat_images)
-        return _sanitize(all_losses), {"yhat_images": yhat_images}
+
+        all_losses, (sinkhorn_losses, lncc_losses, mse_losses, spectral_losses) = vmap(
+            vmap(compute_grid_loss_single_with_breakdown)
+        )(Y_images, yhat_images)
+
+        sublosses = {
+            "sinkhorn": _sanitize(jnp.mean(sinkhorn_losses)),
+            "lncc": _sanitize(jnp.mean(lncc_losses)),
+            "mse": _sanitize(jnp.mean(mse_losses)),
+            "spectral": _sanitize(jnp.mean(spectral_losses)),
+            "sinkhorn_weighted": _sanitize(w_sinkhorn * jnp.mean(sinkhorn_losses)),
+            "lncc_weighted": _sanitize(w_lncc * jnp.mean(lncc_losses)),
+            "mse_weighted": _sanitize(w_mse * jnp.mean(mse_losses)),
+            "spectral_weighted": _sanitize(w_spectral * jnp.mean(spectral_losses)),
+        }
+        return _sanitize(all_losses), {"yhat_images": yhat_images, "sublosses": sublosses}
 
     return _make_loss_func(
         stack,
@@ -859,10 +988,11 @@ def grid_distance_loss(
         dmanager,
         num_z,
         ratio_paths,
-        lambda_over1,
+        lambda_tucount,
         compute_losses,
         lambda_spread=lambda_spread,
         max_ratio=max_ratio,
+        max_tus_per_cotx=max_tus_per_cotx,
         lambda_l0=lambda_l0,
         tu_temperature=tu_temperature,
         tu_n_samples=tu_n_samples,
