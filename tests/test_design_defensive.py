@@ -345,6 +345,7 @@ def test_jaxutils_check_function_with_checkify():
 
     set_enable_checks(True)
     try:
+
         def fn_with_check(x):
             check(x > 0, "x must be positive")
             return x * 2
@@ -499,8 +500,7 @@ def test_checkify_index_bounds_in_coupling_penalty():
     ratio_paths = ["local/layer_1/ratios"]
 
     checked_fn = checkify.checkify(
-        ratio_mask_coupling_penalty,
-        errors=checkify.index_checks | checkify.float_checks
+        ratio_mask_coupling_penalty, errors=checkify.index_checks | checkify.float_checks
     )
 
     # Valid inputs should work
@@ -510,136 +510,35 @@ def test_checkify_index_bounds_in_coupling_penalty():
 
 
 # ---------------------------------------------------------------------------
-# Axis Mapping Tests
+# Input Order Tests
 # ---------------------------------------------------------------------------
 
 
-def test_recipe_axis_mapping_validation():
-    """Test that Recipe validates axis_mapping against cotx names."""
-    from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit
-
-    # Create simple recipe with two cotx
-    cotx1 = CoTransfection(
-        name="x1",
-        units=[TranscriptionUnit(name="tu1", slots=["hEF1a", "mKO2", "L0.T_4560"])],
-        ratios=["1.0"],
-    )
-    cotx2 = CoTransfection(
-        name="x2",
-        units=[TranscriptionUnit(name="tu2", slots=["hEF1a", "eBFP2", "L0.T_4560"])],
-        ratios=["1.0"],
-    )
-
-    # Valid axis_mapping should work
-    recipe = Recipe(
-        name="test_recipe",
-        content=[cotx1, cotx2],
-        axis_mapping={"x1": "x", "x2": "y"},
-    )
-    assert recipe.has_axis_mapping()
-    assert recipe.axis_mapping == {"x1": "x", "x2": "y"}
-
-
-def test_recipe_axis_mapping_invalid_cotx_name():
-    """Test that Recipe rejects axis_mapping with unknown cotx names."""
-    from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit
+def test_recipe_input_order_validation():
+    """Test that Recipe validates input_order for duplicates."""
+    from biocomp.recipe import Recipe
     from pydantic import ValidationError
 
-    cotx1 = CoTransfection(
-        name="x1",
-        units=[TranscriptionUnit(name="tu1", slots=["hEF1a", "mKO2", "L0.T_4560"])],
-        ratios=["1.0"],
+    # Valid input_order should work
+    recipe = Recipe(
+        name="test_recipe",
+        content=[],
+        input_order=["mKO2", "eBFP2"],
     )
+    assert recipe.has_input_order()
+    assert recipe.input_order == ["mKO2", "eBFP2"]
 
-    # Invalid cotx name in axis_mapping should fail
+    # Duplicate proteins should fail
     with pytest.raises((AssertionError, ValidationError)):
         Recipe(
             name="test_recipe",
-            content=[cotx1],
-            axis_mapping={"x1": "x", "INVALID": "y"},
+            content=[],
+            input_order=["mKO2", "mKO2", "eBFP2"],
         )
 
 
-def test_recipe_axis_mapping_duplicate_roles():
-    """Test that Recipe rejects duplicate axis roles."""
-    from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit
-    from pydantic import ValidationError
-
-    cotx1 = CoTransfection(
-        name="x1",
-        units=[TranscriptionUnit(name="tu1", slots=["hEF1a", "mKO2", "L0.T_4560"])],
-        ratios=["1.0"],
-    )
-    cotx2 = CoTransfection(
-        name="x2",
-        units=[TranscriptionUnit(name="tu2", slots=["hEF1a", "eBFP2", "L0.T_4560"])],
-        ratios=["1.0"],
-    )
-
-    # Duplicate x role should fail
-    with pytest.raises((AssertionError, ValidationError)):
-        Recipe(
-            name="test_recipe",
-            content=[cotx1, cotx2],
-            axis_mapping={"x1": "x", "x2": "x"},
-        )
-
-
-def test_recipe_get_input_axis_order():
-    """Test Recipe.get_input_axis_order returns correct ordering."""
-    from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit
-
-    # Create recipe with axis_mapping where x2 is "x" and x1 is "y" (reversed)
-    cotx1 = CoTransfection(
-        name="x1",
-        units=[TranscriptionUnit(name="tu1", slots=["hEF1a", "mKO2", "L0.T_4560"])],
-        ratios=["1.0"],
-    )
-    cotx2 = CoTransfection(
-        name="x2",
-        units=[TranscriptionUnit(name="tu2", slots=["hEF1a", "eBFP2", "L0.T_4560"])],
-        ratios=["1.0"],
-    )
-
-    recipe = Recipe(
-        name="test_recipe",
-        content=[cotx1, cotx2],
-        axis_mapping={"x2": "x", "x1": "y"},  # x2 is x-axis, x1 is y-axis
-    )
-
-    order = recipe.get_input_axis_order()
-    # Expected: [1, 0] because x2 (index 1) is "x" and x1 (index 0) is "y"
-    assert order == [1, 0], f"Expected [1, 0] but got {order}"
-
-
-def test_recipe_get_axis_cotx_names():
-    """Test Recipe.get_axis_cotx_names returns correct names."""
-    from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit
-
-    cotx1 = CoTransfection(
-        name="input_a",
-        units=[TranscriptionUnit(name="tu1", slots=["hEF1a", "mKO2", "L0.T_4560"])],
-        ratios=["1.0"],
-    )
-    cotx2 = CoTransfection(
-        name="input_b",
-        units=[TranscriptionUnit(name="tu2", slots=["hEF1a", "eBFP2", "L0.T_4560"])],
-        ratios=["1.0"],
-    )
-
-    recipe = Recipe(
-        name="test_recipe",
-        content=[cotx1, cotx2],
-        axis_mapping={"input_a": "x", "input_b": "y"},
-    )
-
-    x_name, y_name = recipe.get_axis_cotx_names()
-    assert x_name == "input_a"
-    assert y_name == "input_b"
-
-
-def test_network_axis_mapping_propagation():
-    """Test that axis_mapping propagates from Recipe to Network."""
+def test_network_input_order_propagation():
+    """Test that input_order propagates from Recipe to Network."""
     from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit
     from biocomp.network import recipe_to_networks
 
@@ -654,78 +553,45 @@ def test_network_axis_mapping_propagation():
         ratios=["1.0"],
     )
 
-    recipe = Recipe(
+    # Build without input_order first to get natural order
+    recipe_no_order = Recipe(
         name="test_recipe",
         content=[cotx1, cotx2],
-        axis_mapping={"x1": "x", "x2": "y"},
+    )
+    networks_no_order = recipe_to_networks(recipe_no_order, invert=True, inversion_mode="main")
+    assert len(networks_no_order) > 0
+    natural_order = networks_no_order[0].get_inverted_input_proteins()
+
+    # Now build with reversed input_order
+    reversed_order = list(reversed(natural_order))
+    recipe_with_order = Recipe(
+        name="test_recipe",
+        content=[cotx1, cotx2],
+        input_order=reversed_order,
     )
 
-    networks = recipe_to_networks(recipe, invert=True, inversion_mode="main")
-    assert len(networks) > 0
+    networks_with_order = recipe_to_networks(recipe_with_order, invert=True, inversion_mode="main")
+    assert len(networks_with_order) > 0
 
-    for net in networks:
-        assert net.has_axis_mapping(), f"Network {net.name} should have axis_mapping"
-        assert net.get_axis_mapping() == {"x1": "x", "x2": "y"}
-        assert net.get_axis_order() is not None
+    for net in networks_with_order:
+        assert net.has_input_order(), f"Network {net.name} should have input_order"
+        assert net.get_input_order() == reversed_order
+        assert net.get_inverted_input_proteins() == reversed_order
 
 
-def test_data_target_get_reordered_X_with_axis_mapping():
-    """Test that DataTarget.get_reordered_X uses positional mapping for scaffold networks."""
-    from biocomp.design import DataTarget
+def test_network_has_input_order():
+    """Test that Network.has_input_order returns correct value."""
     from biocomp.network import Network
 
-    # Create DataTarget with alphabetically ordered input names
-    X = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
-    Y = np.array([0.5, 0.6, 0.7])
+    # Network without input_order
+    net_no_order = Network(name="test_net", metadata={})
+    assert not net_no_order.has_input_order()
+    assert net_no_order.get_input_order() is None
 
-    target = DataTarget(
-        X=X,
-        Y=Y,
-        name="test_target",
-        input_names=["eBFP2", "mKate"],  # alphabetical order
+    # Network with input_order
+    net_with_order = Network(
+        name="test_net",
+        metadata={"input_order": ["mKO2", "eBFP2"]},
     )
-
-    # Create a mock network with axis_mapping (simulating scaffold network)
-    # The network has DIFFERENT proteins than the target - this is the scaffold case
-    mock_net = Network(
-        name="scaffold_net",
-        metadata={
-            "axis_mapping": {"x1": "x", "x2": "y"},
-            "axis_order": [0, 1],
-        },
-    )
-
-    # With axis_mapping, get_reordered_X should return X unchanged (positional)
-    X_result = target.get_reordered_X(mock_net)
-    assert np.array_equal(X_result, X), "X should be unchanged for scaffold network with axis_mapping"
-
-
-def test_data_target_get_reordered_X_without_axis_mapping():
-    """Test that DataTarget.get_reordered_X uses protein matching without axis_mapping."""
-    from biocomp.design import DataTarget
-    from unittest.mock import MagicMock
-
-    # Create DataTarget with alphabetically ordered input names
-    X = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
-    Y = np.array([0.5, 0.6, 0.7])
-
-    target = DataTarget(
-        X=X,
-        Y=Y,
-        name="test_target",
-        input_names=["A_protein", "B_protein"],  # alphabetical order
-    )
-
-    # Create a mock network WITHOUT axis_mapping using MagicMock
-    mock_net = MagicMock()
-    mock_net.has_axis_mapping.return_value = False
-    mock_net.name = "regular_net"
-    # Network wants B_protein first, then A_protein (reversed order from target)
-    mock_net.get_inverted_input_proteins.return_value = ["B_protein", "A_protein"]
-
-    # Without axis_mapping, get_reordered_X should reorder based on protein names
-    X_result = target.get_reordered_X(mock_net)
-
-    # Expected: columns swapped because network wants B_protein first, then A_protein
-    X_expected = np.array([[0.2, 0.1], [0.4, 0.3], [0.6, 0.5]])
-    assert np.array_equal(X_result, X_expected), f"Expected {X_expected}, got {X_result}"
+    assert net_with_order.has_input_order()
+    assert net_with_order.get_input_order() == ["mKO2", "eBFP2"]
