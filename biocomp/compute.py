@@ -588,8 +588,11 @@ class ComputeStack:
                 final_networks.append(empty_net)
                 continue
 
-            # rebuild from recipe
-            rebuilt = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="all")
+            # rebuild from recipe (skip input_order validation since TU pruning may invalidate it)
+            rebuilt = recipe_to_networks(
+                recipe, br.ALL_RULES, invert=True, inversion_mode="all",
+                skip_input_order_validation=True,
+            )
 
             if len(rebuilt) == 1:
                 rebuilt_net = rebuilt[0]

@@ -514,9 +514,18 @@ class Network(BaseModel):
         excluded = {"name", "description", "input_order"}
         metadata_dict = {k: v for k, v in self.metadata.items() if k not in excluded}
 
-        # propagate input_order if set
+        # propagate input_order only if it's still valid after TU pruning
+        # (marker TUs may have been removed, changing the actual input proteins)
         input_order = self.metadata.get("input_order")
-
+        if input_order is not None:
+            try:
+                actual_input_proteins = self.get_inverted_input_proteins()
+                if set(actual_input_proteins) != set(input_order):
+                    # input_order no longer matches actual markers, omit it
+                    input_order = None
+            except (AssertionError, KeyError):
+                # network may not be inverted or has no input nodes
+                input_order = None
         return Recipe(
             name=self.name or self.metadata.get("name"),
             description=self.metadata.get("description"),
@@ -946,6 +955,7 @@ def recipe_to_networks(
     invert=True,
     inversion_mode: str = "all",
     lib: Optional[PartsLibrary] = None,
+    skip_input_order_validation: bool = False,
 ) -> list[Network]:
     from biocomp.inversion import invert_all_paths
 
@@ -975,18 +985,25 @@ def recipe_to_networks(
         if recipe.input_order is not None and invert:
             input_proteins = net.get_inverted_input_proteins()
             if len(input_proteins) > 0:
-                # validate that input_order covers all input proteins
-                missing = set(input_proteins) - set(recipe.input_order)
-                assert not missing, (
-                    f"input_order missing proteins: {missing}. "
-                    f"Network has inputs: {input_proteins}, recipe specifies: {recipe.input_order}"
-                )
-                extra = set(recipe.input_order) - set(input_proteins)
-                assert not extra, (
-                    f"input_order contains extra proteins not in network inputs: {extra}. "
-                    f"Network has inputs: {input_proteins}, recipe specifies: {recipe.input_order}"
-                )
-                net.apply_input_order(recipe.input_order)
+                proteins_match = set(input_proteins) == set(recipe.input_order)
+                if proteins_match:
+                    # input_order applies to this inversion
+                    net.apply_input_order(recipe.input_order)
+                elif skip_input_order_validation:
+                    # Skip validation (used during commit when TU pruning may invalidate input_order)
+                    pass
+                else:
+                    # Validate that input_order is correct for original recipe construction
+                    missing = set(input_proteins) - set(recipe.input_order)
+                    assert not missing, (
+                        f"input_order missing proteins: {missing}. "
+                        f"Network has inputs: {input_proteins}, recipe specifies: {recipe.input_order}"
+                    )
+                    extra = set(recipe.input_order) - set(input_proteins)
+                    assert not extra, (
+                        f"input_order contains extra proteins not in network inputs: {extra}. "
+                        f"Network has inputs: {input_proteins}, recipe specifies: {recipe.input_order}"
+                    )
 
         result.append(net)
 
