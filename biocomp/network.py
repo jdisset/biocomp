@@ -976,6 +976,13 @@ def recipe_to_networks(
 
     for graph in graphs:
         graph = assign_ern_layer_ids(graph)
+
+        # Skip degenerate graphs with no output nodes (can happen when all TUs are disabled)
+        output_nodes = [n for n in graph.nodes.values() if n.node_type == "output"]
+        if len(output_nodes) == 0:
+            logger.debug(f"Skipping degenerate graph with no output nodes (recipe: {recipe.name})")
+            continue
+
         net = Network(compute_graph=graph)
         dependent_outputs_names = "_".join(net.get_dependent_output_proteins())
         base_name = recipe.name or "network"

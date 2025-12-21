@@ -216,6 +216,7 @@ class DesignManager(BaseModel):
         assert isinstance(self.sampling, LatticeSampling)
         xres, yres = self.sampling.resolution
         jitter = self.sampling.jitter_std
+        noise_std = self.sampling.noise_std
 
         if isinstance(samples, int):
             samples = (samples,)
@@ -228,10 +229,15 @@ class DesignManager(BaseModel):
 
         for net_idx in range(n_networks):
             xsamples, ysamples = [], []
-            for target in self.targets:
+            for t_idx, target in enumerate(self.targets):
                 X, Y_grid = self._sample_from_target(
                     target, n=n, seed=seed, grid=(xres, yres), jitter=jitter
                 )
+                if noise_std > 0:
+                    rng = np.random.default_rng(seed + t_idx * 7919 + net_idx * 6971)
+                    Y_grid = Y_grid + rng.normal(0, noise_std, Y_grid.shape)
+                    if hasattr(target, 'latent_out'):
+                        Y_grid = np.clip(Y_grid, target.latent_out[0], target.latent_out[1])
                 xsamples.append(X)
                 ysamples.append(Y_grid)
 

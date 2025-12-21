@@ -243,9 +243,12 @@ def save_design_target_state(
             data["target_X"] = target.X
         if hasattr(target, "Y"):
             data["target_Y"] = target.Y
-        if hasattr(target, "lattice_x_extent"):
-            metadata["lattice_x_extent"] = target.lattice_x_extent
-            metadata["lattice_y_extent"] = target.lattice_y_extent
+        if hasattr(target, "latent_x"):
+            metadata["latent_x"] = target.latent_x
+            metadata["latent_y"] = target.latent_y
+        if hasattr(target, "viewbox_x"):
+            metadata["viewbox_x"] = target.viewbox_x
+            metadata["viewbox_y"] = target.viewbox_y
 
     if network is not None:
         metadata["network_name"] = getattr(network, "name", "unknown")

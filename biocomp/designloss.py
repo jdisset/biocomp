@@ -510,6 +510,84 @@ def ratio_mask_coupling_penalty(
     return jnp.sum(per_target_penalty)
 
 
+def _ern_tu_tying_single_target(
+    params: ParameterTree,
+    ern_namespaces: list[str],
+    tu_log_alpha_2d: jnp.ndarray,
+    target_idx: int | jnp.ndarray,
+    input_tu_indices_are_3d: bool,
+) -> jnp.ndarray:
+    """ERN TU tying: if pos (mRNA target) is disabled, penalize neg (ERN protein) being enabled."""
+    assert tu_log_alpha_2d.ndim == 2, f"need 2D tu_log_alpha, got {tu_log_alpha_2d.shape}"
+    n_networks, _ = tu_log_alpha_2d.shape
+    total_penalty = jnp.array(0.0)
+
+    for namespace in ern_namespaces:
+        tu_path = f"{namespace}/input_tu_indices"
+        net_path = f"{namespace}/node_network_ids"
+        if tu_path not in params or net_path not in params:
+            continue
+
+        input_tu_indices = params[tu_path]
+        node_network_ids = params[net_path]
+
+        if input_tu_indices_are_3d:
+            assert input_tu_indices.ndim == 4, f"need 4D input_tu_indices, got {input_tu_indices.ndim}D"
+            assert node_network_ids.ndim == 2, f"need 2D node_network_ids, got {node_network_ids.ndim}D"
+            input_tu_indices = input_tu_indices[target_idx]
+            node_network_ids = node_network_ids[target_idx]
+        else:
+            assert input_tu_indices.ndim == 3, f"need 3D input_tu_indices, got {input_tu_indices.ndim}D"
+            assert node_network_ids.ndim == 1, f"need 1D node_network_ids, got {node_network_ids.ndim}D"
+
+        n_nodes, n_inputs, _ = input_tu_indices.shape
+        assert n_inputs == 2, f"ERN needs 2 inputs, got {n_inputs}"
+
+        neg_tu_indices = input_tu_indices[:, 0, :]
+        pos_tu_indices = input_tu_indices[:, 1, :]
+
+        def get_max_log_alpha(tu_indices_row, network_id):
+            valid = tu_indices_row >= 0
+            safe_idx = jnp.maximum(tu_indices_row, 0)
+            safe_net = jnp.clip(network_id, 0, n_networks - 1)
+            las = tu_log_alpha_2d[safe_net, safe_idx]
+            las = jnp.where(valid, las, 10.0)  # -1 = always enabled
+            return jnp.max(las)
+
+        neg_las = vmap(get_max_log_alpha)(neg_tu_indices, node_network_ids)
+        pos_las = vmap(get_max_log_alpha)(pos_tu_indices, node_network_ids)
+
+        # penalty = P(pos disabled) * relu(neg_log_alpha - pos_log_alpha)
+        pos_disabled_prob = jax.nn.sigmoid(-pos_las)
+        excess = jax.nn.relu(neg_las - pos_las)
+        total_penalty = total_penalty + jnp.sum(pos_disabled_prob * excess)
+
+    return total_penalty
+
+
+def ern_tu_tying_penalty(
+    params: ParameterTree,
+    ern_namespaces: list[str],
+    tu_log_alpha: jnp.ndarray,
+) -> jnp.ndarray:
+    """ERN TU tying: push neg TU down when pos TU is disabled. One-way coupling."""
+    if not ern_namespaces:
+        return jnp.array(0.0)
+    assert tu_log_alpha.ndim in (2, 3), f"need 2D or 3D tu_log_alpha, got {tu_log_alpha.ndim}D"
+
+    if tu_log_alpha.ndim == 2:
+        return _ern_tu_tying_single_target(
+            params, ern_namespaces, tu_log_alpha, target_idx=0, input_tu_indices_are_3d=False
+        )
+
+    def compute_for_target(target_idx, target_la):
+        return _ern_tu_tying_single_target(
+            params, ern_namespaces, target_la, target_idx=target_idx, input_tu_indices_are_3d=True
+        )
+
+    return jnp.sum(vmap(compute_for_target)(jnp.arange(tu_log_alpha.shape[0]), tu_log_alpha))
+
+
 def per_batch_apply(params, X, Z, keys, stack, tu_uniform=None):
     def apply_single(x, z, key):
         return stack.apply(params, x, z, key, tu_enabled_random_vars=tu_uniform)
@@ -618,6 +696,7 @@ def _make_loss_func(
     tu_n_samples=4,
     lambda_coupling=0.1,
     min_ratio_threshold=0.005,
+    lambda_ern_tying=0.0,
 ):
     """Create the loss function with optional TU sample averaging for variance reduction.
 
@@ -628,6 +707,9 @@ def _make_loss_func(
             min_ratio_threshold, this creates gradient pressure to push down tu_log_alpha.
         min_ratio_threshold: Coupling only activates when normalized ratio < this.
             Set to 0 to disable coupling entirely.
+        lambda_ern_tying: Weight for ERN TU tying penalty. When an ERN's positive input
+            (mRNA target) is disabled, push the negative input (ERN protein) to also be
+            disabled. Set to 0 to disable (default).
     """
     # config-time validation (Python assertions) - catches config bugs early
     _validate_temperature_schedule(tu_temperature, total_steps=100000)
@@ -642,6 +724,11 @@ def _make_loss_func(
     if dmanager.enable_tu_masking and hasattr(stack, 'get_per_network_tu_mask'):
         per_network_tu_mask = stack.get_per_network_tu_mask()
         logger.debug(f"Per-network TU mask shape: {per_network_tu_mask.shape}")
+
+    ern_namespaces = [
+        layer.namespace for layer in (stack.layers or [])
+        if layer.f_type and layer.f_type.startswith("sequestron_ERN")
+    ]
 
     # Debug: dump axis assignment for each target-network pair
     # This documents how X columns map to network inputs, crucial for visualization
@@ -744,10 +831,7 @@ def _make_loss_func(
             l0_penalty = as_schedule(lambda_l0)(step) * jnp.sum(per_tu_penalty)
             l0_penalty = _sanitize(jnp.atleast_1d(l0_penalty))[0]
 
-            # ratio-mask coupling: push down tu_log_alpha when ratio is too small
-            # ONLY activates when normalized_ratio < min_ratio_threshold
-            # NOTE: can't check coupling_weight > 0 as it's traced; multiply by weight instead
-            if min_ratio_threshold > 0 and ratio_paths:  # static checks only
+            if min_ratio_threshold > 0 and ratio_paths:
                 coupling_weight = as_schedule(lambda_coupling)(step)
                 raw_coupling = ratio_mask_coupling_penalty(
                     params, ratio_paths, log_alpha, min_ratio_threshold
@@ -755,7 +839,17 @@ def _make_loss_func(
                 coupling_penalty = coupling_weight * raw_coupling
                 coupling_penalty = _sanitize(jnp.atleast_1d(coupling_penalty))[0]
 
-        # TU sample averaging for variance reduction
+            if ern_namespaces:
+                tying_weight = as_schedule(lambda_ern_tying)(step)
+                raw_tying = ern_tu_tying_penalty(params, ern_namespaces, log_alpha)
+                ern_tying_penalty_val = tying_weight * raw_tying
+                ern_tying_penalty_val = _sanitize(jnp.atleast_1d(ern_tying_penalty_val))[0]
+            else:
+                ern_tying_penalty_val = jnp.array(0.0)
+        else:
+            ern_tying_penalty_val = jnp.array(0.0)
+
+        # TU sample averaging
         extra_aux_inner = {}
         if tu_n_samples > 1 and TU_LOG_ALPHA_PATH in params:
             tu_uniforms = _sample_tu_uniform(params, mask_key, n_samples=tu_n_samples)
@@ -834,6 +928,7 @@ def _make_loss_func(
             "yhatdep": yhatdep,
             "l0_penalty": l0_penalty,
             "coupling_penalty": coupling_penalty,
+            "ern_tying_penalty": ern_tying_penalty_val,
             "tucount_penalty": tucount_penalty,
             "spread_penalty": spread_penalty,
             "tu_uniform": tu_uniform,
@@ -843,7 +938,10 @@ def _make_loss_func(
             "sublosses": sublosses,
         }
 
-        loss = all_losses.mean() + tucount_penalty + spread_penalty + l0_penalty + coupling_penalty
+        loss = (
+            all_losses.mean() + tucount_penalty + spread_penalty
+            + l0_penalty + coupling_penalty + ern_tying_penalty_val
+        )
         # NOTE: can't assert jnp.isfinite(loss) - it's a traced value
         # Use _sanitize for handling and checkify in tests for validation
         loss = jnp.nan_to_num(loss, nan=1e6, posinf=1e6, neginf=1e6)
@@ -868,6 +966,7 @@ def distance_loss(
     tu_n_samples=4,
     lambda_coupling=0.1,
     min_ratio_threshold=0.005,
+    lambda_ern_tying=0.0,
     distance_func=huber_zncc_loss,
 ):
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks):
@@ -894,6 +993,7 @@ def distance_loss(
         tu_n_samples=tu_n_samples,
         lambda_coupling=lambda_coupling,
         min_ratio_threshold=min_ratio_threshold,
+        lambda_ern_tying=lambda_ern_tying,
     )
 
 
@@ -919,6 +1019,7 @@ def grid_distance_loss(
     tu_n_samples=4,
     lambda_coupling=0.1,
     min_ratio_threshold=0.005,
+    lambda_ern_tying=0.0,
     **kw,
 ):
     assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
@@ -998,4 +1099,5 @@ def grid_distance_loss(
         tu_n_samples=tu_n_samples,
         lambda_coupling=lambda_coupling,
         min_ratio_threshold=min_ratio_threshold,
+        lambda_ern_tying=lambda_ern_tying,
     )

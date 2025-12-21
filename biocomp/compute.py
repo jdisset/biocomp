@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable, Optional, Union, Any, TypeVar
+from concurrent.futures import ThreadPoolExecutor
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -478,6 +479,10 @@ class ComputeStack:
         return ComputeStack(self.networks, deepcopy(self.layers))
 
     def commit(self, params: ParameterTree, **kwargs):
+        import time as _time
+
+        _t0 = _time.perf_counter()
+
         from biocomp.tumasking import TU_LOG_ALPHA_PATH, get_final_mask
         from biocomp.network import recipe_to_networks
         import biocomp.biorules as br
@@ -490,18 +495,25 @@ class ComputeStack:
         )
 
         # create copies of all networks
+        _t1 = _time.perf_counter()
         network_copies = [deepcopy(net) for net in self.networks]
+        _t2 = _time.perf_counter()
+        logger.debug(f"COMMIT TIMING: deepcopy {len(network_copies)} networks: {_t2 - _t1:.3f}s")
 
         # create a temporary stack with network copies for commit operations
         temp_stack = ComputeStack(network_copies, self.layers)
         temp_stack.node_map = self.node_map
 
         # first, run node-level commits (they need edges to exist)
+        _t3 = _time.perf_counter()
         for layer in self.layers:
             layer.commit(params, stack=temp_stack, **kwargs)
+        _t4 = _time.perf_counter()
+        logger.debug(f"COMMIT TIMING: layer commits ({len(self.layers)} layers): {_t4 - _t3:.3f}s")
 
         # AFTER node commits, remove disabled TU edges and source nodes
         # SINGLE SOURCE OF TRUTH: hard-concrete masks (tu_log_alpha) determine what's disabled
+        _t5 = _time.perf_counter()
         if TU_LOG_ALPHA_PATH in params and tu_id_to_idx:
             tu_log_alpha = params[TU_LOG_ALPHA_PATH]
             assert tu_log_alpha.ndim == 2, (
@@ -544,60 +556,71 @@ class ComputeStack:
             # fallback: prune based on zero ratios (non-design contexts)
             for net in network_copies:
                 net.prune_disabled_tus()
+        _t6 = _time.perf_counter()
+        logger.debug(f"COMMIT TIMING: TU pruning: {_t6 - _t5:.3f}s")
 
         # ROUNDTRIP: export to recipe and rebuild to ensure clean graph structure
         # This ensures orphan nodes (e.g., transcription nodes with no source) are removed
         # and the graph is consistent. Always performed for robustness.
-        final_networks = []
-        for net in network_copies:
-            recipe = net.to_recipe()
-
-            # handle networks with empty recipes (all TUs disabled)
-            if not recipe.content:
-                # create an empty network to maintain index correspondence
-                from biocomp.network import Network
-                from biocomp.graphengine import GraphState
-
-                empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
-                empty_net.name = net.name
-                empty_net.metadata = net.metadata
-                final_networks.append(empty_net)
-                continue
-
-            # check if network was over-pruned (no output nodes, empty dependent outputs,
-            # or corrupted input/output mappings from cotransfection removal)
+        def _rebuild_network(net):
+            """Rebuild a single network from recipe. Returns rebuilt network."""
+            # check if network was over-pruned BEFORE calling to_recipe
+            # (to_recipe can fail on corrupted networks)
             output_nodes = [n for n in net.compute_graph.nodes.values() if n.node_type == "output"]
             if len(output_nodes) != 1:
                 original_outputs = ()
             else:
                 try:
                     original_outputs = tuple(sorted(net.get_dependent_output_proteins()))
-                except AssertionError:
-                    # corrupted input/output mapping (e.g., cotransfections removed)
+                except (AssertionError, IndexError, KeyError):
                     original_outputs = ()
 
             if len(original_outputs) == 0:
-                # over-pruned network: only marker TUs remain (all outputs are also inputs)
-                # create empty network to maintain index correspondence
-                from biocomp.network import Network
-                from biocomp.graphengine import GraphState
-
                 empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
                 empty_net.name = net.name
                 empty_net.metadata = net.metadata
-                final_networks.append(empty_net)
-                continue
+                return empty_net
+
+            # Now safe to convert to recipe
+            try:
+                recipe = net.to_recipe()
+            except (AssertionError, IndexError, KeyError):
+                # Network is in an invalid state after pruning
+                empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
+                empty_net.name = net.name
+                empty_net.metadata = net.metadata
+                return empty_net
+
+            # handle networks with empty recipes (all TUs disabled)
+            if not recipe.content:
+                empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
+                empty_net.name = net.name
+                empty_net.metadata = net.metadata
+                return empty_net
 
             # rebuild from recipe (skip input_order validation since TU pruning may invalidate it)
             rebuilt = recipe_to_networks(
-                recipe, br.ALL_RULES, invert=True, inversion_mode="all",
+                recipe,
+                br.ALL_RULES,
+                invert=True,
+                inversion_mode="all",
                 skip_input_order_validation=True,
             )
+
+            # handle degenerate networks (all inversions had no output nodes)
+            if len(rebuilt) == 0:
+                logger.warning(
+                    f"COMMIT: Recipe '{recipe.name}' produced no valid networks "
+                    f"(all inversions degenerate). Returning empty network."
+                )
+                empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
+                empty_net.name = net.name
+                empty_net.metadata = net.metadata
+                return empty_net
 
             if len(rebuilt) == 1:
                 rebuilt_net = rebuilt[0]
             else:
-                # find the matching inversion by dependent output proteins
                 matching = [
                     r
                     for r in rebuilt
@@ -605,19 +628,33 @@ class ComputeStack:
                 ]
                 assert len(matching) == 1, (
                     f"COMMIT ERROR: Recipe '{recipe.name}' produced {len(rebuilt)} inversions, "
-                    f"but {len(matching)} match the original network's dependent outputs {original_outputs}. "
-                    f"Rebuilt outputs: {[tuple(sorted(r.get_dependent_output_proteins())) for r in rebuilt]}"
+                    f"but {len(matching)} match original outputs {original_outputs}. "
+                    f"Rebuilt: {[tuple(sorted(r.get_dependent_output_proteins())) for r in rebuilt]}"
                 )
                 rebuilt_net = matching[0]
-            # preserve original network metadata and name
+
             rebuilt_net.name = net.name
             rebuilt_net.metadata = net.metadata
-            final_networks.append(rebuilt_net)
+            return rebuilt_net
+
+        # Parallelize per-network rebuilding (each is independent)
+        n_workers = min(len(network_copies), 8)
+        if n_workers > 1:
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                final_networks = list(executor.map(_rebuild_network, network_copies))
+        else:
+            final_networks = [_rebuild_network(net) for net in network_copies]
+        _t7 = _time.perf_counter()
+        logger.debug(
+            f"COMMIT TIMING: roundtrip rebuild ({len(network_copies)} nets, {n_workers} workers): {_t7 - _t6:.3f}s"
+        )
 
         # verify all committed networks have valid edge slots
         for i, net in enumerate(final_networks):
             self._assert_valid_edge_slots(net, f"committed network[{i}]")
 
+        _t8 = _time.perf_counter()
+        logger.debug(f"COMMIT TIMING: TOTAL: {_t8 - _t0:.3f}s")
         return final_networks
 
     def _assert_valid_edge_slots(self, network, context: str):
@@ -851,16 +888,22 @@ class ComputeStack:
             assert len(input_shapes) == 1  # each node has one "input"
             assert layer_id == 0  # input layer is the first layer
             assert input_shapes == layer.f_out_shapes
-            # input indices of the input layer are just the indices of the nodes
-            # we need to get the node_id from the node_map
+            # input indices of the input layer are determined by node position
+            # node_map returns (layer_id, node_pos)
             input_start_indices = np.array(
                 [
                     [
-                        self.node_map[(key.network_id, key.node_id)][0]
-                        * input_lengths[0]  # layer_id * length
+                        self.node_map[(key.network_id, key.node_id)][1]
+                        * input_lengths[0]  # node_pos * length
                         for key in layer.nodes
                     ]
                 ]
+            )
+            flat_indices = input_start_indices.flatten()
+            n_unique = len(np.unique(flat_indices))
+            assert n_unique == len(flat_indices), (
+                f"Input layer has duplicate indices! indices={flat_indices}, "
+                f"expected {len(flat_indices)} unique values but got {n_unique}. "
             )
         else:
             input_start_indices = np.array(

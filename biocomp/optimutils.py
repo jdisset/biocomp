@@ -453,6 +453,101 @@ def three_phase_schedule(
     )
 
 
+def five_phase_schedule(
+    total_steps: int,
+    phase1_frac: float,
+    phase2_frac: float,
+    phase3_frac: float,
+    phase4_frac: float,
+    phase1_value: float,
+    phase2_end_value: float,
+    phase3_end_value: float,
+    phase4_start_value: float,
+    phase5_end_value: float,
+    phase2_power: float = 1.0,
+    phase3_power: float = 2.0,
+    phase5_power: float = 2.0,
+) -> optax.Schedule:
+    """Create a five-phase schedule with wake-up (re-softening) phase.
+
+    This schedule extends three_phase_schedule with a "wake-up" phase that
+    JUMPS back to a softer value, allowing recovery from over-pruning.
+    Inspired by simulated annealing with reheating.
+
+    Phases:
+        1. Constant at phase1_value (warm exploration)
+        2. Polynomial decay to phase2_end_value (initial pruning)
+        3. Polynomial decay to phase3_end_value (initial commitment)
+        4. JUMP to phase4_start_value (wake-up - allows TU recovery)
+        5. Polynomial decay to phase5_end_value (final commitment)
+
+    The key innovation is Phase 4: a discontinuous jump to a softer value,
+    allowing pruned TUs to potentially recover if gradients favor them.
+
+    Args:
+        total_steps: Total number of optimization steps
+        phase1_frac: Fraction of steps for phase 1 (e.g., 0.25)
+        phase2_frac: Fraction of steps at end of phase 2 (e.g., 0.50)
+        phase3_frac: Fraction of steps at end of phase 3 (e.g., 0.65)
+        phase4_frac: Fraction of steps at end of phase 4 (e.g., 0.85)
+        phase1_value: Constant value during exploration
+        phase2_end_value: Value at end of initial pruning
+        phase3_end_value: Value at end of initial commitment
+        phase4_start_value: JUMP to this value at wake-up start
+        phase5_end_value: Final value at end of training
+        phase2_power: Polynomial power for phase 2 decay
+        phase3_power: Polynomial power for phase 3 decay
+        phase5_power: Polynomial power for phase 5 decay
+
+    Returns:
+        optax.Schedule that can be called with step number
+    """
+    assert 0 < phase1_frac < phase2_frac < phase3_frac < phase4_frac < 1, (
+        f"phase fractions must be 0 < p1 < p2 < p3 < p4 < 1, got "
+        f"{phase1_frac}, {phase2_frac}, {phase3_frac}, {phase4_frac}"
+    )
+
+    phase1_steps = int(phase1_frac * total_steps)
+    phase2_steps = int(phase2_frac * total_steps)
+    phase3_steps = int(phase3_frac * total_steps)
+    phase4_steps = int(phase4_frac * total_steps)
+
+    phase2_duration = phase2_steps - phase1_steps
+    phase3_duration = phase3_steps - phase2_steps
+    phase5_duration = total_steps - phase4_steps
+
+    return optax.join_schedules(
+        schedules=[
+            # Phase 1: constant warm exploration
+            optax.constant_schedule(phase1_value),
+            # Phase 2: polynomial decay (initial pruning)
+            optax.polynomial_schedule(
+                init_value=phase1_value,
+                end_value=phase2_end_value,
+                power=phase2_power,
+                transition_steps=phase2_duration,
+            ),
+            # Phase 3: polynomial decay (initial commitment)
+            optax.polynomial_schedule(
+                init_value=phase2_end_value,
+                end_value=phase3_end_value,
+                power=phase3_power,
+                transition_steps=phase3_duration,
+            ),
+            # Phase 4: JUMP to wake-up value (discontinuous!)
+            optax.constant_schedule(phase4_start_value),
+            # Phase 5: polynomial decay (final commitment)
+            optax.polynomial_schedule(
+                init_value=phase4_start_value,
+                end_value=phase5_end_value,
+                power=phase5_power,
+                transition_steps=phase5_duration,
+            ),
+        ],
+        boundaries=[phase1_steps, phase2_steps, phase3_steps, phase4_steps],
+    )
+
+
 def optimize(
     step: Callable,
     params,

@@ -31,6 +31,7 @@ class LatticeSampling(SamplingConfig):
     strategy: Literal["lattice"] = "lattice"
     resolution: tuple[int, int] = (64, 64)
     jitter_std: float = 0.0
+    noise_std: float = 0.0
 
 
 SamplingConfigUnion = Union[UniformSampling, LatticeSampling]
@@ -40,8 +41,8 @@ class TargetBase(BaseModel, ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: Optional[str] = None
-    lattice_x_extent: tuple[float, float] = (0.0, 1.0)
-    lattice_y_extent: tuple[float, float] = (0.0, 1.0)
+    latent_x: tuple[float, float] = (0.0, 0.6)
+    latent_y: tuple[float, float] = (0.0, 0.6)
 
     @abstractmethod
     def get_lattice(
@@ -56,19 +57,20 @@ class TargetBase(BaseModel, ABC):
 
 class SVGTarget(TargetBase):
     path: Union[str, Path]
-    img_latent_xlim: tuple[float, float] = (0.0, 1.0)
-    img_latent_ylim: tuple[float, float] = (0.0, 1.0)
-    img_latent_outlim: tuple[float, float] = (0.0, 1.0)
+    viewbox_x: tuple[float, float] = (0.0, 1.0)
+    viewbox_y: tuple[float, float] = (0.0, 1.0)
+    latent_out: tuple[float, float] = (0.0, 0.6)
     transform_to_log_space: bool = False
     max_is_black: bool = True
+    blur_sigma: float = 3.0
 
     @model_validator(mode="after")
-    def _auto_log_extent(self):
+    def _auto_log_viewbox(self):
         if self.transform_to_log_space:
-            if self.lattice_x_extent == (0.0, 1.0):
-                self.lattice_x_extent = (0.1, 1.0)
-            if self.lattice_y_extent == (0.0, 1.0):
-                self.lattice_y_extent = (0.1, 1.0)
+            if self.viewbox_x == (0.0, 1.0):
+                self.viewbox_x = (0.1, 1.0)
+            if self.viewbox_y == (0.0, 1.0):
+                self.viewbox_y = (0.1, 1.0)
         return self
 
     def _sample(self, n: int, seed: int, grid: Optional[tuple[int, int]]):
@@ -79,11 +81,11 @@ class SVGTarget(TargetBase):
             grid=grid,
             grid_jitter_std=0.0,
             log=self.transform_to_log_space,
-            lattice_x_extent=self.lattice_x_extent,
-            lattice_y_extent=self.lattice_y_extent,
-            img_latent_xlim=self.img_latent_xlim,
-            img_latent_ylim=self.img_latent_ylim,
-            img_latent_outlim=self.img_latent_outlim,
+            viewbox_x=self.viewbox_x,
+            viewbox_y=self.viewbox_y,
+            latent_x=self.latent_x,
+            latent_y=self.latent_y,
+            latent_out=self.latent_out,
             max_is_black=self.max_is_black,
         )
 
@@ -91,19 +93,28 @@ class SVGTarget(TargetBase):
         self, resolution: tuple[int, int], seed: int = 0
     ) -> tuple[np.ndarray, np.ndarray]:
         X, Y = self._sample(n=1, seed=seed, grid=resolution)
-        return X, Y[0]
+        Y_out = Y[0]
+        if self.blur_sigma > 0:
+            from scipy.ndimage import gaussian_filter
+            Y_out = gaussian_filter(Y_out, sigma=self.blur_sigma, mode='nearest')
+        return X, Y_out
 
     def sample_uniform(self, n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
         return self._sample(n=n, seed=seed, grid=None)
 
 
 class Target(SVGTarget):
-    """Legacy alias for SVGTarget."""
+    """Legacy alias for SVGTarget with deprecated parameter names."""
 
     xlim: Optional[tuple[float, float]] = None
     ylim: Optional[tuple[float, float]] = None
     outlim: Optional[tuple[float, float]] = None
     rescale_to: Optional[dict] = None
+    lattice_x_extent: Optional[tuple[float, float]] = None
+    lattice_y_extent: Optional[tuple[float, float]] = None
+    img_latent_xlim: Optional[tuple[float, float]] = None
+    img_latent_ylim: Optional[tuple[float, float]] = None
+    img_latent_outlim: Optional[tuple[float, float]] = None
 
     @model_validator(mode="after")
     def _migrate_legacy_params(self):
@@ -112,23 +123,38 @@ class Target(SVGTarget):
                 f"Target.{old} is deprecated, use {new} instead", DeprecationWarning, stacklevel=3
             )
 
+        if self.lattice_x_extent is not None:
+            _warn("lattice_x_extent", "viewbox_x")
+            self.viewbox_x = self.lattice_x_extent
+        if self.lattice_y_extent is not None:
+            _warn("lattice_y_extent", "viewbox_y")
+            self.viewbox_y = self.lattice_y_extent
+        if self.img_latent_xlim is not None:
+            _warn("img_latent_xlim", "latent_x")
+            self.latent_x = self.img_latent_xlim
+        if self.img_latent_ylim is not None:
+            _warn("img_latent_ylim", "latent_y")
+            self.latent_y = self.img_latent_ylim
+        if self.img_latent_outlim is not None:
+            _warn("img_latent_outlim", "latent_out")
+            self.latent_out = self.img_latent_outlim
         if self.xlim is not None:
-            _warn("xlim", "lattice_x_extent")
-            self.lattice_x_extent = self.xlim
+            _warn("xlim", "viewbox_x")
+            self.viewbox_x = self.xlim
         if self.ylim is not None:
-            _warn("ylim", "lattice_y_extent")
-            self.lattice_y_extent = self.ylim
+            _warn("ylim", "viewbox_y")
+            self.viewbox_y = self.ylim
         if self.outlim is not None:
-            _warn("outlim", "img_latent_outlim")
-            self.img_latent_outlim = self.outlim
+            _warn("outlim", "latent_out")
+            self.latent_out = self.outlim
         if self.rescale_to is not None:
-            _warn("rescale_to", "lattice_*_extent and img_latent_*lim")
+            _warn("rescale_to", "viewbox_*/latent_*")
             if "x" in self.rescale_to:
-                self.lattice_x_extent = tuple(self.rescale_to["x"])
+                self.viewbox_x = tuple(self.rescale_to["x"])
             if "y" in self.rescale_to:
-                self.lattice_y_extent = tuple(self.rescale_to["y"])
+                self.viewbox_y = tuple(self.rescale_to["y"])
             if "out" in self.rescale_to:
-                self.img_latent_outlim = tuple(self.rescale_to["out"])
+                self.latent_out = tuple(self.rescale_to["out"])
         return self
 
 
@@ -158,8 +184,8 @@ class DataTarget(TargetBase):
         X_samples, Y_samples = data_to_lattice_2d(
             self.X,
             self.Y,
-            xlims=self.lattice_x_extent,
-            ylims=self.lattice_y_extent,
+            xlims=self.latent_x,
+            ylims=self.latent_y,
             resolution=resolution,
         )
         nan_mask = np.isnan(Y_samples)

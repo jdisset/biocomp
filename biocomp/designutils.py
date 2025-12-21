@@ -206,32 +206,32 @@ def _extract_shapes_from_svg(svg_path, max_is_black):
 
 
 def _generate_svg_sample_points(
-    n, lattice_extent, img_latent_lim, vx, vy, vw, vh, rng, log, grid=None, grid_jitter_std=None
+    n, viewbox, latent, vx, vy, vw, vh, rng, log, grid=None, grid_jitter_std=None
 ):
     """Generate sample points in SVG coordinate space and return latent coordinates.
 
     Args:
-        lattice_extent: (x_extent, y_extent) - final latent space bounds
-        img_latent_lim: (x_lim, y_lim) - SVG-to-latent mapping parameters
+        viewbox: (viewbox_x, viewbox_y) - fraction of SVG to sample (0-1 normalized)
+        latent: (latent_x, latent_y) - output latent coordinate ranges
     """
-    x_extent, y_extent = lattice_extent
-    x_lim, y_lim = img_latent_lim
+    viewbox_x, viewbox_y = viewbox
+    latent_x, latent_y = latent
 
     if grid:
         xres, yres = grid
         if log:
             eps = 1e-6
             x_vals = (
-                np.logspace(np.log10(eps + x_extent[0] * vw), np.log10(x_extent[1] * vw), xres) + vx
+                np.logspace(np.log10(eps + viewbox_x[0] * vw), np.log10(viewbox_x[1] * vw), xres) + vx
             )
             y_vals = (
                 vh
-                - np.logspace(np.log10(eps + y_extent[0] * vh), np.log10(y_extent[1] * vh), yres)
+                - np.logspace(np.log10(eps + viewbox_y[0] * vh), np.log10(viewbox_y[1] * vh), yres)
                 + vy
             )
         else:
-            x_vals = np.linspace(x_extent[0] * vw + vx, x_extent[1] * vw + vx, xres)
-            y_vals = np.linspace((1 - y_extent[1]) * vh + vy, (1 - y_extent[0]) * vh + vy, yres)
+            x_vals = np.linspace(viewbox_x[0] * vw + vx, viewbox_x[1] * vw + vx, xres)
+            y_vals = np.linspace((1 - viewbox_y[0]) * vh + vy, (1 - viewbox_y[1]) * vh + vy, yres)
 
         sx_grid, sy_grid = np.meshgrid(x_vals, y_vals)
         sx_list, sy_list = [], []
@@ -251,28 +251,42 @@ def _generate_svg_sample_points(
         if log:
             eps = 1e-6
             sx = (
-                10 ** rng.uniform(np.log10(eps + x_extent[0] * vw), np.log10(x_extent[1] * vw), n)
+                10 ** rng.uniform(np.log10(eps + viewbox_x[0] * vw), np.log10(viewbox_x[1] * vw), n)
                 + vx
             )
             sy = (
                 vh
-                - 10 ** rng.uniform(np.log10(eps + y_extent[0] * vh), np.log10(y_extent[1] * vh), n)
+                - 10 ** rng.uniform(np.log10(eps + viewbox_y[0] * vh), np.log10(viewbox_y[1] * vh), n)
                 + vy
             )
         else:
-            sx = rng.uniform(x_extent[0] * vw + vx, x_extent[1] * vw + vx, n)
-            sy = rng.uniform((1 - y_extent[1]) * vh + vy, (1 - y_extent[0]) * vh + vy, n)
+            sx = rng.uniform(viewbox_x[0] * vw + vx, viewbox_x[1] * vw + vx, n)
+            sy = rng.uniform((1 - viewbox_y[1]) * vh + vy, (1 - viewbox_y[0]) * vh + vy, n)
 
     # Convert SVG coordinates to latent space
+    # KEY: Normalize against the VIEWBOX range, so cropped region maps to FULL latent range
     if log:
-        X = np.column_stack((np.log10(sx - vx), np.log10(vh - (sy - vy))))
+        eps = 1e-6
+        x_log = np.log10(sx - vx)
+        y_log = np.log10(vh - (sy - vy))
+        x_log_min = np.log10(eps + viewbox_x[0] * vw)
+        x_log_max = np.log10(viewbox_x[1] * vw)
+        y_log_min = np.log10(eps + viewbox_y[0] * vh)
+        y_log_max = np.log10(viewbox_y[1] * vh)
+        x_norm = (x_log - x_log_min) / (x_log_max - x_log_min + eps)
+        y_norm = (y_log - y_log_min) / (y_log_max - y_log_min + eps)
     else:
-        # Map SVG coords to [0,1] normalized, then scale by img_latent_lim
-        x_norm = (sx - vx) / vw
-        y_norm = (vh - (sy - vy)) / vh
-        x_latent = x_norm * (x_lim[1] - x_lim[0]) + x_lim[0]
-        y_latent = y_norm * (y_lim[1] - y_lim[0]) + y_lim[0]
-        X = np.column_stack((x_latent, y_latent))
+        # Normalize against viewbox, not full SVG
+        svg_x_min = viewbox_x[0] * vw + vx
+        svg_x_max = viewbox_x[1] * vw + vx
+        svg_y_min = (1 - viewbox_y[1]) * vh + vy
+        svg_y_max = (1 - viewbox_y[0]) * vh + vy
+        x_norm = (sx - svg_x_min) / (svg_x_max - svg_x_min) if svg_x_max != svg_x_min else 0.5
+        y_norm = 1.0 - ((sy - svg_y_min) / (svg_y_max - svg_y_min)) if svg_y_max != svg_y_min else 0.5
+
+    x_latent = x_norm * (latent_x[1] - latent_x[0]) + latent_x[0]
+    y_latent = y_norm * (latent_y[1] - latent_y[0]) + latent_y[0]
+    X = np.column_stack((x_latent, y_latent))
 
     return X, sx, sy
 
@@ -301,26 +315,31 @@ def sample_from_svg(
     grid=None,
     grid_jitter_std=None,
     # New API parameters
-    lattice_x_extent: tuple[float, float] = None,
-    lattice_y_extent: tuple[float, float] = None,
-    img_latent_xlim: tuple[float, float] = (0.0, 1.0),
-    img_latent_ylim: tuple[float, float] = (0.0, 1.0),
-    img_latent_outlim: tuple[float, float] = (0.0, 1.0),
+    viewbox_x: tuple[float, float] = None,
+    viewbox_y: tuple[float, float] = None,
+    latent_x: tuple[float, float] = (0.0, 0.6),
+    latent_y: tuple[float, float] = (0.0, 0.6),
+    latent_out: tuple[float, float] = (0.0, 0.6),
     # Legacy parameters (deprecated)
     rescale_to=None,
     xlim=None,
     ylim=None,
     outlim=None,
+    lattice_x_extent=None,
+    lattice_y_extent=None,
+    img_latent_xlim=None,
+    img_latent_ylim=None,
+    img_latent_outlim=None,
 ):
     """Sample points from an SVG file and return latent coordinates + values.
 
-    New API:
-        lattice_x_extent, lattice_y_extent: Final latent space bounds for sampling
-        img_latent_xlim, img_latent_ylim: How SVG viewBox maps to latent coordinates
-        img_latent_outlim: How SVG grayscale maps to latent output values
+    Args:
+        viewbox_x, viewbox_y: Fraction of SVG to sample (0-1 normalized). Default (0,1) = full image.
+        latent_x, latent_y: Output coordinate range. The viewbox region maps to this full range.
+        latent_out: Output value range. Grayscale 0-1 maps to this range.
 
-    Legacy API (deprecated):
-        xlim, ylim, outlim, rescale_to: Old parameter names, will emit warnings
+    The key semantic: viewbox crops the SVG, latent defines the output coordinate system.
+    A cropped viewbox still maps to the FULL latent range.
     """
     import warnings
 
@@ -328,30 +347,31 @@ def sample_from_svg(
     seed = seed or np.random.randint(0, 2**32 - 1)
 
     # Handle legacy parameters
-    if xlim is not None or ylim is not None or outlim is not None or rescale_to is not None:
+    legacy_used = any(p is not None for p in [
+        xlim, ylim, outlim, rescale_to, lattice_x_extent, lattice_y_extent,
+        img_latent_xlim, img_latent_ylim, img_latent_outlim
+    ])
+    if legacy_used:
         warnings.warn(
-            "sample_from_svg: xlim/ylim/outlim/rescale_to are deprecated. "
-            "Use lattice_*_extent and img_latent_*lim instead.",
+            "sample_from_svg: legacy parameters are deprecated. "
+            "Use viewbox_x/y and latent_x/y/out instead.",
             DeprecationWarning,
             stacklevel=2,
         )
-        # Legacy mode: xlim/ylim were used for both extent and mapping, rescale_to for final coords
+        viewbox_x = viewbox_x or lattice_x_extent or xlim
+        viewbox_y = viewbox_y or lattice_y_extent or ylim
+        latent_x = img_latent_xlim or latent_x
+        latent_y = img_latent_ylim or latent_y
+        latent_out = img_latent_outlim or outlim or latent_out
         if rescale_to:
-            lattice_x_extent = lattice_x_extent or tuple(rescale_to.get("x", (0, 1)))
-            lattice_y_extent = lattice_y_extent or tuple(rescale_to.get("y", (0, 1)))
-            img_latent_outlim = outlim or tuple(rescale_to.get("out", (0, 1)))
-        else:
-            # Without rescale_to, xlim/ylim were both extent and mapping
-            lattice_x_extent = lattice_x_extent or xlim
-            lattice_y_extent = lattice_y_extent or ylim
-            img_latent_outlim = outlim or (0, 1)
-        img_latent_xlim = xlim or (0, 1)
-        img_latent_ylim = ylim or (0, 1)
+            viewbox_x = viewbox_x or tuple(rescale_to.get("x", (0, 1)))
+            viewbox_y = viewbox_y or tuple(rescale_to.get("y", (0, 1)))
+            latent_out = tuple(rescale_to.get("out", latent_out))
 
-    # Apply defaults
-    default_extent = (0.1, 1.0) if log else (0.0, 1.0)
-    lattice_x_extent = lattice_x_extent or default_extent
-    lattice_y_extent = lattice_y_extent or default_extent
+    # Apply defaults for viewbox
+    default_viewbox = (0.1, 1.0) if log else (0.0, 1.0)
+    viewbox_x = viewbox_x or default_viewbox
+    viewbox_y = viewbox_y or default_viewbox
 
     if grid:
         n = n or 1
@@ -367,8 +387,8 @@ def sample_from_svg(
 
     X, sx, sy = _generate_svg_sample_points(
         n,
-        (lattice_x_extent, lattice_y_extent),
-        (img_latent_xlim, img_latent_ylim),
+        (viewbox_x, viewbox_y),
+        (latent_x, latent_y),
         vx,
         vy,
         vw,
@@ -378,7 +398,7 @@ def sample_from_svg(
         grid,
         grid_jitter_std,
     )
-    Y = _assign_greyscale_values(sx, sy, paths, greys, max_is_black, img_latent_outlim, grid_shape)
+    Y = _assign_greyscale_values(sx, sy, paths, greys, max_is_black, latent_out, grid_shape)
 
     return (X, Y) if grid else (X, Y[:, None])
 
