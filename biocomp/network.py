@@ -935,6 +935,233 @@ class Network(BaseModel):
     def network_info(self):
         return generate_network_info(self)
 
+    def to_circuit_data(self, hide_markers: bool = True):
+        """Convert Network to jeanplot CircuitData for visualization."""
+        from jeanplot.gene import CircuitData, TUData, PartData, SourceData, InteractionData
+
+        if self.compute_graph is None:
+            return CircuitData()
+
+        graph = self.compute_graph
+        net_info = self.generate_network_info()
+        markers = set(net_info.get("markers", []))
+        lib = LibraryContext.get_library()
+
+        CATEGORY_TO_ROLE = {
+            "promoter": "promoter",
+            "terminator": "terminator",
+            "ERN": "regulator",
+            "ERN_recog_site_5p": "recognition_site",
+            "fluo_marker": "reporter",
+            "uORF_group": "uorf",
+            "CDS": "cds",
+            "insulator": "insulator",
+        }
+        PART_ORDER = [
+            "insulator",
+            "promoter",
+            "uorf",
+            "recognition_site",
+            "regulator",
+            "cds",
+            "reporter",
+            "terminator",
+        ]
+
+        def get_parts_for_source(node, output_slot=0):
+            parts = []
+            outgoing = list(graph.get_outgoing_edges(node.node_id))
+            dna_edges = [
+                e for e in outgoing if e.content_type == "DNA" and e.from_output_slot == output_slot
+            ]
+            if not dna_edges:
+                return parts
+
+            edge = dna_edges[0]
+            seen = set()
+
+            for p in edge.content:
+                pname = p.name if hasattr(p, "name") else str(p)
+                if pname in seen:
+                    continue
+                seen.add(pname)
+                cat = getattr(p, "category", None)
+                if not cat and lib and pname in lib.parts.index:
+                    cat = lib.parts.loc[pname].category
+                role = CATEGORY_TO_ROLE.get(cat, "cds")
+                if role == "insulator":
+                    continue
+                parts.append(PartData(id=f"{node.node_id}_{pname}", name=pname, role=role))
+
+            for emb_name, emb_parts in (edge.content_embedding_names or {}).items():
+                for pname in emb_parts:
+                    if not pname or pname == "00_empty_tc" or pname in seen:
+                        continue
+                    seen.add(pname)
+                    cat = None
+                    if lib and pname in lib.parts.index:
+                        cat = lib.parts.loc[pname].category
+                    role = CATEGORY_TO_ROLE.get(cat, "cds")
+                    if role == "insulator":
+                        continue
+                    parts.append(PartData(id=f"{node.node_id}_{pname}", name=pname, role=role))
+
+            parts.sort(key=lambda p: PART_ORDER.index(p.role) if p.role in PART_ORDER else 99)
+            return parts
+
+        def get_source_reporter(node) -> str | None:
+            """Get the reporter/fluo_marker protein name from a source node."""
+            for edge in graph.get_outgoing_edges(node.node_id):
+                if edge.content_type != "DNA":
+                    continue
+                for p in edge.content:
+                    pname = p.name if hasattr(p, "name") else str(p)
+                    cat = getattr(p, "category", None)
+                    if not cat and lib and pname in lib.parts.index:
+                        cat = lib.parts.loc[pname].category
+                    if cat == "fluo_marker":
+                        return pname
+            return None
+
+        tus: dict[str, TUData] = {}
+        source_to_tus: dict[int, list[str]] = {}
+        source_id_to_tu_id: dict[str, str] = {}  # source_id -> tu_id mapping
+        source_to_reporter: dict[int, str | None] = {}  # node_id -> reporter protein
+
+        for node in graph.get_nodes_by_type("source"):
+            name = node.extra.get("name", "")
+            cotx_group = node.extra.get("cotx_group", "cotx_1")
+            tu_id = f"{name}_{cotx_group}" if name else f"tu_{node.node_id}"
+            source_id = node.extra.get("source_id")
+
+            # Check if this source's reporter protein is a marker (input protein)
+            reporter = get_source_reporter(node)
+            source_to_reporter[node.node_id] = reporter
+            is_marker = reporter in markers if reporter else False
+            if hide_markers and is_marker:
+                continue
+
+            parts = get_parts_for_source(node)
+            tus[tu_id] = TUData(
+                id=tu_id,
+                name=name or tu_id,
+                parts=parts,
+                source_id=source_id,
+            )
+            if source_id:
+                source_id_to_tu_id[source_id] = tu_id
+
+            for edge in graph.get_incoming_edges(node.node_id):
+                upstream = graph.nodes.get(edge.source_id)
+                if upstream and upstream.node_type == "aggregation":
+                    source_to_tus.setdefault(upstream.node_id, []).append(tu_id)
+                    break
+
+        sources: list[SourceData] = []
+        for node in graph.get_nodes_by_type("aggregation"):
+            agg_id = node.node_id
+            tu_ids = source_to_tus.get(agg_id, [])
+            if not tu_ids:
+                continue
+
+            # Find marker by checking which connected source has a marker reporter protein
+            marker = None
+            for edge in graph.get_outgoing_edges(agg_id):
+                src_node = graph.nodes.get(edge.target_id)
+                if src_node and src_node.node_type == "source":
+                    reporter = source_to_reporter.get(src_node.node_id)
+                    if reporter and reporter in markers:
+                        marker = reporter
+                        break
+
+            # Extract ratios and compute percentages per TU
+            raw_ratios = node.extra.get("ratios", [])
+            members = node.extra.get("members", [])
+            ratios = None
+            if raw_ratios:
+                # Normalize for display (smallest = 1)
+                min_r = min(r for r in raw_ratios if r > 0) if any(r > 0 for r in raw_ratios) else 1.0
+                ratios = [r / min_r for r in raw_ratios]
+                # Compute percentages and assign to TUs
+                total = sum(raw_ratios)
+                if total > 0 and len(members) == len(raw_ratios):
+                    for sid, ratio in zip(members, raw_ratios):
+                        tu_id = source_id_to_tu_id.get(sid)
+                        if tu_id and tu_id in tus:
+                            tus[tu_id].ratio_percent = (ratio / total) * 100
+
+            sources.append(
+                SourceData(
+                    id=str(agg_id),
+                    name=node.extra.get("name"),
+                    source_type="mix",
+                    tu_ids=tu_ids,
+                    ratios=ratios,
+                    marker=marker,
+                )
+            )
+
+        def trace_to_source_tu(node_id: int, visited: set | None = None) -> str | None:
+            if visited is None:
+                visited = set()
+            if node_id in visited:
+                return None
+            visited.add(node_id)
+
+            node = graph.nodes.get(node_id)
+            if not node:
+                return None
+
+            if node.node_type == "source":
+                name = node.extra.get("name", "")
+                cotx = node.extra.get("cotx_group", "cotx_1")
+                tu_id = f"{name}_{cotx}" if name else f"tu_{node_id}"
+                return tu_id if tu_id in tus else None
+
+            for edge in graph.get_incoming_edges(node_id):
+                result = trace_to_source_tu(edge.source_id, visited)
+                if result:
+                    return result
+            return None
+
+        interactions: list[InteractionData] = []
+        for ern in graph.get_nodes_by_type("sequestron_ERN"):
+            incoming = list(graph.get_incoming_edges(ern.node_id))
+            pos_edges = [e for e in incoming if e.to_input_slot == 0]
+            neg_edges = [e for e in incoming if e.to_input_slot == 1]
+
+            if not pos_edges or not neg_edges:
+                continue
+
+            ern_part = pos_edges[0].content[0].name if pos_edges[0].content else None
+            rec_parts = [p.name for p in neg_edges[0].content] if neg_edges[0].content else []
+            rec_part = next((p for p in rec_parts if ern_part and ern_part in p), None)
+
+            if not ern_part or not rec_part:
+                continue
+
+            source_tu = trace_to_source_tu(pos_edges[0].source_id)
+            target_tu = trace_to_source_tu(neg_edges[0].source_id)
+
+            if source_tu and target_tu:
+                interactions.append(
+                    InteractionData(
+                        id=f"int_{ern.node_id}",
+                        source_tu=source_tu,
+                        source_part=ern_part,
+                        target_tu=target_tu,
+                        target_part=rec_part,
+                        interaction_type="cleavage",
+                    )
+                )
+
+        return CircuitData(
+            transcription_units=list(tus.values()),
+            sources=sources,
+            interactions=interactions,
+            metadata={"network_name": self.name, "architecture": net_info.get("architecture")},
+        )
+
 
 def assign_ern_layer_ids(graph: GraphState) -> GraphState:
     ern_nodes = {n.node_id: n for n in graph.nodes.values() if n.node_type == "sequestron_ERN"}
