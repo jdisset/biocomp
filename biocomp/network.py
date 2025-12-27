@@ -935,9 +935,22 @@ class Network(BaseModel):
     def network_info(self):
         return generate_network_info(self)
 
-    def to_circuit_data(self, hide_markers: bool = True):
-        """Convert Network to jeanplot CircuitData for visualization."""
+    def to_circuit_data(
+        self,
+        hide_markers: bool = True,
+        disabled_tu_ids: set[str] | None = None,
+        hide_disabled: bool = False,
+    ):
+        """Convert Network to jeanplot CircuitData for visualization.
+
+        Args:
+            hide_markers: If True, hide TUs that are markers
+            disabled_tu_ids: Set of TU IDs to mark as disabled (for styling)
+            hide_disabled: If True, completely remove disabled TUs from output
+        """
         from jeanplot.gene import CircuitData, TUData, PartData, SourceData, InteractionData
+
+        disabled_tu_ids = disabled_tu_ids or set()
 
         if self.compute_graph is None:
             return CircuitData()
@@ -1041,12 +1054,17 @@ class Network(BaseModel):
             if hide_markers and is_marker:
                 continue
 
+            is_disabled = tu_id in disabled_tu_ids or name in disabled_tu_ids
+            if hide_disabled and is_disabled:
+                continue
+
             parts = get_parts_for_source(node)
             tus[tu_id] = TUData(
                 id=tu_id,
                 name=name or tu_id,
                 parts=parts,
                 source_id=source_id,
+                disabled=is_disabled,
             )
             if source_id:
                 source_id_to_tu_id[source_id] = tu_id
@@ -1101,29 +1119,6 @@ class Network(BaseModel):
                 )
             )
 
-        def trace_to_source_tu(node_id: int, visited: set | None = None) -> str | None:
-            if visited is None:
-                visited = set()
-            if node_id in visited:
-                return None
-            visited.add(node_id)
-
-            node = graph.nodes.get(node_id)
-            if not node:
-                return None
-
-            if node.node_type == "source":
-                name = node.extra.get("name", "")
-                cotx = node.extra.get("cotx_group", "cotx_1")
-                tu_id = f"{name}_{cotx}" if name else f"tu_{node_id}"
-                return tu_id if tu_id in tus else None
-
-            for edge in graph.get_incoming_edges(node_id):
-                result = trace_to_source_tu(edge.source_id, visited)
-                if result:
-                    return result
-            return None
-
         interactions: list[InteractionData] = []
         for ern in graph.get_nodes_by_type("sequestron_ERN"):
             incoming = list(graph.get_incoming_edges(ern.node_id))
@@ -1134,26 +1129,37 @@ class Network(BaseModel):
                 continue
 
             ern_part = pos_edges[0].content[0].name if pos_edges[0].content else None
-            rec_parts = [p.name for p in neg_edges[0].content] if neg_edges[0].content else []
-            rec_part = next((p for p in rec_parts if ern_part and ern_part in p), None)
-
-            if not ern_part or not rec_part:
+            if not ern_part:
                 continue
 
-            source_tu = trace_to_source_tu(pos_edges[0].source_id)
-            target_tu = trace_to_source_tu(neg_edges[0].source_id)
+            # Get source TUs directly from edge metadata (aggregated edges carry all tu_ids)
+            source_tus = []
+            for pos_edge in pos_edges:
+                source_tus.extend(pos_edge.extra.get("tu_id", []))
+            if not source_tus:
+                continue
 
-            if source_tu and target_tu:
-                interactions.append(
-                    InteractionData(
-                        id=f"int_{ern.node_id}",
-                        source_tu=source_tu,
-                        source_part=ern_part,
-                        target_tu=target_tu,
-                        target_part=rec_part,
-                        interaction_type="cleavage",
-                    )
-                )
+            interaction_idx = 0
+            for neg_edge in neg_edges:
+                rec_parts = [p.name for p in neg_edge.content] if neg_edge.content else []
+                rec_part = next((p for p in rec_parts if ern_part in p), None)
+                if not rec_part:
+                    continue
+
+                target_tus = neg_edge.extra.get("tu_id", [])
+                for source_tu in source_tus:
+                    for target_tu in target_tus:
+                        interactions.append(
+                            InteractionData(
+                                id=f"int_{ern.node_id}_{interaction_idx}",
+                                source_tu=source_tu,
+                                source_part=ern_part,
+                                target_tu=target_tu,
+                                target_part=rec_part,
+                                interaction_type="inhibition",
+                            )
+                        )
+                        interaction_idx += 1
 
         return CircuitData(
             transcription_units=list(tus.values()),

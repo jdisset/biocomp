@@ -137,12 +137,39 @@ def add_node_network_ids(
     params: ParameterTree,
     nodelist: list[StackNode],
     namespace: str,
+    stack: "ComputeStack | None" = None,
 ):
-    """Add network_id for each node at {namespace}/node_network_ids."""
-    network_ids = jnp.array([node.network_id for node in nodelist], dtype=jnp.int32)
+    """Add network_id for each node at {namespace}/node_network_ids.
+
+    Args:
+        params: Parameter tree to store the mapping
+        nodelist: List of StackNodes in this layer (order must match param indexing)
+        namespace: Layer namespace (e.g., "local/3/aggregation")
+        stack: Optional ComputeStack for validation (recommended)
+    """
+    assert len(nodelist) > 0, f"Empty nodelist for {namespace}"
+
+    network_ids = []
+    for i, node in enumerate(nodelist):
+        nid = node.network_id
+        assert isinstance(nid, int) and nid >= 0, (
+            f"Invalid network_id {nid} for node {i} in {namespace}"
+        )
+        if stack is not None:
+            assert nid < len(stack.networks), (
+                f"network_id {nid} >= n_networks {len(stack.networks)} "
+                f"for node {i} in {namespace}"
+            )
+        network_ids.append(nid)
+
+    network_ids_arr = jnp.array(network_ids, dtype=jnp.int32)
+    assert network_ids_arr.shape[0] == len(nodelist), (
+        f"network_ids shape {network_ids_arr.shape} != nodelist len {len(nodelist)}"
+    )
+
     params.at(
         f"{namespace}/node_network_ids",
-        network_ids,
+        network_ids_arr,
         tags=[NON_GRAD_TAG],
         overwrite=None,
     )
