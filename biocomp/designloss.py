@@ -448,7 +448,8 @@ def ratio_mask_coupling_penalty(
     ratio_paths: list[str],
     tu_log_alpha: jnp.ndarray,
     min_ratio_threshold: float = 0.005,
-) -> jnp.ndarray:
+    return_per_target: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     """Coupling loss: push down tu_log_alpha when ratio is below threshold.
 
     ONLY activates when normalized_ratio < min_ratio_threshold. When ratios are in
@@ -466,9 +467,11 @@ def ratio_mask_coupling_penalty(
         ratio_paths: List of paths to ratio parameters (e.g., ['local/layer_3/ratios'])
         tu_log_alpha: TU log_alpha array, shape (n_targets, n_networks, n_tus) or (n_networks, n_tus)
         min_ratio_threshold: Coupling activates when (ratio/max_ratio) < this (default 0.005 = 0.5%)
+        return_per_target: If True, also return per-target breakdown shape (n_targets,)
 
     Returns:
-        Scalar coupling penalty (0 if all ratios are above threshold)
+        If return_per_target=False: Scalar coupling penalty (0 if all ratios are above threshold)
+        If return_per_target=True: (scalar, per_target_penalty) where per_target has shape (n_targets,)
 
     Note: Runtime value checks (NaN, bounds) tested via checkify in tests.
     """
@@ -485,21 +488,34 @@ def ratio_mask_coupling_penalty(
     )
 
     if tu_log_alpha.ndim == 2:
-        return _ratio_mask_coupling_single_target(
-            params, ratio_paths, tu_log_alpha, min_ratio_threshold,
-            target_idx=0, ratios_are_3d=False,
+        scalar = _ratio_mask_coupling_single_target(
+            params,
+            ratio_paths,
+            tu_log_alpha,
+            min_ratio_threshold,
+            target_idx=0,
+            ratios_are_3d=False,
         )
+        if return_per_target:
+            return scalar, jnp.array([scalar])
+        return scalar
 
     assert tu_log_alpha.ndim == 3, f"tu_log_alpha must be 2D or 3D, got {tu_log_alpha.ndim}D"
     n_targets, n_networks, n_tus = tu_log_alpha.shape
-    assert n_targets > 0 and n_networks > 0 and n_tus > 0, f"Empty tu_log_alpha: {tu_log_alpha.shape}"
+    assert n_targets > 0 and n_networks > 0 and n_tus > 0, (
+        f"Empty tu_log_alpha: {tu_log_alpha.shape}"
+    )
 
     target_indices = jnp.arange(n_targets)
 
     def compute_for_target(target_idx, target_tu_log_alpha):
         return _ratio_mask_coupling_single_target(
-            params, ratio_paths, target_tu_log_alpha, min_ratio_threshold,
-            target_idx=target_idx, ratios_are_3d=True,
+            params,
+            ratio_paths,
+            target_tu_log_alpha,
+            min_ratio_threshold,
+            target_idx=target_idx,
+            ratios_are_3d=True,
         )
 
     per_target_penalty = vmap(compute_for_target)(target_indices, tu_log_alpha)
@@ -507,7 +523,10 @@ def ratio_mask_coupling_penalty(
         f"per_target_penalty shape mismatch: expected ({n_targets},), got {per_target_penalty.shape}"
     )
 
-    return jnp.sum(per_target_penalty)
+    scalar = jnp.sum(per_target_penalty)
+    if return_per_target:
+        return scalar, per_target_penalty
+    return scalar
 
 
 def _ern_tu_tying_single_target(
@@ -532,13 +551,21 @@ def _ern_tu_tying_single_target(
         node_network_ids = params[net_path]
 
         if input_tu_indices_are_3d:
-            assert input_tu_indices.ndim == 4, f"need 4D input_tu_indices, got {input_tu_indices.ndim}D"
-            assert node_network_ids.ndim == 2, f"need 2D node_network_ids, got {node_network_ids.ndim}D"
+            assert input_tu_indices.ndim == 4, (
+                f"need 4D input_tu_indices, got {input_tu_indices.ndim}D"
+            )
+            assert node_network_ids.ndim == 2, (
+                f"need 2D node_network_ids, got {node_network_ids.ndim}D"
+            )
             input_tu_indices = input_tu_indices[target_idx]
             node_network_ids = node_network_ids[target_idx]
         else:
-            assert input_tu_indices.ndim == 3, f"need 3D input_tu_indices, got {input_tu_indices.ndim}D"
-            assert node_network_ids.ndim == 1, f"need 1D node_network_ids, got {node_network_ids.ndim}D"
+            assert input_tu_indices.ndim == 3, (
+                f"need 3D input_tu_indices, got {input_tu_indices.ndim}D"
+            )
+            assert node_network_ids.ndim == 1, (
+                f"need 1D node_network_ids, got {node_network_ids.ndim}D"
+            )
 
         n_nodes, n_inputs, _ = input_tu_indices.shape
         assert n_inputs == 2, f"ERN needs 2 inputs, got {n_inputs}"
@@ -672,6 +699,7 @@ def _validate_temperature_schedule(tu_temperature, total_steps: int = 10000) -> 
         )
         if temp < MIN_TEMPERATURE:
             import warnings
+
             warnings.warn(
                 f"tu_temperature={temp} at step {step} is below MIN_TEMPERATURE={MIN_TEMPERATURE}. "
                 f"Will be clamped to {MIN_TEMPERATURE} at runtime.",
@@ -721,12 +749,13 @@ def _make_loss_func(
 
     # per-network TU mask: only penalize TUs each network actually uses
     per_network_tu_mask = None
-    if dmanager.enable_tu_masking and hasattr(stack, 'get_per_network_tu_mask'):
+    if dmanager.enable_tu_masking and hasattr(stack, "get_per_network_tu_mask"):
         per_network_tu_mask = stack.get_per_network_tu_mask()
         logger.debug(f"Per-network TU mask shape: {per_network_tu_mask.shape}")
 
     ern_namespaces = [
-        layer.namespace for layer in (stack.layers or [])
+        layer.namespace
+        for layer in (stack.layers or [])
         if layer.f_type and layer.f_type.startswith("sequestron_ERN")
     ]
 
@@ -738,33 +767,35 @@ def _make_loss_func(
 
         axis_assignments = []
         for tid, target in enumerate(dmanager.targets):
-            target_name = getattr(target, 'name', f'target_{tid}')
-            target_input_names = getattr(target, 'input_names', None)
+            target_name = getattr(target, "name", f"target_{tid}")
+            target_input_names = getattr(target, "input_names", None)
             for net_idx, network in enumerate(dmanager.networks):
-                network_name = getattr(network, 'name', f'network_{net_idx}')
+                network_name = getattr(network, "name", f"network_{net_idx}")
                 try:
                     network_input_proteins = network.get_inverted_input_proteins()
                 except Exception:
                     network_input_proteins = None
-                axis_assignments.append({
-                    'target_id': tid,
-                    'target_name': target_name,
-                    'target_input_names': target_input_names,  # alphabetical order = X columns
-                    'network_id': net_idx,
-                    'network_name': network_name,
-                    'network_input_proteins': network_input_proteins,
-                    # During optimization: X[:,0] -> network input slot 0 (positional)
-                    # target_input_names[0] = what X[:,0] represents (e.g., 'eBFP2')
-                    # network_input_proteins[0] = what network slot 0 is called (may differ)
-                })
+                axis_assignments.append(
+                    {
+                        "target_id": tid,
+                        "target_name": target_name,
+                        "target_input_names": target_input_names,  # alphabetical order = X columns
+                        "network_id": net_idx,
+                        "network_name": network_name,
+                        "network_input_proteins": network_input_proteins,
+                        # During optimization: X[:,0] -> network input slot 0 (positional)
+                        # target_input_names[0] = what X[:,0] represents (e.g., 'eBFP2')
+                        # network_input_proteins[0] = what network slot 0 is called (may differ)
+                    }
+                )
         save_debug_state(
             "axis_assignment_mapping",
-            {'assignments': axis_assignments},
+            {"assignments": axis_assignments},
             {
-                'n_targets': n_targets,
-                'n_networks': n_networks,
-                'note': 'X columns are in alphabetical order of target.input_names. '
-                        'During optimization, X[:,i] goes to network input slot i positionally.',
+                "n_targets": n_targets,
+                "n_networks": n_networks,
+                "note": "X columns are in alphabetical order of target.input_names. "
+                "During optimization, X[:,i] goes to network input slot i positionally.",
             },
             output_dir=get_design_debug_output_dir(),
             mode="design",
@@ -799,7 +830,9 @@ def _make_loss_func(
 
         tu_temp = as_schedule(tu_temperature)(step)
         l0_penalty = jnp.array(0.0)
+        l0_penalty_per_network = None  # will be (n_targets, n_networks) if TU masking enabled
         coupling_penalty = jnp.array(0.0)
+        coupling_penalty_per_target = None  # will be (n_targets,) if coupling enabled
         if TU_LOG_ALPHA_PATH in params:
             log_alpha = params[TU_LOG_ALPHA_PATH]
             # defensive: validate log_alpha shape
@@ -820,6 +853,7 @@ def _make_loss_func(
             # log_alpha shape: (n_targets, n_networks, n_tus)
             # per_network_tu_mask shape: (n_networks, n_tus)
             from biocomp.tumasking import l0_penalty as l0_penalty_fn
+
             per_tu_penalty = l0_penalty_fn(log_alpha, temperature=tu_temp)
             if per_network_tu_mask is not None:
                 # defensive: validate mask shape
@@ -828,16 +862,18 @@ def _make_loss_func(
                 )
                 # mask zeros out unused TUs before summing
                 per_tu_penalty = per_tu_penalty * per_network_tu_mask[None, :, :]
-            l0_penalty = as_schedule(lambda_l0)(step) * jnp.sum(per_tu_penalty)
-            l0_penalty = _sanitize(jnp.atleast_1d(l0_penalty))[0]
+            # per-network L0 breakdown: sum over TUs, shape (n_targets, n_networks)
+            l0_weight = as_schedule(lambda_l0)(step)
+            l0_penalty_per_network = _sanitize(l0_weight * jnp.sum(per_tu_penalty, axis=-1))
+            l0_penalty = _sanitize(jnp.atleast_1d(jnp.sum(l0_penalty_per_network)))[0]
 
             if min_ratio_threshold > 0 and ratio_paths:
                 coupling_weight = as_schedule(lambda_coupling)(step)
-                raw_coupling = ratio_mask_coupling_penalty(
-                    params, ratio_paths, log_alpha, min_ratio_threshold
+                raw_coupling, raw_coupling_per_target = ratio_mask_coupling_penalty(
+                    params, ratio_paths, log_alpha, min_ratio_threshold, return_per_target=True
                 )
-                coupling_penalty = coupling_weight * raw_coupling
-                coupling_penalty = _sanitize(jnp.atleast_1d(coupling_penalty))[0]
+                coupling_penalty_per_target = _sanitize(coupling_weight * raw_coupling_per_target)
+                coupling_penalty = _sanitize(jnp.atleast_1d(coupling_weight * raw_coupling))[0]
 
             if ern_namespaces:
                 tying_weight = as_schedule(lambda_ern_tying)(step)
@@ -888,12 +924,20 @@ def _make_loss_func(
             tu_probs = jax.nn.sigmoid(log_alpha)
             tu_enabled_mask = tu_probs > 0.5
             tu_stats = {
+                # Aggregated statistics (backward compatibility)
                 "enabled_count": jnp.sum(tu_enabled_mask),
                 "total_count": jnp.array(log_alpha.size),
                 "mean_prob": jnp.mean(tu_probs),
                 "min_log_alpha": jnp.min(log_alpha),
                 "max_log_alpha": jnp.max(log_alpha),
                 "log_alpha_std": jnp.std(log_alpha),
+                # Per-network breakdown: shape (n_targets, n_networks)
+                # log_alpha shape is (n_targets, n_networks, n_tus)
+                "enabled_count_per_network": jnp.sum(tu_enabled_mask, axis=-1),
+                "mean_prob_per_network": jnp.mean(tu_probs, axis=-1),
+                "min_log_alpha_per_network": jnp.min(log_alpha, axis=-1),
+                "max_log_alpha_per_network": jnp.max(log_alpha, axis=-1),
+                "std_log_alpha_per_network": jnp.std(log_alpha, axis=-1),
             }
 
         # compute ratio statistics
@@ -901,12 +945,12 @@ def _make_loss_func(
         if ratio_leaves:
             all_ratios = []
             for p in ratio_leaves:
-                if hasattr(p, 'view'):
+                if hasattr(p, "view"):
                     try:
                         all_ratios.append(jnp.abs(p.view()).ravel())
                     except Exception:
                         pass
-                elif hasattr(p, 'shape'):
+                elif hasattr(p, "shape"):
                     all_ratios.append(jnp.abs(p).ravel())
             if all_ratios:
                 ratios_flat = jnp.concatenate(all_ratios)
@@ -922,25 +966,46 @@ def _make_loss_func(
         # extract sublosses from inner aux if available
         sublosses = extra_aux_inner.get("sublosses", {}) if extra_aux_inner else {}
 
+        # compute per-network prediction statistics
+        # yhatdep shape: (batch_size, n_targets, n_networks)
+        pred_stats_per_network = {
+            "mean": jnp.mean(yhatdep, axis=0),  # (n_targets, n_networks)
+            "std": jnp.std(yhatdep, axis=0),  # (n_targets, n_networks)
+            "min": jnp.min(yhatdep, axis=0),  # (n_targets, n_networks)
+            "max": jnp.max(yhatdep, axis=0),  # (n_targets, n_networks)
+        }
+
         aux = {
             "apply_aux": apply_aux,
             "all_losses": all_losses,
             "yhatdep": yhatdep,
+            "X": X,  # input coordinates for diagnostic plots
+            "Y": Y,  # target values for diagnostic plots
+            # Scalar penalties (backward compatibility)
             "l0_penalty": l0_penalty,
             "coupling_penalty": coupling_penalty,
             "ern_tying_penalty": ern_tying_penalty_val,
             "tucount_penalty": tucount_penalty,
             "spread_penalty": spread_penalty,
+            # Per-network/target penalty breakdowns
+            "l0_penalty_per_network": l0_penalty_per_network,  # (n_targets, n_networks) or None
+            "coupling_penalty_per_target": coupling_penalty_per_target,  # (n_targets,) or None
+            # Other aux data
             "tu_uniform": tu_uniform,
-            "tu_stats": tu_stats,
+            "tu_stats": tu_stats,  # includes *_per_network keys
             "ratio_stats": ratio_stats,
             "tu_temperature": tu_temp,
-            "sublosses": sublosses,
+            "sublosses": sublosses,  # includes *_per_network keys
+            "pred_stats_per_network": pred_stats_per_network,
         }
 
         loss = (
-            all_losses.mean() + tucount_penalty + spread_penalty
-            + l0_penalty + coupling_penalty + ern_tying_penalty_val
+            all_losses.mean()
+            + tucount_penalty
+            + spread_penalty
+            + l0_penalty
+            + coupling_penalty
+            + ern_tying_penalty_val
         )
         # NOTE: can't assert jnp.isfinite(loss) - it's a traced value
         # Use _sanitize for handling and checkify in tests for validation
@@ -1031,24 +1096,25 @@ def grid_distance_loss(
         y_img, yhat_img = _sanitize(y_img), _sanitize(yhat_img)
 
         # compute individual losses (unweighted)
-        sinkhorn_l = sinkhorn_divergence_conv(
-            proj_nonneg_ste(yhat_img),
-            proj_nonneg_ste(y_img),
-            eps_sinkhorn,
-            n_iters=n_sinkhorn_iters,
-        ) if w_sinkhorn > 0 else jnp.array(0.0)
+        sinkhorn_l = (
+            sinkhorn_divergence_conv(
+                proj_nonneg_ste(yhat_img),
+                proj_nonneg_ste(y_img),
+                eps_sinkhorn,
+                n_iters=n_sinkhorn_iters,
+            )
+            if w_sinkhorn > 0
+            else jnp.array(0.0)
+        )
 
-        lncc_l = lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel) if w_lncc > 0 else jnp.array(0.0)
+        lncc_l = (
+            lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel) if w_lncc > 0 else jnp.array(0.0)
+        )
         mse_l = jnp.mean((y_img - yhat_img) ** 2) if w_mse > 0 else jnp.array(0.0)
         spectral_l = spectral_loss(None, y_img, yhat_img) if w_spectral > 0 else jnp.array(0.0)
 
         # weighted total
-        total = (
-            w_sinkhorn * sinkhorn_l
-            + w_lncc * lncc_l
-            + w_mse * mse_l
-            + w_spectral * spectral_l
-        )
+        total = w_sinkhorn * sinkhorn_l + w_lncc * lncc_l + w_mse * mse_l + w_spectral * spectral_l
         return total, (sinkhorn_l, lncc_l, mse_l, spectral_l)
 
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks_):
@@ -1072,6 +1138,7 @@ def grid_distance_loss(
         )(Y_images, yhat_images)
 
         sublosses = {
+            # Aggregated metrics (backward compatibility)
             "sinkhorn": _sanitize(jnp.mean(sinkhorn_losses)),
             "lncc": _sanitize(jnp.mean(lncc_losses)),
             "mse": _sanitize(jnp.mean(mse_losses)),
@@ -1080,6 +1147,11 @@ def grid_distance_loss(
             "lncc_weighted": _sanitize(w_lncc * jnp.mean(lncc_losses)),
             "mse_weighted": _sanitize(w_mse * jnp.mean(mse_losses)),
             "spectral_weighted": _sanitize(w_spectral * jnp.mean(spectral_losses)),
+            # Per-network breakdown: shape (n_targets, n_networks)
+            "sinkhorn_per_network": _sanitize(sinkhorn_losses),
+            "lncc_per_network": _sanitize(lncc_losses),
+            "mse_per_network": _sanitize(mse_losses),
+            "spectral_per_network": _sanitize(spectral_losses),
         }
         return _sanitize(all_losses), {"yhat_images": yhat_images, "sublosses": sublosses}
 

@@ -236,7 +236,7 @@ class DesignManager(BaseModel):
                 if noise_std > 0:
                     rng = np.random.default_rng(seed + t_idx * 7919 + net_idx * 6971)
                     Y_grid = Y_grid + rng.normal(0, noise_std, Y_grid.shape)
-                    if hasattr(target, 'latent_out'):
+                    if hasattr(target, "latent_out"):
                         Y_grid = np.clip(Y_grid, target.latent_out[0], target.latent_out[1])
                 xsamples.append(X)
                 ysamples.append(Y_grid)
@@ -381,16 +381,20 @@ class DesignConfig(DesignOptimConfig):
     loss_function: EncodedPartialFunction = Field(default=distance_loss)
     n_replicates: int = 4
     # aux fields saved per step - extend for richer analysis
+    # sublosses and tu_stats dicts contain *_per_network keys automatically
     keep_in_history: List[str] = [
         "loss",
-        "all_losses",
-        "sublosses",  # individual loss components (sinkhorn, lncc, mse, etc.)
-        "tu_stats",  # TU masking statistics (enabled_count, mean_prob, etc.)
-        "ratio_stats",  # ratio parameter statistics (min, max, mean)
+        "all_losses",  # (n_targets, n_networks)
+        "sublosses",  # includes *_per_network: sinkhorn/lncc/mse/spectral_per_network
+        "tu_stats",  # includes *_per_network: enabled_count/mean_prob/log_alpha stats
+        "ratio_stats",
         "l0_penalty",
+        "l0_penalty_per_network",  # (n_targets, n_networks)
         "tucount_penalty",
         "spread_penalty",
-        "coupling_penalty",  # regularization
+        "coupling_penalty",
+        "coupling_penalty_per_target",  # (n_targets,)
+        "pred_stats_per_network",  # dict with mean/std/min/max per (n_targets, n_networks)
     ]
     # TU masking initialization - small std keeps init in sigmoid's active gradient region
     tu_log_alpha_init_mean: float = 0.0  # 0 = 50/50 enabled/disabled starting point
