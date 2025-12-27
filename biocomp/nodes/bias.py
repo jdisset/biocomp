@@ -41,13 +41,13 @@ def hard_bias(
 
         for node, k in zip(nodelist, keys):
             extra = node.get(stack).extra
-            fluo_specs = extra.get("fluo_bias_data")
+            fluo_specs = extra.get("fluo_bias") or extra.get("fluo_bias_data")
 
             if not fluo_specs:
                 fluo_specs = {"value": 0.5, "tu_id": 0, "protein": None, "units": "AU"}
 
             assert isinstance(fluo_specs, dict), (
-                f"fluo_bias_data should be a dict, got {type(fluo_specs)}: {repr(fluo_specs)}"
+                f"fluo_bias/fluo_bias_data should be a dict, got {type(fluo_specs)}: {repr(fluo_specs)}"
             )
 
             value = fluo_specs.get("value")
@@ -117,13 +117,13 @@ def bias(
 
         for node, k in zip(nodelist, keys):
             extra = node.get(stack).extra
-            fluo_specs = extra.get("fluo_bias_data")
+            fluo_specs = extra.get("fluo_bias") or extra.get("fluo_bias_data")
 
             if not fluo_specs:
                 fluo_specs = {"value": 0.5, "tu_id": 0, "protein": None, "units": "AU"}
 
             assert isinstance(fluo_specs, dict), (
-                f"fluo_bias_data should be a dict, got {type(fluo_specs)}: {repr(fluo_specs)}"
+                f"fluo_bias/fluo_bias_data should be a dict, got {type(fluo_specs)}: {repr(fluo_specs)}"
             )
 
             value = fluo_specs.get("value")
