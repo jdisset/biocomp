@@ -4,7 +4,7 @@ import optax
 import random
 import os
 import time
-from typing import List, Tuple, Callable, Optional, NamedTuple
+from typing import List, Literal, Tuple, Callable, Optional, NamedTuple, Union
 
 from biocomp.utils import (
     EncodedPartialFunction,
@@ -56,6 +56,7 @@ class CounterState(NamedTuple):
 
 def create_counter():
     """No-op gradient transformation that counts steps."""
+
     def init_fn(params):
         return CounterState(count=jnp.zeros([], jnp.int32))
 
@@ -111,7 +112,7 @@ class OptimConfig(ArbitraryModel):
     batch_size: int = 32
     n_epochs: float = 3
     n_replicates: int = 16
-    keep_in_history: List[str] = ["loss"]
+    keep_in_history: Union[List[str], Literal["all"]] = ["loss"]
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
@@ -215,10 +216,7 @@ def extract_learning_rate(opt_state):
 
 
 def sanitize_gradients(grads):
-    return jax.tree.map(
-        lambda g: jnp.where(jnp.isfinite(g), g, 0.0) if g is not None else g,
-        grads
-    )
+    return jax.tree.map(lambda g: jnp.where(jnp.isfinite(g), g, 0.0) if g is not None else g, grads)
 
 
 def make_training_step(
@@ -282,13 +280,18 @@ def make_training_step(
     training_step = base_training_step
 
     if scannable:
+        # Keys to exclude from history (handled separately or too large)
+        exclude_from_all = {"opt"}
 
         def scannable_training_step(carry, i_x_y_z_k):
             params, opt_state = carry
             i, x, y, z, k = i_x_y_z_k
             updt = base_training_step(params, opt_state, x, y, z, k)
             params, opt_state = updt["params"], updt["opt"]
-            history = {k: updt[k] for k in fields_to_keep_in_history}
+            if fields_to_keep_in_history == "all":
+                history = {k: v for k, v in updt.items() if k not in exclude_from_all}
+            else:
+                history = {k: updt[k] for k in fields_to_keep_in_history}
             return (params, opt_state), history
 
         training_step = scannable_training_step

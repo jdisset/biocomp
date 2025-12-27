@@ -2,7 +2,7 @@
 import random
 from functools import partial
 from pathlib import Path
-from typing import List, Tuple, Callable, Optional
+from typing import List, Literal, Tuple, Callable, Optional, Union
 import warnings
 
 import numpy as np
@@ -380,30 +380,9 @@ def initialize_params(
 class DesignConfig(DesignOptimConfig):
     loss_function: EncodedPartialFunction = Field(default=distance_loss)
     n_replicates: int = 4
-    # aux fields saved per step - extend for richer analysis
-    # sublosses and tu_stats dicts contain *_per_network keys automatically
-    keep_in_history: List[str] = [
-        "loss",
-        "all_losses",  # (n_targets, n_networks)
-        "sublosses",  # includes *_per_network: sinkhorn/lncc/mse/spectral_per_network
-        "tu_stats",  # includes *_per_network: enabled_count/mean_prob/log_alpha stats
-        "ratio_stats",
-        "l0_penalty",
-        "l0_penalty_per_network",  # (n_targets, n_networks)
-        "tucount_penalty",
-        "spread_penalty",
-        "coupling_penalty",
-        "coupling_penalty_per_target",  # (n_targets,)
-        "pred_stats_per_network",  # dict with mean/std/min/max per (n_targets, n_networks)
-        "tu_temperature",  # current temperature for diagnostic logging
-        # Arrays needed for diagnostic plotting (per-network scatter plots)
-        "yhatdep",  # predictions: (batch_size, n_targets, n_networks)
-        "X",  # input coordinates: (batch_size, n_targets, n_networks * 2)
-        "Y",  # target values: (batch_size, n_targets, n_networks)
-        # Optimization state for parameter/gradient visualization
-        "grad",  # gradients for particle plots
-        "params",  # parameters for particle plots
-    ]
+    # "all" keeps everything from the loss function's aux dict (recommended for diagnostics)
+    # Can also specify a list: ["loss", "all_losses", "sublosses", ...]
+    keep_in_history: Union[List[str], Literal["all"]] = "all"
     # TU masking initialization - small std keeps init in sigmoid's active gradient region
     tu_log_alpha_init_mean: float = 0.0  # 0 = 50/50 enabled/disabled starting point
     tu_log_alpha_init_std: float = 0.5  # small std prevents gradient death at sigmoid tails
