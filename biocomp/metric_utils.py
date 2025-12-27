@@ -585,3 +585,18 @@ class GridStats:
             "grid_kl_similarity": self.grid_kl_similarity,
             "grid_r_squared": self.grid_r_squared,
         }
+
+
+# nre = grid_nrmse / data_nrmse. normalizes for scale + heteroscedasticity.
+# k=64 gives ~4x higher noise floor than k=1024
+DEFAULT_GRIDSTATS_PARAMS: dict = {
+    "hypercube_res": 10,
+    "hypercube_min": 0.0,
+    "hypercube_max": 0.8,
+    "k": 64,
+    "radius": 0.3,
+    "min_points": 20,
+}
+
+SPLIT_HALF_SUBSET_SIZE: int = 10000  # fixed size for fair cross-dataset comparison
+SPLIT_HALF_N_BOOTSTRAPS: int = 5  # cv ~6%, good speed/stability tradeoff
