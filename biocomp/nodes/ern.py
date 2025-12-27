@@ -10,6 +10,7 @@ from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
     add_tu_input_mapping,
+    add_node_network_ids,
     NON_GRAD_TAG,
 )
 from biocomp.tumasking import TU_LOG_ALPHA_PATH
@@ -131,6 +132,7 @@ def sequestron_ERN(
         # --------- random_var var
         add_random_var_ids(params, len(nodelist), 1, namespace)
         add_tu_input_mapping(params, stack, nodelist, namespace)
+        add_node_network_ids(params, nodelist, namespace)
 
         init_if_needed(
             params,

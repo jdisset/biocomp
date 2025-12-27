@@ -10,6 +10,7 @@ from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
     add_tu_input_mapping,
+    add_node_network_ids,
     NON_GRAD_TAG,
     get_prev_num_random_vars,
     reference_forward_random_var_ids,
@@ -225,6 +226,7 @@ def transform_nn(
         else:
             add_random_var_ids(params, len(nodelist), len(input_shapes) + 1, namespace)
             add_tu_input_mapping(params, stack, nodelist, namespace)
+            add_node_network_ids(params, nodelist, namespace)
 
         fake_vals = [np.zeros(s) for s in input_shapes]
 

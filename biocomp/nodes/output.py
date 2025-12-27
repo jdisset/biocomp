@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from jax import vmap
 import numpy as np
 from biocomp.parameters import ParameterTree, init_if_needed
-from biocomp.nodeutils import LayerInstance, add_tu_input_mapping
+from biocomp.nodeutils import LayerInstance, add_tu_input_mapping, add_node_network_ids
 from biocomp.tumasking import TU_LOG_ALPHA_PATH
 from typing import Optional
 
@@ -66,6 +66,7 @@ def grouped_output(
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
         MLP_head(x=np.zeros(input_shapes[0]), rng_key=key, params=params)
         add_tu_input_mapping(params, stack, nodelist, namespace)
+        add_node_network_ids(params, nodelist, namespace)
 
     def apply(
         *inputs: ArrayLike,

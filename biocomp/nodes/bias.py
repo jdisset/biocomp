@@ -4,7 +4,7 @@ from jax.typing import ArrayLike
 import jax.numpy as jnp
 import numpy as np
 from biocomp.parameters import ParameterTree
-from biocomp.nodeutils import LayerInstance, NON_GRAD_TAG
+from biocomp.nodeutils import LayerInstance, NON_GRAD_TAG, add_node_network_ids
 from biocomp.utils import get_logger
 
 
@@ -66,6 +66,7 @@ def hard_bias(
         # min/max values are constraints, not learnable - tag them to exclude from optimization
         params.at(f"{namespace}/min_value", jnp.stack(min_values), tags=[NON_GRAD_TAG])
         params.at(f"{namespace}/max_value", jnp.stack(max_values), tags=[NON_GRAD_TAG])
+        add_node_network_ids(params, nodelist, namespace)
 
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> tuple[ArrayLike, dict]:
         bias_value = get_bias_value(params, node_id)
@@ -143,6 +144,7 @@ def bias(
         params.at(f"{namespace}/min_value", jnp.stack(min_values), tags=[NON_GRAD_TAG])
         params.at(f"{namespace}/max_value", jnp.stack(max_values), tags=[NON_GRAD_TAG])
         params[f"{namespace}/scale"] = jnp.stack(scales)
+        add_node_network_ids(params, nodelist, namespace)
 
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> tuple[ArrayLike, dict]:
         bias_value = get_bias_value(params, node_id)

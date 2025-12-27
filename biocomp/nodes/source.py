@@ -10,6 +10,7 @@ from biocomp.parameters import ParameterTree, init_if_needed
 from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
+    add_node_network_ids,
     NON_GRAD_TAG,
     reference_forward_random_var_ids,
     empty_prepare,
@@ -82,6 +83,7 @@ def source_with_pos(
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key, **_):
         add_random_var_ids(params, len(nodelist), len(input_shapes), namespace)
+        add_node_network_ids(params, nodelist, namespace)
         MLP_head(np.zeros((2 + len(input_shapes),)), params, key)
 
     def MLP_head(vals, params, key):
