@@ -395,6 +395,14 @@ class DesignConfig(DesignOptimConfig):
         "coupling_penalty",
         "coupling_penalty_per_target",  # (n_targets,)
         "pred_stats_per_network",  # dict with mean/std/min/max per (n_targets, n_networks)
+        "tu_temperature",  # current temperature for diagnostic logging
+        # Arrays needed for diagnostic plotting (per-network scatter plots)
+        "yhatdep",  # predictions: (batch_size, n_targets, n_networks)
+        "X",  # input coordinates: (batch_size, n_targets, n_networks * 2)
+        "Y",  # target values: (batch_size, n_targets, n_networks)
+        # Optimization state for parameter/gradient visualization
+        "grad",  # gradients for particle plots
+        "params",  # parameters for particle plots
     ]
     # TU masking initialization - small std keeps init in sigmoid's active gradient region
     tu_log_alpha_init_mean: float = 0.0  # 0 = 50/50 enabled/disabled starting point
