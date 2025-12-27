@@ -57,6 +57,17 @@ def _get_ticks(y_min, y_max, n_major, n_minor_per_major, is_log):
     return major_ticks, minor_ticks
 
 
+def _get_symlog_ticks(y_min: float, y_max: float, linthresh: float) -> list[float]:
+    positive_powers = []
+    p = linthresh
+    while p <= max(abs(y_min), abs(y_max)) * 10:
+        positive_powers.append(p)
+        p *= 10
+
+    all_ticks = [-t for t in reversed(positive_powers)] + [0] + positive_powers
+    return [t for t in all_ticks if y_min <= t <= y_max]
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
@@ -98,7 +109,9 @@ def particle_plot(
         dot_params: {size}
         arrow_params: {scale, cmap, size, threshold}
         vaxis_params: {color, linewidth, major_tick_length, minor_tick_length,
-                       n_major_ticks, n_minor_per_major}
+                       n_major_ticks, n_minor_per_major, custom_ticks}
+                       If custom_ticks is provided, uses those tick positions instead
+                       of computing from data range.
         label_params: {show, rotation, line_color}
         setup_yaxis_params: passed to setup_transformed_axis
     """
@@ -124,6 +137,7 @@ def particle_plot(
         "minor_tick_length": 0.05,
         "n_major_ticks": 6,
         "n_minor_per_major": 4,
+        "symlog_linthresh": None,
         **vaxis_params,
     }
     labp = {"show": True, "rotation": 45, "line_color": "#444444", **label_params}
@@ -167,17 +181,19 @@ def particle_plot(
         y_range = y_max_d - y_min_d
         y_min, y_max = y_min_d - 0.1 * y_range, y_max_d + 0.15 * y_range
 
-    major_ticks, minor_ticks = _get_ticks(
-        y_min, y_max, vp["n_major_ticks"], vp["n_minor_per_major"], is_log
-    )
+    if vp["symlog_linthresh"] is not None:
+        major_ticks = _get_symlog_ticks(y_min, y_max, vp["symlog_linthresh"])
+        minor_ticks = []
+    else:
+        major_ticks, minor_ticks = _get_ticks(
+            y_min, y_max, vp["n_major_ticks"], vp["n_minor_per_major"], is_log
+        )
 
-    # batch vertical axes
     vline_segs = [[(x, y_min), (x, y_max)] for x in x_pos]
     ax.add_collection(
         LineCollection(vline_segs, colors=vp["color"], linewidths=vp["linewidth"], zorder=0)
     )
 
-    # batch tick marks (scale lengths relative to spacing)
     major_len = vp["major_tick_length"] * value_spacing
     minor_len = vp["minor_tick_length"] * value_spacing
     tick_segs, tick_lws = [], []

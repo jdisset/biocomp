@@ -729,8 +729,10 @@ class Timer:
 
 
 def logb(x, base=10):
-    """Compute log of x in base b."""
-    return np.log(x) / np.log(base)
+    """Compute log of x in base b, handling zeros gracefully."""
+    with np.errstate(divide='ignore', invalid='ignore'):
+        result = np.log(x) / np.log(base)
+    return result
 
 
 def cubic_exp_fwd(x, threshold, base, scale: float = 1):
