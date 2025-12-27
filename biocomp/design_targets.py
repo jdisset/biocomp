@@ -96,7 +96,8 @@ class SVGTarget(TargetBase):
         Y_out = Y[0]
         if self.blur_sigma > 0:
             from scipy.ndimage import gaussian_filter
-            Y_out = gaussian_filter(Y_out, sigma=self.blur_sigma, mode='nearest')
+
+            Y_out = gaussian_filter(Y_out, sigma=self.blur_sigma, mode="nearest")
         return X, Y_out
 
     def sample_uniform(self, n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
@@ -164,8 +165,47 @@ class DataTarget(TargetBase):
     z_slice: Optional[float] = None
     z_tolerance: float = 0.05
     original_network: Optional[Network] = None
+    scale_to_latent: bool = True  # If True, rescale X to fit in latent_x/latent_y
     _lattice_X: Optional[np.ndarray] = None
     _lattice_Y: Optional[np.ndarray] = None
+
+    @model_validator(mode="after")
+    def _rescale_x_to_latent(self):
+        """Rescale X coordinates so the full data pattern fits in latent_x/latent_y.
+
+        Without this, setting latent_x=(0, 0.6) when data spans (0, 1) would CROP
+        the pattern. With rescaling, the full pattern is SCALED to fit.
+        """
+        if not self.scale_to_latent:
+            return self
+
+        X = np.asarray(self.X)
+        if X.ndim != 2 or X.shape[1] < 2:
+            return self
+
+        # Compute data range for each dimension
+        x_min, x_max = X[:, 0].min(), X[:, 0].max()
+        y_min, y_max = X[:, 1].min(), X[:, 1].max()
+
+        # Avoid division by zero for constant data
+        x_range = x_max - x_min if x_max > x_min else 1.0
+        y_range = y_max - y_min if y_max > y_min else 1.0
+
+        # Scale X to fit in latent_x/latent_y
+        X_scaled = X.copy()
+        X_scaled[:, 0] = (X[:, 0] - x_min) / x_range * (
+            self.latent_x[1] - self.latent_x[0]
+        ) + self.latent_x[0]
+        X_scaled[:, 1] = (X[:, 1] - y_min) / y_range * (
+            self.latent_y[1] - self.latent_y[0]
+        ) + self.latent_y[0]
+
+        # Handle higher dimensions (just copy them)
+        if X.shape[1] > 2:
+            X_scaled[:, 2:] = X[:, 2:]
+
+        self.X = X_scaled
+        return self
 
     @classmethod
     def from_plot_data(cls, plot_data, rescaler=None, **kwargs):
