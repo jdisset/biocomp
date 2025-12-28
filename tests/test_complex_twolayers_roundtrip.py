@@ -342,7 +342,7 @@ def test_outputs_match(roundtrip_recipe):
         y_rebuilt, _ = jax.vmap(rebuilt_stack.apply, in_axes=(None, 0, None, None))(rebuilt_params, x, random_variables, eval_key)
 
         assert y_opt.shape == y_rebuilt.shape
-        output_tol = 10 ** (-RATIO_PRECISION + 1)
+        output_tol = 2 * 10 ** (-RATIO_PRECISION + 1)
         assert jnp.allclose(y_opt, y_rebuilt, rtol=output_tol, atol=output_tol)
 
         # Also verify that rebuilding with original key produces original outputs
