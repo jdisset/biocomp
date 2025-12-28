@@ -1206,6 +1206,9 @@ def grid_distance_loss(
     w_lncc=0.5,
     w_mse=0.0,
     w_spectral=0.0,
+    w_simse=0.0,
+    w_zncc=0.0,
+    w_contrast=0.0,
     eps_sinkhorn=0.1,
     n_sinkhorn_iters=50,
     lncc_kernel=7,
@@ -1230,6 +1233,7 @@ def grid_distance_loss(
     def compute_grid_loss_single_with_breakdown(y_img, yhat_img):
         """Compute loss with individual component breakdown for aux data."""
         y_img, yhat_img = _sanitize(y_img), _sanitize(yhat_img)
+        y_flat, yhat_flat = y_img.ravel(), yhat_img.ravel()
 
         # compute individual losses (unweighted)
         sinkhorn_l = (
@@ -1249,9 +1253,29 @@ def grid_distance_loss(
         mse_l = jnp.mean((y_img - yhat_img) ** 2) if w_mse > 0 else jnp.array(0.0)
         spectral_l = spectral_loss(None, y_img, yhat_img) if w_spectral > 0 else jnp.array(0.0)
 
+        # scale-invariant losses (work on flattened arrays)
+        simse_l = simse_loss(None, y_flat, yhat_flat) if w_simse > 0 else jnp.array(0.0)
+        zncc_l = zncc_loss(None, y_flat, yhat_flat) if w_zncc > 0 else jnp.array(0.0)
+
+        # contrast loss: penalize low dynamic range in predictions
+        # returns 0 when yhat has full [0,1] contrast, 1 when flat
+        contrast_l = (
+            jax.nn.relu(1.0 - (jnp.max(yhat_img) - jnp.min(yhat_img)))
+            if w_contrast > 0
+            else jnp.array(0.0)
+        )
+
         # weighted total
-        total = w_sinkhorn * sinkhorn_l + w_lncc * lncc_l + w_mse * mse_l + w_spectral * spectral_l
-        return total, (sinkhorn_l, lncc_l, mse_l, spectral_l)
+        total = (
+            w_sinkhorn * sinkhorn_l
+            + w_lncc * lncc_l
+            + w_mse * mse_l
+            + w_spectral * spectral_l
+            + w_simse * simse_l
+            + w_zncc * zncc_l
+            + w_contrast * contrast_l
+        )
+        return total, (sinkhorn_l, lncc_l, mse_l, spectral_l, simse_l, zncc_l, contrast_l)
 
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks_):
         yhatdep = _sanitize(yhatdep)
@@ -1269,9 +1293,15 @@ def grid_distance_loss(
         )
         yhat_images = yhatdep.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
 
-        all_losses, (sinkhorn_losses, lncc_losses, mse_losses, spectral_losses) = vmap(
-            vmap(compute_grid_loss_single_with_breakdown)
-        )(Y_images, yhat_images)
+        all_losses, (
+            sinkhorn_losses,
+            lncc_losses,
+            mse_losses,
+            spectral_losses,
+            simse_losses,
+            zncc_losses,
+            contrast_losses,
+        ) = vmap(vmap(compute_grid_loss_single_with_breakdown))(Y_images, yhat_images)
 
         sublosses = {
             # Aggregated metrics (backward compatibility)
@@ -1279,15 +1309,24 @@ def grid_distance_loss(
             "lncc": _sanitize(jnp.mean(lncc_losses)),
             "mse": _sanitize(jnp.mean(mse_losses)),
             "spectral": _sanitize(jnp.mean(spectral_losses)),
+            "simse": _sanitize(jnp.mean(simse_losses)),
+            "zncc": _sanitize(jnp.mean(zncc_losses)),
+            "contrast": _sanitize(jnp.mean(contrast_losses)),
             "sinkhorn_weighted": _sanitize(w_sinkhorn * jnp.mean(sinkhorn_losses)),
             "lncc_weighted": _sanitize(w_lncc * jnp.mean(lncc_losses)),
             "mse_weighted": _sanitize(w_mse * jnp.mean(mse_losses)),
             "spectral_weighted": _sanitize(w_spectral * jnp.mean(spectral_losses)),
+            "simse_weighted": _sanitize(w_simse * jnp.mean(simse_losses)),
+            "zncc_weighted": _sanitize(w_zncc * jnp.mean(zncc_losses)),
+            "contrast_weighted": _sanitize(w_contrast * jnp.mean(contrast_losses)),
             # Per-network breakdown: shape (n_targets, n_networks)
             "sinkhorn_per_network": _sanitize(sinkhorn_losses),
             "lncc_per_network": _sanitize(lncc_losses),
             "mse_per_network": _sanitize(mse_losses),
             "spectral_per_network": _sanitize(spectral_losses),
+            "simse_per_network": _sanitize(simse_losses),
+            "zncc_per_network": _sanitize(zncc_losses),
+            "contrast_per_network": _sanitize(contrast_losses),
         }
         return _sanitize(all_losses), {"yhat_images": yhat_images, "sublosses": sublosses}
 
