@@ -479,6 +479,43 @@ class Network(BaseModel):
         for nid in nodes_to_remove:
             del self.compute_graph.nodes[nid]
 
+        self._cleanup_orphaned_bias_nodes()
+
+    def _cleanup_orphaned_bias_nodes(self):
+        """Remove bias nodes whose output protein is no longer valid after TU pruning."""
+        output_proteins = self.get_output_proteins()
+        bias_nodes_to_remove = []
+
+        for node in self.compute_graph.get_nodes_by_type("bias"):
+            input_from_output = node.extra.get("input_from_output")
+            if input_from_output is None:
+                continue
+
+            if input_from_output >= len(output_proteins):
+                bias_nodes_to_remove.append(node.node_id)
+                continue
+
+            fluo_bias = node.extra.get("fluo_bias")
+            if fluo_bias and isinstance(fluo_bias, dict):
+                expected_protein = fluo_bias.get("protein")
+                actual_protein = output_proteins[input_from_output]
+                if expected_protein and expected_protein != actual_protein:
+                    bias_nodes_to_remove.append(node.node_id)
+
+        if not bias_nodes_to_remove:
+            return
+
+        edges_to_remove = [
+            eid
+            for eid, e in self.compute_graph.edges.items()
+            if e.source_id in bias_nodes_to_remove or e.target_id in bias_nodes_to_remove
+        ]
+        for eid in edges_to_remove:
+            del self.compute_graph.edges[eid]
+
+        for nid in bias_nodes_to_remove:
+            del self.compute_graph.nodes[nid]
+
     def to_recipe(self) -> Recipe:
         """Converts the network back to a Recipe object"""
 

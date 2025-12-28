@@ -552,6 +552,8 @@ class ComputeStack:
                         edges_to_remove.append(edge_id)
                 for edge_id in edges_to_remove:
                     del net.compute_graph.edges[edge_id]
+
+                net._cleanup_orphaned_bias_nodes()
         else:
             # fallback: prune based on zero ratios (non-design contexts)
             for net in network_copies:
