@@ -3,7 +3,10 @@ from pydantic import BaseModel
 from copy import deepcopy
 from itertools import chain
 from biocomp.graphrules import GraphRewritingRule, PropertyConstraint, EdgeConstraint
+from biocomp.logging_config import get_logger
 from collections import defaultdict, Counter
+
+logger = get_logger(__name__)
 
 
 NodeType = Union[
@@ -288,8 +291,8 @@ class GraphBuilder:
                         evaluated = eval(value)
                         if isinstance(evaluated, (list, dict)):
                             properties[key] = evaluated
-                    except (SyntaxError, NameError):
-                        pass
+                    except (SyntaxError, NameError) as e:
+                        logger.warning(f"Template evaluation failed for property '{key}': {value!r} - {e}")
             self.nodes[node_id].extra.update(properties)
 
     def rewire_edges_from(self, old_source_id: int, new_source_id: int):

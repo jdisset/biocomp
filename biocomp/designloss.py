@@ -9,7 +9,7 @@ import numpy as np
 from assertpy import assert_that
 
 from .parameters import ParameterTree
-from .optimutils import as_schedule
+from .optimutils import as_schedule, jax_three_phase_schedule
 from .tumasking import TU_LOG_ALPHA_PATH, MIN_TEMPERATURE
 from .logging_config import get_logger
 from .designdebug import is_design_debug_enabled, save_debug_state
@@ -707,6 +707,121 @@ def _validate_temperature_schedule(tu_temperature, total_steps: int = 10000) -> 
             )
 
 
+HYPEROPT_SCHEDULE_NAMESPACE = "hyperopt_schedules"
+
+
+def normalize_schedule_spec(spec):
+    """Convert various schedule specifications to universal three-phase params.
+
+    Supports:
+        - float/int: Constant schedule (all phases same value)
+        - dict with 'start', 'end': Linear schedule over all steps
+        - dict with 'phase1_value', etc.: Full three-phase schedule
+        - callable: Optax schedule (NOT for hyperopt mode, use for backward compat only)
+
+    Returns:
+        dict with keys: phase1_frac, phase2_frac, phase1_value, phase2_end_value, phase3_end_value
+        OR the original callable if spec is a callable (backward compat mode)
+
+    Example:
+        normalize_schedule_spec(0.5)  # constant 0.5
+        normalize_schedule_spec({'start': 1.0, 'end': 0.1})  # linear decay
+        normalize_schedule_spec({'phase1_frac': 0.4, ...})  # explicit three-phase
+    """
+    if callable(spec):
+        return spec
+
+    if isinstance(spec, (int, float)):
+        return {
+            'phase1_frac': 0.0,
+            'phase2_frac': 0.0,
+            'phase1_value': float(spec),
+            'phase2_end_value': float(spec),
+            'phase3_end_value': float(spec),
+        }
+
+    if isinstance(spec, dict):
+        if 'start' in spec and 'end' in spec:
+            return {
+                'phase1_frac': 0.0,
+                'phase2_frac': 1.0,
+                'phase1_value': float(spec['start']),
+                'phase2_end_value': float(spec['end']),
+                'phase3_end_value': float(spec['end']),
+            }
+        if 'phase1_value' in spec:
+            return {
+                'phase1_frac': float(spec.get('phase1_frac', 0.4)),
+                'phase2_frac': float(spec.get('phase2_frac', 0.75)),
+                'phase1_value': float(spec['phase1_value']),
+                'phase2_end_value': float(spec.get('phase2_end_value', spec['phase1_value'])),
+                'phase3_end_value': float(spec.get('phase3_end_value', spec['phase1_value'])),
+            }
+
+    raise ValueError(f"Invalid schedule spec: {spec}. Expected float, callable, or dict with 'start'/'end' or 'phase1_value'/etc.")
+
+
+def init_schedule_params(schedule_specs: dict[str, any]) -> dict[str, jnp.ndarray]:
+    """Initialize schedule parameters for hyperopt mode.
+
+    Args:
+        schedule_specs: Dict mapping schedule names to specs (float, dict, or callable).
+                       Callables are skipped (use standard optax mode).
+
+    Returns:
+        Dict mapping param paths to JAX arrays for the params tree.
+
+    Example:
+        init_schedule_params({
+            'lambda_l0': {'phase1_value': 0.0, 'phase3_end_value': 0.01},
+            'tu_temperature': {'start': 1.0, 'end': 0.02},
+            'lambda_spread': 0.001,  # constant
+        })
+    """
+    result = {}
+    for name, spec in schedule_specs.items():
+        normalized = normalize_schedule_spec(spec)
+        if callable(normalized):
+            continue
+        for key, value in normalized.items():
+            result[f"{HYPEROPT_SCHEDULE_NAMESPACE}/{name}_{key}"] = jnp.array(value, dtype=jnp.float32)
+    return result
+
+
+def _get_schedule_value(params, step, total_steps, schedule_name, schedule_or_value, schedule_ns=None):
+    """Get schedule value, supporting both optax schedules and dynamic JAX-native mode.
+
+    Args:
+        params: ParameterTree with schedule params (if schedule_ns is provided)
+        step: Current optimization step
+        total_steps: Total steps (for JAX schedule computation)
+        schedule_name: Name of the schedule (e.g., 'lambda_l0', 'tu_temperature')
+        schedule_or_value: Fallback optax schedule or constant value
+        schedule_ns: Namespace path for dynamic schedule params. If provided, reads
+            schedule params from params[f"{schedule_ns}/{schedule_name}_*"] and uses
+            jax_three_phase_schedule. If None, uses as_schedule(schedule_or_value).
+
+    Returns:
+        Scalar JAX array with the schedule value at the current step
+    """
+    if schedule_ns is None:
+        return as_schedule(schedule_or_value)(step)
+
+    prefix = f"{schedule_ns}/{schedule_name}"
+    if f"{prefix}_phase1_value" not in params:
+        return as_schedule(schedule_or_value)(step)
+
+    return jax_three_phase_schedule(
+        step,
+        total_steps,
+        params[f"{prefix}_phase1_frac"],
+        params[f"{prefix}_phase2_frac"],
+        params[f"{prefix}_phase1_value"],
+        params[f"{prefix}_phase2_end_value"],
+        params[f"{prefix}_phase3_end_value"],
+    )
+
+
 def _make_loss_func(
     stack,
     dconf,
@@ -725,6 +840,8 @@ def _make_loss_func(
     lambda_coupling=0.1,
     min_ratio_threshold=0.005,
     lambda_ern_tying=0.0,
+    hyperopt_schedule_ns=None,
+    hyperopt_total_steps=None,
 ):
     """Create the loss function with optional TU sample averaging for variance reduction.
 
@@ -738,9 +855,17 @@ def _make_loss_func(
         lambda_ern_tying: Weight for ERN TU tying penalty. When an ERN's positive input
             (mRNA target) is disabled, push the negative input (ERN protein) to also be
             disabled. Set to 0 to disable (default).
+        hyperopt_schedule_ns: If provided, read schedule params from this namespace in
+            the params tree and use jax_three_phase_schedule for recompilation-free hyperopt.
+            Expected params: {ns}/{sched}_phase1_frac, _phase2_frac, _phase1_value, etc.
+        hyperopt_total_steps: Total steps for JAX schedule computation (required if hyperopt_schedule_ns is set).
     """
+    if hyperopt_schedule_ns and not hyperopt_total_steps:
+        raise ValueError("hyperopt_total_steps required when hyperopt_schedule_ns is set")
+
     # config-time validation (Python assertions) - catches config bugs early
-    _validate_temperature_schedule(tu_temperature, total_steps=100000)
+    if hyperopt_schedule_ns is None:
+        _validate_temperature_schedule(tu_temperature, total_steps=100000)
 
     n_targets, n_networks = dmanager.n_targets, len(dmanager.networks)
     dep_mask = stack.get_dependent_output_mask()
@@ -812,6 +937,9 @@ def _make_loss_func(
         yhatdep = jnp.clip(yhatdep, -max_prediction, max_prediction)
         return yhatdep, apply_aux
 
+    total_steps = hyperopt_total_steps or 100000
+    schedule_ns = hyperopt_schedule_ns
+
     def loss_func(dynamic, static, X, Y, Z, key, step):
         params = ParameterTree.merge(dynamic, static)
         mask_key, forward_key = jax.random.split(key)
@@ -819,16 +947,18 @@ def _make_loss_func(
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
 
         # regularization penalties (independent of TU samples)
-        tucount_penalty = as_schedule(lambda_tucount)(step) * sum(
+        tucount_w = _get_schedule_value(params, step, total_steps, "lambda_tucount", lambda_tucount, schedule_ns)
+        tucount_penalty = tucount_w * sum(
             get_tucount_penalty_for_leaf(p, max_tus=max_tus_per_cotx) for p in ratio_leaves
         )
         tucount_penalty = _sanitize(jnp.atleast_1d(tucount_penalty))[0]
-        spread_penalty = as_schedule(lambda_spread)(step) * sum(
+        spread_w = _get_schedule_value(params, step, total_steps, "lambda_spread", lambda_spread, schedule_ns)
+        spread_penalty = spread_w * sum(
             get_spread_penalty_for_leaf(p, max_ratio=max_ratio) for p in ratio_leaves
         )
         spread_penalty = _sanitize(jnp.atleast_1d(spread_penalty))[0]
 
-        tu_temp = as_schedule(tu_temperature)(step)
+        tu_temp = _get_schedule_value(params, step, total_steps, "tu_temperature", tu_temperature, schedule_ns)
         l0_penalty = jnp.array(0.0)
         l0_penalty_per_network = None  # will be (n_targets, n_networks) if TU masking enabled
         coupling_penalty = jnp.array(0.0)
@@ -863,12 +993,12 @@ def _make_loss_func(
                 # mask zeros out unused TUs before summing
                 per_tu_penalty = per_tu_penalty * per_network_tu_mask[None, :, :]
             # per-network L0 breakdown: sum over TUs, shape (n_targets, n_networks)
-            l0_weight = as_schedule(lambda_l0)(step)
+            l0_weight = _get_schedule_value(params, step, total_steps, "lambda_l0", lambda_l0, schedule_ns)
             l0_penalty_per_network = _sanitize(l0_weight * jnp.sum(per_tu_penalty, axis=-1))
             l0_penalty = _sanitize(jnp.atleast_1d(jnp.sum(l0_penalty_per_network)))[0]
 
             if min_ratio_threshold > 0 and ratio_paths:
-                coupling_weight = as_schedule(lambda_coupling)(step)
+                coupling_weight = _get_schedule_value(params, step, total_steps, "lambda_coupling", lambda_coupling, schedule_ns)
                 raw_coupling, raw_coupling_per_target = ratio_mask_coupling_penalty(
                     params, ratio_paths, log_alpha, min_ratio_threshold, return_per_target=True
                 )
@@ -876,7 +1006,7 @@ def _make_loss_func(
                 coupling_penalty = _sanitize(jnp.atleast_1d(coupling_weight * raw_coupling))[0]
 
             if ern_namespaces:
-                tying_weight = as_schedule(lambda_ern_tying)(step)
+                tying_weight = _get_schedule_value(params, step, total_steps, "lambda_ern_tying", lambda_ern_tying, schedule_ns)
                 raw_tying = ern_tu_tying_penalty(params, ern_namespaces, log_alpha)
                 ern_tying_penalty_val = tying_weight * raw_tying
                 ern_tying_penalty_val = _sanitize(jnp.atleast_1d(ern_tying_penalty_val))[0]
@@ -1033,6 +1163,8 @@ def distance_loss(
     min_ratio_threshold=0.005,
     lambda_ern_tying=0.0,
     distance_func=huber_zncc_loss,
+    hyperopt_schedule_ns=None,
+    hyperopt_total_steps=None,
 ):
     def compute_losses(X, Y, yhatdep, step, n_targets, n_networks):
         yhatdep = _sanitize(yhatdep)
@@ -1059,6 +1191,8 @@ def distance_loss(
         lambda_coupling=lambda_coupling,
         min_ratio_threshold=min_ratio_threshold,
         lambda_ern_tying=lambda_ern_tying,
+        hyperopt_schedule_ns=hyperopt_schedule_ns,
+        hyperopt_total_steps=hyperopt_total_steps,
     )
 
 
@@ -1085,6 +1219,8 @@ def grid_distance_loss(
     lambda_coupling=0.1,
     min_ratio_threshold=0.005,
     lambda_ern_tying=0.0,
+    hyperopt_schedule_ns=None,
+    hyperopt_total_steps=None,
     **kw,
 ):
     assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
@@ -1172,4 +1308,6 @@ def grid_distance_loss(
         lambda_coupling=lambda_coupling,
         min_ratio_threshold=min_ratio_threshold,
         lambda_ern_tying=lambda_ern_tying,
+        hyperopt_schedule_ns=hyperopt_schedule_ns,
+        hyperopt_total_steps=hyperopt_total_steps,
     )

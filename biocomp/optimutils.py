@@ -408,6 +408,111 @@ def as_schedule(value_or_callable):
     return lambda step: jnp.asarray(value_or_callable)
 
 
+def linear_schedule(
+    total_steps: int,
+    start_value: float,
+    end_value: float,
+) -> optax.Schedule:
+    """Simple linear interpolation schedule from start to end over total_steps."""
+    return optax.polynomial_schedule(
+        init_value=start_value,
+        end_value=end_value,
+        power=1.0,
+        transition_steps=total_steps,
+    )
+
+
+def constant_or_linear_schedule(
+    total_steps: int,
+    start_value: float,
+    end_value: float | None = None,
+) -> optax.Schedule:
+    """If end_value is None or equals start_value, return constant; else linear."""
+    if end_value is None or start_value == end_value:
+        return optax.constant_schedule(start_value)
+    return linear_schedule(total_steps, start_value, end_value)
+
+
+def jax_three_phase_schedule(
+    step: ArrayLike,
+    total_steps: int,
+    phase1_frac: ArrayLike,
+    phase2_frac: ArrayLike,
+    phase1_value: ArrayLike,
+    phase2_end_value: ArrayLike,
+    phase3_end_value: ArrayLike,
+    phase2_power: float = 1.0,
+    phase3_power: float = 2.0,
+) -> jnp.ndarray:
+    """Pure JAX three-phase schedule evaluation for dynamic hyperparameter injection.
+
+    Unlike optax schedules, this function takes schedule parameters as JAX arrays,
+    allowing them to be changed without recompiling the JIT-traced function.
+
+    Uses the same polynomial interpolation formula as optax.polynomial_schedule:
+        decay = (1 - progress)^power
+        value = end_value + (init_value - end_value) * decay
+
+    Args:
+        step: Current step (JAX traced value)
+        total_steps: Total optimization steps (static, known at trace time)
+        phase1_frac: Fraction of steps for phase 1 (exploration)
+        phase2_frac: Fraction of steps at end of phase 2 (pruning)
+        phase1_value: Constant value during phase 1
+        phase2_end_value: Value at end of phase 2
+        phase3_end_value: Value at end of phase 3
+        phase2_power: Polynomial power for phase 2 decay (default 1.0 = linear)
+        phase3_power: Polynomial power for phase 3 decay (default 2.0 = quadratic)
+
+    Returns:
+        Interpolated value at the given step
+    """
+    step = jnp.asarray(step, dtype=jnp.float32)
+    phase1_steps = phase1_frac * total_steps
+    phase2_steps = phase2_frac * total_steps
+
+    # Phase 1: constant at phase1_value
+    in_phase1 = step < phase1_steps
+
+    # Phase 2: polynomial decay from phase1_value to phase2_end_value
+    # Using optax formula: decay = (1 - progress)^power, value = end + (init - end) * decay
+    phase2_duration = jnp.maximum(phase2_steps - phase1_steps, 1e-8)
+    phase2_progress = jnp.clip((step - phase1_steps) / phase2_duration, 0.0, 1.0)
+    phase2_decay = (1.0 - phase2_progress) ** phase2_power
+    phase2_value = phase2_end_value + (phase1_value - phase2_end_value) * phase2_decay
+    in_phase2 = (step >= phase1_steps) & (step < phase2_steps)
+
+    # Phase 3: polynomial decay from phase2_end_value to phase3_end_value
+    phase3_duration = jnp.maximum(total_steps - phase2_steps, 1e-8)
+    phase3_progress = jnp.clip((step - phase2_steps) / phase3_duration, 0.0, 1.0)
+    phase3_decay = (1.0 - phase3_progress) ** phase3_power
+    phase3_value = phase3_end_value + (phase2_end_value - phase3_end_value) * phase3_decay
+
+    return jnp.where(in_phase1, phase1_value, jnp.where(in_phase2, phase2_value, phase3_value))
+
+
+def jax_linear_schedule(
+    step: ArrayLike,
+    total_steps: int,
+    start_value: ArrayLike,
+    end_value: ArrayLike,
+) -> jnp.ndarray:
+    """Pure JAX linear schedule evaluation for dynamic hyperparameter injection.
+
+    Args:
+        step: Current step (JAX traced value)
+        total_steps: Total optimization steps (static)
+        start_value: Value at step 0
+        end_value: Value at final step
+
+    Returns:
+        Linearly interpolated value at the given step
+    """
+    step = jnp.asarray(step, dtype=jnp.float32)
+    progress = jnp.clip(step / (total_steps + 1e-8), 0.0, 1.0)
+    return start_value + (end_value - start_value) * progress
+
+
 def three_phase_schedule(
     total_steps: int,
     phase1_frac: float,
