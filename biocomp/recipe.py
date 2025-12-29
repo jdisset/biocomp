@@ -380,6 +380,7 @@ class Recipe(BaseModel):
     metadata: Optional[dict] = None
     content: CoTxList = []
     input_order: Optional[list[str]] = None  # ordered list of input protein names
+    axis_mapping: Optional[dict[str, str]] = None  # cotx_name -> axis (x, y)
 
     @model_validator(mode="after")
     def _validate_input_order(self) -> "Recipe":
@@ -390,9 +391,37 @@ class Recipe(BaseModel):
         )
         return self
 
+    @model_validator(mode="after")
+    def _validate_axis_mapping(self) -> "Recipe":
+        if self.axis_mapping is None:
+            return self
+        valid_axes = {"x", "y"}
+        for cotx, axis in self.axis_mapping.items():
+            assert axis in valid_axes, f"axis_mapping[{cotx}] must be 'x' or 'y', got '{axis}'"
+        return self
+
     def has_input_order(self) -> bool:
         """Check if recipe has explicit input order defined."""
         return self.input_order is not None and len(self.input_order) > 0
+
+    def has_axis_mapping(self) -> bool:
+        """Check if recipe has axis_mapping defined (for design scaffolds)."""
+        return self.axis_mapping is not None and len(self.axis_mapping) > 0
+
+    def get_input_order_from_axis_mapping(self) -> Optional[list[str]]:
+        """Convert axis_mapping to input_order (x first, then y)."""
+        if not self.has_axis_mapping():
+            return None
+        x_cotx = None
+        y_cotx = None
+        for cotx, axis in self.axis_mapping.items():
+            if axis == "x":
+                x_cotx = cotx
+            elif axis == "y":
+                y_cotx = cotx
+        if x_cotx is None or y_cotx is None:
+            return None
+        return [x_cotx, y_cotx]
 
 
 ## {{{                      --     recipe loading     --

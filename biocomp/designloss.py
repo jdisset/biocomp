@@ -1,5 +1,8 @@
 """Loss functions for circuit design optimization."""
 
+from dataclasses import dataclass
+from typing import Optional
+
 import jax
 import jax.numpy as jnp
 from jax import vmap, lax
@@ -15,6 +18,123 @@ from .logging_config import get_logger
 from .designdebug import is_design_debug_enabled, save_debug_state
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class GridLossResult:
+    """Result of grid-based loss computation.
+
+    This is the SINGLE SOURCE OF TRUTH for grid loss computation.
+    Both TunerSession and grid_distance_loss MUST use this dataclass.
+    """
+
+    total: float
+    sinkhorn: float
+    lncc: float
+    mse: float
+    spectral: float = 0.0
+    sinkhorn_contrib: Optional[jnp.ndarray] = None
+    lncc_contrib: Optional[jnp.ndarray] = None
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "total": self.total,
+            "sinkhorn": self.sinkhorn,
+            "lncc": self.lncc,
+            "mse": self.mse,
+            "spectral": self.spectral,
+        }
+
+
+def compute_grid_losses(
+    Y_pred: jnp.ndarray,
+    Y_target: jnp.ndarray,
+    w_sinkhorn: float = 1.0,
+    w_lncc: float = 0.5,
+    w_mse: float = 0.0,
+    w_spectral: float = 0.0,
+    eps_sinkhorn: float = 0.1,
+    n_sinkhorn_iters: int = 50,
+    lncc_kernel: int = 7,
+    return_contributions: bool = False,
+) -> GridLossResult:
+    """Compute grid-based losses - shared between tuner and design mode.
+
+    This is the SINGLE SOURCE OF TRUTH for grid loss computation.
+    Both TunerSession and grid_distance_loss MUST call this function.
+
+    Args:
+        Y_pred: Predicted grid, shape (H, W)
+        Y_target: Target grid, shape (H, W)
+        w_*: Loss weights
+        eps_sinkhorn: Sinkhorn regularization
+        n_sinkhorn_iters: Sinkhorn iterations
+        lncc_kernel: LNCC kernel size
+        return_contributions: If True, compute per-pixel LNCC contribution
+
+    Returns:
+        GridLossResult with scalar losses and optional per-pixel contributions
+    """
+    assert Y_pred.shape == Y_target.shape, f"Shape mismatch: {Y_pred.shape} vs {Y_target.shape}"
+    assert Y_pred.ndim == 2, f"Expected 2D grid, got {Y_pred.ndim}D"
+
+    Y_pred = _sanitize(Y_pred.astype(jnp.float32))
+    Y_target = _sanitize(Y_target.astype(jnp.float32))
+
+    sinkhorn_l = (
+        sinkhorn_divergence_conv(
+            proj_nonneg_ste(Y_pred),
+            proj_nonneg_ste(Y_target),
+            eps_sinkhorn,
+            n_iters=n_sinkhorn_iters,
+        )
+        if w_sinkhorn > 0
+        else jnp.array(0.0)
+    )
+
+    lncc_l = lncc_grid_loss(None, Y_target, Y_pred, k=lncc_kernel) if w_lncc > 0 else jnp.array(0.0)
+    mse_l = jnp.mean((Y_pred - Y_target) ** 2) if w_mse > 0 else jnp.array(0.0)
+    spectral_l = spectral_loss(None, Y_target, Y_pred) if w_spectral > 0 else jnp.array(0.0)
+
+    total = w_sinkhorn * sinkhorn_l + w_lncc * lncc_l + w_mse * mse_l + w_spectral * spectral_l
+
+    lncc_contrib = None
+    if return_contributions:
+        lncc_contrib = _compute_lncc_contribution(Y_pred, Y_target, lncc_kernel)
+
+    return GridLossResult(
+        total=float(total),
+        sinkhorn=float(sinkhorn_l),
+        lncc=float(lncc_l),
+        mse=float(mse_l),
+        spectral=float(spectral_l),
+        lncc_contrib=lncc_contrib,
+    )
+
+
+def _compute_lncc_contribution(
+    Y_pred: jnp.ndarray, Y_target: jnp.ndarray, k: int = 7
+) -> jnp.ndarray:
+    """Compute per-pixel LNCC contribution for visualization."""
+    eps = 1e-6
+    r, N = k // 2, k * k
+
+    def box2d(a):
+        a = jnp.pad(a, ((r + 1, r), (r + 1, r)), mode="edge")
+        s = jnp.cumsum(jnp.cumsum(a, 0), 1)
+        return (
+            s[: -2 * r - 1, : -2 * r - 1]
+            - s[: -2 * r - 1, 2 * r + 1 :]
+            - s[2 * r + 1 :, : -2 * r - 1]
+            + s[2 * r + 1 :, 2 * r + 1 :]
+        )
+
+    m0, m1 = box2d(Y_target) / N, box2d(Y_pred) / N
+    y0c, y1c = Y_target - m0, Y_pred - m1
+    var_y, var_yhat = box2d(y0c**2), box2d(y1c**2)
+    cov = box2d(y0c * y1c)
+    std_product = jnp.sqrt((var_y + eps) * (var_yhat + eps))
+    return 1.0 - jnp.clip(cov / std_product, -1, 1)
 
 
 def _sanitize(x):
@@ -733,32 +853,34 @@ def normalize_schedule_spec(spec):
 
     if isinstance(spec, (int, float)):
         return {
-            'phase1_frac': 0.0,
-            'phase2_frac': 0.0,
-            'phase1_value': float(spec),
-            'phase2_end_value': float(spec),
-            'phase3_end_value': float(spec),
+            "phase1_frac": 0.0,
+            "phase2_frac": 0.0,
+            "phase1_value": float(spec),
+            "phase2_end_value": float(spec),
+            "phase3_end_value": float(spec),
         }
 
     if isinstance(spec, dict):
-        if 'start' in spec and 'end' in spec:
+        if "start" in spec and "end" in spec:
             return {
-                'phase1_frac': 0.0,
-                'phase2_frac': 1.0,
-                'phase1_value': float(spec['start']),
-                'phase2_end_value': float(spec['end']),
-                'phase3_end_value': float(spec['end']),
+                "phase1_frac": 0.0,
+                "phase2_frac": 1.0,
+                "phase1_value": float(spec["start"]),
+                "phase2_end_value": float(spec["end"]),
+                "phase3_end_value": float(spec["end"]),
             }
-        if 'phase1_value' in spec:
+        if "phase1_value" in spec:
             return {
-                'phase1_frac': float(spec.get('phase1_frac', 0.4)),
-                'phase2_frac': float(spec.get('phase2_frac', 0.75)),
-                'phase1_value': float(spec['phase1_value']),
-                'phase2_end_value': float(spec.get('phase2_end_value', spec['phase1_value'])),
-                'phase3_end_value': float(spec.get('phase3_end_value', spec['phase1_value'])),
+                "phase1_frac": float(spec.get("phase1_frac", 0.4)),
+                "phase2_frac": float(spec.get("phase2_frac", 0.75)),
+                "phase1_value": float(spec["phase1_value"]),
+                "phase2_end_value": float(spec.get("phase2_end_value", spec["phase1_value"])),
+                "phase3_end_value": float(spec.get("phase3_end_value", spec["phase1_value"])),
             }
 
-    raise ValueError(f"Invalid schedule spec: {spec}. Expected float, callable, or dict with 'start'/'end' or 'phase1_value'/etc.")
+    raise ValueError(
+        f"Invalid schedule spec: {spec}. Expected float, callable, or dict with 'start'/'end' or 'phase1_value'/etc."
+    )
 
 
 def init_schedule_params(schedule_specs: dict[str, any]) -> dict[str, jnp.ndarray]:
@@ -784,11 +906,15 @@ def init_schedule_params(schedule_specs: dict[str, any]) -> dict[str, jnp.ndarra
         if callable(normalized):
             continue
         for key, value in normalized.items():
-            result[f"{HYPEROPT_SCHEDULE_NAMESPACE}/{name}_{key}"] = jnp.array(value, dtype=jnp.float32)
+            result[f"{HYPEROPT_SCHEDULE_NAMESPACE}/{name}_{key}"] = jnp.array(
+                value, dtype=jnp.float32
+            )
     return result
 
 
-def _get_schedule_value(params, step, total_steps, schedule_name, schedule_or_value, schedule_ns=None):
+def _get_schedule_value(
+    params, step, total_steps, schedule_name, schedule_or_value, schedule_ns=None
+):
     """Get schedule value, supporting both optax schedules and dynamic JAX-native mode.
 
     Args:
@@ -947,18 +1073,24 @@ def _make_loss_func(
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
 
         # regularization penalties (independent of TU samples)
-        tucount_w = _get_schedule_value(params, step, total_steps, "lambda_tucount", lambda_tucount, schedule_ns)
+        tucount_w = _get_schedule_value(
+            params, step, total_steps, "lambda_tucount", lambda_tucount, schedule_ns
+        )
         tucount_penalty = tucount_w * sum(
             get_tucount_penalty_for_leaf(p, max_tus=max_tus_per_cotx) for p in ratio_leaves
         )
         tucount_penalty = _sanitize(jnp.atleast_1d(tucount_penalty))[0]
-        spread_w = _get_schedule_value(params, step, total_steps, "lambda_spread", lambda_spread, schedule_ns)
+        spread_w = _get_schedule_value(
+            params, step, total_steps, "lambda_spread", lambda_spread, schedule_ns
+        )
         spread_penalty = spread_w * sum(
             get_spread_penalty_for_leaf(p, max_ratio=max_ratio) for p in ratio_leaves
         )
         spread_penalty = _sanitize(jnp.atleast_1d(spread_penalty))[0]
 
-        tu_temp = _get_schedule_value(params, step, total_steps, "tu_temperature", tu_temperature, schedule_ns)
+        tu_temp = _get_schedule_value(
+            params, step, total_steps, "tu_temperature", tu_temperature, schedule_ns
+        )
         l0_penalty = jnp.array(0.0)
         l0_penalty_per_network = None  # will be (n_targets, n_networks) if TU masking enabled
         coupling_penalty = jnp.array(0.0)
@@ -993,12 +1125,16 @@ def _make_loss_func(
                 # mask zeros out unused TUs before summing
                 per_tu_penalty = per_tu_penalty * per_network_tu_mask[None, :, :]
             # per-network L0 breakdown: sum over TUs, shape (n_targets, n_networks)
-            l0_weight = _get_schedule_value(params, step, total_steps, "lambda_l0", lambda_l0, schedule_ns)
+            l0_weight = _get_schedule_value(
+                params, step, total_steps, "lambda_l0", lambda_l0, schedule_ns
+            )
             l0_penalty_per_network = _sanitize(l0_weight * jnp.sum(per_tu_penalty, axis=-1))
             l0_penalty = _sanitize(jnp.atleast_1d(jnp.sum(l0_penalty_per_network)))[0]
 
             if min_ratio_threshold > 0 and ratio_paths:
-                coupling_weight = _get_schedule_value(params, step, total_steps, "lambda_coupling", lambda_coupling, schedule_ns)
+                coupling_weight = _get_schedule_value(
+                    params, step, total_steps, "lambda_coupling", lambda_coupling, schedule_ns
+                )
                 raw_coupling, raw_coupling_per_target = ratio_mask_coupling_penalty(
                     params, ratio_paths, log_alpha, min_ratio_threshold, return_per_target=True
                 )
@@ -1006,7 +1142,9 @@ def _make_loss_func(
                 coupling_penalty = _sanitize(jnp.atleast_1d(coupling_weight * raw_coupling))[0]
 
             if ern_namespaces:
-                tying_weight = _get_schedule_value(params, step, total_steps, "lambda_ern_tying", lambda_ern_tying, schedule_ns)
+                tying_weight = _get_schedule_value(
+                    params, step, total_steps, "lambda_ern_tying", lambda_ern_tying, schedule_ns
+                )
                 raw_tying = ern_tu_tying_penalty(params, ern_namespaces, log_alpha)
                 ern_tying_penalty_val = tying_weight * raw_tying
                 ern_tying_penalty_val = _sanitize(jnp.atleast_1d(ern_tying_penalty_val))[0]

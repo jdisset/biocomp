@@ -1259,27 +1259,66 @@ def recipe_to_networks(
         net.name = f"{base_name}_{dependent_outputs_names}"
 
         # Apply input_order if specified (only for inverted networks with inputs)
-        if recipe.input_order is not None and invert:
+        effective_input_order = recipe.input_order
+
+        # If no input_order but axis_mapping is specified, derive input_order from it
+        if effective_input_order is None and recipe.axis_mapping is not None and invert:
             input_proteins = net.get_inverted_input_proteins()
             if len(input_proteins) > 0:
-                proteins_match = set(input_proteins) == set(recipe.input_order)
+                input_protein_set = set(input_proteins)
+
+                # Build cotx_name -> marker_protein from recipe content
+                # A marker is a TU whose output protein is in the input_proteins list
+                cotx_to_protein: dict[str, str] = {}
+                for cotx in recipe.content:
+                    cotx_name = cotx.name
+                    if not cotx_name:
+                        continue
+                    for tu in cotx.units:
+                        for slot in reversed(tu.slots or []):
+                            slot_name = slot.part if hasattr(slot, "part") else str(slot)
+                            if isinstance(slot_name, str) and slot_name in input_protein_set:
+                                cotx_to_protein[cotx_name] = slot_name
+                                break
+                        if cotx_name in cotx_to_protein:
+                            break
+
+                # Convert axis_mapping to input_order (x first, then y)
+                x_protein = None
+                y_protein = None
+                for cotx_name, axis in recipe.axis_mapping.items():
+                    protein = cotx_to_protein.get(cotx_name)
+                    if protein:
+                        if axis == "x":
+                            x_protein = protein
+                        elif axis == "y":
+                            y_protein = protein
+
+                if x_protein and y_protein:
+                    effective_input_order = [x_protein, y_protein]
+                    net.metadata["axis_mapping"] = recipe.axis_mapping
+
+        if effective_input_order is not None and invert:
+            input_proteins = net.get_inverted_input_proteins()
+            if len(input_proteins) > 0:
+                proteins_match = set(input_proteins) == set(effective_input_order)
                 if proteins_match:
                     # input_order applies to this inversion
-                    net.apply_input_order(recipe.input_order)
+                    net.apply_input_order(effective_input_order)
                 elif skip_input_order_validation:
                     # Skip validation (used during commit when TU pruning may invalidate input_order)
                     pass
                 else:
                     # Validate that input_order is correct for original recipe construction
-                    missing = set(input_proteins) - set(recipe.input_order)
+                    missing = set(input_proteins) - set(effective_input_order)
                     assert not missing, (
                         f"input_order missing proteins: {missing}. "
-                        f"Network has inputs: {input_proteins}, recipe specifies: {recipe.input_order}"
+                        f"Network has inputs: {input_proteins}, recipe specifies: {effective_input_order}"
                     )
-                    extra = set(recipe.input_order) - set(input_proteins)
+                    extra = set(effective_input_order) - set(input_proteins)
                     assert not extra, (
                         f"input_order contains extra proteins not in network inputs: {extra}. "
-                        f"Network has inputs: {input_proteins}, recipe specifies: {recipe.input_order}"
+                        f"Network has inputs: {input_proteins}, recipe specifies: {effective_input_order}"
                     )
 
         result.append(net)
