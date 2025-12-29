@@ -4,7 +4,12 @@ from jax.typing import ArrayLike
 import jax.numpy as jnp
 import numpy as np
 from biocomp.parameters import ArrayRef, ParameterTree
-from biocomp.nodeutils import LayerInstance, add_tu_output_mapping, add_node_network_ids, NON_GRAD_TAG
+from biocomp.nodeutils import (
+    LayerInstance,
+    add_tu_output_mapping,
+    add_node_network_ids,
+    NON_GRAD_TAG,
+)
 from biocomp.tumasking import TU_LOG_ALPHA_PATH
 from biocomp.utils import get_logger
 from typing import Optional
@@ -221,13 +226,21 @@ def inv_aggregation(
     namespace: str,
     **_,
 ) -> LayerInstance:
-    assert len(input_shapes) == 1, f"inverse_Aggregation expects 1 input, got {len(input_shapes)}"
-    assert n_outputs == 1, f"inverse_Aggregation expects 1 output, got {n_outputs}"
+    assert len(input_shapes) == 1, f"inv_aggregation expects 1 input, got {len(input_shapes)}"
+    assert n_outputs == 1, f"inv_aggregation expects 1 output, got {n_outputs}"
+
+    fwd_path_to_idx: dict[str, int] = {}
+    fwd_paths_list: list[str] = []
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], **_):
+        nonlocal fwd_path_to_idx, fwd_paths_list
+        fwd_path_to_idx = {}
+        fwd_paths_list = []
+
         ratio_ref = ArrayRef(params.data)
         original_slots = []
         fwd_node_positions = []
+        fwd_path_indices = []
 
         for node in nodelist:
             extra = node.get(stack).extra
@@ -239,15 +252,20 @@ def inv_aggregation(
             assert fwd_node.layer_number is not None
             node_fwd_ns = stack.get_layer_namespace(fwd_node.layer_number)
             fwd_pos = fwd_node.node_position_in_layer
+            fwd_path = f"{node_fwd_ns}/ratios"
 
-            ratio_ref.push_back(f"{node_fwd_ns}/ratios", (fwd_pos, original_slot))
+            if fwd_path not in fwd_path_to_idx:
+                fwd_path_to_idx[fwd_path] = len(fwd_paths_list)
+                fwd_paths_list.append(fwd_path)
+            fwd_path_indices.append(fwd_path_to_idx[fwd_path])
+
+            ratio_ref.push_back(fwd_path, (fwd_pos, original_slot))
             fwd_node_positions.append(fwd_pos)
 
         params.at(f"{namespace}/ratios", ratio_ref, overwrite=None)
         params.at(f"{namespace}/original_slots", jnp.array(original_slots), tags=[NON_GRAD_TAG])
-        params.at(
-            f"{namespace}/fwd_node_positions", jnp.array(fwd_node_positions), tags=[NON_GRAD_TAG]
-        )
+        params.at(f"{namespace}/fwd_node_positions", jnp.array(fwd_node_positions), tags=[NON_GRAD_TAG])
+        params.at(f"{namespace}/fwd_path_indices", jnp.array(fwd_path_indices), tags=[NON_GRAD_TAG])
 
     DISABLED_THRESHOLD = 1.0 / 120.0
 
@@ -261,38 +279,42 @@ def inv_aggregation(
         network_id: Optional[ArrayLike] = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
-        original_ratio = jnp.abs(params[f"{namespace}/ratios"][node_id])
         original_slot = params[f"{namespace}/original_slots"][node_id]
         fwd_node_pos = params[f"{namespace}/fwd_node_positions"][node_id]
+        fwd_path_idx = params[f"{namespace}/fwd_path_indices"][node_id]
 
         ratio_ref = params.data.get_at(f"{namespace}/ratios", get_leaf_value=False).value
-        fwd_ratios_path = ratio_ref.paths[0]
-        fwd_ns = fwd_ratios_path.rsplit("/ratios", 1)[0]
-        all_fwd_ratios = jnp.abs(params[fwd_ratios_path][fwd_node_pos])
+        original_ratio = jnp.abs(params[f"{namespace}/ratios"][node_id])
 
-        fwd_tu_path = f"{fwd_ns}/output_tu_indices"
-        if fwd_tu_path in params and tu_enabled_random_vars is not None:
-            from biocomp.tumasking import compute_input_masks
+        all_masked_sums = []
+        all_this_masks = []
+        for path in ratio_ref.paths:
+            fwd_ratios = jnp.abs(params[path][fwd_node_pos])
+            fwd_ns = path.rsplit("/ratios", 1)[0]
+            fwd_tu_path = f"{fwd_ns}/output_tu_indices"
 
-            tu_indices = params[fwd_tu_path][fwd_node_pos]
-            tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
-            tu_log_alpha = None
-            if tu_log_alpha_full is not None:
-                assert tu_log_alpha_full.ndim == 2, (
-                    f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha_full.ndim}D"
+            if fwd_tu_path in params and tu_enabled_random_vars is not None:
+                from biocomp.tumasking import compute_input_masks
+
+                tu_indices = params[fwd_tu_path][fwd_node_pos]
+                tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
+                tu_log_alpha = tu_log_alpha_full[network_id] if tu_log_alpha_full is not None else None
+                masks = compute_input_masks(
+                    tu_indices, tu_enabled_random_vars, tu_log_alpha, is_multi_tu=False
                 )
-                assert network_id is not None, "network_id required for per-network TU masking"
-                tu_log_alpha = tu_log_alpha_full[network_id]
-            all_masks = compute_input_masks(
-                tu_indices, tu_enabled_random_vars, tu_log_alpha, is_multi_tu=False
-            )
-        else:
-            all_masks = jnp.ones_like(all_fwd_ratios)
+            else:
+                masks = jnp.ones_like(fwd_ratios)
 
-        masked_ratios = all_fwd_ratios * all_masks
-        masked_sum = jnp.sum(masked_ratios)
-        safe_sum = jnp.maximum(masked_sum, 1e-8)  # jnp.where evals both branches
-        this_mask = all_masks[original_slot]
+            all_masked_sums.append(jnp.sum(fwd_ratios * masks))
+            slot_idx = jnp.minimum(original_slot, masks.shape[0] - 1)
+            all_this_masks.append(masks[slot_idx])
+
+        all_masked_sums = jnp.stack(all_masked_sums)
+        all_this_masks = jnp.stack(all_this_masks)
+        masked_sum = all_masked_sums[fwd_path_idx]
+        this_mask = all_this_masks[fwd_path_idx]
+
+        safe_sum = jnp.maximum(masked_sum, 1e-8)
         normalized_ratio = jnp.where(masked_sum > 1e-8, original_ratio * this_mask / safe_sum, 0.0)
 
         is_enabled = normalized_ratio >= DISABLED_THRESHOLD
