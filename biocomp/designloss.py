@@ -192,7 +192,8 @@ def _gauss_blur2d(x, kernel):
 def sinkhorn_divergence_conv(a, b, eps, n_iters=80, uniform_mix=1e-9, min_mass=1e-6):
     """Grid-based Sinkhorn divergence using fast Gaussian convolutions."""
     assert a.shape == b.shape, f"sinkhorn a/b shape mismatch: {a.shape} vs {b.shape}"
-    assert eps > 0, f"sinkhorn eps must be positive, got {eps}"
+    # note: eps > 0 assertion removed to support JAX tracing with dynamic schedules
+    eps = jnp.maximum(eps, 1e-6)  # clamp to avoid numerical issues
 
     a = jnp.maximum(_sanitize(a.astype(jnp.float32)), 1e-24)
     b = jnp.maximum(_sanitize(b.astype(jnp.float32)), 1e-24)
@@ -406,18 +407,14 @@ def simse_lncc_loss(x, y, yhat, simse_weight=0.3, **kw):
 
 
 def soft_tucount_penalty(W, max_tus=5, rel_active=1e-3, width=2e-4):
-    """Penalty for having more than max_tus active TUs per co-transfection (aggregation row).
-
-    Args:
-        W: Ratio matrix with shape (n_aggregation_nodes, n_members)
-        max_tus: Maximum allowed active TUs per row before penalty kicks in (default 5)
-        rel_active: Threshold - ratio/max_ratio above this counts as "active" (default 1e-3)
-        width: Sigmoid sharpness for soft counting (default 2e-4)
-
-    Returns:
-        Penalty value: sum of squared excesses over max_tus across all rows
-    """
+    """Penalty for having more than max_tus active TUs per co-transfection (aggregation row)."""
     A = jnp.abs(W)
+    if A.ndim == 0:
+        return jnp.array(0.0)
+    if A.ndim == 1:
+        A = A[None, :]
+    elif A.ndim > 2:
+        A = A.reshape(-1, A.shape[-1])
     m = jnp.max(A, axis=1, keepdims=True)
     norm = jnp.where(m > 0, A / (m + 1e-12), 0.0)
     soft_count = jnp.sum(jax.nn.sigmoid((norm - rel_active) / (width + 1e-12)), axis=1)
@@ -428,16 +425,19 @@ def get_tucount_penalty_for_leaf(p, max_tus=5, rel_active=1e-3, width=2e-4):
     """Get TU count penalty for a parameter leaf (handles ArrayRef and raw arrays)."""
     kw = dict(max_tus=max_tus, rel_active=rel_active, width=width)
     if hasattr(p, "view"):
-        try:
-            return soft_tucount_penalty(p.view(), **kw)
-        except Exception:
-            return sum(soft_tucount_penalty(p.tree[path], **kw) for path in p.paths)
+        return soft_tucount_penalty(p.view(), **kw)
     return soft_tucount_penalty(p, **kw)
 
 
 def ratio_spread_penalty(W, max_ratio=100.0, eps=1e-9):
     """Penalty for ratio spread exceeding max_ratio."""
     A = jnp.abs(W)
+    if A.ndim == 0:
+        return jnp.array(0.0)
+    if A.ndim == 1:
+        A = A[None, :]
+    elif A.ndim > 2:
+        A = A.reshape(-1, A.shape[-1])
     log_max_ratio = jnp.log(max_ratio + eps)
     pos_mask = A > eps
     log_A = jnp.where(pos_mask, jnp.log(A + eps), -jnp.inf)
@@ -449,12 +449,8 @@ def ratio_spread_penalty(W, max_ratio=100.0, eps=1e-9):
 
 
 def get_spread_penalty_for_leaf(p, max_ratio=100.0):
-    print("enforcing max aggregation ratio of", max_ratio)
     if hasattr(p, "view"):
-        try:
-            return ratio_spread_penalty(p.view(), max_ratio=max_ratio)
-        except Exception:
-            return sum(ratio_spread_penalty(p.tree[path], max_ratio=max_ratio) for path in p.paths)
+        return ratio_spread_penalty(p.view(), max_ratio=max_ratio)
     return ratio_spread_penalty(p, max_ratio=max_ratio)
 
 
@@ -926,6 +922,10 @@ def init_schedule_params(schedule_specs: dict[str, any]) -> dict[str, jnp.ndarra
     return result
 
 
+_SCHEDULE_FALLBACK_WARNED: set[str] = set()
+
+
+
 def _get_schedule_value(
     params, step, total_steps, schedule_name, schedule_or_value, schedule_ns=None
 ):
@@ -949,6 +949,12 @@ def _get_schedule_value(
 
     prefix = f"{schedule_ns}/{schedule_name}"
     if f"{prefix}_phase1_value" not in params:
+        if schedule_name not in _SCHEDULE_FALLBACK_WARNED:
+            _SCHEDULE_FALLBACK_WARNED.add(schedule_name)
+            logger.warning(
+                f"Schedule '{schedule_name}' not found in params at '{prefix}_phase1_value'. "
+                f"Using fallback value. This hyperparam will NOT be optimized."
+            )
         return as_schedule(schedule_or_value)(step)
 
     return jax_three_phase_schedule(
@@ -1175,7 +1181,9 @@ def _make_loss_func(
 
             def forward_with_tu(tu_u, fwd_key):
                 yhatdep, _ = single_forward_pass(params, X, Z, fwd_key, tu_u)
-                losses, inner_aux = compute_losses_fn(X, Y, yhatdep, step, n_targets, n_networks)
+                losses, inner_aux = compute_losses_fn(
+                    params, X, Y, yhatdep, step, n_targets, n_networks
+                )
                 return losses, yhatdep, inner_aux
 
             all_losses_stack, yhatdep_stack, inner_aux_stack = vmap(forward_with_tu)(
@@ -1194,7 +1202,7 @@ def _make_loss_func(
             tu_uniform = _sample_tu_uniform(params, mask_key, n_samples=1)
             yhatdep, apply_aux = single_forward_pass(params, X, Z, forward_key, tu_uniform)
             all_losses, extra_aux_inner = compute_losses_fn(
-                X, Y, yhatdep, step, n_targets, n_networks
+                params, X, Y, yhatdep, step, n_targets, n_networks
             )
 
         all_losses = _sanitize(all_losses)
@@ -1318,7 +1326,7 @@ def distance_loss(
     hyperopt_schedule_ns=None,
     hyperopt_total_steps=None,
 ):
-    def compute_losses(X, Y, yhatdep, step, n_targets, n_networks):
+    def compute_losses(params, X, Y, yhatdep, step, n_targets, n_networks):
         yhatdep = _sanitize(yhatdep)
         all_losses = compute_all_losses(
             X, Y, yhatdep, Partial(distance_func, epsilon=as_schedule(epsilon)(step))
@@ -1381,57 +1389,31 @@ def grid_distance_loss(
     assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
     xres, yres = dmanager.grid_resolution
     n_networks = len(dmanager.networks)
+    total_steps = hyperopt_total_steps or 100000
+    schedule_ns = hyperopt_schedule_ns
 
-    def compute_grid_loss_single_with_breakdown(y_img, yhat_img):
-        """Compute loss with individual component breakdown for aux data."""
+    def compute_grid_loss_single_unweighted(y_img, yhat_img, eps_sink):
+        """Compute unweighted loss components for a single image pair."""
         y_img, yhat_img = _sanitize(y_img), _sanitize(yhat_img)
         y_flat, yhat_flat = y_img.ravel(), yhat_img.ravel()
 
-        # compute individual losses (unweighted)
-        sinkhorn_l = (
-            sinkhorn_divergence_conv(
-                proj_nonneg_ste(yhat_img),
-                proj_nonneg_ste(y_img),
-                eps_sinkhorn,
-                n_iters=n_sinkhorn_iters,
-            )
-            if w_sinkhorn > 0
-            else jnp.array(0.0)
+        sinkhorn_l = sinkhorn_divergence_conv(
+            proj_nonneg_ste(yhat_img),
+            proj_nonneg_ste(y_img),
+            eps_sink,
+            n_iters=n_sinkhorn_iters,
         )
+        lncc_l = lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel)
+        mse_l = jnp.mean((y_img - yhat_img) ** 2)
+        spectral_l = spectral_loss(None, y_img, yhat_img)
+        simse_l = simse_loss(None, y_flat, yhat_flat)
+        zncc_l = zncc_loss(None, y_flat, yhat_flat)
+        contrast_l = jax.nn.relu(1.0 - (jnp.max(yhat_img) - jnp.min(yhat_img)))
 
-        lncc_l = (
-            lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel) if w_lncc > 0 else jnp.array(0.0)
-        )
-        mse_l = jnp.mean((y_img - yhat_img) ** 2) if w_mse > 0 else jnp.array(0.0)
-        spectral_l = spectral_loss(None, y_img, yhat_img) if w_spectral > 0 else jnp.array(0.0)
+        return (sinkhorn_l, lncc_l, mse_l, spectral_l, simse_l, zncc_l, contrast_l)
 
-        # scale-invariant losses (work on flattened arrays)
-        simse_l = simse_loss(None, y_flat, yhat_flat) if w_simse > 0 else jnp.array(0.0)
-        zncc_l = zncc_loss(None, y_flat, yhat_flat) if w_zncc > 0 else jnp.array(0.0)
-
-        # contrast loss: penalize low dynamic range in predictions
-        # returns 0 when yhat has full [0,1] contrast, 1 when flat
-        contrast_l = (
-            jax.nn.relu(1.0 - (jnp.max(yhat_img) - jnp.min(yhat_img)))
-            if w_contrast > 0
-            else jnp.array(0.0)
-        )
-
-        # weighted total
-        total = (
-            w_sinkhorn * sinkhorn_l
-            + w_lncc * lncc_l
-            + w_mse * mse_l
-            + w_spectral * spectral_l
-            + w_simse * simse_l
-            + w_zncc * zncc_l
-            + w_contrast * contrast_l
-        )
-        return total, (sinkhorn_l, lncc_l, mse_l, spectral_l, simse_l, zncc_l, contrast_l)
-
-    def compute_losses(X, Y, yhatdep, step, n_targets, n_networks_):
+    def compute_losses(params, X, Y, yhatdep, step, n_targets, n_networks_):
         yhatdep = _sanitize(yhatdep)
-        # Y shape: (batch_size, n_targets, 1) - validate before squeeze
         assert Y.ndim == 3 and Y.shape[-1] == 1, (
             f"grid_distance_loss expects Y shape (batch_size, n_targets, 1), got {Y.shape}. "
             "The last dim must be 1 for proper squeeze+reshape to grid."
@@ -1445,21 +1427,49 @@ def grid_distance_loss(
         )
         yhat_images = yhatdep.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
 
+        # get dynamic weights from params (or use defaults)
+        w_sink = _get_schedule_value(
+            params, step, total_steps, "w_sinkhorn", w_sinkhorn, schedule_ns
+        )
+        w_lncc_val = _get_schedule_value(params, step, total_steps, "w_lncc", w_lncc, schedule_ns)
+        w_mse_val = _get_schedule_value(params, step, total_steps, "w_mse", w_mse, schedule_ns)
+        w_spec = _get_schedule_value(
+            params, step, total_steps, "w_spectral", w_spectral, schedule_ns
+        )
+        w_sim = _get_schedule_value(params, step, total_steps, "w_simse", w_simse, schedule_ns)
+        w_zncc_val = _get_schedule_value(params, step, total_steps, "w_zncc", w_zncc, schedule_ns)
+        w_con = _get_schedule_value(
+            params, step, total_steps, "w_contrast", w_contrast, schedule_ns
+        )
+        eps_sink = _get_schedule_value(
+            params, step, total_steps, "eps_sinkhorn", eps_sinkhorn, schedule_ns
+        )
+
+        # compute unweighted losses for all image pairs
         (
-            all_losses,
-            (
-                sinkhorn_losses,
-                lncc_losses,
-                mse_losses,
-                spectral_losses,
-                simse_losses,
-                zncc_losses,
-                contrast_losses,
-            ),
-        ) = vmap(vmap(compute_grid_loss_single_with_breakdown))(Y_images, yhat_images)
+            sinkhorn_losses,
+            lncc_losses,
+            mse_losses,
+            spectral_losses,
+            simse_losses,
+            zncc_losses,
+            contrast_losses,
+        ) = vmap(vmap(lambda y, yh: compute_grid_loss_single_unweighted(y, yh, eps_sink)))(
+            Y_images, yhat_images
+        )
+
+        # apply dynamic weights
+        all_losses = (
+            w_sink * sinkhorn_losses
+            + w_lncc_val * lncc_losses
+            + w_mse_val * mse_losses
+            + w_spec * spectral_losses
+            + w_sim * simse_losses
+            + w_zncc_val * zncc_losses
+            + w_con * contrast_losses
+        )
 
         sublosses = {
-            # Aggregated metrics (backward compatibility)
             "sinkhorn": _sanitize(jnp.mean(sinkhorn_losses)),
             "lncc": _sanitize(jnp.mean(lncc_losses)),
             "mse": _sanitize(jnp.mean(mse_losses)),
@@ -1467,14 +1477,13 @@ def grid_distance_loss(
             "simse": _sanitize(jnp.mean(simse_losses)),
             "zncc": _sanitize(jnp.mean(zncc_losses)),
             "contrast": _sanitize(jnp.mean(contrast_losses)),
-            "sinkhorn_weighted": _sanitize(w_sinkhorn * jnp.mean(sinkhorn_losses)),
-            "lncc_weighted": _sanitize(w_lncc * jnp.mean(lncc_losses)),
-            "mse_weighted": _sanitize(w_mse * jnp.mean(mse_losses)),
-            "spectral_weighted": _sanitize(w_spectral * jnp.mean(spectral_losses)),
-            "simse_weighted": _sanitize(w_simse * jnp.mean(simse_losses)),
-            "zncc_weighted": _sanitize(w_zncc * jnp.mean(zncc_losses)),
-            "contrast_weighted": _sanitize(w_contrast * jnp.mean(contrast_losses)),
-            # Per-network breakdown: shape (n_targets, n_networks)
+            "sinkhorn_weighted": _sanitize(w_sink * jnp.mean(sinkhorn_losses)),
+            "lncc_weighted": _sanitize(w_lncc_val * jnp.mean(lncc_losses)),
+            "mse_weighted": _sanitize(w_mse_val * jnp.mean(mse_losses)),
+            "spectral_weighted": _sanitize(w_spec * jnp.mean(spectral_losses)),
+            "simse_weighted": _sanitize(w_sim * jnp.mean(simse_losses)),
+            "zncc_weighted": _sanitize(w_zncc_val * jnp.mean(zncc_losses)),
+            "contrast_weighted": _sanitize(w_con * jnp.mean(contrast_losses)),
             "sinkhorn_per_network": _sanitize(sinkhorn_losses),
             "lncc_per_network": _sanitize(lncc_losses),
             "mse_per_network": _sanitize(mse_losses),

@@ -587,6 +587,19 @@ RATIO_PRUNE_THRESHOLD = 1.0 / 120.0
 
 def normalize_ratios_prune(current_ratios, threshold=RATIO_PRUNE_THRESHOLD, eps=1e-12):
     A = jnp.abs(current_ratios)
+    if A.ndim == 0:
+        return A
+    if A.ndim == 1:
+        A = A[None, :]
+        m = jnp.maximum(jnp.max(A, axis=1, keepdims=True), eps)
+        norm = A / m
+        return jnp.where(norm >= threshold, norm, 0.0).squeeze(0)
+    if A.ndim > 2:
+        orig_shape = A.shape
+        A = A.reshape(-1, A.shape[-1])
+        m = jnp.maximum(jnp.max(A, axis=1, keepdims=True), eps)
+        norm = A / m
+        return jnp.where(norm >= threshold, norm, 0.0).reshape(orig_shape)
     m = jnp.maximum(jnp.max(A, axis=1, keepdims=True), eps)
     norm = A / m
     return jnp.where(norm >= threshold, norm, 0.0)

@@ -672,6 +672,7 @@ def optimize(
     verbose=False,
     defer_sync: bool = True,
     sync_every: int = 0,
+    precompiled: bool = False,
 ):
     loggers = loggers or []
 
@@ -683,12 +684,17 @@ def optimize(
     )
 
     xb, yb = xbatches[0], ybatches[0]
-    logger.info("[COMPILE] Compiling training step (AOT)...")
-    t_compile = time.perf_counter()
-    compiled_step = compile_step(step, (params, opt_state, key, xb, yb))
-    compile_time = time.perf_counter() - t_compile
-    if not get_checkify_enabled():
-        logger.info(f"[COMPILE] Step compiled in {compile_time:.2f}s")
+    if precompiled:
+        compiled_step = step
+        compile_time = 0.0
+        logger.info("[COMPILE] Using pre-compiled step")
+    else:
+        logger.info("[COMPILE] Compiling training step (AOT)...")
+        t_compile = time.perf_counter()
+        compiled_step = compile_step(step, (params, opt_state, key, xb, yb))
+        compile_time = time.perf_counter() - t_compile
+        if not get_checkify_enabled():
+            logger.info(f"[COMPILE] Step compiled in {compile_time:.2f}s")
 
     if async_handler:
         async_handler.process_start_loggers(config, stack)
