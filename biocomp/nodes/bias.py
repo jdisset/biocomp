@@ -16,6 +16,9 @@ logger = get_logger(__name__)
 MIN_FLUO_INTENSITY = 0.0
 MAX_FLUO_INTENSITY = 1.0
 
+DEFAULT_BIAS_MIN = 0.0
+DEFAULT_BIAS_MAX = 0.7
+
 
 def hard_bias(
     input_shapes: list[tuple[int]],
@@ -54,16 +57,17 @@ def hard_bias(
             if isinstance(value, dict) and "min" in value and "max" in value:
                 min_v = value.get("min", MIN_FLUO_INTENSITY)
                 max_v = value.get("max", MAX_FLUO_INTENSITY)
+                init_v = jax.random.uniform(k, shape, minval=min_v, maxval=max_v)
             else:
-                min_v = max_v = float(value)
+                min_v = DEFAULT_BIAS_MIN
+                max_v = DEFAULT_BIAS_MAX
+                init_v = jnp.full(shape, float(value), dtype=jnp.float32)
 
-            raw_v = jax.random.uniform(k, shape, minval=min_v, maxval=max_v)
-            raw_values.append(raw_v)
+            raw_values.append(init_v)
             min_values.append(jnp.asarray(min_v, dtype=jnp.float32))
             max_values.append(jnp.asarray(max_v, dtype=jnp.float32))
 
         params[f"{namespace}/raw_value"] = jnp.stack(raw_values)
-        # min/max values are constraints, not learnable - tag them to exclude from optimization
         params.at(f"{namespace}/min_value", jnp.stack(min_values), tags=[NON_GRAD_TAG])
         params.at(f"{namespace}/max_value", jnp.stack(max_values), tags=[NON_GRAD_TAG])
         add_node_network_ids(params, nodelist, namespace)
@@ -130,11 +134,13 @@ def bias(
             if isinstance(value, dict) and "min" in value and "max" in value:
                 min_v = value.get("min", MIN_FLUO_INTENSITY)
                 max_v = value.get("max", MAX_FLUO_INTENSITY)
+                init_v = jax.random.uniform(k, shape, minval=min_v, maxval=max_v)
             else:
-                min_v = max_v = float(value)
+                min_v = DEFAULT_BIAS_MIN
+                max_v = DEFAULT_BIAS_MAX
+                init_v = jnp.full(shape, float(value), dtype=jnp.float32)
 
-            raw_v = jax.random.uniform(k, shape, minval=min_v, maxval=max_v)
-            raw_values.append(raw_v)
+            raw_values.append(init_v)
             min_values.append(jnp.asarray(min_v, dtype=jnp.float32))
             max_values.append(jnp.asarray(max_v, dtype=jnp.float32))
             scales.append(jnp.array(0.0, dtype=jnp.float32))

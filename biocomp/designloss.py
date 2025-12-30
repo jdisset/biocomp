@@ -32,6 +32,7 @@ class GridLossResult:
     sinkhorn: float
     lncc: float
     mse: float
+    simse: float = 0.0
     spectral: float = 0.0
     sinkhorn_contrib: Optional[jnp.ndarray] = None
     lncc_contrib: Optional[jnp.ndarray] = None
@@ -42,6 +43,7 @@ class GridLossResult:
             "sinkhorn": self.sinkhorn,
             "lncc": self.lncc,
             "mse": self.mse,
+            "simse": self.simse,
             "spectral": self.spectral,
         }
 
@@ -52,6 +54,7 @@ def compute_grid_losses(
     w_sinkhorn: float = 1.0,
     w_lncc: float = 0.5,
     w_mse: float = 0.0,
+    w_simse: float = 0.0,
     w_spectral: float = 0.0,
     eps_sinkhorn: float = 0.1,
     n_sinkhorn_iters: int = 50,
@@ -94,9 +97,19 @@ def compute_grid_losses(
 
     lncc_l = lncc_grid_loss(None, Y_target, Y_pred, k=lncc_kernel) if w_lncc > 0 else jnp.array(0.0)
     mse_l = jnp.mean((Y_pred - Y_target) ** 2) if w_mse > 0 else jnp.array(0.0)
+    simse_l = (
+        simse_loss(None, Y_target.flatten(), Y_pred.flatten()) if w_simse > 0 else jnp.array(0.0)
+    )
     spectral_l = spectral_loss(None, Y_target, Y_pred) if w_spectral > 0 else jnp.array(0.0)
+    logger.debug(f"compute_grid_losses: w_mse={w_mse}, raw_mse={float(mse_l):.6f}")
 
-    total = w_sinkhorn * sinkhorn_l + w_lncc * lncc_l + w_mse * mse_l + w_spectral * spectral_l
+    total = (
+        w_sinkhorn * sinkhorn_l
+        + w_lncc * lncc_l
+        + w_mse * mse_l
+        + w_simse * simse_l
+        + w_spectral * spectral_l
+    )
 
     lncc_contrib = None
     if return_contributions:
@@ -107,6 +120,7 @@ def compute_grid_losses(
         sinkhorn=float(sinkhorn_l),
         lncc=float(lncc_l),
         mse=float(mse_l),
+        simse=float(simse_l),
         spectral=float(spectral_l),
         lncc_contrib=lncc_contrib,
     )
@@ -1431,14 +1445,17 @@ def grid_distance_loss(
         )
         yhat_images = yhatdep.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
 
-        all_losses, (
-            sinkhorn_losses,
-            lncc_losses,
-            mse_losses,
-            spectral_losses,
-            simse_losses,
-            zncc_losses,
-            contrast_losses,
+        (
+            all_losses,
+            (
+                sinkhorn_losses,
+                lncc_losses,
+                mse_losses,
+                spectral_losses,
+                simse_losses,
+                zncc_losses,
+                contrast_losses,
+            ),
         ) = vmap(vmap(compute_grid_loss_single_with_breakdown))(Y_images, yhat_images)
 
         sublosses = {

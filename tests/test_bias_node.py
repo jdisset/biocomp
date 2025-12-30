@@ -129,8 +129,10 @@ def test_bias_prefers_fluo_bias_over_fluo_bias_data():
     assert max_value == approx(0.9), "Should use fluo_bias (0.9), not fluo_bias_data (0.8)"
 
 
-def test_bias_with_scalar_value_locks_range(fluo_bias_scalar_spec):
-    """Scalar value results in min == max (locked bias, no gradient flow)."""
+def test_bias_with_scalar_value_uses_default_bounds(fluo_bias_scalar_spec):
+    """Scalar value uses default bounds [0, 0.7] for design mode flexibility."""
+    from biocomp.nodes.bias import DEFAULT_BIAS_MIN, DEFAULT_BIAS_MAX
+
     mock_node = MockStackNode(extra={"fluo_bias": fluo_bias_scalar_spec})
     nodelist = [mock_node]
 
@@ -147,12 +149,17 @@ def test_bias_with_scalar_value_locks_range(fluo_bias_scalar_spec):
 
     min_value = float(np.asarray(params["local/bias_test/min_value"]).flatten()[0])
     max_value = float(np.asarray(params["local/bias_test/max_value"]).flatten()[0])
+    raw_value = float(np.asarray(params["local/bias_test/raw_value"]).flatten()[0])
 
-    assert min_value == approx(max_value) == approx(0.3), "Scalar value should lock min == max"
+    assert min_value == approx(DEFAULT_BIAS_MIN), "Scalar should use default min bound"
+    assert max_value == approx(DEFAULT_BIAS_MAX), "Scalar should use default max bound"
+    assert raw_value == approx(0.3), "Raw value should be initialized to the scalar value"
 
 
 def test_bias_default_when_no_spec():
-    """Without fluo_bias spec, default value is 0.5 (locked)."""
+    """Without fluo_bias spec, uses default value 0.5 with default bounds [0, 0.7]."""
+    from biocomp.nodes.bias import DEFAULT_BIAS_MIN, DEFAULT_BIAS_MAX
+
     mock_node = MockStackNode(extra={})
     nodelist = [mock_node]
 
@@ -169,8 +176,11 @@ def test_bias_default_when_no_spec():
 
     min_value = float(np.asarray(params["local/bias_test/min_value"]).flatten()[0])
     max_value = float(np.asarray(params["local/bias_test/max_value"]).flatten()[0])
+    raw_value = float(np.asarray(params["local/bias_test/raw_value"]).flatten()[0])
 
-    assert min_value == max_value == 0.5, "Default should be locked at 0.5"
+    assert min_value == approx(DEFAULT_BIAS_MIN), "Default should use default min bound"
+    assert max_value == approx(DEFAULT_BIAS_MAX), "Default should use default max bound"
+    assert raw_value == approx(0.5), "Default raw value should be 0.5"
 
 
 def test_bias_output_varies_with_raw_value_when_unlocked():
@@ -205,8 +215,8 @@ def test_bias_output_varies_with_raw_value_when_unlocked():
 
 
 def test_bias_output_constant_when_locked():
-    """Verify output stays constant when min == max (locked bias)."""
-    spec = {"tu_id": 0, "value": 0.5, "protein": "X", "units": "AU"}
+    """Verify output stays constant when min == max (locked bias via explicit range)."""
+    spec = {"tu_id": 0, "value": {"min": 0.5, "max": 0.5}, "protein": "X", "units": "AU"}
     mock_node = MockStackNode(extra={"fluo_bias": spec})
     nodelist = [mock_node]
 
