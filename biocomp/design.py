@@ -2,7 +2,7 @@
 import random
 from functools import partial
 from pathlib import Path
-from typing import List, Literal, Tuple, Callable, Optional, Union
+from typing import List, Literal, Tuple, Callable, Optional, Union, Any
 import warnings
 
 import numpy as np
@@ -380,12 +380,26 @@ def initialize_params(
 class DesignConfig(DesignOptimConfig):
     loss_function: EncodedPartialFunction = Field(default=distance_loss)
     n_replicates: int = 4
-    # "all" keeps everything from the loss function's aux dict (recommended for diagnostics)
-    # Can also specify a list: ["loss", "all_losses", "sublosses", ...]
     keep_in_history: Union[List[str], Literal["all"]] = "all"
-    # TU masking initialization - small std keeps init in sigmoid's active gradient region
-    tu_log_alpha_init_mean: float = 0.0  # 0 = 50/50 enabled/disabled starting point
-    tu_log_alpha_init_std: float = 0.5  # small std prevents gradient death at sigmoid tails
+    tu_log_alpha_init_mean: float = 2.0
+    tu_log_alpha_init_std: float = 0.5
+
+    pluggable_optimizer: Any = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def get_pluggable_optimizer(self) -> Any:
+        """Get pluggable optimizer, creating from optimizer_stack if not set."""
+        if self.pluggable_optimizer is not None:
+            return self.pluggable_optimizer
+        from biocomp.designoptim import GradientDescentOptimizer
+
+        total_steps = int(self.n_epochs * max(1, self.n_batches_per_epoch // self.batches_per_step))
+        return GradientDescentOptimizer(
+            optimizer_stack=self.optimizer_stack,
+            n_steps=total_steps,
+            sanitize_grads=True,
+        )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

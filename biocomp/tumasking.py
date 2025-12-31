@@ -126,6 +126,18 @@ def soft_clip(x: ArrayLike, low: float = 0.0, high: float = 1.0) -> jnp.ndarray:
     return low + (high - low) * soft
 
 
+LEAKY_MASK_FLOOR = 0.001
+
+
+def leaky_mask_floor(mask: ArrayLike) -> jnp.ndarray:
+    """Add tiny floor to mask to ensure gradients always flow.
+
+    This changes the forward value slightly (disabled = 0.001 instead of 0),
+    but ensures gradients to masked values are never exactly zero.
+    """
+    return jnp.maximum(mask, LEAKY_MASK_FLOOR)
+
+
 def hard_concrete_from_uniform(
     u: ArrayLike,
     log_alpha: ArrayLike,

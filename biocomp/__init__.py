@@ -26,3 +26,14 @@ from .recipe import (  # noqa: E402
     TranscriptionUnit as TranscriptionUnit,
     Slot as Slot,
 )
+
+from .designcodec import GenomeCodec as GenomeCodec  # noqa: E402
+
+from .designoptim import (  # noqa: E402
+    OptimPhase as OptimPhase,
+    OptimizationState as OptimizationState,
+    GradientDescentOptimizer as GradientDescentOptimizer,
+    EvolutionaryOptimizer as EvolutionaryOptimizer,
+    HybridOptimizer as HybridOptimizer,
+    ObjectiveWrapper as ObjectiveWrapper,
+)

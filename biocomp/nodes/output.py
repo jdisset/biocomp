@@ -6,7 +6,7 @@ from jax import vmap
 import numpy as np
 from biocomp.parameters import ParameterTree, init_if_needed
 from biocomp.nodeutils import LayerInstance, add_tu_input_mapping, add_node_network_ids
-from biocomp.tumasking import TU_LOG_ALPHA_PATH
+from biocomp.tumasking import TU_LOG_ALPHA_PATH, leaky_mask_floor
 from typing import Optional
 
 from biocomp.neuralutils import (
@@ -102,8 +102,9 @@ def grouped_output(
 
         res = vmap(partial(MLP_head, rng_key=key, params=params))(inputs_arr)
 
-        masked_inputs = inputs_arr * input_masks.reshape(-1, *([1] * len(input_shapes[0])))
-        masked_res = res * input_masks.reshape(-1, 1)
+        masks_reshaped = leaky_mask_floor(input_masks).reshape(-1, *([1] * len(input_shapes[0])))
+        masked_inputs = inputs_arr * masks_reshaped
+        masked_res = res * leaky_mask_floor(input_masks).reshape(-1, 1)
 
         if dummy:
             pre = masked_res

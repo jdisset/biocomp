@@ -10,7 +10,7 @@ from biocomp.nodeutils import (
     add_node_network_ids,
     NON_GRAD_TAG,
 )
-from biocomp.tumasking import TU_LOG_ALPHA_PATH
+from biocomp.tumasking import TU_LOG_ALPHA_PATH, leaky_mask_floor
 from biocomp.utils import get_logger
 from typing import Optional
 
@@ -130,7 +130,7 @@ def aggregation(
         else:
             output_masks = jnp.ones(n_outputs)
 
-        masked_ratios = abs_ratios * output_masks
+        masked_ratios = abs_ratios * leaky_mask_floor(output_masks)
         masked_sum = jnp.sum(masked_ratios)
         safe_sum = jnp.maximum(masked_sum, 1e-8)  # jnp.where evals both branches
         normalized_ratios = jnp.where(
@@ -305,7 +305,7 @@ def inv_aggregation(
             else:
                 masks = jnp.ones_like(fwd_ratios)
 
-            all_masked_sums.append(jnp.sum(fwd_ratios * masks))
+            all_masked_sums.append(jnp.sum(fwd_ratios * leaky_mask_floor(masks)))
             slot_idx = jnp.minimum(original_slot, masks.shape[0] - 1)
             all_this_masks.append(masks[slot_idx])
 
@@ -315,11 +315,20 @@ def inv_aggregation(
         this_mask = all_this_masks[fwd_path_idx]
 
         safe_sum = jnp.maximum(masked_sum, 1e-8)
-        normalized_ratio = jnp.where(masked_sum > 1e-8, original_ratio * this_mask / safe_sum, 0.0)
+        masked_ratio = original_ratio * leaky_mask_floor(this_mask)
+        normalized_ratio = jnp.where(masked_sum > 1e-8, masked_ratio / safe_sum, 0.0)
 
         is_enabled = normalized_ratio >= DISABLED_THRESHOLD
         safe_ratio = jnp.maximum(normalized_ratio, DISABLED_THRESHOLD)
-        result = jnp.where(is_enabled, input / safe_ratio, 0.0)
+        full_result = input / safe_ratio
+        # STE for leaky gradient: forward uses 0 when disabled, backward uses small floor
+        DISABLED_RESULT_FLOOR = 0.01
+        leaky_result = full_result * DISABLED_RESULT_FLOOR
+        result = jnp.where(is_enabled, full_result, leaky_result)
+        # Correct to exactly 0 in forward for disabled cases (STE)
+        result = result + jax.lax.stop_gradient(
+            jnp.where(is_enabled, 0.0, -leaky_result)
+        )
 
         return result, {
             "original_ratio": original_ratio,

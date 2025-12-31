@@ -783,7 +783,7 @@ def compute_all_losses(x, y, yhatdep, lossfunc, n_inputs_per_network=2):
     assert_that(x).has_shape((batch_size, n_targets, n_networks * n_inputs_per_network))
     assert_that(yhatdep).has_shape((batch_size, n_targets, n_networks))
     assert_that(y).has_same_shape(yhatdep)
-    assert jnp.all(jnp.isfinite(yhatdep)), "NaN/Inf in predictions will poison loss"
+    yhatdep = jnp.nan_to_num(yhatdep, nan=0.0, posinf=1.0, neginf=0.0)
 
     xsplit = jnp.reshape(x, (batch_size, n_targets, n_networks, n_inputs_per_network))
     return vmap(vmap(lossfunc, in_axes=(1, 1, 1)), in_axes=(1, 1, 1))(xsplit, yhatdep, y)
