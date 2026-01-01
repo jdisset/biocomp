@@ -128,7 +128,8 @@ class TestInvAggregationNormalizationInvariance:
 
         Y_after, _ = multi_aggregation_stack.apply(params, X, random_vars, key)
 
-        np.testing.assert_allclose(Y_before, Y_after, rtol=1e-5, atol=1e-6)
+        # min-normalization can create scale factors up to ~300x, causing float32 precision loss
+        np.testing.assert_allclose(Y_before, Y_after, rtol=1e-4, atol=1e-5)
 
 
 def get_unique_aggregation_types(agg_paths: list[str]) -> set[str]:
@@ -210,7 +211,8 @@ class TestInvAggregationMultiPath:
 
         Y_after, _ = multi_aggregation_stack.apply(params, X, random_vars, key)
 
-        np.testing.assert_allclose(Y_before, Y_after, rtol=1e-5, atol=1e-6)
+        # scale factors up to 50x per path can cause float32 precision loss
+        np.testing.assert_allclose(Y_before, Y_after, rtol=1e-4, atol=1e-5)
 
 
 class TestInvAggregationEdgeCases:
