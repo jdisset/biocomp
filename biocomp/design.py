@@ -1,8 +1,8 @@
-### {{{                          --     imports     --
+from __future__ import annotations
 import random
 from functools import partial
 from pathlib import Path
-from typing import List, Literal, Tuple, Callable, Optional, Union, Any
+from typing import Literal, Callable, Any, TYPE_CHECKING
 import warnings
 
 import numpy as np
@@ -23,8 +23,10 @@ import biocomp.nodes as nd
 from biocomp.network import Network
 from .parameters import ParameterTree
 from biocomp.logging_config import get_logger
-from biocomptools.modelmodel import BiocompModel
 from biocomp.optimutils import make_training_step, per_replicate_step, optimize, DesignOptimConfig
+
+if TYPE_CHECKING:
+    from biocomptools.modelmodel import BiocompModel
 from biocomp.designloss import distance_loss, grid_distance_loss  # noqa: F401 - re-exported
 from biocomp.tumasking import build_tu_id_mapping, TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
 from biocomp.designdebug import save_debug_state, is_design_debug_enabled
@@ -45,25 +47,16 @@ from biocomp.design_targets import (  # noqa: F401
 
 logger = get_logger(__name__)
 
-# Module-level context for debug output directory (set by run_design.py)
 _debug_output_dir: str | None = None
 
 
 def set_design_debug_output_dir(output_dir: str | None):
-    """Set the output directory for design debug saves."""
     global _debug_output_dir
     _debug_output_dir = output_dir
 
 
 def get_design_debug_output_dir() -> str | None:
-    """Get the current design debug output directory."""
     return _debug_output_dir
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-
-## {{{                          --     design manager   --
 
 
 class DesignManager(BaseModel):
@@ -72,12 +65,12 @@ class DesignManager(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     targets: list[TargetUnion]
-    networks: List[Network]
+    networks: list[Network]
     sampling: SamplingConfigUnion = Field(default_factory=UniformSampling, discriminator="strategy")
 
     enable_tu_masking: bool = False
-    _tu_ids: Optional[list[str]] = None
-    _tu_id_to_idx: Optional[dict[str, int]] = None
+    _tu_ids: list[str] | None = None
+    _tu_id_to_idx: dict[str, int] | None = None
 
     @model_validator(mode="after")
     def _validate_input_order_consistency(self) -> "DesignManager":
@@ -146,7 +139,7 @@ class DesignManager(BaseModel):
         target: TargetUnion,
         n: int,
         seed: int,
-        grid: Optional[tuple[int, int]] = None,
+        grid: tuple[int, int] | None = None,
         jitter: float = 0.0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Sample from target using its interface methods."""
@@ -161,7 +154,7 @@ class DesignManager(BaseModel):
     def get_samples(
         self,
         samples: int | tuple[int, ...],
-        seed: Optional[int | ArrayLike] = None,
+        seed: int | ArrayLike | None = None,
     ) -> tuple[jax.Array, jax.Array]:
         if seed is None:
             seed = random.randint(0, 2**32 - 1)
@@ -288,7 +281,7 @@ class DesignManager(BaseModel):
         return isinstance(self.sampling, LatticeSampling)
 
     @property
-    def grid_resolution(self) -> Optional[tuple[int, int]]:
+    def grid_resolution(self) -> tuple[int, int] | None:
         if isinstance(self.sampling, LatticeSampling):
             return self.sampling.resolution
         return None
@@ -323,11 +316,6 @@ class DesignManager(BaseModel):
     @property
     def n_targets(self):
         return len(self.targets)
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-## {{{                   --     param initialization     --
 
 
 def initialize_params(
@@ -380,13 +368,25 @@ def initialize_params(
 class DesignConfig(DesignOptimConfig):
     loss_function: EncodedPartialFunction = Field(default=distance_loss)
     n_replicates: int = 4
-    keep_in_history: Union[List[str], Literal["all"]] = "all"
+    keep_in_history: list[str] | Literal["all"] = "all"
     tu_log_alpha_init_mean: float = 2.0
     tu_log_alpha_init_std: float = 0.5
 
     pluggable_optimizer: Any = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @property
+    def uses_pluggable_optimizer(self) -> bool:
+        """Check if using new-style pluggable optimizer."""
+        return self.pluggable_optimizer is not None
+
+    @property
+    def optimizer(self) -> Any:
+        """Return optax optimizer for backward compat, or pluggable if set."""
+        if self.pluggable_optimizer is not None:
+            return self.pluggable_optimizer
+        return super().optimizer
 
     def get_pluggable_optimizer(self) -> Any:
         """Get pluggable optimizer, creating from optimizer_stack if not set."""
@@ -402,12 +402,7 @@ class DesignConfig(DesignOptimConfig):
         )
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-
 def assert_tree_shape(tree, expected_shape, only_first_dims=True):
-    """Assert that the shape of each leaf in the tree matches the expected shape."""
-
     N_DIMS = len(expected_shape)
 
     def check_shape(x):
@@ -420,15 +415,12 @@ def assert_tree_shape(tree, expected_shape, only_first_dims=True):
     jax.tree.map(check_shape, tree)
 
 
-## {{{                   --     evaluation and analysis     --
-
-
 def get_topk_replicate_network_pairs(
     losses: jax.Array,
     dmanager: DesignManager,
     dconf: DesignConfig,
     k: int = 1,
-) -> List[List[Tuple[int, int, float]]]:
+) -> list[list[tuple[int, int, float]]]:
     """Find top-k replicate/network pairs with lowest loss for each target.
 
     Args:
@@ -468,12 +460,12 @@ def plot_design_results(
     dconf: DesignConfig,
     xraw: jax.Array,
     yraw: jax.Array,
-    topk: List[List[Tuple[int, int, float]]],
-    yhatdep: Optional[jax.Array] = None,
-    n_eval_samples: Optional[int] = None,
-    save_dir: Optional[Path] = None,
+    topk: list[list[tuple[int, int, float]]],
+    yhatdep: jax.Array | None = None,
+    n_eval_samples: int | None = None,
+    save_dir: Path | None = None,
     show_difference: bool = False,
-    plot_top_k: Optional[int] = None,
+    plot_top_k: int | None = None,
 ) -> None:
     """Plot design results for each target showing best replicate/network combination.
 
@@ -497,7 +489,6 @@ def plot_design_results(
     else:
         n_eval_samples = min(n_eval_samples, xraw.shape[2])
 
-    # validate shapes
     n_networks = len(dmanager.networks)
     assert_that(xraw).has_shape(
         (n_networks, dconf.n_replicates, xraw.shape[2], dmanager.n_targets, 2)
@@ -506,30 +497,24 @@ def plot_design_results(
         (n_networks, dconf.n_replicates, yraw.shape[2], dmanager.n_targets, 1)
     )
 
-    # determine how many top-k results to plot
     if plot_top_k is None:
-        plot_top_k = 1  # default to just the best result
+        plot_top_k = 1
 
     for tid, target in enumerate(dmanager.targets):
-        # plot multiple top-k results for this target
         n_to_plot = min(plot_top_k, len(topk[tid]))
 
         for rank in range(n_to_plot):
             rep_id, net_id, loss_val = topk[tid][rank]
 
-            # get data for this specific target/network/replicate combo
-            x_target = xraw[net_id, rep_id, :n_eval_samples, tid]  # shape: (n_samples, 2)
-            y_target = yraw[net_id, rep_id, :n_eval_samples, tid, 0]  # squeeze last dim
+            x_target = xraw[net_id, rep_id, :n_eval_samples, tid]
+            y_target = yraw[net_id, rep_id, :n_eval_samples, tid, 0]
 
-            # assertions
             assert_that(x_target).has_shape((n_eval_samples, 2))
             assert_that(y_target).has_shape((n_eval_samples,))
 
-            # create figure
             nax = 3 if show_difference else 2
             fig, axes = plt.subplots(1, nax, figsize=(nax * 5, 5), dpi=100)
 
-            # ground truth
             sc1 = axes[0].scatter(
                 x_target[:, 0], x_target[:, 1], c=y_target, cmap=DEFAULT_CMAP_NAME, s=5, alpha=0.7
             )
@@ -538,8 +523,7 @@ def plot_design_results(
             plt.colorbar(sc1, ax=axes[0])
 
             if yhatdep is not None:
-                # prediction
-                yhat_target = yhatdep[rep_id, :n_eval_samples, tid, net_id]  # shape: (n_samples,)
+                yhat_target = yhatdep[rep_id, :n_eval_samples, tid, net_id]
                 assert_that(yhat_target).has_shape((n_eval_samples,))
                 assert_that(yhatdep).has_shape(
                     (dconf.n_replicates, yhatdep.shape[1], dmanager.n_targets, n_networks)
@@ -556,7 +540,6 @@ def plot_design_results(
                 axes[1].set_aspect("equal")
                 plt.colorbar(sc2, ax=axes[1])
 
-                # difference
                 if show_difference:
                     diff = yhat_target - y_target
                     assert_that(diff).has_shape((n_eval_samples,))
@@ -589,11 +572,6 @@ def plot_design_results(
                 logger.info(f"Saved figure to {save_path}")
 
             plt.show()
-
-
-##────────────────────────────────────────────────────────────────────────────}}}
-
-### {{{                       --     main design function     --
 
 
 RATIO_PRUNE_THRESHOLD = 1.0 / 120.0
@@ -655,13 +633,205 @@ def normalize_ratio_source_arrays(params, source_paths, normalize_func):
     )
 
 
+def _start_pluggable(
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    model: BiocompModel,
+    loggers: list[tuple[int, Callable]] | None = None,
+    async_handler=None,
+):
+    import time
+    from .designcodec import GenomeCodec
+
+    timings = {}
+    t_total = time.perf_counter()
+
+    logger.info("=" * 60)
+    logger.info("DESIGN OPTIMIZATION (PLUGGABLE OPTIMIZER)")
+    logger.info("=" * 60)
+
+    pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
+    optimizer = dconf.pluggable_optimizer
+
+    # Phase 1: Build compute stack
+    t0 = time.perf_counter()
+    logger.info("[1/6] Building compute stack...")
+    stack = dmanager.build_stack(model)
+    timings["stack_build"] = time.perf_counter() - t0
+    logger.info(f"  -> Stack built in {timings['stack_build']:.2f}s")
+
+    # Phase 2: Initialize parameters (single replicate for pluggable optimizer)
+    t1 = time.perf_counter()
+    logger.info("[2/6] Initializing parameters...")
+    n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
+    n_networks = len(dmanager.networks)
+
+    # Use n_replicates=1 for pluggable optimizer - squeeze later
+    initial_params = initialize_params(
+        stack,
+        n_replicates=1,
+        n_targets=dmanager.n_targets,
+        shared_params=model.shared_params,
+        key=pkey,
+        n_tus=n_tus,
+        n_networks=n_networks,
+        tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
+        tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
+    )
+    # Squeeze replicate dim: (1, n_targets, ...) -> (n_targets, ...)
+    initial_params = jax.tree.map(lambda x: x.squeeze(0), initial_params)
+    timings["param_init"] = time.perf_counter() - t1
+    logger.info(f"  -> Parameters initialized in {timings['param_init']:.2f}s")
+
+    # Phase 3: Create codec for param encoding
+    t2 = time.perf_counter()
+    logger.info("[3/6] Creating parameter codec...")
+    static, dynamic = initial_params.filter_by_tag(["non_grad", "shared"])
+    codec = GenomeCodec.from_params(initial_params, static_tags=("shared", "non_grad"))
+    flat_params = codec.encode(initial_params)
+    logger.info(f"  Genome dimension: {codec.param_dim}")
+    timings["codec"] = time.perf_counter() - t2
+    logger.info(f"  -> Codec created in {timings['codec']:.2f}s")
+
+    # Phase 4: Create loss function and objective
+    t3 = time.perf_counter()
+    logger.info("[4/6] Creating objective function...")
+    num_z = static["global/number_of_random_variables"]
+    num_z = (dmanager.n_targets, int(num_z.ravel()[0].squeeze()))
+    direct_ratio_paths, source_ratio_paths = get_ratio_paths_and_sources(initial_params)
+
+    loss_fn = dconf.loss_function.get_impl()(
+        stack, dconf, dmanager, num_z=num_z, ratio_paths=direct_ratio_paths
+    )
+
+    effective_batch_size = dconf.batch_size
+    if dmanager.is_lattice_mode:
+        xres, yres = dmanager.grid_resolution
+        effective_batch_size *= xres * yres
+
+    xbatches_list, ybatches_list = dmanager.get_samples(
+        (len(dmanager.networks), 1, 1, 1, dconf.batch_size), bkey
+    )
+    x_samples = jnp.concatenate(xbatches_list, axis=-1)
+    x_samples = x_samples.reshape(effective_batch_size, dmanager.n_targets, -1)
+    y_samples = ybatches_list[0].reshape(effective_batch_size, dmanager.n_targets, -1)
+
+    # CMA-ES requires deterministic objective: fix z to mean (0.5) and use fixed RNG key
+    fixed_z = jnp.full((x_samples.shape[0], *num_z), 0.5)
+    fixed_key = jax.random.key(42)
+
+    def single_objective(flat_genome: jnp.ndarray, step: jnp.ndarray) -> float:
+        params = codec.decode(flat_genome, apply_constraints=True)
+        static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
+        loss, _ = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, step)
+        return loss
+
+    vmapped_objective = jax.vmap(single_objective, in_axes=(0, None))
+
+    logger.info("  Compiling vmapped objective (AOT)...")
+    t_compile = time.perf_counter()
+    compiled_pop_objective = jax.jit(vmapped_objective)
+    dummy_pop = jnp.zeros((optimizer._get_pop_size(codec.param_dim), codec.param_dim))
+    _ = compiled_pop_objective(dummy_pop, jnp.array(0, dtype=jnp.int32)).block_until_ready()
+    compile_time = time.perf_counter() - t_compile
+    logger.info(f"  -> Compiled in {compile_time:.2f}s")
+
+    def objective_fn_init(flat_genome: jnp.ndarray) -> float:
+        return single_objective(flat_genome, jnp.array(0, dtype=jnp.int32))
+
+    def get_yhatdep(flat_genome: jnp.ndarray, step: jnp.ndarray) -> jnp.ndarray:
+        params = codec.decode(flat_genome, apply_constraints=True)
+        static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
+        _, aux = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, step)
+        return aux.get("yhatdep")
+
+    compiled_get_yhatdep = jax.jit(get_yhatdep)
+
+    timings["objective"] = time.perf_counter() - t3
+    logger.info(f"  -> Objective created in {timings['objective']:.2f}s")
+
+    # Phase 5: Initialize optimizer
+    t4 = time.perf_counter()
+    logger.info("[5/6] Initializing optimizer...")
+    init_key, opt_key = jax.random.split(loop_key)
+    opt_state = optimizer.init(init_key, flat_params, objective_fn_init)
+    logger.info(f"  Initial loss: {float(opt_state.best_loss):.6f}")
+    timings["opt_init"] = time.perf_counter() - t4
+    logger.info(f"  -> Optimizer initialized in {timings['opt_init']:.2f}s")
+
+    # Phase 6: Optimization loop
+    logger.info("=" * 60)
+    logger.info("STARTING OPTIMIZATION LOOP")
+    logger.info("=" * 60)
+
+    loss_history = []
+    step_history = []
+    pbar = tqdm(desc="Optimizing", unit="step")
+
+    while not optimizer.should_stop(opt_state):
+        opt_key, step_key = jax.random.split(opt_key)
+        current_step = jnp.array(int(opt_state.step), dtype=jnp.int32)
+        # Pass the pre-compiled population objective and current step
+        opt_state, metrics = optimizer.step(
+            opt_state, step_key, compiled_pop_objective, current_step
+        )
+
+        loss_history.append(float(opt_state.best_loss))
+        step_history.append({k: float(v) if hasattr(v, "item") else v for k, v in metrics.items()})
+
+        pbar.update(1)
+        pbar.set_postfix(loss=f"{float(opt_state.best_loss):.4f}")
+
+        # Call loggers - pass current step's metrics as step_history dict
+        if loggers:
+            should_log = any(
+                int(opt_state.step) % p == 0 or p == -1 for p, _ in loggers
+            )
+            yhatdep_arr = None
+            if should_log:
+                yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, current_step)
+            current_step_data = {
+                "loss": [[float(opt_state.best_loss)]],
+                "yhatdep": yhatdep_arr,
+                **metrics,
+            }
+            for period, callback in loggers:
+                if int(opt_state.step) % period == 0 or period == -1:
+                    callback(
+                        int(opt_state.step),
+                        None,
+                        step_history=current_step_data,
+                        stack=stack,
+                    )
+
+    pbar.close()
+
+    timings["total"] = time.perf_counter() - t_total
+    logger.info("=" * 60)
+    logger.info(f"OPTIMIZATION COMPLETE in {timings['total']:.2f}s")
+    logger.info(f"  Final loss: {float(opt_state.best_loss):.6f}")
+    logger.info(f"  Total steps: {int(opt_state.step)}")
+    logger.info("=" * 60)
+
+    # Decode final params and add replicate dimension for compatibility
+    final_params = codec.decode(opt_state.best_params, apply_constraints=True)
+    final_params = jax.tree.map(lambda x: x[None, ...], final_params)
+
+    return final_params, loss_history, step_history
+
+
 def start(
     dmanager: DesignManager,
     dconf: DesignConfig,
     model: BiocompModel,
-    loggers: Optional[List[Tuple[int, Callable]]] = None,
+    loggers: list[tuple[int, Callable]] | None = None,
     async_handler=None,
 ):
+    # Dispatch to pluggable optimizer loop if configured
+    if dconf.uses_pluggable_optimizer:
+        logger.info("Using pluggable optimizer: %s", type(dconf.pluggable_optimizer).__name__)
+        return _start_pluggable(dmanager, dconf, model, loggers, async_handler)
+
     import time
 
     timings = {}
@@ -877,18 +1047,13 @@ def start(
     )
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-## {{{                   --     evaluation functions     --
-
-
 def sample_for_evaluation(
     dmanager: DesignManager,
     dconf: DesignConfig,
     final_params: ParameterTree,
     n_eval_samples: int,
     key: jax.Array,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Sample evaluation data. Returns (xraw, yraw) with shapes (n_networks, n_replicates, n_samples, n_targets, 2/1)."""
     n_networks, n_replicates, n_targets = (
         len(dmanager.networks),
@@ -914,7 +1079,7 @@ def evaluate_design(
     max_eval_size: int = 64,
     max_loss_size: int = 64,
     store_predictions: bool = True,
-) -> Tuple[Optional[jnp.ndarray], jnp.ndarray]:
+) -> tuple[jnp.ndarray | None, jnp.ndarray]:
     """Evaluate design quality. Returns (predictions, losses) where losses has shape (n_replicates, n_targets, n_networks).
 
     CRITICAL: This function MUST apply TU masks to be consistent with training.
@@ -934,10 +1099,8 @@ def evaluate_design(
     x_combined = xraw.transpose(1, 2, 3, 0, 4).reshape(n_replicates, n_samples, n_targets, -1)
     y_combined = yraw[0]
 
-    # check if TU masking is enabled
     has_tu_masking = TU_LOG_ALPHA_PATH in final_params
 
-    # validate TU masking params shape
     if has_tu_masking:
         tu_log_alpha_full = final_params[TU_LOG_ALPHA_PATH]
         assert tu_log_alpha_full.ndim == 4, (
@@ -1071,6 +1234,3 @@ def compute_baseline_loss(
         logger.info(f"Baseline '{target_name}': loss={model_loss:.6f} ({original_network.name})")
 
     return results
-
-
-##────────────────────────────────────────────────────────────────────────────}}}

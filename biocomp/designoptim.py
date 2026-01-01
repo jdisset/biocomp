@@ -140,19 +140,61 @@ class EvolutionaryOptimizer(BaseModel):
         return _state(0, params, params, loss, OptimPhase.EC, (es_state, es_params))
 
     def step(
-        self, state: OptimizationState, key: jax.random.PRNGKey, objective_fn: Callable
+        self,
+        state: OptimizationState,
+        key: jax.random.PRNGKey,
+        objective_fn: Callable,
+        step: jnp.ndarray | None = None,
     ) -> tuple[OptimizationState, dict]:
+        """Execute one CMA-ES generation.
+
+        Args:
+            state: Current optimization state
+            key: Random key for this step
+            objective_fn: Either:
+                - A pre-compiled vmapped function (pop, step) -> losses (preferred for GPU)
+                - A single-sample function (genome) -> loss (legacy, will be vmapped+JIT'd)
+            step: Current step number (required if objective_fn takes step as 2nd arg)
+        """
         es_state, es_params = state.opt_state
         k1, k2 = jax.random.split(key)
 
         pop, es_state = self._es.ask(k1, es_state, es_params)
-        raw_fit = -jax.vmap(objective_fn)(pop)
-        fitness = jnp.where(jnp.isfinite(raw_fit), raw_fit, -jnp.inf)
+
+        # If step is provided, objective_fn is pre-compiled vmapped: (pop, step) -> losses
+        # Otherwise, it's a single-sample function that needs vmapping (legacy path)
+        # NOTE: evosax CMA-ES MINIMIZES fitness, so pass loss directly (no negation!)
+        if step is not None:
+            raw_fit = objective_fn(pop, step)
+        else:
+            raw_fit = jax.jit(jax.vmap(objective_fn))(pop)
+
+        # For invalid samples, use +inf (worst possible for minimization)
+        fitness = jnp.where(jnp.isfinite(raw_fit), raw_fit, jnp.inf)
         es_state, _ = self._es.tell(k2, pop, fitness, es_state, es_params)
 
-        best_idx = jnp.argmax(fitness)
-        gen_best, gen_loss = pop[best_idx], -fitness[best_idx]
+        # clamp sigma to prevent explosion (evosax doesn't do this internally)
+        sigma_before = es_state.std
+        clamped_sigma = jnp.clip(es_state.std, self.min_sigma, self.max_sigma)
+        es_state = es_state.replace(std=clamped_sigma)
+        sigma_clamped = sigma_before != clamped_sigma
+
+        # evosax minimizes, so best = argmin
+        best_idx = jnp.argmin(fitness)
+        gen_best, gen_loss = pop[best_idx], fitness[best_idx]
         is_better = gen_loss < state.best_loss
+
+        # compute fitness statistics for diagnostics (fitness = loss, lower is better)
+        valid_fitness = jnp.where(jnp.isfinite(raw_fit), raw_fit, jnp.nan)
+        fitness_std = jnp.nanstd(valid_fitness)
+        fitness_min = jnp.nanmin(valid_fitness)  # best loss in population
+        fitness_max = jnp.nanmax(valid_fitness)  # worst loss in population
+
+        # genome statistics for debugging
+        mean_genome = self._es.get_mean(es_state)
+        genome_std = jnp.std(pop, axis=0).mean()
+        genome_range = jnp.max(pop) - jnp.min(pop)
+        best_dist_from_mean = jnp.linalg.norm(gen_best - mean_genome)
 
         return state._replace(
             step=state.step + 1,
@@ -162,15 +204,29 @@ class EvolutionaryOptimizer(BaseModel):
             best_loss=jnp.where(is_better, gen_loss, state.best_loss),
         ), {
             "gen_best_loss": gen_loss,
-            "gen_mean_loss": -jnp.mean(fitness),
-            "sigma": es_state.std,
+            "gen_mean_loss": jnp.mean(fitness),
+            "sigma": clamped_sigma,
+            "sigma_before_clamp": sigma_before,
+            "sigma_clamped": sigma_clamped,
             "n_valid": jnp.sum(jnp.isfinite(raw_fit)),
+            "fitness_std": fitness_std,
+            "fitness_min": fitness_min,
+            "fitness_max": fitness_max,
+            "genome_std": genome_std,
+            "genome_range": genome_range,
+            "best_dist_from_mean": best_dist_from_mean,
+            "improved": is_better,
             "phase": state.phase,
         }
 
     def should_stop(self, state: OptimizationState) -> bool:
         es_state, _ = state.opt_state
-        return float(es_state.std) < self.min_sigma or int(state.step) >= self.n_generations
+        sigma = float(es_state.std)
+        return (
+            sigma < self.min_sigma
+            or sigma > self.max_sigma
+            or int(state.step) >= self.n_generations
+        )
 
 
 class HybridOptimizer(BaseModel):
@@ -193,16 +249,20 @@ class HybridOptimizer(BaseModel):
         )
 
     def step(
-        self, state: OptimizationState, key: jax.random.PRNGKey, objective_fn: Callable
+        self,
+        state: OptimizationState,
+        key: jax.random.PRNGKey,
+        objective_fn: Callable,
+        step: jnp.ndarray | None = None,
     ) -> tuple[OptimizationState, dict]:
         return (
-            self._ec_step(state, key, objective_fn)
+            self._ec_step(state, key, objective_fn, step)
             if int(state.phase) == OptimPhase.EC
-            else self._gd_step(state, key, objective_fn)
+            else self._gd_step(state, key, objective_fn, step)
         )
 
-    def _ec_step(self, state, key, objective_fn):
-        new_ec, metrics = self.ec.step(state.opt_state["ec"], key, objective_fn)
+    def _ec_step(self, state, key, objective_fn, step=None):
+        new_ec, metrics = self.ec.step(state.opt_state["ec"], key, objective_fn, step)
         if int(new_ec.step) >= self.ec_generations:
             return self._handoff(state, new_ec, key, objective_fn, metrics)
         return state._replace(
@@ -235,7 +295,8 @@ class HybridOptimizer(BaseModel):
             "ec_final_loss": ec_state.best_loss,
         }
 
-    def _gd_step(self, state, key, objective_fn):
+    def _gd_step(self, state, key, objective_fn, step=None):
+        # GD uses value_and_grad on single-sample objective, step not used
         gd_state = state.opt_state["gd"]
         assert gd_state is not None, "GD state None in GD phase"
         new_gd, metrics = self.gd.step(gd_state, key, objective_fn)

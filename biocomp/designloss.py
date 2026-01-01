@@ -1,7 +1,7 @@
 """Loss functions for circuit design optimization."""
 
+from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -34,8 +34,9 @@ class GridLossResult:
     mse: float
     simse: float = 0.0
     spectral: float = 0.0
-    sinkhorn_contrib: Optional[jnp.ndarray] = None
-    lncc_contrib: Optional[jnp.ndarray] = None
+    gradient: float = 0.0
+    sinkhorn_contrib: jnp.ndarray | None = None
+    lncc_contrib: jnp.ndarray | None = None
 
     def to_dict(self) -> dict[str, float]:
         return {
@@ -45,6 +46,7 @@ class GridLossResult:
             "mse": self.mse,
             "simse": self.simse,
             "spectral": self.spectral,
+            "gradient": self.gradient,
         }
 
 
@@ -56,6 +58,7 @@ def compute_grid_losses(
     w_mse: float = 0.0,
     w_simse: float = 0.0,
     w_spectral: float = 0.0,
+    w_gradient: float = 0.0,
     eps_sinkhorn: float = 0.1,
     n_sinkhorn_iters: int = 50,
     lncc_kernel: int = 7,
@@ -101,6 +104,9 @@ def compute_grid_losses(
         simse_loss(None, Y_target.flatten(), Y_pred.flatten()) if w_simse > 0 else jnp.array(0.0)
     )
     spectral_l = spectral_loss(None, Y_target, Y_pred) if w_spectral > 0 else jnp.array(0.0)
+    gradient_l = (
+        gradient_magnitude_loss(Y_target, Y_pred) if w_gradient > 0 else jnp.array(0.0)
+    )
     logger.debug(f"compute_grid_losses: w_mse={w_mse}, raw_mse={float(mse_l):.6f}")
 
     total = (
@@ -109,6 +115,7 @@ def compute_grid_losses(
         + w_mse * mse_l
         + w_simse * simse_l
         + w_spectral * spectral_l
+        + w_gradient * gradient_l
     )
 
     lncc_contrib = None
@@ -122,33 +129,40 @@ def compute_grid_losses(
         mse=float(mse_l),
         simse=float(simse_l),
         spectral=float(spectral_l),
+        gradient=float(gradient_l),
         lncc_contrib=lncc_contrib,
     )
+
+
+def _box2d_sum(a: jnp.ndarray, r: int) -> jnp.ndarray:
+    """2D box filter via summed area table. r is the half-width (kernel size = 2r+1)."""
+    a = jnp.pad(a, ((r + 1, r), (r + 1, r)), mode="edge")
+    s = jnp.cumsum(jnp.cumsum(a, 0), 1)
+    return (
+        s[: -2 * r - 1, : -2 * r - 1]
+        - s[: -2 * r - 1, 2 * r + 1 :]
+        - s[2 * r + 1 :, : -2 * r - 1]
+        + s[2 * r + 1 :, 2 * r + 1 :]
+    )
+
+
+def _lncc_grid_per_pixel(
+    y: jnp.ndarray, yhat: jnp.ndarray, k: int = 7, eps: float = 1e-6
+) -> jnp.ndarray:
+    """Compute per-pixel LNCC values on a 2D grid."""
+    r, N = k // 2, k * k
+    m_y, m_yhat = _box2d_sum(y, r) / N, _box2d_sum(yhat, r) / N
+    y_c, yhat_c = y - m_y, yhat - m_yhat
+    var_y, var_yhat = _box2d_sum(y_c**2, r), _box2d_sum(yhat_c**2, r)
+    cov = _box2d_sum(y_c * yhat_c, r)
+    std_product = jnp.sqrt((var_y + eps) * (var_yhat + eps))
+    return jnp.clip(cov / std_product, -1, 1)
 
 
 def _compute_lncc_contribution(
     Y_pred: jnp.ndarray, Y_target: jnp.ndarray, k: int = 7
 ) -> jnp.ndarray:
-    """Compute per-pixel LNCC contribution for visualization."""
-    eps = 1e-6
-    r, N = k // 2, k * k
-
-    def box2d(a):
-        a = jnp.pad(a, ((r + 1, r), (r + 1, r)), mode="edge")
-        s = jnp.cumsum(jnp.cumsum(a, 0), 1)
-        return (
-            s[: -2 * r - 1, : -2 * r - 1]
-            - s[: -2 * r - 1, 2 * r + 1 :]
-            - s[2 * r + 1 :, : -2 * r - 1]
-            + s[2 * r + 1 :, 2 * r + 1 :]
-        )
-
-    m0, m1 = box2d(Y_target) / N, box2d(Y_pred) / N
-    y0c, y1c = Y_target - m0, Y_pred - m1
-    var_y, var_yhat = box2d(y0c**2), box2d(y1c**2)
-    cov = box2d(y0c * y1c)
-    std_product = jnp.sqrt((var_y + eps) * (var_yhat + eps))
-    return 1.0 - jnp.clip(cov / std_product, -1, 1)
+    return 1.0 - _lncc_grid_per_pixel(Y_target, Y_pred, k)
 
 
 def _sanitize(x):
@@ -329,6 +343,29 @@ def spectral_loss(x, y, yhat, **kw):
     return jnp.mean((jnp.abs(jnp.fft.fft2(y)) - jnp.abs(jnp.fft.fft2(yhat))) ** 2)
 
 
+def gradient_magnitude_loss(y, yhat, eps=1e-6, **kw):
+    """Compare gradient magnitudes to capture edge/shape structure.
+
+    This loss penalizes differences in where edges/boundaries are located.
+    Unlike Sinkhorn which only cares about mass distribution, this captures
+    the local structure of the shape.
+    """
+    assert y.ndim == 2, f"gradient_magnitude_loss: y must be 2D grid, got {y.ndim}D"
+    assert y.shape == yhat.shape, f"gradient_magnitude_loss shape mismatch: {y.shape} vs {yhat.shape}"
+
+    y, yhat = _sanitize(y.astype(jnp.float32)), _sanitize(yhat.astype(jnp.float32))
+
+    dy_y = jnp.diff(y, axis=0)
+    dx_y = jnp.diff(y, axis=1)
+    dy_yhat = jnp.diff(yhat, axis=0)
+    dx_yhat = jnp.diff(yhat, axis=1)
+
+    grad_mag_y = jnp.sqrt(dy_y[:, :-1] ** 2 + dx_y[:-1, :] ** 2 + eps)
+    grad_mag_yhat = jnp.sqrt(dy_yhat[:, :-1] ** 2 + dx_yhat[:-1, :] ** 2 + eps)
+
+    return jnp.mean((grad_mag_y - grad_mag_yhat) ** 2)
+
+
 def mse_loss(x, y, yhat, **kw):
     assert y.shape == yhat.shape, f"mse_loss shape mismatch: y={y.shape} vs yhat={yhat.shape}"
     return jnp.mean((yhat - y) ** 2)
@@ -376,30 +413,10 @@ def lncc_loss(x, y, yhat, target_neighbors=12, eps=1e-6, **kw):
 
 
 def lncc_grid_loss(x, y, yhat, k=7, eps=1e-6, **kw):
-    """Local NCC on 2D grid using box filter."""
     assert y.ndim == 2, f"lncc_grid_loss: y must be 2D grid, got {y.ndim}D"
     assert y.shape == yhat.shape, f"lncc_grid_loss shape mismatch: y={y.shape} vs yhat={yhat.shape}"
-
     y, yhat = _sanitize(y), _sanitize(yhat)
-    r, N = k // 2, k * k
-
-    def box2d(a):
-        a = jnp.pad(a, ((r + 1, r), (r + 1, r)), mode="edge")
-        s = jnp.cumsum(jnp.cumsum(a, 0), 1)
-        return (
-            s[: -2 * r - 1, : -2 * r - 1]
-            - s[: -2 * r - 1, 2 * r + 1 :]
-            - s[2 * r + 1 :, : -2 * r - 1]
-            + s[2 * r + 1 :, 2 * r + 1 :]
-        )
-
-    m0, m1 = box2d(y) / N, box2d(yhat) / N
-    y0c, y1c = y - m0, yhat - m1
-    var_y, var_yhat = box2d(y0c**2), box2d(y1c**2)
-    cov = box2d(y0c * y1c)
-    std_product = jnp.sqrt((var_y + eps) * (var_yhat + eps))
-    lncc = jnp.clip(cov / std_product, -1, 1)
-    return 1.0 - jnp.mean(lncc)
+    return 1.0 - jnp.mean(_lncc_grid_per_pixel(y, yhat, k, eps))
 
 
 def simse_lncc_loss(x, y, yhat, simse_weight=0.3, **kw):
@@ -543,9 +560,7 @@ def _ratio_mask_coupling_single_target(
         assert n_nodes > 0, "n_nodes must be > 0"
         assert n_outputs > 0, "n_outputs must be > 0"
 
-        # normalize ratios per node using MAX normalization (not sum)
-        # this ensures min_ratio_threshold has consistent meaning regardless of TU count
-        # e.g., threshold=0.005 means "less than 0.5% of the largest ratio"
+        # MAX normalization: threshold=0.005 means "ratio < 0.5% of largest ratio in that node"
         ratio_max = jnp.max(ratios, axis=-1, keepdims=True)
         normalized_ratios = ratios / jnp.maximum(ratio_max, 1e-8)
 
@@ -553,19 +568,15 @@ def _ratio_mask_coupling_single_target(
 
         valid_tu_mask = (tu_indices >= 0).astype(jnp.float32)
         safe_tu_indices = jnp.maximum(tu_indices, 0)
-        # clamp network_ids and tu_indices to valid range (defensive against corruption)
         safe_network_ids = jnp.clip(network_ids_expanded, 0, n_networks - 1)
         safe_tu_indices = jnp.clip(safe_tu_indices, 0, n_tus - 1)
 
-        # index into 2D tu_log_alpha
         tu_log_alpha_per_ratio = tu_log_alpha_2d[safe_network_ids, safe_tu_indices]
         tu_enabled_prob = jax.nn.sigmoid(tu_log_alpha_per_ratio)
 
-        # penalty only when ratio < threshold
         below_threshold = jax.nn.relu(min_ratio_threshold - normalized_ratios)
         per_element_penalty = tu_enabled_prob * below_threshold * valid_tu_mask
 
-        # use nan_to_num for safety (NaN checks done via checkify in tests)
         per_element_penalty = jnp.nan_to_num(per_element_penalty, nan=0.0, posinf=0.0, neginf=0.0)
 
         total_penalty = total_penalty + jnp.sum(per_element_penalty)
@@ -605,7 +616,6 @@ def ratio_mask_coupling_penalty(
 
     Note: Runtime value checks (NaN, bounds) tested via checkify in tests.
     """
-    # static assertions (evaluated at trace/call time, not runtime)
     assert isinstance(ratio_paths, list), f"ratio_paths must be a list, got {type(ratio_paths)}"
     assert isinstance(min_ratio_threshold, (int, float)), (
         f"min_ratio_threshold must be numeric, got {type(min_ratio_threshold)}"
@@ -925,7 +935,6 @@ def init_schedule_params(schedule_specs: dict[str, any]) -> dict[str, jnp.ndarra
 _SCHEDULE_FALLBACK_WARNED: set[str] = set()
 
 
-
 def _get_schedule_value(
     params, step, total_steps, schedule_name, schedule_or_value, schedule_ns=None
 ):
@@ -1092,7 +1101,6 @@ def _make_loss_func(
 
         ratio_leaves = params.get_leaves_by_path(ratio_paths)
 
-        # regularization penalties (independent of TU samples)
         tucount_w = _get_schedule_value(
             params, step, total_steps, "lambda_tucount", lambda_tucount, schedule_ns
         )
@@ -1112,12 +1120,11 @@ def _make_loss_func(
             params, step, total_steps, "tu_temperature", tu_temperature, schedule_ns
         )
         l0_penalty = jnp.array(0.0)
-        l0_penalty_per_network = None  # will be (n_targets, n_networks) if TU masking enabled
+        l0_penalty_per_network = None
         coupling_penalty = jnp.array(0.0)
-        coupling_penalty_per_target = None  # will be (n_targets,) if coupling enabled
+        coupling_penalty_per_target = None
         if TU_LOG_ALPHA_PATH in params:
             log_alpha = params[TU_LOG_ALPHA_PATH]
-            # defensive: validate log_alpha shape
             assert log_alpha.ndim == 3, (
                 f"log_alpha must be 3D (n_targets, n_networks, n_tus), got {log_alpha.ndim}D"
             )
@@ -1127,24 +1134,16 @@ def _make_loss_func(
             assert log_alpha.shape[1] == n_networks, (
                 f"log_alpha n_networks mismatch: {log_alpha.shape[1]} vs {n_networks}"
             )
-            # NOTE: can't assert jnp.isfinite(log_alpha) here - it's a traced value
-            # Use _sanitize() for NaN/Inf handling and checkify in tests for validation
             log_alpha = jnp.nan_to_num(log_alpha, nan=0.0, posinf=10.0, neginf=-10.0)
 
-            # per-network L0: only penalize TUs each network actually uses
-            # log_alpha shape: (n_targets, n_networks, n_tus)
-            # per_network_tu_mask shape: (n_networks, n_tus)
             from biocomp.tumasking import l0_penalty as l0_penalty_fn
 
             per_tu_penalty = l0_penalty_fn(log_alpha, temperature=tu_temp)
             if per_network_tu_mask is not None:
-                # defensive: validate mask shape
                 assert per_network_tu_mask.shape[0] == n_networks, (
                     f"per_network_tu_mask shape mismatch: {per_network_tu_mask.shape} vs n_networks={n_networks}"
                 )
-                # mask zeros out unused TUs before summing
                 per_tu_penalty = per_tu_penalty * per_network_tu_mask[None, :, :]
-            # per-network L0 breakdown: sum over TUs, shape (n_targets, n_networks)
             l0_weight = _get_schedule_value(
                 params, step, total_steps, "lambda_l0", lambda_l0, schedule_ns
             )
@@ -1189,13 +1188,10 @@ def _make_loss_func(
             all_losses_stack, yhatdep_stack, inner_aux_stack = vmap(forward_with_tu)(
                 tu_uniforms, forward_keys
             )
-            # average losses over TU samples
             all_losses = jnp.mean(all_losses_stack, axis=0)
-            # use last sample's yhatdep and aux for logging
             yhatdep = yhatdep_stack[-1]
             tu_uniform = tu_uniforms[-1]
             apply_aux = None
-            # extract last sample's inner aux (sublosses etc.)
             if inner_aux_stack:
                 extra_aux_inner = jax.tree.map(lambda x: x[-1], inner_aux_stack)
         else:
@@ -1207,22 +1203,18 @@ def _make_loss_func(
 
         all_losses = _sanitize(all_losses)
 
-        # compute TU statistics if masking is enabled
         tu_stats = {}
         if TU_LOG_ALPHA_PATH in params:
             log_alpha = params[TU_LOG_ALPHA_PATH]
             tu_probs = jax.nn.sigmoid(log_alpha)
             tu_enabled_mask = tu_probs > 0.5
             tu_stats = {
-                # Aggregated statistics (backward compatibility)
                 "enabled_count": jnp.sum(tu_enabled_mask),
                 "total_count": jnp.array(log_alpha.size),
                 "mean_prob": jnp.mean(tu_probs),
                 "min_log_alpha": jnp.min(log_alpha),
                 "max_log_alpha": jnp.max(log_alpha),
                 "log_alpha_std": jnp.std(log_alpha),
-                # Per-network breakdown: shape (n_targets, n_networks)
-                # log_alpha shape is (n_targets, n_networks, n_tus)
                 "enabled_count_per_network": jnp.sum(tu_enabled_mask, axis=-1),
                 "mean_prob_per_network": jnp.mean(tu_probs, axis=-1),
                 "min_log_alpha_per_network": jnp.min(log_alpha, axis=-1),
@@ -1230,7 +1222,6 @@ def _make_loss_func(
                 "std_log_alpha_per_network": jnp.std(log_alpha, axis=-1),
             }
 
-        # compute ratio statistics
         ratio_stats = {}
         if ratio_leaves:
             all_ratios = []
@@ -1253,39 +1244,33 @@ def _make_loss_func(
                     "total_count": jnp.array(ratios_flat.size),
                 }
 
-        # extract sublosses from inner aux if available
         sublosses = extra_aux_inner.get("sublosses", {}) if extra_aux_inner else {}
 
-        # compute per-network prediction statistics
-        # yhatdep shape: (batch_size, n_targets, n_networks)
         pred_stats_per_network = {
-            "mean": jnp.mean(yhatdep, axis=0),  # (n_targets, n_networks)
-            "std": jnp.std(yhatdep, axis=0),  # (n_targets, n_networks)
-            "min": jnp.min(yhatdep, axis=0),  # (n_targets, n_networks)
-            "max": jnp.max(yhatdep, axis=0),  # (n_targets, n_networks)
+            "mean": jnp.mean(yhatdep, axis=0),
+            "std": jnp.std(yhatdep, axis=0),
+            "min": jnp.min(yhatdep, axis=0),
+            "max": jnp.max(yhatdep, axis=0),
         }
 
         aux = {
             "apply_aux": apply_aux,
             "all_losses": all_losses,
             "yhatdep": yhatdep,
-            "X": X,  # input coordinates for diagnostic plots
-            "Y": Y,  # target values for diagnostic plots
-            # Scalar penalties (backward compatibility)
+            "X": X,
+            "Y": Y,
             "l0_penalty": l0_penalty,
             "coupling_penalty": coupling_penalty,
             "ern_tying_penalty": ern_tying_penalty_val,
             "tucount_penalty": tucount_penalty,
             "spread_penalty": spread_penalty,
-            # Per-network/target penalty breakdowns
-            "l0_penalty_per_network": l0_penalty_per_network,  # (n_targets, n_networks) or None
-            "coupling_penalty_per_target": coupling_penalty_per_target,  # (n_targets,) or None
-            # Other aux data
+            "l0_penalty_per_network": l0_penalty_per_network,
+            "coupling_penalty_per_target": coupling_penalty_per_target,
             "tu_uniform": tu_uniform,
-            "tu_stats": tu_stats,  # includes *_per_network keys
+            "tu_stats": tu_stats,
             "ratio_stats": ratio_stats,
             "tu_temperature": tu_temp,
-            "sublosses": sublosses,  # includes *_per_network keys
+            "sublosses": sublosses,
             "pred_stats_per_network": pred_stats_per_network,
         }
 
@@ -1297,8 +1282,6 @@ def _make_loss_func(
             + coupling_penalty
             + ern_tying_penalty_val
         )
-        # NOTE: can't assert jnp.isfinite(loss) - it's a traced value
-        # Use _sanitize for handling and checkify in tests for validation
         loss = jnp.nan_to_num(loss, nan=1e6, posinf=1e6, neginf=1e6)
         return loss, aux
 
@@ -1369,6 +1352,7 @@ def grid_distance_loss(
     w_simse=0.0,
     w_zncc=0.0,
     w_contrast=0.0,
+    w_gradient=0.0,
     eps_sinkhorn=0.1,
     n_sinkhorn_iters=50,
     lncc_kernel=7,
@@ -1408,9 +1392,12 @@ def grid_distance_loss(
         spectral_l = spectral_loss(None, y_img, yhat_img)
         simse_l = simse_loss(None, y_flat, yhat_flat)
         zncc_l = zncc_loss(None, y_flat, yhat_flat)
-        contrast_l = jax.nn.relu(1.0 - (jnp.max(yhat_img) - jnp.min(yhat_img)))
+        target_range = jnp.max(y_img) - jnp.min(y_img)
+        pred_range = jnp.max(yhat_img) - jnp.min(yhat_img)
+        contrast_l = jax.nn.relu(target_range - pred_range)
+        gradient_l = gradient_magnitude_loss(y_img, yhat_img)
 
-        return (sinkhorn_l, lncc_l, mse_l, spectral_l, simse_l, zncc_l, contrast_l)
+        return (sinkhorn_l, lncc_l, mse_l, spectral_l, simse_l, zncc_l, contrast_l, gradient_l)
 
     def compute_losses(params, X, Y, yhatdep, step, n_targets, n_networks_):
         yhatdep = _sanitize(yhatdep)
@@ -1427,7 +1414,6 @@ def grid_distance_loss(
         )
         yhat_images = yhatdep.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
 
-        # get dynamic weights from params (or use defaults)
         w_sink = _get_schedule_value(
             params, step, total_steps, "w_sinkhorn", w_sinkhorn, schedule_ns
         )
@@ -1441,11 +1427,13 @@ def grid_distance_loss(
         w_con = _get_schedule_value(
             params, step, total_steps, "w_contrast", w_contrast, schedule_ns
         )
+        w_grad = _get_schedule_value(
+            params, step, total_steps, "w_gradient", w_gradient, schedule_ns
+        )
         eps_sink = _get_schedule_value(
             params, step, total_steps, "eps_sinkhorn", eps_sinkhorn, schedule_ns
         )
 
-        # compute unweighted losses for all image pairs
         (
             sinkhorn_losses,
             lncc_losses,
@@ -1454,11 +1442,11 @@ def grid_distance_loss(
             simse_losses,
             zncc_losses,
             contrast_losses,
+            gradient_losses,
         ) = vmap(vmap(lambda y, yh: compute_grid_loss_single_unweighted(y, yh, eps_sink)))(
             Y_images, yhat_images
         )
 
-        # apply dynamic weights
         all_losses = (
             w_sink * sinkhorn_losses
             + w_lncc_val * lncc_losses
@@ -1467,6 +1455,7 @@ def grid_distance_loss(
             + w_sim * simse_losses
             + w_zncc_val * zncc_losses
             + w_con * contrast_losses
+            + w_grad * gradient_losses
         )
 
         sublosses = {
@@ -1477,6 +1466,7 @@ def grid_distance_loss(
             "simse": _sanitize(jnp.mean(simse_losses)),
             "zncc": _sanitize(jnp.mean(zncc_losses)),
             "contrast": _sanitize(jnp.mean(contrast_losses)),
+            "gradient": _sanitize(jnp.mean(gradient_losses)),
             "sinkhorn_weighted": _sanitize(w_sink * jnp.mean(sinkhorn_losses)),
             "lncc_weighted": _sanitize(w_lncc_val * jnp.mean(lncc_losses)),
             "mse_weighted": _sanitize(w_mse_val * jnp.mean(mse_losses)),
@@ -1484,6 +1474,7 @@ def grid_distance_loss(
             "simse_weighted": _sanitize(w_sim * jnp.mean(simse_losses)),
             "zncc_weighted": _sanitize(w_zncc_val * jnp.mean(zncc_losses)),
             "contrast_weighted": _sanitize(w_con * jnp.mean(contrast_losses)),
+            "gradient_weighted": _sanitize(w_grad * jnp.mean(gradient_losses)),
             "sinkhorn_per_network": _sanitize(sinkhorn_losses),
             "lncc_per_network": _sanitize(lncc_losses),
             "mse_per_network": _sanitize(mse_losses),
@@ -1491,6 +1482,7 @@ def grid_distance_loss(
             "simse_per_network": _sanitize(simse_losses),
             "zncc_per_network": _sanitize(zncc_losses),
             "contrast_per_network": _sanitize(contrast_losses),
+            "gradient_per_network": _sanitize(gradient_losses),
         }
         return _sanitize(all_losses), {"yhat_images": yhat_images, "sublosses": sublosses}
 
