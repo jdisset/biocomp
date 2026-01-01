@@ -853,6 +853,83 @@ def smooth(
         raise ValueError(f"Unknown force_dim value {force_dim}")
 
 
+TXT_KNN_DEFAULTS = {"knn_stats_params": {"radius": 0.2, "k": 100, "min_points": 1}}
+
+
+@configurable
+def smooth_txt(
+    plot_data: PlotData,
+    ax=None,
+    rescaler: DataRescaler = None,
+    force_dim: Optional[int] = None,
+    smooth_1d_params={},
+    smooth_2d_params={},
+    smooth_3d_params={},
+    **kw,
+):
+    from biocomp.plotting.plotting_txt import smooth_1d_txt, smooth_2d_txt, smooth_3d_txt
+
+    if rescaler is None:
+        rescaler = IdentityRescaler()
+
+    if "knn_grid_params" not in smooth_2d_params:
+        smooth_2d_params = {**smooth_2d_params, "knn_grid_params": TXT_KNN_DEFAULTS}
+    if "knn_grid_params" not in smooth_3d_params:
+        smooth_3d_params = {**smooth_3d_params, "knn_grid_params": TXT_KNN_DEFAULTS}
+
+    dim = plot_data.dimensions
+    x = rescaler.fwd(plot_data.x)
+    y = rescaler.fwd(plot_data.y)
+
+    if force_dim is None:
+        match (dim.input, dim.output):
+            case (1, 1):
+                force_dim = 1
+            case (2, 1):
+                force_dim = 2
+            case (3, 1):
+                force_dim = 3
+            case _:
+                raise ValueError(
+                    f"Plotting {dim.input} inputs and {dim.output} outputs is not supported"
+                )
+
+    if force_dim == 1:
+        return smooth_1d_txt(
+            X=x,
+            Y=y,
+            input_names=plot_data.input_names,
+            output_name=plot_data.output_name,
+            rescaler=rescaler,
+            ax=ax,
+            **combine_dicts(smooth_1d_params, kw),
+        )
+
+    if force_dim == 2:
+        return smooth_2d_txt(
+            X=x,
+            Y=y,
+            input_names=plot_data.input_names,
+            output_name=plot_data.output_name,
+            rescaler=rescaler,
+            ax=ax,
+            **combine_dicts(smooth_2d_params, kw),
+        )
+
+    if force_dim == 3:
+        return smooth_3d_txt(
+            X=x,
+            Y=y,
+            input_names=plot_data.input_names,
+            output_name=plot_data.output_name,
+            rescaler=rescaler,
+            ax=ax,
+            **combine_dicts(smooth_3d_params, kw),
+        )
+
+    raise ValueError(f"Unknown force_dim value {force_dim}")
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
