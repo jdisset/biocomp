@@ -253,7 +253,8 @@ def test_gradual_disabling(lib, design_stack):
         )
 
         # Full disabled (fraction=0) should produce near-zero output
-        assert magnitudes[-1] < 1e-3, (
+        # Threshold is 5e-3 to accommodate leaky mask floor (0.001) ensuring gradient flow
+        assert magnitudes[-1] < 5e-3, (
             f"All TUs disabled should give near-zero output, got {magnitudes[-1]}"
         )
 
@@ -280,6 +281,7 @@ def test_per_network_tu_mask(lib, design_stack):
 
         # verify mask matches direct TU extraction for each network
         from biocomp.tumasking import extract_tu_ids_from_network
+
         for net_idx, net in enumerate(stack.networks):
             net_tu_ids = extract_tu_ids_from_network(net)
             expected_tus = {tid for tid in net_tu_ids if tid in tu_id_to_idx}
@@ -387,7 +389,13 @@ def multi_network_stack(lib):
         n_z = int(params["global/number_of_random_variables"])
         dummy_tu_uniform = jnp.full((n_networks, n_tus), 0.5)
         params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
-        stack.apply(params, jnp.zeros((n_inputs,)), jnp.zeros((n_z,)), key, tu_enabled_random_vars=dummy_tu_uniform)
+        stack.apply(
+            params,
+            jnp.zeros((n_inputs,)),
+            jnp.zeros((n_z,)),
+            key,
+            tu_enabled_random_vars=dummy_tu_uniform,
+        )
 
         return stack, tu_ids, tu_id_to_idx, len(networks)
 
@@ -531,15 +539,15 @@ def test_commit_applies_tu_masks(lib, design_stack):
         total_members_before = 0
         for net in stack.networks:
             for node in net.compute_graph.nodes.values():
-                if 'aggregation' in node.node_type.lower():
-                    members = node.extra.get('members', [])
+                if "aggregation" in node.node_type.lower():
+                    members = node.extra.get("members", [])
                     total_members_before += len(members)
 
         # set half TUs to disabled (negative log_alpha) and half enabled (positive)
         tu_log_alpha = jnp.zeros((n_networks, n_tus))
         half = n_tus // 2
         tu_log_alpha = tu_log_alpha.at[:, :half].set(-3.0)  # disabled (sigmoid(-3) ≈ 0.05)
-        tu_log_alpha = tu_log_alpha.at[:, half:].set(3.0)   # enabled (sigmoid(3) ≈ 0.95)
+        tu_log_alpha = tu_log_alpha.at[:, half:].set(3.0)  # enabled (sigmoid(3) ≈ 0.95)
         params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
 
         # commit the stack
@@ -549,8 +557,8 @@ def test_commit_applies_tu_masks(lib, design_stack):
         total_members_after = 0
         for net in committed_networks:
             for node in net.compute_graph.nodes.values():
-                if 'aggregation' in node.node_type.lower():
-                    members = node.extra.get('members', [])
+                if "aggregation" in node.node_type.lower():
+                    members = node.extra.get("members", [])
                     total_members_after += len(members)
 
         assert total_members_after < total_members_before, (
@@ -579,8 +587,8 @@ def test_commit_preserves_enabled_tus(lib, design_stack):
         # check that no aggregation node has all-zero ratios
         for net in committed_networks:
             for node in net.compute_graph.nodes.values():
-                if 'aggregation' in node.node_type.lower():
-                    ratios = node.extra.get('ratios', [])
+                if "aggregation" in node.node_type.lower():
+                    ratios = node.extra.get("ratios", [])
                     if ratios:
                         all_zero = all(abs(r) < 1e-6 for r in ratios)
                         assert not all_zero, (
@@ -616,7 +624,7 @@ def test_commit_removes_fully_disabled_tu_edges(lib, design_stack):
         edges_with_any_tu_before = 0
         for net in stack.networks:
             for edge in net.compute_graph.edges.values():
-                edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                edge_tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
                 if edge_tu_ids:
                     edges_with_any_tu_before += 1
 
@@ -626,7 +634,7 @@ def test_commit_removes_fully_disabled_tu_edges(lib, design_stack):
         edges_with_tu_after = 0
         for net in committed_networks:
             for edge in net.compute_graph.edges.values():
-                edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                edge_tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
                 if edge_tu_ids:
                     edges_with_tu_after += 1
 
@@ -659,7 +667,7 @@ def test_single_tu_edge_removed_when_disabled(lib, design_stack):
         single_tu_edges = []
         for net in stack.networks:
             for edge in net.compute_graph.edges.values():
-                edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                edge_tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
                 if len(edge_tu_ids) == 1:
                     single_tu_edges.append(edge_tu_ids[0])
 
@@ -681,7 +689,7 @@ def test_single_tu_edge_removed_when_disabled(lib, design_stack):
         found_single_tu_edge_after = False
         for net in committed_networks:
             for edge in net.compute_graph.edges.values():
-                edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                edge_tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
                 if edge_tu_ids == [target_tu_id]:
                     found_single_tu_edge_after = True
                     break
@@ -722,8 +730,8 @@ def test_all_tus_disabled_produces_different_commit(lib, design_stack):
             total = 0
             for net in networks:
                 for node in net.compute_graph.nodes.values():
-                    if 'aggregation' in node.node_type.lower():
-                        members = node.extra.get('members', [])
+                    if "aggregation" in node.node_type.lower():
+                        members = node.extra.get("members", [])
                         total += len(members)
             return total
 
@@ -754,7 +762,7 @@ def test_tu_mask_boundary_threshold(lib, design_stack):
         # set TUs at boundary: first at -0.1 (disabled), second at +0.1 (enabled)
         tu_log_alpha = jnp.zeros((n_networks, n_tus))
         tu_log_alpha = tu_log_alpha.at[:, 0].set(-0.1)  # sigmoid ≈ 0.475 < 0.5 → disabled
-        tu_log_alpha = tu_log_alpha.at[:, 1].set(0.1)   # sigmoid ≈ 0.525 > 0.5 → enabled
+        tu_log_alpha = tu_log_alpha.at[:, 1].set(0.1)  # sigmoid ≈ 0.525 > 0.5 → enabled
         params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
 
         # commit to verify it works, but we're testing the threshold behavior
@@ -762,6 +770,7 @@ def test_tu_mask_boundary_threshold(lib, design_stack):
 
         # verify the boundary behavior
         from biocomp.tumasking import get_final_mask
+
         mask_0 = get_final_mask(jnp.array([-0.1]))[0]
         mask_1 = get_final_mask(jnp.array([0.1]))[0]
 
@@ -772,6 +781,7 @@ def test_tu_mask_boundary_threshold(lib, design_stack):
 def test_commit_without_tu_masking_unchanged(lib):
     """Verify that commit works correctly when TU masking is NOT enabled."""
     from biocomp.recipe import Recipe
+
     scaffold_path = (
         Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
     )
@@ -784,6 +794,7 @@ def test_commit_without_tu_masking_unchanged(lib):
         # build stack WITHOUT TU masking
         stack = ComputeStack(networks)
         from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+
         stack.build(SIMPLE_NODES_COMPUTE_CONFIG)  # no tu_id_to_idx
 
         key = jax.random.key(42)
@@ -799,8 +810,8 @@ def test_commit_without_tu_masking_unchanged(lib):
         # verify ratios are preserved (not zeroed out)
         for net in committed_networks:
             for node in net.compute_graph.nodes.values():
-                if 'aggregation' in node.node_type.lower():
-                    ratios = node.extra.get('ratios', [])
+                if "aggregation" in node.node_type.lower():
+                    ratios = node.extra.get("ratios", [])
                     if ratios:
                         assert any(r > 0 for r in ratios), "Ratios should not all be zero"
 
@@ -830,8 +841,8 @@ def test_per_network_tu_mask_commit_independence(lib, multi_network_stack):
         def count_members(net):
             count = 0
             for node in net.compute_graph.nodes.values():
-                if 'aggregation' in node.node_type.lower():
-                    members = node.extra.get('members', [])
+                if "aggregation" in node.node_type.lower():
+                    members = node.extra.get("members", [])
                     count += len(members)
             return count
 
@@ -851,15 +862,16 @@ def test_evaluate_design_uses_tu_masks():
     # this is a smoke test that imports the function and checks it has tu_mask logic
     from biocomp.design import evaluate_design
     import inspect
+
     source = inspect.getsource(evaluate_design)
 
-    assert 'tu_mask' in source, (
+    assert "tu_mask" in source, (
         "evaluate_design does not contain 'tu_mask' - TU masking may not be applied!"
     )
-    assert 'TU_LOG_ALPHA_PATH' in source, (
+    assert "TU_LOG_ALPHA_PATH" in source, (
         "evaluate_design does not check TU_LOG_ALPHA_PATH - TU masking may not be applied!"
     )
-    assert 'sigmoid' in source.lower() or 'tu_enabled_random_vars' in source, (
+    assert "sigmoid" in source.lower() or "tu_enabled_random_vars" in source, (
         "evaluate_design does not compute TU mask - TU masking may not be applied!"
     )
 
@@ -888,7 +900,7 @@ def test_committed_recipe_excludes_disabled_tus(lib, design_stack):
 
         first_tu_id = tu_ids[0]
         # TU ID format: cotx_name_cotx (e.g. b_a+_b), recipe name: cotx_name (e.g. b_a+)
-        first_tu_recipe_name = '_'.join(first_tu_id.split('_')[:-1])
+        first_tu_recipe_name = "_".join(first_tu_id.split("_")[:-1])
 
         # count TUs before commit
         tus_before = []
@@ -922,7 +934,6 @@ def test_disabled_tu_removed_after_commit(lib, design_stack):
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx = design_stack
         key = jax.random.key(42)
-        params = stack.init(key)
 
         n_tus = len(tu_ids)
         n_networks = len(stack.networks)
@@ -939,8 +950,8 @@ def test_disabled_tu_removed_after_commit(lib, design_stack):
         total_members_all = 0
         for net in committed_all_enabled:
             for node in net.compute_graph.nodes.values():
-                if 'aggregation' in node.node_type.lower():
-                    members = node.extra.get('members', [])
+                if "aggregation" in node.node_type.lower():
+                    members = node.extra.get("members", [])
                     total_members_all += len(members)
 
         # disable first TU
@@ -953,8 +964,8 @@ def test_disabled_tu_removed_after_commit(lib, design_stack):
         total_members_one_disabled = 0
         for net in committed_one_disabled:
             for node in net.compute_graph.nodes.values():
-                if 'aggregation' in node.node_type.lower():
-                    members = node.extra.get('members', [])
+                if "aggregation" in node.node_type.lower():
+                    members = node.extra.get("members", [])
                     total_members_one_disabled += len(members)
 
         assert total_members_one_disabled < total_members_all, (
@@ -1016,6 +1027,7 @@ def test_fluo_bias_invalid_tu_id_handled(lib):
         tu_ids, tu_id_to_idx = build_tu_id_mapping(networks)
         stack = ComputeStack(networks)
         from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+
         stack.build(SIMPLE_NODES_COMPUTE_CONFIG, enable_tu_masking=True)
         stack.tu_id_to_idx = tu_id_to_idx
 
@@ -1083,6 +1095,7 @@ def test_multi_network_independent_tu_removal(lib):
 
         stack = ComputeStack(networks)
         from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+
         stack.build(SIMPLE_NODES_COMPUTE_CONFIG, enable_tu_masking=True)
         stack.tu_id_to_idx = tu_id_to_idx
 
@@ -1114,7 +1127,7 @@ def test_multi_network_independent_tu_removal(lib):
 
         # verify network 0 lost exactly the first 2 disabled TUs
         disabled_0 = {tu_ids[0], tu_ids[1]}
-        expected_names_0 = {'_'.join(tid.split('_')[:-1]) for tid in disabled_0}
+        expected_names_0 = {"_".join(tid.split("_")[:-1]) for tid in disabled_0}
         removed_0 = tus_before[0] - tus_after[0]
         assert expected_names_0 == removed_0, (
             f"Network 0 should have removed {expected_names_0}, but removed {removed_0}"
@@ -1123,7 +1136,7 @@ def test_multi_network_independent_tu_removal(lib):
         # verify network 1 lost TUs 2,3,4 (if enough TUs)
         if n_tus > 4:
             disabled_1 = {tu_ids[2], tu_ids[3], tu_ids[4]}
-            expected_names_1 = {'_'.join(tid.split('_')[:-1]) for tid in disabled_1}
+            expected_names_1 = {"_".join(tid.split("_")[:-1]) for tid in disabled_1}
             removed_1 = tus_before[1] - tus_after[1]
             assert expected_names_1 == removed_1, (
                 f"Network 1 should have removed {expected_names_1}, but removed {removed_1}"
@@ -1142,7 +1155,7 @@ def test_multi_network_independent_tu_removal(lib):
             if net_idx == 0:
                 # disabled TUs 0,1 - their single-TU edges should be gone
                 for edge in net.compute_graph.edges.values():
-                    edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                    edge_tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
                     # for single-TU edges, if the TU is disabled, edge should be gone
                     if len(edge_tu_ids) == 1:
                         assert edge_tu_ids[0] not in disabled_0, (
@@ -1151,7 +1164,7 @@ def test_multi_network_independent_tu_removal(lib):
             elif net_idx == 1 and n_tus > 4:
                 disabled_1 = {tu_ids[2], tu_ids[3], tu_ids[4]}
                 for edge in net.compute_graph.edges.values():
-                    edge_tu_ids = edge.extra.get('tu_id', []) if edge.extra else []
+                    edge_tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
                     if len(edge_tu_ids) == 1:
                         assert edge_tu_ids[0] not in disabled_1, (
                             f"Net 1: single-TU edge with disabled TU {edge_tu_ids[0]} should be removed"
@@ -1231,17 +1244,19 @@ def test_committed_network_rebuilds_equivalent(lib, design_stack):
             )
 
             # verify aggregation nodes have matching member counts
-            committed_aggs = [n for n in committed_graph.nodes.values() if n.node_type == "aggregation"]
+            committed_aggs = [
+                n for n in committed_graph.nodes.values() if n.node_type == "aggregation"
+            ]
             rebuilt_aggs = [n for n in rebuilt_graph.nodes.values() if n.node_type == "aggregation"]
 
             for c_agg, r_agg in zip(
                 sorted(committed_aggs, key=lambda x: x.node_id),
-                sorted(rebuilt_aggs, key=lambda x: x.node_id)
+                sorted(rebuilt_aggs, key=lambda x: x.node_id),
             ):
-                c_members = c_agg.extra.get('members', [])
-                r_members = r_agg.extra.get('members', [])
-                c_ratios = c_agg.extra.get('ratios', [])
-                r_ratios = r_agg.extra.get('ratios', [])
+                c_members = c_agg.extra.get("members", [])
+                r_members = r_agg.extra.get("members", [])
+                c_ratios = c_agg.extra.get("ratios", [])
+                r_ratios = r_agg.extra.get("ratios", [])
                 c_out_edges = len(committed_graph.get_outgoing_edges(c_agg.node_id))
                 r_out_edges = len(rebuilt_graph.get_outgoing_edges(r_agg.node_id))
 
@@ -1275,6 +1290,7 @@ def test_committed_network_rebuilds_equivalent(lib, design_stack):
 
         # verify networks can be stacked together
         from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
+
         combined_stack = ComputeStack(committed_networks)
         combined_stack.build(SIMPLE_NODES_COMPUTE_CONFIG)
         combined_params = combined_stack.init(key)
