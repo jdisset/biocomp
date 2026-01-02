@@ -105,7 +105,7 @@ class GradientDescentOptimizer(BaseModel):
 
 class EvolutionaryOptimizer(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
-    population_size: int | str = "auto"
+    popsize: int | str = "auto"
     n_generations: int = 100
     sigma_init: float = 0.5
     min_sigma: float = 1e-4
@@ -116,28 +116,27 @@ class EvolutionaryOptimizer(BaseModel):
     def _get_pop_size(self, dim: int) -> int:
         return (
             4 + int(3 * math.log(dim))
-            if self.population_size == "auto"
-            else int(self.population_size)
+            if self.popsize == "auto"
+            else int(self.popsize)
         )
 
     def init(
         self, key: jax.random.PRNGKey, params: jnp.ndarray, objective_fn: Callable
     ) -> OptimizationState:
-        from evosax.algorithms.distribution_based import CMA_ES
+        from evosax import CMA_ES
 
         loss = _validate_init(params, objective_fn)
         dim = params.shape[0]
         assert dim > 0, f"dim must be positive: {dim}"
 
         pop_size = self._get_pop_size(dim)
-        es = CMA_ES(population_size=pop_size, solution=params)
-        es_params = es.default_params.replace(std_init=self.sigma_init)
+        es = CMA_ES(popsize=pop_size, num_dims=dim, sigma_init=self.sigma_init)
         object.__setattr__(self, "_es", es)
         object.__setattr__(self, "_pop_size", pop_size)
 
-        es_state = es.init(jax.random.split(key)[1], params, es_params)
+        es_state = es.initialize(jax.random.split(key)[1], init_mean=params)
         logger.info(f"CMA-ES: dim={dim}, pop={pop_size}, σ₀={self.sigma_init}")
-        return _state(0, params, params, loss, OptimPhase.EC, (es_state, es_params))
+        return _state(0, params, params, loss, OptimPhase.EC, es_state)
 
     def step(
         self,
@@ -156,10 +155,10 @@ class EvolutionaryOptimizer(BaseModel):
                 - A single-sample function (genome) -> loss (legacy, will be vmapped+JIT'd)
             step: Current step number (required if objective_fn takes step as 2nd arg)
         """
-        es_state, es_params = state.opt_state
-        k1, k2 = jax.random.split(key)
+        es_state = state.opt_state
+        k1, _ = jax.random.split(key)
 
-        pop, es_state = self._es.ask(k1, es_state, es_params)
+        pop, es_state = self._es.ask(k1, es_state)
 
         # If step is provided, objective_fn is pre-compiled vmapped: (pop, step) -> losses
         # Otherwise, it's a single-sample function that needs vmapping (legacy path)
@@ -171,12 +170,12 @@ class EvolutionaryOptimizer(BaseModel):
 
         # For invalid samples, use +inf (worst possible for minimization)
         fitness = jnp.where(jnp.isfinite(raw_fit), raw_fit, jnp.inf)
-        es_state, _ = self._es.tell(k2, pop, fitness, es_state, es_params)
+        es_state = self._es.tell(pop, fitness, es_state)
 
         # clamp sigma to prevent explosion (evosax doesn't do this internally)
-        sigma_before = es_state.std
-        clamped_sigma = jnp.clip(es_state.std, self.min_sigma, self.max_sigma)
-        es_state = es_state.replace(std=clamped_sigma)
+        sigma_before = es_state.sigma
+        clamped_sigma = jnp.clip(es_state.sigma, self.min_sigma, self.max_sigma)
+        es_state = es_state.replace(sigma=clamped_sigma)
         sigma_clamped = sigma_before != clamped_sigma
 
         # evosax minimizes, so best = argmin
@@ -187,19 +186,19 @@ class EvolutionaryOptimizer(BaseModel):
         # compute fitness statistics for diagnostics (fitness = loss, lower is better)
         valid_fitness = jnp.where(jnp.isfinite(raw_fit), raw_fit, jnp.nan)
         fitness_std = jnp.nanstd(valid_fitness)
-        fitness_min = jnp.nanmin(valid_fitness)  # best loss in population
-        fitness_max = jnp.nanmax(valid_fitness)  # worst loss in population
+        fitness_min = jnp.nanmin(valid_fitness)
+        fitness_max = jnp.nanmax(valid_fitness)
 
         # genome statistics for debugging
-        mean_genome = self._es.get_mean(es_state)
+        mean_genome = es_state.mean
         genome_std = jnp.std(pop, axis=0).mean()
         genome_range = jnp.max(pop) - jnp.min(pop)
         best_dist_from_mean = jnp.linalg.norm(gen_best - mean_genome)
 
         return state._replace(
             step=state.step + 1,
-            params=self._es.get_mean(es_state),
-            opt_state=(es_state, es_params),
+            params=es_state.mean,
+            opt_state=es_state,
             best_params=jax.lax.select(is_better, gen_best, state.best_params),
             best_loss=jnp.where(is_better, gen_loss, state.best_loss),
         ), {
@@ -220,8 +219,7 @@ class EvolutionaryOptimizer(BaseModel):
         }
 
     def should_stop(self, state: OptimizationState) -> bool:
-        es_state, _ = state.opt_state
-        sigma = float(es_state.std)
+        sigma = float(state.opt_state.sigma)
         return (
             sigma < self.min_sigma
             or sigma > self.max_sigma

@@ -104,14 +104,14 @@ class TestGradientDescentOptimizer:
 
 class TestEvolutionaryOptimizer:
     def test_init_returns_valid_state(self, key):
-        state = EvolutionaryOptimizer(population_size=16, n_generations=50).init(
+        state = EvolutionaryOptimizer(popsize=16, n_generations=50).init(
             key, jnp.zeros(10), sphere
         )
         assert state.step == 0 and state.params.shape == (10,)
         assert jnp.isfinite(state.best_loss) and state.phase == OptimPhase.EC
 
     def test_reduces_loss(self, key):
-        opt = EvolutionaryOptimizer(population_size=32, n_generations=50, sigma_init=0.5)
+        opt = EvolutionaryOptimizer(popsize=32, n_generations=50, sigma_init=0.5)
         state = opt.init(key, jnp.ones(10) * 2, sphere)
         initial_loss = float(state.best_loss)
         for _ in range(50):
@@ -121,8 +121,8 @@ class TestEvolutionaryOptimizer:
             state, _ = opt.step(state, subkey, sphere)
         assert float(state.best_loss) < initial_loss
 
-    def test_auto_population_size(self, key):
-        opt = EvolutionaryOptimizer(population_size="auto", n_generations=10)
+    def test_auto_popsize(self, key):
+        opt = EvolutionaryOptimizer(popsize="auto", n_generations=10)
         opt.init(key, jnp.zeros(100), sphere)
         assert 4 + int(3 * 4.6) <= opt._pop_size <= 4 + int(3 * 4.7) + 5
 
@@ -133,7 +133,7 @@ class TestEvolutionaryOptimizer:
             call_count[0] += 1
             return jnp.where(call_count[0] % 3 == 0, jnp.nan, jnp.sum(x**2))
 
-        opt = EvolutionaryOptimizer(population_size=16, n_generations=10)
+        opt = EvolutionaryOptimizer(popsize=16, n_generations=10)
         state = opt.init(key, jnp.zeros(10), sphere)
         for _ in range(10):
             if opt.should_stop(state):
@@ -143,7 +143,7 @@ class TestEvolutionaryOptimizer:
         assert jnp.isfinite(state.best_loss)
 
     def test_metrics_contain_sigma(self, key):
-        opt = EvolutionaryOptimizer(population_size=16, n_generations=10)
+        opt = EvolutionaryOptimizer(popsize=16, n_generations=10)
         _, metrics = opt.step(opt.init(key, jnp.zeros(10), sphere), key, sphere)
         assert all(k in metrics for k in ("sigma", "gen_best_loss", "n_valid"))
 
@@ -159,7 +159,7 @@ class TestHybridOptimizer:
 
     def test_phase_transition_occurs(self, key):
         hybrid = HybridOptimizer(
-            ec=EvolutionaryOptimizer(population_size=8, n_generations=10),
+            ec=EvolutionaryOptimizer(popsize=8, n_generations=10),
             gd=GradientDescentOptimizer(n_steps=20),
             ec_generations=5,
         )
@@ -175,7 +175,7 @@ class TestHybridOptimizer:
 
     def test_handoff_preserves_best(self, key):
         hybrid = HybridOptimizer(
-            ec=EvolutionaryOptimizer(population_size=8, n_generations=10),
+            ec=EvolutionaryOptimizer(popsize=8, n_generations=10),
             gd=GradientDescentOptimizer(n_steps=5),
             ec_generations=5,
         )
@@ -191,7 +191,7 @@ class TestHybridOptimizer:
 
     def test_gd_improves_after_handoff(self, key):
         hybrid = HybridOptimizer(
-            ec=EvolutionaryOptimizer(population_size=16, n_generations=10, sigma_init=0.5),
+            ec=EvolutionaryOptimizer(popsize=16, n_generations=10, sigma_init=0.5),
             gd=GradientDescentOptimizer(n_steps=100),
             ec_generations=10,
         )
@@ -218,7 +218,7 @@ class TestJITCompatibility:
         assert state.step > 0
 
     def test_ec_step_jit_compatible(self, key):
-        opt = EvolutionaryOptimizer(population_size=8, n_generations=10)
+        opt = EvolutionaryOptimizer(popsize=8, n_generations=10)
         state = opt.init(key, jnp.zeros(10), sphere)
         jit_step = jax.jit(lambda s, k: opt.step(s, k, sphere))
         for _ in range(5):
