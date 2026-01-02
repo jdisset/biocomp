@@ -15,7 +15,6 @@ from biocomp.nodeutils import (
     get_prev_num_random_vars,
     reference_forward_random_var_ids,
 )
-from biocomp.tumasking import TU_LOG_ALPHA_PATH, leaky_mask_floor
 from biocomp.utils import get_logger
 from typing import Optional
 
@@ -295,19 +294,11 @@ def transform_nn(
 
         input_tu_indices_path = f"{namespace}/input_tu_indices"
         if not is_inverse and input_tu_indices_path in params:
-            from biocomp.tumasking import compute_input_masks
+            from biocomp.tumasking import get_tu_masks
 
             tu_indices = params[input_tu_indices_path][node_id]
-            tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
-            tu_log_alpha = None
-            if tu_log_alpha_full is not None:
-                assert tu_log_alpha_full.ndim == 2, (
-                    f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha_full.ndim}D"
-                )
-                assert network_id is not None, "network_id required for per-network TU masking"
-                tu_log_alpha = tu_log_alpha_full[network_id]
-            input_masks = compute_input_masks(
-                tu_indices, tu_enabled_random_vars, tu_log_alpha, is_multi_tu=True
+            input_masks = get_tu_masks(
+                params, tu_indices, tu_enabled_random_vars, network_id, is_multi_tu=True
             )
         else:
             input_masks = jnp.ones(len(input_shapes))
@@ -317,7 +308,7 @@ def transform_nn(
             inner(params, value=v, random_var=random_var[i], rate_embedding=r, key=k)
             for i, (v, r, k) in enumerate(zip(val, qrates, inner_keys))
         ]
-        masked_inner_outputs = [out * leaky_mask_floor(input_masks[i]) for i, out in enumerate(inner_outputs)]
+        masked_inner_outputs = [out * input_masks[i] for i, out in enumerate(inner_outputs)]
         inner_out = sum(masked_inner_outputs)
 
         inner_out = flat_concat(inner_out, random_var[len(input_shapes)])

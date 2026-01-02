@@ -6,7 +6,6 @@ from jax import vmap
 import numpy as np
 from biocomp.parameters import ParameterTree, init_if_needed
 from biocomp.nodeutils import LayerInstance, add_tu_input_mapping, add_node_network_ids
-from biocomp.tumasking import TU_LOG_ALPHA_PATH, leaky_mask_floor
 from typing import Optional
 
 from biocomp.neuralutils import (
@@ -83,28 +82,20 @@ def grouped_output(
 
         input_tu_indices_path = f"{namespace}/input_tu_indices"
         if input_tu_indices_path in params:
-            from biocomp.tumasking import compute_input_masks
+            from biocomp.tumasking import get_tu_masks
 
             tu_indices = params[input_tu_indices_path][node_id]
-            tu_log_alpha_full = params[TU_LOG_ALPHA_PATH] if TU_LOG_ALPHA_PATH in params else None
-            tu_log_alpha = None
-            if tu_log_alpha_full is not None:
-                assert tu_log_alpha_full.ndim == 2, (
-                    f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha_full.ndim}D"
-                )
-                assert network_id is not None, "network_id required for per-network TU masking"
-                tu_log_alpha = tu_log_alpha_full[network_id]
-            input_masks = compute_input_masks(
-                tu_indices, tu_enabled_random_vars, tu_log_alpha, is_multi_tu=True
+            input_masks = get_tu_masks(
+                params, tu_indices, tu_enabled_random_vars, network_id, is_multi_tu=True
             )
         else:
             input_masks = jnp.ones(len(input_shapes))
 
         res = vmap(partial(MLP_head, rng_key=key, params=params))(inputs_arr)
 
-        masks_reshaped = leaky_mask_floor(input_masks).reshape(-1, *([1] * len(input_shapes[0])))
+        masks_reshaped = input_masks.reshape(-1, *([1] * len(input_shapes[0])))
         masked_inputs = inputs_arr * masks_reshaped
-        masked_res = res * leaky_mask_floor(input_masks).reshape(-1, 1)
+        masked_res = res * input_masks.reshape(-1, 1)
 
         if dummy:
             pre = masked_res

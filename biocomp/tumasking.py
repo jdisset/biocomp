@@ -18,6 +18,7 @@ LOG_ALPHA_MIN = -3.0
 LOG_ALPHA_MAX = 4.0
 TU_ALWAYS_ENABLED = -1
 TU_LOG_ALPHA_PATH = "design/tu_log_alpha"
+TU_BINARY_MASK_PATH = "design/tu_binary_mask"
 
 
 def _validate_hard_concrete_params(gamma: float, zeta: float, temperature: float) -> None:
@@ -314,6 +315,45 @@ def build_tu_id_mapping(networks: list) -> tuple[list[str], dict[str, int]]:
     return sorted_tu_ids, {tu_id: i for i, tu_id in enumerate(sorted_tu_ids)}
 
 
+def set_binary_tu_mask(
+    params,
+    tu_ids: list[str],
+    tu_id_to_idx: dict[str, int],
+    n_networks: int,
+    enabled_tus: dict[int, set[str]] | None = None,
+    disabled_tus: dict[int, set[str]] | None = None,
+) -> None:
+    """Set binary TU mask in params. MUST be called BEFORE first stack.apply() for JIT compatibility.
+
+    Args:
+        params: ParameterTree to modify
+        tu_ids: List of all TU IDs (from build_tu_id_mapping)
+        tu_id_to_idx: TU ID to index mapping (from build_tu_id_mapping)
+        n_networks: Number of networks in the stack
+        enabled_tus: Dict mapping network_id -> set of TU IDs to enable. Default: all enabled.
+        disabled_tus: Dict mapping network_id -> set of TU IDs to disable. Default: none disabled.
+            (Use either enabled_tus OR disabled_tus, not both)
+    """
+    assert not (enabled_tus and disabled_tus), "Use either enabled_tus OR disabled_tus, not both"
+    n_tus = len(tu_ids)
+    mask = jnp.ones((n_networks, n_tus))
+
+    if enabled_tus is not None:
+        mask = jnp.zeros((n_networks, n_tus))
+        for net_id, tu_names in enabled_tus.items():
+            for tu_name in tu_names:
+                if tu_name in tu_id_to_idx:
+                    mask = mask.at[net_id, tu_id_to_idx[tu_name]].set(1.0)
+
+    if disabled_tus is not None:
+        for net_id, tu_names in disabled_tus.items():
+            for tu_name in tu_names:
+                if tu_name in tu_id_to_idx:
+                    mask = mask.at[net_id, tu_id_to_idx[tu_name]].set(0.0)
+
+    params.at(TU_BINARY_MASK_PATH, mask, overwrite=True)
+
+
 def init_tu_log_alpha(
     n_tus: int,
     key: ArrayLike,
@@ -433,3 +473,90 @@ def build_tu_id_mapping_excluding_inverse(
     tu_id_to_idx = {tu_id: i for i, tu_id in enumerate(sorted_tu_ids)}
 
     return sorted_tu_ids, tu_id_to_idx, inverse_tu_ids
+
+
+def _apply_binary_mask_single(tu_idx: ArrayLike, binary_mask: ArrayLike) -> jnp.ndarray:
+    safe_idx = jnp.maximum(tu_idx, 0)
+    mask_val = binary_mask[safe_idx]
+    return jnp.where(tu_idx >= 0, mask_val, 1.0)
+
+
+def _apply_binary_mask_multi(tu_indices: ArrayLike, binary_mask: ArrayLike) -> jnp.ndarray:
+    safe_indices = jnp.maximum(tu_indices, 0)
+    mask_vals = binary_mask[safe_indices]
+    valid = tu_indices >= 0
+    masked_vals = jnp.where(valid, mask_vals, 0.0)
+    all_padding = jnp.all(~valid)
+    return jnp.where(all_padding, 1.0, jnp.max(masked_vals))
+
+
+def _apply_binary_masks(
+    tu_indices: ArrayLike,
+    binary_mask: ArrayLike,
+    *,
+    is_multi_tu: bool,
+) -> jnp.ndarray:
+    tu_indices = jnp.asarray(tu_indices)
+    binary_mask = jnp.asarray(binary_mask)
+    assert binary_mask.ndim == 1, f"binary_mask must be 1D, got {binary_mask.ndim}D"
+    if is_multi_tu:
+        assert tu_indices.ndim == 2, (
+            f"is_multi_tu=True requires 2D tu_indices, got {tu_indices.ndim}D"
+        )
+        return jax.vmap(lambda idx: _apply_binary_mask_multi(idx, binary_mask))(tu_indices)
+    else:
+        assert tu_indices.ndim == 1, (
+            f"is_multi_tu=False requires 1D tu_indices, got {tu_indices.ndim}D"
+        )
+        return jax.vmap(lambda idx: _apply_binary_mask_single(idx, binary_mask))(tu_indices)
+
+
+def get_tu_masks(
+    params,
+    tu_indices: ArrayLike,
+    tu_uniform_samples: Optional[ArrayLike],
+    network_id: Optional[int],
+    *,
+    is_multi_tu: bool,
+) -> jnp.ndarray:
+    """Unified TU masking - mode determined by params contents. Returns ready-to-use masks.
+
+    Priority:
+    1. Binary mask (TU_BINARY_MASK_PATH) - returns raw 0/1 masks (no leaky floor)
+    2. Hard Concrete (TU_LOG_ALPHA_PATH) - returns masks WITH leaky floor for gradient flow
+    3. Default - all TUs enabled (ones)
+
+    The caller should use the returned masks directly without additional processing.
+    Binary mode: discrete decisions, no gradients through mask values
+    Hard Concrete mode: leaky floor ensures gradients flow even when "disabled"
+
+    Args:
+        params: ParameterTree or dict-like containing mask parameters
+        tu_indices: TU indices for this node type
+        tu_uniform_samples: Uniform samples for Hard Concrete (can be None if binary mode)
+        network_id: Network index for slicing 2D mask arrays (can be None if 1D)
+        is_multi_tu: True for input_tu_indices (OR reduction), False for output_tu_indices
+    """
+    tu_indices = jnp.asarray(tu_indices)
+    n_inputs = tu_indices.shape[0]
+
+    if TU_BINARY_MASK_PATH in params:
+        binary_mask = params[TU_BINARY_MASK_PATH]
+        binary_mask = jnp.asarray(binary_mask)
+        if binary_mask.ndim == 2:
+            assert network_id is not None, "network_id required for 2D binary_mask"
+            binary_mask = binary_mask[network_id]
+        return _apply_binary_masks(tu_indices, binary_mask, is_multi_tu=is_multi_tu)
+
+    if TU_LOG_ALPHA_PATH in params:
+        tu_log_alpha = params[TU_LOG_ALPHA_PATH]
+        tu_log_alpha = jnp.asarray(tu_log_alpha)
+        if tu_log_alpha.ndim == 2:
+            assert network_id is not None, "network_id required for 2D tu_log_alpha"
+            tu_log_alpha = tu_log_alpha[network_id]
+        raw_masks = compute_input_masks(
+            tu_indices, tu_uniform_samples, tu_log_alpha, is_multi_tu=is_multi_tu
+        )
+        return leaky_mask_floor(raw_masks)
+
+    return jnp.ones(n_inputs)

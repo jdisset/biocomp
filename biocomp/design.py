@@ -59,6 +59,34 @@ def get_design_debug_output_dir() -> str | None:
     return _debug_output_dir
 
 
+class _PhaseTimer:
+    """Minimal helper for timing optimization phases."""
+
+    def __init__(self):
+        import time
+
+        self._time = time
+        self._timings = {}
+        self._t0 = time.perf_counter()
+        self._phase_start = None
+
+    def start(self, name: str, msg: str):
+        logger.info(msg)
+        self._phase_start = self._time.perf_counter()
+
+    def end(self, name: str):
+        self._timings[name] = self._time.perf_counter() - self._phase_start
+        logger.info(f"  -> {self._timings[name]:.2f}s")
+
+    def total(self) -> float:
+        return self._time.perf_counter() - self._t0
+
+    def summary(self):
+        total = self.total()
+        for name, t in self._timings.items():
+            logger.info(f"  {name:15s} {t:.2f}s ({t / total * 100:.1f}%)")
+
+
 class DesignManager(BaseModel):
     """Handles loading and sampling of 2d design target data."""
 
@@ -640,12 +668,9 @@ def _start_pluggable(
     loggers: list[tuple[int, Callable]] | None = None,
     async_handler=None,
 ):
-    import time
     from .designcodec import GenomeCodec
 
-    timings = {}
-    t_total = time.perf_counter()
-
+    timer = _PhaseTimer()
     logger.info("=" * 60)
     logger.info("DESIGN OPTIMIZATION (PLUGGABLE OPTIMIZER)")
     logger.info("=" * 60)
@@ -653,20 +678,13 @@ def _start_pluggable(
     pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
     optimizer = dconf.pluggable_optimizer
 
-    # Phase 1: Build compute stack
-    t0 = time.perf_counter()
-    logger.info("[1/6] Building compute stack...")
+    timer.start("stack", "[1/6] Building compute stack...")
     stack = dmanager.build_stack(model)
-    timings["stack_build"] = time.perf_counter() - t0
-    logger.info(f"  -> Stack built in {timings['stack_build']:.2f}s")
+    timer.end("stack")
 
-    # Phase 2: Initialize parameters (single replicate for pluggable optimizer)
-    t1 = time.perf_counter()
-    logger.info("[2/6] Initializing parameters...")
+    timer.start("params", "[2/6] Initializing parameters...")
     n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
     n_networks = len(dmanager.networks)
-
-    # Use n_replicates=1 for pluggable optimizer - squeeze later
     initial_params = initialize_params(
         stack,
         n_replicates=1,
@@ -678,45 +696,34 @@ def _start_pluggable(
         tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
         tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
     )
-    # Squeeze replicate dim: (1, n_targets, ...) -> (n_targets, ...)
     initial_params = jax.tree.map(lambda x: x.squeeze(0), initial_params)
-    timings["param_init"] = time.perf_counter() - t1
-    logger.info(f"  -> Parameters initialized in {timings['param_init']:.2f}s")
+    timer.end("params")
 
-    # Phase 3: Create codec for param encoding
-    t2 = time.perf_counter()
-    logger.info("[3/6] Creating parameter codec...")
-    static, dynamic = initial_params.filter_by_tag(["non_grad", "shared"])
+    timer.start("codec", "[3/6] Creating parameter codec...")
+    static, _ = initial_params.filter_by_tag(["non_grad", "shared"])
     codec = GenomeCodec.from_params(initial_params, static_tags=("shared", "non_grad"))
     flat_params = codec.encode(initial_params)
     logger.info(f"  Genome dimension: {codec.param_dim}")
-    timings["codec"] = time.perf_counter() - t2
-    logger.info(f"  -> Codec created in {timings['codec']:.2f}s")
+    timer.end("codec")
 
-    # Phase 4: Create loss function and objective
-    t3 = time.perf_counter()
-    logger.info("[4/6] Creating objective function...")
-    num_z = static["global/number_of_random_variables"]
-    num_z = (dmanager.n_targets, int(num_z.ravel()[0].squeeze()))
-    direct_ratio_paths, source_ratio_paths = get_ratio_paths_and_sources(initial_params)
-
+    timer.start("objective", "[4/6] Creating objective function...")
+    num_z = (dmanager.n_targets, int(static["global/number_of_random_variables"].ravel()[0]))
+    direct_ratio_paths, _ = get_ratio_paths_and_sources(initial_params)
     loss_fn = dconf.loss_function.get_impl()(
         stack, dconf, dmanager, num_z=num_z, ratio_paths=direct_ratio_paths
     )
 
     effective_batch_size = dconf.batch_size
     if dmanager.is_lattice_mode:
-        xres, yres = dmanager.grid_resolution
-        effective_batch_size *= xres * yres
+        effective_batch_size *= dmanager.grid_resolution[0] * dmanager.grid_resolution[1]
 
     xbatches_list, ybatches_list = dmanager.get_samples(
         (len(dmanager.networks), 1, 1, 1, dconf.batch_size), bkey
     )
-    x_samples = jnp.concatenate(xbatches_list, axis=-1)
-    x_samples = x_samples.reshape(effective_batch_size, dmanager.n_targets, -1)
+    x_samples = jnp.concatenate(xbatches_list, axis=-1).reshape(
+        effective_batch_size, dmanager.n_targets, -1
+    )
     y_samples = ybatches_list[0].reshape(effective_batch_size, dmanager.n_targets, -1)
-
-    # CMA-ES requires deterministic objective: fix z to mean (0.5) and use fixed RNG key
     fixed_z = jnp.full((x_samples.shape[0], *num_z), 0.5)
     fixed_key = jax.random.key(42)
 
@@ -726,18 +733,9 @@ def _start_pluggable(
         loss, _ = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, step)
         return loss
 
-    vmapped_objective = jax.vmap(single_objective, in_axes=(0, None))
-
-    logger.info("  Compiling vmapped objective (AOT)...")
-    t_compile = time.perf_counter()
-    compiled_pop_objective = jax.jit(vmapped_objective)
+    compiled_pop_objective = jax.jit(jax.vmap(single_objective, in_axes=(0, None)))
     dummy_pop = jnp.zeros((optimizer._get_pop_size(codec.param_dim), codec.param_dim))
     _ = compiled_pop_objective(dummy_pop, jnp.array(0, dtype=jnp.int32)).block_until_ready()
-    compile_time = time.perf_counter() - t_compile
-    logger.info(f"  -> Compiled in {compile_time:.2f}s")
-
-    def objective_fn_init(flat_genome: jnp.ndarray) -> float:
-        return single_objective(flat_genome, jnp.array(0, dtype=jnp.int32))
 
     def get_yhatdep(flat_genome: jnp.ndarray, step: jnp.ndarray) -> jnp.ndarray:
         params = codec.decode(flat_genome, apply_constraints=True)
@@ -746,78 +744,49 @@ def _start_pluggable(
         return aux.get("yhatdep")
 
     compiled_get_yhatdep = jax.jit(get_yhatdep)
+    timer.end("objective")
 
-    timings["objective"] = time.perf_counter() - t3
-    logger.info(f"  -> Objective created in {timings['objective']:.2f}s")
-
-    # Phase 5: Initialize optimizer
-    t4 = time.perf_counter()
-    logger.info("[5/6] Initializing optimizer...")
+    timer.start("opt_init", "[5/6] Initializing optimizer...")
     init_key, opt_key = jax.random.split(loop_key)
-    opt_state = optimizer.init(init_key, flat_params, objective_fn_init)
+    opt_state = optimizer.init(
+        init_key, flat_params, lambda g: single_objective(g, jnp.array(0, dtype=jnp.int32))
+    )
     logger.info(f"  Initial loss: {float(opt_state.best_loss):.6f}")
-    timings["opt_init"] = time.perf_counter() - t4
-    logger.info(f"  -> Optimizer initialized in {timings['opt_init']:.2f}s")
+    timer.end("opt_init")
 
-    # Phase 6: Optimization loop
     logger.info("=" * 60)
     logger.info("STARTING OPTIMIZATION LOOP")
     logger.info("=" * 60)
 
-    loss_history = []
-    step_history = []
+    loss_history, step_history = [], []
     pbar = tqdm(desc="Optimizing", unit="step")
 
     while not optimizer.should_stop(opt_state):
         opt_key, step_key = jax.random.split(opt_key)
         current_step = jnp.array(int(opt_state.step), dtype=jnp.int32)
-        # Pass the pre-compiled population objective and current step
         opt_state, metrics = optimizer.step(
             opt_state, step_key, compiled_pop_objective, current_step
         )
-
         loss_history.append(float(opt_state.best_loss))
         step_history.append({k: float(v) if hasattr(v, "item") else v for k, v in metrics.items()})
-
         pbar.update(1)
         pbar.set_postfix(loss=f"{float(opt_state.best_loss):.4f}")
 
-        # Call loggers - pass current step's metrics as step_history dict
-        if loggers:
-            should_log = any(
-                int(opt_state.step) % p == 0 or p == -1 for p, _ in loggers
-            )
-            yhatdep_arr = None
-            if should_log:
-                yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, current_step)
-            current_step_data = {
-                "loss": [[float(opt_state.best_loss)]],
-                "yhatdep": yhatdep_arr,
-                **metrics,
-            }
+        if loggers and any(int(opt_state.step) % p == 0 or p == -1 for p, _ in loggers):
+            yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, current_step)
+            step_data = {"loss": [[float(opt_state.best_loss)]], "yhatdep": yhatdep_arr, **metrics}
             for period, callback in loggers:
                 if int(opt_state.step) % period == 0 or period == -1:
-                    callback(
-                        int(opt_state.step),
-                        None,
-                        step_history=current_step_data,
-                        stack=stack,
-                    )
+                    callback(int(opt_state.step), None, step_history=step_data, stack=stack)
 
     pbar.close()
-
-    timings["total"] = time.perf_counter() - t_total
     logger.info("=" * 60)
-    logger.info(f"OPTIMIZATION COMPLETE in {timings['total']:.2f}s")
-    logger.info(f"  Final loss: {float(opt_state.best_loss):.6f}")
-    logger.info(f"  Total steps: {int(opt_state.step)}")
-    logger.info("=" * 60)
+    logger.info(f"OPTIMIZATION COMPLETE in {timer.total():.2f}s")
+    logger.info(f"  Final loss: {float(opt_state.best_loss):.6f}, steps: {int(opt_state.step)}")
+    timer.summary()
 
-    # Decode final params and add replicate dimension for compatibility
     final_params = codec.decode(opt_state.best_params, apply_constraints=True)
-    final_params = jax.tree.map(lambda x: x[None, ...], final_params)
-
-    return final_params, loss_history, step_history
+    return jax.tree.map(lambda x: x[None, ...], final_params), loss_history, step_history
 
 
 def start(
@@ -827,32 +796,22 @@ def start(
     loggers: list[tuple[int, Callable]] | None = None,
     async_handler=None,
 ):
-    # Dispatch to pluggable optimizer loop if configured
     if dconf.uses_pluggable_optimizer:
         logger.info("Using pluggable optimizer: %s", type(dconf.pluggable_optimizer).__name__)
         return _start_pluggable(dmanager, dconf, model, loggers, async_handler)
 
-    import time
-
-    timings = {}
-    t_total = time.perf_counter()
-
+    timer = _PhaseTimer()
     logger.info("=" * 60)
     logger.info("DESIGN OPTIMIZATION - INITIALIZATION PHASE")
     logger.info("=" * 60)
 
     pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
 
-    # Phase 1: Build compute stack
-    t0 = time.perf_counter()
-    logger.info("[1/5] Building compute stack...")
+    timer.start("stack", "[1/5] Building compute stack...")
     stack = dmanager.build_stack(model)
-    timings["stack_build"] = time.perf_counter() - t0
-    logger.info(f"  -> Stack built in {timings['stack_build']:.2f}s")
+    timer.end("stack")
 
-    # Phase 2: Initialize parameters
-    t1 = time.perf_counter()
-    logger.info("[2/5] Initializing parameters...")
+    timer.start("params", "[2/5] Initializing parameters...")
     n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
     n_networks = len(dmanager.networks)
     initial_params = initialize_params(
@@ -867,18 +826,13 @@ def start(
         tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
     )
     assert_tree_shape(initial_params, (dconf.n_replicates, dmanager.n_targets))
-    timings["param_init"] = time.perf_counter() - t1
-    logger.info(f"  -> Parameters initialized in {timings['param_init']:.2f}s")
+    timer.end("params")
 
-    # Phase 3: Initialize optimizer state
-    t2 = time.perf_counter()
-    logger.info("[3/5] Initializing optimizer state...")
+    timer.start("opt_init", "[3/5] Initializing optimizer state...")
     static, dynamic = initial_params.filter_by_tag(["non_grad", "shared"])
     initial_optimizer_state = vmap(vmap(dconf.optimizer.init))(dynamic)
-    timings["opt_init"] = time.perf_counter() - t2
-    logger.info(f"  -> Optimizer state initialized in {timings['opt_init']:.2f}s")
+    timer.end("opt_init")
 
-    # -- get data --
     num_z = static["global/number_of_random_variables"]
     assert_that(num_z.shape[0]).is_equal_to(dconf.n_replicates)
     assert_that(jnp.all(num_z == num_z[0])).is_true()
@@ -886,18 +840,15 @@ def start(
 
     steps_per_epoch = max(1, dconf.n_batches_per_epoch // dconf.batches_per_step)
     total_steps = int(dconf.n_epochs * steps_per_epoch)
-
-    logger.info(
-        f"  Config: {total_steps} total steps, {steps_per_epoch} steps/epoch, "
-        f"batch_size={dconf.batch_size}, batches_per_step={dconf.batches_per_step}"
-    )
     assert_that(total_steps).is_greater_than(0)
+    logger.info(
+        f"  Config: {total_steps} steps, {steps_per_epoch}/epoch, "
+        f"batch={dconf.batch_size}, batches/step={dconf.batches_per_step}"
+    )
 
     n_networks = stack.get_nb_networks()
 
-    # Phase 4: Generate samples
-    t3 = time.perf_counter()
-    logger.info("[4/5] Generating training samples...")
+    timer.start("samples", "[4/5] Generating training samples...")
     xbatches_list, ybatches_list = dmanager.get_samples(
         (
             len(dmanager.networks),
@@ -908,11 +859,9 @@ def start(
         ),
         bkey,
     )
-
     xbatches = jnp.concatenate(xbatches_list, axis=-1)
     ybatches = ybatches_list[0]
-    timings["sample_gen"] = time.perf_counter() - t3
-    logger.info(f"  -> Samples generated in {timings['sample_gen']:.2f}s")
+    timer.end("samples")
 
     effective_batch_size = dconf.batch_size
     if dmanager.is_lattice_mode:
@@ -920,11 +869,7 @@ def start(
         effective_batch_size *= xres * yres
 
     n_design_inputs = 2 * len(dmanager.networks)
-
-    logger.info(
-        f"  Data: {len(dmanager.networks)} design networks, "
-        f"n_design_inputs={n_design_inputs}, xbatches.shape={xbatches.shape}"
-    )
+    logger.info(f"  Data: {len(dmanager.networks)} networks, xbatches.shape={xbatches.shape}")
 
     assert_that(xbatches).has_shape(
         (
@@ -937,25 +882,20 @@ def start(
         )
     )
 
-    # Phase 5: Create loss and step functions
-    t4 = time.perf_counter()
-    logger.info("[5/5] Creating loss and step functions...")
+    timer.start("loss_fn", "[5/5] Creating loss and step functions...")
     direct_ratio_paths, source_ratio_paths = get_ratio_paths_and_sources(initial_params)
     ratio_paths = direct_ratio_paths
     logger.debug(
-        f"Ratio normalization: {len(direct_ratio_paths)} direct + {len(source_ratio_paths)} ArrayRef source paths"
+        f"Ratio paths: {len(direct_ratio_paths)} direct + {len(source_ratio_paths)} ArrayRef"
     )
 
     def norm_ratios_hook(params, *a, **kw):
-        # First, normalize direct ratio paths (non-ArrayRef)
         if direct_ratio_paths:
             params = params.update_leaves_by_path(direct_ratio_paths, normalize_ratios_prune)
-        # Then, normalize source arrays that back ArrayRef ratios
         if source_ratio_paths:
             params = normalize_ratio_source_arrays(
                 params, source_ratio_paths, normalize_ratios_prune
             )
-        # clamp tu_log_alpha (hard_concrete has soft clamp, this is a safety bound)
         if TU_LOG_ALPHA_PATH in params:
             params = params.update_leaves_by_path(
                 [TU_LOG_ALPHA_PATH], lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
@@ -1004,28 +944,11 @@ def start(
             Partial(per_replicate_step, num_z=num_z, training_config=dconf, scannable_step=step_fn)
         )(params, opt_state, keys, xs, ys)
 
-    timings["loss_step_fn"] = time.perf_counter() - t4
-    logger.info(f"  -> Loss/step functions created in {timings['loss_step_fn']:.2f}s")
+    timer.end("loss_fn")
 
-    # Summary of initialization
-    timings["total_init"] = time.perf_counter() - t_total
     logger.info("-" * 60)
-    logger.info(f"INITIALIZATION COMPLETE in {timings['total_init']:.2f}s")
-    logger.info(
-        f"  Stack build:     {timings['stack_build']:.2f}s ({timings['stack_build'] / timings['total_init'] * 100:.1f}%)"
-    )
-    logger.info(
-        f"  Param init:      {timings['param_init']:.2f}s ({timings['param_init'] / timings['total_init'] * 100:.1f}%)"
-    )
-    logger.info(
-        f"  Optimizer init:  {timings['opt_init']:.2f}s ({timings['opt_init'] / timings['total_init'] * 100:.1f}%)"
-    )
-    logger.info(
-        f"  Sample gen:      {timings['sample_gen']:.2f}s ({timings['sample_gen'] / timings['total_init'] * 100:.1f}%)"
-    )
-    logger.info(
-        f"  Loss/step fn:    {timings['loss_step_fn']:.2f}s ({timings['loss_step_fn'] / timings['total_init'] * 100:.1f}%)"
-    )
+    logger.info(f"INITIALIZATION COMPLETE in {timer.total():.2f}s")
+    timer.summary()
     logger.info("=" * 60)
     logger.info("STARTING OPTIMIZATION LOOP")
     logger.info("=" * 60)
