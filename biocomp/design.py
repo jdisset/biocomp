@@ -733,10 +733,6 @@ def _start_pluggable(
         loss, _ = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, step)
         return loss
 
-    compiled_pop_objective = jax.jit(jax.vmap(single_objective, in_axes=(0, None)))
-    dummy_pop = jnp.zeros((optimizer._get_pop_size(codec.param_dim), codec.param_dim))
-    _ = compiled_pop_objective(dummy_pop, jnp.array(0, dtype=jnp.int32)).block_until_ready()
-
     def get_yhatdep(flat_genome: jnp.ndarray, step: jnp.ndarray) -> jnp.ndarray:
         params = codec.decode(flat_genome, apply_constraints=True)
         static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
@@ -748,9 +744,29 @@ def _start_pluggable(
 
     timer.start("opt_init", "[5/6] Initializing optimizer...")
     init_key, opt_key = jax.random.split(loop_key)
-    opt_state = optimizer.init(
-        init_key, flat_params, lambda g: single_objective(g, jnp.array(0, dtype=jnp.int32))
-    )
+
+    from .designoptim import NSGA2DesignOptimizer
+    if isinstance(optimizer, NSGA2DesignOptimizer):
+        def nsga2_objective(flat_genome: jnp.ndarray) -> float:
+            params = codec.decode(flat_genome, apply_constraints=True)
+            static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
+            loss, _ = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, jnp.array(0))
+            return loss
+
+        opt_state = optimizer.init(
+            init_key, flat_params, nsga2_objective,
+            n_tus=n_tus,
+            continuous_dim=codec.param_dim - n_tus if n_tus > 0 else None,
+        )
+        step_objective_fn = nsga2_objective
+    else:
+        compiled_pop_objective = jax.jit(jax.vmap(single_objective, in_axes=(0, None)))
+        dummy_pop = jnp.zeros((optimizer._get_pop_size(codec.param_dim), codec.param_dim))
+        _ = compiled_pop_objective(dummy_pop, jnp.array(0, dtype=jnp.int32)).block_until_ready()
+        opt_state = optimizer.init(
+            init_key, flat_params, lambda g: single_objective(g, jnp.array(0, dtype=jnp.int32))
+        )
+        step_objective_fn = compiled_pop_objective
     logger.info(f"  Initial loss: {float(opt_state.best_loss):.6f}")
     timer.end("opt_init")
 
@@ -765,7 +781,7 @@ def _start_pluggable(
         opt_key, step_key = jax.random.split(opt_key)
         current_step = jnp.array(int(opt_state.step), dtype=jnp.int32)
         opt_state, metrics = optimizer.step(
-            opt_state, step_key, compiled_pop_objective, current_step
+            opt_state, step_key, step_objective_fn, current_step
         )
         loss_history.append(float(opt_state.best_loss))
         step_history.append({k: float(v) if hasattr(v, "item") else v for k, v in metrics.items()})
@@ -786,6 +802,28 @@ def _start_pluggable(
     timer.summary()
 
     final_params = codec.decode(opt_state.best_params, apply_constraints=True)
+
+    final_step_data = {"loss": [[float(opt_state.best_loss)]]}
+
+    from .designoptim import NSGA2DesignState
+    if isinstance(opt_state, NSGA2DesignState):
+        pareto_front, pareto_fitness = opt_state.pareto_front, opt_state.pareto_fitness
+        if pareto_front is not None and pareto_fitness is not None:
+            final_step_data["pareto_front"] = pareto_front
+            final_step_data["pareto_fitness"] = pareto_fitness
+            logger.info(f"  Pareto front: {pareto_fitness.shape[0]} solutions")
+            logger.info(f"    Min loss: {float(jnp.min(pareto_fitness[:, 0])):.4f}")
+            logger.info(f"    Min TU count: {float(jnp.min(pareto_fitness[:, 1])):.0f}")
+
+    if loggers:
+        yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, jnp.array(int(opt_state.step), dtype=jnp.int32))
+        final_step_data["yhatdep"] = yhatdep_arr
+        for period, callback in loggers:
+            if period == -1:
+                callback(int(opt_state.step), None, step_history=final_step_data, stack=stack)
+
+    step_history.append(final_step_data)
+
     return jax.tree.map(lambda x: x[None, ...], final_params), loss_history, step_history
 
 
