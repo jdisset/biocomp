@@ -59,17 +59,27 @@ def hard_bias(
                 max_v = value.get("max", MAX_FLUO_INTENSITY)
                 init_v = jax.random.uniform(k, shape, minval=min_v, maxval=max_v)
             else:
-                min_v = DEFAULT_BIAS_MIN
-                max_v = DEFAULT_BIAS_MAX
-                init_v = jnp.full(shape, float(value), dtype=jnp.float32)
+                fixed_val = float(value)
+                min_v = fixed_val
+                max_v = fixed_val
+                init_v = jnp.full(shape, fixed_val, dtype=jnp.float32)
 
             raw_values.append(init_v)
             min_values.append(jnp.asarray(min_v, dtype=jnp.float32))
             max_values.append(jnp.asarray(max_v, dtype=jnp.float32))
 
-        params[f"{namespace}/raw_value"] = jnp.stack(raw_values)
-        params.at(f"{namespace}/min_value", jnp.stack(min_values), tags=[NON_GRAD_TAG])
-        params.at(f"{namespace}/max_value", jnp.stack(max_values), tags=[NON_GRAD_TAG])
+        raw_values_arr = jnp.stack(raw_values)
+        min_values_arr = jnp.stack(min_values)
+        max_values_arr = jnp.stack(max_values)
+
+        all_constrained = jnp.allclose(min_values_arr, max_values_arr)
+
+        if all_constrained:
+            params.at(f"{namespace}/raw_value", raw_values_arr, tags=[NON_GRAD_TAG])
+        else:
+            params[f"{namespace}/raw_value"] = raw_values_arr
+        params.at(f"{namespace}/min_value", min_values_arr, tags=[NON_GRAD_TAG])
+        params.at(f"{namespace}/max_value", max_values_arr, tags=[NON_GRAD_TAG])
         add_node_network_ids(params, nodelist, namespace)
 
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> tuple[ArrayLike, dict]:
@@ -136,20 +146,31 @@ def bias(
                 max_v = value.get("max", MAX_FLUO_INTENSITY)
                 init_v = jax.random.uniform(k, shape, minval=min_v, maxval=max_v)
             else:
-                min_v = DEFAULT_BIAS_MIN
-                max_v = DEFAULT_BIAS_MAX
-                init_v = jnp.full(shape, float(value), dtype=jnp.float32)
+                fixed_val = float(value)
+                min_v = fixed_val
+                max_v = fixed_val
+                init_v = jnp.full(shape, fixed_val, dtype=jnp.float32)
 
             raw_values.append(init_v)
             min_values.append(jnp.asarray(min_v, dtype=jnp.float32))
             max_values.append(jnp.asarray(max_v, dtype=jnp.float32))
             scales.append(jnp.array(0.0, dtype=jnp.float32))
 
-        params[f"{namespace}/raw_value"] = jnp.stack(raw_values)
-        # min/max values are constraints, not learnable - tag them to exclude from optimization
-        params.at(f"{namespace}/min_value", jnp.stack(min_values), tags=[NON_GRAD_TAG])
-        params.at(f"{namespace}/max_value", jnp.stack(max_values), tags=[NON_GRAD_TAG])
-        params[f"{namespace}/scale"] = jnp.stack(scales)
+        raw_values_arr = jnp.stack(raw_values)
+        scales_arr = jnp.stack(scales)
+        min_values_arr = jnp.stack(min_values)
+        max_values_arr = jnp.stack(max_values)
+
+        all_constrained = jnp.allclose(min_values_arr, max_values_arr)
+
+        if all_constrained:
+            params.at(f"{namespace}/raw_value", raw_values_arr, tags=[NON_GRAD_TAG])
+            params.at(f"{namespace}/scale", scales_arr, tags=[NON_GRAD_TAG])
+        else:
+            params[f"{namespace}/raw_value"] = raw_values_arr
+            params[f"{namespace}/scale"] = scales_arr
+        params.at(f"{namespace}/min_value", min_values_arr, tags=[NON_GRAD_TAG])
+        params.at(f"{namespace}/max_value", max_values_arr, tags=[NON_GRAD_TAG])
         add_node_network_ids(params, nodelist, namespace)
 
     def apply(*_, params: ParameterTree, node_id: ArrayLike, **__) -> tuple[ArrayLike, dict]:

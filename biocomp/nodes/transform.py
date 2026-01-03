@@ -200,8 +200,15 @@ def transform_nn(
                     tags=[NON_GRAD_TAG],
                 )
 
-            # And we also initialize the quantized rates
-            params[f"{namespace}/{rate_name}"] = jax.random.uniform(key1, (n_nodes, *rate_shape))
+            qmasks_arr = np.array(qmasks)
+            choices_per_slot = qmasks_arr.sum(axis=-1)  # (n_nodes, n_inputs)
+            all_single_choice = np.all(choices_per_slot == 1)
+
+            init_rates = jax.random.uniform(key1, (n_nodes, *rate_shape))
+            if all_single_choice:
+                params.at(f"{namespace}/{rate_name}", init_rates, tags=[NON_GRAD_TAG])
+            else:
+                params[f"{namespace}/{rate_name}"] = init_rates
 
         else:
             # For inverse nodes, we will use a view (a subtree of ArrayRef that mirrors the original subtree)

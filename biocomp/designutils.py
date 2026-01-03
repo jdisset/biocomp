@@ -4,9 +4,19 @@ from matplotlib.path import Path as MPath
 from xml.etree import ElementTree as ET
 import re
 from matplotlib.colors import to_rgb
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+import jax
+import jax.numpy as jnp
+
 from biocomp.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from biocomp.compute import ComputeStack
+    from biocomp.designloss import GridLossResult
+    from biocomp.parameters import ParameterTree
 
 NdArray = np.ndarray
 logger = get_logger(__name__)
@@ -222,7 +232,8 @@ def _generate_svg_sample_points(
         if log:
             eps = 1e-6
             x_vals = (
-                np.logspace(np.log10(eps + viewbox_x[0] * vw), np.log10(viewbox_x[1] * vw), xres) + vx
+                np.logspace(np.log10(eps + viewbox_x[0] * vw), np.log10(viewbox_x[1] * vw), xres)
+                + vx
             )
             y_vals = (
                 vh
@@ -256,7 +267,8 @@ def _generate_svg_sample_points(
             )
             sy = (
                 vh
-                - 10 ** rng.uniform(np.log10(eps + viewbox_y[0] * vh), np.log10(viewbox_y[1] * vh), n)
+                - 10
+                ** rng.uniform(np.log10(eps + viewbox_y[0] * vh), np.log10(viewbox_y[1] * vh), n)
                 + vy
             )
         else:
@@ -282,7 +294,9 @@ def _generate_svg_sample_points(
         svg_y_min = (1 - viewbox_y[1]) * vh + vy
         svg_y_max = (1 - viewbox_y[0]) * vh + vy
         x_norm = (sx - svg_x_min) / (svg_x_max - svg_x_min) if svg_x_max != svg_x_min else 0.5
-        y_norm = 1.0 - ((sy - svg_y_min) / (svg_y_max - svg_y_min)) if svg_y_max != svg_y_min else 0.5
+        y_norm = (
+            1.0 - ((sy - svg_y_min) / (svg_y_max - svg_y_min)) if svg_y_max != svg_y_min else 0.5
+        )
 
     x_latent = x_norm * (latent_x[1] - latent_x[0]) + latent_x[0]
     y_latent = y_norm * (latent_y[1] - latent_y[0]) + latent_y[0]
@@ -347,10 +361,20 @@ def sample_from_svg(
     seed = seed or np.random.randint(0, 2**32 - 1)
 
     # Handle legacy parameters
-    legacy_used = any(p is not None for p in [
-        xlim, ylim, outlim, rescale_to, lattice_x_extent, lattice_y_extent,
-        img_latent_xlim, img_latent_ylim, img_latent_outlim
-    ])
+    legacy_used = any(
+        p is not None
+        for p in [
+            xlim,
+            ylim,
+            outlim,
+            rescale_to,
+            lattice_x_extent,
+            lattice_y_extent,
+            img_latent_xlim,
+            img_latent_ylim,
+            img_latent_outlim,
+        ]
+    )
     if legacy_used:
         warnings.warn(
             "sample_from_svg: legacy parameters are deprecated. "
@@ -548,4 +572,303 @@ def data_to_lattice_2d(
     X_grid, Y_grid = sample_from_data(
         X, Y, n=1, xlims=xlims, ylims=ylims, sampling_grid=resolution, k=k, min_points=min_points
     )
-    return X_grid, Y_grid[0]  # return single grid (squeeze n dimension)
+    return X_grid, Y_grid[0]
+
+
+@dataclass
+class RecipeEvaluationResult:
+    """Result of evaluating a recipe against a target."""
+
+    prediction: np.ndarray
+    target: np.ndarray
+    X: np.ndarray
+    grid_resolution: tuple[int, int]
+    sublosses: "GridLossResult"
+    txt_plot: str
+    params: "ParameterTree"
+    recipe: Any
+    network: Any
+    stack: "ComputeStack"
+
+    def prediction_grid(self) -> np.ndarray:
+        return self.prediction.reshape(self.grid_resolution[1], self.grid_resolution[0])
+
+    def target_grid(self) -> np.ndarray:
+        return self.target.reshape(self.grid_resolution[1], self.grid_resolution[0])
+
+
+def load_recipe(recipe_path):
+    """Load a recipe from a YAML file."""
+    import dracon as dr
+
+    config = dr.load(str(recipe_path))
+    return config["recipe"]
+
+
+def load_target(target_path):
+    """Load a target from a YAML file."""
+    import os
+    import dracon as dr
+    from biocomp.design_targets import (
+        SVGTarget,
+        Target,
+        DataTarget,
+        LatticeSampling,
+        UniformSampling,
+    )
+
+    config = dr.load(
+        str(target_path),
+        context={
+            "SVGTarget": SVGTarget,
+            "Target": Target,
+            "DataTarget": DataTarget,
+            "LatticeSampling": LatticeSampling,
+            "UniformSampling": UniformSampling,
+            "BIOCOMP_ROOT": os.environ.get("BIOCOMP_ROOT", ""),
+        },
+    )
+    if isinstance(config, list):
+        return config[0]
+    elif isinstance(config, dict) and "targets" in config:
+        return config["targets"][0]
+    return config
+
+
+def build_network_from_recipe(recipe, invert: bool = True):
+    """Build a network from a recipe."""
+    from biocomp.network import recipe_to_networks
+    import biocomp.biorules as br
+
+    networks = recipe_to_networks(recipe, br.ALL_RULES, invert=invert, inversion_mode="main")
+    assert len(networks) == 1, f"Expected 1 network, got {len(networks)}"
+    return networks[0]
+
+
+def init_params_for_network(
+    model,
+    network,
+    stack=None,
+    key=None,
+):
+    """Initialize parameters for a network using the model's compute config.
+
+    Args:
+        model: BiocompModel to use
+        network: Network to initialize
+        stack: Optional pre-built ComputeStack
+        key: Optional random key
+
+    Returns:
+        (params, stack) tuple
+    """
+    from biocomp.compute import ComputeStack
+    from biocomp.parameters import ParameterTree
+
+    if stack is None:
+        stack = ComputeStack(networks=[network])
+        stack.build(model.compute_config, enable_tu_masking=False)
+
+    if key is None:
+        key = jax.random.PRNGKey(42)
+
+    init_params = stack.init(key)
+    _, nonshared = init_params.filter_by_tag(["shared"])
+    params = ParameterTree.merge(model.shared_params, nonshared)
+
+    return params, stack
+
+
+def generate_lattice_prediction(
+    params,
+    stack,
+    X_latent: np.ndarray,
+    key=None,
+) -> np.ndarray:
+    """Generate predictions on a lattice grid.
+
+    Args:
+        params: ParameterTree with model parameters
+        stack: Built ComputeStack
+        X_latent: Lattice grid coordinates (n_points, n_dims)
+        key: Optional random key
+
+    Returns:
+        Predictions array (n_points,)
+    """
+    if key is None:
+        key = jax.random.PRNGKey(0)
+
+    batch_size = X_latent.shape[0]
+
+    # Get num_z from params if available, else use 0 (deterministic)
+    num_z_path = "global/number_of_random_variables"
+    if num_z_path in params:
+        val = params[num_z_path]
+        num_z = int(val.ravel()[0]) if hasattr(val, "ravel") else int(val)
+    else:
+        num_z = 0
+    Z = jnp.zeros((batch_size, num_z))
+    keys = jax.random.split(key, batch_size)
+
+    def apply_batch(params, x_batch, z_batch, keys):
+        def apply_single(x, z, k):
+            return stack.apply(params, x, z, k)[0]
+
+        return jax.vmap(apply_single)(x_batch, z_batch, keys)
+
+    # JIT the batched apply for proper JAX tracing
+    apply_jit = jax.jit(apply_batch)
+    yhat = apply_jit(params, X_latent, Z, keys)
+
+    dep_mask = stack.get_dependent_output_mask()
+    yhat_dep = np.asarray(jnp.compress(dep_mask, yhat, axis=-1))
+
+    if yhat_dep.shape[-1] > 1:
+        yhat_dep = yhat_dep.mean(axis=-1, keepdims=True)
+
+    return yhat_dep.squeeze(-1)
+
+
+def evaluate_recipe_with_sublosses(
+    recipe_path,
+    target_path,
+    model,
+    resolution: tuple[int, int] = (48, 48),
+    key=None,
+    params=None,
+    stack=None,
+) -> RecipeEvaluationResult:
+    """Evaluate a recipe against a target and return comprehensive results.
+
+    Args:
+        recipe_path: Path to the recipe YAML file
+        target_path: Path to the target YAML file
+        model: BiocompModel to use for prediction
+        resolution: Grid resolution for evaluation
+        key: Optional random key
+        params: Optional pre-initialized parameters (for post-optimization evaluation)
+        stack: Optional pre-built ComputeStack
+
+    Returns:
+        RecipeEvaluationResult with prediction, target, sublosses, and txt-plot
+    """
+    from biocomp.designloss import compute_grid_losses
+    from biocomp.plotting.plotting_txt import smooth_2d_txt
+
+    if key is None:
+        key = jax.random.PRNGKey(42)
+
+    recipe = load_recipe(recipe_path)
+    target = load_target(target_path)
+
+    network = build_network_from_recipe(recipe)
+
+    if params is None or stack is None:
+        params, stack = init_params_for_network(model, network, stack, key)
+
+    X_latent, Y_target_grid = target.get_lattice(resolution, seed=0)
+    Y_target = Y_target_grid.flatten()
+
+    prediction = generate_lattice_prediction(params, stack, X_latent, key)
+
+    Y_pred_grid = prediction.reshape(resolution[1], resolution[0])
+    Y_target_2d = Y_target.reshape(resolution[1], resolution[0])
+
+    sublosses = compute_grid_losses(
+        jnp.array(Y_pred_grid),
+        jnp.array(Y_target_2d),
+        w_sinkhorn=1.0,
+        w_lncc=0.5,
+        w_mse=1.0,
+        return_contributions=False,
+    )
+
+    txt_result = smooth_2d_txt(
+        X_latent,
+        prediction.reshape(-1, 1),
+        input_names=["x1", "x2"],
+        output_name="y",
+        title=f"Prediction: {recipe.name}",
+        xres=48,
+        yres=24,
+    )
+
+    return RecipeEvaluationResult(
+        prediction=prediction,
+        target=Y_target,
+        X=X_latent,
+        grid_resolution=resolution,
+        sublosses=sublosses,
+        txt_plot=str(txt_result),
+        params=params,
+        recipe=recipe,
+        network=network,
+        stack=stack,
+    )
+
+
+def get_committed_values(params, stack) -> dict:
+    """Extract committed values (ratios, bias, parts) from params and stack.
+
+    Returns dict with:
+        - ratios: list of (node_name, ratio_values) tuples
+        - bias: list of (node_name, path_suffix, bias_value) tuples
+    """
+    result = {"ratios": [], "bias": []}
+
+    for layer_idx, layer in enumerate(stack.layers):
+        ns = stack.get_layer_namespace(layer_idx)
+
+        if "aggregation" in ns and "inv" not in ns:
+            ratio_path = f"{ns}/ratios"
+            if ratio_path in params:
+                ratios = np.asarray(params[ratio_path])
+                for node_idx in range(ratios.shape[0]):
+                    node = layer.nodes[node_idx]
+                    node_data = node.get(stack)
+                    node_name = getattr(node_data, "name", f"node_{node_idx}")
+                    result["ratios"].append((node_name, ratios[node_idx].tolist()))
+
+        if "bias" in ns or "hard_bias" in ns:
+            for path_suffix in ["raw_value", "scale", "value"]:
+                bias_path = f"{ns}/{path_suffix}"
+                if bias_path in params:
+                    val = params[bias_path]
+                    if hasattr(val, "shape") and val.size > 1:
+                        bias_val = np.asarray(val).tolist()
+                    else:
+                        bias_val = float(np.asarray(val).ravel()[0])
+                    result["bias"].append((ns, path_suffix, bias_val))
+
+    return result
+
+
+def compare_evaluation_results(
+    before: RecipeEvaluationResult,
+    after: RecipeEvaluationResult,
+    rtol: float = 1e-5,
+    atol: float = 1e-6,
+) -> dict[str, Any]:
+    """Compare two evaluation results and return validation checks.
+
+    Returns dict with boolean results for each check:
+        - predictions_match: Are predictions within tolerance?
+        - sublosses_match: Do all sublosses match?
+        - txt_plots_match: Are txt-plots string-identical?
+    """
+    pred_close = np.allclose(before.prediction, after.prediction, rtol=rtol, atol=atol)
+
+    before_sl = before.sublosses.to_dict()
+    after_sl = after.sublosses.to_dict()
+    sl_match = all(abs(before_sl[k] - after_sl[k]) < atol for k in before_sl)
+
+    txt_match = before.txt_plot == after.txt_plot
+
+    return {
+        "predictions_match": pred_close,
+        "sublosses_match": sl_match,
+        "txt_plots_match": txt_match,
+        "max_prediction_diff": float(np.max(np.abs(before.prediction - after.prediction))),
+        "subloss_diffs": {k: abs(before_sl[k] - after_sl[k]) for k in before_sl},
+    }

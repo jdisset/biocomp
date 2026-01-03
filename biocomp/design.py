@@ -667,6 +667,7 @@ def _start_pluggable(
     model: BiocompModel,
     loggers: list[tuple[int, Callable]] | None = None,
     async_handler=None,
+    lock_ratios: bool = False,
 ):
     from .designcodec import GenomeCodec
 
@@ -679,7 +680,7 @@ def _start_pluggable(
     optimizer = dconf.pluggable_optimizer
 
     timer.start("stack", "[1/6] Building compute stack...")
-    stack = dmanager.build_stack(model)
+    stack = dmanager.build_stack(model, unlock_ratios=not lock_ratios)
     timer.end("stack")
 
     timer.start("params", "[2/6] Initializing parameters...")
@@ -833,10 +834,11 @@ def start(
     model: BiocompModel,
     loggers: list[tuple[int, Callable]] | None = None,
     async_handler=None,
+    lock_ratios: bool = False,
 ):
     if dconf.uses_pluggable_optimizer:
         logger.info("Using pluggable optimizer: %s", type(dconf.pluggable_optimizer).__name__)
-        return _start_pluggable(dmanager, dconf, model, loggers, async_handler)
+        return _start_pluggable(dmanager, dconf, model, loggers, async_handler, lock_ratios)
 
     timer = _PhaseTimer()
     logger.info("=" * 60)
@@ -846,7 +848,7 @@ def start(
     pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
 
     timer.start("stack", "[1/5] Building compute stack...")
-    stack = dmanager.build_stack(model)
+    stack = dmanager.build_stack(model, unlock_ratios=not lock_ratios)
     timer.end("stack")
 
     timer.start("params", "[2/5] Initializing parameters...")

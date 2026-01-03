@@ -34,65 +34,77 @@ def aggregation(
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey, **_):
         ratios = []
-        ratio_ranges_list = []  # Store range info for each node
+        ratio_mins = []
+        ratio_maxs = []
 
         for i, node in enumerate(nodelist):
             extra = node.get(stack).extra
-            if "ratios" in extra and not random_init:
-                assert len(extra["ratios"]) == n_outputs, (
-                    f"Aggregation ratios length mismatch: got {len(extra['ratios'])}, expected {n_outputs}. "
+            base_ratios = extra.get("ratios", [1.0] * n_outputs)
+            ranges = extra.get("ratio_ranges", [None] * n_outputs)
+
+            if len(base_ratios) != n_outputs:
+                assert not random_init, (
+                    f"Aggregation ratios length mismatch: got {len(base_ratios)}, expected {n_outputs}. "
                     f"This usually means the network was committed but graph structure wasn't pruned to match. "
                     f"Members: {extra.get('members', [])}"
                 )
+                base_ratios = [1.0] * n_outputs
+                ranges = [None] * n_outputs
 
-                # Check if this node has unlocked ratios (ratio_ranges with non-None values)
-                ranges = extra.get("ratio_ranges", [])
-                has_unlocked = any(r is not None for r in ranges)
+            has_unlocked = any(r is not None for r in ranges)
 
-                if ranges and has_unlocked:
-                    ratio_ranges_list.append(ranges)
+            if random_init and not has_unlocked:
+                ranges = [{"min": 0.05, "max": 1.0} for _ in range(n_outputs)]
+                has_unlocked = True
 
-                    # find min of unlocked ranges for locked ratios' default
-                    locked_default = 1.0
-                    for range_info in ranges:
-                        if range_info is not None:
-                            locked_default = range_info.get("min", 1.0) or 1.0
-                            break  # use first unlocked range's min
-
-                    # sample in absolute space, then normalize
-                    absolute_ratios = []
-                    for j, range_info in enumerate(ranges):
-                        if range_info is not None:
-                            min_v = range_info.get("min", 1.0) or 1.0
-                            max_v = range_info.get("max", 1.0) or 1.0
-                            # sample absolute ratio from range
-                            absolute_ratios.append(
-                                jax.random.uniform(
-                                    jax.random.fold_in(key, i * n_outputs + j),
-                                    minval=min_v,
-                                    maxval=max_v,
-                                )
+            if has_unlocked:
+                absolute_ratios = []
+                node_mins = []
+                node_maxs = []
+                for j, range_info in enumerate(ranges):
+                    base_val = base_ratios[j] if j < len(base_ratios) else 1.0
+                    if range_info is not None:
+                        min_v = range_info.get("min", 0.05) or 0.05
+                        max_v = range_info.get("max", 1.0) or 1.0
+                        absolute_ratios.append(
+                            jax.random.uniform(
+                                jax.random.fold_in(key, i * n_outputs + j),
+                                minval=min_v,
+                                maxval=max_v,
                             )
-                        else:
-                            # locked: use min of unlocked range
-                            absolute_ratios.append(locked_default)
+                        )
+                        node_mins.append(min_v)
+                        node_maxs.append(max_v)
+                    else:
+                        absolute_ratios.append(base_val)
+                        node_mins.append(base_val)
+                        node_maxs.append(base_val)
 
-                    # normalize to sum to 1
-                    absolute_ratios = jnp.array(absolute_ratios, dtype=jnp.float32)
-                    ratio_v = absolute_ratios / jnp.sum(absolute_ratios)
-                else:
-                    ratio_v = jnp.array(extra["ratios"], dtype=jnp.float32)
-                    ratio_ranges_list.append([None] * n_outputs)  # All locked
+                absolute_ratios = jnp.array(absolute_ratios, dtype=jnp.float32)
+                ratio_v = absolute_ratios / jnp.sum(absolute_ratios)
+                ratio_mins.append(jnp.array(node_mins, dtype=jnp.float32))
+                ratio_maxs.append(jnp.array(node_maxs, dtype=jnp.float32))
             else:
-                # Random init
-                ratio_v = jax.random.uniform(key, (n_outputs,), minval=0.05, maxval=1.0)
-                ratio_ranges_list.append([None] * n_outputs)
+                ratio_v = jnp.array(base_ratios, dtype=jnp.float32)
+                ratio_mins.append(ratio_v.copy())
+                ratio_maxs.append(ratio_v.copy())
 
             ratios.append(ratio_v)
 
         ratios = jnp.stack(ratios)
+        ratio_mins_arr = jnp.stack(ratio_mins)
+        ratio_maxs_arr = jnp.stack(ratio_maxs)
         assert ratios.shape == (len(nodelist), n_outputs), f"Invalid ratio shape {ratios.shape}"
-        params[f"{namespace}/{PNAME}"] = ratios
+
+        all_constrained = jnp.allclose(ratio_mins_arr, ratio_maxs_arr)
+
+        if all_constrained:
+            params.at(f"{namespace}/{PNAME}", ratios, tags=[NON_GRAD_TAG])
+        else:
+            params[f"{namespace}/{PNAME}"] = ratios
+
+        params.at(f"{namespace}/ratio_min", ratio_mins_arr, tags=[NON_GRAD_TAG])
+        params.at(f"{namespace}/ratio_max", ratio_maxs_arr, tags=[NON_GRAD_TAG])
 
         add_tu_output_mapping(params, stack, nodelist, namespace, n_outputs)
         add_node_network_ids(params, nodelist, namespace)
@@ -109,7 +121,12 @@ def aggregation(
     ) -> tuple[ArrayLike, dict]:
         assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
         ratios = params[f"{namespace}/{PNAME}"][node_id][:n_outputs]
-        abs_ratios = jnp.abs(jnp.array(ratios))
+
+        ratio_min = params[f"{namespace}/ratio_min"][node_id][:n_outputs]
+        ratio_max = params[f"{namespace}/ratio_max"][node_id][:n_outputs]
+        constrained_ratios = jnp.clip(ratios, ratio_min, ratio_max)
+
+        abs_ratios = jnp.abs(constrained_ratios)
 
         output_tu_indices_path = f"{namespace}/output_tu_indices"
         if output_tu_indices_path in params:
@@ -131,7 +148,7 @@ def aggregation(
         result = normalized_ratios * input
 
         return result, {
-            "ratios": ratios,
+            "ratios": constrained_ratios,
             "abs_ratios": abs_ratios,
             "n_outputs": n_outputs,
             "output_masks": output_masks,

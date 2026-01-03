@@ -1570,7 +1570,7 @@ def _build_cdg_dual_from_preprocessed(
     next_node_id = 0
 
     # Create a mapping from (source_id, cotx_group) to normalized ratio and range info
-    from biocomp.recipe import NumRange, FluoIntensity
+    from biocomp.recipe import NumRange, FluoIntensity, RatioSpec
 
     source_cotx_to_ratio_map: dict[tuple[str | None, str], tuple[float, Optional[NumRange]]] = {}
     cotx_to_fluo_bias: dict[str, FluoIntensity] = {}  # cotx_group -> FluoIntensity
@@ -1600,8 +1600,9 @@ def _build_cdg_dual_from_preprocessed(
         # Extract numeric values for normalization (use midpoint for ranges)
         numeric_ratios = []
         for r in raw_ratios:
-            if isinstance(r, NumRange):
-                # use midpoint or 1.0 if unbounded
+            if isinstance(r, RatioSpec):
+                numeric_ratios.append(r.value)
+            elif isinstance(r, NumRange):
                 min_v = r.min if r.min is not None else 0.0
                 max_v = r.max if r.max is not None else 1.0
                 numeric_ratios.append((min_v + max_v) / 2.0)
@@ -1626,7 +1627,12 @@ def _build_cdg_dual_from_preprocessed(
         source_position_counter: dict[str, int] = {}
         for unit in cotx.units:
             norm_ratio, orig_ratio = source_to_norm_ratio_map[unit.source]
-            range_info = orig_ratio if isinstance(orig_ratio, NumRange) else None
+            if isinstance(orig_ratio, RatioSpec):
+                range_info = orig_ratio.to_num_range()
+            elif isinstance(orig_ratio, NumRange):
+                range_info = orig_ratio
+            else:
+                range_info = None
             if unit.position_in_source is not None:
                 position = unit.position_in_source
             else:

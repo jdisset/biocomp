@@ -6,9 +6,8 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     Field,
-    field_validator,
-    model_validator,
     model_serializer,
+    model_validator,
 )
 
 from biocomp.logging_config import get_logger
@@ -81,6 +80,117 @@ class FluoIntensity(BaseModel):
         if not self.is_locked():
             return self.value  # type: ignore
         return None
+
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+
+## {{{                          --     RatioSpec     --
+
+DEFAULT_RATIO_MIN = 0.001
+DEFAULT_RATIO_MAX = 10.0
+
+
+class RatioSpec(BaseModel):
+    """Specification for a single TU ratio in a CoTransfection.
+
+    Allows explicit control over whether a ratio is locked (fixed) or unlocked (optimizable).
+
+    Examples:
+        # Locked ratio (fixed at 0.5)
+        RatioSpec(value=0.5, locked=True)
+
+        # Unlocked ratio with custom range
+        RatioSpec(value=0.3, min=0.1, max=0.6)
+
+        # Unlocked ratio with default range
+        RatioSpec(value=0.3, locked=False)
+    """
+
+    value: float
+    min: Optional[float] = None
+    max: Optional[float] = None
+    locked: bool = False
+
+    @model_validator(mode="after")
+    def _validate(self) -> "RatioSpec":
+        if self.locked:
+            if self.min is not None or self.max is not None:
+                raise ValueError(
+                    f"RatioSpec: locked=True is incompatible with min/max. "
+                    f"Got locked=True with min={self.min}, max={self.max}"
+                )
+        else:
+            if self.min is None:
+                object.__setattr__(self, "min", DEFAULT_RATIO_MIN)
+            if self.max is None:
+                object.__setattr__(self, "max", DEFAULT_RATIO_MAX)
+            assert self.min is not None and self.max is not None
+            if self.min > self.max:
+                raise ValueError(f"RatioSpec: min ({self.min}) > max ({self.max})")
+            if not (self.min <= self.value <= self.max):
+                raise ValueError(f"RatioSpec: value ({self.value}) not in [{self.min}, {self.max}]")
+        return self
+
+    def is_locked(self) -> bool:
+        return self.locked
+
+    def to_num_range(self) -> Optional[NumRange]:
+        if self.locked:
+            return None
+        return NumRange(min=self.min, max=self.max)
+
+    def __repr__(self) -> str:
+        if self.locked:
+            return f"RatioSpec({self.value}, locked)"
+        return f"RatioSpec({self.value}, [{self.min}, {self.max}])"
+
+
+def _convert_ratio_value(v) -> Union[NumRange, float, RatioSpec]:
+    """Convert a ratio value from YAML/dict to proper type."""
+    if isinstance(v, (NumRange, RatioSpec)):
+        return v
+    if isinstance(v, (int, float)):
+        return round(float(v), RATIO_PRECISION)
+    if isinstance(v, dict):
+        if "min" in v and "max" in v and "value" not in v:
+            return NumRange(**v)
+        return RatioSpec(**v)
+    raise ValueError(f"Cannot convert {type(v)} to ratio: {v}")
+
+
+def _convert_ratios_input(
+    ratios_input: Union[list, dict, None], units: list["TranscriptionUnit"]
+) -> Optional[list[Union[NumRange, float, RatioSpec]]]:
+    """Convert ratios from various input formats to canonical list format.
+
+    Supports:
+    1. None -> None
+    2. list[float|NumRange|RatioSpec|dict] -> list (legacy + new)
+    3. dict[tu_name -> float|RatioSpec|dict] -> list (new dict syntax)
+    """
+    if ratios_input is None:
+        return None
+
+    if isinstance(ratios_input, list):
+        return [_convert_ratio_value(r) for r in ratios_input]
+
+    if isinstance(ratios_input, dict):
+        tu_names = [u.name for u in units]
+        result: list[Union[NumRange, float, RatioSpec]] = []
+        for tu_name in tu_names:
+            if tu_name not in ratios_input:
+                raise ValueError(
+                    f"Ratio dict missing TU '{tu_name}'. "
+                    f"Available: {list(ratios_input.keys())}, expected: {tu_names}"
+                )
+            result.append(_convert_ratio_value(ratios_input[tu_name]))
+        extra_keys = set(ratios_input.keys()) - set(tu_names)
+        if extra_keys:
+            raise ValueError(f"Ratio dict has unknown TU names: {extra_keys}. Expected: {tu_names}")
+        return result
+
+    raise ValueError(f"ratios must be list or dict, got {type(ratios_input)}")
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -236,54 +346,75 @@ Unit = TranscriptionUnit  # alias for declarative API
 
 
 ## {{{                           --     CoTx     --
+
+RatioType = NumRange | float | RatioSpec
+RatiosInput = list[RatioType] | dict[str, float | dict]
+
+
 class CoTransfection(BaseModel):
     name: Optional[str] = None
     units: list[Unit]
-    ratios: Optional[list[Union[NumRange, float]]] = None
-    fluo_bias: Optional[FluoIntensity] = None  # if None, normal input (not a bias)
+    ratios: Optional[RatiosInput] = None
+    fluo_bias: Optional[FluoIntensity] = None
 
-    @field_validator("ratios", mode="before")
-    @classmethod
-    def round_ratios(cls, v):
-        if v is None:
-            return v
-        return [
-            round(float(r), RATIO_PRECISION)
-            if isinstance(r, (int, float)) and not isinstance(r, NumRange)
-            else r
-            for r in v
-        ]
-
-    def model_post_init(self, *args, **kwargs):
-        super().model_post_init(*args, **kwargs)
-        # Don't set default ratios here - they should be based on unique sources,
-        # which requires network context. Defaults are handled in network.py
-        # Validate fluo_bias tu_id if present
+    @model_validator(mode="after")
+    def _validate(self) -> "CoTransfection":
+        if self.ratios is not None:
+            if isinstance(self.ratios, dict):
+                converted = _convert_ratios_input(self.ratios, self.units)
+                object.__setattr__(self, "ratios", converted)
+            elif isinstance(self.ratios, list):
+                converted = [_convert_ratio_value(r) for r in self.ratios]
+                object.__setattr__(self, "ratios", converted)
         if self.fluo_bias is not None:
             if self.fluo_bias.tu_id < 0 or self.fluo_bias.tu_id >= len(self.units):
                 raise ValueError(
                     f"fluo_bias.tu_id {self.fluo_bias.tu_id} out of range [0, {len(self.units)})"
                 )
-        # Note: ratios are NOT required to sum to 1.0 at recipe level - they represent
-        # relative weights that get normalized during network building/aggregation
+        return self
+
+    def _is_ratio_unlocked(self, r: RatioType) -> bool:
+        if isinstance(r, NumRange):
+            return True
+        if isinstance(r, RatioSpec):
+            return not r.is_locked()
+        return False
+
+    def _get_ratio_value(self, r: RatioType) -> float:
+        if isinstance(r, NumRange):
+            return (r.min + r.max) / 2 if r.min is not None and r.max is not None else 1.0
+        if isinstance(r, RatioSpec):
+            return r.value
+        return float(r)
+
+    def _get_ratio_range(self, r: RatioType) -> Optional[NumRange]:
+        if isinstance(r, NumRange):
+            return r
+        if isinstance(r, RatioSpec):
+            return r.to_num_range()
+        return None
 
     def has_unlocked_ratios(self) -> bool:
-        """Check if any ratio is unlocked (NumRange)"""
-        return self.ratios is not None and any(isinstance(r, NumRange) for r in self.ratios)
+        if self.ratios is None:
+            return False
+        return any(self._is_ratio_unlocked(r) for r in self.ratios)
 
     def get_locked_ratios(self) -> Optional[list[float]]:
-        """Get ratios as floats if all are locked, None otherwise"""
         if self.ratios is None:
             return None
         if self.has_unlocked_ratios():
             return None
-        return [float(r) for r in self.ratios]  # type: ignore
+        return [self._get_ratio_value(r) for r in self.ratios]
 
     def get_ratio_ranges(self) -> list[Optional[NumRange]]:
-        """Get ratio range for each unit (None if locked)"""
         if self.ratios is None:
             return [None] * len(self.units)
-        return [r if isinstance(r, NumRange) else None for r in self.ratios]
+        return [self._get_ratio_range(r) for r in self.ratios]
+
+    def get_ratio_values(self) -> list[float]:
+        if self.ratios is None:
+            return [1.0] * len(self.units)
+        return [self._get_ratio_value(r) for r in self.ratios]
 
     def has_bias(self) -> bool:
         """Check if this cotx specifies a bias (not a normal input)"""
@@ -292,7 +423,7 @@ class CoTransfection(BaseModel):
     def get_tu_ratio(
         self, tu_index: int | str, wrt: Optional[int | str] = None
     ) -> Optional[Union[NumRange, float]]:
-        """Get the ratio for a specific TU by index or name, optionally relative to another TU"""
+        """Get the ratio for a specific TU by index or name, optionally relative to another TU."""
         rel_index = None
         if isinstance(tu_index, str):
             tu_indices = [i for i, tu in enumerate(self.units) if tu.name == tu_index]
@@ -312,26 +443,34 @@ class CoTransfection(BaseModel):
             rel_index = wrt
         else:
             assert wrt is None
+
         if self.ratios is None:
             return 1.0
         if tu_index < 0 or tu_index >= len(self.units):
-            return self.ratios[tu_index]
+            return self._get_ratio_value(self.ratios[tu_index])
+
+        tu_ratio = self.ratios[tu_index]
+        tu_range = self._get_ratio_range(tu_ratio)
+        tu_value = self._get_ratio_value(tu_ratio)
+
         if rel_index is None:
-            wrt_ratio = 1.0
+            wrt_value = 1.0
+            wrt_range = None
         else:
             if rel_index < 0 or rel_index >= len(self.units):
                 raise IndexError(f"wrt index {rel_index} out of range for cotx '{self.name}'")
             wrt_ratio = self.ratios[rel_index]
-        tu_ratio = self.ratios[tu_index]
-        max_wrt = wrt_ratio.max if isinstance(wrt_ratio, NumRange) else wrt_ratio
-        min_wrt = wrt_ratio.min if isinstance(wrt_ratio, NumRange) else wrt_ratio
-        if isinstance(tu_ratio, NumRange):
+            wrt_value = self._get_ratio_value(wrt_ratio)
+            wrt_range = self._get_ratio_range(wrt_ratio)
+
+        if tu_range is not None:
+            max_wrt = wrt_range.max if wrt_range else wrt_value
+            min_wrt = wrt_range.min if wrt_range else wrt_value
             return NumRange(
-                min=(tu_ratio.min / max_wrt) if tu_ratio.min is not None else None,
-                max=(tu_ratio.max / min_wrt) if tu_ratio.max is not None else None,
+                min=(tu_range.min / max_wrt) if tu_range.min is not None else None,
+                max=(tu_range.max / min_wrt) if tu_range.max is not None else None,
             )
-        else:
-            return tu_ratio / wrt_ratio
+        return tu_value / wrt_value
 
     def __hash__(self):
         return hash(str(self.model_dump()))
