@@ -593,7 +593,11 @@ class Network(BaseModel):
                 for base_ratio, ratio_range in zip(base_ratios, ratio_ranges):
                     if ratio_range is not None and isinstance(ratio_range, dict):
                         ratios.append(
-                            NumRange(min=ratio_range.get("min"), max=ratio_range.get("max"))
+                            NumRange(
+                                min=ratio_range.get("min"),
+                                max=ratio_range.get("max"),
+                                init=ratio_range.get("init"),
+                            )
                         )
                     else:
                         ratios.append(base_ratio)
@@ -1603,9 +1607,12 @@ def _build_cdg_dual_from_preprocessed(
             if isinstance(r, RatioSpec):
                 numeric_ratios.append(r.value)
             elif isinstance(r, NumRange):
-                min_v = r.min if r.min is not None else 0.0
-                max_v = r.max if r.max is not None else 1.0
-                numeric_ratios.append((min_v + max_v) / 2.0)
+                if r.init is not None:
+                    numeric_ratios.append(r.init)
+                else:
+                    min_v = r.min if r.min is not None else 0.0
+                    max_v = r.max if r.max is not None else 1.0
+                    numeric_ratios.append((min_v + max_v) / 2.0)
             else:
                 numeric_ratios.append(float(r))
 
@@ -1680,20 +1687,25 @@ def _build_cdg_dual_from_preprocessed(
             }
             # Add range info if ratio is unlocked
             if range_info is not None:
-                source_extra["ratio_range"] = {
+                ratio_range_dict = {
                     "min": range_info.min,
                     "max": range_info.max,
                 }
+                if range_info.init is not None:
+                    ratio_range_dict["init"] = range_info.init
+                source_extra["ratio_range"] = ratio_range_dict
             # Add fluo_bias info if this cotx has a bias
             if cotx_group in cotx_to_fluo_bias:
                 fluo_bias = cotx_to_fluo_bias[cotx_group]
+                if isinstance(fluo_bias.value, (int, float)):
+                    bias_value_dict = fluo_bias.value
+                else:
+                    bias_value_dict = {"min": fluo_bias.value.min, "max": fluo_bias.value.max}
+                    if fluo_bias.value.init is not None:
+                        bias_value_dict["init"] = fluo_bias.value.init
                 source_extra["fluo_bias"] = {
                     "tu_id": fluo_bias.tu_id,
-                    "value": (
-                        fluo_bias.value
-                        if isinstance(fluo_bias.value, (int, float))
-                        else {"min": fluo_bias.value.min, "max": fluo_bias.value.max}
-                    ),
+                    "value": bias_value_dict,
                     "protein": fluo_bias.protein,
                     "units": fluo_bias.units,
                 }

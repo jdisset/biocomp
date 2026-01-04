@@ -780,7 +780,8 @@ def evaluate_recipe_with_sublosses(
         jnp.array(Y_target_2d),
         w_sinkhorn=1.0,
         w_lncc=0.5,
-        w_mse=1.0,
+        w_mse=0.0,
+        w_rmse=0.5,
         return_contributions=False,
     )
 
@@ -872,3 +873,110 @@ def compare_evaluation_results(
         "max_prediction_diff": float(np.max(np.abs(before.prediction - after.prediction))),
         "subloss_diffs": {k: abs(before_sl[k] - after_sl[k]) for k in before_sl},
     }
+
+
+def side_by_side_txt_plot(
+    target_grid: np.ndarray,
+    prediction_grid: np.ndarray,
+    height: int = 10,
+    width: int = 24,
+    loss_weights: dict[str, float] | None = None,
+    title_target: str = "TARGET",
+    title_prediction: str = "PREDICTION",
+) -> tuple[str, dict[str, float]]:
+    """Create side-by-side ASCII heatmaps of target vs prediction with loss metrics table.
+
+    Args:
+        target_grid: 2D array (H, W) of target pattern
+        prediction_grid: 2D array (H, W) of predicted pattern
+        height: Height of each heatmap in characters
+        width: Width of each heatmap in characters
+        loss_weights: Optional dict of loss weights {loss_name: weight}.
+            If None, uses defaults: sinkhorn=1.0, lncc=0.5, rmse=0.5
+        title_target: Title for target heatmap
+        title_prediction: Title for prediction heatmap
+
+    Returns:
+        (txt_output, loss_dict) where:
+            - txt_output: Formatted string with side-by-side heatmaps and loss table
+            - loss_dict: Dict of all loss values (both unweighted and weighted totals)
+    """
+    from biocomp.plotting.ascii_heatmap import heatmap
+    from biocomp.designloss import compute_grid_losses
+
+    assert target_grid.ndim == 2, f"target_grid must be 2D, got {target_grid.ndim}D"
+    assert prediction_grid.ndim == 2, f"prediction_grid must be 2D, got {prediction_grid.ndim}D"
+    assert target_grid.shape == prediction_grid.shape, (
+        f"Shape mismatch: target={target_grid.shape} vs pred={prediction_grid.shape}"
+    )
+
+    defaults = {"sinkhorn": 1.0, "lncc": 0.5, "rmse": 0.5, "mse": 0.0, "simse": 0.0, "spectral": 0.0, "gradient": 0.0, "contrast": 0.0}
+    weights = {**defaults, **(loss_weights or {})}
+
+    result = compute_grid_losses(
+        jnp.array(prediction_grid),
+        jnp.array(target_grid),
+        w_sinkhorn=weights["sinkhorn"],
+        w_lncc=weights["lncc"],
+        w_mse=weights["mse"],
+        w_rmse=weights["rmse"],
+        w_simse=weights["simse"],
+        w_spectral=weights["spectral"],
+        w_gradient=weights["gradient"],
+        w_contrast=weights["contrast"],
+    )
+
+    vmin = min(float(target_grid.min()), float(prediction_grid.min()))
+    vmax = max(float(target_grid.max()), float(prediction_grid.max()))
+
+    # Flip vertically for proper orientation (origin at bottom-left like scientific plots)
+    target_flipped = np.flipud(target_grid)
+    pred_flipped = np.flipud(prediction_grid)
+
+    target_hm = heatmap(target_flipped, vmin=vmin, vmax=vmax, xres=width, yres=height, show_colorbar=False)
+    pred_hm = heatmap(pred_flipped, vmin=vmin, vmax=vmax, xres=width, yres=height, show_colorbar=False)
+
+    target_lines = target_hm.split('\n')
+    pred_lines = pred_hm.split('\n')
+
+    max_lines = max(len(target_lines), len(pred_lines))
+    target_lines += [''] * (max_lines - len(target_lines))
+    pred_lines += [''] * (max_lines - len(pred_lines))
+
+    gap = "    "
+    lines = []
+    lines.append(f"{title_target.center(width)}{gap}{title_prediction.center(width)}")
+    for t_line, p_line in zip(target_lines, pred_lines, strict=False):
+        t_padded = t_line.ljust(width) if len(t_line) < width else t_line[:width]
+        p_padded = p_line.ljust(width) if len(p_line) < width else p_line[:width]
+        lines.append(f"{t_padded}{gap}{p_padded}")
+    lines.append(f"{vmin:.2f} ░▒▓█ {vmax:.2f}".center(width * 2 + len(gap)))
+
+    loss_dict_raw = result.to_dict()
+    loss_order = ["sinkhorn", "lncc", "rmse", "mse", "simse", "spectral", "gradient", "contrast"]
+
+    lines.append("")
+    lines.append("┌────────────┬──────────┬──────────┐")
+    lines.append("│ Loss       │ Unweight │ Weighted │")
+    lines.append("├────────────┼──────────┼──────────┤")
+
+    weighted_total = 0.0
+    for name in loss_order:
+        if name in loss_dict_raw and name != "total":
+            raw_val = loss_dict_raw[name]
+            weight = weights.get(name, 0.0)
+            weighted_val = raw_val * weight
+            weighted_total += weighted_val
+            lines.append(f"│ {name:10} │ {raw_val:8.4f} │ {weighted_val:8.4f} │")
+
+    lines.append("├────────────┼──────────┼──────────┤")
+    lines.append(f"│ {'TOTAL':10} │ {'':8} │ {weighted_total:8.4f} │")
+    lines.append("└────────────┴──────────┴──────────┘")
+
+    loss_dict_out = {
+        **{k: v for k, v in loss_dict_raw.items() if k != "total"},
+        "weighted_total": weighted_total,
+        "weights": weights,
+    }
+
+    return "\n".join(lines), loss_dict_out

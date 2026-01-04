@@ -57,7 +57,10 @@ def hard_bias(
             if isinstance(value, dict) and "min" in value and "max" in value:
                 min_v = value.get("min", MIN_FLUO_INTENSITY)
                 max_v = value.get("max", MAX_FLUO_INTENSITY)
-                init_v = jax.random.uniform(k, shape, minval=min_v, maxval=max_v)
+                if "init" in value:
+                    init_v = jnp.full(shape, float(value["init"]), dtype=jnp.float32)
+                else:
+                    init_v = jax.random.uniform(k, shape, minval=min_v, maxval=max_v)
             else:
                 fixed_val = float(value)
                 min_v = fixed_val
@@ -144,7 +147,18 @@ def bias(
             if isinstance(value, dict) and "min" in value and "max" in value:
                 min_v = value.get("min", MIN_FLUO_INTENSITY)
                 max_v = value.get("max", MAX_FLUO_INTENSITY)
-                init_v = jax.random.uniform(k, shape, minval=min_v, maxval=max_v)
+                if "init" in value:
+                    init_output = float(value["init"])
+                    if abs(max_v - min_v) < 1e-8:
+                        init_v = jnp.full(shape, init_output, dtype=jnp.float32)
+                    else:
+                        s = 0.501  # sigmoid(0) + 0.001, matches scale init below
+                        t = (init_output - min_v) / (max_v - min_v)
+                        t = jnp.clip(t, 0.001, 0.999)  # avoid logit singularities
+                        raw_v = s * jnp.log(t / (1 - t))  # s * logit(t)
+                        init_v = jnp.full(shape, float(raw_v), dtype=jnp.float32)
+                else:
+                    init_v = jax.random.uniform(k, shape, minval=min_v, maxval=max_v)
             else:
                 fixed_val = float(value)
                 min_v = fixed_val

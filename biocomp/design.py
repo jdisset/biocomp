@@ -27,7 +27,17 @@ from biocomp.optimutils import make_training_step, per_replicate_step, optimize,
 
 if TYPE_CHECKING:
     from biocomptools.modelmodel import BiocompModel
-from biocomp.designloss import distance_loss, grid_distance_loss  # noqa: F401 - re-exported
+from biocomp.designloss import (  # noqa: F401 - re-exported
+    grid_distance_loss,
+    simse_loss,
+    zncc_loss,
+    gradient_magnitude_loss,
+    lncc_grid_loss,
+    sinkhorn_divergence_conv,
+    spectral_loss,
+    proj_nonneg_ste,
+    _sanitize,
+)
 from biocomp.tumasking import build_tu_id_mapping, TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
 from biocomp.designdebug import save_debug_state, is_design_debug_enabled
 
@@ -94,7 +104,7 @@ class DesignManager(BaseModel):
 
     targets: list[TargetUnion]
     networks: list[Network]
-    sampling: SamplingConfigUnion = Field(default_factory=UniformSampling, discriminator="strategy")
+    sampling: SamplingConfigUnion = Field(default_factory=LatticeSampling, discriminator="strategy")
 
     enable_tu_masking: bool = False
     _tu_ids: list[str] | None = None
@@ -314,7 +324,14 @@ class DesignManager(BaseModel):
             return self.sampling.resolution
         return None
 
-    def build_stack(self, model: BiocompModel, unlock_ratios=True):
+    def build_stack(
+        self,
+        model: BiocompModel,
+        unlock_ratios=True,
+        use_latent_ratios: bool = False,
+        latent_dim: int = 8,
+        latent_hidden_dim: int = 16,
+    ):
         logger.info(f"Building stack with {len(self.networks)} design networks")
         logger.info(f"Design network names: {[n.name for n in self.networks]}")
         stack = ComputeStack(networks=self.networks)
@@ -329,7 +346,13 @@ class DesignManager(BaseModel):
             assert compute_config.node_functions is not None
 
             compute_config.node_functions["aggregation"] = encode_function(
-                partial(nd.aggregation, random_init=True)
+                partial(
+                    nd.aggregation,
+                    random_init=True,
+                    use_latent_ratios=use_latent_ratios,
+                    latent_dim=latent_dim,
+                    latent_hidden_dim=latent_hidden_dim,
+                )
             )
 
         stack.build(compute_config, enable_tu_masking=self.enable_tu_masking)
@@ -394,11 +417,15 @@ def initialize_params(
 
 
 class DesignConfig(DesignOptimConfig):
-    loss_function: EncodedPartialFunction = Field(default=distance_loss)
+    loss_function: EncodedPartialFunction = Field(default=grid_distance_loss)
     n_replicates: int = 4
     keep_in_history: list[str] | Literal["all"] = "all"
     tu_log_alpha_init_mean: float = 2.0
     tu_log_alpha_init_std: float = 0.5
+
+    use_latent_ratios: bool = False
+    latent_dim: int = 8
+    latent_hidden_dim: int = 16
 
     pluggable_optimizer: Any = None
 
@@ -646,6 +673,26 @@ def get_ratio_paths(params):
     return get_ratio_paths_and_sources(params)[0]
 
 
+def _create_loss_function(
+    stack: ComputeStack,
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    params: ParameterTree,
+) -> tuple[Callable, tuple[int, int], list[str]]:
+    """Create loss function for design optimization.
+
+    Returns: (loss_fn, num_z, ratio_paths)
+    """
+    static, _ = params.filter_by_tag(["non_grad", "shared"])
+    num_z_arr = static["global/number_of_random_variables"]
+    num_z = (dmanager.n_targets, int(num_z_arr.ravel()[0]))
+    direct_ratio_paths, _ = get_ratio_paths_and_sources(params)
+    loss_fn = dconf.loss_function.get_impl()(
+        stack, dconf, dmanager, num_z=num_z, ratio_paths=direct_ratio_paths
+    )
+    return loss_fn, num_z, direct_ratio_paths
+
+
 def normalize_ratio_source_arrays(params, source_paths, normalize_func):
     from biocomp.parameters import flatten_PTree, unflatten_PTree, ParamPath, ParameterTree
 
@@ -678,42 +725,36 @@ def _start_pluggable(
 
     pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
     optimizer = dconf.pluggable_optimizer
-
-    timer.start("stack", "[1/6] Building compute stack...")
-    stack = dmanager.build_stack(model, unlock_ratios=not lock_ratios)
-    timer.end("stack")
-
-    timer.start("params", "[2/6] Initializing parameters...")
     n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
     n_networks = len(dmanager.networks)
+
+    timer.start("stack", "[1/5] Building compute stack...")
+    stack = dmanager.build_stack(
+        model, unlock_ratios=not lock_ratios, use_latent_ratios=dconf.use_latent_ratios,
+        latent_dim=dconf.latent_dim, latent_hidden_dim=dconf.latent_hidden_dim,
+    )
+    timer.end("stack")
+
+    timer.start("params", "[2/5] Initializing parameters...")
     initial_params = initialize_params(
-        stack,
-        n_replicates=1,
-        n_targets=dmanager.n_targets,
-        shared_params=model.shared_params,
-        key=pkey,
-        n_tus=n_tus,
-        n_networks=n_networks,
+        stack, n_replicates=1, n_targets=dmanager.n_targets, shared_params=model.shared_params,
+        key=pkey, n_tus=n_tus, n_networks=n_networks,
         tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
         tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
     )
     initial_params = jax.tree.map(lambda x: x.squeeze(0), initial_params)
     timer.end("params")
 
-    timer.start("codec", "[3/6] Creating parameter codec...")
-    static, _ = initial_params.filter_by_tag(["non_grad", "shared"])
-    codec = GenomeCodec.from_params(initial_params, static_tags=("shared", "non_grad"))
+    timer.start("codec", "[3/5] Creating codec and loss function...")
+    codec = GenomeCodec.from_params(
+        initial_params, static_tags=("shared", "non_grad"), use_latent_ratios=dconf.use_latent_ratios,
+    )
     flat_params = codec.encode(initial_params)
     logger.info(f"  Genome dimension: {codec.param_dim}")
+    loss_fn, num_z, _ = _create_loss_function(stack, dmanager, dconf, initial_params)
     timer.end("codec")
 
-    timer.start("objective", "[4/6] Creating objective function...")
-    num_z = (dmanager.n_targets, int(static["global/number_of_random_variables"].ravel()[0]))
-    direct_ratio_paths, _ = get_ratio_paths_and_sources(initial_params)
-    loss_fn = dconf.loss_function.get_impl()(
-        stack, dconf, dmanager, num_z=num_z, ratio_paths=direct_ratio_paths
-    )
-
+    timer.start("objective", "[4/5] Creating objective function...")
     effective_batch_size = dconf.batch_size
     if dmanager.is_lattice_mode:
         effective_batch_size *= dmanager.grid_resolution[0] * dmanager.grid_resolution[1]
@@ -743,7 +784,7 @@ def _start_pluggable(
     compiled_get_yhatdep = jax.jit(get_yhatdep)
     timer.end("objective")
 
-    timer.start("opt_init", "[5/6] Initializing optimizer...")
+    timer.start("opt_init", "[5/5] Initializing optimizer...")
     init_key, opt_key = jax.random.split(loop_key)
 
     from .designoptim import NSGA2DesignOptimizer
@@ -848,7 +889,13 @@ def start(
     pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
 
     timer.start("stack", "[1/5] Building compute stack...")
-    stack = dmanager.build_stack(model, unlock_ratios=not lock_ratios)
+    stack = dmanager.build_stack(
+        model,
+        unlock_ratios=not lock_ratios,
+        use_latent_ratios=dconf.use_latent_ratios,
+        latent_dim=dconf.latent_dim,
+        latent_hidden_dim=dconf.latent_hidden_dim,
+    )
     timer.end("stack")
 
     timer.start("params", "[2/5] Initializing parameters...")
@@ -872,11 +919,6 @@ def start(
     static, dynamic = initial_params.filter_by_tag(["non_grad", "shared"])
     initial_optimizer_state = vmap(vmap(dconf.optimizer.init))(dynamic)
     timer.end("opt_init")
-
-    num_z = static["global/number_of_random_variables"]
-    assert_that(num_z.shape[0]).is_equal_to(dconf.n_replicates)
-    assert_that(jnp.all(num_z == num_z[0])).is_true()
-    num_z = (dmanager.n_targets, int(num_z.ravel()[0].squeeze()))
 
     steps_per_epoch = max(1, dconf.n_batches_per_epoch // dconf.batches_per_step)
     total_steps = int(dconf.n_epochs * steps_per_epoch)
@@ -923,28 +965,18 @@ def start(
     )
 
     timer.start("loss_fn", "[5/5] Creating loss and step functions...")
-    direct_ratio_paths, source_ratio_paths = get_ratio_paths_and_sources(initial_params)
-    ratio_paths = direct_ratio_paths
-    logger.debug(
-        f"Ratio paths: {len(direct_ratio_paths)} direct + {len(source_ratio_paths)} ArrayRef"
-    )
+    loss_func, num_z, direct_ratio_paths = _create_loss_function(stack, dmanager, dconf, initial_params)
+    _, source_ratio_paths = get_ratio_paths_and_sources(initial_params)
+    logger.debug(f"Ratio paths: {len(direct_ratio_paths)} direct + {len(source_ratio_paths)} ArrayRef")
 
     def norm_ratios_hook(params, *a, **kw):
         if direct_ratio_paths:
             params = params.update_leaves_by_path(direct_ratio_paths, normalize_ratios_prune)
         if source_ratio_paths:
-            params = normalize_ratio_source_arrays(
-                params, source_ratio_paths, normalize_ratios_prune
-            )
+            params = normalize_ratio_source_arrays(params, source_ratio_paths, normalize_ratios_prune)
         if TU_LOG_ALPHA_PATH in params:
-            params = params.update_leaves_by_path(
-                [TU_LOG_ALPHA_PATH], lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
-            )
+            params = params.update_leaves_by_path([TU_LOG_ALPHA_PATH], lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX))
         return params
-
-    loss_func = dconf.loss_function.get_impl()(
-        stack, dconf, dmanager, num_z=num_z, ratio_paths=ratio_paths
-    )
     step_fn = make_training_step(
         loss_func,
         dconf.optimizer,
@@ -1017,18 +1049,83 @@ def sample_for_evaluation(
     n_eval_samples: int,
     key: jax.Array,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Sample evaluation data. Returns (xraw, yraw) with shapes (n_networks, n_replicates, n_samples, n_targets, 2/1)."""
+    """Sample evaluation data. Returns (xraw, yraw) with shapes (n_networks, n_replicates, n_samples, n_targets, 2/1).
+
+    In lattice mode, uses grid sampling (n_samples = xres * yres), ignoring n_eval_samples.
+    In uniform mode, samples n_eval_samples random points.
+    """
     n_networks, n_replicates, n_targets = (
         len(dmanager.networks),
         dconf.n_replicates,
         dmanager.n_targets,
     )
     seed = int(jax.random.key_data(key)[0]) % (2**31)
-    xlist, ylist = dmanager._get_uniform_samples((n_networks, n_replicates, n_eval_samples), seed)
+
+    if dmanager.is_lattice_mode:
+        xres, yres = dmanager.grid_resolution
+        n_samples = xres * yres
+        xlist, ylist = dmanager.get_samples((n_networks, n_replicates, 1), seed)
+    else:
+        n_samples = n_eval_samples
+        xlist, ylist = dmanager.get_samples((n_networks, n_replicates, n_eval_samples), seed)
+
     xraw, yraw = jnp.stack(xlist, axis=0), jnp.stack(ylist, axis=0)
-    assert xraw.shape == (n_networks, n_replicates, n_eval_samples, n_targets, 2)
-    assert yraw.shape == (n_networks, n_replicates, n_eval_samples, n_targets, 1)
+    assert xraw.shape == (n_networks, n_replicates, n_samples, n_targets, 2), f"xraw shape mismatch: {xraw.shape} vs expected ({n_networks}, {n_replicates}, {n_samples}, {n_targets}, 2)"
+    assert yraw.shape == (n_networks, n_replicates, n_samples, n_targets, 1), f"yraw shape mismatch: {yraw.shape} vs expected ({n_networks}, {n_replicates}, {n_samples}, {n_targets}, 1)"
     return xraw, yraw
+
+
+def _compute_grid_loss_for_eval(
+    y_img: jnp.ndarray,
+    yhat_img: jnp.ndarray,
+    w_sinkhorn: float,
+    w_lncc: float,
+    w_mse: float,
+    w_rmse: float,
+    w_simse: float,
+    w_zncc: float,
+    w_gradient: float,
+    w_spectral: float,
+    w_contrast: float,
+    eps_sinkhorn: float,
+    n_sinkhorn_iters: int,
+    lncc_kernel: int,
+) -> float:
+    """Compute grid loss for evaluation - matches grid_distance_loss computation."""
+    y_img, yhat_img = _sanitize(y_img), _sanitize(yhat_img)
+    y_flat, yhat_flat = y_img.ravel(), yhat_img.ravel()
+
+    sinkhorn_l = (
+        sinkhorn_divergence_conv(
+            proj_nonneg_ste(yhat_img), proj_nonneg_ste(y_img), eps_sinkhorn, n_iters=n_sinkhorn_iters
+        )
+        if w_sinkhorn > 0
+        else 0.0
+    )
+    lncc_l = lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel) if w_lncc > 0 else 0.0
+    mse_l = jnp.mean((y_img - yhat_img) ** 2) if (w_mse > 0 or w_rmse > 0) else 0.0
+    rmse_l = jnp.sqrt(mse_l) if w_rmse > 0 else 0.0
+    simse_l = simse_loss(None, y_flat, yhat_flat) if w_simse > 0 else 0.0
+    zncc_l = zncc_loss(None, y_flat, yhat_flat) if w_zncc > 0 else 0.0
+    spectral_l = spectral_loss(None, y_img, yhat_img) if w_spectral > 0 else 0.0
+    gradient_l = gradient_magnitude_loss(y_img, yhat_img) if w_gradient > 0 else 0.0
+    contrast_l = (
+        jax.nn.relu((jnp.max(y_img) - jnp.min(y_img)) - (jnp.max(yhat_img) - jnp.min(yhat_img)))
+        if w_contrast > 0
+        else 0.0
+    )
+
+    return (
+        w_sinkhorn * sinkhorn_l
+        + w_lncc * lncc_l
+        + w_mse * mse_l
+        + w_rmse * rmse_l
+        + w_simse * simse_l
+        + w_zncc * zncc_l
+        + w_spectral * spectral_l
+        + w_gradient * gradient_l
+        + w_contrast * contrast_l
+    )
 
 
 def evaluate_design(
@@ -1045,8 +1142,8 @@ def evaluate_design(
 ) -> tuple[jnp.ndarray | None, jnp.ndarray]:
     """Evaluate design quality. Returns (predictions, losses) where losses has shape (n_replicates, n_targets, n_networks).
 
-    CRITICAL: This function MUST apply TU masks to be consistent with training.
-    Without TU masks, evaluation loss will NOT reflect actual design performance.
+    CRITICAL: This function uses the SAME loss as training (grid_distance_loss weights).
+    This ensures evaluation loss reflects actual design performance.
     """
     stack = dmanager.build_stack(model, unlock_ratios=False)
     n_networks, n_replicates, n_targets, n_samples = (
@@ -1056,6 +1153,30 @@ def evaluate_design(
         xraw.shape[2],
     )
     logger.info(f"Evaluating: {n_replicates} reps × {n_targets} targets × {n_samples} samples")
+
+    # extract loss weights from dconf.loss_function (same as training)
+    loss_kwargs = getattr(dconf.loss_function, 'kwargs', {}) or {}
+    w_sinkhorn = float(loss_kwargs.get('w_sinkhorn', 1.0))
+    w_lncc = float(loss_kwargs.get('w_lncc', 0.5))
+    w_mse = float(loss_kwargs.get('w_mse', 0.0))
+    w_rmse = float(loss_kwargs.get('w_rmse', 0.5))
+    w_simse = float(loss_kwargs.get('w_simse', 0.0))
+    w_zncc = float(loss_kwargs.get('w_zncc', 0.0))
+    w_gradient = float(loss_kwargs.get('w_gradient', 0.0))
+    w_spectral = float(loss_kwargs.get('w_spectral', 0.0))
+    w_contrast = float(loss_kwargs.get('w_contrast', 0.0))
+    eps_sinkhorn = float(loss_kwargs.get('eps_sinkhorn', 0.1))
+    n_sinkhorn_iters = int(loss_kwargs.get('n_sinkhorn_iters', 50))
+    lncc_kernel = int(loss_kwargs.get('lncc_kernel', 7))
+
+    logger.debug(
+        f"Eval loss weights: sinkhorn={w_sinkhorn}, lncc={w_lncc}, mse={w_mse}, rmse={w_rmse}, "
+        f"simse={w_simse}, zncc={w_zncc}, gradient={w_gradient}"
+    )
+
+    # grid resolution for reshaping predictions
+    xres, yres = dmanager.grid_resolution
+    assert n_samples == xres * yres, f"n_samples={n_samples} must equal xres*yres={xres * yres}"
 
     num_z_val = int(final_params["global/number_of_random_variables"][0, 0].squeeze())
     dep_mask = stack.get_dependent_output_mask()
@@ -1132,9 +1253,31 @@ def evaluate_design(
             yhat_dep = jnp.compress(dep_mask, jnp.concatenate(yhats, axis=0), axis=-1)
             if store_predictions:
                 rep_preds.append(yhat_dep)
-            rep_losses.append(
-                jnp.mean((yhat_dep - jnp.tile(y_slice, (1, n_networks))) ** 2, axis=0).tolist()
-            )
+
+            # compute grid-based loss matching training (not simple MSE!)
+            # reshape to grid format: (n_samples, n_networks) -> (n_networks, yres, xres)
+            y_grid = y_slice.squeeze(-1).reshape(yres, xres)
+            network_losses = []
+            for net_idx in range(n_networks):
+                yhat_grid = yhat_dep[:, net_idx].reshape(yres, xres)
+                loss_val = _compute_grid_loss_for_eval(
+                    y_grid,
+                    yhat_grid,
+                    w_sinkhorn,
+                    w_lncc,
+                    w_mse,
+                    w_rmse,
+                    w_simse,
+                    w_zncc,
+                    w_gradient,
+                    w_spectral,
+                    w_contrast,
+                    eps_sinkhorn,
+                    n_sinkhorn_iters,
+                    lncc_kernel,
+                )
+                network_losses.append(float(loss_val))
+            rep_losses.append(network_losses)
             pbar.update(1)
 
         all_losses.append(rep_losses)

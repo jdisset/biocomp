@@ -26,10 +26,12 @@ class NumRange(BaseModel):
     """Range specification for unlocked numeric parameters (ratios, biases)
 
     If min or max is None, it means no limit in that direction.
+    If init is provided, it sets the initial value for optimization.
     """
 
     min: Optional[float] = None
     max: Optional[float] = None
+    init: Optional[float] = None
 
     def contains(self, value: float) -> bool:
         """Check if value is within range"""
@@ -382,6 +384,8 @@ class CoTransfection(BaseModel):
 
     def _get_ratio_value(self, r: RatioType) -> float:
         if isinstance(r, NumRange):
+            if r.init is not None:
+                return r.init
             return (r.min + r.max) / 2 if r.min is not None and r.max is not None else 1.0
         if isinstance(r, RatioSpec):
             return r.value

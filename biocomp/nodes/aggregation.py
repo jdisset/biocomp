@@ -21,12 +21,21 @@ NDArray = np.ndarray | jnp.ndarray
 logger = get_logger(__name__)
 
 
+def _decode_latent_ratios(z, W1, b1, W2, b2):
+    """Decode latent code to ratios via MLP. No softmax - aggregation handles normalization."""
+    h = jax.nn.gelu(W1 @ z + b1)
+    return W2 @ h + b2
+
+
 def aggregation(
     input_shapes: list[tuple[int]],
     n_outputs: int,
     stack: ComputeStack,
     namespace: str,
     random_init: bool = False,
+    use_latent_ratios: bool = False,
+    latent_dim: int = 8,
+    latent_hidden_dim: int = 16,
     **_,
 ) -> LayerInstance:
     assert len(input_shapes) == 1, f"Aggregation expects 1 input, got {len(input_shapes)}"
@@ -66,13 +75,17 @@ def aggregation(
                     if range_info is not None:
                         min_v = range_info.get("min", 0.05) or 0.05
                         max_v = range_info.get("max", 1.0) or 1.0
-                        absolute_ratios.append(
-                            jax.random.uniform(
-                                jax.random.fold_in(key, i * n_outputs + j),
-                                minval=min_v,
-                                maxval=max_v,
+                        init_v = range_info.get("init")
+                        if init_v is not None:
+                            absolute_ratios.append(float(init_v))
+                        else:
+                            absolute_ratios.append(
+                                jax.random.uniform(
+                                    jax.random.fold_in(key, i * n_outputs + j),
+                                    minval=min_v,
+                                    maxval=max_v,
+                                )
                             )
-                        )
                         node_mins.append(min_v)
                         node_maxs.append(max_v)
                     else:
@@ -106,6 +119,39 @@ def aggregation(
         params.at(f"{namespace}/ratio_min", ratio_mins_arr, tags=[NON_GRAD_TAG])
         params.at(f"{namespace}/ratio_max", ratio_maxs_arr, tags=[NON_GRAD_TAG])
 
+        if use_latent_ratios and not all_constrained:
+            n_nodes = len(nodelist)
+            latent_z_list = []
+            latent_W1_list = []
+            latent_b1_list = []
+            latent_W2_list = []
+            latent_b2_list = []
+
+            for i in range(n_nodes):
+                k1, k2, key = jax.random.split(key, 3)
+                init_ratios = ratios[i]
+                target_ratios = jnp.abs(init_ratios) + 0.1
+                target_ratios = target_ratios / jnp.sum(target_ratios)
+
+                z = jax.random.normal(jax.random.fold_in(key, i), (latent_dim,)) * 0.1
+                W1 = jax.random.normal(k1, (latent_hidden_dim, latent_dim)) * jnp.sqrt(2.0 / latent_dim)
+                b1 = jnp.zeros(latent_hidden_dim)
+                W2 = jax.random.normal(k2, (n_outputs, latent_hidden_dim)) * jnp.sqrt(2.0 / latent_hidden_dim) * 0.1
+                b2 = target_ratios
+
+                latent_z_list.append(z)
+                latent_W1_list.append(W1)
+                latent_b1_list.append(b1)
+                latent_W2_list.append(W2)
+                latent_b2_list.append(b2)
+
+            params[f"{namespace}/latent_z"] = jnp.stack(latent_z_list)
+            params[f"{namespace}/latent_W1"] = jnp.stack(latent_W1_list)
+            params[f"{namespace}/latent_b1"] = jnp.stack(latent_b1_list)
+            params[f"{namespace}/latent_W2"] = jnp.stack(latent_W2_list)
+            params[f"{namespace}/latent_b2"] = jnp.stack(latent_b2_list)
+            logger.info(f"Latent ratios enabled: {n_nodes} nodes × {latent_dim}d latent → {n_outputs} outputs")
+
         add_tu_output_mapping(params, stack, nodelist, namespace, n_outputs)
         add_node_network_ids(params, nodelist, namespace)
 
@@ -120,11 +166,23 @@ def aggregation(
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
-        ratios = params[f"{namespace}/{PNAME}"][node_id][:n_outputs]
 
-        ratio_min = params[f"{namespace}/ratio_min"][node_id][:n_outputs]
-        ratio_max = params[f"{namespace}/ratio_max"][node_id][:n_outputs]
-        constrained_ratios = jnp.clip(ratios, ratio_min, ratio_max)
+        latent_z_path = f"{namespace}/latent_z"
+        if use_latent_ratios and latent_z_path in params:
+            z = params[latent_z_path][node_id]
+            W1 = params[f"{namespace}/latent_W1"][node_id]
+            b1 = params[f"{namespace}/latent_b1"][node_id]
+            W2 = params[f"{namespace}/latent_W2"][node_id]
+            b2 = params[f"{namespace}/latent_b2"][node_id]
+            raw_ratios = _decode_latent_ratios(z, W1, b1, W2, b2)[:n_outputs]
+            ratio_min = params[f"{namespace}/ratio_min"][node_id][:n_outputs]
+            ratio_max = params[f"{namespace}/ratio_max"][node_id][:n_outputs]
+            constrained_ratios = jnp.clip(raw_ratios, ratio_min, ratio_max)
+        else:
+            ratios = params[f"{namespace}/{PNAME}"][node_id][:n_outputs]
+            ratio_min = params[f"{namespace}/ratio_min"][node_id][:n_outputs]
+            ratio_max = params[f"{namespace}/ratio_max"][node_id][:n_outputs]
+            constrained_ratios = jnp.clip(ratios, ratio_min, ratio_max)
 
         abs_ratios = jnp.abs(constrained_ratios)
 
@@ -185,7 +243,16 @@ def aggregation(
 
         for i, n in enumerate(nodelist):
             updt = {}
-            ratios = params[f"{namespace}/{PNAME}"][i]
+            latent_z_path = f"{namespace}/latent_z"
+            if use_latent_ratios and latent_z_path in params:
+                z = params[latent_z_path][i]
+                W1 = params[f"{namespace}/latent_W1"][i]
+                b1 = params[f"{namespace}/latent_b1"][i]
+                W2 = params[f"{namespace}/latent_W2"][i]
+                b2 = params[f"{namespace}/latent_b2"][i]
+                ratios = _decode_latent_ratios(z, W1, b1, W2, b2)[:n_outputs]
+            else:
+                ratios = params[f"{namespace}/{PNAME}"][i]
             ratios_array = jnp.abs(jnp.array(ratios))
             original_ratios = ratios_array.copy()
 

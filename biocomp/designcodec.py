@@ -25,6 +25,7 @@ class GenomeCodec(BaseModel):
     tu_log_alpha_max: float = LOG_ALPHA_MAX
     direct_ratio_paths: tuple[str, ...] = ()
     source_ratio_paths: tuple[str, ...] = ()
+    use_latent_ratios: bool = False
 
     @staticmethod
     def from_params(
@@ -61,15 +62,16 @@ class GenomeCodec(BaseModel):
         return self._apply_constraints(params) if apply_constraints else params
 
     def _apply_constraints(self, params: ParameterTree) -> ParameterTree:
-        def normalize(x):
-            return normalize_ratios_prune(x, threshold=self.ratio_prune_threshold)
+        if not self.use_latent_ratios:
+            def normalize(x):
+                return normalize_ratios_prune(x, threshold=self.ratio_prune_threshold)
 
-        if self.direct_ratio_paths:
-            params = params.update_leaves_by_path(list(self.direct_ratio_paths), normalize)
-        if self.source_ratio_paths:
-            from .design import normalize_ratio_source_arrays
+            if self.direct_ratio_paths:
+                params = params.update_leaves_by_path(list(self.direct_ratio_paths), normalize)
+            if self.source_ratio_paths:
+                from .design import normalize_ratio_source_arrays
 
-            params = normalize_ratio_source_arrays(params, list(self.source_ratio_paths), normalize)
+                params = normalize_ratio_source_arrays(params, list(self.source_ratio_paths), normalize)
         if TU_LOG_ALPHA_PATH in params:
             params = params.update_leaves_by_path(
                 [TU_LOG_ALPHA_PATH],

@@ -994,6 +994,47 @@ def test_prediction_before_and_after_commit(lib, simple_design_recipe):
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
+def test_design_eval_matches_training_loss():
+    """Verify _compute_grid_loss_for_eval uses same loss formula as grid_distance_loss."""
+    import numpy as np
+    from biocomp.design import _compute_grid_loss_for_eval
+    from biocomp.designloss import simse_loss, zncc_loss, gradient_magnitude_loss
+
+    np.random.seed(42)
+    y = jnp.array(np.random.rand(32, 32).astype(np.float32))
+    yhat = jnp.array(np.random.rand(32, 32).astype(np.float32))
+
+    # compute expected loss using designloss functions directly
+    expected_loss = (
+        0.4 * float(simse_loss(None, y.ravel(), yhat.ravel()))
+        + 0.4 * float(zncc_loss(None, y.ravel(), yhat.ravel()))
+        + 0.2 * float(gradient_magnitude_loss(y, yhat))
+    )
+
+    # compute using _compute_grid_loss_for_eval
+    eval_loss = float(
+        _compute_grid_loss_for_eval(
+            y,
+            yhat,
+            w_sinkhorn=0.0,
+            w_lncc=0.0,
+            w_mse=0.0,
+            w_simse=0.4,
+            w_zncc=0.4,
+            w_gradient=0.2,
+            w_spectral=0.0,
+            w_contrast=0.0,
+            eps_sinkhorn=0.1,
+            n_sinkhorn_iters=50,
+            lncc_kernel=7,
+        )
+    )
+
+    assert np.isclose(eval_loss, expected_loss, rtol=0.01), (
+        f"Eval loss {eval_loss:.6f} should match training loss {expected_loss:.6f}"
+    )
+
+
 if __name__ == "__main__":
     lib_instance = load_lib()
 
