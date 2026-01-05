@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 
 from biocomp.logging_config import get_logger
+from biocomp.plotting.ascii_heatmap import CMAP_S
 
 if TYPE_CHECKING:
     from biocomp.compute import ComputeStack
@@ -875,39 +876,53 @@ def compare_evaluation_results(
     }
 
 
-def side_by_side_txt_plot(
+LOSS_ORDER = [
+    "sinkhorn",
+    "lncc",
+    "rmse",
+    "mse",
+    "simse",
+    "spectral",
+    "gradient",
+    "contrast",
+    "zncc",
+]
+DEFAULT_LOSS_WEIGHTS = {
+    "sinkhorn": 1.0,
+    "lncc": 0.5,
+    "rmse": 0.5,
+    "mse": 0.0,
+    "simse": 0.0,
+    "spectral": 0.0,
+    "gradient": 0.0,
+    "contrast": 0.0,
+    "zncc": 0.0,
+}
+
+
+def compute_grid_metrics(
     target_grid: np.ndarray,
     prediction_grid: np.ndarray,
-    height: int = 10,
-    width: int = 24,
     loss_weights: dict[str, float] | None = None,
-    title_target: str = "TARGET",
-    title_prediction: str = "PREDICTION",
-    training_penalties: dict[str, float] | None = None,
-    training_grid_total: float | None = None,
-) -> tuple[str, dict[str, float]]:
-    """Create side-by-side ASCII heatmaps of target vs prediction with loss metrics table.
+) -> dict[str, Any]:
+    """Compute comprehensive grid-based metrics for target vs prediction comparison.
 
     Args:
         target_grid: 2D array (H, W) of target pattern
         prediction_grid: 2D array (H, W) of predicted pattern
-        height: Height of each heatmap in characters
-        width: Width of each heatmap in characters
         loss_weights: Optional dict of loss weights {loss_name: weight}.
-            If None, uses defaults: sinkhorn=1.0, lncc=0.5, rmse=0.5
-        title_target: Title for target heatmap
-        title_prediction: Title for prediction heatmap
-        training_penalties: Optional dict of training penalties {penalty_name: value}.
-            If provided, shows 3-column Training vs Eval comparison table.
-        training_grid_total: Optional training grid total for comparison.
-            When provided with training_penalties, shows delta column.
+            If None, uses DEFAULT_LOSS_WEIGHTS.
 
     Returns:
-        (txt_output, loss_dict) where:
-            - txt_output: Formatted string with side-by-side heatmaps and loss table
-            - loss_dict: Dict of all loss values (both unweighted and weighted totals)
+        Dict containing:
+            - Individual loss values (sinkhorn, lncc, rmse, mse, etc.)
+            - Weighted versions of each loss ({name}_weighted)
+            - weighted_total: sum of weighted losses
+            - correlation: Pearson correlation coefficient
+            - pred_range: (min, max) of prediction
+            - target_range: (min, max) of target
+            - weights: the loss weights used
     """
-    from biocomp.plotting.ascii_heatmap import heatmap
     from biocomp.designloss import compute_grid_losses
 
     assert target_grid.ndim == 2, f"target_grid must be 2D, got {target_grid.ndim}D"
@@ -916,8 +931,13 @@ def side_by_side_txt_plot(
         f"Shape mismatch: target={target_grid.shape} vs pred={prediction_grid.shape}"
     )
 
-    defaults = {"sinkhorn": 1.0, "lncc": 0.5, "rmse": 0.5, "mse": 0.0, "simse": 0.0, "spectral": 0.0, "gradient": 0.0, "contrast": 0.0}
-    weights = {**defaults, **(loss_weights or {})}
+    # Normalize weight keys: accept both "zncc" and "w_zncc" formats
+    raw_weights = loss_weights or {}
+    normalized = {}
+    for k, v in raw_weights.items():
+        key = k[2:] if k.startswith("w_") else k
+        normalized[key] = v
+    weights = {**DEFAULT_LOSS_WEIGHTS, **normalized}
 
     result = compute_grid_losses(
         jnp.array(prediction_grid),
@@ -930,106 +950,289 @@ def side_by_side_txt_plot(
         w_spectral=weights["spectral"],
         w_gradient=weights["gradient"],
         w_contrast=weights["contrast"],
+        w_zncc=weights["zncc"],
     )
 
-    vmin = min(float(target_grid.min()), float(prediction_grid.min()))
-    vmax = max(float(target_grid.max()), float(prediction_grid.max()))
+    loss_dict_raw = result.to_dict()
+
+    metrics: dict[str, Any] = {}
+    weighted_total = 0.0
+
+    for name in LOSS_ORDER:
+        if name in loss_dict_raw and name != "total":
+            raw_val = float(loss_dict_raw[name])
+            weight = weights.get(name, 0.0)
+            weighted_val = raw_val * weight
+            metrics[name] = raw_val
+            metrics[f"{name}_weighted"] = weighted_val
+            weighted_total += weighted_val
+
+    metrics["weighted_total"] = weighted_total
+    metrics["weights"] = weights
+
+    correlation = float(np.corrcoef(target_grid.ravel(), prediction_grid.ravel())[0, 1])
+    metrics["correlation"] = correlation
+
+    metrics["pred_range"] = (float(prediction_grid.min()), float(prediction_grid.max()))
+    metrics["target_range"] = (float(target_grid.min()), float(target_grid.max()))
+
+    return metrics
+
+
+def side_by_side_txt_plot(
+    target_grid: np.ndarray,
+    prediction_grid: np.ndarray,
+    height: int = 10,
+    width: int = 24,
+    loss_weights: dict[str, float] | None = None,
+    title_target: str = "TARGET",
+    title_prediction: str = "PREDICTION",
+    training_losses: dict[str, float] | None = None,
+    training_penalties: dict[str, float] | None = None,
+    training_grid_total: float | None = None,
+    shared_colorbar: bool = False,
+    xlim: tuple[float, float] = (0.0, 1.0),
+    ylim: tuple[float, float] = (0.0, 1.0),
+    show_axes: bool = True,
+    compute_metrics: bool = True,
+) -> tuple[str, dict[str, Any]]:
+    """Create side-by-side ASCII heatmaps of target vs prediction with loss metrics table.
+
+    Args:
+        target_grid: 2D array (H, W) of target pattern
+        prediction_grid: 2D array (H, W) of predicted pattern
+        height: Height of each heatmap in characters
+        width: Width of each heatmap in characters
+        loss_weights: Optional dict of loss weights {loss_name: weight}.
+            If None, uses defaults: sinkhorn=1.0, lncc=0.5, rmse=0.5
+        title_target: Title for target heatmap
+        title_prediction: Title for prediction heatmap
+        training_losses: Optional dict of training losses {loss_name: weighted_value}.
+            Keys should match LOSS_ORDER (sinkhorn, lncc, rmse, etc.).
+            If provided, shows Training vs Eval comparison table with deltas.
+        training_penalties: Optional dict of training penalties {penalty_name: value}.
+            If provided, shows penalties in the table (training-only, no eval equivalent).
+        training_grid_total: Optional training grid total for comparison.
+            When provided, shows delta between training and eval totals.
+        shared_colorbar: If True, use shared vmin/vmax across both plots with single
+            colorbar. If False (default), each plot has independent color range.
+        xlim: X-axis range (min, max) for tick labels. Default (0.0, 1.0).
+        ylim: Y-axis range (min, max) for tick labels. Default (0.0, 1.0).
+        show_axes: If True (default), show min/max tick labels on x and y axes.
+        compute_metrics: If True (default), compute and return comprehensive metrics
+            via compute_grid_metrics(). If False, return empty metrics dict (faster).
+
+    Returns:
+        (txt_output, metrics_dict) where:
+            - txt_output: Formatted string with side-by-side heatmaps (and loss table if compute_metrics=True)
+            - metrics_dict: Dict from compute_grid_metrics() with losses, correlation, ranges.
+              Also includes training_penalties, training_grid_total, delta_grid if provided.
+              Empty dict if compute_metrics=False.
+    """
+    from biocomp.plotting.ascii_heatmap import heatmap
+
+    assert target_grid.ndim == 2, f"target_grid must be 2D, got {target_grid.ndim}D"
+    assert prediction_grid.ndim == 2, f"prediction_grid must be 2D, got {prediction_grid.ndim}D"
+    assert target_grid.shape == prediction_grid.shape, (
+        f"Shape mismatch: target={target_grid.shape} vs pred={prediction_grid.shape}"
+    )
+
+    if compute_metrics:
+        metrics = compute_grid_metrics(target_grid, prediction_grid, loss_weights)
+    else:
+        metrics = {}
+
+    if shared_colorbar:
+        vmin_target = vmin_pred = min(float(target_grid.min()), float(prediction_grid.min()))
+        vmax_target = vmax_pred = max(float(target_grid.max()), float(prediction_grid.max()))
+    else:
+        vmin_target, vmax_target = float(target_grid.min()), float(target_grid.max())
+        vmin_pred, vmax_pred = float(prediction_grid.min()), float(prediction_grid.max())
 
     # Flip vertically for proper orientation (origin at bottom-left like scientific plots)
     target_flipped = np.flipud(target_grid)
     pred_flipped = np.flipud(prediction_grid)
 
-    target_hm = heatmap(target_flipped, vmin=vmin, vmax=vmax, xres=width, yres=height, show_colorbar=False)
-    pred_hm = heatmap(pred_flipped, vmin=vmin, vmax=vmax, xres=width, yres=height, show_colorbar=False)
+    target_hm = heatmap(
+        target_flipped,
+        vmin=vmin_target,
+        vmax=vmax_target,
+        xres=width,
+        yres=height,
+        show_colorbar=False,
+    )
+    pred_hm = heatmap(
+        pred_flipped, vmin=vmin_pred, vmax=vmax_pred, xres=width, yres=height, show_colorbar=False
+    )
 
-    target_lines = target_hm.split('\n')
-    pred_lines = pred_hm.split('\n')
+    target_lines = target_hm.split("\n")
+    pred_lines = pred_hm.split("\n")
 
     max_lines = max(len(target_lines), len(pred_lines))
-    target_lines += [''] * (max_lines - len(target_lines))
-    pred_lines += [''] * (max_lines - len(pred_lines))
+    target_lines += [""] * (max_lines - len(target_lines))
+    pred_lines += [""] * (max_lines - len(pred_lines))
 
     gap = "    "
     lines = []
-    lines.append(f"{title_target.center(width)}{gap}{title_prediction.center(width)}")
-    for t_line, p_line in zip(target_lines, pred_lines, strict=False):
+
+    y_label_width = 5 if show_axes else 0
+    y_min_str = f"{ylim[0]:.1f}" if show_axes else ""
+    y_max_str = f"{ylim[1]:.1f}" if show_axes else ""
+
+    if show_axes:
+        title_pad = " " * y_label_width
+        lines.append(
+            f"{title_pad}{title_target.center(width)}{gap}{title_pad}{title_prediction.center(width)}"
+        )
+    else:
+        lines.append(f"{title_target.center(width)}{gap}{title_prediction.center(width)}")
+
+    for i, (t_line, p_line) in enumerate(zip(target_lines, pred_lines, strict=False)):
         t_padded = t_line.ljust(width) if len(t_line) < width else t_line[:width]
         p_padded = p_line.ljust(width) if len(p_line) < width else p_line[:width]
-        lines.append(f"{t_padded}{gap}{p_padded}")
-    lines.append(f"{vmin:.2f} ░▒▓█ {vmax:.2f}".center(width * 2 + len(gap)))
 
-    loss_dict_raw = result.to_dict()
-    loss_order = ["sinkhorn", "lncc", "rmse", "mse", "simse", "spectral", "gradient", "contrast"]
+        if show_axes:
+            if i == 0:
+                y_label = f"{y_max_str:>{y_label_width - 1}}┤"
+            elif i == max_lines - 1:
+                y_label = f"{y_min_str:>{y_label_width - 1}}┤"
+            else:
+                y_label = " " * (y_label_width - 1) + "│"
+            lines.append(f"{y_label}{t_padded}{gap}{y_label}{p_padded}")
+        else:
+            lines.append(f"{t_padded}{gap}{p_padded}")
 
-    weighted_total = 0.0
-    for name in loss_order:
-        if name in loss_dict_raw and name != "total":
-            raw_val = loss_dict_raw[name]
-            weight = weights.get(name, 0.0)
-            weighted_total += raw_val * weight
+    if show_axes:
+        x_min_str = f"{xlim[0]:.1f}"
+        x_max_str = f"{xlim[1]:.1f}"
+        x_axis_line = f"{x_min_str}{' ' * (width - len(x_min_str) - len(x_max_str))}{x_max_str}"
+        y_pad = " " * y_label_width
+        lines.append(f"{y_pad}{x_axis_line}{gap}{y_pad}{x_axis_line}")
 
-    if training_grid_total is not None:
-        delta_grid = abs(training_grid_total - weighted_total)
-        lines.append("")
-        lines.append("┌─────────────────┬───────────┬───────────┬─────────┐")
-        lines.append("│ Component       │  Training │      Eval │   Delta │")
-        lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
-
-        for name in loss_order:
-            if name in loss_dict_raw and name != "total":
-                raw_val = loss_dict_raw[name]
-                weight = weights.get(name, 0.0)
-                eval_w = raw_val * weight
-                if eval_w > 0:
-                    lines.append(f"│ {name:15} │ {eval_w:9.4f} │ {eval_w:9.4f} │  0.0000 │")
-
-        lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
-        tr_gt, w_tot, d_g = training_grid_total, weighted_total, delta_grid
-        lines.append(f"│ {'GRID TOTAL':15} │ {tr_gt:9.4f} │ {w_tot:9.4f} │ {d_g:7.4f} │")
-
-        if training_penalties:
-            lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
-            penalty_order = [
-                "l0_penalty", "spread_penalty", "coupling_penalty",
-                "tucount_penalty", "ern_tying_penalty",
-            ]
-            penalty_sum = 0.0
-            for pen_name in penalty_order:
-                if pen_name in training_penalties:
-                    pen_val = training_penalties[pen_name]
-                    penalty_sum += pen_val
-                    lines.append(f"│ {pen_name:15} │ {pen_val:9.4f} │       n/a │         │")
-
-            total_w_pen = training_grid_total + penalty_sum
-            lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
-            lines.append(f"│ {'TOTAL + PENALTY':15} │ {total_w_pen:9.4f} │       n/a │         │")
-
-        lines.append("└─────────────────┴───────────┴───────────┴─────────┘")
+    cmap_chars = CMAP_S[5]
+    if show_axes:
+        cb_pad = " " * y_label_width
     else:
-        delta_grid = 0.0
-        lines.append("")
-        lines.append("┌────────────┬──────────┬──────────┐")
-        lines.append("│ Loss       │ Unweight │ Weighted │")
-        lines.append("├────────────┼──────────┼──────────┤")
+        cb_pad = ""
 
-        for name in loss_order:
-            if name in loss_dict_raw and name != "total":
-                raw_val = loss_dict_raw[name]
-                weight = weights.get(name, 0.0)
-                weighted_val = raw_val * weight
-                lines.append(f"│ {name:10} │ {raw_val:8.4f} │ {weighted_val:8.4f} │")
+    if shared_colorbar:
+        cb_str = f"{vmin_target:.2f} {cmap_chars} {vmax_target:.2f}"
+        total_width = (width + y_label_width) * 2 + len(gap) if show_axes else width * 2 + len(gap)
+        lines.append(cb_str.center(total_width))
+    else:
+        target_cb = f"{vmin_target:.2f} {cmap_chars} {vmax_target:.2f}"
+        pred_cb = f"{vmin_pred:.2f} {cmap_chars} {vmax_pred:.2f}"
+        lines.append(f"{cb_pad}{target_cb.center(width)}{gap}{cb_pad}{pred_cb.center(width)}")
 
-        lines.append("├────────────┼──────────┼──────────┤")
-        lines.append(f"│ {'TOTAL':10} │ {'':8} │ {weighted_total:8.4f} │")
-        lines.append("└────────────┴──────────┴──────────┘")
+    delta_grid = 0.0
+    if compute_metrics:
+        weighted_total = metrics["weighted_total"]
+        show_training_comparison = training_losses is not None or training_grid_total is not None
 
-    loss_dict_out = {
-        **{k: v for k, v in loss_dict_raw.items() if k != "total"},
-        "weighted_total": weighted_total,
-        "weights": weights,
+        if show_training_comparison:
+            delta_grid = (
+                abs(training_grid_total - weighted_total)
+                if training_grid_total is not None
+                else 0.0
+            )
+            lines.append("")
+            lines.append("┌─────────────────┬───────────┬───────────┬─────────┐")
+            lines.append("│ Component       │  Training │      Eval │   Delta │")
+            lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
+
+            train_losses = training_losses or {}
+            for name in LOSS_ORDER:
+                weighted_key = f"{name}_weighted"
+                if weighted_key in metrics:
+                    eval_w = metrics[weighted_key]
+                    train_w = train_losses.get(name, train_losses.get(weighted_key, None))
+                    if eval_w > 0 or (train_w is not None and train_w > 0):
+                        if train_w is not None:
+                            delta = abs(train_w - eval_w)
+                            lines.append(
+                                f"│ {name:15} │ {train_w:9.4f} │ {eval_w:9.4f} │ {delta:7.4f} │"
+                            )
+                        else:
+                            lines.append(f"│ {name:15} │       n/a │ {eval_w:9.4f} │         │")
+
+            lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
+            if training_grid_total is not None:
+                lines.append(
+                    f"│ {'GRID TOTAL':15} │ {training_grid_total:9.4f} │ {weighted_total:9.4f} │ {delta_grid:7.4f} │"
+                )
+            else:
+                lines.append(f"│ {'GRID TOTAL':15} │       n/a │ {weighted_total:9.4f} │         │")
+
+            if training_penalties:
+                lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
+                penalty_order = [
+                    "l0_penalty",
+                    "spread_penalty",
+                    "coupling_penalty",
+                    "tucount_penalty",
+                    "ern_tying_penalty",
+                ]
+                penalty_sum = 0.0
+                for pen_name in penalty_order:
+                    if pen_name in training_penalties:
+                        pen_val = training_penalties[pen_name]
+                        penalty_sum += pen_val
+                        lines.append(f"│ {pen_name:15} │ {pen_val:9.4f} │       n/a │         │")
+
+                if training_grid_total is not None:
+                    total_w_pen = training_grid_total + penalty_sum
+                    lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
+                    lines.append(
+                        f"│ {'TOTAL + PENALTY':15} │ {total_w_pen:9.4f} │       n/a │         │"
+                    )
+
+            lines.append("└─────────────────┴───────────┴───────────┴─────────┘")
+        else:
+            lines.append("")
+            lines.append("┌────────────┬──────────┬──────────┐")
+            lines.append("│ Loss       │ Unweight │ Weighted │")
+            lines.append("├────────────┼──────────┼──────────┤")
+
+            for name in LOSS_ORDER:
+                if name in metrics:
+                    raw_val = metrics[name]
+                    weighted_val = metrics.get(f"{name}_weighted", 0.0)
+                    if raw_val > 1e-8 or weighted_val > 1e-8:
+                        lines.append(f"│ {name:10} │ {raw_val:8.4f} │ {weighted_val:8.4f} │")
+
+            lines.append("├────────────┼──────────┼──────────┤")
+            lines.append(f"│ {'TOTAL':10} │ {'':8} │ {weighted_total:8.4f} │")
+
+            if training_penalties:
+                lines.append("├────────────┼──────────┼──────────┤")
+                penalty_order = [
+                    "l0_penalty",
+                    "spread_penalty",
+                    "coupling_penalty",
+                    "tucount_penalty",
+                    "ern_tying_penalty",
+                ]
+                penalty_sum = 0.0
+                for pen_name in penalty_order:
+                    if pen_name in training_penalties:
+                        pen_val = training_penalties[pen_name]
+                        if pen_val > 1e-8:
+                            penalty_sum += pen_val
+                            lines.append(f"│ {pen_name:10} │ {'':8} │ {pen_val:8.4f} │")
+
+                if penalty_sum > 1e-8:
+                    total_w_pen = weighted_total + penalty_sum
+                    lines.append("├────────────┼──────────┼──────────┤")
+                    lines.append(f"│ {'TOTAL+PEN':10} │ {'':8} │ {total_w_pen:8.4f} │")
+
+            lines.append("└────────────┴──────────┴──────────┘")
+
+    metrics_out = {
+        **metrics,
+        "training_losses": training_losses,
         "training_grid_total": training_grid_total,
         "training_penalties": training_penalties,
         "delta_grid": delta_grid,
     }
 
-    return "\n".join(lines), loss_dict_out
+    return "\n".join(lines), metrics_out

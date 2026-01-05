@@ -38,6 +38,7 @@ class GridLossResult:
     spectral: float = 0.0
     gradient: float = 0.0
     contrast: float = 0.0
+    zncc: float = 0.0
     sinkhorn_contrib: jnp.ndarray | None = None
     lncc_contrib: jnp.ndarray | None = None
 
@@ -52,6 +53,7 @@ class GridLossResult:
             "spectral": self.spectral,
             "gradient": self.gradient,
             "contrast": self.contrast,
+            "zncc": self.zncc,
         }
 
 
@@ -66,6 +68,7 @@ def compute_grid_losses(
     w_spectral: float = 0.0,
     w_gradient: float = 0.0,
     w_contrast: float = 0.0,
+    w_zncc: float = 0.0,
     eps_sinkhorn: float = 0.1,
     n_sinkhorn_iters: int = 50,
     lncc_kernel: int = 7,
@@ -112,9 +115,7 @@ def compute_grid_losses(
         simse_loss(None, Y_target.flatten(), Y_pred.flatten()) if w_simse > 0 else jnp.array(0.0)
     )
     spectral_l = spectral_loss(None, Y_target, Y_pred) if w_spectral > 0 else jnp.array(0.0)
-    gradient_l = (
-        gradient_magnitude_loss(Y_target, Y_pred) if w_gradient > 0 else jnp.array(0.0)
-    )
+    gradient_l = gradient_magnitude_loss(Y_target, Y_pred) if w_gradient > 0 else jnp.array(0.0)
     # Contrast loss: penalize when prediction range is smaller than target range
     if w_contrast > 0:
         target_range = jnp.max(Y_target) - jnp.min(Y_target)
@@ -122,7 +123,10 @@ def compute_grid_losses(
         contrast_l = jax.nn.relu(target_range - pred_range)
     else:
         contrast_l = jnp.array(0.0)
-    logger.debug(f"compute_grid_losses: w_mse={w_mse}, w_rmse={w_rmse}, raw_mse={float(mse_l):.6f}, raw_rmse={float(rmse_l):.6f}")
+    zncc_l = zncc_loss(None, Y_target.flatten(), Y_pred.flatten()) if w_zncc > 0 else jnp.array(0.0)
+    logger.debug(
+        f"compute_grid_losses: w_mse={w_mse}, w_rmse={w_rmse}, raw_mse={float(mse_l):.6f}, raw_rmse={float(rmse_l):.6f}"
+    )
 
     total = (
         w_sinkhorn * sinkhorn_l
@@ -133,6 +137,7 @@ def compute_grid_losses(
         + w_spectral * spectral_l
         + w_gradient * gradient_l
         + w_contrast * contrast_l
+        + w_zncc * zncc_l
     )
 
     lncc_contrib = None
@@ -149,6 +154,7 @@ def compute_grid_losses(
         spectral=float(spectral_l),
         gradient=float(gradient_l),
         contrast=float(contrast_l),
+        zncc=float(zncc_l),
         lncc_contrib=lncc_contrib,
     )
 
@@ -340,7 +346,9 @@ def gradient_magnitude_loss(y, yhat, eps=1e-6, **kw):
     the local structure of the shape.
     """
     assert y.ndim == 2, f"gradient_magnitude_loss: y must be 2D grid, got {y.ndim}D"
-    assert y.shape == yhat.shape, f"gradient_magnitude_loss shape mismatch: {y.shape} vs {yhat.shape}"
+    assert y.shape == yhat.shape, (
+        f"gradient_magnitude_loss shape mismatch: {y.shape} vs {yhat.shape}"
+    )
 
     y, yhat = _sanitize(y.astype(jnp.float32)), _sanitize(yhat.astype(jnp.float32))
 
@@ -823,18 +831,26 @@ def _dump_axis_assignments(dmanager, n_targets: int, n_networks: int) -> None:
                 network_input_proteins = network.get_inverted_input_proteins()
             except Exception:
                 network_input_proteins = None
-            axis_assignments.append({
-                "target_id": tid, "target_name": target_name,
-                "target_input_names": target_input_names,
-                "network_id": net_idx, "network_name": network_name,
-                "network_input_proteins": network_input_proteins,
-            })
+            axis_assignments.append(
+                {
+                    "target_id": tid,
+                    "target_name": target_name,
+                    "target_input_names": target_input_names,
+                    "network_id": net_idx,
+                    "network_name": network_name,
+                    "network_input_proteins": network_input_proteins,
+                }
+            )
     save_debug_state(
         "axis_assignment_mapping",
         {"assignments": axis_assignments},
-        {"n_targets": n_targets, "n_networks": n_networks,
-         "note": "X columns are in alphabetical order of target.input_names."},
-        output_dir=get_design_debug_output_dir(), mode="design",
+        {
+            "n_targets": n_targets,
+            "n_networks": n_networks,
+            "note": "X columns are in alphabetical order of target.input_names.",
+        },
+        output_dir=get_design_debug_output_dir(),
+        mode="design",
     )
 
 
@@ -1265,7 +1281,17 @@ def grid_distance_loss(
         contrast_l = jax.nn.relu(target_range - pred_range)
         gradient_l = gradient_magnitude_loss(y_img, yhat_img)
 
-        return (sinkhorn_l, lncc_l, mse_l, rmse_l, spectral_l, simse_l, zncc_l, contrast_l, gradient_l)
+        return (
+            sinkhorn_l,
+            lncc_l,
+            mse_l,
+            rmse_l,
+            spectral_l,
+            simse_l,
+            zncc_l,
+            contrast_l,
+            gradient_l,
+        )
 
     def compute_losses(params, X, Y, yhatdep, step, n_targets, n_networks_):
         yhatdep = _sanitize(yhatdep)
@@ -1277,11 +1303,14 @@ def grid_distance_loss(
         assert batch_size == xres * yres, (
             f"batch_size={batch_size} must equal xres*yres={xres * yres} for grid reshape"
         )
-        assert X.shape[0] == batch_size and X.shape[-1] == 2, (
-            f"X shape {X.shape} incompatible with batch_size={batch_size}"
+        assert X.shape[0] == batch_size, (
+            f"X shape {X.shape} batch dim incompatible with batch_size={batch_size}"
         )
-        X_flat = X.reshape(-1, 2) if X.ndim > 2 else X
-        _validate_grid_order(X_flat, xres, yres)
+        assert X.shape[-1] >= 2 and X.shape[-1] % 2 == 0, (
+            f"X shape {X.shape} last dim must be >=2 and even (2 coords per network)"
+        )
+        X_coords = X[..., :2].reshape(-1, 2)
+        _validate_grid_order(X_coords, xres, yres)
 
         assert yhatdep.shape == (batch_size, n_targets, n_networks_), (
             f"yhatdep shape {yhatdep.shape} != expected ({batch_size}, {n_targets}, {n_networks_})"
