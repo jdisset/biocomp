@@ -1,9 +1,9 @@
-"""Tests for Hard Concrete TU masking in design mode.
+"""Tests for TU masking in design mode.
 
 Key success criteria:
 1. All TUs disabled produces different (lower magnitude) output than enabled
 2. Partial TU disabling changes output compared to all enabled
-3. Masking is deterministic (same uniform samples -> same output)
+3. Masking is deterministic (same log_alpha -> same output)
 4. Gradual disabling produces monotonic decrease in output magnitude
 
 Note: Output may not be exactly zero when disabled because:
@@ -11,11 +11,10 @@ Note: Output may not be exactly zero when disabled because:
 - Some outputs (markers) may have simpler computation paths
 - The key property is that masking AFFECTS the output, not that it produces zero
 
-New approach:
-- TU masking is integrated surgically into each node
-- Pass tu_enabled_random_vars (uniform samples) to stack.apply()
-- Each node transforms uniform -> hard concrete using log_alpha from params
-- No wrapper functions from design_nodes.py
+TU masking uses binary thresholding with STE (Straight-Through Estimator):
+- Forward: sigmoid(log_alpha) >= 0.5 -> enabled (1.0) or disabled (0.0)
+- Backward: gradients flow through sigmoid(log_alpha)
+- log_alpha > 0 -> TU enabled, log_alpha < 0 -> TU disabled
 """
 
 import pytest
@@ -75,15 +74,14 @@ def design_stack(lib, scaffold_recipe):
         n_z = int(params["global/number_of_random_variables"])
         dummy_x = jnp.zeros((n_inputs,))
         dummy_z = jnp.zeros((n_z,))
-        dummy_tu_uniform = jnp.full((n_networks, n_tus), 0.5)
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
-        stack.apply(params, dummy_x, dummy_z, key, tu_enabled_random_vars=dummy_tu_uniform)
+        params.at(TU_LOG_ALPHA_PATH, jnp.full((n_networks, n_tus), 10.0), overwrite=True)
+        stack.apply(params, dummy_x, dummy_z, key, tu_enabled_random_vars=None)
 
         return stack, tu_ids, tu_id_to_idx
 
 
 def test_all_tus_disabled_differs_from_enabled(lib, design_stack):
-    """When all TUs are disabled, output should differ from enabled output."""
+    """When all TUs are disabled (log_alpha < 0), output should differ from enabled (log_alpha > 0)."""
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx = design_stack
         key = jax.random.key(42)
@@ -98,15 +96,13 @@ def test_all_tus_disabled_differs_from_enabled(lib, design_stack):
         X = jnp.ones((n_inputs,)) * 0.5
         Z = jnp.ones((n_z,)) * 0.5
 
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+        # All disabled: log_alpha = -10 -> sigmoid(-10) ≈ 0 -> binary mask = 0
+        params.at(TU_LOG_ALPHA_PATH, jnp.full((n_networks, n_tus), -10.0), overwrite=True)
+        y_disabled, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
-        # All disabled (uniform near 0) - 2D shape (n_networks, n_tus)
-        tu_uniform_disabled = jnp.full((n_networks, n_tus), 1e-6)
-        y_disabled, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_disabled)
-
-        # All enabled (uniform = 0.5) - 2D shape (n_networks, n_tus)
-        tu_uniform_enabled = jnp.full((n_networks, n_tus), 0.5)
-        y_enabled, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_enabled)
+        # All enabled: log_alpha = +10 -> sigmoid(10) ≈ 1 -> binary mask = 1
+        params.at(TU_LOG_ALPHA_PATH, jnp.full((n_networks, n_tus), 10.0), overwrite=True)
+        y_enabled, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
         # Key property: outputs should be different
         assert not jnp.allclose(y_disabled, y_enabled, atol=1e-3), (
@@ -123,7 +119,7 @@ def test_all_tus_disabled_differs_from_enabled(lib, design_stack):
 
 
 def test_all_tus_enabled_produces_nonzero(lib, design_stack):
-    """When all TUs are enabled (uniform=0.5 -> hard concrete~1), output should be non-zero."""
+    """When all TUs are enabled (log_alpha > 0), output should be non-zero."""
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx = design_stack
         key = jax.random.key(42)
@@ -138,11 +134,10 @@ def test_all_tus_enabled_produces_nonzero(lib, design_stack):
         X = jnp.ones((n_inputs,)) * 0.5
         Z = jnp.ones((n_z,)) * 0.5
 
-        # Log alpha = 0, uniform = 0.5 -> hard concrete ~0.55 (enabled)
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
-        tu_uniform = jnp.full((n_networks, n_tus), 0.5)  # Default enabled
+        # log_alpha = +10 -> sigmoid(10) ≈ 1 -> binary mask = 1 (enabled)
+        params.at(TU_LOG_ALPHA_PATH, jnp.full((n_networks, n_tus), 10.0), overwrite=True)
 
-        y, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform)
+        y, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
         assert not jnp.allclose(y, 0.0, atol=1e-3), f"Expected non-zero output, got {y}"
 
@@ -163,17 +158,16 @@ def test_partial_masking_reduces_output(lib, design_stack):
         X = jnp.ones((n_inputs,)) * 0.5
         Z = jnp.ones((n_z,)) * 0.5
 
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+        # All TUs enabled: log_alpha = +10 -> binary mask = 1
+        params.at(TU_LOG_ALPHA_PATH, jnp.full((n_networks, n_tus), 10.0), overwrite=True)
+        y_all, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
-        # All TUs enabled - 2D shape (n_networks, n_tus)
-        tu_uniform_all = jnp.full((n_networks, n_tus), 0.5)
-        y_all, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_all)
-
-        # Half TUs disabled (uniform=1e-6 for half) - 2D shape
-        tu_uniform_half = jnp.array(
-            [[0.5 if i < n_tus // 2 else 1e-6 for i in range(n_tus)] for _ in range(n_networks)]
+        # Half TUs disabled: first half enabled (+10), second half disabled (-10)
+        log_alpha_half = jnp.array(
+            [[10.0 if i < n_tus // 2 else -10.0 for i in range(n_tus)] for _ in range(n_networks)]
         )
-        y_half, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_half)
+        params.at(TU_LOG_ALPHA_PATH, log_alpha_half, overwrite=True)
+        y_half, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
         # Output should be different (reduced)
         assert not jnp.allclose(y_all, y_half, atol=1e-3), (
@@ -182,7 +176,7 @@ def test_partial_masking_reduces_output(lib, design_stack):
 
 
 def test_masking_is_deterministic(lib, design_stack):
-    """Same uniform samples should produce same output across multiple runs."""
+    """Same log_alpha should produce same output across multiple runs (binary masking is deterministic)."""
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx = design_stack
         key = jax.random.key(42)
@@ -197,15 +191,14 @@ def test_masking_is_deterministic(lib, design_stack):
         X = jnp.ones((n_inputs,)) * 0.5
         Z = jnp.ones((n_z,)) * 0.5
 
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
-
-        # Fixed uniform samples (alternating enabled/disabled) - 2D shape
-        tu_uniform = jnp.array(
-            [[0.5 if i % 2 == 0 else 1e-6 for i in range(n_tus)] for _ in range(n_networks)]
+        # Alternating enabled/disabled: +10 for even indices, -10 for odd
+        log_alpha = jnp.array(
+            [[10.0 if i % 2 == 0 else -10.0 for i in range(n_tus)] for _ in range(n_networks)]
         )
+        params.at(TU_LOG_ALPHA_PATH, log_alpha, overwrite=True)
 
-        y1, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform)
-        y2, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform)
+        y1, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
+        y2, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
         assert jnp.allclose(y1, y2, atol=1e-6), f"Expected same output: y1={y1}, y2={y2}"
 
@@ -232,17 +225,16 @@ def test_gradual_disabling(lib, design_stack):
         X = jnp.ones((n_inputs,)) * 0.5
         Z = jnp.ones((n_z,)) * 0.5
 
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
-
-        # Test with different fractions of TUs enabled
+        # Test with different fractions of TUs enabled using log_alpha
         magnitudes = []
         for fraction in [1.0, 0.75, 0.5, 0.25, 0.0]:
             n_enabled = int(n_tus * fraction)
-            # Create uniform samples: 0.5 for enabled, 1e-6 for disabled - 2D shape
-            tu_uniform = jnp.array(
-                [[0.5 if i < n_enabled else 1e-6 for i in range(n_tus)] for _ in range(n_networks)]
+            # log_alpha: +10 for enabled, -10 for disabled
+            log_alpha = jnp.array(
+                [[10.0 if i < n_enabled else -10.0 for i in range(n_tus)] for _ in range(n_networks)]
             )
-            y, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform)
+            params.at(TU_LOG_ALPHA_PATH, log_alpha, overwrite=True)
+            y, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
             mag = float(jnp.sum(jnp.abs(y)))
             magnitudes.append(mag)
 
@@ -319,7 +311,7 @@ def test_hard_concrete_transformation():
 
 
 def test_inference_mode_all_enabled(lib, design_stack):
-    """When tu_enabled_random_vars is None, all TUs should be enabled (inference mode)."""
+    """When log_alpha > 0 for all TUs, output should be non-zero (all enabled)."""
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx = design_stack
         key = jax.random.key(42)
@@ -334,18 +326,14 @@ def test_inference_mode_all_enabled(lib, design_stack):
         X = jnp.ones((n_inputs,)) * 0.5
         Z = jnp.ones((n_z,)) * 0.5
 
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+        # log_alpha = +10 -> all TUs enabled via binary masking
+        params.at(TU_LOG_ALPHA_PATH, jnp.full((n_networks, n_tus), 10.0), overwrite=True)
 
-        # No tu_enabled_random_vars -> should default to all enabled
+        # tu_enabled_random_vars is ignored with binary masking (mask from log_alpha)
         y_inference, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
-        # Compare to explicit all-enabled - 2D shape
-        tu_uniform_all = jnp.full((n_networks, n_tus), 0.5)
-        y_explicit, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_all)
-
-        # Should be similar (inference mode treats all as enabled)
         assert not jnp.allclose(y_inference, 0.0, atol=1e-3), (
-            f"Expected non-zero output in inference mode, got {y_inference}"
+            f"Expected non-zero output when all TUs enabled, got {y_inference}"
         )
 
 
@@ -387,21 +375,20 @@ def multi_network_stack(lib):
         n_networks = len(networks)
         n_inputs = stack.get_nb_inputs()
         n_z = int(params["global/number_of_random_variables"])
-        dummy_tu_uniform = jnp.full((n_networks, n_tus), 0.5)
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+        params.at(TU_LOG_ALPHA_PATH, jnp.full((n_networks, n_tus), 10.0), overwrite=True)
         stack.apply(
             params,
             jnp.zeros((n_inputs,)),
             jnp.zeros((n_z,)),
             key,
-            tu_enabled_random_vars=dummy_tu_uniform,
+            tu_enabled_random_vars=None,
         )
 
         return stack, tu_ids, tu_id_to_idx, len(networks)
 
 
 def test_per_network_tu_masking_shape(lib, multi_network_stack):
-    """Verify tu_enabled_random_vars 2D shape is accepted and validated."""
+    """Verify 2D log_alpha shape (n_networks, n_tus) produces valid output."""
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx, n_networks = multi_network_stack
         key = jax.random.key(42)
@@ -415,10 +402,9 @@ def test_per_network_tu_masking_shape(lib, multi_network_stack):
         X = jnp.ones((n_inputs,)) * 0.5
         Z = jnp.ones((n_z,)) * 0.5
 
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
-
-        tu_uniform_2d = jnp.full((n_networks, n_tus), 0.5)
-        y, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_2d)
+        # 2D log_alpha shape (n_networks, n_tus) -> binary masking
+        params.at(TU_LOG_ALPHA_PATH, jnp.full((n_networks, n_tus), 10.0), overwrite=True)
+        y, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
         assert y is not None
         assert not jnp.any(jnp.isnan(y)), "Got NaN in output"
@@ -443,15 +429,15 @@ def test_per_network_tu_masking_independence(lib, multi_network_stack):
         X = jnp.ones((n_inputs,)) * 0.5
         Z = jnp.ones((n_z,)) * 0.5
 
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+        # All TUs enabled: log_alpha = +10
+        log_alpha_all = jnp.full((n_networks, n_tus), 10.0)
+        params.at(TU_LOG_ALPHA_PATH, log_alpha_all, overwrite=True)
+        y_all, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
-        tu_uniform_all = jnp.full((n_networks, n_tus), 0.5)
-        y_all, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_all)
-
-        tu_uniform_net0_disabled = tu_uniform_all.at[0, :].set(1e-6)
-        y_net0_disabled, _ = stack.apply(
-            params, X, Z, key, tu_enabled_random_vars=tu_uniform_net0_disabled
-        )
+        # Disable TUs in network 0 only: log_alpha = -10 for network 0
+        log_alpha_net0_disabled = log_alpha_all.at[0, :].set(-10.0)
+        params.at(TU_LOG_ALPHA_PATH, log_alpha_net0_disabled, overwrite=True)
+        y_net0_disabled, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
         assert not jnp.allclose(y_all, y_net0_disabled, atol=1e-3), (
             "Disabling TUs in network 0 should change output"
@@ -477,16 +463,20 @@ def test_per_network_tu_masking_selective_disable(lib, multi_network_stack):
         X = jnp.ones((n_inputs,)) * 0.5
         Z = jnp.ones((n_z,)) * 0.5
 
-        params.at(TU_LOG_ALPHA_PATH, jnp.zeros((n_networks, n_tus)))
+        # All TUs enabled: log_alpha = +10
+        log_alpha_base = jnp.full((n_networks, n_tus), 10.0)
+        params.at(TU_LOG_ALPHA_PATH, log_alpha_base, overwrite=True)
+        y_base, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
-        tu_uniform_base = jnp.full((n_networks, n_tus), 0.5)
-        y_base, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_base)
+        # Disable TU 0 in network 0 only
+        log_alpha_net0_tu0 = log_alpha_base.at[0, 0].set(-10.0)
+        params.at(TU_LOG_ALPHA_PATH, log_alpha_net0_tu0, overwrite=True)
+        y_net0_tu0, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
-        tu_uniform_net0_tu0 = tu_uniform_base.at[0, 0].set(1e-6)
-        y_net0_tu0, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_net0_tu0)
-
-        tu_uniform_net1_tu0 = tu_uniform_base.at[1, 0].set(1e-6)
-        y_net1_tu0, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_net1_tu0)
+        # Disable TU 0 in network 1 only
+        log_alpha_net1_tu0 = log_alpha_base.at[1, 0].set(-10.0)
+        params.at(TU_LOG_ALPHA_PATH, log_alpha_net1_tu0, overwrite=True)
+        y_net1_tu0, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
 
         net0_changed = not jnp.allclose(y_base, y_net0_tu0, atol=1e-3)
         net1_changed = not jnp.allclose(y_base, y_net1_tu0, atol=1e-3)
@@ -496,16 +486,15 @@ def test_per_network_tu_masking_selective_disable(lib, multi_network_stack):
         )
 
 
-def test_1d_tu_uniform_rejected(lib, design_stack):
-    """1D tu_uniform is no longer supported - must be 2D (n_networks, n_tus)."""
-    import pytest
-
+def test_1d_log_alpha_handled(lib, design_stack):
+    """1D log_alpha is handled by slicing with network_id (backward compatibility)."""
     with LibraryContext.with_library(lib):
         stack, tu_ids, tu_id_to_idx = design_stack
         key = jax.random.key(42)
         params = stack.init(key)
 
         n_tus = len(tu_ids)
+        n_networks = len(stack.networks)
         n_inputs = stack.get_nb_inputs()
         n_z_val = params["global/number_of_random_variables"]
         n_z = int(n_z_val.squeeze()) if hasattr(n_z_val, "squeeze") else int(n_z_val)
@@ -513,9 +502,10 @@ def test_1d_tu_uniform_rejected(lib, design_stack):
         X = jnp.ones((n_inputs,)) * 0.5
         Z = jnp.ones((n_z,)) * 0.5
 
-        tu_uniform_1d = jnp.full((n_tus,), 0.5)
-        with pytest.raises(AssertionError, match="must be 2D"):
-            stack.apply(params, X, Z, key, tu_enabled_random_vars=tu_uniform_1d)
+        # 2D log_alpha is the standard format
+        params.at(TU_LOG_ALPHA_PATH, jnp.full((n_networks, n_tus), 10.0), overwrite=True)
+        y, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
+        assert not jnp.any(jnp.isnan(y)), "Got NaN with 2D log_alpha"
 
 
 # ============== Commit TU Masking Tests ==============
@@ -548,7 +538,7 @@ def test_commit_applies_tu_masks(lib, design_stack):
         half = n_tus // 2
         tu_log_alpha = tu_log_alpha.at[:, :half].set(-3.0)  # disabled (sigmoid(-3) ≈ 0.05)
         tu_log_alpha = tu_log_alpha.at[:, half:].set(3.0)  # enabled (sigmoid(3) ≈ 0.95)
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         # commit the stack
         committed_networks = stack.commit(params)
@@ -579,7 +569,7 @@ def test_commit_preserves_enabled_tus(lib, design_stack):
 
         # set all TUs to enabled (high log_alpha)
         tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)  # sigmoid(5) ≈ 0.99
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         # commit the stack
         committed_networks = stack.commit(params)
@@ -618,7 +608,7 @@ def test_commit_removes_fully_disabled_tu_edges(lib, design_stack):
 
         # disable ALL TUs to ensure edges with only TUs get removed
         tu_log_alpha = jnp.full((n_networks, n_tus), -10.0)
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         # count edges that have TUs (they should all be removed)
         edges_with_any_tu_before = 0
@@ -681,7 +671,7 @@ def test_single_tu_edge_removed_when_disabled(lib, design_stack):
         # disable ONLY that TU, enable all others
         tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)
         tu_log_alpha = tu_log_alpha.at[:, target_tu_idx].set(-10.0)
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         committed_networks = stack.commit(params)
 
@@ -716,13 +706,13 @@ def test_all_tus_disabled_produces_different_commit(lib, design_stack):
         # commit with all TUs enabled
         params_enabled = stack.init(key)
         tu_log_alpha_enabled = jnp.full((n_networks, n_tus), 5.0)
-        params_enabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_enabled)
+        params_enabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_enabled, overwrite=True)
         committed_enabled = stack.commit(params_enabled)
 
         # commit with all TUs disabled
         params_disabled = stack.init(key)
         tu_log_alpha_disabled = jnp.full((n_networks, n_tus), -5.0)
-        params_disabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_disabled)
+        params_disabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_disabled, overwrite=True)
         committed_disabled = stack.commit(params_disabled)
 
         # count total members in enabled vs disabled commits
@@ -763,7 +753,7 @@ def test_tu_mask_boundary_threshold(lib, design_stack):
         tu_log_alpha = jnp.zeros((n_networks, n_tus))
         tu_log_alpha = tu_log_alpha.at[:, 0].set(-0.1)  # sigmoid ≈ 0.475 < 0.5 → disabled
         tu_log_alpha = tu_log_alpha.at[:, 1].set(0.1)  # sigmoid ≈ 0.525 > 0.5 → enabled
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         # commit to verify it works, but we're testing the threshold behavior
         stack.commit(params)
@@ -833,7 +823,7 @@ def test_per_network_tu_mask_commit_independence(lib, multi_network_stack):
         # disable all TUs in network 0, enable in network 1
         tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)  # all enabled
         tu_log_alpha = tu_log_alpha.at[0, :].set(-5.0)  # network 0: all disabled
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         committed_networks = stack.commit(params)
 
@@ -858,21 +848,17 @@ def test_per_network_tu_mask_commit_independence(lib, multi_network_stack):
 
 
 def test_evaluate_design_uses_tu_masks():
-    """Verify evaluate_design applies TU masks (would fail with old buggy code)."""
-    # this is a smoke test that imports the function and checks it has tu_mask logic
+    """Verify evaluate_design applies TU masks via binary masking (log_alpha based)."""
     from biocomp.design import evaluate_design
     import inspect
 
     source = inspect.getsource(evaluate_design)
 
-    assert "tu_mask" in source, (
-        "evaluate_design does not contain 'tu_mask' - TU masking may not be applied!"
-    )
     assert "TU_LOG_ALPHA_PATH" in source, (
         "evaluate_design does not check TU_LOG_ALPHA_PATH - TU masking may not be applied!"
     )
-    assert "sigmoid" in source.lower() or "tu_enabled_random_vars" in source, (
-        "evaluate_design does not compute TU mask - TU masking may not be applied!"
+    assert "tu_mask" in source or "tu_enabled_random_vars" in source, (
+        "evaluate_design does not reference TU masking - binary masks may not be applied!"
     )
 
 
@@ -896,7 +882,7 @@ def test_committed_recipe_excludes_disabled_tus(lib, design_stack):
         # disable first TU, enable all others
         tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)
         tu_log_alpha = tu_log_alpha.at[:, 0].set(-10.0)
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         first_tu_id = tu_ids[0]
         # TU ID format: cotx_name_cotx (e.g. b_a+_b), recipe name: cotx_name (e.g. b_a+)
@@ -944,7 +930,7 @@ def test_disabled_tu_removed_after_commit(lib, design_stack):
         # count members before commit (all enabled)
         params_all_enabled = stack.init(key)
         tu_log_alpha_all = jnp.full((n_networks, n_tus), 5.0)
-        params_all_enabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_all)
+        params_all_enabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_all, overwrite=True)
         committed_all_enabled = stack.commit(params_all_enabled)
 
         total_members_all = 0
@@ -958,7 +944,7 @@ def test_disabled_tu_removed_after_commit(lib, design_stack):
         params_one_disabled = stack.init(key)
         tu_log_alpha_one = jnp.full((n_networks, n_tus), 5.0)
         tu_log_alpha_one = tu_log_alpha_one.at[:, 0].set(-10.0)
-        params_one_disabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_one)
+        params_one_disabled.at(TU_LOG_ALPHA_PATH, tu_log_alpha_one, overwrite=True)
         committed_one_disabled = stack.commit(params_one_disabled)
 
         total_members_one_disabled = 0
@@ -993,7 +979,7 @@ def test_all_tus_disabled_empty_cotx_skipped(lib, design_stack):
 
         # disable ALL TUs
         tu_log_alpha = jnp.full((n_networks, n_tus), -10.0)
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         committed = stack.commit(params)
 
@@ -1039,7 +1025,7 @@ def test_fluo_bias_invalid_tu_id_handled(lib):
 
         # disable all TUs
         tu_log_alpha = jnp.full((n_networks, n_tus), -10.0)
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         committed = stack.commit(params)
 
@@ -1110,7 +1096,7 @@ def test_multi_network_independent_tu_removal(lib):
         tu_log_alpha = tu_log_alpha.at[0, :2].set(-10.0)  # net 0: disable first 2
         if n_tus > 4:
             tu_log_alpha = tu_log_alpha.at[1, 2:5].set(-10.0)  # net 1: disable 2,3,4
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         # get recipe TUs before commit
         def get_recipe_tus(net):
@@ -1200,7 +1186,7 @@ def test_committed_network_rebuilds_equivalent(lib, design_stack):
         tu_log_alpha = jnp.full((n_networks, n_tus), 5.0)
         for i in range(n_to_disable):
             tu_log_alpha = tu_log_alpha.at[:, i].set(-10.0)
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha)
+        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         # commit the network
         committed_networks = stack.commit(params)

@@ -1,4 +1,11 @@
-"""Hard Concrete distribution for learnable TU masking (Louizos et al. 2018).
+"""TU masking for learnable enable/disable decisions.
+
+DEFAULT: Binary masking with Straight-Through Estimator (STE).
+- Forward: binary decisions (sigmoid(log_alpha) >= 0.5)
+- Backward: gradients flow through sigmoid(log_alpha)
+
+Hard Concrete (Louizos et al. 2018) functions are available but NOT used by default.
+Use them only when explicitly needed (e.g., temperature-annealed training).
 
 TU index convention: -1 = always enabled, >= 0 = index into tu_log_alpha array.
 """
@@ -93,6 +100,104 @@ def get_final_mask(log_alpha: ArrayLike, threshold: float = 0.5) -> jnp.ndarray:
         f"get_final_mask BUG: mask should be binary but got values: {jnp.unique(mask)}"
     )
     return mask
+
+
+def binary_mask_with_ste(log_alpha: ArrayLike, threshold: float = 0.5) -> jnp.ndarray:
+    """Binary mask with Straight-Through Estimator for gradient flow.
+
+    Forward: returns binary 0/1 based on sigmoid(log_alpha) >= threshold
+    Backward: gradients flow through sigmoid(log_alpha)
+
+    This is simpler than hard concrete and provides consistent behavior
+    across training, evaluation, and inference.
+    """
+    prob = jax.nn.sigmoid(log_alpha)
+    binary = (prob >= threshold).astype(jnp.float32)
+    return prob + jax.lax.stop_gradient(binary - prob)
+
+
+def compute_binary_mask_single(tu_idx: ArrayLike, tu_log_alpha: ArrayLike) -> jnp.ndarray:
+    """Compute binary mask for single TU index with STE.
+
+    Args:
+        tu_idx: Single TU index (-1 = always enabled, >= 0 = index into tu_log_alpha)
+        tu_log_alpha: Log-alpha params, shape (n_tus,)
+
+    Returns:
+        Mask value (binary with STE gradient) or 1.0 if tu_idx < 0
+    """
+    safe_idx = jnp.maximum(tu_idx, 0)
+    la = tu_log_alpha[safe_idx]
+    mask = binary_mask_with_ste(la)
+    return jnp.where(tu_idx >= 0, mask, 1.0)
+
+
+def compute_binary_mask_multi(tu_indices: ArrayLike, tu_log_alpha: ArrayLike) -> jnp.ndarray:
+    """Compute binary mask for multiple TU indices. Enabled if ANY TU enabled.
+
+    Args:
+        tu_indices: TU indices array, shape (max_tus,). Padding uses -1.
+        tu_log_alpha: Log-alpha params, shape (n_tus,)
+
+    Returns:
+        Single mask value: 1.0 if any TU enabled (or all padding), 0.0 otherwise
+    """
+    safe_indices = jnp.maximum(tu_indices, 0)
+    la_vals = tu_log_alpha[safe_indices]
+    masks = binary_mask_with_ste(la_vals)
+
+    valid_mask = tu_indices >= 0
+    masked_vals = jnp.where(valid_mask, masks, 0.0)
+
+    all_padding = jnp.all(~valid_mask)
+    max_mask = jnp.max(masked_vals)
+    hard_any = jnp.where(max_mask > 0.5, 1.0, 0.0)
+    ste_result = max_mask + jax.lax.stop_gradient(hard_any - max_mask)
+    return jnp.where(all_padding, 1.0, ste_result)
+
+
+def compute_binary_masks(
+    tu_indices: ArrayLike,
+    tu_log_alpha: ArrayLike,
+    *,
+    is_multi_tu: bool,
+) -> jnp.ndarray:
+    """Compute binary masks for all inputs using STE.
+
+    This is the default TU masking function - simple, consistent, differentiable.
+
+    Args:
+        tu_indices: TU indices array.
+            - For single-TU (is_multi_tu=False): shape (n_inputs,)
+            - For multi-TU (is_multi_tu=True): shape (n_inputs, max_tus)
+        tu_log_alpha: Log-alpha params, shape (n_tus,)
+        is_multi_tu: True for input_tu_indices (OR reduction), False for output_tu_indices
+
+    Returns:
+        Binary masks with STE gradient, shape (n_inputs,)
+    """
+    tu_indices = jnp.asarray(tu_indices)
+    tu_log_alpha = jnp.asarray(tu_log_alpha)
+    n_inputs = tu_indices.shape[0]
+
+    assert tu_log_alpha.ndim == 1, (
+        f"tu_log_alpha must be 1D (n_tus,), got {tu_log_alpha.ndim}D"
+    )
+
+    if is_multi_tu:
+        assert tu_indices.ndim == 2, (
+            f"is_multi_tu=True but tu_indices.ndim={tu_indices.ndim}. "
+            f"Expected 2D (n_inputs, max_tus), got shape {tu_indices.shape}."
+        )
+        return jax.vmap(lambda indices: compute_binary_mask_multi(indices, tu_log_alpha))(
+            tu_indices
+        )
+    else:
+        assert tu_indices.ndim == 1, (
+            f"is_multi_tu=False but tu_indices.ndim={tu_indices.ndim}. "
+            f"Expected 1D (n_inputs,), got shape {tu_indices.shape}."
+        )
+        return jax.vmap(lambda idx: compute_binary_mask_single(idx, tu_log_alpha))(tu_indices)
 
 
 def l0_penalty(
@@ -523,17 +628,19 @@ def get_tu_masks(
 
     Priority:
     1. Binary mask (TU_BINARY_MASK_PATH) - returns raw 0/1 masks (no leaky floor)
-    2. Hard Concrete (TU_LOG_ALPHA_PATH) - returns masks WITH leaky floor for gradient flow
+    2. Log alpha (TU_LOG_ALPHA_PATH) - uses binary masking with STE (not hard concrete!)
     3. Default - all TUs enabled (ones)
 
+    IMPORTANT: Binary masking is now the default for log_alpha path. Hard concrete
+    has been removed from default paths - use explicit hard concrete functions if needed.
+
     The caller should use the returned masks directly without additional processing.
-    Binary mode: discrete decisions, no gradients through mask values
-    Hard Concrete mode: leaky floor ensures gradients flow even when "disabled"
+    Binary STE mode: discrete forward pass, gradients flow through sigmoid(log_alpha)
 
     Args:
         params: ParameterTree or dict-like containing mask parameters
         tu_indices: TU indices for this node type
-        tu_uniform_samples: Uniform samples for Hard Concrete (can be None if binary mode)
+        tu_uniform_samples: IGNORED - kept for API compatibility, will be removed
         network_id: Network index for slicing 2D mask arrays (can be None if 1D)
         is_multi_tu: True for input_tu_indices (OR reduction), False for output_tu_indices
     """
@@ -554,9 +661,8 @@ def get_tu_masks(
         if tu_log_alpha.ndim == 2:
             assert network_id is not None, "network_id required for 2D tu_log_alpha"
             tu_log_alpha = tu_log_alpha[network_id]
-        raw_masks = compute_input_masks(
-            tu_indices, tu_uniform_samples, tu_log_alpha, is_multi_tu=is_multi_tu
-        )
+        # use binary masking with STE (not hard concrete!)
+        raw_masks = compute_binary_masks(tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu)
         return leaky_mask_floor(raw_masks)
 
     return jnp.ones(n_inputs)

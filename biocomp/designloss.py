@@ -1013,11 +1013,11 @@ def _make_loss_func(
     hyperopt_schedule_ns=None,
     hyperopt_total_steps=None,
 ):
-    """Create the loss function with optional TU sample averaging for variance reduction.
+    """Create the loss function for design optimization.
 
     Args:
-        tu_n_samples: Number of TU mask samples to average over (default 4).
-            Higher values reduce variance but increase compute cost.
+        tu_n_samples: DEPRECATED - ignored. Binary TU masking is now deterministic.
+            Kept for API compatibility.
         lambda_coupling: Weight for ratio-mask coupling penalty. When a ratio is below
             min_ratio_threshold, this creates gradient pressure to push down tu_log_alpha.
         min_ratio_threshold: Coupling only activates when normalized ratio < this.
@@ -1146,34 +1146,12 @@ def _make_loss_func(
         else:
             ern_tying_penalty_val = jnp.array(0.0)
 
-        # TU sample averaging
-        extra_aux_inner = {}
-        if tu_n_samples > 1 and TU_LOG_ALPHA_PATH in params:
-            tu_uniforms = _sample_tu_uniform(params, mask_key, n_samples=tu_n_samples)
-            forward_keys = jax.random.split(forward_key, tu_n_samples)
-
-            def forward_with_tu(tu_u, fwd_key):
-                yhatdep, _ = single_forward_pass(params, X, Z, fwd_key, tu_u)
-                losses, inner_aux = compute_losses_fn(
-                    params, X, Y, yhatdep, step, n_targets, n_networks
-                )
-                return losses, yhatdep, inner_aux
-
-            all_losses_stack, yhatdep_stack, inner_aux_stack = vmap(forward_with_tu)(
-                tu_uniforms, forward_keys
-            )
-            all_losses = jnp.mean(all_losses_stack, axis=0)
-            yhatdep = yhatdep_stack[-1]
-            tu_uniform = tu_uniforms[-1]
-            apply_aux = None
-            if inner_aux_stack:
-                extra_aux_inner = jax.tree.map(lambda x: x[-1], inner_aux_stack)
-        else:
-            tu_uniform = _sample_tu_uniform(params, mask_key, n_samples=1)
-            yhatdep, apply_aux = single_forward_pass(params, X, Z, forward_key, tu_uniform)
-            all_losses, extra_aux_inner = compute_losses_fn(
-                params, X, Y, yhatdep, step, n_targets, n_networks
-            )
+        # single forward pass with binary TU masking (deterministic, no need for sample averaging)
+        # get_tu_masks() now uses binary masking by default (not hard concrete)
+        yhatdep, apply_aux = single_forward_pass(params, X, Z, forward_key, tu_uniform=None)
+        all_losses, extra_aux_inner = compute_losses_fn(
+            params, X, Y, yhatdep, step, n_targets, n_networks
+        )
 
         all_losses = _sanitize(all_losses)
         tu_stats = _compute_tu_stats(params)
@@ -1200,7 +1178,6 @@ def _make_loss_func(
             "spread_penalty": spread_penalty,
             "l0_penalty_per_network": l0_penalty_per_network,
             "coupling_penalty_per_target": coupling_penalty_per_target,
-            "tu_uniform": tu_uniform,
             "tu_stats": tu_stats,
             "ratio_stats": ratio_stats,
             "tu_temperature": tu_temp,
