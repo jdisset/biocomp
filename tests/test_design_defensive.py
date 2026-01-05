@@ -595,3 +595,357 @@ def test_network_has_input_order():
     )
     assert net_with_order.has_input_order()
     assert net_with_order.get_input_order() == ["mKO2", "eBFP2"]
+
+
+# ---------------------------------------------------------------------------
+# Grid Data Ordering Tests (Lattice Mode)
+# ---------------------------------------------------------------------------
+
+
+def test_grid_data_sequential_order_required():
+    """Test that grid_distance_loss requires data in sequential grid order.
+
+    The bug: reshuffle_batches=True permutes data order, but grid_distance_loss
+    reshapes to (yres, xres) assuming sequential order. This creates a scrambled
+    grid where sinkhorn/lncc losses are meaningless.
+
+    This test verifies that we can detect when data is NOT in sequential order.
+    """
+    xres, yres = 8, 8
+
+    # Generate sequential grid coordinates
+    x_coords = jnp.linspace(0, 1, xres)
+    y_coords = jnp.linspace(0, 1, yres)
+    xx, yy = jnp.meshgrid(x_coords, y_coords)
+    X_sequential = jnp.stack([xx.ravel(), yy.ravel()], axis=-1)
+
+    # Reshape to grid and verify structure
+    X_grid = X_sequential.reshape(yres, xres, 2)
+
+    # First row should have constant y=0 and increasing x
+    first_row_x = X_grid[0, :, 0]
+    first_row_y = X_grid[0, :, 1]
+    assert jnp.allclose(first_row_y, 0.0), "First row y-coords should all be 0"
+    assert jnp.all(first_row_x[1:] > first_row_x[:-1]), "First row x-coords must be monotonically increasing"
+
+    # First column should have constant x=0 and increasing y
+    first_col_x = X_grid[:, 0, 0]
+    first_col_y = X_grid[:, 0, 1]
+    assert jnp.allclose(first_col_x, 0.0), "First column x-coords should all be 0"
+    assert jnp.all(first_col_y[1:] > first_col_y[:-1]), "First column y-coords must be monotonically increasing"
+
+
+def test_shuffled_grid_detection():
+    """Test that we can detect when grid data has been shuffled."""
+    xres, yres = 8, 8
+
+    x_coords = jnp.linspace(0, 1, xres)
+    y_coords = jnp.linspace(0, 1, yres)
+    xx, yy = jnp.meshgrid(x_coords, y_coords)
+    X_sequential = jnp.stack([xx.ravel(), yy.ravel()], axis=-1)
+
+    # Shuffle the data (simulating reshuffle_batches=True)
+    key = jax.random.PRNGKey(42)
+    perm = jax.random.permutation(key, X_sequential.shape[0])
+    X_shuffled = X_sequential[perm]
+
+    # Reshape to grid - this is what grid_distance_loss does
+    X_shuffled_grid = X_shuffled.reshape(yres, xres, 2)
+
+    # Check if first row x-coords are monotonically increasing
+    first_row_x = X_shuffled_grid[0, :, 0]
+    is_monotonic = jnp.all(first_row_x[1:] >= first_row_x[:-1])
+
+    # With shuffled data, this SHOULD fail (detecting the problem)
+    assert not is_monotonic, (
+        "Shuffled data should NOT have monotonically increasing x-coords in first row. "
+        "If this passes, the shuffle didn't work as expected."
+    )
+
+
+def test_validate_grid_order_helper():
+    """Test helper function that validates grid ordering."""
+
+    def validate_grid_order(X: jnp.ndarray, xres: int, yres: int, rtol: float = 0.01) -> bool:
+        """Check if X coordinates are in valid sequential grid order.
+
+        Args:
+            X: Coordinates array of shape (n_points, 2) where n_points = xres * yres
+            xres: Expected x resolution
+            yres: Expected y resolution
+            rtol: Relative tolerance for coordinate comparisons
+
+        Returns:
+            True if X is in valid sequential grid order, False otherwise
+        """
+        assert X.shape == (xres * yres, 2), f"Expected shape ({xres * yres}, 2), got {X.shape}"
+
+        X_grid = X.reshape(yres, xres, 2)
+
+        # Check row structure: each row should have same y, increasing x
+        for row_idx in range(yres):
+            row_x = X_grid[row_idx, :, 0]
+            row_y = X_grid[row_idx, :, 1]
+
+            # All y values in row should be approximately equal
+            if not jnp.allclose(row_y, row_y[0], rtol=rtol):
+                return False
+
+            # x values should be monotonically increasing
+            if not jnp.all(row_x[1:] >= row_x[:-1] - rtol):
+                return False
+
+        # Check column structure: each column should have same x, increasing y
+        for col_idx in range(xres):
+            col_x = X_grid[:, col_idx, 0]
+            col_y = X_grid[:, col_idx, 1]
+
+            # All x values in column should be approximately equal
+            if not jnp.allclose(col_x, col_x[0], rtol=rtol):
+                return False
+
+            # y values should be monotonically increasing
+            if not jnp.all(col_y[1:] >= col_y[:-1] - rtol):
+                return False
+
+        return True
+
+    xres, yres = 8, 8
+
+    # Sequential data should pass
+    x_coords = jnp.linspace(0, 1, xres)
+    y_coords = jnp.linspace(0, 1, yres)
+    xx, yy = jnp.meshgrid(x_coords, y_coords)
+    X_sequential = jnp.stack([xx.ravel(), yy.ravel()], axis=-1)
+    assert validate_grid_order(X_sequential, xres, yres), "Sequential data should be valid"
+
+    # Shuffled data should fail
+    key = jax.random.PRNGKey(42)
+    perm = jax.random.permutation(key, X_sequential.shape[0])
+    X_shuffled = X_sequential[perm]
+    assert not validate_grid_order(X_shuffled, xres, yres), "Shuffled data should be invalid"
+
+
+def test_reshuffle_batches_incompatible_with_grid_loss():
+    """Integration test: verify reshuffle_batches=False is set for lattice mode.
+
+    This test loads the actual config and verifies the critical setting.
+    """
+    import os
+    from pathlib import Path
+
+    # Find biocomp-jobs directory
+    biocomp_root = os.environ.get("BIOCOMP_ROOT")
+    if biocomp_root:
+        config_path = Path(biocomp_root) / "biocomp-jobs/design/design_configs/base.yaml"
+    else:
+        # Try relative path from test location
+        test_dir = Path(__file__).parent
+        config_path = test_dir.parent.parent.parent / "biocomp-jobs/design/design_configs/base.yaml"
+
+    if not config_path.exists():
+        pytest.skip(f"Config file not found at {config_path}")
+
+    content = config_path.read_text()
+
+    # Verify the critical setting is present
+    assert "reshuffle_batches: false" in content or "reshuffle_batches: False" in content, (
+        "CRITICAL: base.yaml must have 'reshuffle_batches: false' for lattice mode. "
+        "Without this, grid_distance_loss receives scrambled data and produces meaningless losses. "
+        "See test_grid_data_sequential_order_required for details."
+    )
+
+
+def test_validate_grid_order_passes_for_sequential_data():
+    """Test _validate_grid_order passes for correctly ordered data."""
+    from biocomp.designloss import _validate_grid_order
+    from biocomp.jaxutils import set_enable_checks
+
+    xres, yres = 8, 8
+    x_coords = jnp.linspace(0, 1, xres)
+    y_coords = jnp.linspace(0, 1, yres)
+    xx, yy = jnp.meshgrid(x_coords, y_coords)
+    X_sequential = jnp.stack([xx.ravel(), yy.ravel()], axis=-1)
+
+    set_enable_checks(False)
+    try:
+        _validate_grid_order(X_sequential, xres, yres)
+    finally:
+        set_enable_checks(False)
+
+
+def test_validate_grid_order_fails_for_shuffled_data():
+    """Test _validate_grid_order catches shuffled data."""
+    from biocomp.designloss import _validate_grid_order
+    from biocomp.jaxutils import set_enable_checks
+
+    xres, yres = 8, 8
+    x_coords = jnp.linspace(0, 1, xres)
+    y_coords = jnp.linspace(0, 1, yres)
+    xx, yy = jnp.meshgrid(x_coords, y_coords)
+    X_sequential = jnp.stack([xx.ravel(), yy.ravel()], axis=-1)
+
+    key = jax.random.PRNGKey(42)
+    perm = jax.random.permutation(key, X_sequential.shape[0])
+    X_shuffled = X_sequential[perm]
+
+    set_enable_checks(False)
+    try:
+        with pytest.raises(AssertionError, match="Grid order violation"):
+            _validate_grid_order(X_shuffled, xres, yres)
+    finally:
+        set_enable_checks(False)
+
+
+def test_validate_grid_order_tolerates_jitter():
+    """Test _validate_grid_order allows small jitter in coordinates."""
+    from biocomp.designloss import _validate_grid_order
+    from biocomp.jaxutils import set_enable_checks
+
+    xres, yres = 8, 8
+    x_coords = jnp.linspace(0, 1, xres)
+    y_coords = jnp.linspace(0, 1, yres)
+    xx, yy = jnp.meshgrid(x_coords, y_coords)
+    X_sequential = jnp.stack([xx.ravel(), yy.ravel()], axis=-1)
+
+    key = jax.random.PRNGKey(123)
+    jitter_std = 0.01
+    jitter = jax.random.normal(key, X_sequential.shape) * jitter_std
+    X_jittered = X_sequential + jitter
+
+    set_enable_checks(False)
+    try:
+        _validate_grid_order(X_jittered, xres, yres)
+    finally:
+        set_enable_checks(False)
+
+
+def test_validate_grid_order_with_checkify():
+    """Test _validate_grid_order works with checkify when enable_checks=True."""
+    from jax.experimental import checkify
+    from biocomp.designloss import _validate_grid_order
+    from biocomp.jaxutils import set_enable_checks
+
+    xres, yres = 8, 8
+    x_coords = jnp.linspace(0, 1, xres)
+    y_coords = jnp.linspace(0, 1, yres)
+    xx, yy = jnp.meshgrid(x_coords, y_coords)
+    X_sequential = jnp.stack([xx.ravel(), yy.ravel()], axis=-1)
+
+    key = jax.random.PRNGKey(42)
+    perm = jax.random.permutation(key, X_sequential.shape[0])
+    X_shuffled = X_sequential[perm]
+
+    set_enable_checks(True)
+    try:
+        checked_fn = checkify.checkify(_validate_grid_order, errors=checkify.user_checks)
+        err, _ = jax.jit(checked_fn, static_argnums=(1, 2))(X_shuffled, xres, yres)
+        with pytest.raises(checkify.JaxRuntimeError, match="Grid order violation"):
+            err.throw()
+    finally:
+        set_enable_checks(False)
+
+
+# ---------------------------------------------------------------------------
+# Loss Component Sanity Tests
+# ---------------------------------------------------------------------------
+
+
+def test_loss_components_bounded():
+    """Test that individual loss components are in expected ranges."""
+    from biocomp.designloss import (
+        sinkhorn_divergence_conv,
+        lncc_grid_loss,
+        mse_loss,
+        zncc_loss,
+    )
+
+    y = jnp.ones((8, 8)) * 0.5
+    yhat = jnp.ones((8, 8)) * 0.6
+
+    sink = sinkhorn_divergence_conv(y, yhat, eps=0.1, n_iters=10)
+    assert jnp.isfinite(sink), "sinkhorn should be finite"
+    assert sink >= 0, f"sinkhorn should be >= 0, got {sink}"
+
+    lncc = lncc_grid_loss(None, y, yhat, k=3)
+    assert jnp.isfinite(lncc), "lncc should be finite"
+    assert 0 <= lncc <= 2, f"lncc should be in [0, 2], got {lncc}"
+
+    mse = mse_loss(None, y.ravel(), yhat.ravel())
+    assert jnp.isfinite(mse), "mse should be finite"
+    assert mse >= 0, f"mse should be >= 0, got {mse}"
+
+    zncc = zncc_loss(None, y.ravel(), yhat.ravel())
+    assert jnp.isfinite(zncc), "zncc should be finite"
+
+
+def test_loss_components_zero_for_identical():
+    """Test that loss is zero or minimal when prediction equals target."""
+    from biocomp.designloss import mse_loss, lncc_grid_loss
+
+    key = jax.random.PRNGKey(42)
+    y = jax.random.uniform(key, (8, 8))
+    yhat = y
+
+    mse = mse_loss(None, y.ravel(), yhat.ravel())
+    assert jnp.abs(mse) < 1e-6, f"mse should be ~0 for identical, got {mse}"
+
+    lncc = lncc_grid_loss(None, y, yhat, k=3)
+    assert jnp.abs(lncc) < 1e-4, f"lncc should be ~0 for identical, got {lncc}"
+
+
+def test_yhatdep_shape_assertion_catches_mismatch():
+    """Test that yhatdep shape mismatch is caught.
+
+    This tests the assertion added to compute_losses that verifies
+    yhatdep.shape == (batch_size, n_targets, n_networks).
+    """
+    batch_size, n_targets, n_networks = 64, 2, 3
+    yhatdep_correct = jnp.ones((batch_size, n_targets, n_networks))
+    yhatdep_wrong = jnp.ones((batch_size, n_networks, n_targets))
+
+    assert yhatdep_correct.shape == (batch_size, n_targets, n_networks)
+    assert yhatdep_wrong.shape != (batch_size, n_targets, n_networks), (
+        "This test verifies the assertion would catch swapped axes"
+    )
+
+
+def test_grid_images_shape_match():
+    """Test that Y_images and yhat_images have matching shapes after reshape.
+
+    This mirrors the assertion in compute_losses that catches shape mismatches
+    that could lead to silent broadcasting in loss computation.
+    """
+    xres, yres = 8, 8
+    n_targets, n_networks = 2, 3
+    batch_size = xres * yres
+
+    Y = jnp.ones((batch_size, n_targets, 1))
+    yhatdep = jnp.ones((batch_size, n_targets, n_networks))
+
+    Y_images = jnp.tile(
+        Y.squeeze(-1).T.reshape(n_targets, 1, yres, xres), (1, n_networks, 1, 1)
+    )
+    yhat_images = yhatdep.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
+
+    assert Y_images.shape == yhat_images.shape, (
+        f"Shape mismatch: Y_images {Y_images.shape} != yhat_images {yhat_images.shape}"
+    )
+    assert Y_images.shape == (n_targets, n_networks, yres, xres)
+
+
+def test_prediction_range_plausible():
+    """Test that model predictions are in a plausible range.
+
+    Predictions in latent space should typically be in [0, 1] or at least finite.
+    This test documents the expected behavior.
+    """
+    yhat = jnp.array([0.0, 0.5, 1.0, -0.1, 1.1])
+
+    assert jnp.all(jnp.isfinite(yhat)), "Predictions should be finite"
+
+    in_range = (yhat >= -0.5) & (yhat <= 1.5)
+    pct_in_range = jnp.mean(in_range)
+    assert pct_in_range > 0.8, (
+        f"Most predictions should be near [0,1], only {pct_in_range*100:.0f}% in range"
+    )

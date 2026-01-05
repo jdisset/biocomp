@@ -14,6 +14,7 @@ from assertpy import assert_that
 from .parameters import ParameterTree
 from .optimutils import as_schedule, jax_three_phase_schedule
 from .tumasking import TU_LOG_ALPHA_PATH, MIN_TEMPERATURE
+from .jaxutils import check as jax_check
 from .logging_config import get_logger
 from .designdebug import is_design_debug_enabled, save_debug_state
 
@@ -185,6 +186,51 @@ def _compute_lncc_contribution(
 
 def _sanitize(x):
     return jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _validate_grid_order(X: jnp.ndarray, xres: int, yres: int, jitter_tolerance: float = 0.15):
+    """Validate X coordinates are in sequential grid order (for use inside JIT with checkify)."""
+    X_grid = X.reshape(yres, xres, 2)
+
+    first_row_x = X_grid[0, :, 0]
+    first_row_y = X_grid[0, :, 1]
+    first_col_x = X_grid[:, 0, 0]
+    first_col_y = X_grid[:, 0, 1]
+
+    x_step = jnp.array(1.0 / (xres - 1) if xres > 1 else 1.0)
+    y_step = jnp.array(1.0 / (yres - 1) if yres > 1 else 1.0)
+    x_tol = x_step * jitter_tolerance
+    y_tol = y_step * jitter_tolerance
+
+    row_y_spread = jnp.max(first_row_y) - jnp.min(first_row_y)
+    jax_check(
+        row_y_spread < y_step + y_tol,
+        "Grid order violation: first row y-coords spread too large. "
+        "Data may be shuffled. Set reshuffle_batches=false.",
+    )
+
+    row_x_diffs = first_row_x[1:] - first_row_x[:-1]
+    row_x_monotonic = jnp.all(row_x_diffs > -x_tol)
+    jax_check(
+        row_x_monotonic,
+        "Grid order violation: first row x-coords not monotonically increasing. "
+        "Data may be shuffled. Set reshuffle_batches=false.",
+    )
+
+    col_x_spread = jnp.max(first_col_x) - jnp.min(first_col_x)
+    jax_check(
+        col_x_spread < x_step + x_tol,
+        "Grid order violation: first column x-coords spread too large. "
+        "Data may be shuffled. Set reshuffle_batches=false.",
+    )
+
+    col_y_diffs = first_col_y[1:] - first_col_y[:-1]
+    col_y_monotonic = jnp.all(col_y_diffs > -y_tol)
+    jax_check(
+        col_y_monotonic,
+        "Grid order violation: first column y-coords not monotonically increasing. "
+        "Data may be shuffled. Set reshuffle_batches=false.",
+    )
 
 
 def _gauss1d(sigma, radius=5):
@@ -1209,6 +1255,12 @@ def grid_distance_loss(
     **kw,
 ):
     assert dmanager.is_lattice_mode, "grid_distance_loss requires lattice sampling"
+    assert not dconf.reshuffle_batches, (
+        "CRITICAL: grid_distance_loss requires reshuffle_batches=False. "
+        "The loss reshapes data to (yres, xres) assuming sequential grid order. "
+        "With reshuffle_batches=True, data is permuted and the grid becomes scrambled, "
+        "making sinkhorn/lncc losses meaningless. Set reshuffle_batches: false in your config."
+    )
     xres, yres = dmanager.grid_resolution
     n_networks = len(dmanager.networks)
     total_steps = hyperopt_total_steps or 100000
@@ -1248,10 +1300,24 @@ def grid_distance_loss(
         assert batch_size == xres * yres, (
             f"batch_size={batch_size} must equal xres*yres={xres * yres} for grid reshape"
         )
+        assert X.shape[0] == batch_size and X.shape[-1] == 2, (
+            f"X shape {X.shape} incompatible with batch_size={batch_size}"
+        )
+        X_flat = X.reshape(-1, 2) if X.ndim > 2 else X
+        _validate_grid_order(X_flat, xres, yres)
+
+        assert yhatdep.shape == (batch_size, n_targets, n_networks_), (
+            f"yhatdep shape {yhatdep.shape} != expected ({batch_size}, {n_targets}, {n_networks_})"
+        )
+
         Y_images = jnp.tile(
             Y.squeeze(-1).T.reshape(n_targets, 1, yres, xres), (1, n_networks, 1, 1)
         )
         yhat_images = yhatdep.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
+
+        assert Y_images.shape == yhat_images.shape, (
+            f"Y_images {Y_images.shape} != yhat_images {yhat_images.shape} after reshape"
+        )
 
         w_sink = _get_schedule_value(
             params, step, total_steps, "w_sinkhorn", w_sinkhorn, schedule_ns

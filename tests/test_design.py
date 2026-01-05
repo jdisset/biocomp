@@ -1019,6 +1019,7 @@ def test_design_eval_matches_training_loss():
             w_sinkhorn=0.0,
             w_lncc=0.0,
             w_mse=0.0,
+            w_rmse=0.0,
             w_simse=0.4,
             w_zncc=0.4,
             w_gradient=0.2,

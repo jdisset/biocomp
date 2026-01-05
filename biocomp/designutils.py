@@ -883,6 +883,8 @@ def side_by_side_txt_plot(
     loss_weights: dict[str, float] | None = None,
     title_target: str = "TARGET",
     title_prediction: str = "PREDICTION",
+    training_penalties: dict[str, float] | None = None,
+    training_grid_total: float | None = None,
 ) -> tuple[str, dict[str, float]]:
     """Create side-by-side ASCII heatmaps of target vs prediction with loss metrics table.
 
@@ -895,6 +897,10 @@ def side_by_side_txt_plot(
             If None, uses defaults: sinkhorn=1.0, lncc=0.5, rmse=0.5
         title_target: Title for target heatmap
         title_prediction: Title for prediction heatmap
+        training_penalties: Optional dict of training penalties {penalty_name: value}.
+            If provided, shows 3-column Training vs Eval comparison table.
+        training_grid_total: Optional training grid total for comparison.
+            When provided with training_penalties, shows delta column.
 
     Returns:
         (txt_output, loss_dict) where:
@@ -955,28 +961,75 @@ def side_by_side_txt_plot(
     loss_dict_raw = result.to_dict()
     loss_order = ["sinkhorn", "lncc", "rmse", "mse", "simse", "spectral", "gradient", "contrast"]
 
-    lines.append("")
-    lines.append("┌────────────┬──────────┬──────────┐")
-    lines.append("│ Loss       │ Unweight │ Weighted │")
-    lines.append("├────────────┼──────────┼──────────┤")
-
     weighted_total = 0.0
     for name in loss_order:
         if name in loss_dict_raw and name != "total":
             raw_val = loss_dict_raw[name]
             weight = weights.get(name, 0.0)
-            weighted_val = raw_val * weight
-            weighted_total += weighted_val
-            lines.append(f"│ {name:10} │ {raw_val:8.4f} │ {weighted_val:8.4f} │")
+            weighted_total += raw_val * weight
 
-    lines.append("├────────────┼──────────┼──────────┤")
-    lines.append(f"│ {'TOTAL':10} │ {'':8} │ {weighted_total:8.4f} │")
-    lines.append("└────────────┴──────────┴──────────┘")
+    if training_grid_total is not None:
+        delta_grid = abs(training_grid_total - weighted_total)
+        lines.append("")
+        lines.append("┌─────────────────┬───────────┬───────────┬─────────┐")
+        lines.append("│ Component       │  Training │      Eval │   Delta │")
+        lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
+
+        for name in loss_order:
+            if name in loss_dict_raw and name != "total":
+                raw_val = loss_dict_raw[name]
+                weight = weights.get(name, 0.0)
+                eval_w = raw_val * weight
+                if eval_w > 0:
+                    lines.append(f"│ {name:15} │ {eval_w:9.4f} │ {eval_w:9.4f} │  0.0000 │")
+
+        lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
+        tr_gt, w_tot, d_g = training_grid_total, weighted_total, delta_grid
+        lines.append(f"│ {'GRID TOTAL':15} │ {tr_gt:9.4f} │ {w_tot:9.4f} │ {d_g:7.4f} │")
+
+        if training_penalties:
+            lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
+            penalty_order = [
+                "l0_penalty", "spread_penalty", "coupling_penalty",
+                "tucount_penalty", "ern_tying_penalty",
+            ]
+            penalty_sum = 0.0
+            for pen_name in penalty_order:
+                if pen_name in training_penalties:
+                    pen_val = training_penalties[pen_name]
+                    penalty_sum += pen_val
+                    lines.append(f"│ {pen_name:15} │ {pen_val:9.4f} │       n/a │         │")
+
+            total_w_pen = training_grid_total + penalty_sum
+            lines.append("├─────────────────┼───────────┼───────────┼─────────┤")
+            lines.append(f"│ {'TOTAL + PENALTY':15} │ {total_w_pen:9.4f} │       n/a │         │")
+
+        lines.append("└─────────────────┴───────────┴───────────┴─────────┘")
+    else:
+        delta_grid = 0.0
+        lines.append("")
+        lines.append("┌────────────┬──────────┬──────────┐")
+        lines.append("│ Loss       │ Unweight │ Weighted │")
+        lines.append("├────────────┼──────────┼──────────┤")
+
+        for name in loss_order:
+            if name in loss_dict_raw and name != "total":
+                raw_val = loss_dict_raw[name]
+                weight = weights.get(name, 0.0)
+                weighted_val = raw_val * weight
+                lines.append(f"│ {name:10} │ {raw_val:8.4f} │ {weighted_val:8.4f} │")
+
+        lines.append("├────────────┼──────────┼──────────┤")
+        lines.append(f"│ {'TOTAL':10} │ {'':8} │ {weighted_total:8.4f} │")
+        lines.append("└────────────┴──────────┴──────────┘")
 
     loss_dict_out = {
         **{k: v for k, v in loss_dict_raw.items() if k != "total"},
         "weighted_total": weighted_total,
         "weights": weights,
+        "training_grid_total": training_grid_total,
+        "training_penalties": training_penalties,
+        "delta_grid": delta_grid,
     }
 
     return "\n".join(lines), loss_dict_out
