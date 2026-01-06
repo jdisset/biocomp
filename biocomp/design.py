@@ -38,7 +38,17 @@ from biocomp.designloss import (  # noqa: F401 - re-exported
     proj_nonneg_ste,
     _sanitize,
 )
-from biocomp.tumasking import build_tu_id_mapping, TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
+from biocomp.tumasking import (
+    build_tu_id_mapping,
+    TU_LOG_ALPHA_PATH,
+    LOG_ALPHA_MIN,
+    LOG_ALPHA_MAX,
+    LATENT_TU_Z_PATH,
+    LATENT_TU_W1_PATH,
+    LATENT_TU_B1_PATH,
+    LATENT_TU_W2_PATH,
+    LATENT_TU_B2_PATH,
+)
 from biocomp.designdebug import save_debug_state, is_design_debug_enabled
 
 # re-export target classes and sampling configs for backward compatibility
@@ -379,13 +389,11 @@ def initialize_params(
     n_networks: int = 1,
     tu_log_alpha_init_mean: float = 2.0,
     tu_log_alpha_init_std: float = 0.5,
+    use_latent_tu_masking: bool = False,
+    latent_tu_dim: int = 16,
+    latent_tu_hidden_dim: int = 32,
 ):
-    """Initialize parameters for design optimization.
-
-    When TU masking is enabled (n_tus > 0), tu_log_alpha has shape
-    (n_replicates, n_targets, n_networks, n_tus) to allow independent
-    TU masking per network/scaffold.
-    """
+    """Initialize design params. If use_latent_tu_masking, creates MLP params instead of direct log_alpha."""
     tu_key, init_key = jax.random.split(key)
 
     def init_single(k):
@@ -401,17 +409,47 @@ def initialize_params(
 
     if n_tus > 0:
         assert n_networks > 0, f"n_tus={n_tus} but n_networks={n_networks}"
-        expected_shape = (n_replicates, n_targets, n_networks, n_tus)
-        tu_log_alpha = tu_log_alpha_init_mean + tu_log_alpha_init_std * jax.random.normal(
-            tu_key, shape=expected_shape
-        )
-        assert tu_log_alpha.shape == expected_shape, (
-            f"tu_log_alpha shape {tu_log_alpha.shape} != {expected_shape}"
-        )
-        params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=None)
-        logger.info(
-            f"Initialized TU log_alpha: {n_tus} TUs × {n_networks} networks (mean={tu_log_alpha_init_mean}, std={tu_log_alpha_init_std})"
-        )
+
+        if use_latent_tu_masking:
+            k_z, k_w1, k_w2, tu_key = jax.random.split(tu_key, 4)
+
+            init_log_alpha = tu_log_alpha_init_mean + tu_log_alpha_init_std * jax.random.normal(
+                tu_key, shape=(n_replicates, n_targets, n_networks, n_tus)
+            )
+            latent_z = jax.random.normal(
+                k_z, shape=(n_replicates, n_targets, n_networks, latent_tu_dim)
+            ) * 0.1
+            W1 = jax.random.normal(
+                k_w1, shape=(n_replicates, n_targets, n_networks, latent_tu_hidden_dim, latent_tu_dim)
+            ) * jnp.sqrt(2.0 / latent_tu_dim)
+            b1 = jnp.zeros((n_replicates, n_targets, n_networks, latent_tu_hidden_dim))
+            W2 = jax.random.normal(
+                k_w2, shape=(n_replicates, n_targets, n_networks, n_tus, latent_tu_hidden_dim)
+            ) * jnp.sqrt(2.0 / latent_tu_hidden_dim) * 0.1
+            b2 = init_log_alpha  # MLP(0) ≈ init_log_alpha
+
+            params.at(LATENT_TU_Z_PATH, latent_z, overwrite=None)
+            params.at(LATENT_TU_W1_PATH, W1, overwrite=None)
+            params.at(LATENT_TU_B1_PATH, b1, overwrite=None)
+            params.at(LATENT_TU_W2_PATH, W2, overwrite=None)
+            params.at(LATENT_TU_B2_PATH, b2, overwrite=None)
+            logger.info(
+                f"Initialized latent TU masking: {n_tus} TUs × {n_networks} networks, "
+                f"latent_dim={latent_tu_dim}, hidden_dim={latent_tu_hidden_dim}"
+            )
+        else:
+            expected_shape = (n_replicates, n_targets, n_networks, n_tus)
+            tu_log_alpha = tu_log_alpha_init_mean + tu_log_alpha_init_std * jax.random.normal(
+                tu_key, shape=expected_shape
+            )
+            assert tu_log_alpha.shape == expected_shape, (
+                f"tu_log_alpha shape {tu_log_alpha.shape} != {expected_shape}"
+            )
+            params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=None)
+            logger.info(
+                f"Initialized TU log_alpha: {n_tus} TUs × {n_networks} networks "
+                f"(mean={tu_log_alpha_init_mean}, std={tu_log_alpha_init_std})"
+            )
 
     return params
 
@@ -426,6 +464,11 @@ class DesignConfig(DesignOptimConfig):
     use_latent_ratios: bool = False
     latent_dim: int = 8
     latent_hidden_dim: int = 16
+
+    enable_tu_masking: bool = False
+    use_latent_tu_masking: bool = False
+    latent_tu_dim: int = 16
+    latent_tu_hidden_dim: int = 32
 
     pluggable_optimizer: Any = None
 
@@ -744,6 +787,9 @@ def _start_pluggable(
         key=pkey, n_tus=n_tus, n_networks=n_networks,
         tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
         tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
+        use_latent_tu_masking=dconf.use_latent_tu_masking,
+        latent_tu_dim=dconf.latent_tu_dim,
+        latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
     )
     initial_params = jax.tree.map(lambda x: x.squeeze(0), initial_params)
     timer.end("params")
@@ -754,6 +800,16 @@ def _start_pluggable(
     )
     flat_params = codec.encode(initial_params)
     logger.info(f"  Genome dimension: {codec.param_dim}")
+
+    if codec.param_dim == 0:
+        raise ValueError(
+            "No parameters to optimize: genome dimension is 0. "
+            "This typically happens with zero-freedom recipes where all ratios are explicitly locked. "
+            "Design optimization requires at least some unlocked parameters. "
+            "Consider using a recipe with unlocked ratios (e.g., T_2_ratios_only.yaml) or "
+            "check that your recipe doesn't have `locked: true` on all ratio specifications."
+        )
+
     loss_fn, num_z, _ = _create_loss_function(stack, dmanager, dconf, initial_params)
     timer.end("codec")
 
@@ -924,12 +980,27 @@ def start(
         n_networks=n_networks,
         tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
         tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
+        use_latent_tu_masking=dconf.use_latent_tu_masking,
+        latent_tu_dim=dconf.latent_tu_dim,
+        latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
     )
     assert_tree_shape(initial_params, (dconf.n_replicates, dmanager.n_targets))
     timer.end("params")
 
     timer.start("opt_init", "[3/5] Initializing optimizer state...")
     static, dynamic = initial_params.filter_by_tag(["non_grad", "shared"])
+
+    # Check if there are any actual JAX arrays to optimize (not just ArrayRefs)
+    jax_leaves = jax.tree.leaves(dynamic)
+    if not jax_leaves:
+        raise ValueError(
+            "No parameters to optimize: all parameters are either shared or marked NON_GRAD. "
+            "This typically happens with zero-freedom recipes where all ratios are explicitly locked. "
+            "Design optimization requires at least some unlocked parameters. "
+            "Consider using a recipe with unlocked ratios (e.g., T_2_ratios_only.yaml) or "
+            "check that your recipe doesn't have `locked: true` on all ratio specifications."
+        )
+
     initial_optimizer_state = vmap(vmap(dconf.optimizer.init))(dynamic)
     timer.end("opt_init")
 

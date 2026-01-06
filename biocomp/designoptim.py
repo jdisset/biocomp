@@ -117,6 +117,7 @@ class EvolutionaryOptimizer(BaseModel):
     min_sigma: float = 1e-4
     max_sigma: float = 10.0
     _es: Any = None
+    _es_params: Any = None
     _pop_size: int | None = None
 
     def _get_pop_size(self, dim: int) -> int:
@@ -129,18 +130,22 @@ class EvolutionaryOptimizer(BaseModel):
     def init(
         self, key: jax.random.PRNGKey, params: jnp.ndarray, objective_fn: Callable
     ) -> OptimizationState:
-        from evosax import CMA_ES
+        from evosax.algorithms import CMA_ES
 
         loss = _validate_init(params, objective_fn)
         dim = params.shape[0]
         assert dim > 0, f"dim must be positive: {dim}"
 
         pop_size = self._get_pop_size(dim)
-        es = CMA_ES(popsize=pop_size, num_dims=dim, sigma_init=self.sigma_init)
+        es = CMA_ES(population_size=pop_size, solution=params)
+        es_params = es.default_params.replace(
+            std_init=self.sigma_init, std_min=self.min_sigma, std_max=self.max_sigma
+        )
         object.__setattr__(self, "_es", es)
+        object.__setattr__(self, "_es_params", es_params)
         object.__setattr__(self, "_pop_size", pop_size)
 
-        es_state = es.initialize(jax.random.split(key)[1], init_mean=params)
+        es_state = es.init(jax.random.split(key)[1], params, es_params)
         logger.info(f"CMA-ES: dim={dim}, pop={pop_size}, σ₀={self.sigma_init}")
         return _state(0, params, params, loss, OptimPhase.EC, es_state)
 
@@ -151,51 +156,36 @@ class EvolutionaryOptimizer(BaseModel):
         objective_fn: Callable,
         step: jnp.ndarray | None = None,
     ) -> tuple[OptimizationState, dict]:
-        """Execute one CMA-ES generation.
-
-        Args:
-            state: Current optimization state
-            key: Random key for this step
-            objective_fn: Either:
-                - A pre-compiled vmapped function (pop, step) -> losses (preferred for GPU)
-                - A single-sample function (genome) -> loss (legacy, will be vmapped+JIT'd)
-            step: Current step number (required if objective_fn takes step as 2nd arg)
-        """
+        """Execute one CMA-ES generation."""
         es_state = state.opt_state
-        k1, _ = jax.random.split(key)
+        k1, k2 = jax.random.split(key)
 
-        pop, es_state = self._es.ask(k1, es_state)
+        pop, es_state = self._es.ask(k1, es_state, self._es_params)
 
-        # If step is provided, objective_fn is pre-compiled vmapped: (pop, step) -> losses
-        # Otherwise, it's a single-sample function that needs vmapping (legacy path)
-        # NOTE: evosax CMA-ES MINIMIZES fitness, so pass loss directly (no negation!)
+        # evosax CMA-ES MINIMIZES fitness, so pass loss directly (no negation)
         if step is not None:
             raw_fit = objective_fn(pop, step)
         else:
             raw_fit = jax.jit(jax.vmap(objective_fn))(pop)
 
-        # For invalid samples, use +inf (worst possible for minimization)
         fitness = jnp.where(jnp.isfinite(raw_fit), raw_fit, jnp.inf)
-        es_state = self._es.tell(pop, fitness, es_state)
+        es_state, _ = self._es.tell(k2, pop, fitness, es_state, self._es_params)
 
-        # clamp sigma to prevent explosion (evosax doesn't do this internally)
-        sigma_before = es_state.sigma
-        clamped_sigma = jnp.clip(es_state.sigma, self.min_sigma, self.max_sigma)
-        es_state = es_state.replace(sigma=clamped_sigma)
+        # clamp sigma (std) to prevent explosion
+        sigma_before = es_state.std
+        clamped_sigma = jnp.clip(es_state.std, self.min_sigma, self.max_sigma)
+        es_state = es_state.replace(std=clamped_sigma)
         sigma_clamped = sigma_before != clamped_sigma
 
-        # evosax minimizes, so best = argmin
         best_idx = jnp.argmin(fitness)
         gen_best, gen_loss = pop[best_idx], fitness[best_idx]
         is_better = gen_loss < state.best_loss
 
-        # compute fitness statistics for diagnostics (fitness = loss, lower is better)
         valid_fitness = jnp.where(jnp.isfinite(raw_fit), raw_fit, jnp.nan)
         fitness_std = jnp.nanstd(valid_fitness)
         fitness_min = jnp.nanmin(valid_fitness)
         fitness_max = jnp.nanmax(valid_fitness)
 
-        # genome statistics for debugging
         mean_genome = es_state.mean
         genome_std = jnp.std(pop, axis=0).mean()
         genome_range = jnp.max(pop) - jnp.min(pop)
@@ -225,7 +215,7 @@ class EvolutionaryOptimizer(BaseModel):
         }
 
     def should_stop(self, state: OptimizationState) -> bool:
-        sigma = float(state.opt_state.sigma)
+        sigma = float(state.opt_state.std)
         return (
             sigma < self.min_sigma
             or sigma > self.max_sigma

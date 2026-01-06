@@ -55,6 +55,7 @@ create_aggregation_nodes = GraphRewritingRule(
                 "ratios": [],
                 "members": [],
                 "ratio_ranges": [],
+                "ratio_locked": [],
                 "fluo_bias": "{{ source1.extra.get('fluo_bias') if source1.extra.get('fluo_bias') else None }}",
             },
         ),
@@ -89,6 +90,7 @@ connect_sources_to_aggregation = GraphRewritingRule(
                 "ratios": "{{ aggregation.extra.get('ratios', []) + [source.extra.get('ratio') if source.extra.get('ratio') is not None else 1.0] }}",
                 "members": "{{ aggregation.extra.get('members', []) + [source.extra.get('source_id')] }}",
                 "ratio_ranges": "{{ (aggregation.extra.get('ratio_ranges') if aggregation.extra.get('ratio_ranges') else []) + ([source.extra.get('ratio_range')] if source.extra.get('ratio_range') else [None]) }}",
+                "ratio_locked": "{{ (aggregation.extra.get('ratio_locked') if aggregation.extra.get('ratio_locked') else []) + [source.extra.get('ratio_locked', False)] }}",
             },
         ),
     ],
@@ -114,6 +116,7 @@ merge_aggregators_by_group = GraphRewritingRule(
                 "ratios": "{{ agg1.extra.get('ratios', []) + agg2.extra.get('ratios', []) }}",
                 "members": "{{ agg1.extra.get('members', []) + agg2.extra.get('members', []) }}",
                 "ratio_ranges": "{{ (agg1.extra.get('ratio_ranges') if agg1.extra.get('ratio_ranges') else []) + (agg2.extra.get('ratio_ranges') if agg2.extra.get('ratio_ranges') else []) }}",
+                "ratio_locked": "{{ (agg1.extra.get('ratio_locked') if agg1.extra.get('ratio_locked') else []) + (agg2.extra.get('ratio_locked') if agg2.extra.get('ratio_locked') else []) }}",
             },
         ),
         # Delete the now-redundant agg1
@@ -137,10 +140,11 @@ sort_aggregation_members = GraphRewritingRule(
         SetProperties(
             node_var="aggregation",
             properties={
-                # Sort members and reorder ratios and ratio_ranges to match
+                # Sort members and reorder ratios, ratio_ranges, and ratio_locked to match
                 "members": "{{ sorted(aggregation.extra.get('members', [])) }}",
                 "ratios": "{{ reorder_list(aggregation.extra.get('ratios', []), sorted_with_indices(aggregation.extra.get('members', []))[1]) }}",
                 "ratio_ranges": "{{ reorder_list(aggregation.extra.get('ratio_ranges', []), sorted_with_indices(aggregation.extra.get('members', []))[1]) }}",
+                "ratio_locked": "{{ reorder_list(aggregation.extra.get('ratio_locked', []), sorted_with_indices(aggregation.extra.get('members', []))[1]) }}",
             },
         ),
     ],
@@ -309,9 +313,11 @@ def sort_aggregation_edges(graph):
 
         ratios = agg_node.extra.get("ratios", [])
         ratio_ranges = agg_node.extra.get("ratio_ranges", [])
+        ratio_locked = agg_node.extra.get("ratio_locked", [])
 
         new_ratios = [1.0] * len(members)
         new_ratio_ranges = [None] * len(members)
+        new_ratio_locked = [False] * len(members)
 
         for old_idx, member in enumerate(members):
             new_idx = sorted_members.index(member)
@@ -319,10 +325,13 @@ def sort_aggregation_edges(graph):
                 new_ratios[new_idx] = ratios[old_idx]
             if old_idx < len(ratio_ranges):
                 new_ratio_ranges[new_idx] = ratio_ranges[old_idx]
+            if old_idx < len(ratio_locked):
+                new_ratio_locked[new_idx] = ratio_locked[old_idx]
 
         agg_node.extra["members"] = sorted_members
         agg_node.extra["ratios"] = new_ratios
         agg_node.extra["ratio_ranges"] = new_ratio_ranges
+        agg_node.extra["ratio_locked"] = new_ratio_locked
 
         outgoing_edges = graph.get_outgoing_edges(agg_node.node_id)
 

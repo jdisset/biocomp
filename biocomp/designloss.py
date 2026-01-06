@@ -13,7 +13,16 @@ from assertpy import assert_that
 
 from .parameters import ParameterTree
 from .optimutils import as_schedule, jax_three_phase_schedule
-from .tumasking import TU_LOG_ALPHA_PATH, MIN_TEMPERATURE
+from .tumasking import (
+    TU_LOG_ALPHA_PATH,
+    LATENT_TU_Z_PATH,
+    LATENT_TU_W1_PATH,
+    LATENT_TU_B1_PATH,
+    LATENT_TU_W2_PATH,
+    LATENT_TU_B2_PATH,
+    asymmetric_l0_loss,
+    decode_latent_tu_masking,
+)
 from .jaxutils import check as jax_check
 from .logging_config import get_logger
 from .designdebug import is_design_debug_enabled, save_debug_state
@@ -778,9 +787,11 @@ def _compute_tu_stats(params) -> dict:
     log_alpha = params[TU_LOG_ALPHA_PATH]
     tu_probs = jax.nn.sigmoid(log_alpha)
     tu_enabled_mask = tu_probs > 0.5
+    n_tus = log_alpha.shape[-1]  # TUs per network (last axis)
     return {
         "enabled_count": jnp.sum(tu_enabled_mask),
         "total_count": jnp.array(log_alpha.size),
+        "n_tus": jnp.array(n_tus),  # TUs per network for proper display
         "mean_prob": jnp.mean(tu_probs),
         "min_log_alpha": jnp.min(log_alpha),
         "max_log_alpha": jnp.max(log_alpha),
@@ -852,30 +863,6 @@ def _dump_axis_assignments(dmanager, n_targets: int, n_networks: int) -> None:
         output_dir=get_design_debug_output_dir(),
         mode="design",
     )
-
-
-def _validate_temperature_schedule(tu_temperature, total_steps: int = 10000) -> None:
-    """Validate tu_temperature schedule at config time (before tracing).
-
-    This catches config bugs early - before we enter JIT/scan where Python
-    assertions don't work. Runtime safety is provided by jnp.maximum() clamping.
-    """
-    sched = as_schedule(tu_temperature)
-    # check schedule at endpoints and midpoint
-    for step in [0, total_steps // 2, total_steps]:
-        temp = float(sched(step))
-        assert temp >= 0, (
-            f"tu_temperature schedule returns negative value {temp} at step {step}. "
-            f"Temperature must be >= 0 for Hard Concrete distribution."
-        )
-        if temp < MIN_TEMPERATURE:
-            import warnings
-
-            warnings.warn(
-                f"tu_temperature={temp} at step {step} is below MIN_TEMPERATURE={MIN_TEMPERATURE}. "
-                f"Will be clamped to {MIN_TEMPERATURE} at runtime.",
-                stacklevel=3,
-            )
 
 
 HYPEROPT_SCHEDULE_NAMESPACE = "hyperopt_schedules"
@@ -1021,13 +1008,18 @@ def _make_loss_func(
     max_tus_per_cotx=5,
     max_prediction=1e6,
     lambda_l0=0.0,
-    tu_temperature=0.5,
+    l0_tu_threshold=None,
+    l0_excess_exponent=2.0,
+    l0_alpha_below=0.5,
+    l0_beta_above=2.0,
+    l0_blend_sharpness=5.0,
     tu_n_samples=4,
     lambda_coupling=0.1,
     min_ratio_threshold=0.005,
     lambda_ern_tying=0.0,
     hyperopt_schedule_ns=None,
     hyperopt_total_steps=None,
+    **_kw,
 ):
     """Create the loss function for design optimization.
 
@@ -1048,10 +1040,6 @@ def _make_loss_func(
     """
     if hyperopt_schedule_ns and not hyperopt_total_steps:
         raise ValueError("hyperopt_total_steps required when hyperopt_schedule_ns is set")
-
-    # config-time validation (Python assertions) - catches config bugs early
-    if hyperopt_schedule_ns is None:
-        _validate_temperature_schedule(tu_temperature, total_steps=100000)
 
     n_targets, n_networks = dmanager.n_targets, len(dmanager.networks)
     dep_mask = stack.get_dependent_output_mask()
@@ -1106,15 +1094,30 @@ def _make_loss_func(
         )
         spread_penalty = _sanitize(jnp.atleast_1d(spread_penalty))[0]
 
-        tu_temp = _get_schedule_value(
-            params, step, total_steps, "tu_temperature", tu_temperature, schedule_ns
-        )
         l0_penalty = jnp.array(0.0)
         l0_penalty_per_network = None
         coupling_penalty = jnp.array(0.0)
         coupling_penalty_per_target = None
-        if TU_LOG_ALPHA_PATH in params:
+
+        # get log_alpha: either decode from latent MLP or use direct path
+        log_alpha = None
+        if LATENT_TU_Z_PATH in params:
+            # latent TU masking: decode MLP to get log_alpha
+            z = params[LATENT_TU_Z_PATH]
+            W1 = params[LATENT_TU_W1_PATH]
+            b1 = params[LATENT_TU_B1_PATH]
+            W2 = params[LATENT_TU_W2_PATH]
+            b2 = params[LATENT_TU_B2_PATH]
+
+            # vmap decode over (targets, networks)
+            def decode_single(z_i, W1_i, b1_i, W2_i, b2_i):
+                return decode_latent_tu_masking(z_i, W1_i, b1_i, W2_i, b2_i)
+
+            log_alpha = vmap(vmap(decode_single))(z, W1, b1, W2, b2)
+        elif TU_LOG_ALPHA_PATH in params:
             log_alpha = params[TU_LOG_ALPHA_PATH]
+
+        if log_alpha is not None:
             assert log_alpha.ndim == 3, (
                 f"log_alpha must be 3D (n_targets, n_networks, n_tus), got {log_alpha.ndim}D"
             )
@@ -1128,16 +1131,36 @@ def _make_loss_func(
 
             from biocomp.tumasking import l0_penalty as l0_penalty_fn
 
-            per_tu_penalty = l0_penalty_fn(log_alpha, temperature=tu_temp)
+            per_tu_penalty = l0_penalty_fn(log_alpha)
             if per_network_tu_mask is not None:
                 assert per_network_tu_mask.shape[0] == n_networks, (
                     f"per_network_tu_mask shape mismatch: {per_network_tu_mask.shape} vs n_networks={n_networks}"
                 )
                 per_tu_penalty = per_tu_penalty * per_network_tu_mask[None, :, :]
+
+            expected_count_per_network = jnp.sum(per_tu_penalty, axis=-1)
+
+            if l0_tu_threshold is not None and l0_tu_threshold > 0:
+                # vmap asymmetric_l0_loss over (targets, networks)
+                def compute_asymmetric_l0(la_single_network):
+                    return asymmetric_l0_loss(
+                        la_single_network,
+                        threshold=l0_tu_threshold,
+                        alpha_below=l0_alpha_below,
+                        beta_above=l0_beta_above,
+                        blend_sharpness=l0_blend_sharpness,
+                    )
+
+                # log_alpha shape: (n_targets, n_networks, n_tus)
+                # vmap over targets then networks
+                l0_raw_per_network = vmap(vmap(compute_asymmetric_l0))(log_alpha)
+            else:
+                l0_raw_per_network = expected_count_per_network
+
             l0_weight = _get_schedule_value(
                 params, step, total_steps, "lambda_l0", lambda_l0, schedule_ns
             )
-            l0_penalty_per_network = _sanitize(l0_weight * jnp.sum(per_tu_penalty, axis=-1))
+            l0_penalty_per_network = _sanitize(l0_weight * l0_raw_per_network)
             l0_penalty = _sanitize(jnp.atleast_1d(jnp.sum(l0_penalty_per_network)))[0]
 
             if min_ratio_threshold > 0 and ratio_paths:
@@ -1196,7 +1219,6 @@ def _make_loss_func(
             "coupling_penalty_per_target": coupling_penalty_per_target,
             "tu_stats": tu_stats,
             "ratio_stats": ratio_stats,
-            "tu_temperature": tu_temp,
             "sublosses": sublosses,
             "pred_stats_per_network": pred_stats_per_network,
         }
@@ -1238,7 +1260,11 @@ def grid_distance_loss(
     lambda_spread=0.01,
     max_ratio=100.0,
     lambda_l0=0.0,
-    tu_temperature=0.5,
+    l0_tu_threshold=None,
+    l0_excess_exponent=2.0,
+    l0_alpha_below=0.5,
+    l0_beta_above=2.0,
+    l0_blend_sharpness=5.0,
     tu_n_samples=4,
     lambda_coupling=0.1,
     min_ratio_threshold=0.005,
@@ -1415,7 +1441,11 @@ def grid_distance_loss(
         max_ratio=max_ratio,
         max_tus_per_cotx=max_tus_per_cotx,
         lambda_l0=lambda_l0,
-        tu_temperature=tu_temperature,
+        l0_tu_threshold=l0_tu_threshold,
+        l0_excess_exponent=l0_excess_exponent,
+        l0_alpha_below=l0_alpha_below,
+        l0_beta_above=l0_beta_above,
+        l0_blend_sharpness=l0_blend_sharpness,
         tu_n_samples=tu_n_samples,
         lambda_coupling=lambda_coupling,
         min_ratio_threshold=min_ratio_threshold,

@@ -1709,10 +1709,13 @@ def _build_cdg_dual_from_preprocessed(
             norm_ratio, orig_ratio = source_to_norm_ratio_map[unit.source]
             if isinstance(orig_ratio, RatioSpec):
                 range_info = orig_ratio.to_num_range()
+                ratio_locked = orig_ratio.is_locked()
             elif isinstance(orig_ratio, NumRange):
                 range_info = orig_ratio
+                ratio_locked = False
             else:
                 range_info = None
+                ratio_locked = False
             if unit.position_in_source is not None:
                 position = unit.position_in_source
             else:
@@ -1729,6 +1732,7 @@ def _build_cdg_dual_from_preprocessed(
                     unit.name,
                     position,
                     i,
+                    ratio_locked,
                 )
 
     source_nodes, tx_nodes, tl_nodes = {}, {}, {}
@@ -1741,6 +1745,7 @@ def _build_cdg_dual_from_preprocessed(
         tu_name,
         position,
         cotx_index,
+        ratio_locked,
     ) in source_cotx_to_ratio_map.items():
         source_key = (source_id, cotx_group)
         if source_key not in source_nodes:
@@ -1757,6 +1762,7 @@ def _build_cdg_dual_from_preprocessed(
                 "cotx_index": cotx_index,
                 "tu_names_by_slot": {},
                 "tu_global_indices_by_slot": {},
+                "ratio_locked": ratio_locked,  # track explicit locks for design mode
             }
             # Add range info if ratio is unlocked
             if range_info is not None:

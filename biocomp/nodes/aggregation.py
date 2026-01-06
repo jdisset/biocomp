@@ -50,6 +50,7 @@ def aggregation(
             extra = node.get(stack).extra
             base_ratios = extra.get("ratios", [1.0] * n_outputs)
             ranges = extra.get("ratio_ranges", [None] * n_outputs)
+            locked = extra.get("ratio_locked", [False] * n_outputs)
 
             if len(base_ratios) != n_outputs:
                 assert not random_init, (
@@ -59,12 +60,23 @@ def aggregation(
                 )
                 base_ratios = [1.0] * n_outputs
                 ranges = [None] * n_outputs
+                locked = [False] * n_outputs
 
             has_unlocked = any(r is not None for r in ranges)
 
+            # random_init only unlocks ratios that are NOT explicitly locked
             if random_init and not has_unlocked:
-                ranges = [{"min": 0.05, "max": 1.0} for _ in range(n_outputs)]
-                has_unlocked = True
+                any_unlocked = False
+                new_ranges = []
+                for j in range(n_outputs):
+                    is_locked = locked[j] if j < len(locked) else False
+                    if is_locked:
+                        new_ranges.append(None)  # keep locked
+                    else:
+                        new_ranges.append({"min": 0.05, "max": 1.0})
+                        any_unlocked = True
+                ranges = new_ranges
+                has_unlocked = any_unlocked
 
             if has_unlocked:
                 absolute_ratios = []
@@ -94,9 +106,11 @@ def aggregation(
                         node_maxs.append(base_val)
 
                 absolute_ratios = jnp.array(absolute_ratios, dtype=jnp.float32)
-                ratio_v = absolute_ratios / jnp.sum(absolute_ratios)
-                ratio_mins.append(jnp.array(node_mins, dtype=jnp.float32))
-                ratio_maxs.append(jnp.array(node_maxs, dtype=jnp.float32))
+                node_mins_arr = jnp.array(node_mins, dtype=jnp.float32)
+                node_maxs_arr = jnp.array(node_maxs, dtype=jnp.float32)
+                ratio_v = absolute_ratios
+                ratio_mins.append(node_mins_arr)
+                ratio_maxs.append(node_maxs_arr)
             else:
                 ratio_v = jnp.array(base_ratios, dtype=jnp.float32)
                 ratio_mins.append(ratio_v.copy())
@@ -233,13 +247,17 @@ def aggregation(
         def get_mask_for_tu(tu_idx: int, network_id: int) -> float:
             if has_binary_mask:
                 binary_mask = params[TU_BINARY_MASK_PATH]
-                if binary_mask.ndim == 2:
-                    binary_mask = binary_mask[network_id]
+                assert binary_mask.ndim == 2, (
+                    f"binary_mask must be 2D (n_networks, n_tus), got {binary_mask.ndim}D"
+                )
+                binary_mask = binary_mask[network_id]
                 return float(binary_mask[tu_idx])
             else:
                 tu_log_alpha = params[TU_LOG_ALPHA_PATH]
-                if tu_log_alpha.ndim == 2:
-                    tu_log_alpha = tu_log_alpha[network_id]
+                assert tu_log_alpha.ndim == 2, (
+                    f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D"
+                )
+                tu_log_alpha = tu_log_alpha[network_id]
                 return float(get_final_mask(tu_log_alpha[tu_idx : tu_idx + 1])[0])
 
         if has_hard_concrete:
@@ -285,9 +303,9 @@ def aggregation(
                         ratios_array = ratios_array.at[j].set(ratios_array[j] * mask)
 
             positive_ratios = ratios_array[ratios_array > 0]
-            min_ratio = jnp.min(positive_ratios) if len(positive_ratios) > 0 else 1.0
-            min_ratio = jnp.maximum(min_ratio, 1e-9)
-            normalized_ratios = ratios_array / min_ratio
+            ratio_sum = jnp.sum(positive_ratios) if len(positive_ratios) > 0 else 1.0
+            ratio_sum = jnp.maximum(ratio_sum, 1e-9)
+            normalized_ratios = ratios_array / ratio_sum
 
             if has_tu_masking and n_masked > 0:
                 n_zeros = sum(1 for r in normalized_ratios.tolist() if abs(r) < 1e-8)

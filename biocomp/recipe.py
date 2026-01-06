@@ -1,4 +1,5 @@
 from biocomp.utils import flatten
+from collections.abc import Sequence as ABCSequence
 from pathlib import Path
 from typing import Union, Optional, Annotated
 from biocomp.library import LibraryContext, PartsLibrary, get_l0_parts, get_l1_parts, get_l1_from_l2
@@ -280,8 +281,10 @@ def convert_to_slot(value):
     """Convert strings or lists of strings to Slot objects"""
     if isinstance(value, Slot):
         return value
-    elif isinstance(value, (str, list)):
+    elif isinstance(value, str):
         return Slot(part=value)
+    elif isinstance(value, ABCSequence):
+        return Slot(part=list(value))
     else:
         raise ValueError(f"Cannot convert {type(value)} to Slot")
 
@@ -382,6 +385,18 @@ class CoTransfection(BaseModel):
             return not r.is_locked()
         return False
 
+    def _is_ratio_explicitly_locked(self, r: RatioType) -> bool:
+        """Check if ratio is EXPLICITLY locked via RatioSpec(locked=True).
+
+        This is different from "not unlocked" - a plain float value is neither
+        explicitly locked nor explicitly unlocked. This distinction is important
+        for design mode where random_init=True should unlock unspecified ratios
+        but NOT override explicitly locked ones.
+        """
+        if isinstance(r, RatioSpec):
+            return r.is_locked()
+        return False
+
     def _get_ratio_value(self, r: RatioType) -> float:
         if isinstance(r, NumRange):
             if r.init is not None:
@@ -419,6 +434,18 @@ class CoTransfection(BaseModel):
         if self.ratios is None:
             return [1.0] * len(self.units)
         return [self._get_ratio_value(r) for r in self.ratios]
+
+    def get_ratio_locked(self) -> list[bool]:
+        """Get list of booleans indicating which ratios are explicitly locked.
+
+        Returns True for ratios specified as RatioSpec(locked=True), False otherwise.
+        This is used by design mode to distinguish between:
+        - Explicitly locked ratios (should stay locked even with random_init=True)
+        - Unspecified ratios (can be unlocked by random_init=True)
+        """
+        if self.ratios is None:
+            return [False] * len(self.units)
+        return [self._is_ratio_explicitly_locked(r) for r in self.ratios]
 
     def has_bias(self) -> bool:
         """Check if this cotx specifies a bias (not a normal input)"""

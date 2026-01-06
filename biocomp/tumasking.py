@@ -27,6 +27,12 @@ TU_ALWAYS_ENABLED = -1
 TU_LOG_ALPHA_PATH = "design/tu_log_alpha"
 TU_BINARY_MASK_PATH = "design/tu_binary_mask"
 
+LATENT_TU_Z_PATH = "design/latent_tu_z"
+LATENT_TU_W1_PATH = "design/latent_tu_W1"
+LATENT_TU_B1_PATH = "design/latent_tu_b1"
+LATENT_TU_W2_PATH = "design/latent_tu_W2"
+LATENT_TU_B2_PATH = "design/latent_tu_b2"
+
 
 def _validate_hard_concrete_params(gamma: float, zeta: float, temperature: float) -> None:
     """fail fast if Hard Concrete params are invalid.
@@ -199,27 +205,116 @@ def compute_binary_masks(
         return jax.vmap(lambda idx: compute_binary_mask_single(idx, tu_log_alpha))(tu_indices)
 
 
-def l0_penalty(
-    log_alpha: ArrayLike,
-    temperature: float = DEFAULT_TEMPERATURE,
-    gamma: float = DEFAULT_GAMMA,
-    zeta: float = DEFAULT_ZETA,
-) -> jnp.ndarray:
-    """Expected L0 penalty P(z > 0), differentiable w.r.t. log_alpha."""
-    _validate_hard_concrete_params(gamma, zeta, temperature)
-    temp_safe = jnp.maximum(temperature, MIN_TEMPERATURE)
+L0_PENALTY_FLOOR_PROB = 0.2  # Stop L0 penalty below this probability
+
+
+def l0_penalty(log_alpha: ArrayLike, floor_prob: float = L0_PENALTY_FLOOR_PROB) -> jnp.ndarray:
+    """L0 penalty with floor to prevent extinction and allow TU rebirth.
+
+    Returns penalty proportional to P(TU enabled), but only above floor_prob.
+    Below floor, penalty is 0 - the TU is "safely disabled" and gradients from
+    other losses (MSE) can potentially push it back up without L0 resistance.
+
+    Args:
+        log_alpha: Log-alpha parameters for TU masking
+        floor_prob: Stop penalizing when sigmoid(log_alpha) drops below this.
+            Default 0.2 means: once P(enabled) < 20%, no more L0 pressure.
+
+    Returns:
+        Per-TU penalty in range [0, 1], normalized so penalty=1 at sigmoid=1.
+    """
     la = clamp_log_alpha(log_alpha)
-    return jax.nn.sigmoid(la - temp_safe * jnp.log(-gamma / zeta))
+    prob = jax.nn.sigmoid(la)
+    # Penalty only above floor, normalized to [0, 1] range
+    raw_penalty = jnp.maximum(prob - floor_prob, 0.0) / (1.0 - floor_prob)
+    return raw_penalty
 
 
 def l0_loss(
     log_alpha: ArrayLike,
-    temperature: float = DEFAULT_TEMPERATURE,
-    gamma: float = DEFAULT_GAMMA,
-    zeta: float = DEFAULT_ZETA,
+    floor_prob: float = L0_PENALTY_FLOOR_PROB,
+    tu_threshold: float | None = None,
+    excess_exponent: float = 2.0,
 ) -> jnp.ndarray:
-    """Total L0 loss (sum of expected L0 penalties)."""
-    return jnp.sum(l0_penalty(log_alpha, temperature, gamma, zeta))
+    """L0 loss: sum of per-TU penalties, optionally with superlinear penalty above threshold.
+
+    DEPRECATED: Use asymmetric_l0_loss() for smoother optimization landscape.
+    """
+    per_tu = l0_penalty(log_alpha, floor_prob)
+    expected_count = jnp.sum(per_tu)
+
+    if tu_threshold is None:
+        return expected_count
+
+    sharpness = 1.0
+    smooth_excess = sharpness * jax.nn.softplus((expected_count - tu_threshold) / sharpness)
+    excess_penalty = (smooth_excess**excess_exponent) / (tu_threshold ** (excess_exponent - 1))
+
+    return expected_count + excess_penalty
+
+
+def asymmetric_l0_loss(
+    log_alpha: ArrayLike,
+    threshold: float,
+    floor_prob: float = L0_PENALTY_FLOOR_PROB,
+    alpha_below: float = 0.5,
+    beta_above: float = 2.0,
+    blend_sharpness: float = 5.0,
+) -> jnp.ndarray:
+    """Smooth asymmetric L0 penalty: sublinear below threshold, superlinear above."""
+    log_alpha = jnp.asarray(log_alpha)
+    assert log_alpha.ndim == 1, f"log_alpha must be 1D (n_tus,), got {log_alpha.ndim}D"
+    assert threshold > 0, f"threshold must be positive, got {threshold}"
+    assert 0 < alpha_below < 1, f"alpha_below must be in (0,1) for sublinear, got {alpha_below}"
+    assert beta_above > 1, f"beta_above must be >1 for superlinear, got {beta_above}"
+
+    per_tu = l0_penalty(log_alpha, floor_prob)
+    count = jnp.sum(per_tu)
+
+    safe_threshold = jnp.maximum(threshold, 1e-6)
+    z = count / safe_threshold
+
+    w = jax.nn.sigmoid(blend_sharpness * (z - 1))
+
+    below_term = z ** alpha_below
+    above_term = z ** beta_above
+
+    return safe_threshold * ((1 - w) * below_term + w * above_term)
+
+
+def decode_latent_tu_masking(
+    z: ArrayLike,
+    W1: ArrayLike,
+    b1: ArrayLike,
+    W2: ArrayLike,
+    b2: ArrayLike,
+) -> jnp.ndarray:
+    """Decode latent code to log_alpha via MLP: z → GELU(W1@z + b1) → W2@h + b2."""
+    z, W1, b1, W2, b2 = map(jnp.asarray, (z, W1, b1, W2, b2))
+    assert z.ndim == 1, f"z must be 1D (latent_dim,), got {z.ndim}D"
+    assert W1.ndim == 2, f"W1 must be 2D (hidden_dim, latent_dim), got {W1.ndim}D"
+    assert W1.shape[1] == z.shape[0], f"W1 cols ({W1.shape[1]}) must match z dim ({z.shape[0]})"
+    assert b1.shape == (W1.shape[0],), f"b1 shape {b1.shape} must be ({W1.shape[0]},)"
+    assert W2.shape[1] == W1.shape[0], f"W2 cols ({W2.shape[1]}) must match hidden ({W1.shape[0]})"
+    assert b2.shape == (W2.shape[0],), f"b2 shape {b2.shape} must be ({W2.shape[0]},)"
+
+    h = jax.nn.gelu(W1 @ z + b1)
+    return W2 @ h + b2
+
+
+def get_log_alpha_from_params(params, network_id: int) -> jnp.ndarray:
+    """Get log_alpha for a network, decoding from latent MLP if present, else direct path."""
+    if LATENT_TU_Z_PATH in params:
+        z = params[LATENT_TU_Z_PATH][network_id]
+        W1 = params[LATENT_TU_W1_PATH][network_id]
+        b1 = params[LATENT_TU_B1_PATH][network_id]
+        W2 = params[LATENT_TU_W2_PATH][network_id]
+        b2 = params[LATENT_TU_B2_PATH][network_id]
+        return decode_latent_tu_masking(z, W1, b1, W2, b2)
+    elif TU_LOG_ALPHA_PATH in params:
+        return params[TU_LOG_ALPHA_PATH][network_id]
+    else:
+        raise ValueError("No TU masking params found (neither latent nor direct)")
 
 
 def soft_clip(x: ArrayLike, low: float = 0.0, high: float = 1.0) -> jnp.ndarray:
@@ -619,7 +714,7 @@ def get_tu_masks(
     params,
     tu_indices: ArrayLike,
     tu_uniform_samples: Optional[ArrayLike],
-    network_id: Optional[int],
+    network_id: int,
     *,
     is_multi_tu: bool,
 ) -> jnp.ndarray:
@@ -627,8 +722,9 @@ def get_tu_masks(
 
     Priority:
     1. Binary mask (TU_BINARY_MASK_PATH) - returns raw 0/1 masks (no leaky floor)
-    2. Log alpha (TU_LOG_ALPHA_PATH) - uses binary masking with STE (not hard concrete!)
-    3. Default - all TUs enabled (ones)
+    2. Latent TU masking (LATENT_TU_Z_PATH) - decodes MLP to log_alpha, then binary STE
+    3. Direct log alpha (TU_LOG_ALPHA_PATH) - uses binary masking with STE
+    4. Default - all TUs enabled (ones)
 
     IMPORTANT: Binary masking is now the default for log_alpha path. Hard concrete
     has been removed from default paths - use explicit hard concrete functions if needed.
@@ -640,7 +736,7 @@ def get_tu_masks(
         params: ParameterTree or dict-like containing mask parameters
         tu_indices: TU indices for this node type
         tu_uniform_samples: IGNORED - kept for API compatibility, will be removed
-        network_id: Network index for slicing 2D mask arrays (can be None if 1D)
+        network_id: Network index for slicing 2D mask arrays. REQUIRED.
         is_multi_tu: True for input_tu_indices (OR reduction), False for output_tu_indices
     """
     tu_indices = jnp.asarray(tu_indices)
@@ -649,17 +745,31 @@ def get_tu_masks(
     if TU_BINARY_MASK_PATH in params:
         binary_mask = params[TU_BINARY_MASK_PATH]
         binary_mask = jnp.asarray(binary_mask)
-        if binary_mask.ndim == 2:
-            assert network_id is not None, "network_id required for 2D binary_mask"
-            binary_mask = binary_mask[network_id]
+        assert binary_mask.ndim == 2, (
+            f"binary_mask must be 2D (n_networks, n_tus), got {binary_mask.ndim}D. "
+            f"Shape: {binary_mask.shape}"
+        )
+        binary_mask = binary_mask[network_id]
         return _apply_binary_masks(tu_indices, binary_mask, is_multi_tu=is_multi_tu)
+
+    if LATENT_TU_Z_PATH in params:
+        z = params[LATENT_TU_Z_PATH][network_id]
+        W1 = params[LATENT_TU_W1_PATH][network_id]
+        b1 = params[LATENT_TU_B1_PATH][network_id]
+        W2 = params[LATENT_TU_W2_PATH][network_id]
+        b2 = params[LATENT_TU_B2_PATH][network_id]
+        tu_log_alpha = decode_latent_tu_masking(z, W1, b1, W2, b2)
+        raw_masks = compute_binary_masks(tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu)
+        return raw_masks
 
     if TU_LOG_ALPHA_PATH in params:
         tu_log_alpha = params[TU_LOG_ALPHA_PATH]
         tu_log_alpha = jnp.asarray(tu_log_alpha)
-        if tu_log_alpha.ndim == 2:
-            assert network_id is not None, "network_id required for 2D tu_log_alpha"
-            tu_log_alpha = tu_log_alpha[network_id]
+        assert tu_log_alpha.ndim == 2, (
+            f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D. "
+            f"Shape: {tu_log_alpha.shape}"
+        )
+        tu_log_alpha = tu_log_alpha[network_id]
         raw_masks = compute_binary_masks(tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu)
         return raw_masks  # no leaky_mask_floor: eval must match commit (0.0 not 0.001)
 
