@@ -27,6 +27,12 @@ logger = get_logger(__name__)
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                --     config and optimizer stack     --
+
+DEFAULT_OPTIMIZER_SIMPLE = [
+    PartialFunction(func="optax.clip_by_global_norm", kwargs={"max_norm": 1.0}),
+    PartialFunction(func="optax.adam", kwargs={"learning_rate": 0.02}),
+]
+
 DEFAULT_OPTIMIZER = [
     PartialFunction(
         func="optax.clip_by_global_norm",
@@ -217,6 +223,17 @@ def extract_learning_rate(opt_state):
 
 def sanitize_gradients(grads):
     return jax.tree.map(lambda g: jnp.where(jnp.isfinite(g), g, 0.0) if g is not None else g, grads)
+
+
+def create_gd_step_fn(optimizer: optax.GradientTransformation, sanitize_grads: bool = True):
+    """Create a reusable GD step function for inner optimization loops."""
+    def gd_step(params, opt_state, loss_fn):
+        loss, grads = jax.value_and_grad(loss_fn)(params)
+        if sanitize_grads:
+            grads = sanitize_gradients(grads)
+        updates, new_opt_state = optimizer.update(grads, opt_state, params)
+        return optax.apply_updates(params, updates), new_opt_state, loss
+    return gd_step
 
 
 def make_training_step(

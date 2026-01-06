@@ -725,7 +725,10 @@ def _start_pluggable(
 
     pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
     optimizer = dconf.pluggable_optimizer
+    from .designoptim import NSGA2DesignOptimizer
+    is_nsga2 = isinstance(optimizer, NSGA2DesignOptimizer)
     n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
+    nsga2_n_tus = dmanager.n_tus if is_nsga2 else 0
     n_networks = len(dmanager.networks)
 
     timer.start("stack", "[1/5] Building compute stack...")
@@ -781,24 +784,31 @@ def _start_pluggable(
         _, aux = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, step)
         return aux.get("yhatdep")
 
-    compiled_get_yhatdep = jax.jit(get_yhatdep)
+    def get_yhatdep_nsga2(flat_genome: jnp.ndarray, step: jnp.ndarray) -> jnp.ndarray:
+        continuous_genes = flat_genome[nsga2_n_tus:]
+        params = codec.decode(continuous_genes, apply_constraints=True)
+        static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
+        _, aux = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, step)
+        return aux.get("yhatdep")
+
+    compiled_get_yhatdep = jax.jit(get_yhatdep_nsga2 if is_nsga2 else get_yhatdep)
     timer.end("objective")
 
     timer.start("opt_init", "[5/5] Initializing optimizer...")
     init_key, opt_key = jax.random.split(loop_key)
 
-    from .designoptim import NSGA2DesignOptimizer
-    if isinstance(optimizer, NSGA2DesignOptimizer):
+    if is_nsga2:
         def nsga2_objective(flat_genome: jnp.ndarray) -> float:
-            params = codec.decode(flat_genome, apply_constraints=True)
+            continuous_genes = flat_genome[nsga2_n_tus:]
+            params = codec.decode(continuous_genes, apply_constraints=True)
             static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
             loss, _ = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, jnp.array(0))
             return loss
 
         opt_state = optimizer.init(
             init_key, flat_params, nsga2_objective,
-            n_tus=n_tus,
-            continuous_dim=codec.param_dim - n_tus if n_tus > 0 else None,
+            n_tus=nsga2_n_tus,
+            continuous_dim=codec.param_dim,
         )
         step_objective_fn = nsga2_objective
     else:
@@ -843,7 +853,10 @@ def _start_pluggable(
     logger.info(f"  Final loss: {float(opt_state.best_loss):.6f}, steps: {int(opt_state.step)}")
     timer.summary()
 
-    final_params = codec.decode(opt_state.best_params, apply_constraints=True)
+    best_genome = opt_state.best_params
+    if is_nsga2:
+        best_genome = best_genome[nsga2_n_tus:]
+    final_params = codec.decode(best_genome, apply_constraints=True)
 
     final_step_data = {"loss": [[float(opt_state.best_loss)]]}
 

@@ -1126,7 +1126,8 @@ def side_by_side_txt_plot(
 
     delta_grid = 0.0
     if compute_metrics:
-        weighted_total = metrics["weighted_total"]
+        weighted_total = float(metrics["weighted_total"])
+        training_grid_total = float(training_grid_total) if training_grid_total is not None else None
         show_training_comparison = training_losses is not None or training_grid_total is not None
 
         if show_training_comparison:
@@ -1144,8 +1145,9 @@ def side_by_side_txt_plot(
             for name in LOSS_ORDER:
                 weighted_key = f"{name}_weighted"
                 if weighted_key in metrics:
-                    eval_w = metrics[weighted_key]
-                    train_w = train_losses.get(name, train_losses.get(weighted_key, None))
+                    eval_w = float(metrics[weighted_key])
+                    train_w_raw = train_losses.get(name, train_losses.get(weighted_key, None))
+                    train_w = float(train_w_raw) if train_w_raw is not None else None
                     if eval_w > 0 or (train_w is not None and train_w > 0):
                         if train_w is not None:
                             delta = abs(train_w - eval_w)
@@ -1175,7 +1177,7 @@ def side_by_side_txt_plot(
                 penalty_sum = 0.0
                 for pen_name in penalty_order:
                     if pen_name in training_penalties:
-                        pen_val = training_penalties[pen_name]
+                        pen_val = float(training_penalties[pen_name])
                         penalty_sum += pen_val
                         lines.append(f"│ {pen_name:15} │ {pen_val:9.4f} │       n/a │         │")
 
@@ -1195,8 +1197,8 @@ def side_by_side_txt_plot(
 
             for name in LOSS_ORDER:
                 if name in metrics:
-                    raw_val = metrics[name]
-                    weighted_val = metrics.get(f"{name}_weighted", 0.0)
+                    raw_val = float(metrics[name])
+                    weighted_val = float(metrics.get(f"{name}_weighted", 0.0))
                     if raw_val > 1e-8 or weighted_val > 1e-8:
                         lines.append(f"│ {name:10} │ {raw_val:8.4f} │ {weighted_val:8.4f} │")
 
@@ -1215,7 +1217,7 @@ def side_by_side_txt_plot(
                 penalty_sum = 0.0
                 for pen_name in penalty_order:
                     if pen_name in training_penalties:
-                        pen_val = training_penalties[pen_name]
+                        pen_val = float(training_penalties[pen_name])
                         if pen_val > 1e-8:
                             penalty_sum += pen_val
                             lines.append(f"│ {pen_name:10} │ {'':8} │ {pen_val:8.4f} │")

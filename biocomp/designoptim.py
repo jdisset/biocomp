@@ -7,7 +7,13 @@ import jax.numpy as jnp
 import optax
 from pydantic import BaseModel, ConfigDict
 
-from .optimutils import build_optimizer_chain, sanitize_gradients, DEFAULT_OPTIMIZER
+from .optimutils import (
+    build_optimizer_chain,
+    sanitize_gradients,
+    create_gd_step_fn,
+    DEFAULT_OPTIMIZER,
+    DEFAULT_OPTIMIZER_SIMPLE,
+)
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -362,9 +368,31 @@ class ObjectiveWrapper(NamedTuple):
         return self._replace(x_samples=x, y_samples=y, z_samples=z)
 
 
-class NSGA2DesignState(NamedTuple):
-    """State for NSGA2 multi-objective design optimizer."""
+def genes_to_mask(genes: jnp.ndarray, threshold: float = 0.5) -> jnp.ndarray:
+    return (genes > threshold).astype(jnp.float32)
 
+
+class InnerGDConfig(BaseModel):
+    """Configuration for inner GD loop in multi-objective optimizers."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    optimizer_stack: list | None = None
+    n_steps: int = 50
+    n_replicates: int = 1
+    init_perturbation: float = 0.1
+    sanitize_grads: bool = True
+    _optimizer: Any = None
+
+    def model_post_init(self, __context):
+        stack = self.optimizer_stack or DEFAULT_OPTIMIZER_SIMPLE
+        object.__setattr__(self, "_optimizer", build_optimizer_chain(stack, with_lr_injection=False))
+
+    @property
+    def optimizer(self) -> optax.GradientTransformation:
+        return self._optimizer
+
+
+class NSGA2DesignState(NamedTuple):
     step: jnp.ndarray
     params: jnp.ndarray
     best_params: jnp.ndarray
@@ -379,45 +407,25 @@ class NSGA2DesignState(NamedTuple):
 
 
 class NSGA2DesignOptimizer(BaseModel):
-    """NSGA2 multi-objective optimizer for design with binary TU masks.
-
-    Evolves binary TU masks using NSGA2, with inner GD loop to optimize
-    continuous parameters (ratios, embeddings) for each individual.
-
-    Objectives:
-        1. Pattern loss (design quality)
-        2. TU count (sparsity/simplicity)
-
-    The binary mask determines which TUs are enabled. For each mask,
-    GD refines the continuous parameters to minimize pattern loss only.
-    The final fitness is multi-objective: (pattern_loss, n_enabled_tus).
-    """
+    """NSGA2 multi-objective optimizer: evolves TU masks + inner GD for continuous params."""
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     pop_size: int = 32
     n_generations: int = 100
-    gd_steps_per_individual: int = 50
-    gd_learning_rate: float = 0.02
-    mask_threshold: float = 0.5
     n_tus: int | None = None
     continuous_dim: int | None = None
-
+    continuous_bounds: tuple[float, float] = (-3.0, 3.0)
+    max_active_tus: int | None = None
+    inner_gd: InnerGDConfig | None = None
     crossover_eta: float = 15.0
     crossover_prob: float = 0.9
     mutation_eta: float = 20.0
-
     _nsga2: Any = None
-    _gd_optimizer: Any = None
 
-    def _get_pop_size(self, dim: int) -> int:
-        return self.pop_size
-
-    def _build_gd_optimizer(self):
-        return optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.adam(self.gd_learning_rate),
-        )
+    def model_post_init(self, __context):
+        if self.inner_gd is None:
+            object.__setattr__(self, "inner_gd", InnerGDConfig())
 
     def init(
         self, key: jax.random.PRNGKey, params: jnp.ndarray, objective_fn: Callable,
@@ -427,25 +435,19 @@ class NSGA2DesignOptimizer(BaseModel):
 
         actual_n_tus = n_tus if n_tus is not None else self.n_tus
         actual_continuous_dim = continuous_dim if continuous_dim is not None else self.continuous_dim
-
-        if actual_n_tus is None:
-            actual_n_tus = 0
-            logger.warning("n_tus not set, assuming 0 TUs (no TU mask optimization)")
-
-        if actual_continuous_dim is None:
-            actual_continuous_dim = int(params.shape[0]) - actual_n_tus
-            logger.info(f"Auto-detected continuous_dim: {actual_continuous_dim}")
+        assert actual_n_tus is not None, "n_tus required (via init arg or class attr)"
+        assert actual_continuous_dim is not None, "continuous_dim required (via init arg or class attr)"
 
         actual_n_tus = int(actual_n_tus)
         actual_continuous_dim = int(actual_continuous_dim)
-
         object.__setattr__(self, "n_tus", actual_n_tus)
         object.__setattr__(self, "continuous_dim", actual_continuous_dim)
 
         total_dim = actual_n_tus + actual_continuous_dim
-        assert params.shape[0] == total_dim, (
-            f"params dim {params.shape[0]} != n_tus ({actual_n_tus}) + continuous ({actual_continuous_dim})"
-        )
+        if params.shape[0] == actual_continuous_dim:
+            tu_genes = jnp.full(actual_n_tus, 0.5)
+            params = jnp.concatenate([tu_genes, params])
+        assert params.shape[0] == total_dim, f"params.shape[0]={params.shape[0]} != {total_dim}"
 
         nsga2_params = NSGA2Params(
             crossover_eta=self.crossover_eta,
@@ -453,26 +455,20 @@ class NSGA2DesignOptimizer(BaseModel):
             mutation_eta=self.mutation_eta,
         )
 
-        lb = jnp.concatenate([jnp.zeros(actual_n_tus), jnp.full(actual_continuous_dim, -3.0)])
-        ub = jnp.concatenate([jnp.ones(actual_n_tus), jnp.full(actual_continuous_dim, 3.0)])
+        lb_cont, ub_cont = self.continuous_bounds
+        lb = jnp.concatenate([jnp.zeros(actual_n_tus), jnp.full(actual_continuous_dim, lb_cont)])
+        ub = jnp.concatenate([jnp.ones(actual_n_tus), jnp.full(actual_continuous_dim, ub_cont)])
 
         nsga2 = NSGA2(
-            pop_size=self.pop_size,
-            n_dims=total_dim,
-            n_objectives=2,
-            lb=lb,
-            ub=ub,
-            params=nsga2_params,
+            pop_size=self.pop_size, n_dims=total_dim, n_objectives=2, lb=lb, ub=ub, params=nsga2_params,
         )
         object.__setattr__(self, "_nsga2", nsga2)
-        object.__setattr__(self, "_gd_optimizer", self._build_gd_optimizer())
 
         nsga2_state = nsga2.init(key)
-
         init_loss = objective_fn(params)
         logger.info(
-            f"NSGA2Design: n_tus={actual_n_tus}, continuous={actual_continuous_dim}, "
-            f"pop={self.pop_size}, gd_steps={self.gd_steps_per_individual}"
+            f"NSGA2Design: n_tus={actual_n_tus}, cont={actual_continuous_dim}, "
+            f"pop={self.pop_size}, gd_steps={self.inner_gd.n_steps}, reps={self.inner_gd.n_replicates}"
         )
 
         return NSGA2DesignState(
@@ -486,89 +482,111 @@ class NSGA2DesignOptimizer(BaseModel):
             pareto_fitness=None,
         )
 
-    def _genes_to_mask(self, genes: jnp.ndarray) -> jnp.ndarray:
-        return (genes > self.mask_threshold).astype(jnp.float32)
+    def is_valid_genome(self, genome: jnp.ndarray) -> jnp.ndarray:
+        if self.max_active_tus is None:
+            return jnp.array(True)
+        mask = genes_to_mask(genome[: self.n_tus])
+        return jnp.sum(mask) <= self.max_active_tus
 
-    def _run_gd_for_individual(
-        self,
-        tu_genes: jnp.ndarray,
-        continuous_params: jnp.ndarray,
-        pattern_loss_fn: Callable,
-        key: jax.Array,
-    ) -> tuple[jnp.ndarray, float]:
-        """Run GD on continuous params with fixed TU mask."""
-        tu_mask = self._genes_to_mask(tu_genes)
+    def repair_genome(self, genome: jnp.ndarray, key: jax.Array) -> jnp.ndarray:
+        if self.max_active_tus is None:
+            return genome
+        tu_genes = genome[: self.n_tus]
+        continuous = genome[self.n_tus :]
+        mask = genes_to_mask(tu_genes)
+        n_active = jnp.sum(mask)
+        n_to_disable = jnp.maximum(0, n_active - self.max_active_tus).astype(jnp.int32)
 
-        def loss_with_mask(cont_params):
-            full_genome = jnp.concatenate([tu_mask, cont_params])
-            return pattern_loss_fn(full_genome)
+        def disable_one(carry, i):
+            genes, k, remaining = carry
+            k, subkey = jax.random.split(k)
+            should_disable = i < remaining
+            active_mask = genes > 0.5
+            active_indices = jnp.where(active_mask, jnp.arange(len(genes)), len(genes))
+            sorted_active = jnp.sort(active_indices)
+            n_active_now = jnp.sum(active_mask)
+            rand_idx = jax.random.randint(subkey, (), 0, jnp.maximum(n_active_now, 1))
+            to_disable = sorted_active[rand_idx]
+            new_genes = jnp.where(
+                should_disable & (jnp.arange(len(genes)) == to_disable) & (to_disable < len(genes)),
+                0.0, genes,
+            )
+            return (new_genes, k, remaining), None
 
-        opt_state = self._gd_optimizer.init(continuous_params)
-
-        def gd_step(carry, _):
-            params, opt_state = carry
-            loss, grads = jax.value_and_grad(loss_with_mask)(params)
-            grads = sanitize_gradients(grads)
-            updates, new_opt_state = self._gd_optimizer.update(grads, opt_state, params)
-            new_params = optax.apply_updates(params, updates)
-            return (new_params, new_opt_state), loss
-
-        (final_params, _), losses = jax.lax.scan(
-            gd_step, (continuous_params, opt_state), None, length=self.gd_steps_per_individual
+        max_disable = self.n_tus if self.n_tus is not None else 32
+        (repaired_tu_genes, _, _), _ = jax.lax.scan(
+            disable_one, (tu_genes, key, n_to_disable), jnp.arange(max_disable)
+        )
+        return jnp.where(
+            n_to_disable > 0, jnp.concatenate([repaired_tu_genes, continuous]), genome,
         )
 
-        final_loss = loss_with_mask(final_params)
-        return final_params, final_loss
+    def _run_single_gd(
+        self, tu_mask: jnp.ndarray, cont_params: jnp.ndarray, loss_fn: Callable,
+    ) -> tuple[jnp.ndarray, float]:
+        def masked_loss(p):
+            return loss_fn(jnp.concatenate([tu_mask, p]))
+
+        gd_step = create_gd_step_fn(self.inner_gd.optimizer, self.inner_gd.sanitize_grads)
+        opt_state = self.inner_gd.optimizer.init(cont_params)
+
+        def body(carry, _):
+            p, s = carry
+            p, s, _ = gd_step(p, s, masked_loss)
+            return (p, s), None
+
+        (final, _), _ = jax.lax.scan(body, (cont_params, opt_state), None, length=self.inner_gd.n_steps)
+        return final, masked_loss(final)
+
+    def _run_gd_for_individual(
+        self, tu_genes: jnp.ndarray, cont_params: jnp.ndarray, loss_fn: Callable, key: jax.Array,
+    ) -> tuple[jnp.ndarray, float]:
+        tu_mask = genes_to_mask(tu_genes)
+
+        if self.inner_gd.n_replicates <= 1:
+            return self._run_single_gd(tu_mask, cont_params, loss_fn)
+
+        def run_replicate(rep_key):
+            perturbation = jax.random.normal(rep_key, cont_params.shape) * self.inner_gd.init_perturbation
+            return self._run_single_gd(tu_mask, cont_params + perturbation, loss_fn)
+
+        rep_keys = jax.random.split(key, self.inner_gd.n_replicates)
+        all_params, all_losses = jax.vmap(run_replicate)(rep_keys)
+        best_idx = jnp.argmin(all_losses)
+        return all_params[best_idx], all_losses[best_idx]
 
     def step(
-        self,
-        state: NSGA2DesignState,
-        key: jax.random.PRNGKey,
-        objective_fn: Callable,
+        self, state: NSGA2DesignState, key: jax.random.PRNGKey, objective_fn: Callable,
         step: jnp.ndarray | None = None,
     ) -> tuple[NSGA2DesignState, dict]:
-        """Execute one NSGA2 generation with inner GD refinement."""
         n_tus = self.n_tus
-
         ask_key, gd_key = jax.random.split(key)
         offspring = self._nsga2.ask(ask_key, state.opt_state)
 
-        def evaluate_individual(genome: jnp.ndarray, ind_key: jax.Array) -> tuple[jnp.ndarray, float]:
-            tu_genes = genome[:n_tus]
-            continuous_init = genome[n_tus:]
-
-            refined_continuous, pattern_loss = self._run_gd_for_individual(
-                tu_genes, continuous_init, objective_fn, ind_key
-            )
-
-            tu_mask = self._genes_to_mask(tu_genes)
-            tu_count = jnp.sum(tu_mask)
-
-            fitness = jnp.array([pattern_loss, tu_count])
-            refined_genome = jnp.concatenate([tu_genes, refined_continuous])
-            return refined_genome, fitness
+        def evaluate_individual(genome: jnp.ndarray, ind_key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray]:
+            tu_genes, cont_init = genome[:n_tus], genome[n_tus:]
+            refined_cont, pattern_loss = self._run_gd_for_individual(tu_genes, cont_init, objective_fn, ind_key)
+            tu_count = jnp.sum(genes_to_mask(tu_genes))
+            return jnp.concatenate([tu_genes, refined_cont]), jnp.array([pattern_loss, tu_count])
 
         gd_keys = jax.random.split(gd_key, self.pop_size)
 
-        refined_list = []
-        fitness_list = []
+        # sequential eval to avoid memory issues with vmap over GD
+        refined_list, fitness_list = [], []
         for i in range(self.pop_size):
             refined, fit = evaluate_individual(offspring[i], gd_keys[i])
             refined_list.append(refined)
             fitness_list.append(fit)
         refined_offspring = jnp.stack(refined_list)
         fitness = jnp.stack(fitness_list)
-
         fitness = jnp.where(jnp.isfinite(fitness), fitness, jnp.inf)
 
         new_nsga2_state = self._nsga2.tell(state.opt_state, refined_offspring, fitness)
-
         pareto_pop, pareto_fit = self._nsga2.get_pareto_front(new_nsga2_state)
 
         best_idx = jnp.argmin(fitness[:, 0])
         gen_best = refined_offspring[best_idx]
         gen_best_loss = fitness[best_idx, 0]
-
         is_better = gen_best_loss < state.best_loss
 
         return NSGA2DesignState(
@@ -595,5 +613,4 @@ class NSGA2DesignOptimizer(BaseModel):
         return int(state.step) >= self.n_generations
 
     def get_pareto_front(self, state: NSGA2DesignState) -> tuple[jnp.ndarray, jnp.ndarray]:
-        """Extract the current Pareto front from state."""
         return state.pareto_front, state.pareto_fitness
