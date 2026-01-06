@@ -658,7 +658,7 @@ def get_ratio_paths_and_sources(params):
     direct_paths, aref_sources, aref_count = [], set(), 0
     for path, value in params.data.iter_leaves():
         path_str = str(path)
-        if "ratio" in path_str and "inverse" not in path_str:
+        if "ratio" in path_str and "inverse" not in path_str and "ratio_min" not in path_str and "ratio_max" not in path_str:
             if isArrayRef(value):
                 aref_count += 1
                 aref_sources.update(str(sp) for sp in value.paths)

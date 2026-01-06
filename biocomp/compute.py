@@ -526,10 +526,9 @@ class ComputeStack:
             for net_idx, net in enumerate(network_copies):
                 network_tu_log_alpha = tu_log_alpha[net_idx]
 
-                # prune source nodes based on disabled TUs
+                original_output_proteins = net.get_output_proteins()
                 net.prune_disabled_tus(network_tu_log_alpha, tu_id_to_idx)
 
-                # remove any remaining edges for disabled TUs
                 edges_to_remove = []
                 for edge_id, edge in net.compute_graph.edges.items():
                     tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
@@ -554,6 +553,8 @@ class ComputeStack:
                     del net.compute_graph.edges[edge_id]
 
                 net._cleanup_orphaned_bias_nodes()
+                net._cleanup_orphaned_input_nodes(original_output_proteins)
+                net._cleanup_orphaned_transcription_nodes()
         else:
             # fallback: prune based on zero ratios (non-design contexts)
             for net in network_copies:
@@ -565,9 +566,12 @@ class ComputeStack:
         # This ensures orphan nodes (e.g., transcription nodes with no source) are removed
         # and the graph is consistent. Always performed for robustness.
         def _rebuild_network(net):
-            """Rebuild a single network from recipe. Returns rebuilt network."""
-            # check if network was over-pruned BEFORE calling to_recipe
-            # (to_recipe can fail on corrupted networks)
+            """Rebuild a single network from recipe."""
+            try:
+                original_input_proteins = net.get_inverted_input_proteins()
+            except (AssertionError, IndexError, KeyError):
+                original_input_proteins = None
+
             output_nodes = [n for n in net.compute_graph.nodes.values() if n.node_type == "output"]
             if len(output_nodes) != 1:
                 original_outputs = ()
@@ -583,24 +587,20 @@ class ComputeStack:
                 empty_net.metadata = net.metadata
                 return empty_net
 
-            # Now safe to convert to recipe
             try:
                 recipe = net.to_recipe()
             except (AssertionError, IndexError, KeyError):
-                # Network is in an invalid state after pruning
                 empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
                 empty_net.name = net.name
                 empty_net.metadata = net.metadata
                 return empty_net
 
-            # handle networks with empty recipes (all TUs disabled)
             if not recipe.content:
                 empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
                 empty_net.name = net.name
                 empty_net.metadata = net.metadata
                 return empty_net
 
-            # rebuild from recipe (skip input_order validation since TU pruning may invalidate it)
             rebuilt = recipe_to_networks(
                 recipe,
                 br.ALL_RULES,
@@ -609,7 +609,6 @@ class ComputeStack:
                 skip_input_order_validation=True,
             )
 
-            # handle degenerate networks (all inversions had no output nodes)
             if len(rebuilt) == 0:
                 logger.warning(
                     f"COMMIT: Recipe '{recipe.name}' produced no valid networks "
@@ -635,8 +634,34 @@ class ComputeStack:
                 )
                 rebuilt_net = matching[0]
 
+            try:
+                rebuilt_dep_outputs = tuple(sorted(rebuilt_net.get_dependent_output_proteins()))
+            except (AssertionError, KeyError):
+                rebuilt_dep_outputs = ()
+
+            if rebuilt_dep_outputs != original_outputs:
+                logger.warning(
+                    f"COMMIT: Recipe roundtrip changed dependent outputs from {original_outputs} "
+                    f"to {rebuilt_dep_outputs}. Marker TUs may have been pruned. "
+                    f"Skipping rebuild, using pruned network directly."
+                )
+                return net
+
             rebuilt_net.name = net.name
             rebuilt_net.metadata = net.metadata
+
+            if original_input_proteins is not None:
+                try:
+                    rebuilt_input_proteins = rebuilt_net.get_inverted_input_proteins()
+                    if set(rebuilt_input_proteins) == set(original_input_proteins):
+                        rebuilt_net.apply_input_order(original_input_proteins)
+                        logger.debug(
+                            f"COMMIT: Restored input ordering {original_input_proteins} "
+                            f"(was {rebuilt_input_proteins})"
+                        )
+                except (AssertionError, IndexError, KeyError) as e:
+                    logger.debug(f"COMMIT: Could not restore input ordering: {e}")
+
             return rebuilt_net
 
         # Parallelize per-network rebuilding (each is independent)

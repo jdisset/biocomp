@@ -292,6 +292,73 @@ def sort_output_edges(graph):
     return graph
 
 
+def sort_aggregation_edges(graph):
+    """Sort members/ratios/edges by source_id to prevent slot-ratio mismatch after commit."""
+    from biocomp.graphengine import GraphEdge
+
+    agg_nodes = [n for n in graph.nodes.values() if n.node_type == "aggregation"]
+
+    for agg_node in agg_nodes:
+        members = agg_node.extra.get("members", [])
+        if len(members) <= 1:
+            continue
+
+        sorted_members = sorted(members)
+        if members == sorted_members:
+            continue
+
+        ratios = agg_node.extra.get("ratios", [])
+        ratio_ranges = agg_node.extra.get("ratio_ranges", [])
+
+        new_ratios = [1.0] * len(members)
+        new_ratio_ranges = [None] * len(members)
+
+        for old_idx, member in enumerate(members):
+            new_idx = sorted_members.index(member)
+            if old_idx < len(ratios):
+                new_ratios[new_idx] = ratios[old_idx]
+            if old_idx < len(ratio_ranges):
+                new_ratio_ranges[new_idx] = ratio_ranges[old_idx]
+
+        agg_node.extra["members"] = sorted_members
+        agg_node.extra["ratios"] = new_ratios
+        agg_node.extra["ratio_ranges"] = new_ratio_ranges
+
+        outgoing_edges = graph.get_outgoing_edges(agg_node.node_id)
+
+        for edge in outgoing_edges:
+            target = graph.nodes.get(edge.target_id)
+            if target is None or target.node_type != "source":
+                continue
+
+            source_id = target.extra.get("source_id")
+            if source_id is None or source_id not in sorted_members:
+                continue
+
+            new_slot = sorted_members.index(source_id)
+            if edge.from_output_slot == new_slot:
+                continue
+
+            old_key = (edge.source_id, edge.target_id, edge.from_output_slot, edge.to_input_slot)
+            if old_key in graph.edges:
+                del graph.edges[old_key]
+
+            new_edge = GraphEdge(
+                source_id=edge.source_id,
+                target_id=edge.target_id,
+                from_output_slot=new_slot,
+                to_input_slot=edge.to_input_slot,
+                content=edge.content,
+                content_type=edge.content_type,
+                content_embedding_names=edge.content_embedding_names,
+                extra=edge.extra,
+            )
+            new_key = (new_edge.source_id, new_edge.target_id, new_edge.from_output_slot, new_edge.to_input_slot)
+            graph.edges[new_key] = new_edge
+
+    return graph
+
+
 ALL_RULES = [
     merge_sources_by_id,
     create_aggregation_nodes,

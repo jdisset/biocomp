@@ -34,8 +34,8 @@ def aggregation(
     namespace: str,
     random_init: bool = False,
     use_latent_ratios: bool = False,
-    latent_dim: int = 8,
-    latent_hidden_dim: int = 16,
+    latent_dim: int = 16,
+    latent_hidden_dim: int = 32,
     **_,
 ) -> LayerInstance:
     assert len(input_shapes) == 1, f"Aggregation expects 1 input, got {len(input_shapes)}"
@@ -168,7 +168,7 @@ def aggregation(
         assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
 
         latent_z_path = f"{namespace}/latent_z"
-        if use_latent_ratios and latent_z_path in params:
+        if latent_z_path in params:
             z = params[latent_z_path][node_id]
             W1 = params[f"{namespace}/latent_W1"][node_id]
             b1 = params[f"{namespace}/latent_b1"][node_id]
@@ -244,15 +244,21 @@ def aggregation(
         for i, n in enumerate(nodelist):
             updt = {}
             latent_z_path = f"{namespace}/latent_z"
-            if use_latent_ratios and latent_z_path in params:
+            if latent_z_path in params:
                 z = params[latent_z_path][i]
                 W1 = params[f"{namespace}/latent_W1"][i]
                 b1 = params[f"{namespace}/latent_b1"][i]
                 W2 = params[f"{namespace}/latent_W2"][i]
                 b2 = params[f"{namespace}/latent_b2"][i]
-                ratios = _decode_latent_ratios(z, W1, b1, W2, b2)[:n_outputs]
+                raw_ratios = _decode_latent_ratios(z, W1, b1, W2, b2)[:n_outputs]
+                ratio_min = params[f"{namespace}/ratio_min"][i][:n_outputs]
+                ratio_max = params[f"{namespace}/ratio_max"][i][:n_outputs]
+                ratios = jnp.clip(raw_ratios, ratio_min, ratio_max)
             else:
-                ratios = params[f"{namespace}/{PNAME}"][i]
+                ratios = params[f"{namespace}/{PNAME}"][i][:n_outputs]
+                ratio_min = params[f"{namespace}/ratio_min"][i][:n_outputs]
+                ratio_max = params[f"{namespace}/ratio_max"][i][:n_outputs]
+                ratios = jnp.clip(ratios, ratio_min, ratio_max)
             ratios_array = jnp.abs(jnp.array(ratios))
             original_ratios = ratios_array.copy()
 

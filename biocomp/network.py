@@ -480,6 +480,37 @@ class Network(BaseModel):
             del self.compute_graph.nodes[nid]
 
         self._cleanup_orphaned_bias_nodes()
+        self._cleanup_orphaned_input_nodes()
+        self._cleanup_orphaned_transcription_nodes()
+
+    def _cleanup_orphaned_transcription_nodes(self):
+        """Remove orphaned nodes iteratively (forward + inverted paths)."""
+        orphan_types = (
+            "source", "transcription", "translation", "aggregation", "output",
+            "inv_transcription", "inv_translation", "inv_source", "inv_aggregation", "inv_output",
+        )
+        changed = True
+        while changed:
+            changed = False
+            nodes_to_remove = []
+
+            for node in self.compute_graph.nodes.values():
+                if node.node_type not in orphan_types:
+                    continue
+                incoming = list(self.compute_graph.get_incoming_edges(node.node_id))
+                if not incoming:
+                    nodes_to_remove.append(node.node_id)
+                    changed = True
+
+            if nodes_to_remove:
+                edges_to_remove = [
+                    eid for eid, e in self.compute_graph.edges.items()
+                    if e.source_id in nodes_to_remove or e.target_id in nodes_to_remove
+                ]
+                for eid in edges_to_remove:
+                    del self.compute_graph.edges[eid]
+                for nid in nodes_to_remove:
+                    del self.compute_graph.nodes[nid]
 
     def _cleanup_orphaned_bias_nodes(self):
         """Remove bias nodes whose output protein is no longer valid after TU pruning."""
@@ -516,6 +547,41 @@ class Network(BaseModel):
         for nid in bias_nodes_to_remove:
             del self.compute_graph.nodes[nid]
 
+    def _cleanup_orphaned_input_nodes(self, original_output_proteins: list[str] | None = None):
+        """Remove input nodes referencing pruned output positions."""
+        current_output_proteins = self.get_output_proteins()
+        input_nodes_to_remove = []
+
+        for node in self.compute_graph.get_nodes_by_type("input"):
+            input_from_output = node.extra.get("input_from_output")
+            if input_from_output is None:
+                continue
+
+            if input_from_output >= len(current_output_proteins):
+                input_nodes_to_remove.append(node.node_id)
+                continue
+
+            if original_output_proteins is not None:
+                if input_from_output >= len(original_output_proteins):
+                    input_nodes_to_remove.append(node.node_id)
+                    continue
+                original_protein = original_output_proteins[input_from_output]
+                if original_protein not in current_output_proteins:
+                    input_nodes_to_remove.append(node.node_id)
+
+        if not input_nodes_to_remove:
+            return
+
+        edges_to_remove = [
+            eid for eid, e in self.compute_graph.edges.items()
+            if e.source_id in input_nodes_to_remove or e.target_id in input_nodes_to_remove
+        ]
+        for eid in edges_to_remove:
+            del self.compute_graph.edges[eid]
+
+        for nid in input_nodes_to_remove:
+            del self.compute_graph.nodes[nid]
+
     def to_recipe(self) -> Recipe:
         """Converts the network back to a Recipe object"""
 
@@ -523,21 +589,18 @@ class Network(BaseModel):
         tus_and_ratios_by_cotx = self._build_transcription_units(cotx_groups)
         bias_by_cotx = self._extract_bias_nodes()
 
-        # Sort by cotx_index to preserve original order
         sorted_group_ids = sorted(cotx_groups.keys(), key=lambda g: cotx_groups[g]["cotx_index"])
 
         content = []
         for group_id in sorted_group_ids:
             tus, reordered_ratios = tus_and_ratios_by_cotx[group_id]
 
-            # skip empty CoTransfections (all TUs removed due to zero ratios)
             if not tus:
                 continue
 
-            # validate fluo_bias tu_id is still in range after TU pruning
             fluo_bias = bias_by_cotx.get(group_id)
             if fluo_bias is not None and fluo_bias.tu_id >= len(tus):
-                fluo_bias = None  # invalid reference, remove it
+                fluo_bias = None
 
             content.append(
                 CoTransfection(
@@ -551,24 +614,33 @@ class Network(BaseModel):
         excluded = {"name", "description", "input_order"}
         metadata_dict = {k: v for k, v in self.metadata.items() if k not in excluded}
 
-        # propagate input_order only if it's still valid after TU pruning
-        # (marker TUs may have been removed, changing the actual input proteins)
+        # derive valid markers from TUs (not stale input nodes)
         input_order = self.metadata.get("input_order")
         if input_order is not None:
-            try:
-                actual_input_proteins = self.get_inverted_input_proteins()
-                if set(actual_input_proteins) != set(input_order):
-                    # input_order no longer matches actual markers, omit it
-                    input_order = None
-            except (AssertionError, KeyError):
-                # network may not be inverted or has no input nodes
+            actual_marker_proteins = set()
+            for cotx in content:
+                for tu in cotx.units:
+                    if tu.slots:
+                        last_slot = tu.slots[-1]
+                        protein = last_slot.part if hasattr(last_slot, 'part') else str(last_slot)
+                        if isinstance(protein, str):
+                            actual_marker_proteins.add(protein)
+
+            valid_input_order = [p for p in input_order if p in actual_marker_proteins]
+            if len(valid_input_order) != len(input_order):
                 input_order = None
+
+        axis_mapping = self.metadata.get("axis_mapping")
+        if axis_mapping is not None and input_order is None:
+            axis_mapping = None
+
         return Recipe(
             name=self.name or self.metadata.get("name"),
             description=self.metadata.get("description"),
             metadata=metadata_dict if metadata_dict else None,
             content=content,
             input_order=input_order,
+            axis_mapping=axis_mapping,
         )
 
     def _extract_cotx_groups(self) -> dict[str, dict]:
@@ -1243,6 +1315,7 @@ def recipe_to_networks(
     compg = compg[0]
     _check_for_split_sequestron(compg, recipe.name)
     compg = br.sort_output_edges(compg)
+    compg = br.sort_aggregation_edges(compg)
     compg = assign_ern_layer_ids(compg)
     graphs = invert_all_paths(compg, mode=inversion_mode) if invert else [compg]
 

@@ -178,7 +178,6 @@ def compute_binary_masks(
     """
     tu_indices = jnp.asarray(tu_indices)
     tu_log_alpha = jnp.asarray(tu_log_alpha)
-    n_inputs = tu_indices.shape[0]
 
     assert tu_log_alpha.ndim == 1, (
         f"tu_log_alpha must be 1D (n_tus,), got {tu_log_alpha.ndim}D"
@@ -661,8 +660,7 @@ def get_tu_masks(
         if tu_log_alpha.ndim == 2:
             assert network_id is not None, "network_id required for 2D tu_log_alpha"
             tu_log_alpha = tu_log_alpha[network_id]
-        # use binary masking with STE (not hard concrete!)
         raw_masks = compute_binary_masks(tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu)
-        return leaky_mask_floor(raw_masks)
+        return raw_masks  # no leaky_mask_floor: eval must match commit (0.0 not 0.001)
 
     return jnp.ones(n_inputs)
