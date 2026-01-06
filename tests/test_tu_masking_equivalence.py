@@ -154,7 +154,7 @@ def setup_tu_masking(params, tu_ids: list[str], tu_id_to_idx: dict[str, int], di
             idx = tu_id_to_idx[tu_id]
             log_alpha = log_alpha.at[:, idx].set(-10.0)
 
-    params.at(TU_LOG_ALPHA_PATH, log_alpha)
+    params.at(TU_LOG_ALPHA_PATH, log_alpha, overwrite=True)
 
 
 def get_tu_uniform_for_masking(n_networks: int, n_tus: int, disabled_indices: set[int]) -> jnp.ndarray:

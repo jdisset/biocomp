@@ -24,6 +24,8 @@ from biocomp.parameters import ParameterTree
 import biocomp.biorules as br
 import dracon as dr
 
+RESOURCES_DIR = Path(__file__).parent / "resources"
+
 
 # Skip all tests if BIOCOMP_DESIGNER_MODEL not set
 pytestmark = pytest.mark.skipif(
@@ -39,18 +41,6 @@ def designer_model():
 
     model_path = os.environ.get("BIOCOMP_DESIGNER_MODEL")
     return BiocompModel.load(model_path)
-
-
-@pytest.fixture(scope="module")
-def biocomp_root():
-    """Get the biocomp root directory."""
-    # Try to find it relative to this file
-    test_dir = Path(__file__).parent
-    for parent in [test_dir] + list(test_dir.parents):
-        if (parent / "biocomp-jobs").exists():
-            return parent
-    # Fallback to environment variable
-    return Path(os.environ.get("BIOCOMP_ROOT", ""))
 
 
 def load_recipe(recipe_path: Path):
@@ -81,9 +71,9 @@ def build_network_and_params(recipe, model, key=None):
 class TestZeroFreedomConstraints:
     """Tests for zero-freedom recipe constraint behavior."""
 
-    def test_zero_freedom_ratios_have_min_equals_max(self, designer_model, biocomp_root):
+    def test_zero_freedom_ratios_have_min_equals_max(self, designer_model):
         """Verify that zero-freedom recipes have min==max for all ratios."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -107,9 +97,9 @@ class TestZeroFreedomConstraints:
                     f"but got min={ratio_min}, max={ratio_max}"
                 )
 
-    def test_zero_freedom_bias_has_min_equals_max(self, designer_model, biocomp_root):
+    def test_zero_freedom_bias_has_min_equals_max(self, designer_model):
         """Verify that zero-freedom recipes have min==max for bias values."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -131,9 +121,9 @@ class TestZeroFreedomConstraints:
                         f"but got min={min_value}, max={max_value}"
                     )
 
-    def test_zero_freedom_ratios_tagged_non_grad(self, designer_model, biocomp_root):
+    def test_zero_freedom_ratios_tagged_non_grad(self, designer_model):
         """Verify that fully-constrained ratios are tagged NON_GRAD."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -151,9 +141,9 @@ class TestZeroFreedomConstraints:
                     f"Fully-constrained ratios at {ratios_path} should be tagged NON_GRAD"
                 )
 
-    def test_zero_freedom_bias_tagged_non_grad(self, designer_model, biocomp_root):
+    def test_zero_freedom_bias_tagged_non_grad(self, designer_model):
         """Verify that fully-constrained bias is tagged NON_GRAD."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -177,9 +167,9 @@ class TestZeroFreedomConstraints:
                                 f"Fully-constrained bias at {raw_value_path} should be tagged NON_GRAD"
                             )
 
-    def test_zero_freedom_loss_constant_during_optimization(self, designer_model, biocomp_root):
+    def test_zero_freedom_loss_constant_during_optimization(self, designer_model):
         """Verify that optimization doesn't change loss for zero-freedom recipes."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -250,9 +240,9 @@ class TestZeroFreedomConstraints:
 class TestConstraintClipping:
     """Tests for constraint clipping behavior."""
 
-    def test_locked_ratios_clipped_to_fixed_values(self, designer_model, biocomp_root):
+    def test_locked_ratios_clipped_to_fixed_values(self, designer_model):
         """Verify that locked ratios are clipped to their fixed values."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -279,9 +269,9 @@ class TestConstraintClipping:
                             f"Locked ratios should clip to original values at node {node_idx}"
                         )
 
-    def test_locked_bias_clipped_to_fixed_value(self, designer_model, biocomp_root):
+    def test_locked_bias_clipped_to_fixed_value(self, designer_model):
         """Verify that locked bias is clipped to fixed value."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -312,11 +302,11 @@ class TestConstraintClipping:
 class TestHeterogeneousConstraints:
     """Tests for heterogeneous constraint behavior across multiple networks."""
 
-    def test_multi_network_per_node_constraints(self, designer_model, biocomp_root):
+    def test_multi_network_per_node_constraints(self, designer_model):
         """Verify that each network maintains its own constraints in a multi-network stack."""
         # Load locked and unlocked recipes
-        locked_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
-        unlocked_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_ratios_only.yaml"
+        locked_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
+        unlocked_path = RESOURCES_DIR / "design/architectures/T_2_ratios_only.yaml"
 
         if not locked_path.exists():
             pytest.skip(f"Recipe not found: {locked_path}")
@@ -366,10 +356,10 @@ class TestHeterogeneousConstraints:
                             f"Node {node_idx} from unlocked network should have unlocked ratios"
                         )
 
-    def test_multi_network_non_grad_tag_only_when_all_locked(self, designer_model, biocomp_root):
+    def test_multi_network_non_grad_tag_only_when_all_locked(self, designer_model):
         """Verify NON_GRAD is only applied when ALL nodes in layer are locked."""
-        locked_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
-        unlocked_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_ratios_only.yaml"
+        locked_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
+        unlocked_path = RESOURCES_DIR / "design/architectures/T_2_ratios_only.yaml"
 
         if not locked_path.exists() or not unlocked_path.exists():
             pytest.skip("Required recipes not found")
@@ -408,10 +398,10 @@ class TestHeterogeneousConstraints:
                     f"All-locked layer at {ns} SHOULD have NON_GRAD tag"
                 )
 
-    def test_multi_network_clipping_respects_per_node_constraints(self, designer_model, biocomp_root):
+    def test_multi_network_clipping_respects_per_node_constraints(self, designer_model):
         """Verify clipping respects per-node constraints in heterogeneous stacks."""
-        locked_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
-        unlocked_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_ratios_only.yaml"
+        locked_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
+        unlocked_path = RESOURCES_DIR / "design/architectures/T_2_ratios_only.yaml"
 
         if not locked_path.exists() or not unlocked_path.exists():
             pytest.skip("Required recipes not found")
@@ -462,9 +452,9 @@ class TestHeterogeneousConstraints:
 class TestGenomeCodecIntegration:
     """Tests for GenomeCodec integration with constraints."""
 
-    def test_zero_freedom_genome_excludes_locked_params(self, designer_model, biocomp_root):
+    def test_zero_freedom_genome_excludes_locked_params(self, designer_model):
         """Verify that locked params are excluded from the genome."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -504,9 +494,9 @@ class TestGenomeCodecIntegration:
                     f"Locked ratios at {ratios_path} should be excluded from genome"
                 )
 
-    def test_unlocked_recipe_genome_includes_ratios(self, designer_model, biocomp_root):
+    def test_unlocked_recipe_genome_includes_ratios(self, designer_model):
         """Verify that unlocked params are included in the genome."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_ratios_only.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_ratios_only.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -533,10 +523,10 @@ class TestGenomeCodecIntegration:
 class TestRecipeToMaskIntegration:
     """Integration tests: recipe part definitions → quantization mask choices."""
 
-    def test_single_part_slot_creates_single_choice_mask(self, designer_model, biocomp_root):
+    def test_single_part_slot_creates_single_choice_mask(self, designer_model):
         """Recipe with single fixed part should create single-choice quantization mask."""
         # T_2_zero_freedom has fixed uORFs like '4x_uORF' directly in slots
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip("Recipe not found")
 
@@ -555,10 +545,10 @@ class TestRecipeToMaskIntegration:
                         f"Fixed uORF slots in {ns} should produce single-choice masks"
                     )
 
-    def test_multi_part_slot_creates_multi_choice_mask(self, designer_model, biocomp_root):
+    def test_multi_part_slot_creates_multi_choice_mask(self, designer_model):
         """Recipe with multiple parts in slot should create multi-choice quantization mask."""
         # two_and_one_all_uorfs has slots like ${U1} with all uORFs available
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/two_and_one_all_uorfs.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/two_and_one_all_uorfs.yaml"
         if not recipe_path.exists():
             pytest.skip("Recipe not found")
 
@@ -581,10 +571,10 @@ class TestRecipeToMaskIntegration:
                         )
         assert found_multi, "all_uorfs recipe should have multi-choice translation masks"
 
-    def test_mixed_slot_configuration_creates_mixed_masks(self, designer_model, biocomp_root):
+    def test_mixed_slot_configuration_creates_mixed_masks(self, designer_model):
         """Recipe with both fixed and multi-part slots should have mixed mask patterns."""
         # two_and_one has U1/U2 with many uORFs, U3 with NO_UORFS (single)
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/two_and_one.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
         if not recipe_path.exists():
             pytest.skip("Recipe not found")
 
@@ -612,10 +602,10 @@ class TestRecipeToMaskIntegration:
             "Mixed slot config should have at least some single or multi choice slots"
         )
 
-    def test_param_dim_reflects_unlocked_parts(self, designer_model, biocomp_root):
+    def test_param_dim_reflects_unlocked_parts(self, designer_model):
         """param_dim should increase with more unlocked part choices."""
-        zero_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
-        all_path = biocomp_root / "biocomp-jobs/design/architectures/two_and_one_all_uorfs.yaml"
+        zero_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
+        all_path = RESOURCES_DIR / "design/architectures/two_and_one_all_uorfs.yaml"
 
         if not zero_path.exists() or not all_path.exists():
             pytest.skip("Required recipes not found")
@@ -640,9 +630,9 @@ class TestRecipeToMaskIntegration:
 class TestTransformNodeConstraints:
     """Tests for transform node (transcription/translation) NON_GRAD optimization."""
 
-    def test_single_choice_masks_tagged_non_grad(self, designer_model, biocomp_root):
+    def test_single_choice_masks_tagged_non_grad(self, designer_model):
         """Forward transform rates with single-choice masks should be tagged NON_GRAD."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -671,9 +661,9 @@ class TestTransformNodeConstraints:
                         )
         assert found_any, "No single-choice forward transform layers found"
 
-    def test_multi_choice_masks_not_tagged_non_grad(self, designer_model, biocomp_root):
+    def test_multi_choice_masks_not_tagged_non_grad(self, designer_model):
         """Forward transform rates with multi-choice masks should NOT be tagged NON_GRAD."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/two_and_one_all_uorfs.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/two_and_one_all_uorfs.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -701,9 +691,9 @@ class TestTransformNodeConstraints:
                         )
         assert found_multi, "No multi-choice forward transform layers found"
 
-    def test_zero_freedom_has_zero_param_dim(self, designer_model, biocomp_root):
+    def test_zero_freedom_has_zero_param_dim(self, designer_model):
         """Zero freedom recipe should have param_dim=0 with all optimizations."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -715,9 +705,9 @@ class TestTransformNodeConstraints:
             f"Zero freedom recipe should have param_dim=0, got {codec.param_dim}"
         )
 
-    def test_unlocked_uorfs_have_positive_param_dim(self, designer_model, biocomp_root):
+    def test_unlocked_uorfs_have_positive_param_dim(self, designer_model):
         """Recipes with unlocked uORFs should have param_dim > 0."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/two_and_one_all_uorfs.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/two_and_one_all_uorfs.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -731,10 +721,10 @@ class TestTransformNodeConstraints:
 class TestHeterogeneousTransformConstraints:
     """Tests for heterogeneous transform node constraints across networks."""
 
-    def test_mixed_networks_respect_individual_constraints(self, designer_model, biocomp_root):
+    def test_mixed_networks_respect_individual_constraints(self, designer_model):
         """Multi-network stack with different uORF constraints should respect each."""
-        locked_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
-        unlocked_path = biocomp_root / "biocomp-jobs/design/architectures/two_and_one_all_uorfs.yaml"
+        locked_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
+        unlocked_path = RESOURCES_DIR / "design/architectures/two_and_one_all_uorfs.yaml"
         if not locked_path.exists() or not unlocked_path.exists():
             pytest.skip("Required recipes not found")
 
@@ -798,10 +788,10 @@ class TestHeterogeneousTransformConstraints:
                             unlocked_found = True
             assert locked_found and unlocked_found, "Both locked and unlocked layers expected"
 
-    def test_per_node_mask_choices_preserved(self, designer_model, biocomp_root):
+    def test_per_node_mask_choices_preserved(self, designer_model):
         """Each node's mask choices should be preserved in multi-network stacks."""
-        locked_path = biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml"
-        unlocked_path = biocomp_root / "biocomp-jobs/design/architectures/two_and_one_all_uorfs.yaml"
+        locked_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
+        unlocked_path = RESOURCES_DIR / "design/architectures/two_and_one_all_uorfs.yaml"
         if not locked_path.exists() or not unlocked_path.exists():
             pytest.skip("Required recipes not found")
 
@@ -842,6 +832,153 @@ class TestHeterogeneousTransformConstraints:
                             )
 
 
+class TestDesignModeConstraints:
+    """Tests for constraints when using DesignManager.build_stack (random_init=True).
+
+    CRITICAL: This tests the design mode behavior where random_init=True is passed
+    to aggregation nodes. The bug we're catching is that random_init=True was
+    overriding explicitly locked ratios (RatioSpec(locked=True)).
+    """
+
+    def test_zero_freedom_ratios_stay_locked_in_design_mode(self, designer_model):
+        """Zero-freedom recipe should have locked ratios even with random_init=True."""
+        from biocomp.design import DesignManager, Target
+
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
+        target_path = RESOURCES_DIR / "design/targets/MIT_T_only.yaml"
+
+        if not recipe_path.exists():
+            pytest.skip(f"Recipe not found: {recipe_path}")
+        if not target_path.exists():
+            pytest.skip(f"Target not found: {target_path}")
+
+        recipe = load_recipe(recipe_path)
+        target = Target(path=str(target_path))
+
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="main")
+        assert len(networks) == 1
+
+        dmanager = DesignManager(targets=[target], networks=networks, enable_tu_masking=False)
+
+        # This is the critical call - builds stack with unlock_ratios=True (random_init=True)
+        stack = dmanager.build_stack(designer_model, unlock_ratios=True)
+
+        key = jax.random.PRNGKey(42)
+        init_params = stack.init(key)
+        _, nonshared = init_params.filter_by_tag(["shared"])
+        params = ParameterTree.merge(designer_model.shared_params, nonshared)
+
+        # Check that ratios are still locked (min == max)
+        for layer_idx, layer in enumerate(stack.layers):
+            ns = stack.get_layer_namespace(layer_idx)
+            if "aggregation" in ns and "inv" not in ns:
+                ratio_min_path = f"{ns}/ratio_min"
+                ratio_max_path = f"{ns}/ratio_max"
+
+                if ratio_min_path in params:
+                    ratio_min = np.asarray(params[ratio_min_path])
+                    ratio_max = np.asarray(params[ratio_max_path])
+
+                    # For zero-freedom recipe, all ratios should be locked
+                    assert np.allclose(ratio_min, ratio_max), (
+                        f"Zero-freedom ratios should remain locked in design mode at {ns}. "
+                        f"Bug: random_init=True is overriding explicit locks. "
+                        f"Got min={ratio_min}, max={ratio_max}"
+                    )
+
+    def test_zero_freedom_param_dim_zero_in_design_mode(self, designer_model):
+        """Zero-freedom recipe should have param_dim=0 even in design mode."""
+        from biocomp.design import DesignManager, Target
+
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
+        target_path = RESOURCES_DIR / "design/targets/MIT_T_only.yaml"
+
+        if not recipe_path.exists():
+            pytest.skip(f"Recipe not found: {recipe_path}")
+        if not target_path.exists():
+            pytest.skip(f"Target not found: {target_path}")
+
+        recipe = load_recipe(recipe_path)
+        target = Target(path=str(target_path))
+
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="main")
+        dmanager = DesignManager(targets=[target], networks=networks, enable_tu_masking=False)
+
+        stack = dmanager.build_stack(designer_model, unlock_ratios=True)
+
+        key = jax.random.PRNGKey(42)
+        init_params = stack.init(key)
+        _, nonshared = init_params.filter_by_tag(["shared"])
+        params = ParameterTree.merge(designer_model.shared_params, nonshared)
+
+        codec = GenomeCodec.from_params(params)
+
+        assert codec.param_dim == 0, (
+            f"Zero-freedom recipe should have param_dim=0 in design mode, got {codec.param_dim}. "
+            f"Bug: random_init=True is adding degrees of freedom to locked ratios."
+        )
+
+    def test_unlocked_ratios_still_unlock_in_design_mode(self, designer_model):
+        """Unlocked recipes should still have unlocked ratios in design mode."""
+        from biocomp.design import DesignManager, Target
+
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_ratios_only.yaml"
+        target_path = RESOURCES_DIR / "design/targets/MIT_T_only.yaml"
+
+        if not recipe_path.exists():
+            pytest.skip(f"Recipe not found: {recipe_path}")
+        if not target_path.exists():
+            pytest.skip(f"Target not found: {target_path}")
+
+        recipe = load_recipe(recipe_path)
+        target = Target(path=str(target_path))
+
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="main")
+        dmanager = DesignManager(targets=[target], networks=networks, enable_tu_masking=False)
+
+        stack = dmanager.build_stack(designer_model, unlock_ratios=True)
+
+        key = jax.random.PRNGKey(42)
+        init_params = stack.init(key)
+        _, nonshared = init_params.filter_by_tag(["shared"])
+        params = ParameterTree.merge(designer_model.shared_params, nonshared)
+
+        codec = GenomeCodec.from_params(params)
+
+        # T_2_ratios_only should have unlocked ratios, so param_dim > 0
+        assert codec.param_dim > 0, (
+            f"Unlocked recipe should have param_dim > 0 in design mode, got {codec.param_dim}"
+        )
+
+    def test_design_mode_genome_empty_for_zero_freedom(self, designer_model):
+        """Zero-freedom recipe should have empty genome (nothing to optimize)."""
+        recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
+
+        if not recipe_path.exists():
+            pytest.skip(f"Recipe not found: {recipe_path}")
+
+        recipe = load_recipe(recipe_path)
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="main")
+
+        # Build stack
+        stack = ComputeStack(networks=networks)
+        stack.build(designer_model.compute_config, enable_tu_masking=False)
+
+        key = jax.random.PRNGKey(42)
+        init_params = stack.init(key)
+        _, nonshared = init_params.filter_by_tag(["shared"])
+        params = ParameterTree.merge(designer_model.shared_params, nonshared)
+
+        codec = GenomeCodec.from_params(params)
+
+        # With zero freedom, param_dim should be 0
+        assert codec.param_dim == 0, f"Zero-freedom should have param_dim=0, got {codec.param_dim}"
+
+        # Genome should be empty
+        genome = codec.encode(params)
+        assert genome.shape == (0,), f"Zero-freedom genome should be empty, got shape {genome.shape}"
+
+
 class TestMultiTopologyDegreesOfFreedom:
     """Tests for degrees of freedom across various network topologies."""
 
@@ -852,10 +989,10 @@ class TestMultiTopologyDegreesOfFreedom:
         ("two_and_one_all_uorfs.yaml", False, False),  # All unlocked
     ])
     def test_various_topologies_respect_constraints(
-        self, designer_model, biocomp_root, recipe_name, expected_locked_rates, expected_locked_ratios
+        self, designer_model, recipe_name, expected_locked_rates, expected_locked_ratios
     ):
         """Different topologies should have correct param_dim based on their constraints."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures" / recipe_name
+        recipe_path = RESOURCES_DIR / "design/architectures" / recipe_name
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 
@@ -907,12 +1044,12 @@ class TestMultiTopologyDegreesOfFreedom:
         if expected_locked_rates and expected_locked_ratios:
             assert codec.param_dim == 0, f"{recipe_name}: Expected param_dim=0 for fully locked"
 
-    def test_three_network_stack_heterogeneous_topologies(self, designer_model, biocomp_root):
+    def test_three_network_stack_heterogeneous_topologies(self, designer_model):
         """Stack with 3 different topologies should respect each network's constraints."""
         paths = [
-            biocomp_root / "biocomp-jobs/design/architectures/T_2_zero_freedom.yaml",
-            biocomp_root / "biocomp-jobs/design/architectures/T_2_ratios_only.yaml",
-            biocomp_root / "biocomp-jobs/design/architectures/two_and_one_all_uorfs.yaml",
+            RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml",
+            RESOURCES_DIR / "design/architectures/T_2_ratios_only.yaml",
+            RESOURCES_DIR / "design/architectures/two_and_one_all_uorfs.yaml",
         ]
         for p in paths:
             if not p.exists():
@@ -982,9 +1119,9 @@ class TestMultiTopologyDegreesOfFreedom:
             "Network 2 (all_uorfs) should have at least some unlocked tl_rates"
         )
 
-    def test_duplicate_networks_maintain_independent_constraints(self, designer_model, biocomp_root):
+    def test_duplicate_networks_maintain_independent_constraints(self, designer_model):
         """Same topology duplicated should maintain independent per-node constraints."""
-        recipe_path = biocomp_root / "biocomp-jobs/design/architectures/two_and_one.yaml"
+        recipe_path = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
         if not recipe_path.exists():
             pytest.skip(f"Recipe not found: {recipe_path}")
 

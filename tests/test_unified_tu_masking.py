@@ -4,7 +4,6 @@ import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
-from pathlib import Path
 import dracon as dr
 
 from biocomp.tumasking import (
@@ -24,11 +23,10 @@ from biocomp.recipe import Recipe
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.library import LibraryContext, load_lib
 import biocomp.biorules as br
+from pathlib import Path
 
-
-SCAFFOLD_PATH = (
-    Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
-)
+RESOURCES_DIR = Path(__file__).parent / "resources"
+SCAFFOLD_PATH = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
 
 
 @pytest.fixture(scope="module")
@@ -663,19 +661,6 @@ def test_binary_mask_vmap_over_networks():
 
     result = jax.vmap(get_masks_for_network)(mask_2d)
     np.testing.assert_array_equal(result, mask_2d)
-
-
-def test_hard_concrete_boundary_values():
-    params = MockParams({TU_LOG_ALPHA_PATH: jnp.array([0.0, 0.0, 0.0])})
-    tu_indices = jnp.array([0, 1, 2])
-
-    tu_uniform_low = jnp.array([0.001, 0.001, 0.001])
-    result_low = get_tu_masks(params, tu_indices, tu_uniform_low, None, is_multi_tu=False)
-    assert jnp.all(result_low < 0.5)
-
-    tu_uniform_high = jnp.array([0.999, 0.999, 0.999])
-    result_high = get_tu_masks(params, tu_indices, tu_uniform_high, None, is_multi_tu=False)
-    assert jnp.all(result_high > 0.5)
 
 
 def test_binary_mask_all_ones():

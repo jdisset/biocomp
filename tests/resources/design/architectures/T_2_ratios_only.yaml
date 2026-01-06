@@ -1,0 +1,58 @@
+<<(<): !include file:$DIR/common.yaml
+
+# Scaffold based on T_2 recipe with ONLY ratios unlocked
+# uORFs are fixed to match original T_2 configuration
+
+!define BIAS_FLUO_COTX3: !biocomp.recipe.FluoIntensity
+  tu_id: 0
+  value: 0.5
+  protein: mMaroon1
+  units: "Rescaled AU"
+
+recipe: !biocomp.recipe.Recipe
+  name: "T_2_ratios_only"
+  description: "T_2 scaffold with only ratios unlocked"
+  input_order: [eBFP2, mKO2]  # swapped to match MIT_T SVG axis orientation (bias is fixed via fluo_bias)
+  axis_mapping:
+    cotx1: y
+    cotx2: x
+  metadata:
+    ng_dna: 610.0
+  content:
+    - !biocomp.recipe.CoTransfection
+      name: cotx1
+      units:
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST2-3_mKO2
+          slots: [cHS4, hEF1a, mKO2, L0.T_4560]
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST1-2_4xmNG
+          slots: [cHS4, hEF1a, 4x_uORF, mNeonGreen, L0.T_4560]  # fixed 4x uORF
+      ratios: ["${RATIO}", "${RATIO}"]
+    - !biocomp.recipe.CoTransfection
+      name: cotx2
+      units:
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST2-3_EBFP2
+          slots: [cHS4, hEF1a, eBFP2, L0.T_4560]
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST1-2_8xCasE
+          slots: [cHS4, hEF1a, 8x_uORF, CasE, L0.T_4560]  # fixed 8x uORF
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.0x_Csy4_ST1-2
+          slots: [cHS4, hEF1a, Csy4, L0.T_4560]  # 0x uORF (none)
+      ratios: ["${RATIO}", "${RATIO}", "${RATIO}"]
+    - !biocomp.recipe.CoTransfection
+      name: cotx3
+      units:
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST1-2_mMaroon1
+          slots: [cHS4, hEF1a, mMaroon1, L0.T_4560]
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST2-3_CasER_mNG
+          slots: [cHS4, hEF1a, CasE_rec, mNeonGreen, L0.T_4560]
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST1-2_1xCsy4R_CasE
+          slots: [cHS4, hEF1a, Csy4_rec, 1x_uORF, CasE, L0.T_4560]  # fixed 1x uORF
+      ratios: ["${RATIO}", "${RATIO}", "${RATIO}"]
+      fluo_bias: "${BIAS_FLUO_COTX3}"

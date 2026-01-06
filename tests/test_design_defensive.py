@@ -10,9 +10,12 @@ import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
+from pathlib import Path
 from jax import grad
 
 from biocomp.graphengine import GraphState, GraphNode, GraphEdge
+
+RESOURCES_DIR = Path(__file__).parent / "resources"
 from biocomp.stack_builder import topological_order
 from biocomp.tumasking import (
     hard_concrete_from_uniform,
@@ -731,17 +734,7 @@ def test_reshuffle_batches_incompatible_with_grid_loss():
 
     This test loads the actual config and verifies the critical setting.
     """
-    import os
-    from pathlib import Path
-
-    # Find biocomp-jobs directory
-    biocomp_root = os.environ.get("BIOCOMP_ROOT")
-    if biocomp_root:
-        config_path = Path(biocomp_root) / "biocomp-jobs/design/design_configs/base.yaml"
-    else:
-        # Try relative path from test location
-        test_dir = Path(__file__).parent
-        config_path = test_dir.parent.parent.parent / "biocomp-jobs/design/design_configs/base.yaml"
+    config_path = RESOURCES_DIR / "design/design_configs/base.yaml"
 
     if not config_path.exists():
         pytest.skip(f"Config file not found at {config_path}")

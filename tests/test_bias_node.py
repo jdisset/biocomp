@@ -129,10 +129,8 @@ def test_bias_prefers_fluo_bias_over_fluo_bias_data():
     assert max_value == approx(0.9), "Should use fluo_bias (0.9), not fluo_bias_data (0.8)"
 
 
-def test_bias_with_scalar_value_uses_default_bounds(fluo_bias_scalar_spec):
-    """Scalar value uses default bounds [0, 0.7] for design mode flexibility."""
-    from biocomp.nodes.bias import DEFAULT_BIAS_MIN, DEFAULT_BIAS_MAX
-
+def test_bias_with_scalar_value_is_locked(fluo_bias_scalar_spec):
+    """Scalar value is locked: min == max == value (consistent with hard_bias behavior)."""
     mock_node = MockStackNode(extra={"fluo_bias": fluo_bias_scalar_spec})
     nodelist = [mock_node]
 
@@ -149,17 +147,17 @@ def test_bias_with_scalar_value_uses_default_bounds(fluo_bias_scalar_spec):
 
     min_value = float(np.asarray(params["local/bias_test/min_value"]).flatten()[0])
     max_value = float(np.asarray(params["local/bias_test/max_value"]).flatten()[0])
-    raw_value = float(np.asarray(params["local/bias_test/raw_value"]).flatten()[0])
 
-    assert min_value == approx(DEFAULT_BIAS_MIN), "Scalar should use default min bound"
-    assert max_value == approx(DEFAULT_BIAS_MAX), "Scalar should use default max bound"
-    assert raw_value == approx(0.3), "Raw value should be initialized to the scalar value"
+    assert min_value == approx(0.3), "Scalar value should lock min to the value"
+    assert max_value == approx(0.3), "Scalar value should lock max to the value"
+
+    output, _ = layer_instance.apply(params=params, node_id=jnp.array(0))
+    output_value = float(output.flatten()[0])
+    assert output_value == approx(0.3, rel=0.01), "Output should equal the locked scalar value"
 
 
 def test_bias_default_when_no_spec():
-    """Without fluo_bias spec, uses default value 0.5 with default bounds [0, 0.7]."""
-    from biocomp.nodes.bias import DEFAULT_BIAS_MIN, DEFAULT_BIAS_MAX
-
+    """Without fluo_bias spec, uses locked default value 0.5 (min == max == 0.5)."""
     mock_node = MockStackNode(extra={})
     nodelist = [mock_node]
 
@@ -176,11 +174,13 @@ def test_bias_default_when_no_spec():
 
     min_value = float(np.asarray(params["local/bias_test/min_value"]).flatten()[0])
     max_value = float(np.asarray(params["local/bias_test/max_value"]).flatten()[0])
-    raw_value = float(np.asarray(params["local/bias_test/raw_value"]).flatten()[0])
 
-    assert min_value == approx(DEFAULT_BIAS_MIN), "Default should use default min bound"
-    assert max_value == approx(DEFAULT_BIAS_MAX), "Default should use default max bound"
-    assert raw_value == approx(0.5), "Default raw value should be 0.5"
+    assert min_value == approx(0.5), "Default should be locked at 0.5 (min)"
+    assert max_value == approx(0.5), "Default should be locked at 0.5 (max)"
+
+    output, _ = layer_instance.apply(params=params, node_id=jnp.array(0))
+    output_value = float(output.flatten()[0])
+    assert output_value == approx(0.5, rel=0.01), "Default output should be 0.5"
 
 
 def test_bias_output_varies_with_raw_value_when_unlocked():

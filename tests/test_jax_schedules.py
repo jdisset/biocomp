@@ -524,8 +524,9 @@ class TestHyperoptIntegration:
 
     def test_phase_frac_constraint_values(self):
         """Phase1_frac < phase2_frac ranges are enforced in YAML config."""
-
-        yaml_path = "/home/jean/Code/biocompiler/biocomp-jobs/hyperopt/hyperparams/design_19.yaml"
+        from pathlib import Path
+        RESOURCES_DIR = Path(__file__).parent / "resources"
+        yaml_path = str(RESOURCES_DIR / "hyperopt/hyperparams/design_19.yaml")
         try:
             with open(yaml_path) as f:
                 content = f.read()

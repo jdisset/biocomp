@@ -1,0 +1,69 @@
+<<(<): !include file:$DIR/common.yaml
+
+# Fully unlocked T_2 scaffold
+# ALL parameters unlocked: uORFs, ratios, and bias
+
+!define BIAS_RANGE: !biocomp.recipe.NumRange
+  min: 0.0
+  max: 0.6
+
+!define BIAS_FLUO_COTX3: !biocomp.recipe.FluoIntensity
+  tu_id: 0
+  value: "${BIAS_RANGE}"
+  protein: mMaroon1
+  units: "Rescaled AU"
+
+# uORF options (full range)
+!define UORF_OPTIONS: [null, 1w_uORF, 1x_uORF, 2x_uORF, 3x_uORF, 4x_uORF, 5x_uORF, 6x_uORF, 8x_uORF]
+
+# uORF slot definitions (all unlocked with full range)
+!define UORF_SLOT: !biocomp.recipe.Slot
+  part: ${UORF_OPTIONS}
+
+recipe: !biocomp.recipe.Recipe
+  name: "T_2_fully_unlocked"
+  description: "T_2 with ALL parameters unlocked (uORFs, ratios, bias)"
+  input_order: [eBFP2, mKO2]
+  axis_mapping:
+    cotx1: y
+    cotx2: x
+  metadata:
+    ng_dna: 610.0
+  content:
+    - !biocomp.recipe.CoTransfection
+      name: cotx1
+      units:
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST2-3_mKO2
+          slots: [cHS4, hEF1a, mKO2, L0.T_4560]
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST1-2_mNG
+          slots: [cHS4, hEF1a, "${UORF_SLOT}", mNeonGreen, L0.T_4560]  # UNLOCKED uORF
+      ratios: ["${RATIO}", "${RATIO}"]  # UNLOCKED
+    - !biocomp.recipe.CoTransfection
+      name: cotx2
+      units:
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST2-3_EBFP2
+          slots: [cHS4, hEF1a, eBFP2, L0.T_4560]
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST1-2_CasE
+          slots: [cHS4, hEF1a, "${UORF_SLOT}", CasE, L0.T_4560]  # UNLOCKED uORF
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.0x_Csy4_ST1-2
+          slots: [cHS4, hEF1a, "${UORF_SLOT}", Csy4, L0.T_4560]  # UNLOCKED uORF
+      ratios: ["${RATIO}", "${RATIO}", "${RATIO}"]  # UNLOCKED
+    - !biocomp.recipe.CoTransfection
+      name: cotx3
+      units:
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST1-2_mMaroon1
+          slots: [cHS4, hEF1a, mMaroon1, L0.T_4560]
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST2-3_CasER_mNG
+          slots: [cHS4, hEF1a, CasE_rec, mNeonGreen, L0.T_4560]
+        - !biocomp.recipe.TranscriptionUnit
+          name: L1.ST1-2_Csy4R_CasE
+          slots: [cHS4, hEF1a, Csy4_rec, "${UORF_SLOT}", CasE, L0.T_4560]  # UNLOCKED uORF
+      ratios: ["${RATIO}", "${RATIO}", "${RATIO}"]  # UNLOCKED
+      fluo_bias: "${BIAS_FLUO_COTX3}"  # UNLOCKED

@@ -23,6 +23,8 @@ import biocomp.compute as cmp
 from biocomp.jaxutils import tree_get
 from biocomp.utils import PartialFunction
 
+RESOURCES_DIR = Path(__file__).parent / "resources"
+
 
 def load_recipe(path: str) -> Recipe:
     data = dr.load(path)
@@ -43,8 +45,7 @@ def load_model():
 
 
 def load_target(target_name: str = "MIT_T") -> Target:
-    biocomp_root = os.environ.get("BIOCOMP_ROOT", "")
-    target_path = Path(biocomp_root) / "Designs" / f"{target_name}.svg"
+    target_path = RESOURCES_DIR / "designs" / f"{target_name}.svg"
     if not target_path.exists():
         pytest.skip(f"Target file not found: {target_path}")
     return Target(path=str(target_path), name=target_name)
@@ -53,7 +54,8 @@ def load_target(target_name: str = "MIT_T") -> Target:
 @pytest.fixture
 def design_setup_long():
     model = load_model()
-    recipe = load_recipe("biocomp-jobs/design/architectures/T_2_fully_unlocked.yaml")
+    recipe_path = RESOURCES_DIR / "design/architectures/T_2_fully_unlocked.yaml"
+    recipe = load_recipe(str(recipe_path))
     networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="all")
     assert len(networks) > 0, "no networks built from recipe"
     return {"model": model, "networks": networks, "target": load_target("MIT_T"), "recipe": recipe}

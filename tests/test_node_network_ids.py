@@ -3,18 +3,16 @@
 import pytest
 import jax
 import numpy as np
-from pathlib import Path
 import dracon as dr
 from biocomp.compute import ComputeStack, DEFAULT_COMPUTE_CONFIG
 from biocomp.network import recipe_to_networks
 from biocomp.recipe import Recipe
 from biocomp.library import LibraryContext, load_lib
 import biocomp.biorules as br
+from pathlib import Path
 
-
-SCAFFOLD_PATH = (
-    Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
-)
+RESOURCES_DIR = Path(__file__).parent / "resources"
+SCAFFOLD_PATH = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
 
 
 @pytest.fixture(scope="module")

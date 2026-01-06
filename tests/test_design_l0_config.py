@@ -13,6 +13,8 @@ from pathlib import Path
 
 from biocomp.optimutils import three_phase_schedule
 
+RESOURCES_DIR = Path(__file__).parent / "resources"
+
 
 def test_l0_penalty_not_all_zero():
     """Verify that L0 penalty schedule produces non-zero values during pruning phase.
@@ -90,7 +92,7 @@ def test_l0_penalty_schedule_at_different_scales():
 
 def test_base_yaml_has_l0_schedule_defined():
     """Verify base.yaml has L0 penalty schedule defined (values may be zero as default)."""
-    base_yaml = Path(__file__).parent.parent.parent / "biocomp-jobs/design/design_configs/base.yaml"
+    base_yaml = RESOURCES_DIR / "design/design_configs/base.yaml"
 
     if not base_yaml.exists():
         pytest.skip("base.yaml not found")

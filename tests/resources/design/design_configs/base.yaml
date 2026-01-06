@@ -1,0 +1,140 @@
+# Optimization settings
+!set_default n_replicates: 1
+!set_default n_epochs: 12
+!set_default n_batches_per_epoch: 64
+!set_default batches_per_step: 1
+
+# Loss function weights - mixed losses for robust optimization
+!set_default w_sinkhorn: 0.5   # optimal transport (distribution matching)
+!set_default w_lncc: 0.2       # local normalized cross-correlation
+!set_default w_rmse: 0.3        # mean squared error
+!set_default w_mse: 0.0        # mean squared error
+!set_default w_spectral: 0.0   # frequency domain loss
+!set_default w_simse: 0.0      # scale-invariant MSE
+!set_default w_zncc: 0.0       # zero-mean normalized cross-correlation
+!set_default w_contrast: 0.01   # contrast encouragement
+!set_default w_gradient: 0.01   # gradient magnitude loss
+
+# TU masking settings
+!set_default tu_log_alpha_init_mean: 2.0
+!set_default tu_log_alpha_init_std: 0.1
+!set_default tu_n_samples: 1  # Monte Carlo samples for variance reduction
+
+# Three-phase L0 penalty schedule:
+#   Phase 1 (0 to phase1_frac): No L0 penalty, free exploration
+#   Phase 2 (phase1_frac to phase2_frac): L0 ramps up, pruning happens here
+#   Phase 3 (phase2_frac to 1.0): Full L0 penalty, lock in results
+!set_default phase1_frac: 0.4
+!set_default phase2_frac: 0.75
+
+# L0 penalty schedule parameters (per phase)
+# NOTE: Disabled by default - regularization can dominate MSE gradient (see t2_refinement_strategy_00.md)
+!set_default lambda_l0_phase1: 0.0
+!set_default lambda_l0_phase2_end: 0.0
+!set_default lambda_l0_phase3_end: 0.0
+
+# L0 nonlinear threshold (set to e.g. 12 for gentler penalty under 12 TUs)
+!set_default l0_tu_threshold: null
+!set_default l0_excess_exponent: 2.0
+
+# Schedule parameters
+!set_default grad_clip_norm: 1.0
+!set_default lr_init: 1e-5
+!set_default lr_peak: 0.01
+!set_default lr_end: 1e-4
+!set_default lr_warmup_frac: 0.1
+
+# Compute total steps and phase boundaries
+!define total_steps: ${int(n_epochs) * int(n_batches_per_epoch)}
+!define warmup_steps: ${int(float(lr_warmup_frac) * total_steps)}
+!define decay_steps: ${int(0.9 * total_steps)}
+
+# Grid/lattice settings
+!set_default grid_resolution_x: 32
+!set_default grid_resolution_y: 32
+!set_default grid_jitter_std: 0.01
+!set_default eps_sinkhorn: 0.1
+!set_default n_sinkhorn_iters: 50
+!set_default lncc_kernel: 15
+# Regularization terms - DISABLED by default
+# These can dominate the MSE gradient (230x larger!) causing optimization to prioritize
+# ratio uniformity over pattern quality. See t2_refinement_strategy_00.md for details.
+# Enable only when physical constraints require it.
+!set_default lambda_tucount: 0.0
+!set_default max_tus_per_cotx: 5
+!set_default lambda_spread: 0.0   # was 0.001 - penalizes ratio spread (DISABLED: dominated gradient)
+!set_default max_ratio: 120.0
+!set_default lambda_ern_tying: 0.0
+!set_default lambda_coupling: 0.0 # was 0.1 - ratio-mask coupling (DISABLED: dominated gradient)
+!set_default min_ratio_threshold: 0.005
+
+design_conf: !biocomp.design.DesignConfig
+  n_replicates: ${n_replicates}
+  n_epochs: ${n_epochs}
+  batch_size: 1
+  n_batches_per_epoch: ${n_batches_per_epoch}
+  batches_per_step: ${batches_per_step}
+  keep_in_history: all
+  reshuffle_batches: false  # CRITICAL: lattice mode requires sequential order for grid reshape
+
+  tu_log_alpha_init_mean: ${float(tu_log_alpha_init_mean)}
+  tu_log_alpha_init_std: ${float(tu_log_alpha_init_std)}
+  loss_function: !biocomp.utils.PartialFunction
+    func: biocomp.design.grid_distance_loss
+    kwargs:
+      w_sinkhorn: ${float(w_sinkhorn)}
+      w_lncc: ${float(w_lncc)}
+      w_mse: ${float(w_mse)}
+      w_rmse: ${float(w_rmse)}
+      w_spectral: ${float(w_spectral)}
+      w_simse: ${float(w_simse)}
+      w_zncc: ${float(w_zncc)}
+      w_contrast: ${float(w_contrast)}
+      w_gradient: ${float(w_gradient)}
+      eps_sinkhorn: ${float(eps_sinkhorn)}
+      n_sinkhorn_iters: ${int(n_sinkhorn_iters)}
+      lncc_kernel: ${int(lncc_kernel)}
+      lambda_tucount: ${float(lambda_tucount)}
+      max_tus_per_cotx: ${int(max_tus_per_cotx)}
+      lambda_spread: ${float(lambda_spread)}
+      max_ratio: ${float(max_ratio)}
+      tu_n_samples: ${int(tu_n_samples)}
+      lambda_ern_tying: ${float(lambda_ern_tying)}
+      lambda_coupling: ${float(lambda_coupling)}
+      min_ratio_threshold: ${float(min_ratio_threshold)}
+      # Three-phase L0 penalty schedule
+      lambda_l0: !biocomp.utils.PartialFunctionResult
+        func: biocomp.optimutils.three_phase_schedule
+        kwargs:
+          total_steps: ${total_steps}
+          phase1_frac: ${float(phase1_frac)}
+          phase2_frac: ${float(phase2_frac)}
+          phase1_value: ${float(lambda_l0_phase1)}
+          phase2_end_value: ${float(lambda_l0_phase2_end)}
+          phase3_end_value: ${float(lambda_l0_phase3_end)}
+          phase2_power: 1.0
+          phase3_power: 2.0
+      l0_tu_threshold: ${l0_tu_threshold}
+      l0_excess_exponent: ${float(l0_excess_exponent)}
+  optimizer_stack:
+    - !biocomp.utils.PartialFunction
+      func: optax.clip_by_global_norm
+      kwargs:
+        max_norm: ${grad_clip_norm}
+    - !biocomp.utils.PartialFunction
+      func: optax.adamw
+      kwargs:
+        learning_rate: !biocomp.utils.PartialFunctionResult
+          func: optax.warmup_cosine_decay_schedule
+          kwargs:
+            init_value: ${float(lr_init)}
+            peak_value: ${float(lr_peak)}
+            warmup_steps: ${warmup_steps}
+            decay_steps: ${decay_steps}
+            end_value: ${float(lr_end)}
+
+sampling: !biocomp.design.LatticeSampling
+  resolution:
+    - ${grid_resolution_x}
+    - ${grid_resolution_y}
+  jitter_std: ${grid_jitter_std}

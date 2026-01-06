@@ -1,0 +1,130 @@
+# Shared design hyperparameters for CMA-ES optimization (19 params)
+#
+# Removed non-functional hyperparams:
+# - lr_* (optimizer already constructed, can't change without recompilation)
+# - grid_jitter_std (in sampling config, not loss function)
+#
+# Usage:
+#   hyperparams: !include file:$DIR/hyperparams/design_19.yaml
+
+# === Loss function weights (3) ===
+- !HyperparamSpec
+  name: w_sinkhorn
+  type: float
+  low: 0.0
+  high: 2.0
+
+- !HyperparamSpec
+  name: w_lncc
+  type: float
+  low: 0.0
+  high: 2.0
+
+- !HyperparamSpec
+  name: w_mse
+  type: float
+  low: 0.0
+  high: 2.0
+
+# === TU masking - L0 penalty schedule (3) ===
+- !HyperparamSpec
+  name: lambda_l0_phase1_value
+  type: float
+  low: 0.0
+  high: 0.01
+
+- !HyperparamSpec
+  name: lambda_l0_phase2_end_value
+  type: float
+  low: 0.0
+  high: 0.1
+
+- !HyperparamSpec
+  name: lambda_l0_phase3_end_value
+  type: float
+  low: 0.0
+  high: 0.5
+
+# === TU masking - temperature schedule (3) ===
+- !HyperparamSpec
+  name: tu_temperature_phase1_value
+  type: float
+  low: 0.5
+  high: 2.0
+
+- !HyperparamSpec
+  name: tu_temperature_phase2_end_value
+  type: float
+  low: 0.1
+  high: 1.0
+
+- !HyperparamSpec
+  name: tu_temperature_phase3_end_value
+  type: float
+  low: 0.01
+  high: 0.5
+
+# === TU masking initialization (2) ===
+- !HyperparamSpec
+  name: tu_log_alpha_init_mean
+  type: float
+  low: -2.0
+  high: 2.0
+
+- !HyperparamSpec
+  name: tu_log_alpha_init_std
+  type: float
+  low: 0.1
+  high: 2.0
+
+# === Phase fractions (2) - global for all schedules ===
+# Note: ranges ensure phase1_frac < phase2_frac (validated in code too)
+- !HyperparamSpec
+  name: phase1_frac
+  type: float
+  low: 0.1
+  high: 0.45
+
+- !HyperparamSpec
+  name: phase2_frac
+  type: float
+  low: 0.5
+  high: 0.9
+
+# === Regularization penalties (5) ===
+- !HyperparamSpec
+  name: lambda_spread
+  type: log_float
+  low: 1e-5
+  high: 0.1
+
+- !HyperparamSpec
+  name: lambda_tucount
+  type: log_float
+  low: 1e-6
+  high: 0.01
+
+- !HyperparamSpec
+  name: lambda_coupling
+  type: log_float
+  low: 1e-4
+  high: 1.0
+
+- !HyperparamSpec
+  name: min_ratio_threshold
+  type: log_float
+  low: 1e-4
+  high: 0.1
+
+- !HyperparamSpec
+  name: lambda_ern_tying
+  type: log_float
+  low: 1e-5
+  high: 0.1
+
+# === Sinkhorn settings (1) ===
+- !HyperparamSpec
+  name: eps_sinkhorn
+  type: log_float
+  low: 0.01
+  high: 1.0

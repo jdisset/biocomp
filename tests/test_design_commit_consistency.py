@@ -9,11 +9,11 @@ This caused logged predictions during design to differ from final committed pred
 """
 
 import os
+from pathlib import Path
 import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
-from pathlib import Path
 import dracon as dr
 
 import biocomp.biorules as br
@@ -23,12 +23,14 @@ from biocomp.recipe import Recipe
 from biocomp.design_targets import SVGTarget
 from biocomp.nodes.aggregation import _decode_latent_ratios
 
+RESOURCES_DIR = Path(__file__).parent / "resources"
 
-SCAFFOLD_PATH = Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
+
+SCAFFOLD_PATH = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
 
 
 def get_svg_target():
-    svg_path = os.path.join(os.environ.get("BIOCOMP_ROOT", "."), "Designs/MIT_T.svg")
+    svg_path = str(RESOURCES_DIR / "designs/MIT_T.svg")
     if not os.path.exists(svg_path):
         pytest.skip(f"SVG target not found: {svg_path}")
     return SVGTarget(

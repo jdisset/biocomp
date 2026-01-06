@@ -1,0 +1,279 @@
+<<(<): !include file:$DIR/common.yaml
+
+# input_order: specifies order of input proteins [x-axis, y-axis]
+
+recipes:
+  - !biocomp.recipe.Recipe
+    name: "two_and_one (CasE, Csy4, PgU)"
+    description: "2+1 layer design network"
+    input_order: [eBFP2, mKO2]  # swapped to match MIT_T SVG axis orientation
+    content:
+      - !biocomp.recipe.CoTransfection
+        name: x1
+        units:
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_marker
+            slots: [hEF1a, mKO2, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_a+
+            slots: [hEF1a, "${U1}", CasE_rec, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_a-
+            slots: [hEF1a, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_b+
+            slots: [hEF1a, "${U2}", Csy4_rec, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_b-
+            slots: [hEF1a, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_c+
+            slots: [hEF1a, "${U3}", PgU_rec, mNeonGreen, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_c-
+            slots: [hEF1a, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_direct_out
+            slots: [hEF1a, mNeonGreen, L0.T_4560]
+        ratios: ["${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}"]
+      - !biocomp.recipe.CoTransfection
+        name: x2
+        units:
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_marker
+            slots: [hEF1a, eBFP2, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_a+
+            slots: [hEF1a, "${U1}", CasE_rec, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_a-
+            slots: [hEF1a, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_b+
+            slots: [hEF1a, "${U2}", Csy4_rec, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_b-
+            slots: [hEF1a, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_c+
+            slots: [hEF1a, "${U3}", PgU_rec, mNeonGreen, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_c-
+            slots: [hEF1a, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_direct_out
+            slots: [hEF1a, mNeonGreen, L0.T_4560]
+        ratios: ["${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}"]
+      - !biocomp.recipe.CoTransfection
+        name: b
+        units:
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_marker
+            slots: [hEF1a, mMaroon1, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_a+
+            slots: [hEF1a, "${U1}", CasE_rec, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_a-
+            slots: [hEF1a, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_b+
+            slots: [hEF1a, "${U2}", Csy4_rec, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_b-
+            slots: [hEF1a, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_c+
+            slots: [hEF1a, "${U3}", PgU_rec, mNeonGreen, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_c-
+            slots: [hEF1a, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_direct_out
+            slots: [hEF1a, mNeonGreen, L0.T_4560]
+        ratios: ["${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}"]
+        fluo_bias: "${BIAS_FLUO}"
+
+  - !biocomp.recipe.Recipe
+    name: "two_and_one (Csy4, PgU, CasE)"
+    description: "2+1 layer design network"
+    input_order: [eBFP2, mKO2]  # swapped to match MIT_T SVG axis orientation
+    content:
+      - !biocomp.recipe.CoTransfection
+        name: x1
+        units:
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_marker
+            slots: [hEF1a, mKO2, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_a+
+            slots: [hEF1a, "${U1}", Csy4_rec, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_a-
+            slots: [hEF1a, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_b+
+            slots: [hEF1a, "${U2}", PgU_rec, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_b-
+            slots: [hEF1a, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_c+
+            slots: [hEF1a, "${U3}", CasE_rec, mNeonGreen, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_c-
+            slots: [hEF1a, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_direct_out
+            slots: [hEF1a, mNeonGreen, L0.T_4560]
+        ratios: ["${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}"]
+      - !biocomp.recipe.CoTransfection
+        name: x2
+        units:
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_marker
+            slots: [hEF1a, eBFP2, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_a+
+            slots: [hEF1a, "${U1}", Csy4_rec, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_a-
+            slots: [hEF1a, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_b+
+            slots: [hEF1a, "${U2}", PgU_rec, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_b-
+            slots: [hEF1a, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_c+
+            slots: [hEF1a, "${U3}", CasE_rec, mNeonGreen, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_c-
+            slots: [hEF1a, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_direct_out
+            slots: [hEF1a, mNeonGreen, L0.T_4560]
+        ratios: ["${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}"]
+      - !biocomp.recipe.CoTransfection
+        name: b
+        units:
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_marker
+            slots: [hEF1a, mMaroon1, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_a+
+            slots: [hEF1a, "${U1}", Csy4_rec, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_a-
+            slots: [hEF1a, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_b+
+            slots: [hEF1a, "${U2}", PgU_rec, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_b-
+            slots: [hEF1a, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_c+
+            slots: [hEF1a, "${U3}", CasE_rec, mNeonGreen, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_c-
+            slots: [hEF1a, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_direct_out
+            slots: [hEF1a, mNeonGreen, L0.T_4560]
+        ratios: ["${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}"]
+        fluo_bias: "${BIAS_FLUO}"
+
+  - !biocomp.recipe.Recipe
+    name: "two_and_one (PgU, CasE, Csy4)"
+    description: "2+1 layer design network"
+    input_order: [eBFP2, mKO2]  # swapped to match MIT_T SVG axis orientation
+    content:
+      - !biocomp.recipe.CoTransfection
+        name: x1
+        units:
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_marker
+            slots: [hEF1a, mKO2, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_a+
+            slots: [hEF1a, "${U1}", PgU_rec, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_a-
+            slots: [hEF1a, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_b+
+            slots: [hEF1a, "${U2}", CasE_rec, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_b-
+            slots: [hEF1a, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_c+
+            slots: [hEF1a, "${U3}", Csy4_rec, mNeonGreen, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_c-
+            slots: [hEF1a, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x1_direct_out
+            slots: [hEF1a, mNeonGreen, L0.T_4560]
+        ratios: ["${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}"]
+      - !biocomp.recipe.CoTransfection
+        name: x2
+        units:
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_marker
+            slots: [hEF1a, eBFP2, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_a+
+            slots: [hEF1a, "${U1}", PgU_rec, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_a-
+            slots: [hEF1a, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_b+
+            slots: [hEF1a, "${U2}", CasE_rec, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_b-
+            slots: [hEF1a, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_c+
+            slots: [hEF1a, "${U3}", Csy4_rec, mNeonGreen, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_c-
+            slots: [hEF1a, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: x2_direct_out
+            slots: [hEF1a, mNeonGreen, L0.T_4560]
+        ratios: ["${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}"]
+      - !biocomp.recipe.CoTransfection
+        name: b
+        units:
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_marker
+            slots: [hEF1a, mMaroon1, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_a+
+            slots: [hEF1a, "${U1}", PgU_rec, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_a-
+            slots: [hEF1a, PgU, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_b+
+            slots: [hEF1a, "${U2}", CasE_rec, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_b-
+            slots: [hEF1a, CasE, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_c+
+            slots: [hEF1a, "${U3}", Csy4_rec, mNeonGreen, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_c-
+            slots: [hEF1a, Csy4, L0.T_4560]
+          - !biocomp.recipe.TranscriptionUnit
+            name: b_direct_out
+            slots: [hEF1a, mNeonGreen, L0.T_4560]
+        ratios: ["${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}", "${RATIO}"]
+        fluo_bias: "${BIAS_FLUO}"
+
+recipe: ${&/recipes[0]}

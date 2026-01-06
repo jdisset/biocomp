@@ -17,6 +17,7 @@ from biocomp.tumasking import (
     init_tu_log_alpha,
     DEFAULT_GAMMA,
     DEFAULT_ZETA,
+    L0_PENALTY_FLOOR_PROB,
 )
 
 
@@ -95,22 +96,66 @@ def test_get_final_mask():
 
 
 def test_l0_penalty_range():
-    """L0 penalty should be in (0, 1)."""
-    log_alphas = jnp.array([-10.0, -3.0, 0.0, 3.0, 10.0])
-    penalties = l0_penalty(log_alphas)
+    """L0 penalty should be in [0, 1) with floor behavior."""
+    # Below floor (sigmoid < 0.2): penalty = 0
+    log_alphas_low = jnp.array([-10.0, -3.0])  # sigmoid ≈ 0, 0.05
+    penalties_low = l0_penalty(log_alphas_low)
+    assert jnp.all(penalties_low == 0.0), "L0 penalty should be 0 below floor"
 
-    assert jnp.all(penalties > 0.0), "L0 penalty should be > 0"
-    assert jnp.all(penalties < 1.0), "L0 penalty should be < 1"
+    # Above floor: penalty in (0, 1)
+    log_alphas_high = jnp.array([0.0, 3.0, 10.0])  # sigmoid ≈ 0.5, 0.95, 1.0
+    penalties_high = l0_penalty(log_alphas_high)
+    assert jnp.all(penalties_high > 0.0), "L0 penalty should be > 0 above floor"
+    assert jnp.all(penalties_high < 1.0), "L0 penalty should be < 1"
 
 
 def test_l0_penalty_monotonic():
-    """L0 penalty should increase with log_alpha."""
+    """L0 penalty should be monotonically non-decreasing with log_alpha."""
     log_alphas = jnp.linspace(-5.0, 5.0, 20)
     penalties = l0_penalty(log_alphas)
 
-    # Should be monotonically increasing
+    # Should be monotonically non-decreasing (flat at 0 below floor, then increasing)
     diffs = penalties[1:] - penalties[:-1]
-    assert jnp.all(diffs > 0), "L0 penalty should be monotonic in log_alpha"
+    assert jnp.all(diffs >= 0), "L0 penalty should be non-decreasing in log_alpha"
+
+    # Strictly increasing above floor (sigmoid > 0.2, log_alpha > -1.39)
+    above_floor_idx = log_alphas > -1.0  # safely above floor
+    above_floor_alphas = log_alphas[above_floor_idx]
+    above_floor_penalties = l0_penalty(above_floor_alphas)
+    above_floor_diffs = above_floor_penalties[1:] - above_floor_penalties[:-1]
+    assert jnp.all(above_floor_diffs > 0), "L0 penalty should be strictly increasing above floor"
+
+
+def test_l0_penalty_floor_behavior():
+    """L0 penalty floor allows TU 'rebirth' by removing L0 pressure below threshold."""
+    # Note: clamp_log_alpha applies soft tanh clamping, so we need values well below floor
+    # to ensure the clamped value is still below floor_prob threshold
+
+    # Well below floor (log_alpha=-3 -> clamped sigmoid << 0.2): penalty = 0
+    penalty_well_below = l0_penalty(jnp.array(-3.0))
+    assert penalty_well_below == 0.0, f"Well below floor, penalty should be 0, got {penalty_well_below}"
+
+    # Slightly below floor (log_alpha=-2): sigmoid after clamping ~0.15 < 0.2
+    penalty_below = l0_penalty(jnp.array(-2.0))
+    assert penalty_below == 0.0, f"Below floor, penalty should be 0, got {penalty_below}"
+
+    # Above floor (log_alpha=0): sigmoid = 0.5 > 0.2
+    penalty_above = l0_penalty(jnp.array(0.0))
+    expected_above = (0.5 - L0_PENALTY_FLOOR_PROB) / (1.0 - L0_PENALTY_FLOOR_PROB)
+    np.testing.assert_allclose(penalty_above, expected_above, rtol=0.01)
+
+    # At high log_alpha: penalty approaches 1 (normalized)
+    # Note: clamp_log_alpha limits range, so sigmoid doesn't reach exactly 1
+    penalty_max = l0_penalty(jnp.array(10.0))
+    assert penalty_max > 0.95, f"High log_alpha should give penalty near 1, got {penalty_max}"
+
+    # Gradient well below floor is 0 (flat region)
+    grad_below_floor = jax.grad(lambda la: l0_penalty(la))(jnp.array(-3.0))
+    assert grad_below_floor == 0.0, "Gradient should be 0 well below floor"
+
+    # Gradient above floor is positive
+    grad_above_floor = jax.grad(lambda la: l0_penalty(la))(jnp.array(0.0))
+    assert grad_above_floor > 0.0, "Gradient should be positive above floor"
 
 
 def test_l0_penalty_gradient():
@@ -131,6 +176,40 @@ def test_l0_loss():
 
     expected = 3 * l0_penalty(jnp.array(0.0))
     np.testing.assert_allclose(loss, expected, rtol=1e-5)
+
+
+def test_l0_loss_threshold_nonlinear():
+    """L0 loss with threshold should be gentle below and harsh above."""
+    threshold = 12.0
+
+    # Create log_alphas that give ~6 expected TUs (below threshold)
+    # sigmoid(2.0) ≈ 0.88, after floor: (0.88 - 0.2) / 0.8 ≈ 0.85 per TU
+    # 7 TUs * 0.85 ≈ 6 expected count
+    log_alphas_low = jnp.full((7,), 2.0)
+    loss_low_linear = l0_loss(log_alphas_low, tu_threshold=None)
+    loss_low_nonlin = l0_loss(log_alphas_low, tu_threshold=threshold)
+
+    # Below threshold: nonlinear should be similar to linear (just small excess from softplus)
+    assert loss_low_nonlin < loss_low_linear * 1.5, (
+        f"Below threshold, nonlinear loss ({loss_low_nonlin}) should not be much larger than linear ({loss_low_linear})"
+    )
+
+    # Create log_alphas that give ~30 expected TUs (well above threshold)
+    log_alphas_high = jnp.full((35,), 2.0)
+    loss_high_linear = l0_loss(log_alphas_high, tu_threshold=None)
+    loss_high_nonlin = l0_loss(log_alphas_high, tu_threshold=threshold)
+
+    # Above threshold: nonlinear should be larger than linear
+    assert loss_high_nonlin > loss_high_linear, (
+        f"Above threshold, nonlinear loss ({loss_high_nonlin}) should be larger than linear ({loss_high_linear})"
+    )
+
+    # Verify the penalty ratio grows above threshold vs below
+    ratio_low = loss_low_nonlin / loss_low_linear
+    ratio_high = loss_high_nonlin / loss_high_linear
+    assert ratio_high > ratio_low, (
+        f"Penalty ratio should increase above threshold: {ratio_high:.3f} vs {ratio_low:.3f}"
+    )
 
 
 def test_get_tu_mask_single_tu():

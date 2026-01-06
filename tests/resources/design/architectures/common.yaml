@@ -1,0 +1,66 @@
+!define P: hEF1a
+!define T: L0.T_4560
+
+!define ERNS: [CasE, Csy4, PgU]
+
+!define ERN_ROTATIONS:
+  - [CasE, Csy4, PgU]
+  - [Csy4, PgU, CasE]
+  - [PgU, CasE, Csy4]
+
+!define ERN_PERMUTATIONS:
+  - [CasE, Csy4, PgU]
+  - [CasE, PgU, Csy4]
+  - [Csy4, CasE, PgU]
+  - [Csy4, PgU, CasE]
+  - [PgU, CasE, Csy4]
+  - [PgU, Csy4, CasE]
+
+!define UORFS: [null, 1w_uORF, 1x_uORF, 2x_uORF, 3x_uORF, 4x_uORF, 5x_uORF, 6x_uORF, 8x_uORF]
+!define NO_UORFS: [null]
+
+!define COLORS:
+  x1: mKO2
+  x2: eBFP2
+  b: mMaroon1
+  y: mNeonGreen
+
+!define RATIO: !biocomp.recipe.NumRange
+  min: 0.01
+  max: 1.0
+
+!define BIAS_FLUO: !biocomp.recipe.FluoIntensity
+  tu_id: 0
+  value: !biocomp.recipe.NumRange
+    min: 0.0
+    max: 0.5
+  protein: mMaroon1
+  units: "Rescaled AU"
+
+!define U1: !biocomp.recipe.Slot
+  part: ${UORFS}
+  ref_id: U1
+
+!define U2: !biocomp.recipe.Slot
+  part: ${UORFS}
+  ref_id: U2
+
+!define U3: !biocomp.recipe.Slot
+  part: ${NO_UORFS}
+  ref_id: U3
+
+!define U4: !biocomp.recipe.Slot
+  part: ${NO_UORFS}
+  ref_id: U4
+
+!define U5: !biocomp.recipe.Slot
+  part: ${NO_UORFS}
+  ref_id: U5
+
+!define U6: !biocomp.recipe.Slot
+  part: ${NO_UORFS}
+  ref_id: U6
+
+!define U7: !biocomp.recipe.Slot
+  part: ${NO_UORFS}
+  ref_id: U7

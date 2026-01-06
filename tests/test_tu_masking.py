@@ -20,7 +20,6 @@ TU masking uses binary thresholding with STE (Straight-Through Estimator):
 import pytest
 import jax
 import jax.numpy as jnp
-from pathlib import Path
 import dracon as dr
 
 from biocomp.network import recipe_to_networks
@@ -34,11 +33,10 @@ from biocomp.tumasking import (
     TU_LOG_ALPHA_PATH,
     hard_concrete_from_uniform,
 )
+from pathlib import Path
 
-
-SCAFFOLD_PATH = (
-    Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
-)
+RESOURCES_DIR = Path(__file__).parent / "resources"
+SCAFFOLD_PATH = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
 
 
 @pytest.fixture(scope="module")
@@ -344,10 +342,10 @@ def test_inference_mode_all_enabled(lib, design_stack):
 def multi_network_stack(lib):
     """Build a stack with multiple networks. Module-scoped for speed."""
     scaffold_path_1 = (
-        Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
+        RESOURCES_DIR / "design/architectures/two_and_one.yaml"
     )
     scaffold_path_2 = (
-        Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/three.yaml"
+        RESOURCES_DIR / "design/architectures/three.yaml"
     )
 
     with LibraryContext.with_library(lib):
@@ -773,7 +771,7 @@ def test_commit_without_tu_masking_unchanged(lib):
     from biocomp.recipe import Recipe
 
     scaffold_path = (
-        Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
+        RESOURCES_DIR / "design/architectures/two_and_one.yaml"
     )
 
     with LibraryContext.with_library(lib):
@@ -1002,7 +1000,7 @@ def test_fluo_bias_invalid_tu_id_handled(lib):
     import biocomp.biorules as br
 
     scaffold_path = (
-        Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
+        RESOURCES_DIR / "design/architectures/two_and_one.yaml"
     )
 
     with LibraryContext.with_library(lib):
@@ -1059,7 +1057,7 @@ def test_multi_network_independent_tu_removal(lib):
     import biocomp.biorules as br
 
     scaffold_path = (
-        Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one.yaml"
+        RESOURCES_DIR / "design/architectures/two_and_one.yaml"
     )
 
     with LibraryContext.with_library(lib):
