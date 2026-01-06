@@ -134,9 +134,15 @@ def aggregation(
                 target_ratios = target_ratios / jnp.sum(target_ratios)
 
                 z = jax.random.normal(jax.random.fold_in(key, i), (latent_dim,)) * 0.1
-                W1 = jax.random.normal(k1, (latent_hidden_dim, latent_dim)) * jnp.sqrt(2.0 / latent_dim)
+                W1 = jax.random.normal(k1, (latent_hidden_dim, latent_dim)) * jnp.sqrt(
+                    2.0 / latent_dim
+                )
                 b1 = jnp.zeros(latent_hidden_dim)
-                W2 = jax.random.normal(k2, (n_outputs, latent_hidden_dim)) * jnp.sqrt(2.0 / latent_hidden_dim) * 0.1
+                W2 = (
+                    jax.random.normal(k2, (n_outputs, latent_hidden_dim))
+                    * jnp.sqrt(2.0 / latent_hidden_dim)
+                    * 0.1
+                )
                 b2 = target_ratios
 
                 latent_z_list.append(z)
@@ -150,7 +156,9 @@ def aggregation(
             params[f"{namespace}/latent_b1"] = jnp.stack(latent_b1_list)
             params[f"{namespace}/latent_W2"] = jnp.stack(latent_W2_list)
             params[f"{namespace}/latent_b2"] = jnp.stack(latent_b2_list)
-            logger.info(f"Latent ratios enabled: {n_nodes} nodes × {latent_dim}d latent → {n_outputs} outputs")
+            logger.info(
+                f"Latent ratios enabled: {n_nodes} nodes × {latent_dim}d latent → {n_outputs} outputs"
+            )
 
         add_tu_output_mapping(params, stack, nodelist, namespace, n_outputs)
         add_node_network_ids(params, nodelist, namespace)
@@ -366,33 +374,55 @@ def inv_aggregation(
         fwd_path_idx = params[f"{namespace}/fwd_path_indices"][node_id]
 
         ratio_ref = params.data.get_at(f"{namespace}/ratios", get_leaf_value=False).value
-        original_ratio = jnp.abs(params[f"{namespace}/ratios"][node_id])
 
-        all_masked_sums = []
-        all_this_masks = []
+        all_masked_sums, all_this_masks, all_this_ratios = [], [], []
         for path in ratio_ref.paths:
-            fwd_ratios = jnp.abs(params[path][fwd_node_pos])
             fwd_ns = path.rsplit("/ratios", 1)[0]
-            fwd_tu_path = f"{fwd_ns}/output_tu_indices"
+            latent_path = f"{fwd_ns}/latent_z"
+            if latent_path in params:
+                z = params[latent_path][fwd_node_pos]
+                W1, b1 = (
+                    params[f"{fwd_ns}/latent_W1"][fwd_node_pos],
+                    params[f"{fwd_ns}/latent_b1"][fwd_node_pos],
+                )
+                W2, b2 = (
+                    params[f"{fwd_ns}/latent_W2"][fwd_node_pos],
+                    params[f"{fwd_ns}/latent_b2"][fwd_node_pos],
+                )
+                raw = _decode_latent_ratios(z, W1, b1, W2, b2)
+                fwd_ratios = jnp.abs(
+                    jnp.clip(
+                        raw,
+                        params[f"{fwd_ns}/ratio_min"][fwd_node_pos],
+                        params[f"{fwd_ns}/ratio_max"][fwd_node_pos],
+                    )
+                )
+            else:
+                fwd_ratios = jnp.abs(params[path][fwd_node_pos])
 
-            if fwd_tu_path in params and tu_enabled_random_vars is not None:
+            slot_idx = jnp.minimum(original_slot, fwd_ratios.shape[0] - 1)
+            all_this_ratios.append(fwd_ratios[slot_idx])
+
+            tu_path = f"{fwd_ns}/output_tu_indices"
+            if tu_path in params and tu_enabled_random_vars is not None:
                 from biocomp.tumasking import get_tu_masks
 
-                tu_indices = params[fwd_tu_path][fwd_node_pos]
                 masks = get_tu_masks(
-                    params, tu_indices, tu_enabled_random_vars, network_id, is_multi_tu=False
+                    params,
+                    params[tu_path][fwd_node_pos],
+                    tu_enabled_random_vars,
+                    network_id,
+                    is_multi_tu=False,
                 )
             else:
                 masks = jnp.ones_like(fwd_ratios)
 
             all_masked_sums.append(jnp.sum(fwd_ratios * masks))
-            slot_idx = jnp.minimum(original_slot, masks.shape[0] - 1)
             all_this_masks.append(masks[slot_idx])
 
-        all_masked_sums = jnp.stack(all_masked_sums)
-        all_this_masks = jnp.stack(all_this_masks)
-        masked_sum = all_masked_sums[fwd_path_idx]
-        this_mask = all_this_masks[fwd_path_idx]
+        masked_sum = jnp.stack(all_masked_sums)[fwd_path_idx]
+        this_mask = jnp.stack(all_this_masks)[fwd_path_idx]
+        original_ratio = jnp.stack(all_this_ratios)[fwd_path_idx]
 
         safe_sum = jnp.maximum(masked_sum, 1e-8)
         masked_ratio = original_ratio * this_mask
@@ -401,11 +431,8 @@ def inv_aggregation(
         is_enabled = normalized_ratio >= DISABLED_THRESHOLD
         safe_ratio = jnp.maximum(normalized_ratio, DISABLED_THRESHOLD)
         full_result = input / safe_ratio
-        # STE for leaky gradient: forward uses 0 when disabled, backward uses small floor
-        DISABLED_RESULT_FLOOR = 0.01
-        leaky_result = full_result * DISABLED_RESULT_FLOOR
+        leaky_result = full_result * 0.01
         result = jnp.where(is_enabled, full_result, leaky_result)
-        # Correct to exactly 0 in forward for disabled cases (STE)
         result = result + jax.lax.stop_gradient(jnp.where(is_enabled, 0.0, -leaky_result))
 
         return result, {
