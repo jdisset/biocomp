@@ -301,6 +301,7 @@ class TranscriptionUnit(BaseModel):
     params: dict = Field(default_factory=dict, exclude=True)  # param name -> value
     source: Optional[str] = None  # plasmid name, for example
     position_in_source: Optional[int] = None
+    no_masking: bool = False  # if True, TU cannot be disabled during design (always mask=1)
     param_ref_ids: dict[str, Optional[str]] = Field(
         default_factory=dict, exclude=True
     )  # param name -> ref_id

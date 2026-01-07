@@ -162,6 +162,16 @@ def _create_circle_path(cx, cy, r, n_points=32):
     return [(cx + r * np.cos(a), cy + r * np.sin(a)) for a in angles]
 
 
+def _snap_vertices_to_viewbox(pts, vx, vy, vw, vh, eps=0.01):
+    """Snap polygon vertices within eps of viewbox boundary to exactly the boundary."""
+    pts = pts.copy()
+    pts[:, 0] = np.where(np.abs(pts[:, 0] - vx) < eps, vx, pts[:, 0])
+    pts[:, 0] = np.where(np.abs(pts[:, 0] - (vx + vw)) < eps, vx + vw, pts[:, 0])
+    pts[:, 1] = np.where(np.abs(pts[:, 1] - vy) < eps, vy, pts[:, 1])
+    pts[:, 1] = np.where(np.abs(pts[:, 1] - (vy + vh)) < eps, vy + vh, pts[:, 1])
+    return pts
+
+
 def _process_rect(el, vw, vh, vx, vy, max_is_black):
     x = float(el.get("x", 0))
     y = float(el.get("y", 0))
@@ -175,6 +185,7 @@ def _process_rect(el, vw, vh, vx, vy, max_is_black):
         pts = _clip_polygon_to_rect(pts, (vx, vy, vx + vw, vy + vh))
         if len(pts) < 3:
             return None, None
+        pts = _snap_vertices_to_viewbox(pts, vx, vy, vw, vh)
         if len(pts) > 0 and not np.array_equal(pts[0], pts[-1]):
             pts = np.vstack([pts, pts[0]])
     else:

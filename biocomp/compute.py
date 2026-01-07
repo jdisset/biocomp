@@ -293,6 +293,7 @@ class ComputeStack:
     tu_id_to_idx: Optional[dict[str, int]] = None
     n_tus: int = 0
     inverse_tu_ids: Optional[set[str]] = None  # TUs feeding inverse nodes (never disabled)
+    no_masking_tu_ids: Optional[set[str]] = None  # TUs with no_masking=True in recipe
 
     ### {{{                     --     public interface     --
 
@@ -329,14 +330,15 @@ class ComputeStack:
         """Build TU ID to index mapping for all networks."""
         from biocomp.tumasking import build_tu_id_mapping_excluding_inverse
 
-        sorted_tu_ids, tu_id_to_idx, inverse_tu_ids = build_tu_id_mapping_excluding_inverse(
-            self.networks
+        sorted_tu_ids, tu_id_to_idx, inverse_tu_ids, no_masking_tu_ids = (
+            build_tu_id_mapping_excluding_inverse(self.networks)
         )
         self.tu_id_to_idx = tu_id_to_idx
         self.n_tus = len(sorted_tu_ids)
         self.inverse_tu_ids = inverse_tu_ids
+        self.no_masking_tu_ids = no_masking_tu_ids
         logger.debug(
-            f"Built TU mapping: {self.n_tus} TUs, {len(inverse_tu_ids)} feeding inverse nodes"
+            f"Built TU mapping: {self.n_tus} TUs, {len(inverse_tu_ids)} inverse, {len(no_masking_tu_ids)} no_masking"
         )
 
     def get_per_network_tu_mask(self) -> jnp.ndarray:
@@ -514,6 +516,7 @@ class ComputeStack:
         # AFTER node commits, remove disabled TU edges and source nodes
         # SINGLE SOURCE OF TRUTH: hard-concrete masks (tu_log_alpha) determine what's disabled
         _t5 = _time.perf_counter()
+        dead_ern_recs_by_net: dict[int, set[tuple[str, str]]] = {}
         if TU_LOG_ALPHA_PATH in params and tu_id_to_idx:
             tu_log_alpha = params[TU_LOG_ALPHA_PATH]
             assert tu_log_alpha.ndim == 2, (
@@ -552,6 +555,39 @@ class ComputeStack:
                 for edge_id in edges_to_remove:
                     del net.compute_graph.edges[edge_id]
 
+                # ERN-aware cleanup: handle ERN nodes with disabled inputs
+                dead_ern_recs = net._cleanup_ern_nodes(network_tu_log_alpha, tu_id_to_idx)
+                dead_ern_recs_by_net[net_idx] = dead_ern_recs
+
+                # Handle cascade: if ERN cleanup disabled additional TUs, remove their edges AND sources
+                additional_disabled = net.metadata.pop("_additional_disabled_tus", set())
+                if additional_disabled:
+                    for edge_id, edge in list(net.compute_graph.edges.items()):
+                        tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+                        if any(tu_id in additional_disabled for tu_id in tu_ids):
+                            del net.compute_graph.edges[edge_id]
+
+                    disabled_source_ids = set()
+                    for tu_id in additional_disabled:
+                        for node in net.compute_graph.get_nodes_by_type("source"):
+                            tu_names = node.extra.get("tu_names_by_slot", {})
+                            cotx_group = node.extra.get("cotx_group", "")
+                            for tu_name in tu_names.values():
+                                full_tu_id = f"{tu_name}_{cotx_group}" if cotx_group else tu_name
+                                if full_tu_id in additional_disabled:
+                                    disabled_source_ids.add(node.node_id)
+                                    break
+
+                    for edge_id, edge in list(net.compute_graph.edges.items()):
+                        if (
+                            edge.source_id in disabled_source_ids
+                            or edge.target_id in disabled_source_ids
+                        ):
+                            del net.compute_graph.edges[edge_id]
+                    for node_id in disabled_source_ids:
+                        if node_id in net.compute_graph.nodes:
+                            del net.compute_graph.nodes[node_id]
+
                 net._cleanup_orphaned_bias_nodes()
                 net._cleanup_orphaned_input_nodes(original_output_proteins)
                 net._cleanup_orphaned_transcription_nodes()
@@ -565,8 +601,11 @@ class ComputeStack:
         # ROUNDTRIP: export to recipe and rebuild to ensure clean graph structure
         # This ensures orphan nodes (e.g., transcription nodes with no source) are removed
         # and the graph is consistent. Always performed for robustness.
-        def _rebuild_network(net):
+        def _rebuild_network(net_idx_and_net: tuple[int, Network]):
             """Rebuild a single network from recipe."""
+            net_idx, net = net_idx_and_net
+            strip_ern_recs = dead_ern_recs_by_net.get(net_idx, set())
+
             try:
                 original_input_proteins = net.get_inverted_input_proteins()
             except (AssertionError, IndexError, KeyError):
@@ -588,7 +627,7 @@ class ComputeStack:
                 return empty_net
 
             try:
-                recipe = net.to_recipe()
+                recipe = net.to_recipe(strip_ern_recs=strip_ern_recs)
             except (AssertionError, IndexError, KeyError):
                 empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
                 empty_net.name = net.name
@@ -666,11 +705,12 @@ class ComputeStack:
 
         # Parallelize per-network rebuilding (each is independent)
         n_workers = min(len(network_copies), 8)
+        indexed_networks = list(enumerate(network_copies))
         if n_workers > 1:
             with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                final_networks = list(executor.map(_rebuild_network, network_copies))
+                final_networks = list(executor.map(_rebuild_network, indexed_networks))
         else:
-            final_networks = [_rebuild_network(net) for net in network_copies]
+            final_networks = [_rebuild_network(idx_net) for idx_net in indexed_networks]
         _t7 = _time.perf_counter()
         logger.debug(
             f"COMMIT TIMING: roundtrip rebuild ({len(network_copies)} nets, {n_workers} workers): {_t7 - _t6:.3f}s"

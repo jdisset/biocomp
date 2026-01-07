@@ -18,6 +18,8 @@ from biocomp.tumasking import (
     DEFAULT_GAMMA,
     DEFAULT_ZETA,
     L0_PENALTY_FLOOR_PROB,
+    asymmetric_l0_loss,
+    decode_latent_tu_masking,
 )
 
 
@@ -67,7 +69,9 @@ def test_sample_hard_concrete_exact_zeros_and_ones():
 
     # Check we have exact zeros
     n_exact_zeros = int((samples_low == 0.0).sum())
-    assert n_exact_zeros > n_samples * 0.8, f"Expected mostly zeros, got {n_exact_zeros}/{n_samples}"
+    assert n_exact_zeros > n_samples * 0.8, (
+        f"Expected mostly zeros, got {n_exact_zeros}/{n_samples}"
+    )
 
     # Check we have exact ones
     n_exact_ones = int((samples_high == 1.0).sum())
@@ -133,7 +137,9 @@ def test_l0_penalty_floor_behavior():
 
     # Well below floor (log_alpha=-3 -> clamped sigmoid << 0.2): penalty = 0
     penalty_well_below = l0_penalty(jnp.array(-3.0))
-    assert penalty_well_below == 0.0, f"Well below floor, penalty should be 0, got {penalty_well_below}"
+    assert penalty_well_below == 0.0, (
+        f"Well below floor, penalty should be 0, got {penalty_well_below}"
+    )
 
     # Slightly below floor (log_alpha=-2): sigmoid after clamping ~0.15 < 0.2
     penalty_below = l0_penalty(jnp.array(-2.0))
@@ -221,14 +227,18 @@ def test_get_tu_mask_single_tu():
     # tu_a should be mostly on
     n_on = 0
     for i in range(100):
-        mask_a = get_tu_mask_for_node(["tu_a"], tu_id_to_idx, log_alpha_all, jax.random.fold_in(key, i))
+        mask_a = get_tu_mask_for_node(
+            ["tu_a"], tu_id_to_idx, log_alpha_all, jax.random.fold_in(key, i)
+        )
         n_on += int(mask_a > 0.5)
     assert n_on > 80, f"tu_a should be mostly on, got {n_on}/100"
 
     # tu_b should be mostly off
     n_on = 0
     for i in range(100):
-        mask_b = get_tu_mask_for_node(["tu_b"], tu_id_to_idx, log_alpha_all, jax.random.fold_in(key, i))
+        mask_b = get_tu_mask_for_node(
+            ["tu_b"], tu_id_to_idx, log_alpha_all, jax.random.fold_in(key, i)
+        )
         n_on += int(mask_b > 0.5)
     assert n_on < 20, f"tu_b should be mostly off, got {n_on}/100"
 
@@ -242,7 +252,9 @@ def test_get_tu_mask_multiple_tus():
 
     n_on = 0
     for i in range(100):
-        mask = get_tu_mask_for_node(["tu_a", "tu_b"], tu_id_to_idx, log_alpha_all, jax.random.fold_in(key, i))
+        mask = get_tu_mask_for_node(
+            ["tu_a", "tu_b"], tu_id_to_idx, log_alpha_all, jax.random.fold_in(key, i)
+        )
         n_on += int(mask > 0.5)
     assert n_on > 60, f"both TUs on should give mostly 1, got {n_on}/100"
 
@@ -250,7 +262,9 @@ def test_get_tu_mask_multiple_tus():
     log_alpha_all = jnp.array([5.0, -5.0])
     n_on = 0
     for i in range(100):
-        mask = get_tu_mask_for_node(["tu_a", "tu_b"], tu_id_to_idx, log_alpha_all, jax.random.fold_in(key, i))
+        mask = get_tu_mask_for_node(
+            ["tu_a", "tu_b"], tu_id_to_idx, log_alpha_all, jax.random.fold_in(key, i)
+        )
         n_on += int(mask > 0.5)
     assert n_on < 30, f"one TU off should give mostly 0, got {n_on}/100"
 
@@ -314,9 +328,7 @@ def test_compute_input_masks_single_tu_requires_1d():
     tu_uniform = jnp.full((4,), 0.5)
     tu_log_alpha = jnp.zeros(4)
 
-    masks = compute_input_masks(
-        tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=False
-    )
+    masks = compute_input_masks(tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=False)
     assert masks.shape == (3,), f"Expected (3,), got {masks.shape}"
 
 
@@ -326,9 +338,7 @@ def test_compute_input_masks_multi_tu_requires_2d():
     tu_uniform = jnp.full((4,), 0.5)
     tu_log_alpha = jnp.zeros(4)
 
-    masks = compute_input_masks(
-        tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=True
-    )
+    masks = compute_input_masks(tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=True)
     assert masks.shape == (3,), f"Expected (3,), got {masks.shape}"
 
 
@@ -339,9 +349,7 @@ def test_compute_input_masks_single_tu_rejects_2d():
     tu_log_alpha = jnp.zeros(4)
 
     with pytest.raises(AssertionError, match=r"is_multi_tu=False but tu_indices.ndim=2"):
-        compute_input_masks(
-            tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=False
-        )
+        compute_input_masks(tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=False)
 
 
 def test_compute_input_masks_multi_tu_rejects_1d():
@@ -351,9 +359,7 @@ def test_compute_input_masks_multi_tu_rejects_1d():
     tu_log_alpha = jnp.zeros(4)
 
     with pytest.raises(AssertionError, match=r"is_multi_tu=True but tu_indices.ndim=1"):
-        compute_input_masks(
-            tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=True
-        )
+        compute_input_masks(tu_indices, tu_uniform, tu_log_alpha, is_multi_tu=True)
 
 
 def test_compute_input_masks_none_inputs_returns_ones():
@@ -362,16 +368,173 @@ def test_compute_input_masks_none_inputs_returns_ones():
     tu_indices_2d = jnp.array([[0, 1], [1, 2], [2, 3]])
 
     # None tu_uniform
-    masks = compute_input_masks(
-        tu_indices_1d, None, jnp.zeros(4), is_multi_tu=False
-    )
+    masks = compute_input_masks(tu_indices_1d, None, jnp.zeros(4), is_multi_tu=False)
     np.testing.assert_array_equal(masks, jnp.ones(3))
 
     # None tu_log_alpha
-    masks = compute_input_masks(
-        tu_indices_2d, jnp.full((4,), 0.5), None, is_multi_tu=True
-    )
+    masks = compute_input_masks(tu_indices_2d, jnp.full((4,), 0.5), None, is_multi_tu=True)
     np.testing.assert_array_equal(masks, jnp.ones(3))
+
+
+# --- Tests for asymmetric_l0_loss ---
+
+
+def test_asymmetric_l0_loss_zero_at_zero():
+    """f(0) should be 0."""
+    log_alpha = jnp.full((10,), -10.0)  # all TUs fully disabled
+    loss = asymmetric_l0_loss(log_alpha, threshold=5.0)
+    assert float(loss) < 1e-6, f"loss at zero TUs should be ~0, got {loss}"
+
+
+def test_asymmetric_l0_loss_at_threshold():
+    """f(threshold) ≈ threshold (anchor point)."""
+    threshold = 5.0
+    log_alpha = jnp.full((10,), 1.0)  # sigmoid(1) ≈ 0.73, after floor ~0.66
+    count = jnp.sum(l0_penalty(log_alpha))
+    assert count > 0, "sanity check: expected positive count"
+
+    # create log_alpha that gives count ≈ threshold
+    # need to tune: at floor=0.2, per_tu = (sigmoid(la) - 0.2) / 0.8
+    # for count=5 with 10 TUs, need per_tu=0.5, so sigmoid(la)=0.6 -> la≈0.4
+    la_tuned = jnp.full((10,), 0.4)
+    count_tuned = float(jnp.sum(l0_penalty(la_tuned)))
+    loss_tuned = float(asymmetric_l0_loss(la_tuned, threshold=threshold))
+
+    # at count=threshold, loss ≈ threshold (within blend transition zone)
+    assert abs(loss_tuned - count_tuned) < threshold * 0.5, (
+        f"at count≈{count_tuned:.2f}, loss={loss_tuned:.2f} should be close to count"
+    )
+
+
+def test_asymmetric_l0_loss_sublinear_below():
+    """Below threshold, marginal penalty should be less than 1 (sublinear growth)."""
+    threshold = 12.0
+
+    # test two points below threshold and verify marginal rate < 1
+    la_low = jnp.full((4,), 2.0)
+    la_high = jnp.full((8,), 2.0)
+    loss_low = float(asymmetric_l0_loss(la_low, threshold=threshold))
+    loss_high = float(asymmetric_l0_loss(la_high, threshold=threshold))
+    count_low = float(jnp.sum(l0_penalty(la_low)))
+    count_high = float(jnp.sum(l0_penalty(la_high)))
+
+    # marginal rate = d(loss)/d(count)
+    marginal_rate = (loss_high - loss_low) / (count_high - count_low + 1e-6)
+    assert marginal_rate < 1.0, (
+        f"below threshold: marginal rate={marginal_rate:.4f} should be < 1 (sublinear)"
+    )
+
+
+def test_asymmetric_l0_loss_superlinear_above():
+    """Above threshold, marginal penalty should be greater than 1 (superlinear growth)."""
+    threshold = 5.0
+
+    # test two points above threshold and verify marginal rate > 1
+    la_low = jnp.full((12,), 2.0)  # ~10 expected TUs
+    la_high = jnp.full((20,), 2.0)  # ~17 expected TUs
+    loss_low = float(asymmetric_l0_loss(la_low, threshold=threshold))
+    loss_high = float(asymmetric_l0_loss(la_high, threshold=threshold))
+    count_low = float(jnp.sum(l0_penalty(la_low)))
+    count_high = float(jnp.sum(l0_penalty(la_high)))
+
+    # marginal rate = d(loss)/d(count)
+    marginal_rate = (loss_high - loss_low) / (count_high - count_low + 1e-6)
+    assert marginal_rate > 1.0, (
+        f"above threshold: marginal rate={marginal_rate:.4f} should be > 1 (superlinear)"
+    )
+
+
+def test_asymmetric_l0_loss_differentiable():
+    """Gradient should exist and be finite."""
+    log_alpha = jnp.full((10,), 0.5)
+    grad_fn = jax.grad(lambda la: asymmetric_l0_loss(la, threshold=5.0).sum())
+    grad = grad_fn(log_alpha)
+    assert jnp.all(jnp.isfinite(grad)), f"gradient should be finite, got {grad}"
+    assert jnp.any(grad != 0), "gradient should be nonzero"
+
+
+def test_asymmetric_l0_loss_smooth_transition():
+    """Loss should be smooth (no jumps) around threshold."""
+    threshold = 10.0
+
+    # compute losses at a few points around threshold
+    losses = []
+    for c in [8, 9, 10, 11, 12]:
+        # tune log_alpha to get target count
+        # per_tu ≈ (sigmoid(la) - 0.2) / 0.8, for c TUs with 20 elements: per_tu = c/20
+        target_per_tu = c / 20.0
+        target_sigmoid = target_per_tu * 0.8 + 0.2
+        la_val = jnp.log(target_sigmoid / (1 - target_sigmoid))
+        la = jnp.full((20,), float(la_val))
+        losses.append(float(asymmetric_l0_loss(la, threshold=threshold)))
+
+    # check monotonicity
+    for i in range(len(losses) - 1):
+        assert losses[i] <= losses[i + 1] + 0.1, f"loss should be non-decreasing: {losses}"
+
+
+# --- Tests for decode_latent_tu_masking ---
+
+
+def test_decode_latent_tu_masking_shape():
+    """Output shape should be (n_tus,)."""
+    latent_dim, hidden_dim, n_tus = 8, 16, 10
+    z = jnp.zeros(latent_dim)
+    W1 = jnp.zeros((hidden_dim, latent_dim))
+    b1 = jnp.zeros(hidden_dim)
+    W2 = jnp.zeros((n_tus, hidden_dim))
+    b2 = jnp.ones(n_tus) * 2.0
+
+    log_alpha = decode_latent_tu_masking(z, W1, b1, W2, b2)
+    assert log_alpha.shape == (n_tus,), f"expected ({n_tus},), got {log_alpha.shape}"
+
+
+def test_decode_latent_tu_masking_at_zero():
+    """decode(0) ≈ b2 (since z=0 -> h=gelu(0)=0 -> W2@h=0 -> output=b2)."""
+    latent_dim, hidden_dim, n_tus = 8, 16, 10
+    z = jnp.zeros(latent_dim)
+    W1 = jax.random.normal(jax.random.key(0), (hidden_dim, latent_dim)) * 0.1
+    b1 = jnp.zeros(hidden_dim)
+    W2 = jax.random.normal(jax.random.key(1), (n_tus, hidden_dim)) * 0.1
+    b2 = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0, -1.0, -2.0, -3.0, 0.0, 0.5])
+
+    log_alpha = decode_latent_tu_masking(z, W1, b1, W2, b2)
+    np.testing.assert_allclose(log_alpha, b2, atol=0.1)
+
+
+def test_decode_latent_tu_masking_gradient_flow():
+    """Gradients should flow through the MLP."""
+    latent_dim, hidden_dim, n_tus = 8, 16, 10
+    z = jax.random.normal(jax.random.key(0), (latent_dim,)) * 0.1
+    W1 = jax.random.normal(jax.random.key(1), (hidden_dim, latent_dim)) * 0.1
+    b1 = jnp.zeros(hidden_dim)
+    W2 = jax.random.normal(jax.random.key(2), (n_tus, hidden_dim)) * 0.1
+    b2 = jnp.zeros(n_tus)
+
+    def loss_fn(z, W1, b1, W2, b2):
+        la = decode_latent_tu_masking(z, W1, b1, W2, b2)
+        return jnp.sum(la**2)
+
+    grads = jax.grad(loss_fn, argnums=(0, 1, 2, 3, 4))(z, W1, b1, W2, b2)
+
+    for i, (name, g) in enumerate(zip(["z", "W1", "b1", "W2", "b2"], grads)):
+        assert jnp.all(jnp.isfinite(g)), f"grad_{name} should be finite"
+        # z, W1, W2 should have nonzero gradients; b1 may be zero if gelu(0)=0
+        if name in ["z", "W1", "W2", "b2"]:
+            assert jnp.any(g != 0), f"grad_{name} should be nonzero"
+
+
+def test_decode_latent_tu_masking_vmap():
+    """Should work with vmap over batch dimension."""
+    batch, latent_dim, hidden_dim, n_tus = 4, 8, 16, 10
+    z = jax.random.normal(jax.random.key(0), (batch, latent_dim)) * 0.1
+    W1 = jax.random.normal(jax.random.key(1), (batch, hidden_dim, latent_dim)) * 0.1
+    b1 = jnp.zeros((batch, hidden_dim))
+    W2 = jax.random.normal(jax.random.key(2), (batch, n_tus, hidden_dim)) * 0.1
+    b2 = jnp.zeros((batch, n_tus))
+
+    log_alpha = jax.vmap(decode_latent_tu_masking)(z, W1, b1, W2, b2)
+    assert log_alpha.shape == (batch, n_tus), f"expected ({batch}, {n_tus}), got {log_alpha.shape}"
 
 
 if __name__ == "__main__":

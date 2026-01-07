@@ -26,6 +26,7 @@ LOG_ALPHA_MAX = 4.0
 TU_ALWAYS_ENABLED = -1
 TU_LOG_ALPHA_PATH = "design/tu_log_alpha"
 TU_BINARY_MASK_PATH = "design/tu_binary_mask"
+PROTECTED_TU_MASK_PATH = "design/protected_tu_mask"
 
 LATENT_TU_Z_PATH = "design/latent_tu_z"
 LATENT_TU_W1_PATH = "design/latent_tu_W1"
@@ -185,9 +186,7 @@ def compute_binary_masks(
     tu_indices = jnp.asarray(tu_indices)
     tu_log_alpha = jnp.asarray(tu_log_alpha)
 
-    assert tu_log_alpha.ndim == 1, (
-        f"tu_log_alpha must be 1D (n_tus,), got {tu_log_alpha.ndim}D"
-    )
+    assert tu_log_alpha.ndim == 1, f"tu_log_alpha must be 1D (n_tus,), got {tu_log_alpha.ndim}D"
 
     if is_multi_tu:
         assert tu_indices.ndim == 2, (
@@ -265,7 +264,7 @@ def asymmetric_l0_loss(
     log_alpha = jnp.asarray(log_alpha)
     assert log_alpha.ndim == 1, f"log_alpha must be 1D (n_tus,), got {log_alpha.ndim}D"
     assert threshold > 0, f"threshold must be positive, got {threshold}"
-    assert 0 < alpha_below < 1, f"alpha_below must be in (0,1) for sublinear, got {alpha_below}"
+    assert 0 <= alpha_below < 1, f"alpha_below must be in [0,1) for sublinear/zero, got {alpha_below}"
     assert beta_above > 1, f"beta_above must be >1 for superlinear, got {beta_above}"
 
     per_tu = l0_penalty(log_alpha, floor_prob)
@@ -276,8 +275,8 @@ def asymmetric_l0_loss(
 
     w = jax.nn.sigmoid(blend_sharpness * (z - 1))
 
-    below_term = z ** alpha_below
-    above_term = z ** beta_above
+    below_term = jnp.array(0.0) if alpha_below == 0 else z**alpha_below
+    above_term = z**beta_above
 
     return safe_threshold * ((1 - w) * below_term + w * above_term)
 
@@ -659,19 +658,31 @@ def extract_tu_ids_for_inverse_nodes(networks: list) -> set[str]:
     return inverse_tu_ids
 
 
+def extract_no_masking_tu_ids(networks: list) -> set[str]:
+    """Extract TU IDs with no_masking=True from edge extra."""
+    no_masking_tu_ids = set()
+    for net in networks:
+        graph = net.compute_graph
+        for edge in graph.edges.values():
+            if edge.extra:
+                no_masking_tu_ids.update(edge.extra.get("no_masking_tu_ids", []))
+    return no_masking_tu_ids
+
+
 def build_tu_id_mapping_excluding_inverse(
     networks: list,
-) -> tuple[list[str], dict[str, int], set[str]]:
-    """Build TU ID mapping. Returns (sorted_tu_ids, tu_id_to_idx, inverse_tu_ids)."""
+) -> tuple[list[str], dict[str, int], set[str], set[str]]:
+    """Build TU ID mapping. Returns (sorted_tu_ids, tu_id_to_idx, inverse_tu_ids, no_masking_tu_ids)."""
     all_tu_ids = set()
     for net in networks:
         all_tu_ids.update(extract_tu_ids_from_network(net))
 
     inverse_tu_ids = extract_tu_ids_for_inverse_nodes(networks)
+    no_masking_tu_ids = extract_no_masking_tu_ids(networks)
     sorted_tu_ids = sorted(all_tu_ids)
     tu_id_to_idx = {tu_id: i for i, tu_id in enumerate(sorted_tu_ids)}
 
-    return sorted_tu_ids, tu_id_to_idx, inverse_tu_ids
+    return sorted_tu_ids, tu_id_to_idx, inverse_tu_ids, no_masking_tu_ids
 
 
 def _apply_binary_mask_single(tu_idx: ArrayLike, binary_mask: ArrayLike) -> jnp.ndarray:
@@ -759,6 +770,11 @@ def get_tu_masks(
         W2 = params[LATENT_TU_W2_PATH][network_id]
         b2 = params[LATENT_TU_B2_PATH][network_id]
         tu_log_alpha = decode_latent_tu_masking(z, W1, b1, W2, b2)
+        if PROTECTED_TU_MASK_PATH in params:
+            protected_mask = jnp.asarray(params[PROTECTED_TU_MASK_PATH])
+            tu_log_alpha = jnp.where(
+                protected_mask, jax.lax.stop_gradient(tu_log_alpha), tu_log_alpha
+            )
         raw_masks = compute_binary_masks(tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu)
         return raw_masks
 
@@ -770,7 +786,12 @@ def get_tu_masks(
             f"Shape: {tu_log_alpha.shape}"
         )
         tu_log_alpha = tu_log_alpha[network_id]
+        if PROTECTED_TU_MASK_PATH in params:
+            protected_mask = jnp.asarray(params[PROTECTED_TU_MASK_PATH])
+            tu_log_alpha = jnp.where(
+                protected_mask, jax.lax.stop_gradient(tu_log_alpha), tu_log_alpha
+            )
         raw_masks = compute_binary_masks(tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu)
-        return raw_masks  # no leaky_mask_floor: eval must match commit (0.0 not 0.001)
+        return raw_masks
 
     return jnp.ones(n_inputs)

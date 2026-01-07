@@ -433,6 +433,162 @@ class Network(BaseModel):
 
         return disabled_sources
 
+    def get_ern_input_states(
+        self,
+        tu_log_alpha,
+        tu_id_to_idx: dict[str, int],
+    ) -> dict[int, tuple[bool, bool]]:
+        """Determine enabled state of each ERN node's inputs.
+
+        Args:
+            tu_log_alpha: TU log_alpha array for this network, shape (n_tus,)
+            tu_id_to_idx: Mapping from TU ID to index
+
+        Returns:
+            Dict mapping ERN node_id -> (neg_enabled, pos_enabled)
+            where neg = slot 0 (ERN protein), pos = slot 1 (mRNA with ERN_rec)
+        """
+        from biocomp.tumasking import get_final_mask
+
+        assert self.compute_graph is not None
+        result = {}
+
+        def check_edges_enabled(edges: list) -> bool:
+            """True if ANY edge has at least one enabled TU."""
+            if not edges:
+                return False
+            for edge in edges:
+                tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+                if not tu_ids:
+                    return True
+                for tu_id in tu_ids:
+                    if tu_id not in tu_id_to_idx:
+                        return True
+                    tu_idx = tu_id_to_idx[tu_id]
+                    if tu_idx < tu_log_alpha.shape[0]:
+                        mask = get_final_mask(tu_log_alpha[tu_idx : tu_idx + 1])[0]
+                        if float(mask) > 0:
+                            return True
+            return False
+
+        for node in self.compute_graph.nodes.values():
+            if node.node_type != "sequestron_ERN":
+                continue
+
+            incoming = list(self.compute_graph.get_incoming_edges(node.node_id))
+            neg_edges = [e for e in incoming if e.to_input_slot == 0]
+            pos_edges = [e for e in incoming if e.to_input_slot == 1]
+
+            neg_enabled = check_edges_enabled(neg_edges)
+            pos_enabled = check_edges_enabled(pos_edges)
+            result[node.node_id] = (neg_enabled, pos_enabled)
+
+        return result
+
+    def _cleanup_ern_nodes(
+        self,
+        tu_log_alpha,
+        tu_id_to_idx: dict[str, int],
+    ) -> set[tuple[str, str]]:
+        """Handle ERN nodes with disabled inputs according to biological semantics.
+
+        Case 1 (positive disabled): ERN is useless, also mark negative TU for removal
+        Case 2 (negative disabled): ERN acts as passthrough, strip ERN_rec from positive TU's recipe
+
+        Args:
+            tu_log_alpha: TU log_alpha array for this network
+            tu_id_to_idx: TU ID to index mapping
+
+        Returns:
+            Set of (tu_id, ern_rec_part_name) tuples where ERN_rec should be stripped from recipe
+        """
+        from biocomp.graphengine import GraphEdge
+
+        assert self.compute_graph is not None
+        ern_states = self.get_ern_input_states(tu_log_alpha, tu_id_to_idx)
+
+        nodes_to_remove = set()
+        edges_to_remove = set()
+        edges_to_add = []
+        strip_ern_recs: set[tuple[str, str]] = set()
+        additional_disabled_tus: set[str] = set()
+
+        for ern_node_id, (neg_enabled, pos_enabled) in ern_states.items():
+            if neg_enabled and pos_enabled:
+                continue
+
+            ern_node = self.compute_graph.nodes[ern_node_id]
+            incoming = list(self.compute_graph.get_incoming_edges(ern_node_id))
+            outgoing = list(self.compute_graph.get_outgoing_edges(ern_node_id))
+
+            neg_edges = [e for e in incoming if e.to_input_slot == 0]
+            pos_edges = [e for e in incoming if e.to_input_slot == 1]
+
+            if not pos_enabled:
+                # Case 1: Positive input disabled (mRNA gone) - ERN is useless
+                nodes_to_remove.add(ern_node_id)
+                for e in incoming + outgoing:
+                    edges_to_remove.add(
+                        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot)
+                    )
+                for neg_edge in neg_edges:
+                    tu_ids = neg_edge.extra.get("tu_id", []) if neg_edge.extra else []
+                    additional_disabled_tus.update(tu_ids)
+
+            elif not neg_enabled:
+                # Case 2: Negative input disabled (ERN protein gone) - passthrough for positive
+                nodes_to_remove.add(ern_node_id)
+
+                for e in incoming + outgoing:
+                    edges_to_remove.add(
+                        (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot)
+                    )
+
+                # Rewire: connect positive input sources directly to ERN's downstream targets
+                for pos_edge in pos_edges:
+                    for out_edge in outgoing:
+                        new_edge = GraphEdge(
+                            source_id=pos_edge.source_id,
+                            target_id=out_edge.target_id,
+                            from_output_slot=pos_edge.from_output_slot,
+                            to_input_slot=out_edge.to_input_slot,
+                            content=pos_edge.content,
+                            content_type=pos_edge.content_type,
+                            content_embedding_names=pos_edge.content_embedding_names,
+                            extra=pos_edge.extra,
+                        )
+                        edges_to_add.append(new_edge)
+
+                seq_name = ern_node.extra.get("seq_name", "")
+                if "#" in seq_name:
+                    ern_rec_name = seq_name.split("#")[1]
+                    for pos_edge in pos_edges:
+                        tu_ids = pos_edge.extra.get("tu_id", []) if pos_edge.extra else []
+                        for tu_id in tu_ids:
+                            strip_ern_recs.add((tu_id, ern_rec_name))
+
+        for edge_key in edges_to_remove:
+            if edge_key in self.compute_graph.edges:
+                del self.compute_graph.edges[edge_key]
+
+        for node_id in nodes_to_remove:
+            if node_id in self.compute_graph.nodes:
+                del self.compute_graph.nodes[node_id]
+
+        for new_edge in edges_to_add:
+            key = (
+                new_edge.source_id,
+                new_edge.target_id,
+                new_edge.from_output_slot,
+                new_edge.to_input_slot,
+            )
+            self.compute_graph.edges[key] = new_edge
+
+        if additional_disabled_tus:
+            self.metadata["_additional_disabled_tus"] = additional_disabled_tus
+
+        return strip_ern_recs
+
     def prune_disabled_tus(
         self,
         tu_log_alpha=None,
@@ -486,8 +642,16 @@ class Network(BaseModel):
     def _cleanup_orphaned_transcription_nodes(self):
         """Remove orphaned nodes iteratively (forward + inverted paths)."""
         orphan_types = (
-            "source", "transcription", "translation", "aggregation", "output",
-            "inv_transcription", "inv_translation", "inv_source", "inv_aggregation", "inv_output",
+            "source",
+            "transcription",
+            "translation",
+            "aggregation",
+            "output",
+            "inv_transcription",
+            "inv_translation",
+            "inv_source",
+            "inv_aggregation",
+            "inv_output",
         )
         changed = True
         while changed:
@@ -504,7 +668,8 @@ class Network(BaseModel):
 
             if nodes_to_remove:
                 edges_to_remove = [
-                    eid for eid, e in self.compute_graph.edges.items()
+                    eid
+                    for eid, e in self.compute_graph.edges.items()
                     if e.source_id in nodes_to_remove or e.target_id in nodes_to_remove
                 ]
                 for eid in edges_to_remove:
@@ -573,7 +738,8 @@ class Network(BaseModel):
             return
 
         edges_to_remove = [
-            eid for eid, e in self.compute_graph.edges.items()
+            eid
+            for eid, e in self.compute_graph.edges.items()
             if e.source_id in input_nodes_to_remove or e.target_id in input_nodes_to_remove
         ]
         for eid in edges_to_remove:
@@ -582,11 +748,16 @@ class Network(BaseModel):
         for nid in input_nodes_to_remove:
             del self.compute_graph.nodes[nid]
 
-    def to_recipe(self) -> Recipe:
-        """Converts the network back to a Recipe object"""
+    def to_recipe(self, strip_ern_recs: set[tuple[str, str]] | None = None) -> Recipe:
+        """Converts the network back to a Recipe object
 
+        Args:
+            strip_ern_recs: Set of (tu_id, part_name) tuples to filter out (dead ERN_rec sites)
+        """
         cotx_groups = self._extract_cotx_groups()
-        tus_and_ratios_by_cotx = self._build_transcription_units(cotx_groups)
+        tus_and_ratios_by_cotx = self._build_transcription_units(
+            cotx_groups, strip_ern_recs=strip_ern_recs
+        )
         bias_by_cotx = self._extract_bias_nodes()
 
         sorted_group_ids = sorted(cotx_groups.keys(), key=lambda g: cotx_groups[g]["cotx_index"])
@@ -622,7 +793,7 @@ class Network(BaseModel):
                 for tu in cotx.units:
                     if tu.slots:
                         last_slot = tu.slots[-1]
-                        protein = last_slot.part if hasattr(last_slot, 'part') else str(last_slot)
+                        protein = last_slot.part if hasattr(last_slot, "part") else str(last_slot)
                         if isinstance(protein, str):
                             actual_marker_proteins.add(protein)
 
@@ -695,9 +866,13 @@ class Network(BaseModel):
         return cotx_groups
 
     def _build_transcription_units(
-        self, cotx_groups: dict, prune_zero_ratios: bool = True
+        self,
+        cotx_groups: dict,
+        prune_zero_ratios: bool = True,
+        strip_ern_recs: set[tuple[str, str]] | None = None,
     ) -> dict[str, tuple[list[TranscriptionUnit], list]]:
         zero_ratio_sources = self.get_zero_ratio_source_ids() if prune_zero_ratios else set()
+        strip_ern_recs = strip_ern_recs or set()
 
         tus_and_ratios_by_cotx = {}
         for group_id, info in cotx_groups.items():
@@ -736,7 +911,9 @@ class Network(BaseModel):
 
             for global_index, position, source_id, source_node, output_slot in tu_specs:
                 param_ref_ids = source_node.extra.get("param_ref_ids", {})
-                slots = self._extract_slots_from_source(source_node, param_ref_ids, output_slot)
+                slots = self._extract_slots_from_source(
+                    source_node, param_ref_ids, output_slot, strip_ern_recs
+                )
 
                 if param_ref_ids:
                     for slot in slots:
@@ -790,15 +967,32 @@ class Network(BaseModel):
         return has_real_parts or has_ref_id
 
     def _extract_slots_from_source(
-        self, source_node, param_ref_ids: dict = None, output_slot: int = 0
+        self,
+        source_node,
+        param_ref_ids: dict = None,
+        output_slot: int = 0,
+        strip_ern_recs: set[tuple[str, str]] | None = None,
     ) -> list[Slot]:
-        """Reconstruct slots by sorting all parts by their biological category"""
+        """Reconstruct slots by sorting all parts by their biological category
+
+        Args:
+            source_node: Source node to extract slots from
+            param_ref_ids: Parameter reference IDs for embedding slots
+            output_slot: Which output slot to extract from
+            strip_ern_recs: Set of (tu_id, part_name) tuples to filter out (dead ERN_rec sites)
+        """
         param_ref_ids = param_ref_ids or {}
+        strip_ern_recs = strip_ern_recs or set()
         lib = LibraryContext.get_library()
 
         dna_edge = self._get_dna_edge(source_node, output_slot)
         if not dna_edge:
             return []
+
+        tu_names_by_slot = source_node.extra.get("tu_names_by_slot", {})
+        tu_name = tu_names_by_slot.get(output_slot, source_node.extra.get("name", ""))
+        cotx_group = source_node.extra.get("cotx_group", "")
+        tu_id = f"{tu_name}_{cotx_group}" if cotx_group and tu_name else tu_name
 
         embeddings = dna_edge.content_embedding_names or {}
 
@@ -807,6 +1001,8 @@ class Network(BaseModel):
 
         # DNA parts (non-embeddings) - categories already stored in edge
         for part_obj in dna_edge.content:
+            if (tu_id, part_obj.name) in strip_ern_recs:
+                continue
             parts.append((part_obj.category, part_obj.name, None))
 
         # Embedding parts - look up categories from library
@@ -1211,7 +1407,9 @@ class Network(BaseModel):
             ratios = None
             if raw_ratios:
                 # Normalize for display (smallest = 1)
-                min_r = min(r for r in raw_ratios if r > 0) if any(r > 0 for r in raw_ratios) else 1.0
+                min_r = (
+                    min(r for r in raw_ratios if r > 0) if any(r > 0 for r in raw_ratios) else 1.0
+                )
                 ratios = [r / min_r for r in raw_ratios]
                 # Compute percentages and assign to TUs
                 total = sum(raw_ratios)
@@ -1856,7 +2054,7 @@ def _build_cdg_dual_from_preprocessed(
                     for p in info["DNA_content"]
                 ),
                 content_embedding_names={k: tuple(v) for k, v in info["DNA_params"].items()},
-                extra={"tu_id": [tuid]},
+                extra={"tu_id": [tuid], "no_masking_tu_ids": [tuid] if tu.no_masking else []},
             )
         )
 
@@ -1875,7 +2073,7 @@ def _build_cdg_dual_from_preprocessed(
                 content_type="RNA",
                 content=tuple(Part(name=p, category="RNA") for p in info["RNA_content"]),
                 content_embedding_names={k: tuple(v) for k, v in info["RNA_params"].items()},
-                extra={"tu_id": [tuid]},
+                extra={"tu_id": [tuid], "no_masking_tu_ids": [tuid] if tu.no_masking else []},
             )
         )
 
@@ -1912,7 +2110,7 @@ def _build_cdg_dual_from_preprocessed(
                 content_type="PRT",
                 content=tuple(Part(name=p, category="PRT") for p in info["PRT_content"]),
                 content_embedding_names={k: tuple(v) for k, v in info["PRT_params"].items()},
-                extra={"tu_id": [tuid]},
+                extra={"tu_id": [tuid], "no_masking_tu_ids": [tuid] if tu.no_masking else []},
             )
         )
 
@@ -1928,9 +2126,16 @@ def _build_cdg_dual_from_preprocessed(
             existing = unique_edges_dict[key]
             existing_tu_ids = existing.extra.get("tu_id", []) if existing.extra else []
             new_tu_ids = e.extra.get("tu_id", []) if e.extra else []
+            existing_no_mask = existing.extra.get("no_masking_tu_ids", []) if existing.extra else []
+            new_no_mask = e.extra.get("no_masking_tu_ids", []) if e.extra else []
             merged = sorted(set(existing_tu_ids + new_tu_ids))
-            if merged != existing_tu_ids:
-                merged_extra = {**(existing.extra or {}), "tu_id": merged}
+            merged_no_mask = sorted(set(existing_no_mask + new_no_mask))
+            if merged != existing_tu_ids or merged_no_mask != existing_no_mask:
+                merged_extra = {
+                    **(existing.extra or {}),
+                    "tu_id": merged,
+                    "no_masking_tu_ids": merged_no_mask,
+                }
                 unique_edges_dict[key] = existing.model_copy(update={"extra": merged_extra})
 
     nodes_dict = {n.node_id: n for n in nodes}

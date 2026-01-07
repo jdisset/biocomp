@@ -113,16 +113,16 @@ def test_apply_binary_masks_shape_validation():
 
 
 def test_get_tu_masks_binary_mode_single():
-    params = MockParams({TU_BINARY_MASK_PATH: jnp.array([1.0, 0.0, 1.0, 0.0])})
+    params = MockParams({TU_BINARY_MASK_PATH: jnp.array([[1.0, 0.0, 1.0, 0.0]])})
     tu_indices = jnp.array([0, 1, 2, 3])
-    result = get_tu_masks(params, tu_indices, None, None, is_multi_tu=False)
+    result = get_tu_masks(params, tu_indices, None, 0, is_multi_tu=False)
     np.testing.assert_array_equal(result, jnp.array([1.0, 0.0, 1.0, 0.0]))
 
 
 def test_get_tu_masks_binary_mode_multi():
-    params = MockParams({TU_BINARY_MASK_PATH: jnp.array([1.0, 0.0, 1.0, 0.0])})
+    params = MockParams({TU_BINARY_MASK_PATH: jnp.array([[1.0, 0.0, 1.0, 0.0]])})
     tu_indices = jnp.array([[0, 1], [1, 3], [2, 0]])
-    result = get_tu_masks(params, tu_indices, None, None, is_multi_tu=True)
+    result = get_tu_masks(params, tu_indices, None, 0, is_multi_tu=True)
     np.testing.assert_array_equal(result, jnp.array([1.0, 0.0, 1.0]))
 
 
@@ -148,15 +148,18 @@ def test_get_tu_masks_binary_mode_requires_network_id_for_2d():
     params = MockParams({TU_BINARY_MASK_PATH: mask_2d})
     tu_indices = jnp.array([0, 1])
 
-    with pytest.raises(AssertionError, match="network_id required"):
-        get_tu_masks(params, tu_indices, None, None, is_multi_tu=False)
+    result_net0 = get_tu_masks(params, tu_indices, None, 0, is_multi_tu=False)
+    np.testing.assert_array_equal(result_net0, jnp.array([1.0, 0.0]))
+
+    result_net1 = get_tu_masks(params, tu_indices, None, 1, is_multi_tu=False)
+    np.testing.assert_array_equal(result_net1, jnp.array([0.0, 1.0]))
 
 
 def test_get_tu_masks_hard_concrete_mode():
-    params = MockParams({TU_LOG_ALPHA_PATH: jnp.array([5.0, -5.0, 5.0, -5.0])})
+    params = MockParams({TU_LOG_ALPHA_PATH: jnp.array([[5.0, -5.0, 5.0, -5.0]])})
     tu_indices = jnp.array([0, 1, 2, 3])
     tu_uniform = jnp.array([0.5, 0.5, 0.5, 0.5])
-    result = get_tu_masks(params, tu_indices, tu_uniform, None, is_multi_tu=False)
+    result = get_tu_masks(params, tu_indices, tu_uniform, 0, is_multi_tu=False)
     assert result[0] > 0.5
     assert result[1] < 0.5
     assert result[2] > 0.5
@@ -193,13 +196,13 @@ def test_get_tu_masks_disabled_mode():
 def test_get_tu_masks_binary_priority_over_hard_concrete():
     params = MockParams(
         {
-            TU_BINARY_MASK_PATH: jnp.array([1.0, 0.0]),
-            TU_LOG_ALPHA_PATH: jnp.array([-5.0, 5.0]),
+            TU_BINARY_MASK_PATH: jnp.array([[1.0, 0.0]]),
+            TU_LOG_ALPHA_PATH: jnp.array([[-5.0, 5.0]]),
         }
     )
     tu_indices = jnp.array([0, 1])
     tu_uniform = jnp.array([0.5, 0.5])
-    result = get_tu_masks(params, tu_indices, tu_uniform, None, is_multi_tu=False)
+    result = get_tu_masks(params, tu_indices, tu_uniform, 0, is_multi_tu=False)
     np.testing.assert_array_equal(result, jnp.array([1.0, 0.0]))
 
 
@@ -613,23 +616,23 @@ def test_no_masking_backward_compatible(lib, default_mode_stack):
 
 
 def test_empty_tu_indices():
-    params = MockParams({TU_BINARY_MASK_PATH: jnp.array([1.0, 0.0])})
+    params = MockParams({TU_BINARY_MASK_PATH: jnp.array([[1.0, 0.0]])})
     tu_indices = jnp.array([], dtype=jnp.int32)
-    result = get_tu_masks(params, tu_indices, None, None, is_multi_tu=False)
+    result = get_tu_masks(params, tu_indices, None, 0, is_multi_tu=False)
     assert result.shape == (0,)
 
 
 def test_all_always_enabled_indices():
-    params = MockParams({TU_BINARY_MASK_PATH: jnp.array([0.0, 0.0, 0.0])})
+    params = MockParams({TU_BINARY_MASK_PATH: jnp.array([[0.0, 0.0, 0.0]])})
     tu_indices = jnp.array([TU_ALWAYS_ENABLED, TU_ALWAYS_ENABLED, TU_ALWAYS_ENABLED])
-    result = get_tu_masks(params, tu_indices, None, None, is_multi_tu=False)
+    result = get_tu_masks(params, tu_indices, None, 0, is_multi_tu=False)
     np.testing.assert_array_equal(result, jnp.ones(3))
 
 
 def test_mixed_always_enabled_and_disabled():
-    params = MockParams({TU_BINARY_MASK_PATH: jnp.array([0.0, 1.0, 0.0])})
+    params = MockParams({TU_BINARY_MASK_PATH: jnp.array([[0.0, 1.0, 0.0]])})
     tu_indices = jnp.array([TU_ALWAYS_ENABLED, 0, 1, 2])
-    result = get_tu_masks(params, tu_indices, None, None, is_multi_tu=False)
+    result = get_tu_masks(params, tu_indices, None, 0, is_multi_tu=False)
     np.testing.assert_array_equal(result, jnp.array([1.0, 0.0, 1.0, 0.0]))
 
 
@@ -637,12 +640,12 @@ def test_binary_mask_jit_compatible():
     @jax.jit
     def jitted_get_masks(binary_mask, tu_indices):
         params = {TU_BINARY_MASK_PATH: binary_mask}
-        return get_tu_masks(params, tu_indices, None, None, is_multi_tu=False)
+        return get_tu_masks(params, tu_indices, None, 0, is_multi_tu=False)
 
-    mask = jnp.array([1.0, 0.0, 1.0])
+    mask = jnp.array([[1.0, 0.0, 1.0]])
     indices = jnp.array([0, 1, 2])
     result = jitted_get_masks(mask, indices)
-    np.testing.assert_array_equal(result, mask)
+    np.testing.assert_array_equal(result, mask[0])
 
 
 def test_binary_mask_vmap_over_networks():
@@ -655,38 +658,38 @@ def test_binary_mask_vmap_over_networks():
     )
     tu_indices = jnp.array([0, 1, 2])
 
-    def get_masks_for_network(mask_1d):
-        params = {TU_BINARY_MASK_PATH: mask_1d}
-        return get_tu_masks(params, tu_indices, None, None, is_multi_tu=False)
+    def get_masks_for_network(network_id):
+        params = {TU_BINARY_MASK_PATH: mask_2d}
+        return get_tu_masks(params, tu_indices, None, network_id, is_multi_tu=False)
 
-    result = jax.vmap(get_masks_for_network)(mask_2d)
+    result = jax.vmap(get_masks_for_network)(jnp.arange(3))
     np.testing.assert_array_equal(result, mask_2d)
 
 
 def test_binary_mask_all_ones():
-    params = MockParams({TU_BINARY_MASK_PATH: jnp.ones(10)})
+    params = MockParams({TU_BINARY_MASK_PATH: jnp.ones((1, 10))})
     tu_indices = jnp.arange(10)
-    result = get_tu_masks(params, tu_indices, None, None, is_multi_tu=False)
+    result = get_tu_masks(params, tu_indices, None, 0, is_multi_tu=False)
     np.testing.assert_array_equal(result, jnp.ones(10))
 
 
 def test_binary_mask_all_zeros():
-    params = MockParams({TU_BINARY_MASK_PATH: jnp.zeros(10)})
+    params = MockParams({TU_BINARY_MASK_PATH: jnp.zeros((1, 10))})
     tu_indices = jnp.arange(10)
-    result = get_tu_masks(params, tu_indices, None, None, is_multi_tu=False)
+    result = get_tu_masks(params, tu_indices, None, 0, is_multi_tu=False)
     np.testing.assert_array_equal(result, jnp.zeros(10))
 
 
 def test_binary_mask_gradients_stop():
-    def loss_fn(mask):
-        params = {TU_BINARY_MASK_PATH: mask}
+    def loss_fn(mask_2d):
+        params = {TU_BINARY_MASK_PATH: mask_2d}
         tu_indices = jnp.array([0, 1, 2])
-        masks = get_tu_masks(params, tu_indices, None, None, is_multi_tu=False)
+        masks = get_tu_masks(params, tu_indices, None, 0, is_multi_tu=False)
         return jnp.sum(masks)
 
-    mask = jnp.array([1.0, 0.0, 1.0])
+    mask = jnp.array([[1.0, 0.0, 1.0]])
     grads = jax.grad(loss_fn)(mask)
-    np.testing.assert_array_equal(grads, jnp.ones(3))
+    np.testing.assert_array_equal(grads, jnp.ones((1, 3)))
 
 
 if __name__ == "__main__":

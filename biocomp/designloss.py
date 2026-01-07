@@ -782,16 +782,26 @@ def _sample_tu_uniform(params, key, n_samples=1):
 
 def _compute_tu_stats(params) -> dict:
     """Compute TU masking statistics for logging."""
-    if TU_LOG_ALPHA_PATH not in params:
+    if LATENT_TU_Z_PATH in params:
+        z = params[LATENT_TU_Z_PATH]
+        W1 = params[LATENT_TU_W1_PATH]
+        b1 = params[LATENT_TU_B1_PATH]
+        W2 = params[LATENT_TU_W2_PATH]
+        b2 = params[LATENT_TU_B2_PATH]
+        # z shape: (n_targets, n_networks, latent_dim) - vmap decode over (targets, networks)
+        log_alpha = jax.vmap(jax.vmap(decode_latent_tu_masking))(z, W1, b1, W2, b2)
+    elif TU_LOG_ALPHA_PATH in params:
+        log_alpha = params[TU_LOG_ALPHA_PATH]
+    else:
         return {}
-    log_alpha = params[TU_LOG_ALPHA_PATH]
+
     tu_probs = jax.nn.sigmoid(log_alpha)
     tu_enabled_mask = tu_probs > 0.5
-    n_tus = log_alpha.shape[-1]  # TUs per network (last axis)
+    n_tus = log_alpha.shape[-1]
     return {
         "enabled_count": jnp.sum(tu_enabled_mask),
         "total_count": jnp.array(log_alpha.size),
-        "n_tus": jnp.array(n_tus),  # TUs per network for proper display
+        "n_tus": jnp.array(n_tus),
         "mean_prob": jnp.mean(tu_probs),
         "min_log_alpha": jnp.min(log_alpha),
         "max_log_alpha": jnp.max(log_alpha),

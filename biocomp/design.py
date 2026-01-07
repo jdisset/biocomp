@@ -24,6 +24,7 @@ from biocomp.network import Network
 from .parameters import ParameterTree
 from biocomp.logging_config import get_logger
 from biocomp.optimutils import make_training_step, per_replicate_step, optimize, DesignOptimConfig
+from biocomp.tumasking import PROTECTED_TU_MASK_PATH
 
 if TYPE_CHECKING:
     from biocomptools.modelmodel import BiocompModel
@@ -392,6 +393,8 @@ def initialize_params(
     use_latent_tu_masking: bool = False,
     latent_tu_dim: int = 16,
     latent_tu_hidden_dim: int = 32,
+    no_masking_tu_ids: set[str] | None = None,
+    tu_id_to_idx: dict[str, int] | None = None,
 ):
     """Initialize design params. If use_latent_tu_masking, creates MLP params instead of direct log_alpha."""
     tu_key, init_key = jax.random.split(key)
@@ -416,16 +419,22 @@ def initialize_params(
             init_log_alpha = tu_log_alpha_init_mean + tu_log_alpha_init_std * jax.random.normal(
                 tu_key, shape=(n_replicates, n_targets, n_networks, n_tus)
             )
-            latent_z = jax.random.normal(
-                k_z, shape=(n_replicates, n_targets, n_networks, latent_tu_dim)
-            ) * 0.1
+            latent_z = (
+                jax.random.normal(k_z, shape=(n_replicates, n_targets, n_networks, latent_tu_dim))
+                * 0.1
+            )
             W1 = jax.random.normal(
-                k_w1, shape=(n_replicates, n_targets, n_networks, latent_tu_hidden_dim, latent_tu_dim)
+                k_w1,
+                shape=(n_replicates, n_targets, n_networks, latent_tu_hidden_dim, latent_tu_dim),
             ) * jnp.sqrt(2.0 / latent_tu_dim)
             b1 = jnp.zeros((n_replicates, n_targets, n_networks, latent_tu_hidden_dim))
-            W2 = jax.random.normal(
-                k_w2, shape=(n_replicates, n_targets, n_networks, n_tus, latent_tu_hidden_dim)
-            ) * jnp.sqrt(2.0 / latent_tu_hidden_dim) * 0.1
+            W2 = (
+                jax.random.normal(
+                    k_w2, shape=(n_replicates, n_targets, n_networks, n_tus, latent_tu_hidden_dim)
+                )
+                * jnp.sqrt(2.0 / latent_tu_hidden_dim)
+                * 0.1
+            )
             b2 = init_log_alpha  # MLP(0) ≈ init_log_alpha
 
             params.at(LATENT_TU_Z_PATH, latent_z, overwrite=None)
@@ -450,6 +459,30 @@ def initialize_params(
                 f"Initialized TU log_alpha: {n_tus} TUs × {n_networks} networks "
                 f"(mean={tu_log_alpha_init_mean}, std={tu_log_alpha_init_std})"
             )
+
+        protected_tu_mask_1d = jnp.zeros(n_tus, dtype=bool)
+        if no_masking_tu_ids and tu_id_to_idx:
+            protected_indices = [
+                tu_id_to_idx[tu_id] for tu_id in no_masking_tu_ids if tu_id in tu_id_to_idx
+            ]
+            if protected_indices:
+                protected_tu_mask_1d = protected_tu_mask_1d.at[jnp.array(protected_indices)].set(
+                    True
+                )
+                idx_arr = jnp.array(protected_indices)
+                if use_latent_tu_masking:
+                    b2_val = params[LATENT_TU_B2_PATH]
+                    b2_val = b2_val.at[..., idx_arr].set(10.0)
+                    params.at(LATENT_TU_B2_PATH, b2_val, overwrite=True)
+                else:
+                    tu_log_alpha_val = params[TU_LOG_ALPHA_PATH]
+                    tu_log_alpha_val = tu_log_alpha_val.at[..., idx_arr].set(10.0)
+                    params.at(TU_LOG_ALPHA_PATH, tu_log_alpha_val, overwrite=True)
+                logger.info(f"Protected {len(protected_indices)} TUs from masking (log_alpha=10.0)")
+        protected_tu_mask = jnp.tile(
+            protected_tu_mask_1d[None, None, :], (n_replicates, n_targets, 1)
+        )
+        params.at(PROTECTED_TU_MASK_PATH, protected_tu_mask, overwrite=None, tags=["non_grad"])
 
     return params
 
@@ -701,7 +734,12 @@ def get_ratio_paths_and_sources(params):
     direct_paths, aref_sources, aref_count = [], set(), 0
     for path, value in params.data.iter_leaves():
         path_str = str(path)
-        if "ratio" in path_str and "inverse" not in path_str and "ratio_min" not in path_str and "ratio_max" not in path_str:
+        if (
+            "ratio" in path_str
+            and "inverse" not in path_str
+            and "ratio_min" not in path_str
+            and "ratio_max" not in path_str
+        ):
             if isArrayRef(value):
                 aref_count += 1
                 aref_sources.update(str(sp) for sp in value.paths)
@@ -769,6 +807,7 @@ def _start_pluggable(
     pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
     optimizer = dconf.pluggable_optimizer
     from .designoptim import NSGA2DesignOptimizer
+
     is_nsga2 = isinstance(optimizer, NSGA2DesignOptimizer)
     n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
     nsga2_n_tus = dmanager.n_tus if is_nsga2 else 0
@@ -776,27 +815,39 @@ def _start_pluggable(
 
     timer.start("stack", "[1/5] Building compute stack...")
     stack = dmanager.build_stack(
-        model, unlock_ratios=not lock_ratios, use_latent_ratios=dconf.use_latent_ratios,
-        latent_dim=dconf.latent_dim, latent_hidden_dim=dconf.latent_hidden_dim,
+        model,
+        unlock_ratios=not lock_ratios,
+        use_latent_ratios=dconf.use_latent_ratios,
+        latent_dim=dconf.latent_dim,
+        latent_hidden_dim=dconf.latent_hidden_dim,
     )
     timer.end("stack")
 
     timer.start("params", "[2/5] Initializing parameters...")
     initial_params = initialize_params(
-        stack, n_replicates=1, n_targets=dmanager.n_targets, shared_params=model.shared_params,
-        key=pkey, n_tus=n_tus, n_networks=n_networks,
+        stack,
+        n_replicates=1,
+        n_targets=dmanager.n_targets,
+        shared_params=model.shared_params,
+        key=pkey,
+        n_tus=n_tus,
+        n_networks=n_networks,
         tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
         tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
         use_latent_tu_masking=dconf.use_latent_tu_masking,
         latent_tu_dim=dconf.latent_tu_dim,
         latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
+        no_masking_tu_ids=stack.no_masking_tu_ids,
+        tu_id_to_idx=stack.tu_id_to_idx,
     )
     initial_params = jax.tree.map(lambda x: x.squeeze(0), initial_params)
     timer.end("params")
 
     timer.start("codec", "[3/5] Creating codec and loss function...")
     codec = GenomeCodec.from_params(
-        initial_params, static_tags=("shared", "non_grad"), use_latent_ratios=dconf.use_latent_ratios,
+        initial_params,
+        static_tags=("shared", "non_grad"),
+        use_latent_ratios=dconf.use_latent_ratios,
     )
     flat_params = codec.encode(initial_params)
     logger.info(f"  Genome dimension: {codec.param_dim}")
@@ -854,15 +905,20 @@ def _start_pluggable(
     init_key, opt_key = jax.random.split(loop_key)
 
     if is_nsga2:
+
         def nsga2_objective(flat_genome: jnp.ndarray) -> float:
             continuous_genes = flat_genome[nsga2_n_tus:]
             params = codec.decode(continuous_genes, apply_constraints=True)
             static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
-            loss, _ = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, jnp.array(0))
+            loss, _ = loss_fn(
+                dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, jnp.array(0)
+            )
             return loss
 
         opt_state = optimizer.init(
-            init_key, flat_params, nsga2_objective,
+            init_key,
+            flat_params,
+            nsga2_objective,
             n_tus=nsga2_n_tus,
             continuous_dim=codec.param_dim,
         )
@@ -888,9 +944,7 @@ def _start_pluggable(
     while not optimizer.should_stop(opt_state):
         opt_key, step_key = jax.random.split(opt_key)
         current_step = jnp.array(int(opt_state.step), dtype=jnp.int32)
-        opt_state, metrics = optimizer.step(
-            opt_state, step_key, step_objective_fn, current_step
-        )
+        opt_state, metrics = optimizer.step(opt_state, step_key, step_objective_fn, current_step)
         loss_history.append(float(opt_state.best_loss))
         step_history.append({k: float(v) if hasattr(v, "item") else v for k, v in metrics.items()})
         pbar.update(1)
@@ -917,6 +971,7 @@ def _start_pluggable(
     final_step_data = {"loss": [[float(opt_state.best_loss)]]}
 
     from .designoptim import NSGA2DesignState
+
     if isinstance(opt_state, NSGA2DesignState):
         pareto_front, pareto_fitness = opt_state.pareto_front, opt_state.pareto_fitness
         if pareto_front is not None and pareto_fitness is not None:
@@ -927,7 +982,9 @@ def _start_pluggable(
             logger.info(f"    Min TU count: {float(jnp.min(pareto_fitness[:, 1])):.0f}")
 
     if loggers:
-        yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, jnp.array(int(opt_state.step), dtype=jnp.int32))
+        yhatdep_arr = compiled_get_yhatdep(
+            opt_state.best_params, jnp.array(int(opt_state.step), dtype=jnp.int32)
+        )
         final_step_data["yhatdep"] = yhatdep_arr
         for period, callback in loggers:
             if period == -1:
@@ -983,12 +1040,14 @@ def start(
         use_latent_tu_masking=dconf.use_latent_tu_masking,
         latent_tu_dim=dconf.latent_tu_dim,
         latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
+        no_masking_tu_ids=stack.no_masking_tu_ids,
+        tu_id_to_idx=stack.tu_id_to_idx,
     )
-    assert_tree_shape(initial_params, (dconf.n_replicates, dmanager.n_targets))
     timer.end("params")
 
     timer.start("opt_init", "[3/5] Initializing optimizer state...")
     static, dynamic = initial_params.filter_by_tag(["non_grad", "shared"])
+    assert_tree_shape(dynamic, (dconf.n_replicates, dmanager.n_targets))
 
     # Check if there are any actual JAX arrays to optimize (not just ArrayRefs)
     jax_leaves = jax.tree.leaves(dynamic)
@@ -1049,18 +1108,27 @@ def start(
     )
 
     timer.start("loss_fn", "[5/5] Creating loss and step functions...")
-    loss_func, num_z, direct_ratio_paths = _create_loss_function(stack, dmanager, dconf, initial_params)
+    loss_func, num_z, direct_ratio_paths = _create_loss_function(
+        stack, dmanager, dconf, initial_params
+    )
     _, source_ratio_paths = get_ratio_paths_and_sources(initial_params)
-    logger.debug(f"Ratio paths: {len(direct_ratio_paths)} direct + {len(source_ratio_paths)} ArrayRef")
+    logger.debug(
+        f"Ratio paths: {len(direct_ratio_paths)} direct + {len(source_ratio_paths)} ArrayRef"
+    )
 
     def norm_ratios_hook(params, *a, **kw):
         if direct_ratio_paths:
             params = params.update_leaves_by_path(direct_ratio_paths, normalize_ratios_prune)
         if source_ratio_paths:
-            params = normalize_ratio_source_arrays(params, source_ratio_paths, normalize_ratios_prune)
+            params = normalize_ratio_source_arrays(
+                params, source_ratio_paths, normalize_ratios_prune
+            )
         if TU_LOG_ALPHA_PATH in params:
-            params = params.update_leaves_by_path([TU_LOG_ALPHA_PATH], lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX))
+            params = params.update_leaves_by_path(
+                [TU_LOG_ALPHA_PATH], lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
+            )
         return params
+
     step_fn = make_training_step(
         loss_func,
         dconf.optimizer,
@@ -1093,8 +1161,6 @@ def start(
                 expected_y_last_dim,
             )
         )
-        assert_tree_shape(params, (dconf.n_replicates, dmanager.n_targets))
-        assert_tree_shape(opt_state, (dconf.n_replicates, dmanager.n_targets))
 
         return jax.vmap(
             Partial(per_replicate_step, num_z=num_z, training_config=dconf, scannable_step=step_fn)
@@ -1154,8 +1220,12 @@ def sample_for_evaluation(
         xlist, ylist = dmanager.get_samples((n_networks, n_replicates, n_eval_samples), seed)
 
     xraw, yraw = jnp.stack(xlist, axis=0), jnp.stack(ylist, axis=0)
-    assert xraw.shape == (n_networks, n_replicates, n_samples, n_targets, 2), f"xraw shape mismatch: {xraw.shape} vs expected ({n_networks}, {n_replicates}, {n_samples}, {n_targets}, 2)"
-    assert yraw.shape == (n_networks, n_replicates, n_samples, n_targets, 1), f"yraw shape mismatch: {yraw.shape} vs expected ({n_networks}, {n_replicates}, {n_samples}, {n_targets}, 1)"
+    assert xraw.shape == (n_networks, n_replicates, n_samples, n_targets, 2), (
+        f"xraw shape mismatch: {xraw.shape} vs expected ({n_networks}, {n_replicates}, {n_samples}, {n_targets}, 2)"
+    )
+    assert yraw.shape == (n_networks, n_replicates, n_samples, n_targets, 1), (
+        f"yraw shape mismatch: {yraw.shape} vs expected ({n_networks}, {n_replicates}, {n_samples}, {n_targets}, 1)"
+    )
     return xraw, yraw
 
 
@@ -1181,7 +1251,10 @@ def _compute_grid_loss_for_eval(
 
     sinkhorn_l = (
         sinkhorn_divergence_conv(
-            proj_nonneg_ste(yhat_img), proj_nonneg_ste(y_img), eps_sinkhorn, n_iters=n_sinkhorn_iters
+            proj_nonneg_ste(yhat_img),
+            proj_nonneg_ste(y_img),
+            eps_sinkhorn,
+            n_iters=n_sinkhorn_iters,
         )
         if w_sinkhorn > 0
         else 0.0
@@ -1239,19 +1312,19 @@ def evaluate_design(
     logger.info(f"Evaluating: {n_replicates} reps × {n_targets} targets × {n_samples} samples")
 
     # extract loss weights from dconf.loss_function (same as training)
-    loss_kwargs = getattr(dconf.loss_function, 'kwargs', {}) or {}
-    w_sinkhorn = float(loss_kwargs.get('w_sinkhorn', 1.0))
-    w_lncc = float(loss_kwargs.get('w_lncc', 0.5))
-    w_mse = float(loss_kwargs.get('w_mse', 0.0))
-    w_rmse = float(loss_kwargs.get('w_rmse', 0.5))
-    w_simse = float(loss_kwargs.get('w_simse', 0.0))
-    w_zncc = float(loss_kwargs.get('w_zncc', 0.0))
-    w_gradient = float(loss_kwargs.get('w_gradient', 0.0))
-    w_spectral = float(loss_kwargs.get('w_spectral', 0.0))
-    w_contrast = float(loss_kwargs.get('w_contrast', 0.0))
-    eps_sinkhorn = float(loss_kwargs.get('eps_sinkhorn', 0.1))
-    n_sinkhorn_iters = int(loss_kwargs.get('n_sinkhorn_iters', 50))
-    lncc_kernel = int(loss_kwargs.get('lncc_kernel', 7))
+    loss_kwargs = getattr(dconf.loss_function, "kwargs", {}) or {}
+    w_sinkhorn = float(loss_kwargs.get("w_sinkhorn", 1.0))
+    w_lncc = float(loss_kwargs.get("w_lncc", 0.5))
+    w_mse = float(loss_kwargs.get("w_mse", 0.0))
+    w_rmse = float(loss_kwargs.get("w_rmse", 0.5))
+    w_simse = float(loss_kwargs.get("w_simse", 0.0))
+    w_zncc = float(loss_kwargs.get("w_zncc", 0.0))
+    w_gradient = float(loss_kwargs.get("w_gradient", 0.0))
+    w_spectral = float(loss_kwargs.get("w_spectral", 0.0))
+    w_contrast = float(loss_kwargs.get("w_contrast", 0.0))
+    eps_sinkhorn = float(loss_kwargs.get("eps_sinkhorn", 0.1))
+    n_sinkhorn_iters = int(loss_kwargs.get("n_sinkhorn_iters", 50))
+    lncc_kernel = int(loss_kwargs.get("lncc_kernel", 7))
 
     logger.debug(
         f"Eval loss weights: sinkhorn={w_sinkhorn}, lncc={w_lncc}, mse={w_mse}, rmse={w_rmse}, "
