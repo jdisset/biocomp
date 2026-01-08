@@ -111,6 +111,25 @@ def build_optimizer_chain(optimizer_stack: list, with_lr_injection: bool = False
     return optax.chain(create_counter(), *main_chain)
 
 
+def build_two_timescale_optimizer(
+    optimizer_stack: list,
+    tu_mask_lr_scale: float = 0.1,
+) -> optax.GradientTransformation:
+    """Two-timescale optimizer: slower learning rate for TU mask parameters.
+
+    TU mask params (log_alpha) update slower to prevent them from racing ahead
+    of continuous params and making premature enable/disable decisions.
+    """
+    base_opt = build_optimizer_chain(optimizer_stack, with_lr_injection=False)
+    scaled_opt = optax.chain(optax.scale(tu_mask_lr_scale), base_opt)
+
+    def label_fn(path, _):
+        path_str = "/".join(str(p) for p in path) if isinstance(path, tuple) else str(path)
+        return "tu_mask" if "tu_log_alpha" in path_str else "default"
+
+    return optax.multi_transform({"tu_mask": scaled_opt, "default": base_opt}, label_fn)
+
+
 class OptimConfig(ArbitraryModel):
     optimizer_stack: list[EncodedPartialFunction] = DEFAULT_OPTIMIZER
     seed: Optional[int] = None
@@ -528,6 +547,38 @@ def jax_linear_schedule(
     step = jnp.asarray(step, dtype=jnp.float32)
     progress = jnp.clip(step / (total_steps + 1e-8), 0.0, 1.0)
     return start_value + (end_value - start_value) * progress
+
+
+def jax_smooth_three_phase_schedule(
+    step: ArrayLike,
+    total_steps: int,
+    phase1_frac: ArrayLike,
+    phase2_frac: ArrayLike,
+    phase1_value: ArrayLike,
+    phase2_end_value: ArrayLike,
+    phase3_end_value: ArrayLike,
+    transition_sharpness: float = 10.0,
+) -> jnp.ndarray:
+    """Three-phase schedule with sigmoid-blended transitions.
+
+    Unlike jax_three_phase_schedule which has hard phase boundaries,
+    this uses sigmoid blending for smoother transitions that don't
+    abruptly kill promising TUs at phase boundaries.
+
+    Args:
+        transition_sharpness: Higher = sharper transitions (10.0 is reasonably smooth)
+    """
+    step = jnp.asarray(step, dtype=jnp.float32)
+    phase1_steps = phase1_frac * total_steps
+    phase2_steps = phase2_frac * total_steps
+
+    transition_width = 0.05 * total_steps
+
+    blend_1_to_2 = jax.nn.sigmoid(transition_sharpness * (step - phase1_steps) / transition_width)
+    blend_2_to_3 = jax.nn.sigmoid(transition_sharpness * (step - phase2_steps) / transition_width)
+
+    phase2_val = phase1_value + (phase2_end_value - phase1_value) * blend_1_to_2
+    return phase2_val + (phase3_end_value - phase2_end_value) * blend_2_to_3
 
 
 def three_phase_schedule(

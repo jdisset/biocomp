@@ -20,8 +20,10 @@ from .tumasking import (
     LATENT_TU_B1_PATH,
     LATENT_TU_W2_PATH,
     LATENT_TU_B2_PATH,
+    L0_PENALTY_FLOOR_PROB,
     asymmetric_l0_loss,
     decode_latent_tu_masking,
+    entropy_bonus,
 )
 from .jaxutils import check as jax_check
 from .logging_config import get_logger
@@ -781,14 +783,19 @@ def _sample_tu_uniform(params, key, n_samples=1):
 
 
 def _compute_tu_stats(params) -> dict:
-    """Compute TU masking statistics for logging."""
+    """Compute TU masking statistics for logging.
+
+    Includes diagnostic metrics for convergence analysis:
+    - mask_entropy: binary entropy of probabilities (high=exploring, low=committed)
+    - boundary_count: TUs with prob in [0.3, 0.7] (still deciding)
+    - below_floor_count: TUs with prob < 0.2 (in the "graveyard")
+    """
     if LATENT_TU_Z_PATH in params:
         z = params[LATENT_TU_Z_PATH]
         W1 = params[LATENT_TU_W1_PATH]
         b1 = params[LATENT_TU_B1_PATH]
         W2 = params[LATENT_TU_W2_PATH]
         b2 = params[LATENT_TU_B2_PATH]
-        # z shape: (n_targets, n_networks, latent_dim) - vmap decode over (targets, networks)
         log_alpha = jax.vmap(jax.vmap(decode_latent_tu_masking))(z, W1, b1, W2, b2)
     elif TU_LOG_ALPHA_PATH in params:
         log_alpha = params[TU_LOG_ALPHA_PATH]
@@ -798,7 +805,19 @@ def _compute_tu_stats(params) -> dict:
     tu_probs = jax.nn.sigmoid(log_alpha)
     tu_enabled_mask = tu_probs > 0.5
     n_tus = log_alpha.shape[-1]
+
+    # diagnostic metrics for convergence analysis
+    probs_flat = tu_probs.flatten()
+    eps = 1e-6
+    probs_clipped = jnp.clip(probs_flat, eps, 1 - eps)
+    entropy_per_tu = -(probs_clipped * jnp.log(probs_clipped) + (1 - probs_clipped) * jnp.log(1 - probs_clipped))
+    mask_entropy = jnp.mean(entropy_per_tu) / jnp.log(2.0)  # normalize to [0, 1]
+
+    boundary_mask = (probs_flat >= 0.3) & (probs_flat <= 0.7)
+    below_floor_mask = probs_flat < L0_PENALTY_FLOOR_PROB
+
     return {
+        "log_alpha": log_alpha,
         "enabled_count": jnp.sum(tu_enabled_mask),
         "total_count": jnp.array(log_alpha.size),
         "n_tus": jnp.array(n_tus),
@@ -811,6 +830,10 @@ def _compute_tu_stats(params) -> dict:
         "min_log_alpha_per_network": jnp.min(log_alpha, axis=-1),
         "max_log_alpha_per_network": jnp.max(log_alpha, axis=-1),
         "std_log_alpha_per_network": jnp.std(log_alpha, axis=-1),
+        # diagnostic metrics for TUMaskingDiagLogger
+        "mask_entropy": mask_entropy,
+        "boundary_count": jnp.sum(boundary_mask),
+        "below_floor_count": jnp.sum(below_floor_mask),
     }
 
 
@@ -1018,11 +1041,13 @@ def _make_loss_func(
     max_tus_per_cotx=5,
     max_prediction=1e6,
     lambda_l0=0.0,
+    lambda_entropy=0.0,
     l0_tu_threshold=None,
     l0_excess_exponent=2.0,
     l0_alpha_below=0.5,
     l0_beta_above=2.0,
     l0_blend_sharpness=5.0,
+    l0_leak_coef=0.0,
     tu_n_samples=4,
     lambda_coupling=0.1,
     min_ratio_threshold=0.005,
@@ -1058,9 +1083,22 @@ def _make_loss_func(
 
     # per-network TU mask: only penalize TUs each network actually uses
     per_network_tu_mask = None
+    protected_tu_mask = None  # True = protected (stop_gradient), False = normal
     if dmanager.enable_tu_masking and hasattr(stack, "get_per_network_tu_mask"):
         per_network_tu_mask = stack.get_per_network_tu_mask()
         logger.debug(f"Per-network TU mask shape: {per_network_tu_mask.shape}")
+
+        # protected TU mask: True = protected (gradients blocked), False = normal
+        if hasattr(stack, "no_masking_tu_ids") and stack.no_masking_tu_ids and stack.tu_id_to_idx:
+            protected_tu_mask = np.zeros(stack.n_tus, dtype=bool)
+            for tu_id in stack.no_masking_tu_ids:
+                if tu_id in stack.tu_id_to_idx:
+                    protected_tu_mask[stack.tu_id_to_idx[tu_id]] = True
+            protected_tu_mask = jnp.array(protected_tu_mask)
+            n_protected = int(np.sum(protected_tu_mask))
+            logger.debug(
+                f"Protected TU mask: {n_protected} TUs have stop_gradient (always enabled)"
+            )
 
     ern_namespaces = [
         layer.namespace
@@ -1108,6 +1146,7 @@ def _make_loss_func(
         l0_penalty_per_network = None
         coupling_penalty = jnp.array(0.0)
         coupling_penalty_per_target = None
+        entropy_penalty = jnp.array(0.0)
 
         # get log_alpha: either decode from latent MLP or use direct path
         log_alpha = None
@@ -1141,7 +1180,16 @@ def _make_loss_func(
 
             from biocomp.tumasking import l0_penalty as l0_penalty_fn
 
-            per_tu_penalty = l0_penalty_fn(log_alpha)
+            # apply stop_gradient to protected TUs: they count toward L0 but can't be modified
+            log_alpha_for_l0 = log_alpha
+            if protected_tu_mask is not None:
+                log_alpha_for_l0 = jnp.where(
+                    protected_tu_mask[None, None, :],  # True = protected
+                    jax.lax.stop_gradient(log_alpha),  # no gradients for protected
+                    log_alpha,
+                )
+
+            per_tu_penalty = l0_penalty_fn(log_alpha_for_l0, leak_coef=l0_leak_coef)
             if per_network_tu_mask is not None:
                 assert per_network_tu_mask.shape[0] == n_networks, (
                     f"per_network_tu_mask shape mismatch: {per_network_tu_mask.shape} vs n_networks={n_networks}"
@@ -1159,11 +1207,12 @@ def _make_loss_func(
                         alpha_below=l0_alpha_below,
                         beta_above=l0_beta_above,
                         blend_sharpness=l0_blend_sharpness,
+                        leak_coef=l0_leak_coef,
                     )
 
                 # log_alpha shape: (n_targets, n_networks, n_tus)
-                # vmap over targets then networks
-                l0_raw_per_network = vmap(vmap(compute_asymmetric_l0))(log_alpha)
+                # vmap over targets then networks (use masked log_alpha)
+                l0_raw_per_network = vmap(vmap(compute_asymmetric_l0))(log_alpha_for_l0)
             else:
                 l0_raw_per_network = expected_count_per_network
 
@@ -1177,8 +1226,13 @@ def _make_loss_func(
                 coupling_weight = _get_schedule_value(
                     params, step, total_steps, "lambda_coupling", lambda_coupling, schedule_ns
                 )
+                # use masked log_alpha so protected TUs don't get gradient pressure
                 raw_coupling, raw_coupling_per_target = ratio_mask_coupling_penalty(
-                    params, ratio_paths, log_alpha, min_ratio_threshold, return_per_target=True
+                    params,
+                    ratio_paths,
+                    log_alpha_for_l0,
+                    min_ratio_threshold,
+                    return_per_target=True,
                 )
                 coupling_penalty_per_target = _sanitize(coupling_weight * raw_coupling_per_target)
                 coupling_penalty = _sanitize(jnp.atleast_1d(coupling_weight * raw_coupling))[0]
@@ -1187,11 +1241,18 @@ def _make_loss_func(
                 tying_weight = _get_schedule_value(
                     params, step, total_steps, "lambda_ern_tying", lambda_ern_tying, schedule_ns
                 )
-                raw_tying = ern_tu_tying_penalty(params, ern_namespaces, log_alpha)
+                # use masked log_alpha so protected TUs don't get gradient pressure
+                raw_tying = ern_tu_tying_penalty(params, ern_namespaces, log_alpha_for_l0)
                 ern_tying_penalty_val = tying_weight * raw_tying
                 ern_tying_penalty_val = _sanitize(jnp.atleast_1d(ern_tying_penalty_val))[0]
             else:
                 ern_tying_penalty_val = jnp.array(0.0)
+
+            entropy_weight = _get_schedule_value(
+                params, step, total_steps, "lambda_entropy", lambda_entropy, schedule_ns
+            )
+            ent = entropy_bonus(log_alpha)
+            entropy_penalty = _sanitize(jnp.atleast_1d(-entropy_weight * ent))[0]
         else:
             ern_tying_penalty_val = jnp.array(0.0)
 
@@ -1221,6 +1282,7 @@ def _make_loss_func(
             "X": X,
             "Y": Y,
             "l0_penalty": l0_penalty,
+            "entropy_penalty": entropy_penalty,
             "coupling_penalty": coupling_penalty,
             "ern_tying_penalty": ern_tying_penalty_val,
             "tucount_penalty": tucount_penalty,
@@ -1238,6 +1300,7 @@ def _make_loss_func(
             + tucount_penalty
             + spread_penalty
             + l0_penalty
+            + entropy_penalty
             + coupling_penalty
             + ern_tying_penalty_val
         )
@@ -1270,11 +1333,13 @@ def grid_distance_loss(
     lambda_spread=0.01,
     max_ratio=100.0,
     lambda_l0=0.0,
+    lambda_entropy=0.0,
     l0_tu_threshold=None,
     l0_excess_exponent=2.0,
     l0_alpha_below=0.5,
     l0_beta_above=2.0,
     l0_blend_sharpness=5.0,
+    l0_leak_coef=0.0,
     tu_n_samples=4,
     lambda_coupling=0.1,
     min_ratio_threshold=0.005,
@@ -1451,11 +1516,13 @@ def grid_distance_loss(
         max_ratio=max_ratio,
         max_tus_per_cotx=max_tus_per_cotx,
         lambda_l0=lambda_l0,
+        lambda_entropy=lambda_entropy,
         l0_tu_threshold=l0_tu_threshold,
         l0_excess_exponent=l0_excess_exponent,
         l0_alpha_below=l0_alpha_below,
         l0_beta_above=l0_beta_above,
         l0_blend_sharpness=l0_blend_sharpness,
+        l0_leak_coef=l0_leak_coef,
         tu_n_samples=tu_n_samples,
         lambda_coupling=lambda_coupling,
         min_ratio_threshold=min_ratio_threshold,

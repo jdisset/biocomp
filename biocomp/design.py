@@ -503,6 +503,11 @@ class DesignConfig(DesignOptimConfig):
     latent_tu_dim: int = 16
     latent_tu_hidden_dim: int = 32
 
+    # TU masking convergence improvements (see tu_masking_introduction.md)
+    use_probabilistic_or: bool = False  # probabilistic OR for multi-TU edges (requires code integration)
+    use_two_timescale: bool = False  # slower LR for log_alpha via optax.multi_transform
+    tu_mask_lr_scale: float = 0.1  # LR multiplier for log_alpha when use_two_timescale=True
+
     pluggable_optimizer: Any = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -530,6 +535,8 @@ class DesignConfig(DesignOptimConfig):
             optimizer_stack=self.optimizer_stack,
             n_steps=total_steps,
             sanitize_grads=True,
+            use_two_timescale=self.use_two_timescale,
+            tu_mask_lr_scale=self.tu_mask_lr_scale,
         )
 
 

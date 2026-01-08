@@ -139,12 +139,86 @@ def compute_binary_mask_single(tu_idx: ArrayLike, tu_log_alpha: ArrayLike) -> jn
     return jnp.where(tu_idx >= 0, mask, 1.0)
 
 
-def compute_binary_mask_multi(tu_indices: ArrayLike, tu_log_alpha: ArrayLike) -> jnp.ndarray:
-    """Compute binary mask for multiple TU indices. Enabled if ANY TU enabled.
+MULTI_TU_SOFTMAX_TEMPERATURE = 0.1
+
+
+def compute_binary_mask_multi_probabilistic_or(
+    tu_indices: ArrayLike,
+    tu_log_alpha: ArrayLike,
+) -> jnp.ndarray:
+    """Compute binary mask using Probabilistic OR (Noisy OR).
+
+    P(any TU on) = 1 - ∏(1 - P(TU_i))
+
+    Unlike softmax OR which uses weighted sum, probabilistic OR naturally gives
+    gradient to ALL contributing TUs proportional to how much they affect the
+    product. This fixes the "rich-get-richer" problem where the argmax TU
+    dominates gradient flow.
 
     Args:
         tu_indices: TU indices array, shape (max_tus,). Padding uses -1.
         tu_log_alpha: Log-alpha params, shape (n_tus,)
+
+    Returns:
+        Single mask value: P(any on) with STE for binary forward pass.
+    """
+    safe_indices = jnp.maximum(tu_indices, 0)
+    probs = jax.nn.sigmoid(tu_log_alpha[safe_indices])
+
+    valid_mask = tu_indices >= 0
+    masked_probs = jnp.where(valid_mask, probs, 0.0)  # invalid = prob 0
+
+    all_padding = jnp.all(~valid_mask)
+
+    # probabilistic OR: P(any on) = 1 - P(all off) = 1 - ∏(1 - p_i)
+    prob_all_off = jnp.prod(1.0 - masked_probs)
+    prob_any_on = 1.0 - prob_all_off
+
+    # STE: forward = hard threshold, backward = soft probability
+    binary_edge = (prob_any_on >= 0.5).astype(jnp.float32)
+    ste_result = prob_any_on + jax.lax.stop_gradient(binary_edge - prob_any_on)
+
+    return jnp.where(all_padding, 1.0, ste_result)
+
+
+def entropy_bonus(log_alpha: ArrayLike, epsilon: float = 1e-6) -> jnp.ndarray:
+    """Compute entropy bonus for TU mask probabilities.
+
+    H = -mean[p * log(p) + (1-p) * log(1-p)]
+
+    Higher entropy = more uncertain = exploring.
+    Lower entropy = committed = exploitation.
+
+    Use as loss term: loss += -lambda_entropy * entropy_bonus(log_alpha)
+    (Negative because we WANT to maximize entropy during exploration phase)
+
+    Args:
+        log_alpha: Log-alpha parameters, any shape
+        epsilon: Numerical stability clipping
+
+    Returns:
+        Scalar entropy value, normalized to [0, 1] where 1 = all at 0.5
+    """
+    probs = jax.nn.sigmoid(log_alpha)
+    probs = jnp.clip(probs, epsilon, 1 - epsilon)
+    entropy_per_tu = -(probs * jnp.log(probs) + (1 - probs) * jnp.log(1 - probs))
+    return jnp.mean(entropy_per_tu) / jnp.log(2.0)  # normalize to [0, 1]
+
+
+def compute_binary_mask_multi(
+    tu_indices: ArrayLike,
+    tu_log_alpha: ArrayLike,
+    softmax_temperature: float = MULTI_TU_SOFTMAX_TEMPERATURE,
+) -> jnp.ndarray:
+    """Compute binary mask for multiple TU indices. Enabled if ANY TU enabled.
+
+    All TUs receive gradients proportional to their contribution (via softmax),
+    while forward pass uses hard OR (any TU enabled → edge enabled).
+
+    Args:
+        tu_indices: TU indices array, shape (max_tus,). Padding uses -1.
+        tu_log_alpha: Log-alpha params, shape (n_tus,)
+        softmax_temperature: Controls gradient sharpness. Lower = more peaked.
 
     Returns:
         Single mask value: 1.0 if any TU enabled (or all padding), 0.0 otherwise
@@ -157,9 +231,16 @@ def compute_binary_mask_multi(tu_indices: ArrayLike, tu_log_alpha: ArrayLike) ->
     masked_vals = jnp.where(valid_mask, masks, 0.0)
 
     all_padding = jnp.all(~valid_mask)
-    max_mask = jnp.max(masked_vals)
-    hard_any = jnp.where(max_mask > 0.5, 1.0, 0.0)
-    ste_result = max_mask + jax.lax.stop_gradient(hard_any - max_mask)
+
+    # Softmax over log_alphas for gradient distribution (all TUs receive gradients)
+    weights = jax.nn.softmax(jnp.where(valid_mask, la_vals / softmax_temperature, -1e9))
+    soft_or = jnp.sum(weights * masked_vals)
+
+    # Hard OR for forward pass (any enabled → 1.0)
+    hard_any = jnp.where(jnp.max(masked_vals) > 0.5, 1.0, 0.0)
+
+    # STE: forward uses hard_any, backward uses soft_or
+    ste_result = soft_or + jax.lax.stop_gradient(hard_any - soft_or)
     return jnp.where(all_padding, 1.0, ste_result)
 
 
@@ -168,6 +249,8 @@ def compute_binary_masks(
     tu_log_alpha: ArrayLike,
     *,
     is_multi_tu: bool,
+    softmax_temperature: float = MULTI_TU_SOFTMAX_TEMPERATURE,
+    use_probabilistic_or: bool = False,
 ) -> jnp.ndarray:
     """Compute binary masks for all inputs using STE.
 
@@ -179,6 +262,9 @@ def compute_binary_masks(
             - For multi-TU (is_multi_tu=True): shape (n_inputs, max_tus)
         tu_log_alpha: Log-alpha params, shape (n_tus,)
         is_multi_tu: True for input_tu_indices (OR reduction), False for output_tu_indices
+        softmax_temperature: For multi-TU, controls gradient sharpness. Lower = more peaked.
+        use_probabilistic_or: If True, use P(any)=1-∏(1-p) instead of softmax OR for multi-TU.
+            Probabilistic OR gives better gradient flow to non-dominant TUs.
 
     Returns:
         Binary masks with STE gradient, shape (n_inputs,)
@@ -193,9 +279,14 @@ def compute_binary_masks(
             f"is_multi_tu=True but tu_indices.ndim={tu_indices.ndim}. "
             f"Expected 2D (n_inputs, max_tus), got shape {tu_indices.shape}."
         )
-        return jax.vmap(lambda indices: compute_binary_mask_multi(indices, tu_log_alpha))(
-            tu_indices
-        )
+        if use_probabilistic_or:
+            return jax.vmap(
+                lambda indices: compute_binary_mask_multi_probabilistic_or(indices, tu_log_alpha)
+            )(tu_indices)
+        else:
+            return jax.vmap(
+                lambda indices: compute_binary_mask_multi(indices, tu_log_alpha, softmax_temperature)
+            )(tu_indices)
     else:
         assert tu_indices.ndim == 1, (
             f"is_multi_tu=False but tu_indices.ndim={tu_indices.ndim}. "
@@ -207,7 +298,11 @@ def compute_binary_masks(
 L0_PENALTY_FLOOR_PROB = 0.2  # Stop L0 penalty below this probability
 
 
-def l0_penalty(log_alpha: ArrayLike, floor_prob: float = L0_PENALTY_FLOOR_PROB) -> jnp.ndarray:
+def l0_penalty(
+    log_alpha: ArrayLike,
+    floor_prob: float = L0_PENALTY_FLOOR_PROB,
+    leak_coef: float = 0.0,
+) -> jnp.ndarray:
     """L0 penalty with floor to prevent extinction and allow TU rebirth.
 
     Returns penalty proportional to P(TU enabled), but only above floor_prob.
@@ -218,15 +313,24 @@ def l0_penalty(log_alpha: ArrayLike, floor_prob: float = L0_PENALTY_FLOOR_PROB) 
         log_alpha: Log-alpha parameters for TU masking
         floor_prob: Stop penalizing when sigmoid(log_alpha) drops below this.
             Default 0.2 means: once P(enabled) < 20%, no more L0 pressure.
+        leak_coef: If > 0, adds weak positive penalty below floor that creates
+            gradient pressure to re-enable disabled TUs. Typical value: 0.01-0.05.
+            This prevents TUs from getting permanently stuck in disabled state.
 
     Returns:
-        Per-TU penalty in range [0, 1], normalized so penalty=1 at sigmoid=1.
+        Per-TU penalty in range [0, 1] (or up to 1+leak_coef with leak below floor).
     """
     la = clamp_log_alpha(log_alpha)
     prob = jax.nn.sigmoid(la)
     # Penalty only above floor, normalized to [0, 1] range
-    raw_penalty = jnp.maximum(prob - floor_prob, 0.0) / (1.0 - floor_prob)
-    return raw_penalty
+    above_floor = jnp.maximum(prob - floor_prob, 0.0) / (1.0 - floor_prob)
+    if leak_coef > 0:
+        # Leak: positive penalty below floor → GD pushes prob UP toward floor
+        # At prob=0: penalty = leak (max pressure to re-enable)
+        # At prob=floor: penalty = 0 (no extra pressure)
+        below_floor = jnp.maximum(floor_prob - prob, 0.0) / floor_prob
+        return above_floor + leak_coef * below_floor
+    return above_floor
 
 
 def l0_loss(
@@ -234,12 +338,13 @@ def l0_loss(
     floor_prob: float = L0_PENALTY_FLOOR_PROB,
     tu_threshold: float | None = None,
     excess_exponent: float = 2.0,
+    leak_coef: float = 0.0,
 ) -> jnp.ndarray:
     """L0 loss: sum of per-TU penalties, optionally with superlinear penalty above threshold.
 
     DEPRECATED: Use asymmetric_l0_loss() for smoother optimization landscape.
     """
-    per_tu = l0_penalty(log_alpha, floor_prob)
+    per_tu = l0_penalty(log_alpha, floor_prob, leak_coef)
     expected_count = jnp.sum(per_tu)
 
     if tu_threshold is None:
@@ -259,6 +364,7 @@ def asymmetric_l0_loss(
     alpha_below: float = 0.5,
     beta_above: float = 2.0,
     blend_sharpness: float = 5.0,
+    leak_coef: float = 0.0,
 ) -> jnp.ndarray:
     """Smooth asymmetric L0 penalty: sublinear below threshold, superlinear above."""
     log_alpha = jnp.asarray(log_alpha)
@@ -267,7 +373,7 @@ def asymmetric_l0_loss(
     assert 0 <= alpha_below < 1, f"alpha_below must be in [0,1) for sublinear/zero, got {alpha_below}"
     assert beta_above > 1, f"beta_above must be >1 for superlinear, got {beta_above}"
 
-    per_tu = l0_penalty(log_alpha, floor_prob)
+    per_tu = l0_penalty(log_alpha, floor_prob, leak_coef)
     count = jnp.sum(per_tu)
 
     safe_threshold = jnp.maximum(threshold, 1e-6)
@@ -728,6 +834,7 @@ def get_tu_masks(
     network_id: int,
     *,
     is_multi_tu: bool,
+    use_probabilistic_or: bool = False,
 ) -> jnp.ndarray:
     """Unified TU masking - mode determined by params contents. Returns ready-to-use masks.
 
@@ -749,6 +856,7 @@ def get_tu_masks(
         tu_uniform_samples: IGNORED - kept for API compatibility, will be removed
         network_id: Network index for slicing 2D mask arrays. REQUIRED.
         is_multi_tu: True for input_tu_indices (OR reduction), False for output_tu_indices
+        use_probabilistic_or: If True, use P(any)=1-∏(1-p) for multi-TU edges instead of softmax OR.
     """
     tu_indices = jnp.asarray(tu_indices)
     n_inputs = tu_indices.shape[0]
@@ -775,7 +883,9 @@ def get_tu_masks(
             tu_log_alpha = jnp.where(
                 protected_mask, jax.lax.stop_gradient(tu_log_alpha), tu_log_alpha
             )
-        raw_masks = compute_binary_masks(tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu)
+        raw_masks = compute_binary_masks(
+            tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu, use_probabilistic_or=use_probabilistic_or
+        )
         return raw_masks
 
     if TU_LOG_ALPHA_PATH in params:
@@ -791,7 +901,9 @@ def get_tu_masks(
             tu_log_alpha = jnp.where(
                 protected_mask, jax.lax.stop_gradient(tu_log_alpha), tu_log_alpha
             )
-        raw_masks = compute_binary_masks(tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu)
+        raw_masks = compute_binary_masks(
+            tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu, use_probabilistic_or=use_probabilistic_or
+        )
         return raw_masks
 
     return jnp.ones(n_inputs)

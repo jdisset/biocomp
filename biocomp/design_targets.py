@@ -59,10 +59,10 @@ class SVGTarget(TargetBase):
     path: Union[str, Path]
     viewbox_x: tuple[float, float] = (0.0, 1.0)
     viewbox_y: tuple[float, float] = (0.0, 1.0)
-    latent_out: tuple[float, float] = (0.0, 0.6)
+    latent_out: tuple[float, float] = (0.05, 0.45)
     transform_to_log_space: bool = False
     max_is_black: bool = True
-    blur_sigma: float = 3.0
+    blur_sigma: float = 0.0
 
     @model_validator(mode="after")
     def _auto_log_viewbox(self):

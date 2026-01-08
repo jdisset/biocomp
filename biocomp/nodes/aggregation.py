@@ -10,7 +10,7 @@ from biocomp.nodeutils import (
     add_node_network_ids,
     NON_GRAD_TAG,
 )
-from biocomp.tumasking import TU_LOG_ALPHA_PATH, TU_BINARY_MASK_PATH
+from biocomp.tumasking import TU_LOG_ALPHA_PATH, TU_BINARY_MASK_PATH, LATENT_TU_Z_PATH
 from biocomp.utils import get_logger
 from typing import Optional
 
@@ -237,35 +237,29 @@ def aggregation(
         }
 
     def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack = None, **_):
-        from biocomp.tumasking import get_final_mask, TU_ALWAYS_ENABLED
+        from biocomp.tumasking import get_final_mask, TU_ALWAYS_ENABLED, get_log_alpha_from_params
 
         output_tu_indices_path = f"{namespace}/output_tu_indices"
-        has_hard_concrete = output_tu_indices_path in params and TU_LOG_ALPHA_PATH in params
         has_binary_mask = output_tu_indices_path in params and TU_BINARY_MASK_PATH in params
-        has_tu_masking = has_hard_concrete or has_binary_mask
+        has_log_alpha = output_tu_indices_path in params and (
+            TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params
+        )
+        has_tu_masking = has_binary_mask or has_log_alpha
 
         def get_mask_for_tu(tu_idx: int, network_id: int) -> float:
             if has_binary_mask:
                 binary_mask = params[TU_BINARY_MASK_PATH]
-                assert binary_mask.ndim == 2, (
-                    f"binary_mask must be 2D (n_networks, n_tus), got {binary_mask.ndim}D"
-                )
-                binary_mask = binary_mask[network_id]
-                return float(binary_mask[tu_idx])
+                assert binary_mask.ndim == 2, f"binary_mask must be 2D (n_networks, n_tus), got {binary_mask.ndim}D"
+                return float(binary_mask[network_id, tu_idx])
             else:
-                tu_log_alpha = params[TU_LOG_ALPHA_PATH]
-                assert tu_log_alpha.ndim == 2, (
-                    f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D"
-                )
-                tu_log_alpha = tu_log_alpha[network_id]
+                tu_log_alpha = get_log_alpha_from_params(params, network_id)
                 return float(get_final_mask(tu_log_alpha[tu_idx : tu_idx + 1])[0])
 
-        if has_hard_concrete:
-            tu_log_alpha = params[TU_LOG_ALPHA_PATH]
-            assert tu_log_alpha.ndim == 2, (
-                f"COMMIT BUG: tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D. "
-                f"Shape: {tu_log_alpha.shape}. This likely means params were not sliced for (rep, target)."
-            )
+        if has_log_alpha and not has_binary_mask:
+            if LATENT_TU_Z_PATH in params:
+                assert params[LATENT_TU_Z_PATH].ndim == 2, "COMMIT BUG: params not sliced for (rep, target)"
+            else:
+                assert params[TU_LOG_ALPHA_PATH].ndim == 2, "COMMIT BUG: params not sliced for (rep, target)"
 
         for i, n in enumerate(nodelist):
             updt = {}

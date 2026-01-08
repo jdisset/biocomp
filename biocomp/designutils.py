@@ -27,22 +27,54 @@ def _parse_transform(transform_str):
     if not transform_str:
         return np.eye(3)
 
-    rotate_match = re.match(r"rotate\(([-\d.]+)(?:\s+([-\d.]+)\s+([-\d.]+))?\)", transform_str)
-    if not rotate_match:
-        return np.eye(3)
-
-    angle = float(rotate_match.group(1)) * np.pi / 180
-    cx = float(rotate_match.group(2)) if rotate_match.group(2) else 0
-    cy = float(rotate_match.group(3)) if rotate_match.group(3) else 0
-
-    cos_a, sin_a = np.cos(angle), np.sin(angle)
-    return np.array(
-        [
-            [cos_a, -sin_a, cx - cx * cos_a + cy * sin_a],
-            [sin_a, cos_a, cy - cx * sin_a - cy * cos_a],
-            [0, 0, 1],
-        ]
+    matrix_match = re.match(
+        r"matrix\(\s*([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)[\s,]+"
+        r"([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)\s*\)",
+        transform_str,
     )
+    if matrix_match:
+        a, b, c, d, e, f = map(float, matrix_match.groups())
+        return np.array([[a, c, e], [b, d, f], [0, 0, 1]])
+
+    translate_match = re.match(r"translate\(\s*([-\d.]+)(?:[\s,]+([-\d.]+))?\s*\)", transform_str)
+    if translate_match:
+        tx = float(translate_match.group(1))
+        ty = float(translate_match.group(2)) if translate_match.group(2) else 0
+        return np.array([[1, 0, tx], [0, 1, ty], [0, 0, 1]], dtype=float)
+
+    scale_match = re.match(r"scale\(\s*([-\d.]+)(?:[\s,]+([-\d.]+))?\s*\)", transform_str)
+    if scale_match:
+        sx = float(scale_match.group(1))
+        sy = float(scale_match.group(2)) if scale_match.group(2) else sx
+        return np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=float)
+
+    rotate_match = re.match(
+        r"rotate\(\s*([-\d.]+)(?:[\s,]+([-\d.]+)[\s,]+([-\d.]+))?\s*\)", transform_str
+    )
+    if rotate_match:
+        angle = float(rotate_match.group(1)) * np.pi / 180
+        cx = float(rotate_match.group(2)) if rotate_match.group(2) else 0
+        cy = float(rotate_match.group(3)) if rotate_match.group(3) else 0
+        cos_a, sin_a = np.cos(angle), np.sin(angle)
+        return np.array(
+            [
+                [cos_a, -sin_a, cx - cx * cos_a + cy * sin_a],
+                [sin_a, cos_a, cy - cx * sin_a - cy * cos_a],
+                [0, 0, 1],
+            ]
+        )
+
+    skewx_match = re.match(r"skewX\(\s*([-\d.]+)\s*\)", transform_str)
+    if skewx_match:
+        angle = float(skewx_match.group(1)) * np.pi / 180
+        return np.array([[1, np.tan(angle), 0], [0, 1, 0], [0, 0, 1]], dtype=float)
+
+    skewy_match = re.match(r"skewY\(\s*([-\d.]+)\s*\)", transform_str)
+    if skewy_match:
+        angle = float(skewy_match.group(1)) * np.pi / 180
+        return np.array([[1, 0, 0], [np.tan(angle), 1, 0], [0, 0, 1]], dtype=float)
+
+    return np.eye(3)
 
 
 def _apply_transform(pts, transform_matrix):
@@ -117,21 +149,10 @@ def _clip_polygon_to_rect(polygon_pts, rect_bounds):
 
 
 def _parse_svg_path(d):
-    # parse basic svg path commands
-    tok, out, i, x, y = re.findall(r"[MLHVZmlhvz]|[-+]?\d*\.?\d+", d), [], 0, 0, 0
-    while i < len(tok):
-        c = tok[i]
-        if c in "ML":
-            x, y = map(float, tok[i + 1 : i + 3])
-            out.append((x, y))
-            i += 3
-        elif c == "H":
-            x = float(tok[i + 1])
-            out.append((x, y))
-            i += 2
-        else:
-            i += 1
-    return out
+    from svgpath2mpl import parse_path
+
+    mpath = parse_path(d)
+    return [tuple(pt) for pt in mpath.vertices]
 
 
 def _greyscale(fill, max_is_black):
@@ -253,8 +274,16 @@ def _generate_svg_sample_points(
                 + vy
             )
         else:
-            x_vals = np.linspace(viewbox_x[0] * vw + vx, viewbox_x[1] * vw + vx, xres)
-            y_vals = np.linspace((1 - viewbox_y[0]) * vh + vy, (1 - viewbox_y[1]) * vh + vy, yres)
+            # Sample at cell centers (half-step inset) to avoid boundary detection issues
+            # with contains_point() which can miss points exactly on rect edges
+            x_step = (viewbox_x[1] - viewbox_x[0]) * vw / xres
+            y_step = (viewbox_y[1] - viewbox_y[0]) * vh / yres
+            x_start = viewbox_x[0] * vw + vx + x_step / 2
+            x_end = viewbox_x[1] * vw + vx - x_step / 2
+            y_start = (1 - viewbox_y[0]) * vh + vy - y_step / 2
+            y_end = (1 - viewbox_y[1]) * vh + vy + y_step / 2
+            x_vals = np.linspace(x_start, x_end, xres)
+            y_vals = np.linspace(y_start, y_end, yres)
 
         sx_grid, sy_grid = np.meshgrid(x_vals, y_vals)
         sx_list, sy_list = [], []
@@ -1071,9 +1100,16 @@ def side_by_side_txt_plot(
         xres=width,
         yres=height,
         show_colorbar=False,
+        resample="mean",
     )
     pred_hm = heatmap(
-        pred_flipped, vmin=vmin_pred, vmax=vmax_pred, xres=width, yres=height, show_colorbar=False
+        pred_flipped,
+        vmin=vmin_pred,
+        vmax=vmax_pred,
+        xres=width,
+        yres=height,
+        show_colorbar=False,
+        resample="mean",
     )
 
     target_lines = target_hm.split("\n")
@@ -1138,7 +1174,9 @@ def side_by_side_txt_plot(
     delta_grid = 0.0
     if compute_metrics:
         weighted_total = float(metrics["weighted_total"])
-        training_grid_total = float(training_grid_total) if training_grid_total is not None else None
+        training_grid_total = (
+            float(training_grid_total) if training_grid_total is not None else None
+        )
         show_training_comparison = training_losses is not None or training_grid_total is not None
 
         if show_training_comparison:
@@ -1249,3 +1287,39 @@ def side_by_side_txt_plot(
     }
 
     return "\n".join(lines), metrics_out
+
+
+def format_tu_activation_list(
+    tu_log_alpha: np.ndarray | None,
+    tu_idx_to_id: dict[int, str],
+    threshold: float = 0.5,
+    network_tu_ids: set[str] | None = None,
+) -> list[str]:
+    """Format enabled TUs with activation probabilities.
+
+    Args:
+        tu_log_alpha: shape (n_tus,) - log_alpha values for a single design
+        tu_idx_to_id: mapping from TU index to TU name string
+        threshold: sigmoid threshold for enabled TUs (default 0.5)
+        network_tu_ids: if provided, only show TUs in this set (filters to network-specific TUs)
+
+    Returns:
+        List of formatted strings like "TU_CasE_1: ON (0.92)"
+        Only includes TUs where sigmoid(log_alpha) >= threshold.
+        Sorted by activation probability (descending).
+    """
+    if tu_log_alpha is None or len(tu_log_alpha) == 0 or not tu_idx_to_id:
+        return []
+    tu_log_alpha = np.asarray(tu_log_alpha).flatten()
+    probs = 1 / (1 + np.exp(-tu_log_alpha))  # sigmoid
+    enabled_entries = []
+    for idx, tu_name in tu_idx_to_id.items():
+        if idx >= len(probs):
+            continue
+        if network_tu_ids is not None and tu_name not in network_tu_ids:
+            continue
+        prob = float(probs[idx])
+        if prob >= threshold:
+            enabled_entries.append((tu_name, prob))
+    enabled_entries.sort(key=lambda x: -x[1])
+    return [f"{name}: ON ({prob:.2f})" for name, prob in enabled_entries]

@@ -75,16 +75,22 @@ class GradientDescentOptimizer(BaseModel):
     optimizer_stack: list | None = None
     n_steps: int = 1000
     sanitize_grads: bool = True
+    use_two_timescale: bool = False
+    tu_mask_lr_scale: float = 0.1
     _optimizer: Any = None
 
     def model_post_init(self, __context):
-        object.__setattr__(
-            self,
-            "_optimizer",
-            build_optimizer_chain(
+        if self.use_two_timescale:
+            from biocomp.optimutils import build_two_timescale_optimizer
+            opt = build_two_timescale_optimizer(
+                self.optimizer_stack or DEFAULT_OPTIMIZER,
+                tu_mask_lr_scale=self.tu_mask_lr_scale,
+            )
+        else:
+            opt = build_optimizer_chain(
                 self.optimizer_stack or DEFAULT_OPTIMIZER, with_lr_injection=True
-            ),
-        )
+            )
+        object.__setattr__(self, "_optimizer", opt)
 
     def init(
         self, key: jax.random.PRNGKey, params: jnp.ndarray, objective_fn: Callable
