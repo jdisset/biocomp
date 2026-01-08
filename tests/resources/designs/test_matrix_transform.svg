@@ -1,0 +1,7 @@
+<svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+<!-- Background -->
+<rect width="100" height="100" fill="white"/>
+<!-- 45-degree rotated rectangle using matrix transform: cos(45)=0.707, sin(45)=0.707 -->
+<!-- matrix(cos, sin, -sin, cos, tx, ty) = matrix(0.707 0.707 -0.707 0.707 50 20) -->
+<rect width="40" height="20" transform="matrix(0.707 0.707 -0.707 0.707 50 20)" fill="black"/>
+</svg>
