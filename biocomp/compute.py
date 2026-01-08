@@ -66,10 +66,13 @@ class StackNode:
         assert n is not None, f"Node {self.node_id} not found in network {self.network_id}"
         return n
 
-    def get_forward_stacknode(self, stack: "ComputeStack") -> "StackNode":
+    def get_forward_stacknode(self, stack: "ComputeStack") -> "StackNode | None":
         node = self.get(stack)
-        assert node.is_inverse_of is not None, "Node has no inverse"
-        return stack.get_node_from_net_and_compute_id(self.network_id, node.is_inverse_of.node_id)
+        if node.is_inverse_of is None:
+            return None
+        return stack.get_node_from_net_and_compute_id(
+            self.network_id, node.is_inverse_of.node_id, allow_missing=True
+        )
 
     def get_outgoing_edges(self, stack: "ComputeStack") -> list[GraphEdge]:
         return self._get_compute_graph(stack).get_outgoing_edges(self.node_id)
@@ -141,6 +144,7 @@ class StackLayer:
     f_prepare: Optional[Callable] = None
     f_apply: Optional[Callable] = None
     f_commit: Optional[Callable] = None
+    f_introspect: Optional[Callable] = None
 
     # parameter namespace for this layer (e.g., "local/5/aggregation_2x")
     namespace: Optional[str] = None
@@ -215,6 +219,7 @@ class StackLayer:
         self.f_apply = impl.apply
         self.f_out_shapes = impl.output_shapes
         self.f_commit = impl.commit
+        self.f_introspect = impl.introspect
         self.is_built = True
 
     def get_n_outputs(self) -> int:
@@ -294,6 +299,12 @@ class ComputeStack:
     n_tus: int = 0
     inverse_tu_ids: Optional[set[str]] = None  # TUs feeding inverse nodes (never disabled)
     no_masking_tu_ids: Optional[set[str]] = None  # TUs with no_masking=True in recipe
+
+    def get_node(self, network_id: int, node_id: int):
+        """Look up a node from compute_graph by network_id and node_id."""
+        assert 0 <= network_id < len(self.networks), f"network_id {network_id} out of range"
+        graph = self.networks[network_id].compute_graph
+        return graph.nodes.get(node_id)
 
     ### {{{                     --     public interface     --
 
@@ -465,15 +476,18 @@ class ComputeStack:
         )
         return int(start_index), out_shape
 
-    def get_node_from_net_and_compute_id(self, network_id: int, compute_node_id: int) -> StackNode:
+    def get_node_from_net_and_compute_id(
+        self, network_id: int, compute_node_id: int, allow_missing: bool = False
+    ) -> StackNode | None:
         """Returns the NodeKey corresponding to the given network and compute node ids"""
         assert self.node_map is not None, "No node map"
         assert self.layers is not None, "Stack has no layers"
-        assert (
-            network_id,
-            compute_node_id,
-        ) in self.node_map, f"Node not found: {network_id}/{compute_node_id}"
-        layer_id, node_loc = self.node_map[(network_id, compute_node_id)]
+        key = (network_id, compute_node_id)
+        if key not in self.node_map:
+            if allow_missing:
+                return None
+            raise AssertionError(f"Node not found: {network_id}/{compute_node_id}")
+        layer_id, node_loc = self.node_map[key]
         return self.layers[layer_id].nodes[node_loc]
 
     def copy(self):
@@ -485,14 +499,17 @@ class ComputeStack:
 
         _t0 = _time.perf_counter()
 
-        from biocomp.tumasking import TU_LOG_ALPHA_PATH, get_final_mask
+        from biocomp.tumasking import TU_LOG_ALPHA_PATH, TU_BINARY_MASK_PATH, get_final_mask
         from biocomp.network import recipe_to_networks
         import biocomp.biorules as br
 
         tu_id_to_idx = getattr(self, "tu_id_to_idx", None)
-        will_roundtrip = TU_LOG_ALPHA_PATH in params and tu_id_to_idx
+        has_log_alpha = TU_LOG_ALPHA_PATH in params and tu_id_to_idx
+        has_binary_mask = TU_BINARY_MASK_PATH in params and tu_id_to_idx
+        will_roundtrip = has_log_alpha or has_binary_mask
         logger.debug(
             f"COMMIT: TU_LOG_ALPHA in params={TU_LOG_ALPHA_PATH in params}, "
+            f"TU_BINARY_MASK in params={TU_BINARY_MASK_PATH in params}, "
             f"tu_id_to_idx={tu_id_to_idx is not None}, will_roundtrip={will_roundtrip}"
         )
 
@@ -591,6 +608,85 @@ class ComputeStack:
                 net._cleanup_orphaned_bias_nodes()
                 net._cleanup_orphaned_input_nodes(original_output_proteins)
                 net._cleanup_orphaned_transcription_nodes()
+
+        elif has_binary_mask:
+            binary_mask = params[TU_BINARY_MASK_PATH]
+            assert binary_mask.ndim == 2, (
+                f"COMMIT: binary_mask must be 2D (n_networks, n_tus), got {binary_mask.ndim}D"
+            )
+            assert binary_mask.shape[0] >= len(network_copies), (
+                f"binary_mask has {binary_mask.shape[0]} networks but we have {len(network_copies)}"
+            )
+
+            for net_idx, net in enumerate(network_copies):
+                network_binary_mask = binary_mask[net_idx]
+
+                # convert binary mask to pseudo-log_alpha for prune_disabled_tus
+                # binary 1.0 → log_alpha 10.0 (enabled), binary 0.0 → log_alpha -10.0 (disabled)
+                pseudo_log_alpha = jnp.where(network_binary_mask > 0.5, 10.0, -10.0)
+
+                original_output_proteins = net.get_output_proteins()
+                net.prune_disabled_tus(pseudo_log_alpha, tu_id_to_idx)
+
+                edges_to_remove = []
+                for edge_id, edge in net.compute_graph.edges.items():
+                    tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+                    if not tu_ids:
+                        continue
+                    all_disabled = True
+                    for tu_id in tu_ids:
+                        if tu_id not in tu_id_to_idx:
+                            all_disabled = False
+                            break
+                        tu_idx = tu_id_to_idx[tu_id]
+                        assert 0 <= tu_idx < network_binary_mask.shape[0], (
+                            f"tu_idx {tu_idx} out of bounds for binary_mask shape {network_binary_mask.shape}"
+                        )
+                        if float(network_binary_mask[tu_idx]) > 0.5:
+                            all_disabled = False
+                            break
+                    if all_disabled and tu_ids:
+                        edges_to_remove.append(edge_id)
+                for edge_id in edges_to_remove:
+                    del net.compute_graph.edges[edge_id]
+
+                # ERN-aware cleanup: handle ERN nodes with disabled inputs
+                dead_ern_recs = net._cleanup_ern_nodes(pseudo_log_alpha, tu_id_to_idx)
+                dead_ern_recs_by_net[net_idx] = dead_ern_recs
+
+                # Handle cascade: if ERN cleanup disabled additional TUs, remove their edges AND sources
+                additional_disabled = net.metadata.pop("_additional_disabled_tus", set())
+                if additional_disabled:
+                    for edge_id, edge in list(net.compute_graph.edges.items()):
+                        tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+                        if any(tu_id in additional_disabled for tu_id in tu_ids):
+                            del net.compute_graph.edges[edge_id]
+
+                    disabled_source_ids = set()
+                    for tu_id in additional_disabled:
+                        for node in net.compute_graph.get_nodes_by_type("source"):
+                            tu_names = node.extra.get("tu_names_by_slot", {})
+                            cotx_group = node.extra.get("cotx_group", "")
+                            for tu_name in tu_names.values():
+                                full_tu_id = f"{tu_name}_{cotx_group}" if cotx_group else tu_name
+                                if full_tu_id in additional_disabled:
+                                    disabled_source_ids.add(node.node_id)
+                                    break
+
+                    for edge_id, edge in list(net.compute_graph.edges.items()):
+                        if (
+                            edge.source_id in disabled_source_ids
+                            or edge.target_id in disabled_source_ids
+                        ):
+                            del net.compute_graph.edges[edge_id]
+                    for node_id in disabled_source_ids:
+                        if node_id in net.compute_graph.nodes:
+                            del net.compute_graph.nodes[node_id]
+
+                net._cleanup_orphaned_bias_nodes()
+                net._cleanup_orphaned_input_nodes(original_output_proteins)
+                net._cleanup_orphaned_transcription_nodes()
+
         else:
             # fallback: prune based on zero ratios (non-design contexts)
             for net in network_copies:
@@ -686,6 +782,20 @@ class ComputeStack:
                 )
                 return net
 
+            # Check if nb_inputs changed (critical for inverted networks)
+            original_nb_inputs = net.nb_inputs
+            rebuilt_nb_inputs = rebuilt_net.nb_inputs
+            if rebuilt_nb_inputs != original_nb_inputs:
+                # nb_inputs changed means inverted path structure changed.
+                # We can't skip rebuild because the pruned network may have broken
+                # sources (sources without inv_aggregation input). The rebuilt
+                # network is structurally valid even if it has fewer inputs.
+                logger.warning(
+                    f"COMMIT: Recipe roundtrip changed nb_inputs from {original_nb_inputs} "
+                    f"to {rebuilt_nb_inputs}. Inverted inputs may have been lost. "
+                    f"Using rebuilt network (pruned network may have broken structure)."
+                )
+
             rebuilt_net.name = net.name
             rebuilt_net.metadata = net.metadata
 
@@ -738,14 +848,14 @@ class ComputeStack:
                 f"{context}: Edge {eid} references missing target node {edge.target_id}"
             )
 
-            # aggregation outputs are determined by ratios/members length
+            # aggregation outputs are determined by members length
             if src.node_type == "aggregation":
-                n_outputs = len(src.extra.get("ratios", []))
+                members = src.extra.get("members", {})
+                n_outputs = len(members) if isinstance(members, dict) else len(members)
                 assert edge.from_output_slot < n_outputs, (
                     f"{context}: Edge {eid} from aggregation[{edge.source_id}] has "
                     f"from_output_slot={edge.from_output_slot} but aggregation only has "
-                    f"{n_outputs} outputs (ratios={src.extra.get('ratios', [])}, "
-                    f"members={src.extra.get('members', [])})"
+                    f"{n_outputs} outputs (members={members})"
                 )
 
     def __repr__(self):
@@ -856,8 +966,9 @@ class ComputeStack:
                 )
         first_key = self.layers[0].nodes[0]
         first_node = self.networks[first_key.network_id].compute_graph.nodes[first_key.node_id]
-        assert first_node.node_type in ("input", "bias"), (
-            f"First node must be input or bias: {first_node.node_type}"
+        # "numeric" is valid for networks without inputs (e.g., after TU pruning removes all input nodes)
+        assert first_node.node_type in ("input", "bias", "numeric"), (
+            f"First node must be input, bias, or numeric: {first_node.node_type}"
         )
 
     def get_all_node_keys(self) -> list[StackNode]:
@@ -1205,11 +1316,21 @@ class ComputeStack:
                     f"tu_enabled_random_vars.shape[0]={tu_enabled_random_vars.shape[0]} != n_networks={len(self.networks)}"
                 )
 
-            running_output = inputs.reshape(-1)
+            # Check if layer 0 is the input layer
+            layer0_is_input = self.layers[0].f_type == "input"
+            if layer0_is_input:
+                # input layer: outputs are the inputs themselves
+                running_output = inputs.reshape(-1)
+                start_layer = 1
+            else:
+                # no input layer (e.g., bias-only network): start with empty output
+                running_output = jnp.array([])
+                start_layer = 0
+
             stack_aux = {}
             stack_grad_wrt_inputs = jnp.array([])
 
-            for lid in range(1, len(self.layers)):  # skip the input layer
+            for lid in range(start_layer, len(self.layers)):
                 assert running_output.shape[0] == self.layers_start_index[lid]
 
                 n_nodes = len(self.layers[lid].nodes)

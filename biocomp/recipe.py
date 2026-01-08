@@ -636,9 +636,10 @@ def name_transcription_unit(tu: TranscriptionUnit, lib: PartsLibrary) -> Optiona
     flat_parts = [p for p in flat_parts if p and p != ""]
 
     matching_l1s = []
+    sorted_flat = sorted(flat_parts)
     for l1_name in lib.L1s.index:
         l1_parts = get_l1_parts(l1_name, lib)
-        if l1_parts and l1_parts == flat_parts:
+        if l1_parts and sorted(l1_parts) == sorted_flat:
             matching_l1s.append(l1_name)
 
     if not matching_l1s:

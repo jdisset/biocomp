@@ -15,6 +15,7 @@ from biocomp.optimutils import (
     compile_step,
     run_logger_callbacks,
     get_checkify_enabled,
+    _logger_needs_params_sync,
 )
 from biocomp.utils import PartialFunction, PartialFunctionResult
 
@@ -242,6 +243,70 @@ class TestRunLoggerCallbacks:
                 stack=None,
                 period_filter=lambda p, s: p > 0 and s % p == 0,
             )
+
+
+class TestLoggerNeedsParamsSync:
+    """Test _logger_needs_params_sync helper function."""
+
+    def test_empty_logger_list_returns_false(self):
+        assert _logger_needs_params_sync([], step=10) is False
+
+    def test_logger_without_required_arrays_returns_false(self):
+        class MockLogger:
+            periods = 10
+
+        assert _logger_needs_params_sync([MockLogger()], step=10) is False
+
+    def test_logger_with_latest_params_requirement_returns_true(self):
+        class MockLogger:
+            periods = 10
+            required_arrays = ["yhatdep", "latest_params"]
+
+        assert _logger_needs_params_sync([MockLogger()], step=10) is True
+
+    def test_logger_with_other_requirement_returns_false(self):
+        class MockLogger:
+            periods = 10
+            required_arrays = ["yhatdep"]
+
+        assert _logger_needs_params_sync([MockLogger()], step=10) is False
+
+    def test_logger_period_mismatch_returns_false(self):
+        class MockLogger:
+            periods = 10
+            required_arrays = ["latest_params"]
+
+        assert _logger_needs_params_sync([MockLogger()], step=5) is False
+        assert _logger_needs_params_sync([MockLogger()], step=0) is False
+
+    def test_uses_frequency_attribute_fallback(self):
+        class MockLogger:
+            frequency = 5
+            required_arrays = ["latest_params"]
+
+        assert _logger_needs_params_sync([MockLogger()], step=5) is True
+        assert _logger_needs_params_sync([MockLogger()], step=10) is True
+        assert _logger_needs_params_sync([MockLogger()], step=3) is False
+
+    def test_periods_list_uses_first_element(self):
+        class MockLogger:
+            periods = [5, 10]
+            required_arrays = ["latest_params"]
+
+        assert _logger_needs_params_sync([MockLogger()], step=5) is True
+        assert _logger_needs_params_sync([MockLogger()], step=10) is True
+
+    def test_multiple_loggers_any_match(self):
+        class LoggerNoReq:
+            periods = 10
+
+        class LoggerWithReq:
+            periods = 7
+            required_arrays = ["latest_params"]
+
+        loggers = [LoggerNoReq(), LoggerWithReq()]
+        assert _logger_needs_params_sync(loggers, step=7) is True
+        assert _logger_needs_params_sync(loggers, step=10) is False
 
 
 class TestAsSchedule:

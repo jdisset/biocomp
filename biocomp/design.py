@@ -504,7 +504,9 @@ class DesignConfig(DesignOptimConfig):
     latent_tu_hidden_dim: int = 32
 
     # TU masking convergence improvements (see tu_masking_introduction.md)
-    use_probabilistic_or: bool = False  # probabilistic OR for multi-TU edges (requires code integration)
+    use_probabilistic_or: bool = (
+        False  # probabilistic OR for multi-TU edges (requires code integration)
+    )
     use_two_timescale: bool = False  # slower LR for log_alpha via optax.multi_transform
     tu_mask_lr_scale: float = 0.1  # LR multiplier for log_alpha when use_two_timescale=True
 
@@ -801,6 +803,7 @@ def _start_pluggable(
     dconf: DesignConfig,
     model: BiocompModel,
     loggers: list[tuple[int, Callable]] | None = None,
+    logger_objects: list | None = None,
     async_handler=None,
     lock_ratios: bool = False,
 ):
@@ -960,6 +963,16 @@ def _start_pluggable(
         if loggers and any(int(opt_state.step) % p == 0 or p == -1 for p, _ in loggers):
             yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, current_step)
             step_data = {"loss": [[float(opt_state.best_loss)]], "yhatdep": yhatdep_arr, **metrics}
+            needs_params = logger_objects and any(
+                'latest_params' in getattr(lo, 'required_arrays', [])
+                for lo in logger_objects
+                if int(opt_state.step) % getattr(lo, 'periods', 1) == 0
+            )
+            if needs_params:
+                best_genome = opt_state.best_params
+                if is_nsga2:
+                    best_genome = best_genome[nsga2_n_tus:]
+                step_data["latest_params"] = codec.decode(best_genome, apply_constraints=True)
             for period, callback in loggers:
                 if int(opt_state.step) % period == 0 or period == -1:
                     callback(int(opt_state.step), None, step_history=step_data, stack=stack)
@@ -975,7 +988,7 @@ def _start_pluggable(
         best_genome = best_genome[nsga2_n_tus:]
     final_params = codec.decode(best_genome, apply_constraints=True)
 
-    final_step_data = {"loss": [[float(opt_state.best_loss)]]}
+    final_step_data = {"loss": [[float(opt_state.best_loss)]], "latest_params": final_params}
 
     from .designoptim import NSGA2DesignState
 
@@ -1007,12 +1020,15 @@ def start(
     dconf: DesignConfig,
     model: BiocompModel,
     loggers: list[tuple[int, Callable]] | None = None,
+    logger_objects: list | None = None,
     async_handler=None,
     lock_ratios: bool = False,
 ):
     if dconf.uses_pluggable_optimizer:
         logger.info("Using pluggable optimizer: %s", type(dconf.pluggable_optimizer).__name__)
-        return _start_pluggable(dmanager, dconf, model, loggers, async_handler, lock_ratios)
+        return _start_pluggable(
+            dmanager, dconf, model, loggers, logger_objects, async_handler, lock_ratios
+        )
 
     timer = _PhaseTimer()
     logger.info("=" * 60)
@@ -1194,6 +1210,7 @@ def start(
         key=loop_key,
         stack=stack,
         loggers=loggers,
+        logger_objects=logger_objects,
         async_handler=async_handler,
         verbose=True,
     )

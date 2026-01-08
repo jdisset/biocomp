@@ -102,7 +102,53 @@ def hard_bias(
 
     output_shapes = [tuple(shape)]
 
-    return LayerInstance(prepare, apply, output_shapes, commit=commit)
+    def introspect(
+        params: ParameterTree,
+        nodelist: list[StackNode],
+        stack: ComputeStack,
+        network_id: int,
+        local_only: bool = True,
+    ) -> list:
+        from biocomp.paramintrospect import NodeParamInfo, ParamValue, ParamKind
+
+        result = []
+        for node_idx, node in enumerate(nodelist):
+            if node.network_id != network_id:
+                continue
+
+            extra = node.get(stack).extra
+            fluo_specs = extra.get("fluo_bias") or extra.get("fluo_bias_data") or {}
+            protein = fluo_specs.get("protein", "unknown")
+            node_name = f"bias_{protein}"
+
+            raw_val = float(np.mean(np.asarray(params[f"{namespace}/raw_value"][node_idx])))
+            min_val = float(np.mean(np.asarray(params[f"{namespace}/min_value"][node_idx])))
+            max_val = float(np.mean(np.asarray(params[f"{namespace}/max_value"][node_idx])))
+            bias_val = float(np.clip(raw_val, min_val, max_val))
+
+            is_constrained = abs(min_val - max_val) < 1e-6
+
+            ungrouped = [
+                ParamValue(
+                    name="bias",
+                    kind=ParamKind.BIAS,
+                    value=bias_val,
+                    bounds=None if is_constrained else (min_val, max_val),
+                )
+            ]
+
+            result.append(
+                NodeParamInfo(
+                    node_type="hard_bias",
+                    node_name=node_name,
+                    network_id=network_id,
+                    ungrouped=ungrouped,
+                )
+            )
+
+        return result
+
+    return LayerInstance(prepare, apply, output_shapes, commit=commit, introspect=introspect)
 
 
 def bias(
@@ -207,4 +253,49 @@ def bias(
 
     output_shapes = [tuple(shape)]
 
-    return LayerInstance(prepare, apply, output_shapes, commit=commit)
+    def introspect(
+        params: ParameterTree,
+        nodelist: list[StackNode],
+        stack: ComputeStack,
+        network_id: int,
+        local_only: bool = True,
+    ) -> list:
+        from biocomp.paramintrospect import NodeParamInfo, ParamValue, ParamKind
+
+        result = []
+        for node_idx, node in enumerate(nodelist):
+            if node.network_id != network_id:
+                continue
+
+            extra = node.get(stack).extra
+            fluo_specs = extra.get("fluo_bias") or extra.get("fluo_bias_data") or {}
+            protein = fluo_specs.get("protein", "unknown")
+            node_name = f"bias_{protein}"
+
+            bias_val = float(np.mean(np.asarray(get_bias_value(params, node_idx))))
+            min_val = float(np.mean(np.asarray(params[f"{namespace}/min_value"][node_idx])))
+            max_val = float(np.mean(np.asarray(params[f"{namespace}/max_value"][node_idx])))
+
+            is_constrained = abs(min_val - max_val) < 1e-6
+
+            ungrouped = [
+                ParamValue(
+                    name="bias",
+                    kind=ParamKind.BIAS,
+                    value=bias_val,
+                    bounds=None if is_constrained else (min_val, max_val),
+                )
+            ]
+
+            result.append(
+                NodeParamInfo(
+                    node_type="bias",
+                    node_name=node_name,
+                    network_id=network_id,
+                    ungrouped=ungrouped,
+                )
+            )
+
+        return result
+
+    return LayerInstance(prepare, apply, output_shapes, commit=commit, introspect=introspect)

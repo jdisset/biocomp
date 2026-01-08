@@ -198,6 +198,21 @@ def run_logger_callbacks(loggers, step, config, step_history, stack, period_filt
                 raise
 
 
+def _logger_needs_params_sync(logger_objects: list, step: int) -> bool:
+    """Check if any logger triggering at this step requires latest_params."""
+    for logger_obj in logger_objects:
+        period = getattr(logger_obj, 'periods', None)
+        if period is None:
+            period = getattr(logger_obj, 'frequency', 1)
+        if isinstance(period, list):
+            period = period[0] if period else 1
+        if period is not None and period > 0 and step > 0 and step % period == 0:
+            reqs = getattr(logger_obj, 'required_arrays', [])
+            if 'latest_params' in reqs:
+                return True
+    return False
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                  --     training step functions     --
@@ -736,6 +751,7 @@ def optimize(
     key: ArrayLike,
     stack: ComputeStack,
     loggers: Optional[List[Tuple[int, Callable]]] = None,
+    logger_objects: Optional[List] = None,
     async_handler=None,
     verbose=False,
     defer_sync: bool = True,
@@ -743,6 +759,10 @@ def optimize(
     precompiled: bool = False,
 ):
     loggers = loggers or []
+    # Combine sync logger objects with async handler's logger objects
+    effective_logger_objects = list(logger_objects or [])
+    if async_handler and hasattr(async_handler, 'logger_objects'):
+        effective_logger_objects.extend(async_handler.logger_objects)
 
     assert_that(xbatches.shape[:3]).is_equal_to(
         (steps_per_epoch, config.n_replicates, config.batches_per_step)
@@ -781,6 +801,14 @@ def optimize(
 
     logger.info(f"[OPTIMIZE] Starting {config.n_epochs} epochs, {n_total_steps} total steps")
     logger.info(f"[OPTIMIZE] Config: {steps_per_epoch} steps/epoch, defer_sync={defer_sync}")
+    if effective_logger_objects:
+        reqs_info = [
+            (type(lo).__name__, getattr(lo, 'required_arrays', []))
+            for lo in effective_logger_objects
+        ]
+        logger.info(f"[OPTIMIZE] Logger requirements: {reqs_info}")
+    else:
+        logger.warning("[OPTIMIZE] No logger_objects available - cannot honor required_arrays for sync")
 
     t_loop_start = time.perf_counter()
     epoch_start_time = t_loop_start
@@ -788,7 +816,13 @@ def optimize(
 
     for i, step_key in enumerate(jax.random.split(key, n_total_steps), 1):
         is_epoch_boundary = i % steps_per_epoch == 0
-        should_sync = not defer_sync or (i % effective_sync_every == 0) or is_epoch_boundary
+        logger_needs_sync = _logger_needs_params_sync(effective_logger_objects, i)
+        should_sync = (
+            not defer_sync
+            or (i % effective_sync_every == 0)
+            or is_epoch_boundary
+            or logger_needs_sync
+        )
 
         if is_epoch_boundary:
             # End of epoch timing

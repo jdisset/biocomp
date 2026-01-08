@@ -374,7 +374,7 @@ def test_binary_mask_commit_removes_disabled_tus(lib, binary_mask_stack):
             for net in networks:
                 for node in net.compute_graph.nodes.values():
                     if "aggregation" in node.node_type.lower():
-                        total += len(node.extra.get("members", []))
+                        total += len(node.extra.get("members", {}))
             return total
 
         members_enabled = count_members(committed_enabled)

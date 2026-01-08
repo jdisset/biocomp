@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 
 from biocomp.library import LibraryContext, PartsLibrary
-from biocomp.recipe import Recipe, TranscriptionUnit, CoTxList, Slot, CoTransfection
+from biocomp.recipe import Recipe, TranscriptionUnit, CoTxList, Slot, CoTransfection, name_transcription_unit
 from biocomp.logging_config import get_logger
 from biocomp.graphengine import (
     GraphState,
@@ -88,7 +88,10 @@ class Network(BaseModel):
 
     @property
     def nb_inputs(self):
-        return len(self.get_inverted_input_proteins())
+        # include_disabled=True ensures committed networks with pruned TUs
+        # still have the same nb_inputs as the original network (for spatial variation)
+        mapping = self.get_inverted_input_positions(include_disabled=True)
+        return len(mapping)
 
     def get_nb_outputs(self) -> int:
         """Compatibility method for old code expecting get_nb_outputs()"""
@@ -114,47 +117,68 @@ class Network(BaseModel):
         assert len(mapping) <= len(output_proteins), f"Invalid mapping: {mapping}"
         return [output_proteins[mapping[i]] for i in range(len(mapping))]
 
-    def get_inverted_input_positions(self, include_biases: bool = False) -> dict[int, int]:
+    def get_inverted_input_positions(
+        self, include_biases: bool = False, include_disabled: bool = False
+    ) -> dict[int, int]:
         """Returns a mapping from input position to output position
 
         Args:
             include_biases: If True, also includes bias nodes in the mapping
+            include_disabled: If True, includes disabled inputs (input_from_output=-1)
+                in the mapping. This is needed to preserve nb_inputs for committed
+                networks where some inputs target pruned outputs.
+
+        Returns:
+            dict mapping input_position to output_position. Disabled inputs have
+            output_position = -1 if include_disabled=True.
+
+        NOTE: When include_disabled=False, disabled inputs are excluded entirely.
+        When include_disabled=True, they are included with value -1.
         """
         assert self.compute_graph is not None
         mapping = {}
         mask_types = ["input"]
 
-        # If including biases, add bias nodes to the types
         if include_biases:
             mask_types.append("bias")
 
         inputs = [n for n in self.compute_graph.nodes.values() if n.node_type in mask_types]
+
+        # Collect inputs with their original positions
+        all_inputs = []
         for node in inputs:
             if node.node_type == "bias":
                 if "input_from_output" not in node.extra:
-                    # non-inverted networks
                     continue
-                # For bias nodes, use a special position (after regular inputs)
-                # Add number of regular inputs to get the bias position
-                regular_input_count = len([n for n in inputs if n.node_type == "input"])
-                bias_input_pos = regular_input_count + len(
-                    [
-                        n
-                        for n in inputs
-                        if n.node_type == "bias"
-                        and n.node_id < node.node_id
-                        and "input_from_output" in n.extra
-                    ]
-                )
-                mapping[bias_input_pos] = node.extra["input_from_output"]
+                input_from_output = node.extra["input_from_output"]
+                if input_from_output < 0 and not include_disabled:
+                    continue
+                all_inputs.append(("bias", node.node_id, input_from_output))
             else:
+                if "input_from_output" not in node.extra:
+                    continue
+                input_from_output = node.extra["input_from_output"]
+                if input_from_output < 0 and not include_disabled:
+                    continue
                 assert "input_position" in node.extra, f"input_position not in {node.extra}"
-                assert "input_from_output" in node.extra, f"input_from_output not in {node.extra}"
-                assert node.extra["input_position"] not in mapping
-                mapping[node.extra["input_position"]] = node.extra["input_from_output"]
+                all_inputs.append(("input", node.extra["input_position"], input_from_output))
 
+        # Sort by original position for consistent ordering
+        all_inputs.sort(key=lambda x: (0 if x[0] == "input" else 1, x[1]))
+
+        # Build mapping with renumbered positions (compact, no gaps)
+        for new_pos, (node_type, _, output_pos) in enumerate(all_inputs):
+            mapping[new_pos] = output_pos
+
+        if not mapping:
+            return {}
+
+        # Validate enabled inputs (non-negative output_pos) have unique targets
+        enabled_outputs = [v for v in mapping.values() if v >= 0]
         assert set(mapping.keys()) == set(range(len(mapping.keys()))), f"Invalid mapping: {mapping}"
-        assert len(mapping.keys()) == len(set(mapping.values())), f"Invalid mapping: {mapping}"
+        assert len(enabled_outputs) == len(set(enabled_outputs)), (
+            f"Invalid mapping (duplicate enabled outputs): {mapping}"
+        )
         return mapping
 
     def get_bias_proteins(self) -> list[str]:
@@ -605,6 +629,9 @@ class Network(BaseModel):
         """
         assert self.compute_graph is not None, "compute_graph must exist"
 
+        # save original output proteins BEFORE any pruning for renumbering later
+        original_output_proteins = self.get_output_proteins()
+
         # SINGLE SOURCE OF TRUTH: prefer hard-concrete masks
         if tu_log_alpha is not None:
             assert tu_id_to_idx is not None, "tu_id_to_idx required when tu_log_alpha is provided"
@@ -635,17 +662,53 @@ class Network(BaseModel):
         for nid in nodes_to_remove:
             del self.compute_graph.nodes[nid]
 
-        self._cleanup_orphaned_bias_nodes()
-        self._cleanup_orphaned_input_nodes()
+        # IMPORTANT: cleanup order matters!
+        # 1. transcription nodes first - removes cascading orphans and their edges to output
+        # 2. then bias/input - these depend on accurate get_output_proteins() count
+        #    and need original_output_proteins for renumbering
         self._cleanup_orphaned_transcription_nodes()
+        self._cleanup_orphaned_bias_nodes()
+        self._cleanup_orphaned_input_nodes(original_output_proteins)
 
     def _cleanup_orphaned_transcription_nodes(self):
-        """Remove orphaned nodes iteratively (forward + inverted paths)."""
+        """Remove orphaned nodes iteratively (forward + inverted paths).
+
+        Removes nodes with 0 incoming edges for all forward and inverted node types.
+        After TU pruning and inv_* cleanup, some nodes may have broken inputs
+        and cause stack build failures if not removed.
+        """
+        # First pass: remove inv_* nodes whose forward counterpart (is_inverse_of) is missing
+        # This can happen after TU pruning removes source/transcription nodes
+        existing_node_ids = set(self.compute_graph.nodes.keys())
+        inv_nodes_to_remove = []
+        for node in self.compute_graph.nodes.values():
+            if not node.node_type.startswith("inv_"):
+                continue
+            if node.is_inverse_of is None:
+                continue
+            if node.is_inverse_of.node_id not in existing_node_ids:
+                inv_nodes_to_remove.append(node.node_id)
+
+        if inv_nodes_to_remove:
+            edges_to_remove = [
+                eid
+                for eid, e in self.compute_graph.edges.items()
+                if e.source_id in inv_nodes_to_remove or e.target_id in inv_nodes_to_remove
+            ]
+            for eid in edges_to_remove:
+                del self.compute_graph.edges[eid]
+            for nid in inv_nodes_to_remove:
+                del self.compute_graph.nodes[nid]
+
         orphan_types = (
-            "source",
+            # After TU pruning, remaining nodes may have 0 incoming edges.
+            # These must be removed to prevent cascade failures during stack build.
+            # NOTE: "source" is NOT included here because commit() handles source
+            # cleanup via _cleanup_ern_nodes and recipe roundtrip. Additionally,
+            # "sequestron_ERN" is handled by _cleanup_ern_nodes in commit().
+            "aggregation",
             "transcription",
             "translation",
-            "aggregation",
             "output",
             "inv_transcription",
             "inv_translation",
@@ -678,7 +741,7 @@ class Network(BaseModel):
                     del self.compute_graph.nodes[nid]
 
     def _cleanup_orphaned_bias_nodes(self):
-        """Remove bias nodes whose output protein is no longer valid after TU pruning."""
+        """Remove or renumber bias nodes whose output protein shifted or was pruned."""
         output_proteins = self.get_output_proteins()
         bias_nodes_to_remove = []
 
@@ -687,15 +750,19 @@ class Network(BaseModel):
             if input_from_output is None:
                 continue
 
-            if input_from_output >= len(output_proteins):
-                bias_nodes_to_remove.append(node.node_id)
-                continue
-
             fluo_bias = node.extra.get("fluo_bias")
-            if fluo_bias and isinstance(fluo_bias, dict):
-                expected_protein = fluo_bias.get("protein")
-                actual_protein = output_proteins[input_from_output]
-                if expected_protein and expected_protein != actual_protein:
+            expected_protein = fluo_bias.get("protein") if fluo_bias and isinstance(fluo_bias, dict) else None
+
+            if expected_protein:
+                # use protein name to renumber or remove
+                if expected_protein in output_proteins:
+                    new_position = output_proteins.index(expected_protein)
+                    node.extra["input_from_output"] = new_position
+                else:
+                    bias_nodes_to_remove.append(node.node_id)
+            else:
+                # fallback: just check if index is out of bounds
+                if input_from_output >= len(output_proteins):
                     bias_nodes_to_remove.append(node.node_id)
 
         if not bias_nodes_to_remove:
@@ -713,50 +780,62 @@ class Network(BaseModel):
             del self.compute_graph.nodes[nid]
 
     def _cleanup_orphaned_input_nodes(self, original_output_proteins: list[str] | None = None):
-        """Remove input nodes referencing pruned output positions."""
+        """Renumber input nodes referencing pruned output positions.
+
+        If original_output_proteins is provided, nodes are renumbered to match
+        the new positions of their target proteins. If the target protein is
+        removed, the node is marked as "disabled" (input_from_output = -1)
+        rather than removed - this preserves the network structure for the
+        inverted path.
+
+        NOTE: Input nodes with input_from_output = -1 should read as 0 during
+        computation, matching training behavior where disabled TUs produce 0.
+        """
         current_output_proteins = self.get_output_proteins()
-        input_nodes_to_remove = []
 
         for node in self.compute_graph.get_nodes_by_type("input"):
             input_from_output = node.extra.get("input_from_output")
             if input_from_output is None:
                 continue
-
-            if input_from_output >= len(current_output_proteins):
-                input_nodes_to_remove.append(node.node_id)
+            # skip already-disabled nodes (e.g., set by prune_disabled_tus)
+            if input_from_output < 0:
                 continue
 
             if original_output_proteins is not None:
+                # use original mapping to find target protein and renumber
                 if input_from_output >= len(original_output_proteins):
-                    input_nodes_to_remove.append(node.node_id)
+                    # OOB - mark as disabled
+                    node.extra["input_from_output"] = -1
                     continue
                 original_protein = original_output_proteins[input_from_output]
                 if original_protein not in current_output_proteins:
-                    input_nodes_to_remove.append(node.node_id)
+                    # protein was removed - mark as disabled instead of removing
+                    node.extra["input_from_output"] = -1
+                else:
+                    # renumber to new position
+                    new_position = current_output_proteins.index(original_protein)
+                    node.extra["input_from_output"] = new_position
+            else:
+                # fallback: just check if index is out of bounds
+                if input_from_output >= len(current_output_proteins):
+                    # OOB - mark as disabled
+                    node.extra["input_from_output"] = -1
 
-        if not input_nodes_to_remove:
-            return
-
-        edges_to_remove = [
-            eid
-            for eid, e in self.compute_graph.edges.items()
-            if e.source_id in input_nodes_to_remove or e.target_id in input_nodes_to_remove
-        ]
-        for eid in edges_to_remove:
-            del self.compute_graph.edges[eid]
-
-        for nid in input_nodes_to_remove:
-            del self.compute_graph.nodes[nid]
-
-    def to_recipe(self, strip_ern_recs: set[tuple[str, str]] | None = None) -> Recipe:
+    def to_recipe(
+        self,
+        strip_ern_recs: set[tuple[str, str]] | None = None,
+        auto_name_from_l1: bool = False,
+    ) -> Recipe:
         """Converts the network back to a Recipe object
 
         Args:
             strip_ern_recs: Set of (tu_id, part_name) tuples to filter out (dead ERN_rec sites)
+            auto_name_from_l1: If True, attempt to name TUs after matching L1 constructs
+                              from the parts library. Non-matching TUs get generic "tu_N" names.
         """
         cotx_groups = self._extract_cotx_groups()
         tus_and_ratios_by_cotx = self._build_transcription_units(
-            cotx_groups, strip_ern_recs=strip_ern_recs
+            cotx_groups, strip_ern_recs=strip_ern_recs, auto_name_from_l1=auto_name_from_l1
         )
         bias_by_cotx = self._extract_bias_nodes()
 
@@ -815,7 +894,7 @@ class Network(BaseModel):
         )
 
     def _extract_cotx_groups(self) -> dict[str, dict]:
-        from biocomp.recipe import NumRange
+        from biocomp.recipe import NumRange, RatioSpec
 
         cotx_groups = {}
         assert self.compute_graph is not None
@@ -829,26 +908,47 @@ class Network(BaseModel):
 
         for node in self.compute_graph.get_nodes_by_type("aggregation"):
             group_id = node.extra["cotx_group"]
-            ratios = []
-            if "ratio_ranges" in node.extra:
-                ratio_ranges = node.extra["ratio_ranges"]
-                base_ratios = node.extra["ratios"]
-                for base_ratio, ratio_range in zip(base_ratios, ratio_ranges):
-                    if ratio_range is not None and isinstance(ratio_range, dict):
-                        ratios.append(
-                            NumRange(
-                                min=ratio_range.get("min"),
-                                max=ratio_range.get("max"),
-                                init=ratio_range.get("init"),
-                            )
-                        )
+            members = node.extra.get("members", {})
+
+            if isinstance(members, dict):
+                sorted_ids = sorted(members.keys())
+                base_ratios = []
+                ratio_ranges_list = []
+                locked_list = []
+                for mid in sorted_ids:
+                    m = members[mid]
+                    if isinstance(m, dict):
+                        base_ratios.append(m.get("ratio", 1.0))
+                        ratio_ranges_list.append(m.get("ratio_range"))
+                        locked_list.append(m.get("locked", False))
                     else:
-                        ratios.append(base_ratio)
+                        base_ratios.append(1.0)
+                        ratio_ranges_list.append(None)
+                        locked_list.append(False)
             else:
-                ratios = node.extra["ratios"]
+                sorted_ids = list(members) if members else []
+                base_ratios = node.extra.get("ratios", [1.0] * len(sorted_ids))
+                ratio_ranges_list = node.extra.get("ratio_ranges", [None] * len(sorted_ids))
+                locked_list = node.extra.get("ratio_locked", [False] * len(sorted_ids))
+
+            ratios = []
+            for base_ratio, ratio_range, is_locked in zip(base_ratios, ratio_ranges_list, locked_list):
+                if is_locked:
+                    ratios.append(RatioSpec(value=base_ratio, locked=True))
+                elif ratio_range is not None and isinstance(ratio_range, dict):
+                    ratios.append(
+                        NumRange(
+                            min=ratio_range.get("min"),
+                            max=ratio_range.get("max"),
+                            init=ratio_range.get("init"),
+                        )
+                    )
+                else:
+                    ratios.append(base_ratio)
+
             cotx_groups[group_id] = {
                 "ratios": ratios,
-                "source_ids": node.extra["members"],
+                "source_ids": sorted_ids,
                 "cotx_index": source_cotx_indices.get(group_id, 0),
             }
 
@@ -870,9 +970,13 @@ class Network(BaseModel):
         cotx_groups: dict,
         prune_zero_ratios: bool = True,
         strip_ern_recs: set[tuple[str, str]] | None = None,
+        auto_name_from_l1: bool = False,
     ) -> dict[str, tuple[list[TranscriptionUnit], list]]:
         zero_ratio_sources = self.get_zero_ratio_source_ids() if prune_zero_ratios else set()
         strip_ern_recs = strip_ern_recs or set()
+
+        lib = LibraryContext.get_library() if auto_name_from_l1 else None
+        tu_counter = 1
 
         tus_and_ratios_by_cotx = {}
         for group_id, info in cotx_groups.items():
@@ -932,6 +1036,14 @@ class Network(BaseModel):
 
                 if param_ref_ids:
                     tu.param_ref_ids = dict(param_ref_ids)
+
+                if auto_name_from_l1 and lib is not None:
+                    l1_name = name_transcription_unit(tu, lib)
+                    if l1_name:
+                        tu.name = l1_name
+                    else:
+                        tu.name = f"tu_{tu_counter}"
+                        tu_counter += 1
 
                 tus.append(tu)
             tus_and_ratios_by_cotx[group_id] = (tus, reordered_ratios)

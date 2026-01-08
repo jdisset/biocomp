@@ -104,12 +104,17 @@ def compute_fingerprint(
     """
     from biocomptools.modelmodel import NetworkModel
 
-    network = network_model.stack.networks[network_idx]
+    networks = network_model.stack.networks
+    network = networks[network_idx]
     n_inputs = network.nb_inputs
     X = _generate_canonical_grid(n_inputs, resolution, seed)
 
-    single_nm = NetworkModel(model=network_model.model, network=network)
-    Y, _ = single_nm.predict(
+    if len(networks) == 1:
+        nm = network_model
+    else:
+        nm = NetworkModel(model=network_model.model, network=network)
+
+    Y, _ = nm.predict(
         X,
         key=jax.random.PRNGKey(seed),
         disable_variational=True,

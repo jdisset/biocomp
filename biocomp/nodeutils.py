@@ -21,6 +21,9 @@ class LayerInstance:
     apply: Callable[[NDArray, NDArray, ParameterTree, NodeID, NDArray], ResultAndAux]
     output_shapes: list[tuple[int]]
     commit: Optional[Callable[[ParameterTree, list[StackNode], ComputeStack], None]] = None
+    introspect: Optional[
+        Callable[[ParameterTree, list[StackNode], ComputeStack, int, bool], list]
+    ] = None
 
     def __post_init__(self):
         assert all(isinstance(shape, tuple) for shape in self.output_shapes), (
@@ -81,6 +84,13 @@ def add_random_var_ids(params: ParameterTree, num_nodes: int, num_per_node, name
 
 
 def reference_forward_random_var_ids(stack, params, nodelist, inv_namespace):
+    # check if all forward nodes exist - skip if any are missing (pruned network)
+    all_forward_exist = all(node.get_forward_stacknode(stack) is not None for node in nodelist)
+    if not all_forward_exist:
+        # pruned network with missing forward nodes - skip reference setup
+        # the inv_* nodes will use default random variable handling
+        return
+
     ref = ArrayRef(params.data)
     for node in nodelist:
         fwd_node = node.get_forward_stacknode(stack)
@@ -157,8 +167,7 @@ def add_node_network_ids(
         )
         if stack is not None:
             assert nid < len(stack.networks), (
-                f"network_id {nid} >= n_networks {len(stack.networks)} "
-                f"for node {i} in {namespace}"
+                f"network_id {nid} >= n_networks {len(stack.networks)} for node {i} in {namespace}"
             )
         network_ids.append(nid)
 

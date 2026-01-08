@@ -451,7 +451,120 @@ def transform_nn(
 
     output_shape = [(1,)]
 
-    return LayerInstance(prepare, apply, output_shape, commit=commit)
+    def introspect(
+        params: ParameterTree,
+        nodelist: list[StackNode],
+        stack: ComputeStack,
+        network_id: int,
+        local_only: bool = True,
+    ) -> list:
+        from biocomp.paramintrospect import (
+            NodeParamInfo,
+            TUParamGroup,
+            ParamValue,
+            ParamKind,
+            InputSlot,
+            get_tu_prob,
+            is_tu_enabled,
+        )
+
+        if is_inverse:
+            return []
+
+        result = []
+        for node_idx, node in enumerate(nodelist):
+            if node.network_id != network_id:
+                continue
+
+            extra = node.get(stack).extra
+            node_name = extra.get("name", f"{transform_name}_{node_idx}")
+
+            rates = np.asarray(params[f"{namespace}/{rate_name}"][node_idx])
+            resolved_names = qz.get_quantized_part_names(
+                rates,
+                params,
+                quantization_names,
+                quantization_values_path,
+                quantization_mask_path,
+                node_idx,
+            )
+
+            edges = node.get_incoming_edges(stack)
+            edges_sorted = sorted(edges, key=lambda e: e.to_input_slot)
+
+            input_tu_path = f"{namespace}/input_tu_indices"
+            tu_indices = None
+            if input_tu_path in params:
+                tu_arr = params[input_tu_path]
+                tu_indices = np.asarray(tu_arr.view() if hasattr(tu_arr, "view") else tu_arr)
+                if tu_indices.ndim >= 1 and node_idx < tu_indices.shape[0]:
+                    tu_indices = tu_indices[node_idx]
+
+            tu_groups = []
+            for slot_idx, edge in enumerate(edges_sorted):
+                tu_ids_on_edge = edge.extra.get("tu_id", []) if edge.extra else []
+                tu_id = tu_ids_on_edge[0] if tu_ids_on_edge else f"input_{slot_idx}"
+
+                source = stack.get_node(node.network_id, edge.source_id)
+                source_name = source.extra.get("name", f"node_{edge.source_id}") if source else None
+
+                is_masked = False
+                prob = 1.0
+                if tu_indices is not None:
+                    if tu_indices.ndim == 2 and slot_idx < tu_indices.shape[0]:
+                        slot_tu_indices = tu_indices[slot_idx]
+                        for tidx in slot_tu_indices:
+                            tidx = int(tidx)
+                            if tidx >= 0:
+                                prob = get_tu_prob(params, network_id, tidx)
+                                if not is_tu_enabled(prob):
+                                    is_masked = True
+                                break
+                    elif tu_indices.ndim == 1 and slot_idx < len(tu_indices):
+                        tidx = int(tu_indices[slot_idx])
+                        if tidx >= 0:
+                            prob = get_tu_prob(params, network_id, tidx)
+                            is_masked = not is_tu_enabled(prob)
+
+                rate_val = float(np.mean(rates[slot_idx])) if slot_idx < len(rates) else 0.0
+                part_name = resolved_names[slot_idx] if slot_idx < len(resolved_names) else None
+
+                pv = ParamValue(
+                    name=rate_name,
+                    kind=ParamKind.RATE,
+                    value=rate_val,
+                    quantized_to=part_name,
+                )
+
+                inp = InputSlot(
+                    slot_idx=slot_idx,
+                    tu_id=tu_id,
+                    is_masked=is_masked,
+                    source_node=source_name,
+                )
+
+                tu_groups.append(
+                    TUParamGroup(
+                        tu_id=tu_id,
+                        is_enabled=not is_masked,
+                        prob=prob,
+                        params=[pv],
+                        inputs=[inp],
+                    )
+                )
+
+            result.append(
+                NodeParamInfo(
+                    node_type=transform_name,
+                    node_name=node_name,
+                    network_id=network_id,
+                    tu_groups=tu_groups,
+                )
+            )
+
+        return result
+
+    return LayerInstance(prepare, apply, output_shape, commit=commit, introspect=introspect)
 
 
 from biocomp.part_embeddings import EMBEDDINGS_BY_NAME  # noqa: E402

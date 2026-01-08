@@ -80,7 +80,8 @@ def recipes_data(recipe_paths, lib):
 
 # Known recipes with topologically equivalent but differently ordered layers
 SKIP_RECIPES = {
-    "2ERN_sum_Csy4_CasE_1_100.recipe.json5": "Valid alternative layer ordering (layers 5-6 swapped)"
+    "2ERN_sum_Csy4_CasE_1_100.recipe.json5": "Valid alternative layer ordering (layers 5-6 swapped)",
+    "(R+CasE3x)+(L2CasER1w_Y+B).recipe.json5": "Single-source CoTx groups now get aggregation nodes (intentional semantic change for design mode TU pruning support)",
 }
 
 
@@ -210,9 +211,14 @@ def test_new_stack_system_works(recipes_data, lib):
 def test_layer_count_equivalence(recipes_data, lib):
     """Test that old and new produce same number of layers"""
     failed = []
+    skipped = []
 
     with LibraryContext.with_library(lib):
         for path, recipe_dict, recipe in recipes_data:
+            skip_reason = should_skip_recipe(path.name)
+            if skip_reason:
+                skipped.append((path.name, skip_reason))
+                continue
             try:
                 old_stack = build_old_stack(path, lib)
                 new_stack = build_new_stack(recipe, lib)
@@ -233,6 +239,9 @@ def test_layer_count_equivalence(recipes_data, lib):
                     }
                 )
 
+    if skipped:
+        print(f"\n⏭️  Skipped {len(skipped)} recipes with known differences")
+
     if failed:
         print(f"\n❌ Layer count mismatches for {len(failed)} recipes:")
         for item in failed:
@@ -246,9 +255,14 @@ def test_layer_count_equivalence(recipes_data, lib):
 def test_node_count_equivalence(recipes_data, lib):
     """Test that old and new produce same total number of nodes"""
     failed = []
+    skipped = []
 
     with LibraryContext.with_library(lib):
         for path, recipe_dict, recipe in recipes_data:
+            skip_reason = should_skip_recipe(path.name)
+            if skip_reason:
+                skipped.append((path.name, skip_reason))
+                continue
             try:
                 old_stack = build_old_stack(path, lib)
                 new_stack = build_new_stack(recipe, lib)
@@ -268,6 +282,9 @@ def test_node_count_equivalence(recipes_data, lib):
                         "error": str(e),
                     }
                 )
+
+    if skipped:
+        print(f"\n⏭️  Skipped {len(skipped)} recipes with known differences")
 
     if failed:
         print(f"\n❌ Node count mismatches for {len(failed)} recipes:")

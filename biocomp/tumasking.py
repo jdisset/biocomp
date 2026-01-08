@@ -333,6 +333,27 @@ def l0_penalty(
     return above_floor
 
 
+def commitment_penalty(log_alpha: ArrayLike, margin: float = 0.05) -> jnp.ndarray:
+    """Penalize TUs near the 0.5 decision threshold to encourage commitment.
+
+    Only affects TUs in the narrow band [0.5-margin, 0.5+margin]. TUs outside
+    this band receive zero penalty, avoiding the direction problem where
+    entropy-based approaches push TUs the "wrong" way.
+
+    Args:
+        log_alpha: TU log-alpha parameters
+        margin: Half-width of penalty band around 0.5. Default 0.05 means
+            only TUs with sigmoid(log_alpha) in [0.45, 0.55] are penalized.
+
+    Returns:
+        Per-TU penalty in [0, 1], maximum at prob=0.5, zero outside margin band.
+    """
+    prob = jax.nn.sigmoid(clamp_log_alpha(log_alpha))
+    dist = jnp.abs(prob - 0.5)
+    violation = jnp.maximum(margin - dist, 0.0)
+    return (violation / margin) ** 2
+
+
 def l0_loss(
     log_alpha: ArrayLike,
     floor_prob: float = L0_PENALTY_FLOOR_PROB,

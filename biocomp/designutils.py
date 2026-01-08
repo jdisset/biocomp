@@ -1289,37 +1289,3 @@ def side_by_side_txt_plot(
     return "\n".join(lines), metrics_out
 
 
-def format_tu_activation_list(
-    tu_log_alpha: np.ndarray | None,
-    tu_idx_to_id: dict[int, str],
-    threshold: float = 0.5,
-    network_tu_ids: set[str] | None = None,
-) -> list[str]:
-    """Format enabled TUs with activation probabilities.
-
-    Args:
-        tu_log_alpha: shape (n_tus,) - log_alpha values for a single design
-        tu_idx_to_id: mapping from TU index to TU name string
-        threshold: sigmoid threshold for enabled TUs (default 0.5)
-        network_tu_ids: if provided, only show TUs in this set (filters to network-specific TUs)
-
-    Returns:
-        List of formatted strings like "TU_CasE_1: ON (0.92)"
-        Only includes TUs where sigmoid(log_alpha) >= threshold.
-        Sorted by activation probability (descending).
-    """
-    if tu_log_alpha is None or len(tu_log_alpha) == 0 or not tu_idx_to_id:
-        return []
-    tu_log_alpha = np.asarray(tu_log_alpha).flatten()
-    probs = 1 / (1 + np.exp(-tu_log_alpha))  # sigmoid
-    enabled_entries = []
-    for idx, tu_name in tu_idx_to_id.items():
-        if idx >= len(probs):
-            continue
-        if network_tu_ids is not None and tu_name not in network_tu_ids:
-            continue
-        prob = float(probs[idx])
-        if prob >= threshold:
-            enabled_entries.append((tu_name, prob))
-    enabled_entries.sort(key=lambda x: -x[1])
-    return [f"{name}: ON ({prob:.2f})" for name, prob in enabled_entries]

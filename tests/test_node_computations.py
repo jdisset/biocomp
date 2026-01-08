@@ -179,6 +179,14 @@ def manual_simple_two_reporters(params: ParameterTree, X, random_vars: jnp.ndarr
     return jnp.array([y8_0, y8_1])
 
 
+def find_layer_idx(stack, layer_type):
+    """Find the index of a layer by its type"""
+    for i, layer in enumerate(stack.layers):
+        if layer.f_type == layer_type:
+            return i
+    raise ValueError(f"Layer type {layer_type} not found in stack")
+
+
 def test_simple_single_reporter_computation(lib, simple_single_reporter):
     """Test that compute stack matches manual computation for simple_single_reporter"""
     with LibraryContext.with_library(lib):
@@ -191,14 +199,18 @@ def test_simple_single_reporter_computation(lib, simple_single_reporter):
         init_key = jax.random.PRNGKey(42)
         params = stack.init(init_key)
 
+        # Find layer indices dynamically (they may change as graph building evolves)
+        tc_layer_idx = find_layer_idx(stack, "transcription")
+        tl_layer_idx = find_layer_idx(stack, "translation")
+
         # ========== Verify quantization masks ==========
         # Transcription: should only allow hEF1a (index 0 in DEFAULT_AVAILABLE_TC_RATES)
-        tc_mask = params["local/5/transcription/tc_rate_quantization_mask"][0]  # mask for node 0
+        tc_mask = params[f"local/{tc_layer_idx}/transcription/tc_rate_quantization_mask"][0]
         assert tc_mask.shape == (1, 1), f"TC mask shape should be (1, 1), got {tc_mask.shape}"
         assert tc_mask[0, 0], "hEF1a (index 0) should be available"
 
         # Translation: should only allow 00_empty_tc (index 0 in DEFAULT_AVAILABLE_TL_RATES)
-        tl_mask = params["local/6/translation/tl_rate_quantization_mask"][0]  # mask for node 0
+        tl_mask = params[f"local/{tl_layer_idx}/translation/tl_rate_quantization_mask"][0]
         assert tl_mask.shape == (1, 13), f"TL mask shape should be (1, 13), got {tl_mask.shape}"
         assert tl_mask[0, 0], "00_empty_tc (index 0) should be available"
         assert jnp.sum(tl_mask) == 1, (
@@ -235,6 +247,23 @@ def test_simple_single_reporter_computation(lib, simple_single_reporter):
         assert std_dev > 1e-6, "All results should be different with different random keys"
 
 
+def find_layer_idx_containing(stack, type_prefix):
+    """Find the index of a layer whose type starts with type_prefix"""
+    for i, layer in enumerate(stack.layers):
+        if layer.f_type.startswith(type_prefix):
+            return i
+    raise ValueError(f"Layer type starting with {type_prefix} not found in stack")
+
+
+def find_aggregation_param_key(params, layer_idx):
+    """Find the param key for aggregation layer (e.g., aggregation2x, aggregation3x)"""
+    layer_params = params[f"local/{layer_idx}"]
+    for key in layer_params.value.keys():
+        if key.startswith("aggregation"):
+            return key
+    raise ValueError(f"No aggregation key found in layer {layer_idx}")
+
+
 def test_simple_two_reporters_computation(lib, simple_two_reporters):
     """Test that compute stack matches manual computation for simple_two_reporters"""
     with LibraryContext.with_library(lib):
@@ -247,14 +276,19 @@ def test_simple_two_reporters_computation(lib, simple_two_reporters):
         init_key = jax.random.PRNGKey(42)
         params = stack.init(init_key)
 
+        # Find layer indices dynamically
+        tc_layer_idx = find_layer_idx(stack, "transcription")
+        tl_layer_idx = find_layer_idx(stack, "translation")
+        agg_layer_idx = find_layer_idx_containing(stack, "aggregation")
+
         # ========== Verify quantization masks ==========
         # Transcription: should only allow hEF1a (index 0)
-        tc_mask = params["local/7/transcription/tc_rate_quantization_mask"]
+        tc_mask = params[f"local/{tc_layer_idx}/transcription/tc_rate_quantization_mask"]
         assert tc_mask.shape == (2, 1, 1), f"TC mask shape should be (2, 1, 1), got {tc_mask.shape}"
         assert tc_mask[0, 0, 0] and tc_mask[1, 0, 0], "hEF1a should be available for both nodes"
 
         # Translation: should only allow 00_empty_tc (index 0)
-        tl_mask = params["local/8/translation/tl_rate_quantization_mask"]
+        tl_mask = params[f"local/{tl_layer_idx}/translation/tl_rate_quantization_mask"]
         assert tl_mask.shape == (2, 1, 13), (
             f"TL mask shape should be (2, 1, 13), got {tl_mask.shape}"
         )
@@ -263,8 +297,9 @@ def test_simple_two_reporters_computation(lib, simple_two_reporters):
         )
         assert jnp.sum(tl_mask[0]) == 1 and jnp.sum(tl_mask[1]) == 1, "Only 1 uORF per node"
 
-        # Aggregation ratios should match recipe
-        ratios = params["local/5/aggregation2x/ratios"][0]
+        # Aggregation ratios should match recipe - find param key dynamically
+        agg_param_key = find_aggregation_param_key(params, agg_layer_idx)
+        ratios = params[f"local/{agg_layer_idx}/{agg_param_key}/ratios"][0]
         assert jnp.allclose(ratios, jnp.array([0.833, 0.167])), (
             f"Ratios should be [0.833, 0.167], got {ratios}"
         )
@@ -375,14 +410,19 @@ def test_simple_single_ern_computation(lib, simple_single_ern):
         init_key = jax.random.PRNGKey(42)
         params = stack.init(init_key)
 
+        # Find layer indices dynamically
+        tc_layer_idx = find_layer_idx(stack, "transcription")
+        tl_layer_idx = find_layer_idx(stack, "translation")
+        agg_layer_idx = find_layer_idx_containing(stack, "aggregation")
+
         # ========== Verify quantization masks ==========
         # Transcription: 3 nodes, all should only allow hEF1a (index 0)
-        tc_mask = params["local/7/transcription/tc_rate_quantization_mask"]
+        tc_mask = params[f"local/{tc_layer_idx}/transcription/tc_rate_quantization_mask"]
         assert tc_mask.shape == (3, 1, 1), f"TC mask shape should be (3, 1, 1), got {tc_mask.shape}"
         assert all(tc_mask[i, 0, 0] for i in range(3)), "hEF1a should be available for all nodes"
 
         # Translation: 2 nodes (mNeonGreen + ERN target), should only allow 00_empty_tc (index 0)
-        tl_mask = params["local/8/translation/tl_rate_quantization_mask"]
+        tl_mask = params[f"local/{tl_layer_idx}/translation/tl_rate_quantization_mask"]
         assert tl_mask.shape == (2, 1, 13), (
             f"TL mask shape should be (2, 1, 13), got {tl_mask.shape}"
         )
@@ -392,7 +432,8 @@ def test_simple_single_ern_computation(lib, simple_single_ern):
         assert jnp.sum(tl_mask[0]) == 1 and jnp.sum(tl_mask[1]) == 1, "Only 1 uORF per node"
 
         # Aggregation ratios should be [1/3, 1/3, 1/3]
-        ratios = params["local/5/aggregation3x/ratios"][0]
+        agg_param_key = find_aggregation_param_key(params, agg_layer_idx)
+        ratios = params[f"local/{agg_layer_idx}/{agg_param_key}/ratios"][0]
         expected_ratio = 1.0 / 3.0
         assert jnp.allclose(ratios, jnp.full(3, expected_ratio)), (
             f"Ratios should be [1/3, 1/3, 1/3], got {ratios}"

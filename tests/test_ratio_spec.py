@@ -339,7 +339,10 @@ class TestNetworkIntegration:
             compg = networks[0].compute_graph
             agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
             assert len(agg_nodes) == 1
-            assert agg_nodes[0].extra["ratios"] == [0.6, 0.4]
+            members = agg_nodes[0].extra["members"]
+            sorted_ids = sorted(members.keys())
+            ratios = [members[m]["ratio"] for m in sorted_ids]
+            assert ratios == [0.6, 0.4]
 
     def test_locked_ratios_no_ratio_ranges(self, lib):
         from biocomp.network import recipe_to_networks
@@ -381,8 +384,11 @@ class TestNetworkIntegration:
             compg = networks[0].compute_graph
             agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
             agg = agg_nodes[0]
-            assert agg.extra["ratios"] == [0.6, 0.4]
-            ratio_ranges = agg.extra.get("ratio_ranges", [None, None])
+            members = agg.extra["members"]
+            sorted_ids = sorted(members.keys())
+            ratios = [members[m]["ratio"] for m in sorted_ids]
+            assert ratios == [0.6, 0.4]
+            ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
             assert all(r is None for r in ratio_ranges)
 
     def test_unlocked_ratios_have_ratio_ranges(self, lib):
@@ -425,7 +431,9 @@ class TestNetworkIntegration:
             compg = networks[0].compute_graph
             agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
             agg = agg_nodes[0]
-            ratio_ranges = agg.extra.get("ratio_ranges", [None, None])
+            members = agg.extra["members"]
+            sorted_ids = sorted(members.keys())
+            ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
             assert ratio_ranges[0] is not None
             assert ratio_ranges[0]["min"] == 0.3
             assert ratio_ranges[0]["max"] == 0.9

@@ -436,10 +436,12 @@ def test_shared_source_network_structure(lib):
         assert len(agglayer.nodes) == 1
         aggnode = network.compute_graph.get_node(agglayer.nodes[0].node_id)
 
-        members_to_ratio = dict(zip(aggnode.extra['members'], aggnode.extra['ratios']))
+        members = aggnode.extra['members']
+        members_to_ratio = {m: members[m]['ratio'] for m in members}
         assert members_to_ratio == {'plsmd1': 0.1, 'out2_plsmd': 0.2, 'ern2_plsmd': 0.3, 'mrkr_plsmd': 0.4}
 
-        plsmd1_idx = aggnode.extra['members'].index('plsmd1')
+        sorted_members = sorted(members.keys())
+        plsmd1_idx = sorted_members.index('plsmd1')
         plsmd1_nodes = network.compute_graph.get_downstream_nodes_by_output_slot(aggnode.node_id, plsmd1_idx)
         assert len(plsmd1_nodes) == 1
 

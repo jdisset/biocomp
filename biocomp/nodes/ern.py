@@ -225,8 +225,11 @@ def sequestron_ERN(
         input_tu_indices_path = f"{namespace}/input_tu_indices"
         if input_tu_indices_path in params:
             from biocomp.tumasking import get_tu_masks
+
             tu_indices = params[input_tu_indices_path][node_id]
-            input_masks = get_tu_masks(params, tu_indices, tu_enabled_random_vars, network_id, is_multi_tu=True)
+            input_masks = get_tu_masks(
+                params, tu_indices, tu_enabled_random_vars, network_id, is_multi_tu=True
+            )
         else:
             input_masks = jnp.ones(2)
 
@@ -280,7 +283,120 @@ def sequestron_ERN(
 
     output_shape = [(1,)]
 
-    return LayerInstance(prepare, apply, output_shape)
+    def introspect(
+        params: ParameterTree,
+        nodelist: list[StackNode],
+        stack: ComputeStack,
+        network_id: int,
+        local_only: bool = True,
+    ) -> list:
+        from biocomp.paramintrospect import (
+            NodeParamInfo,
+            ParamValue,
+            ParamKind,
+            InputSlot,
+            get_tu_prob,
+            is_tu_enabled,
+        )
+
+        result = []
+        for node_idx, node in enumerate(nodelist):
+            if node.network_id != network_id:
+                continue
+
+            comp_node = node.get(stack)
+            extra = comp_node.extra
+            seq_name = extra.get("seq_name", "unknown")
+            node_name = seq_name.split("::")[-1] if "::" in seq_name else seq_name
+
+            affinity_ref = params[f"{namespace}/affinity"]
+            if hasattr(affinity_ref, "view"):
+                affinity_val = float(np.mean(np.asarray(affinity_ref[node_idx])))
+            else:
+                affinity_val = float(np.mean(np.asarray(affinity_ref[node_idx])))
+
+            ungrouped = [
+                ParamValue(
+                    name="affinity",
+                    kind=ParamKind.AFFINITY,
+                    value=affinity_val,
+                )
+            ]
+
+            if use_ern_layer_id:
+                lid_path = f"{namespace}/node_layer_ids"
+                if lid_path in params:
+                    lid_val = int(params[lid_path][node_idx])
+                    ungrouped.append(
+                        ParamValue(
+                            name="layer_id",
+                            kind=ParamKind.OTHER,
+                            value=lid_val,
+                        )
+                    )
+
+            edges = node.get_incoming_edges(stack)
+            edges_sorted = sorted(edges, key=lambda e: e.to_input_slot)
+
+            input_tu_path = f"{namespace}/input_tu_indices"
+            tu_indices = None
+            if input_tu_path in params:
+                tu_arr = params[input_tu_path]
+                tu_indices = np.asarray(tu_arr.view() if hasattr(tu_arr, "view") else tu_arr)
+                if tu_indices.ndim >= 1 and node_idx < tu_indices.shape[0]:
+                    tu_indices = tu_indices[node_idx]
+
+            ungrouped_inputs = []
+            input_labels = ["neg", "pos"]
+            for slot_idx, edge in enumerate(edges_sorted):
+                source = stack.get_node(node.network_id, edge.source_id)
+                source_name = source.extra.get("name", f"node_{edge.source_id}") if source else None
+
+                is_masked = False
+                if tu_indices is not None:
+                    if tu_indices.ndim == 2 and slot_idx < tu_indices.shape[0]:
+                        slot_tu_indices = tu_indices[slot_idx]
+                        for tidx in slot_tu_indices:
+                            tidx = int(tidx)
+                            if tidx >= 0:
+                                prob = get_tu_prob(params, network_id, tidx)
+                                if not is_tu_enabled(prob):
+                                    is_masked = True
+                                break
+                    elif tu_indices.ndim == 1 and slot_idx < len(tu_indices):
+                        tidx = int(tu_indices[slot_idx])
+                        if tidx >= 0:
+                            prob = get_tu_prob(params, network_id, tidx)
+                            is_masked = not is_tu_enabled(prob)
+
+                tu_ids_on_edge = edge.extra.get("tu_id", []) if edge.extra else []
+                tu_id = tu_ids_on_edge[0] if tu_ids_on_edge else None
+                label = (
+                    input_labels[slot_idx] if slot_idx < len(input_labels) else f"input_{slot_idx}"
+                )
+
+                ungrouped_inputs.append(
+                    InputSlot(
+                        slot_idx=slot_idx,
+                        tu_id=tu_id,
+                        is_masked=is_masked,
+                        source_node=f"{label}:{source_name}" if source_name else label,
+                    )
+                )
+
+            result.append(
+                NodeParamInfo(
+                    node_type="sequestron_ERN",
+                    node_name=node_name,
+                    network_id=network_id,
+                    ungrouped=ungrouped,
+                    ungrouped_inputs=ungrouped_inputs,
+                )
+            )
+
+        return result
+
+    return LayerInstance(prepare, apply, output_shape, introspect=introspect)
 
 
 ERN_DEFAULT_NEG_PARTS = ["CasE", "Csy4", "PgU"]

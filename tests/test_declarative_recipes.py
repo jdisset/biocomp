@@ -984,8 +984,11 @@ def test_simple_aggregation_compg(lib, simple_aggregation):
         assert len(agg_nodes) == 1
 
         agg = agg_nodes[0]
-        assert agg.extra["ratios"] == [0.5, 0.5]
-        assert len(agg.extra["members"]) == 2
+        members = agg.extra["members"]
+        assert isinstance(members, dict)
+        assert len(members) == 2
+        ratios = [members[m]["ratio"] for m in sorted(members.keys())]
+        assert ratios == [0.5, 0.5]
 
         output_nodes = [n for n in compg.nodes.values() if n.node_type == "output"]
         assert len(output_nodes) == 1
@@ -1009,8 +1012,11 @@ def test_single_cotx_ERN(lib, simple_two_reporters):
         assert len(agg_nodes) == 1
 
         agg = agg_nodes[0]
-        assert agg.extra["ratios"] == [0.833, 0.167]
-        assert len(agg.extra["members"]) == 2
+        members = agg.extra["members"]
+        sorted_ids = sorted(members.keys())
+        ratios = [members[m]["ratio"] for m in sorted_ids]
+        assert ratios == [0.833, 0.167]
+        assert len(members) == 2
 
         output_nodes = [n for n in compg.nodes.values() if n.node_type == "output"]
         assert len(output_nodes) == 1
@@ -1033,8 +1039,11 @@ def test_multi_cotx_aggregation_compg(lib, multi_cotx_aggregation):
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 2
 
-        ratios_sets = [tuple(agg.extra["ratios"]) for agg in agg_nodes]
-        # Ratios are normalized: [0.25, 0.25] → [0.5, 0.5], [0.3, 0.2] → [0.6, 0.4]
+        ratios_sets = []
+        for agg in agg_nodes:
+            members = agg.extra["members"]
+            assert isinstance(members, dict)
+            ratios_sets.append(tuple(members[m]["ratio"] for m in sorted(members.keys())))
         assert (0.5, 0.5) in ratios_sets
         assert (0.6, 0.4) in ratios_sets
 
@@ -1053,7 +1062,11 @@ def test_complex_ern_compg(lib, complex_ern_network):
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
         # Ratios are normalized: [0.2, 0.2, 0.1] → [0.4, 0.4, 0.2]
-        assert agg_nodes[0].extra["ratios"] == [0.4, 0.4, 0.2]
+        agg = agg_nodes[0]
+        members = agg.extra["members"]
+        sorted_ids = sorted(members.keys())
+        ratios = [members[m]["ratio"] for m in sorted_ids]
+        assert ratios == [0.4, 0.4, 0.2]
 
         ern_nodes = [n for n in compg.nodes.values() if n.node_type == "sequestron_ERN"]
         assert len(ern_nodes) == 1
@@ -1223,12 +1236,13 @@ def test_unlocked_ratios_network_builds(lib, unlocked_ratios_network):
         net = networks[0]
         compg = net.compute_graph
 
-        # Should have aggregation node with ratio_ranges
+        # Should have aggregation node with ratio_ranges in members
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
-        assert "ratio_ranges" in agg.extra
-        ratio_ranges = agg.extra["ratio_ranges"]
+        members = agg.extra["members"]
+        sorted_ids = sorted(members.keys())
+        ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
         # First ratio should have range info (unlocked)
         assert ratio_ranges[0] is not None
         assert ratio_ranges[0]["min"] == 0.5
@@ -1336,13 +1350,15 @@ def test_combined_unlocked_network(lib, combined_unlocked_network):
         bias_nodes = [n for n in compg.nodes.values() if n.node_type == "bias"]
         assert len(bias_nodes) == 1
 
-        # Should have aggregation with ratio_ranges
+        # Should have aggregation with ratio_ranges in members
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
-        assert "ratio_ranges" in agg.extra
+        members = agg.extra["members"]
+        sorted_ids = sorted(members.keys())
+        ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
         # Both ratios should be unlocked
-        assert all(r is not None for r in agg.extra["ratio_ranges"])
+        assert all(r is not None for r in ratio_ranges)
 
 
 def test_unlocked_ratios_commit(lib, unlocked_ratios_network):
@@ -1365,7 +1381,7 @@ def test_unlocked_ratios_commit(lib, unlocked_ratios_network):
 
         committed_networks = stack.commit(params)
 
-        # After commit: check that extra dict no longer has ratio_ranges (all None)
+        # After commit: check that ratio_ranges in members are all None (locked)
         agg_nodes = [
             n
             for n in committed_networks[0].compute_graph.nodes.values()
@@ -1373,11 +1389,12 @@ def test_unlocked_ratios_commit(lib, unlocked_ratios_network):
         ]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
-        # After commit, ratio_ranges should all be None (locked)
-        if "ratio_ranges" in agg.extra:
-            assert all(r is None for r in agg.extra["ratio_ranges"]), (
-                "All ratios should be locked after commit"
-            )
+        members = agg.extra["members"]
+        ratio_ranges = [members[m].get("ratio_range") for m in members]
+        # After commit, all ratio_ranges should be None (locked)
+        assert all(r is None for r in ratio_ranges), (
+            "All ratios should be locked after commit"
+        )
 
 
 def test_multiple_random_inits_produce_different_ratios(lib, unlocked_ratios_network):
@@ -1445,12 +1462,13 @@ def test_ern_with_unlocked_ratios_compg(lib, ern_with_unlocked_ratios):
         networks = recipe_to_networks(ern_with_unlocked_ratios, br.ALL_RULES, invert=True)
         compg = networks[0].compute_graph
 
-        # Should have aggregation with mixed ratio_ranges
+        # Should have aggregation with mixed ratio_ranges in members
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
-        assert "ratio_ranges" in agg.extra
-        ratio_ranges = agg.extra["ratio_ranges"]
+        members = agg.extra["members"]
+        sorted_ids = sorted(members.keys())
+        ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
         # First and third ratios should be unlocked (have ranges)
         assert ratio_ranges[0] is not None
         assert ratio_ranges[1] is None  # Locked
@@ -1594,12 +1612,13 @@ def test_complex_mixed_unlocked_compg(lib, complex_mixed_unlocked):
         networks = recipe_to_networks(complex_mixed_unlocked, br.ALL_RULES, invert=True)
         compg = networks[0].compute_graph
 
-        # Should have aggregation with mixed ratio_ranges
+        # Should have aggregation with mixed ratio_ranges in members
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
-        assert "ratio_ranges" in agg.extra
-        ratio_ranges = agg.extra["ratio_ranges"]
+        members = agg.extra["members"]
+        sorted_ids = sorted(members.keys())
+        ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
         assert ratio_ranges[0] is not None  # Unlocked
         assert ratio_ranges[1] is None  # Locked
         assert ratio_ranges[2] is not None  # Unlocked

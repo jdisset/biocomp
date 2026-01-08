@@ -22,6 +22,7 @@ from .tumasking import (
     LATENT_TU_B2_PATH,
     L0_PENALTY_FLOOR_PROB,
     asymmetric_l0_loss,
+    commitment_penalty,
     decode_latent_tu_masking,
     entropy_bonus,
 )
@@ -1042,6 +1043,8 @@ def _make_loss_func(
     max_prediction=1e6,
     lambda_l0=0.0,
     lambda_entropy=0.0,
+    lambda_commitment=0.0,
+    commitment_margin=0.05,
     l0_tu_threshold=None,
     l0_excess_exponent=2.0,
     l0_alpha_below=0.5,
@@ -1147,6 +1150,7 @@ def _make_loss_func(
         coupling_penalty = jnp.array(0.0)
         coupling_penalty_per_target = None
         entropy_penalty = jnp.array(0.0)
+        commitment_penalty_val = jnp.array(0.0)
 
         # get log_alpha: either decode from latent MLP or use direct path
         log_alpha = None
@@ -1253,8 +1257,15 @@ def _make_loss_func(
             )
             ent = entropy_bonus(log_alpha)
             entropy_penalty = _sanitize(jnp.atleast_1d(-entropy_weight * ent))[0]
+
+            commitment_weight = _get_schedule_value(
+                params, step, total_steps, "lambda_commitment", lambda_commitment, schedule_ns
+            )
+            commit_raw = jnp.mean(commitment_penalty(log_alpha, commitment_margin))
+            commitment_penalty_val = _sanitize(jnp.atleast_1d(commitment_weight * commit_raw))[0]
         else:
             ern_tying_penalty_val = jnp.array(0.0)
+            commitment_penalty_val = jnp.array(0.0)
 
         # single forward pass with binary TU masking (deterministic, no need for sample averaging)
         # get_tu_masks() now uses binary masking by default (not hard concrete)
@@ -1283,6 +1294,7 @@ def _make_loss_func(
             "Y": Y,
             "l0_penalty": l0_penalty,
             "entropy_penalty": entropy_penalty,
+            "commitment_penalty": commitment_penalty_val,
             "coupling_penalty": coupling_penalty,
             "ern_tying_penalty": ern_tying_penalty_val,
             "tucount_penalty": tucount_penalty,
@@ -1301,6 +1313,7 @@ def _make_loss_func(
             + spread_penalty
             + l0_penalty
             + entropy_penalty
+            + commitment_penalty_val
             + coupling_penalty
             + ern_tying_penalty_val
         )
@@ -1334,6 +1347,8 @@ def grid_distance_loss(
     max_ratio=100.0,
     lambda_l0=0.0,
     lambda_entropy=0.0,
+    lambda_commitment=0.0,
+    commitment_margin=0.05,
     l0_tu_threshold=None,
     l0_excess_exponent=2.0,
     l0_alpha_below=0.5,
@@ -1517,6 +1532,8 @@ def grid_distance_loss(
         max_tus_per_cotx=max_tus_per_cotx,
         lambda_l0=lambda_l0,
         lambda_entropy=lambda_entropy,
+        lambda_commitment=lambda_commitment,
+        commitment_margin=commitment_margin,
         l0_tu_threshold=l0_tu_threshold,
         l0_excess_exponent=l0_excess_exponent,
         l0_alpha_below=l0_alpha_below,

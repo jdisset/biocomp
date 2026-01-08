@@ -1237,10 +1237,8 @@ def test_committed_network_rebuilds_equivalent(lib, design_stack):
                 sorted(committed_aggs, key=lambda x: x.node_id),
                 sorted(rebuilt_aggs, key=lambda x: x.node_id),
             ):
-                c_members = c_agg.extra.get("members", [])
-                r_members = r_agg.extra.get("members", [])
-                c_ratios = c_agg.extra.get("ratios", [])
-                r_ratios = r_agg.extra.get("ratios", [])
+                c_members = c_agg.extra.get("members", {})
+                r_members = r_agg.extra.get("members", {})
                 c_out_edges = len(committed_graph.get_outgoing_edges(c_agg.node_id))
                 r_out_edges = len(rebuilt_graph.get_outgoing_edges(r_agg.node_id))
 
@@ -1250,26 +1248,20 @@ def test_committed_network_rebuilds_equivalent(lib, design_stack):
                     f"Rebuilt: {len(r_members)} members: {r_members}"
                 )
 
-                assert len(c_ratios) == len(r_ratios), (
-                    f"Network {net_idx}, Agg {c_agg.node_id}: ratio count mismatch.\n"
-                    f"Committed: {len(c_ratios)} ratios\n"
-                    f"Rebuilt: {len(r_ratios)} ratios"
-                )
-
                 assert c_out_edges == r_out_edges, (
                     f"Network {net_idx}, Agg {c_agg.node_id}: outgoing edge count mismatch.\n"
                     f"Committed: {c_out_edges} edges\n"
                     f"Rebuilt: {r_out_edges} edges"
                 )
 
-                # CRITICAL: ratios should match outgoing edges (the original bug!)
-                assert len(c_ratios) == c_out_edges, (
-                    f"Network {net_idx}, Agg {c_agg.node_id}: COMMITTED network has mismatched ratios/edges!\n"
-                    f"Ratios: {len(c_ratios)}, Outgoing edges: {c_out_edges}"
+                # CRITICAL: members count should match outgoing edges (the original bug!)
+                assert len(c_members) == c_out_edges, (
+                    f"Network {net_idx}, Agg {c_agg.node_id}: COMMITTED network has mismatched members/edges!\n"
+                    f"Members: {len(c_members)}, Outgoing edges: {c_out_edges}"
                 )
-                assert len(r_ratios) == r_out_edges, (
-                    f"Network {net_idx}, Agg {c_agg.node_id}: REBUILT network has mismatched ratios/edges!\n"
-                    f"Ratios: {len(r_ratios)}, Outgoing edges: {r_out_edges}"
+                assert len(r_members) == r_out_edges, (
+                    f"Network {net_idx}, Agg {c_agg.node_id}: REBUILT network has mismatched members/edges!\n"
+                    f"Members: {len(r_members)}, Outgoing edges: {r_out_edges}"
                 )
 
         # verify networks can be stacked together

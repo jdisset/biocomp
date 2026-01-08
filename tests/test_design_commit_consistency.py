@@ -129,8 +129,10 @@ def test_latent_ratios_commit_matches_apply(lib):
                 break
         assert committed_node is not None
 
-        commit_ratios = np.array(committed_node.extra.get("ratios", []))
-        assert len(commit_ratios) > 0, "No ratios in committed node"
+        members = committed_node.extra.get("members", {})
+        assert len(members) > 0, "No members in committed node"
+        sorted_ids = sorted(members.keys())
+        commit_ratios = np.array([members[m]["ratio"] for m in sorted_ids])
 
         apply_normalized = np.array(apply_normalized)
         commit_sum = np.sum(commit_ratios)
