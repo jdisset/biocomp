@@ -342,6 +342,7 @@ class DesignManager(BaseModel):
         use_latent_ratios: bool = False,
         latent_dim: int = 8,
         latent_hidden_dim: int = 16,
+        auto_lock_topology_tus: bool = True,
     ):
         logger.info(f"Building stack with {len(self.networks)} design networks")
         logger.info(f"Design network names: {[n.name for n in self.networks]}")
@@ -366,7 +367,11 @@ class DesignManager(BaseModel):
                 )
             )
 
-        stack.build(compute_config, enable_tu_masking=self.enable_tu_masking)
+        stack.build(
+            compute_config,
+            enable_tu_masking=self.enable_tu_masking,
+            auto_lock_topology_tus=auto_lock_topology_tus,
+        )
 
         logger.info(
             f"Stack built: {stack.get_nb_networks()} networks, "
@@ -502,6 +507,7 @@ class DesignConfig(DesignOptimConfig):
     use_latent_tu_masking: bool = False
     latent_tu_dim: int = 16
     latent_tu_hidden_dim: int = 32
+    auto_lock_topology_tus: bool = True  # auto-detect TUs whose masking would change topology
 
     # TU masking convergence improvements (see tu_masking_introduction.md)
     use_probabilistic_or: bool = (
@@ -830,6 +836,7 @@ def _start_pluggable(
         use_latent_ratios=dconf.use_latent_ratios,
         latent_dim=dconf.latent_dim,
         latent_hidden_dim=dconf.latent_hidden_dim,
+        auto_lock_topology_tus=dconf.auto_lock_topology_tus,
     )
     timer.end("stack")
 
@@ -1044,6 +1051,7 @@ def start(
         use_latent_ratios=dconf.use_latent_ratios,
         latent_dim=dconf.latent_dim,
         latent_hidden_dim=dconf.latent_hidden_dim,
+        auto_lock_topology_tus=dconf.auto_lock_topology_tus,
     )
     timer.end("stack")
 

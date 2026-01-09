@@ -43,6 +43,8 @@ class TUParamGroup:
     tu_id: str
     is_enabled: bool
     prob: float
+    cotx_group: str = ""
+    no_masking: bool = False
     params: list[ParamValue] = field(default_factory=list)
     inputs: list[InputSlot] = field(default_factory=list)
 
@@ -147,30 +149,48 @@ def get_input_mask_status(
     return result
 
 
-def _build_tu_id_mapping(stack: "ComputeStack", network_id: int) -> dict[str, str]:
-    """Build mapping from full tu_id (name_cotx) to display name (just name)."""
-    mapping: dict[str, str] = {}
+def _build_tu_id_mapping(
+    stack: "ComputeStack", network_id: int
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Build mappings from tu_id to display name and cotx group.
+
+    Maps both full format (name_cotx) and display name format to support
+    different introspection sources (transform uses full, aggregation uses display).
+    """
+    name_mapping: dict[str, str] = {}
+    cotx_mapping: dict[str, str] = {}
     graph = stack.networks[network_id].compute_graph
     if graph is None or graph.nodes is None:
-        return mapping
+        return name_mapping, cotx_mapping
     for node in graph.nodes.values():
         if node.node_type == "source":
             tu_name = node.extra.get("name", "")
             cotx_group = node.extra.get("cotx_group", "")
-            if tu_name and cotx_group:
-                full_tu_id = f"{tu_name}_{cotx_group}"
-                mapping[full_tu_id] = tu_name
-    return mapping
+            if tu_name:
+                if cotx_group:
+                    full_tu_id = f"{tu_name}_{cotx_group}"
+                    name_mapping[full_tu_id] = tu_name
+                    cotx_mapping[full_tu_id] = cotx_group
+                cotx_mapping[tu_name] = cotx_group
+    return name_mapping, cotx_mapping
 
 
-def _normalize_tu_ids(infos: list[NodeParamInfo], mapping: dict[str, str]) -> None:
-    """Normalize tu_ids in place using the mapping."""
+def _normalize_tu_ids(
+    infos: list[NodeParamInfo],
+    name_mapping: dict[str, str],
+    cotx_mapping: dict[str, str],
+    no_masking_tu_ids: set[str],
+) -> None:
+    """Normalize tu_ids, set cotx_group and no_masking flags in place."""
     for info in infos:
         for tg in info.tu_groups:
-            tg.tu_id = mapping.get(tg.tu_id, tg.tu_id)
+            original_id = tg.tu_id
+            tg.cotx_group = cotx_mapping.get(original_id, "")
+            tg.no_masking = original_id in no_masking_tu_ids
+            tg.tu_id = name_mapping.get(original_id, original_id)
             for inp in tg.inputs:
                 if inp.tu_id:
-                    inp.tu_id = mapping.get(inp.tu_id, inp.tu_id)
+                    inp.tu_id = name_mapping.get(inp.tu_id, inp.tu_id)
 
 
 def introspect_stack(
@@ -193,8 +213,9 @@ def introspect_stack(
             layer_infos = layer.f_introspect(params, layer.nodes, stack, network_id, local_only)
             result.extend(layer_infos)
 
-    tu_id_mapping = _build_tu_id_mapping(stack, network_id)
-    _normalize_tu_ids(result, tu_id_mapping)
+    name_mapping, cotx_mapping = _build_tu_id_mapping(stack, network_id)
+    no_masking_tu_ids = stack.no_masking_tu_ids or set()
+    _normalize_tu_ids(result, name_mapping, cotx_mapping, no_masking_tu_ids)
 
     return result
 
@@ -320,6 +341,8 @@ def get_network_param_dict(
     def tg_to_dict(tg: TUParamGroup) -> dict:
         return {
             "tu_id": tg.tu_id,
+            "cotx_group": tg.cotx_group,
+            "no_masking": tg.no_masking,
             "enabled": tg.is_enabled,
             "prob": tg.prob,
             "params": [param_to_dict(p) for p in tg.params],
@@ -366,21 +389,13 @@ def _fmt_input_compact(inputs: list[InputSlot]) -> str:
     return "← " + ", ".join(parts)
 
 
-def _extract_cotx_group(tu_id: str) -> tuple[str, str]:
-    """Extract cotx group and local TU name from full TU id like 'x1_marker' -> ('x1', 'marker')."""
-    if "_" in tu_id:
-        parts = tu_id.split("_", 1)
-        return parts[0], parts[1]
-    return "", tu_id
-
-
 def _render_tu_table(console, tu_data: dict) -> None:
     """Render unified TU table with all parameters, grouped by CoTransfection."""
     from rich.table import Table
 
     cotx_groups: dict[str, list[str]] = {}
-    for tu_id in tu_data:
-        cotx, _ = _extract_cotx_group(tu_id)
+    for tu_id, entries in tu_data.items():
+        cotx = entries[0][1].cotx_group if entries else ""
         if cotx not in cotx_groups:
             cotx_groups[cotx] = []
         cotx_groups[cotx].append(tu_id)
@@ -400,7 +415,7 @@ def _render_tu_table(console, tu_data: dict) -> None:
         tu_ids = sorted(cotx_groups[cotx])
         cotx_enabled = sum(1 for tid in tu_ids if any(tg.is_enabled for _, tg in tu_data[tid]))
         table.add_row(
-            f"[bold cyan]{cotx}[/bold cyan]",
+            f"[bold cyan]{cotx}[/bold cyan]" if cotx else "[dim]ungrouped[/dim]",
             f"[cyan]{cotx_enabled}/{len(tu_ids)}[/cyan]",
             "",
             "",
@@ -411,17 +426,18 @@ def _render_tu_table(console, tu_data: dict) -> None:
 
         for tu_id in tu_ids:
             entries = tu_data[tu_id]
-            _, local_name = _extract_cotx_group(tu_id)
 
             ratio_str = tc_str = tl_str = "-"
             ratio_range = ""
             is_enabled = False
             prob = 0.0
+            no_masking = False
 
             for _, tg in entries:
                 if tg.is_enabled:
                     is_enabled = True
                 prob = max(prob, tg.prob)
+                no_masking = no_masking or tg.no_masking
 
                 for pv in tg.params:
                     val_fmt = f"{pv.value:.3f}"
@@ -437,13 +453,14 @@ def _render_tu_table(console, tu_data: dict) -> None:
                         elif "tl" in pv.name:
                             tl_str = val_fmt
 
+            lock = "🔒" if no_masking else ""
             status = "✓" if is_enabled else "✗"
             status_styled = f"[green]{status}[/green]" if is_enabled else f"[red]{status}[/red]"
             ratio_display = ratio_str + ratio_range if ratio_str != "-" else "-"
 
             if is_enabled:
                 table.add_row(
-                    f"  {local_name}",
+                    f"  {tu_id} {lock}".rstrip(),
                     status_styled,
                     f"{prob:.2f}",
                     ratio_display,
@@ -453,7 +470,7 @@ def _render_tu_table(console, tu_data: dict) -> None:
             else:
                 d = "grey50"
                 table.add_row(
-                    f"[{d}]  {local_name}[/{d}]",
+                    f"[{d}]  {tu_id} {lock}[/{d}]".rstrip(),
                     f"[{d}]{status}[/{d}]",
                     f"[{d}]{prob:.2f}[/{d}]",
                     f"[{d}]{ratio_display}[/{d}]",
@@ -520,3 +537,53 @@ def format_network_params_rich(
         _render_bio_tus(console, tu_data)
 
     _render_ungrouped_rich(console, infos)
+
+
+def format_committed_network_tus(network, console=None) -> None:
+    """Display TUs directly from a committed network's compute_graph.
+
+    This inspects the network structure itself (not params), showing what TUs
+    actually exist after commit. All displayed TUs are enabled by definition
+    since disabled ones should have been removed during commit.
+
+    Uses the same rendering as format_network_params_rich for consistency.
+    """
+    from rich.console import Console
+    from rich.panel import Panel
+
+    if console is None:
+        console = Console()
+
+    if network.compute_graph is None:
+        console.print("[dim]Network has no compute_graph[/dim]")
+        return
+
+    net_name = network.name or "committed_network"
+    console.print(Panel(f"[bold]{net_name}[/bold] (committed)", expand=False))
+
+    tu_data: dict[str, list[tuple[str, TUParamGroup]]] = {}
+    for node in network.compute_graph.nodes.values():
+        if node.node_type != "source":
+            continue
+
+        tu_name = node.extra.get("name", "")
+        cotx = node.extra.get("cotx_group", "")
+        if not tu_name:
+            continue
+
+        tg = TUParamGroup(
+            tu_id=tu_name,
+            is_enabled=True,
+            prob=1.0,
+            cotx_group=cotx,
+            no_masking=False,
+        )
+        if tu_name not in tu_data:
+            tu_data[tu_name] = []
+        tu_data[tu_name].append(("source", tg))
+
+    if not tu_data:
+        console.print("[dim]No TUs found in committed network[/dim]")
+        return
+
+    _render_tu_table(console, tu_data)

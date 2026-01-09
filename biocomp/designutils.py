@@ -1,12 +1,12 @@
 import numpy as np
 from numpy.typing import NDArray
-from matplotlib.path import Path as MPath
-from xml.etree import ElementTree as ET
 import re
 from matplotlib.colors import to_rgb
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
+
+from svgelements import SVG, Shape, Group
 
 import jax
 import jax.numpy as jnp
@@ -21,131 +21,6 @@ if TYPE_CHECKING:
 
 NdArray = np.ndarray
 logger = get_logger(__name__)
-
-
-def _parse_transform(transform_str):
-    if not transform_str:
-        return np.eye(3)
-
-    matrix_match = re.match(
-        r"matrix\(\s*([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)[\s,]+"
-        r"([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)\s*\)",
-        transform_str,
-    )
-    if matrix_match:
-        a, b, c, d, e, f = map(float, matrix_match.groups())
-        return np.array([[a, c, e], [b, d, f], [0, 0, 1]])
-
-    translate_match = re.match(r"translate\(\s*([-\d.]+)(?:[\s,]+([-\d.]+))?\s*\)", transform_str)
-    if translate_match:
-        tx = float(translate_match.group(1))
-        ty = float(translate_match.group(2)) if translate_match.group(2) else 0
-        return np.array([[1, 0, tx], [0, 1, ty], [0, 0, 1]], dtype=float)
-
-    scale_match = re.match(r"scale\(\s*([-\d.]+)(?:[\s,]+([-\d.]+))?\s*\)", transform_str)
-    if scale_match:
-        sx = float(scale_match.group(1))
-        sy = float(scale_match.group(2)) if scale_match.group(2) else sx
-        return np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=float)
-
-    rotate_match = re.match(
-        r"rotate\(\s*([-\d.]+)(?:[\s,]+([-\d.]+)[\s,]+([-\d.]+))?\s*\)", transform_str
-    )
-    if rotate_match:
-        angle = float(rotate_match.group(1)) * np.pi / 180
-        cx = float(rotate_match.group(2)) if rotate_match.group(2) else 0
-        cy = float(rotate_match.group(3)) if rotate_match.group(3) else 0
-        cos_a, sin_a = np.cos(angle), np.sin(angle)
-        return np.array(
-            [
-                [cos_a, -sin_a, cx - cx * cos_a + cy * sin_a],
-                [sin_a, cos_a, cy - cx * sin_a - cy * cos_a],
-                [0, 0, 1],
-            ]
-        )
-
-    skewx_match = re.match(r"skewX\(\s*([-\d.]+)\s*\)", transform_str)
-    if skewx_match:
-        angle = float(skewx_match.group(1)) * np.pi / 180
-        return np.array([[1, np.tan(angle), 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-
-    skewy_match = re.match(r"skewY\(\s*([-\d.]+)\s*\)", transform_str)
-    if skewy_match:
-        angle = float(skewy_match.group(1)) * np.pi / 180
-        return np.array([[1, 0, 0], [np.tan(angle), 1, 0], [0, 0, 1]], dtype=float)
-
-    return np.eye(3)
-
-
-def _apply_transform(pts, transform_matrix):
-    if np.array_equal(transform_matrix, np.eye(3)):
-        return pts
-    pts_h = np.column_stack([pts, np.ones(len(pts))])
-    return (pts_h @ transform_matrix.T)[:, :2]
-
-
-def _inside_edge(pt, edge_pt1, edge_pt2):
-    return (edge_pt2[0] - edge_pt1[0]) * (pt[1] - edge_pt1[1]) >= (edge_pt2[1] - edge_pt1[1]) * (
-        pt[0] - edge_pt1[0]
-    )
-
-
-def _line_intersection(p1, p2, p3, p4):
-    x1, y1 = p1
-    x2, y2 = p2
-    x3, y3 = p3
-    x4, y4 = p4
-
-    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(denom) < 1e-10:
-        return None
-
-    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
-    return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
-
-
-def _clip_polygon_to_rect(polygon_pts, rect_bounds):
-    # sutherland-hodgman algorithm
-    x_min, y_min, x_max, y_max = rect_bounds
-    rect_edges = [
-        [(x_min, y_min), (x_max, y_min)],
-        [(x_max, y_min), (x_max, y_max)],
-        [(x_max, y_max), (x_min, y_max)],
-        [(x_min, y_max), (x_min, y_min)],
-    ]
-
-    output_pts = list(polygon_pts)
-
-    for edge in rect_edges:
-        if not output_pts:
-            break
-
-        input_pts = output_pts
-        output_pts = []
-
-        if not input_pts:
-            continue
-
-        prev_pt = input_pts[-1]
-
-        for curr_pt in input_pts:
-            curr_inside = _inside_edge(curr_pt, edge[0], edge[1])
-            prev_inside = _inside_edge(prev_pt, edge[0], edge[1])
-
-            if curr_inside:
-                if not prev_inside:
-                    intersection = _line_intersection(prev_pt, curr_pt, edge[0], edge[1])
-                    if intersection:
-                        output_pts.append(intersection)
-                output_pts.append(curr_pt)
-            elif prev_inside:
-                intersection = _line_intersection(prev_pt, curr_pt, edge[0], edge[1])
-                if intersection:
-                    output_pts.append(intersection)
-
-            prev_pt = curr_pt
-
-    return np.array(output_pts) if output_pts else np.array([])
 
 
 def _parse_svg_path(d):
@@ -168,82 +43,43 @@ def _greyscale(fill, max_is_black):
     return 1.0 - grey if max_is_black else grey
 
 
-def _get_masked_elements(root):
-    masked_elements = []
-    for group in root.iter():
-        if group.tag.endswith("g") and group.get("mask"):
-            for el in group.iter():
-                if el != group:
-                    masked_elements.append(el)
-    return masked_elements if masked_elements else root.iter()
-
-
-def _create_circle_path(cx, cy, r, n_points=32):
-    angles = np.linspace(0, 2 * np.pi, n_points + 1)
-    return [(cx + r * np.cos(a), cy + r * np.sin(a)) for a in angles]
-
-
-def _snap_vertices_to_viewbox(pts, vx, vy, vw, vh, eps=0.01):
-    """Snap polygon vertices within eps of viewbox boundary to exactly the boundary."""
-    pts = pts.copy()
-    pts[:, 0] = np.where(np.abs(pts[:, 0] - vx) < eps, vx, pts[:, 0])
-    pts[:, 0] = np.where(np.abs(pts[:, 0] - (vx + vw)) < eps, vx + vw, pts[:, 0])
-    pts[:, 1] = np.where(np.abs(pts[:, 1] - vy) < eps, vy, pts[:, 1])
-    pts[:, 1] = np.where(np.abs(pts[:, 1] - (vy + vh)) < eps, vy + vh, pts[:, 1])
-    return pts
-
-
-def _process_rect(el, vw, vh, vx, vy, max_is_black):
-    x = float(el.get("x", 0))
-    y = float(el.get("y", 0))
-    w = float(el.get("width", vw))
-    h = float(el.get("height", vh))
-    pts = np.array([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
-
-    transform = el.get("transform", "")
-    if transform:
-        pts = _apply_transform(pts, _parse_transform(transform))
-        pts = _clip_polygon_to_rect(pts, (vx, vy, vx + vw, vy + vh))
-        if len(pts) < 3:
-            return None, None
-        pts = _snap_vertices_to_viewbox(pts, vx, vy, vw, vh)
-        if len(pts) > 0 and not np.array_equal(pts[0], pts[-1]):
-            pts = np.vstack([pts, pts[0]])
-    else:
-        pts = np.vstack([pts, pts[0]])
-
-    return MPath(pts), _greyscale(el.get("fill", "none"), max_is_black)
-
-
 def _extract_shapes_from_svg(svg_path, max_is_black):
-    root = ET.parse(svg_path).getroot()
-    vx, vy, vw, vh = map(float, root.get("viewBox", "0 0 100 100").split())
+    """Extract shapes from SVG using svgelements (handles all transforms automatically)."""
+    from svgpath2mpl import parse_path
+
+    svg = SVG.parse(str(svg_path))
+
+    vx = svg.viewbox.x if svg.viewbox else 0
+    vy = svg.viewbox.y if svg.viewbox else 0
+    vw = svg.viewbox.width if svg.viewbox else 100
+    vh = svg.viewbox.height if svg.viewbox else 100
+
+    masked_elements = set()
+    for el in svg.elements():
+        if isinstance(el, Group) and el.values.get("mask"):
+            for child in el:
+                if isinstance(child, Shape):
+                    masked_elements.add(id(child))
 
     paths, greys = [], []
-    elements_to_process = _get_masked_elements(root)
-
-    for el in elements_to_process:
-        fill = el.get("fill", "none")
-        if fill in ("none", "white"):
+    for el in svg.elements():
+        if not isinstance(el, Shape):
+            continue
+        if masked_elements and id(el) not in masked_elements:
             continue
 
-        if el.tag.endswith("rect"):
-            path, grey = _process_rect(el, vw, vh, vx, vy, max_is_black)
-            if path:
-                paths.append(path)
-                greys.append(grey)
-        elif el.tag.endswith("path"):
-            pts = _parse_svg_path(el.get("d", ""))
-            if len(pts) >= 3:
-                paths.append(MPath(pts + [pts[0]]))
-                greys.append(_greyscale(fill, max_is_black))
-        elif el.tag.endswith("circle"):
-            cx = float(el.get("cx", 0))
-            cy = float(el.get("cy", 0))
-            r = float(el.get("r", 0))
-            pts = _create_circle_path(cx, cy, r)
-            paths.append(MPath(pts))
-            greys.append(_greyscale(fill, max_is_black))
+        fill = el.fill
+        if fill is None or str(fill).lower() in ("none", "white", "#ffffff"):
+            continue
+
+        path_d = el.d()
+        if not path_d:
+            continue
+
+        mpath = parse_path(path_d)
+        grey = _greyscale(str(fill), max_is_black)
+        paths.append(mpath)
+        greys.append(grey)
 
     return paths, np.asarray(greys), (vx, vy, vw, vh)
 
@@ -1287,5 +1123,3 @@ def side_by_side_txt_plot(
     }
 
     return "\n".join(lines), metrics_out
-
-

@@ -2544,6 +2544,62 @@ def get_all_ERNs_names(network):
     return ERN_names
 
 
+def find_topology_changing_tus(network: "Network") -> set[str]:
+    """Find TUs whose masking would cause topology changes during commit.
+
+    When an ERN's negative input (the protein) is disabled, the ERN goes into
+    passthrough mode and strips the _rec site from the positive input's RNA.
+    If the stripped RNA matches another TU's RNA, they merge into one
+    transcription node - changing computation semantics.
+
+    Returns TU IDs that should be marked no_masking because disabling them
+    would cause topology-changing merges.
+    """
+    assert network.compute_graph is not None
+    graph = network.compute_graph
+
+    tu_to_rna: dict[str, tuple[str, ...]] = {}
+    for edge in graph.edges.values():
+        if edge.content_type == "RNA" and edge.extra:
+            rna_content = tuple(p.name for p in edge.content) if edge.content else ()
+            for tu_id in edge.extra.get("tu_id", []):
+                tu_to_rna[tu_id] = rna_content
+
+    dangerous_tus: set[str] = set()
+
+    for ern_node in graph.get_nodes_by_type("sequestron_ERN"):
+        seq_name = ern_node.extra.get("seq_name", "") if ern_node.extra else ""
+        if "#" not in seq_name:
+            continue
+        ern_rec_name = seq_name.split("#")[1]
+
+        incoming = list(graph.get_incoming_edges(ern_node.node_id))
+        neg_edges = [e for e in incoming if e.to_input_slot == 0]
+        pos_edges = [e for e in incoming if e.to_input_slot == 1]
+
+        neg_tu_ids: set[str] = set()
+        for e in neg_edges:
+            neg_tu_ids.update(e.extra.get("tu_id", []) if e.extra else [])
+
+        pos_tu_ids: set[str] = set()
+        for e in pos_edges:
+            pos_tu_ids.update(e.extra.get("tu_id", []) if e.extra else [])
+
+        for pos_tu in pos_tu_ids:
+            rna = tu_to_rna.get(pos_tu, ())
+            stripped_rna = tuple(p for p in rna if p != ern_rec_name)
+
+            # would stripped RNA merge with another TU's RNA?
+            for other_tu, other_rna in tu_to_rna.items():
+                if other_tu == pos_tu:
+                    continue
+                if other_rna == stripped_rna:
+                    dangerous_tus.update(neg_tu_ids)
+                    break
+
+    return dangerous_tus
+
+
 def get_uorf_names(uorf_values, ern_names):
     uorf_names = []
     for uorf, ern_name in zip(uorf_values, ern_names):

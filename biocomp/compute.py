@@ -308,7 +308,13 @@ class ComputeStack:
 
     ### {{{                     --     public interface     --
 
-    def build(self, config: ComputeConfig, enable_tu_masking: bool = False, **kwargs):
+    def build(
+        self,
+        config: ComputeConfig,
+        enable_tu_masking: bool = False,
+        auto_lock_topology_tus: bool = True,
+        **kwargs,
+    ):
         """
         Split apart all the networks into their constituent nodes
         and put these nodes into ordered layers, maximizing parallelism by ensuring same-type nodes
@@ -320,12 +326,13 @@ class ComputeStack:
         Args:
             config: ComputeConfig with node implementations
             enable_tu_masking: If True, build TU-to-index mapping for design mode TU masking
+            auto_lock_topology_tus: If True, auto-detect TUs whose masking would change topology
         """
         with ut.timer("Building compute stack", logger):
             self.config = config
 
             if enable_tu_masking:
-                self._build_tu_mapping()
+                self._build_tu_mapping(auto_lock_topology_tus=auto_lock_topology_tus)
 
             self._assemble_stack(**kwargs)
             self._refresh()
@@ -337,13 +344,20 @@ class ComputeStack:
             self.check()
             self.is_built = True
 
-    def _build_tu_mapping(self):
+    def _build_tu_mapping(self, auto_lock_topology_tus: bool = True):
         """Build TU ID to index mapping for all networks."""
         from biocomp.tumasking import build_tu_id_mapping_excluding_inverse
 
         sorted_tu_ids, tu_id_to_idx, inverse_tu_ids, no_masking_tu_ids = (
             build_tu_id_mapping_excluding_inverse(self.networks)
         )
+
+        if auto_lock_topology_tus:
+            from biocomp.network import find_topology_changing_tus
+
+            for net in self.networks:
+                no_masking_tu_ids.update(find_topology_changing_tus(net))
+
         self.tu_id_to_idx = tu_id_to_idx
         self.n_tus = len(sorted_tu_ids)
         self.inverse_tu_ids = inverse_tu_ids

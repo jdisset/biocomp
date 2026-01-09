@@ -44,11 +44,17 @@ def simple_recipe(lib):
                 CoTransfection(
                     name="test_cotx",
                     units=[
-                        TranscriptionUnit(slots=[P, u, "CasE_rec", "mNeonGreen", T], name="output", source="p1"),
+                        TranscriptionUnit(
+                            slots=[P, u, "CasE_rec", "mNeonGreen", T], name="output", source="p1"
+                        ),
                         TranscriptionUnit(slots=[P, "CasE", T], name="ern", source="p2"),
                         TranscriptionUnit(slots=[P, "mKO2", T], name="marker", source="p3"),
                     ],
-                    ratios=[NumRange(min=0.2, max=0.5), NumRange(min=0.3, max=0.6), NumRange(min=0.1, max=0.3)],
+                    ratios=[
+                        NumRange(min=0.2, max=0.5),
+                        NumRange(min=0.3, max=0.6),
+                        NumRange(min=0.1, max=0.3),
+                    ],
                 ),
             ],
         )
@@ -181,7 +187,7 @@ class TestNodeParamInfoDataClass:
     def test_with_all_fields(self):
         pv = ParamValue("rate", ParamKind.RATE, 0.5, bounds=(0.0, 1.0), quantized_to="2x_uORF")
         inp = InputSlot(0, "tu1", False, "source")
-        tg = TUParamGroup("tu1", True, 0.9, [pv], [inp])
+        tg = TUParamGroup("tu1", True, 0.9, params=[pv], inputs=[inp])
         info = NodeParamInfo("translation", "tl_1", 1, [tg], [], [])
         assert info.tu_groups[0].params[0].quantized_to == "2x_uORF"
 
@@ -218,6 +224,17 @@ class TestIntrospectStackReal:
 
         with pytest.raises(AssertionError, match="out of range"):
             introspect_stack(built_stack, initialized_params, -1)
+
+    def test_cotx_group_populated(self, built_stack, initialized_params):
+        infos = introspect_stack(built_stack, initialized_params, network_id=0)
+        tu_data = aggregate_by_tu(infos)
+        cotx_groups_found = set()
+        for tu_id, entries in tu_data.items():
+            for _, tg in entries:
+                cotx_groups_found.add(tg.cotx_group)
+        assert "test_cotx" in cotx_groups_found, (
+            f"Expected cotx group 'test_cotx', got: {cotx_groups_found}"
+        )
 
 
 class TestFormatNetworkParamsReal:

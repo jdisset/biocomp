@@ -503,28 +503,11 @@ def transform_nn(
             tu_groups = []
             for slot_idx, edge in enumerate(edges_sorted):
                 tu_ids_on_edge = edge.extra.get("tu_id", []) if edge.extra else []
-                tu_id = tu_ids_on_edge[0] if tu_ids_on_edge else f"input_{slot_idx}"
+                if not tu_ids_on_edge:
+                    tu_ids_on_edge = [f"input_{slot_idx}"]
 
                 source = stack.get_node(node.network_id, edge.source_id)
                 source_name = source.extra.get("name", f"node_{edge.source_id}") if source else None
-
-                is_masked = False
-                prob = 1.0
-                if tu_indices is not None:
-                    if tu_indices.ndim == 2 and slot_idx < tu_indices.shape[0]:
-                        slot_tu_indices = tu_indices[slot_idx]
-                        for tidx in slot_tu_indices:
-                            tidx = int(tidx)
-                            if tidx >= 0:
-                                prob = get_tu_prob(params, network_id, tidx)
-                                if not is_tu_enabled(prob):
-                                    is_masked = True
-                                break
-                    elif tu_indices.ndim == 1 and slot_idx < len(tu_indices):
-                        tidx = int(tu_indices[slot_idx])
-                        if tidx >= 0:
-                            prob = get_tu_prob(params, network_id, tidx)
-                            is_masked = not is_tu_enabled(prob)
 
                 rate_val = float(np.mean(rates[slot_idx])) if slot_idx < len(rates) else 0.0
                 part_name = resolved_names[slot_idx] if slot_idx < len(resolved_names) else None
@@ -536,22 +519,42 @@ def transform_nn(
                     quantized_to=part_name,
                 )
 
-                inp = InputSlot(
-                    slot_idx=slot_idx,
-                    tu_id=tu_id,
-                    is_masked=is_masked,
-                    source_node=source_name,
-                )
+                # create a TUParamGroup for each TU on this edge (shared edges have multiple TUs)
+                for tu_id in tu_ids_on_edge:
+                    is_masked = False
+                    prob = 1.0
+                    if tu_indices is not None:
+                        if tu_indices.ndim == 2 and slot_idx < tu_indices.shape[0]:
+                            slot_tu_indices = tu_indices[slot_idx]
+                            for tidx in slot_tu_indices:
+                                tidx = int(tidx)
+                                if tidx >= 0:
+                                    prob = get_tu_prob(params, network_id, tidx)
+                                    if not is_tu_enabled(prob):
+                                        is_masked = True
+                                    break
+                        elif tu_indices.ndim == 1 and slot_idx < len(tu_indices):
+                            tidx = int(tu_indices[slot_idx])
+                            if tidx >= 0:
+                                prob = get_tu_prob(params, network_id, tidx)
+                                is_masked = not is_tu_enabled(prob)
 
-                tu_groups.append(
-                    TUParamGroup(
+                    inp = InputSlot(
+                        slot_idx=slot_idx,
                         tu_id=tu_id,
-                        is_enabled=not is_masked,
-                        prob=prob,
-                        params=[pv],
-                        inputs=[inp],
+                        is_masked=is_masked,
+                        source_node=source_name,
                     )
-                )
+
+                    tu_groups.append(
+                        TUParamGroup(
+                            tu_id=tu_id,
+                            is_enabled=not is_masked,
+                            prob=prob,
+                            params=[pv],
+                            inputs=[inp],
+                        )
+                    )
 
             result.append(
                 NodeParamInfo(

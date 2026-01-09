@@ -8,7 +8,6 @@ from PIL import Image
 
 from biocomp.design_targets import SVGTarget
 from biocomp.designutils import (
-    _parse_transform,
     _parse_svg_path,
     _extract_shapes_from_svg,
     sample_from_svg,
@@ -36,85 +35,6 @@ def render_svg_to_array(svg_path: Path, size: tuple[int, int]) -> np.ndarray:
     )
     img = Image.open(io.BytesIO(png_data)).convert("L")
     return np.array(img) / 255.0
-
-
-class TestTransformParsing:
-    """Test _parse_transform function with various SVG transform strings."""
-
-    def test_empty_transform(self):
-        result = _parse_transform("")
-        assert np.allclose(result, np.eye(3))
-
-    def test_none_transform(self):
-        result = _parse_transform(None)
-        assert np.allclose(result, np.eye(3))
-
-    def test_unrecognized_transform(self):
-        result = _parse_transform("unknown(1, 2, 3)")
-        assert np.allclose(result, np.eye(3))
-
-    def test_rotate_basic(self):
-        result = _parse_transform("rotate(90)")
-        cos_90, sin_90 = 0.0, 1.0
-        expected = np.array([[cos_90, -sin_90, 0], [sin_90, cos_90, 0], [0, 0, 1]])
-        assert np.allclose(result, expected, atol=1e-6)
-
-    def test_rotate_with_center(self):
-        result = _parse_transform("rotate(90 50 50)")
-        assert result.shape == (3, 3)
-        pt = np.array([50, 0, 1])
-        transformed = result @ pt
-        assert np.allclose(transformed[:2], [100, 50], atol=1e-6)
-
-    def test_matrix_transform(self):
-        result = _parse_transform("matrix(0.707 0.707 -0.707 0.707 50 20)")
-        assert result.shape == (3, 3)
-        assert np.isclose(result[0, 0], 0.707, atol=1e-3)
-        assert np.isclose(result[0, 1], -0.707, atol=1e-3)
-        assert np.isclose(result[0, 2], 50, atol=1e-3)
-        assert np.isclose(result[1, 0], 0.707, atol=1e-3)
-        assert np.isclose(result[1, 1], 0.707, atol=1e-3)
-        assert np.isclose(result[1, 2], 20, atol=1e-3)
-
-    def test_translate_xy(self):
-        result = _parse_transform("translate(30, 40)")
-        expected = np.array([[1, 0, 30], [0, 1, 40], [0, 0, 1]])
-        assert np.allclose(result, expected)
-
-    def test_translate_x_only(self):
-        result = _parse_transform("translate(30)")
-        expected = np.array([[1, 0, 30], [0, 1, 0], [0, 0, 1]])
-        assert np.allclose(result, expected)
-
-    def test_scale_uniform(self):
-        result = _parse_transform("scale(2)")
-        expected = np.array([[2, 0, 0], [0, 2, 0], [0, 0, 1]])
-        assert np.allclose(result, expected)
-
-    def test_scale_nonuniform(self):
-        result = _parse_transform("scale(2, 0.5)")
-        expected = np.array([[2, 0, 0], [0, 0.5, 0], [0, 0, 1]])
-        assert np.allclose(result, expected)
-
-    def test_skewx(self):
-        result = _parse_transform("skewX(45)")
-        assert np.isclose(result[0, 1], np.tan(np.pi / 4), atol=1e-6)
-        assert np.isclose(result[1, 0], 0)
-
-    def test_skewy(self):
-        result = _parse_transform("skewY(45)")
-        assert np.isclose(result[1, 0], np.tan(np.pi / 4), atol=1e-6)
-        assert np.isclose(result[0, 1], 0)
-
-    def test_matrix_with_spaces(self):
-        result = _parse_transform("matrix( 1 0 0 1 10 20 )")
-        expected = np.array([[1, 0, 10], [0, 1, 20], [0, 0, 1]])
-        assert np.allclose(result, expected)
-
-    def test_matrix_with_commas(self):
-        result = _parse_transform("matrix(1, 0, 0, 1, 10, 20)")
-        expected = np.array([[1, 0, 10], [0, 1, 20], [0, 0, 1]])
-        assert np.allclose(result, expected)
 
 
 class TestPathParsing:
@@ -379,6 +299,41 @@ class TestMITDesigns:
         assert top_row > 0.15, "I should have top bar"
         assert bottom_row > 0.15, "I should have bottom bar"
         assert center_col > 0.15, "I should have vertical stem"
+
+    def test_logo_m_transform_with_scientific_notation(self):
+        """Transforms with scientific notation must work (logo_M middle bar regression)."""
+        svg_path = MIT_DESIGNS_DIR / "logo_M.svg"
+        if not svg_path.exists():
+            pytest.skip("logo_M.svg not found")
+
+        paths, greys, _ = _extract_shapes_from_svg(svg_path, max_is_black=True)
+
+        assert len(paths) == 3, f"Expected 3 shapes (left, middle, right bars), got {len(paths)}"
+
+        bboxes = [p.get_extents() for p in paths]
+        x_ranges = sorted([(b.x0, b.x1) for b in bboxes])
+
+        assert x_ranges[0][1] < 30, f"Left leg should end before x=30, got {x_ranges[0][1]}"
+        assert 35 < x_ranges[1][0] < 45, f"Middle bar should start ~x=38, got {x_ranges[1][0]}"
+        assert x_ranges[2][0] > 70, f"Right leg should start after x=70, got {x_ranges[2][0]}"
+
+    def test_logo_m_middle_bar_visible_in_lattice(self):
+        """logo_M.svg must render with visible middle bar in lattice sampling."""
+        svg_path = MIT_DESIGNS_DIR / "logo_M.svg"
+        if not svg_path.exists():
+            pytest.skip("logo_M.svg not found")
+
+        target = SVGTarget(path=svg_path, name="logo_M")
+        _, Y_grid = target.get_lattice(resolution=(32, 32), seed=0)
+
+        mid_row = Y_grid[16, :]
+        high_mask = mid_row > 0.3
+
+        transitions = np.abs(np.diff(high_mask.astype(int))).sum()
+        assert transitions >= 4, (
+            f"M should have 3 bars (4+ transitions in middle row), got {transitions}. "
+            "Middle bar may be missing due to scientific notation transform parsing bug!"
+        )
 
 
 class TestTransformIntegration:
