@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from biocomp.utils import encode_function, EncodedPartialFunction
 from biocomp.compute import ComputeStack
+from biocomp.config import BIOCOMP_CONSTANTS
 import biocomp.nodes as nd
 from biocomp.network import Network
 from .parameters import ParameterTree
@@ -720,7 +721,7 @@ def plot_design_results(
             plt.show()
 
 
-RATIO_PRUNE_THRESHOLD = 1.0 / 120.0
+RATIO_PRUNE_THRESHOLD = BIOCOMP_CONSTANTS["ratio"]["prune_threshold"]
 
 
 def normalize_ratios_prune(current_ratios, threshold=RATIO_PRUNE_THRESHOLD, eps=1e-12):

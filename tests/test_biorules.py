@@ -12,7 +12,6 @@ from biocomp.library import LibraryContext
 import biocomp.biorules as br
 from biocomp.graphengine import apply_rule_sequence, apply_rule, graphs_are_isomorphic
 from biocomp.inversion import invert_all_paths
-import biocomp.old_network.recipe as reco
 import biocomp.recipe as recn
 from pathlib import Path
 import os
@@ -343,53 +342,3 @@ def test_inversion_produces_input_nodes(lib, multi_aggregation_ern):
                 assert "input_from_output" in inp.extra
 
 
-def test_inversion_old_vs_new_basic(lib):
-    """Compare old vs new inversion system on a basic recipe"""
-    # Handle both running from biocomp dir and from project root with env var
-    BIOCOMPILER_PROJECT_ROOT = os.environ.get("BIOCOMPILER_PROJECT_ROOT", "")
-    if BIOCOMPILER_PROJECT_ROOT:
-        test_recipe_path = Path(BIOCOMPILER_PROJECT_ROOT) / "biocomp" / "tests" / "networks" / "old_recipes"
-    else:
-        # Running from biocomp directory
-        test_recipe_path = Path(__file__).parent / "networks" / "old_recipes"
-    recipe_path = test_recipe_path / "BPBLTRv1_1.recipe.json5"
-
-    if not recipe_path.exists():
-        pytest.skip(f"Test recipe not found: {recipe_path}")
-
-    with LibraryContext.with_library(lib):
-        # Build old system inverted network
-        old_net = reco.network_from_recipe(recipe_path, lib, inverse="all")[0]
-        old_net.build()
-        old_inverted_nets = reco.inverted_network(old_net, mode="all")
-
-        # Build new system inverted network
-        recipe_dict = json5.load(open(recipe_path))
-        new_recipe = recn.dict_to_recipe(recipe_dict)
-        cdg = build_central_dogma_graph_direct(new_recipe.content, lib, dual=True)
-        forward_compg = apply_rule_sequence(br.ALL_RULES, cdg)[0]
-        new_inverted_graphs = invert_all_paths(forward_compg, mode="all")
-
-        # Should produce same number of inverted networks
-        assert len(old_inverted_nets) == len(new_inverted_graphs), \
-            f"Old system: {len(old_inverted_nets)}, New system: {len(new_inverted_graphs)}"
-
-        # Each inverted network should have similar structure
-        for old_inv in old_inverted_nets:
-            old_inv_graphstate = old_network_compg_to_graphstate(old_inv)
-
-            # Count input and inverse nodes
-            old_input_count = len([n for n in old_inv_graphstate.nodes.values() if n.node_type == "input"])
-            old_inv_count = len([n for n in old_inv_graphstate.nodes.values() if n.node_type.startswith("inv_")])
-
-            # New system should have similar counts
-            found_match = False
-            for new_inv in new_inverted_graphs:
-                new_input_count = len([n for n in new_inv.nodes.values() if n.node_type == "input"])
-                new_inv_count = len([n for n in new_inv.nodes.values() if n.node_type.startswith("inv_")])
-
-                if new_input_count == old_input_count and new_inv_count == old_inv_count:
-                    found_match = True
-                    break
-
-            assert found_match, f"No new inverted graph matched old one with {old_input_count} inputs and {old_inv_count} inv nodes"

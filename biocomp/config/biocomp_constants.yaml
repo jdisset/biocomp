@@ -1,0 +1,10 @@
+ratio:
+  prune_threshold: 0.008333333333333333  # 1.0 / 120.0
+
+sampling:
+  epsilon_density: 1e-12
+  epsilon_probability: 1e-16
+  high_density_penalty: 1.0
+
+metrics:
+  epsilon: 1e-9

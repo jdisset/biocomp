@@ -19,6 +19,7 @@ from rich.table import Table
 from rich.console import Console
 
 from biocomp.logging_config import get_logger
+from biocomp.config import BIOCOMP_CONSTANTS
 
 logger = get_logger(__name__)
 
@@ -340,8 +341,8 @@ def network_data_check(x, y, network):
 
 
 def optimal_density_subsample(X, kde, rng, quantile_threshold=0.1):
-    EPSILON = 1e-12
-    HIGH_DENSITIES_PENALTY = 1.00
+    EPSILON = BIOCOMP_CONSTANTS["sampling"]["epsilon_density"]
+    HIGH_DENSITIES_PENALTY = BIOCOMP_CONSTANTS["sampling"]["high_density_penalty"]
     densities = kde.evaluate(X.T) + EPSILON
     threshold = np.quantile(densities, quantile_threshold)
     dice = np.random.RandomState(rng)
@@ -383,8 +384,8 @@ def sample_batches_w_coord_threshold(
     assert X.shape[0] == Y.shape[0]
     assert densities.shape == (X.shape[0],)
 
-    EPSILON = 1e-16
-    HIGH_DENSITIES_PENALTY = 1.0
+    EPSILON = BIOCOMP_CONSTANTS["sampling"]["epsilon_probability"]
+    HIGH_DENSITIES_PENALTY = BIOCOMP_CONSTANTS["sampling"]["high_density_penalty"]
 
     threshold = np.inf
     if density_threshold_quantile is not None:
@@ -439,8 +440,8 @@ def sample_batches(
         key,
     ) = args
 
-    EPSILON = 1e-16
-    HIGH_DENSITIES_PENALTY = 1.0
+    EPSILON = BIOCOMP_CONSTANTS["sampling"]["epsilon_probability"]
+    HIGH_DENSITIES_PENALTY = BIOCOMP_CONSTANTS["sampling"]["high_density_penalty"]
     threshold = np.quantile(densities + EPSILON, density_threshold_quantile)
 
     p_select = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
@@ -582,8 +583,8 @@ def compute_selection_probabilities(
     Precompute selection probabilities for batch sampling.
     Vectorized operations for better performance.
     """
-    EPSILON = 1e-16
-    HIGH_DENSITIES_PENALTY = 1.0
+    EPSILON = BIOCOMP_CONSTANTS["sampling"]["epsilon_probability"]
+    HIGH_DENSITIES_PENALTY = BIOCOMP_CONSTANTS["sampling"]["high_density_penalty"]
 
     threshold = np.inf
     if density_threshold_quantile is not None:

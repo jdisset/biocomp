@@ -12,6 +12,7 @@ from biocomp.nodeutils import (
 )
 from biocomp.tumasking import TU_LOG_ALPHA_PATH, TU_BINARY_MASK_PATH, LATENT_TU_Z_PATH
 from biocomp.utils import get_logger
+from biocomp.config import BIOCOMP_CONSTANTS
 from typing import Optional
 from dataclasses import dataclass, asdict
 
@@ -573,7 +574,7 @@ def inv_aggregation(
         )
         params.at(f"{namespace}/fwd_path_indices", jnp.array(fwd_path_indices), tags=[NON_GRAD_TAG])
 
-    DISABLED_THRESHOLD = 1.0 / 120.0
+    DISABLED_THRESHOLD = BIOCOMP_CONSTANTS["ratio"]["prune_threshold"]
 
     def apply(
         input: NDArray,
