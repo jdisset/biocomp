@@ -16,11 +16,77 @@ from biocomp.plotting.ascii_heatmap import CMAP_S
 
 if TYPE_CHECKING:
     from biocomp.compute import ComputeStack
+    from biocomp.design import DesignManager
+    from biocomp.design_targets import Target
     from biocomp.designloss import GridLossResult
+    from biocomp.network import Network
     from biocomp.parameters import ParameterTree
+    from biocomptools.modelmodel import BiocompModel
+    from biocomptools.toollib.networkprediction import PlotData
 
 NdArray = np.ndarray
 logger = get_logger(__name__)
+
+
+def build_design_stack(
+    dmanager: "DesignManager",
+    model: "BiocompModel",
+    *,
+    unlock_ratios: bool = True,
+    use_latent_ratios: bool = False,
+    latent_dim: int = 0,
+    latent_hidden_dim: int = 0,
+    auto_lock_topology_tus: bool = True,
+) -> "ComputeStack":
+    """Single source of truth for design stack construction.
+
+    All design-related stack building should use this helper to ensure
+    consistent TU masking behavior across training, logging, and commit.
+    """
+    return dmanager.build_stack(
+        model,
+        unlock_ratios=unlock_ratios,
+        use_latent_ratios=use_latent_ratios,
+        latent_dim=latent_dim,
+        latent_hidden_dim=latent_hidden_dim,
+        auto_lock_topology_tus=auto_lock_topology_tus,
+    )
+
+
+def predict_design_grid(
+    model: "BiocompModel",
+    networks: list["Network"],
+    target: "Target",
+    resolution: tuple[int, int],
+    seed: int = 0,
+) -> tuple[list["PlotData"], np.ndarray]:
+    """Single source of truth for design grid prediction.
+
+    Ensures consistent prediction flags:
+    - already_latent=True (design targets are in latent space)
+    - z_value=0.0 (deterministic for reproducibility)
+    - disable_variational=True
+    - skip_input_reorder=True (design uses positional inputs)
+
+    Returns:
+        (data_list, Y_target) - prediction data and target grid
+    """
+    from biocomptools.modelmodel import NetworkModel
+    from biocomptools.toollib.networkprediction import NetworkPrediction
+
+    X_lat, Y_target = target.get_lattice(resolution=resolution, seed=seed)
+    nm = NetworkModel(model=model, network=networks)
+
+    pred = NetworkPrediction(
+        predict_at=[X_lat] * len(networks),
+        network_model=nm,
+        already_latent=True,
+        z_value=0.0,
+        disable_variational=True,
+        skip_input_reorder=True,
+        seed=seed,
+    )
+    return pred.get_data(rescale_latent=False), Y_target
 
 
 def _parse_svg_path(d):

@@ -87,6 +87,22 @@ def _members_to_arrays(
     )
 
 
+def extract_ratios_from_extra(extra: dict) -> tuple[list[str], list[float]]:
+    """Extract member IDs and ratios from aggregation node extra.
+
+    Expects new dict format only. Returns (member_ids, ratios) with deterministic ordering.
+    """
+    members_data = extra.get("members", {})
+    if not isinstance(members_data, dict) or not members_data:
+        return [], []
+    sorted_ids = sorted(members_data.keys())
+    ratios = [
+        members_data[m].get("ratio", 1.0) if isinstance(members_data[m], dict) else 1.0
+        for m in sorted_ids
+    ]
+    return sorted_ids, ratios
+
+
 def _decode_latent_ratios(z, W1, b1, W2, b2):
     """Decode latent code to ratios via MLP. No softmax - aggregation handles normalization."""
     h = jax.nn.gelu(W1 @ z + b1)

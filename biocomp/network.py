@@ -9,7 +9,14 @@ import pandas as pd
 import numpy as np
 
 from biocomp.library import LibraryContext, PartsLibrary
-from biocomp.recipe import Recipe, TranscriptionUnit, CoTxList, Slot, CoTransfection, name_transcription_unit
+from biocomp.recipe import (
+    Recipe,
+    TranscriptionUnit,
+    CoTxList,
+    Slot,
+    CoTransfection,
+    name_transcription_unit,
+)
 from biocomp.logging_config import get_logger
 from biocomp.graphengine import (
     GraphState,
@@ -391,12 +398,13 @@ class Network(BaseModel):
         assert self.compute_graph is not None, "compute_graph must exist"
         zero_ratio_sources = set()
         for agg in self.compute_graph.get_nodes_by_type("aggregation"):
-            members = agg.extra.get("members", [])
-            ratios = agg.extra.get("ratios", [])
-            if len(members) == len(ratios):
-                for sid, r in zip(members, ratios):
-                    if isinstance(r, (int, float)) and r == 0:
-                        zero_ratio_sources.add(sid)
+            members = agg.extra.get("members", {})
+            if not isinstance(members, dict):
+                continue
+            for sid, data in members.items():
+                ratio = data.get("ratio", 1.0) if isinstance(data, dict) else 1.0
+                if ratio == 0:
+                    zero_ratio_sources.add(sid)
         return zero_ratio_sources
 
     def get_disabled_tu_source_ids(
@@ -457,6 +465,54 @@ class Network(BaseModel):
 
         return disabled_sources
 
+    def find_exclusive_ern_neg_tus(self, tu_id_to_idx: dict[str, int]) -> set[str]:
+        """Find neg TUs that feed exactly one ERN and no other nodes.
+
+        These are the only TUs safe to cascade-disable during commit.
+        Most neg TUs are SHARED across multiple ERNs (e.g., CasE protein feeds 3+ ERNs)
+        and should NOT be cascade-disabled to avoid breaking other ERNs.
+
+        Args:
+            tu_id_to_idx: TU ID to index mapping
+
+        Returns:
+            Set of TU IDs that are exclusive to one ERN (safe to cascade-disable)
+        """
+        assert self.compute_graph is not None
+
+        # track which ERNs each neg TU feeds (via slot 0)
+        neg_tu_ern_usage: dict[str, list[int]] = {}
+        # track TUs that feed any non-ERN node
+        neg_tu_other_usage: set[str] = set()
+
+        for edge in self.compute_graph.edges.values():
+            target_node = self.compute_graph.nodes.get(edge.target_id)
+            if target_node is None:
+                continue
+
+            tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+            if not tu_ids:
+                continue
+
+            if target_node.node_type == "sequestron_ERN" and edge.to_input_slot == 0:
+                # neg input (slot 0) to ERN
+                for tu_id in tu_ids:
+                    if tu_id in tu_id_to_idx:
+                        neg_tu_ern_usage.setdefault(tu_id, []).append(target_node.node_id)
+            elif target_node.node_type != "sequestron_ERN":
+                # feeds non-ERN node (could be translation, output, etc.)
+                for tu_id in tu_ids:
+                    if tu_id in tu_id_to_idx:
+                        neg_tu_other_usage.add(tu_id)
+
+        # exclusive = feeds exactly 1 ERN neg input AND no other nodes
+        exclusive = set()
+        for tu_id, ern_list in neg_tu_ern_usage.items():
+            if len(ern_list) == 1 and tu_id not in neg_tu_other_usage:
+                exclusive.add(tu_id)
+
+        return exclusive
+
     def get_ern_input_states(
         self,
         tu_log_alpha,
@@ -516,7 +572,9 @@ class Network(BaseModel):
     ) -> set[tuple[str, str]]:
         """Handle ERN nodes with disabled inputs according to biological semantics.
 
-        Case 1 (positive disabled): ERN is useless, also mark negative TU for removal
+        Case 1 (positive disabled): ERN is useless. Only cascade-disable neg TUs
+            that are EXCLUSIVE to this ERN (feed exactly one ERN, no other nodes).
+            Shared neg TUs (common case, e.g., CasE feeds 3+ ERNs) are kept.
         Case 2 (negative disabled): ERN acts as passthrough, strip ERN_rec from positive TU's recipe
 
         Args:
@@ -530,6 +588,9 @@ class Network(BaseModel):
 
         assert self.compute_graph is not None
         ern_states = self.get_ern_input_states(tu_log_alpha, tu_id_to_idx)
+
+        # find exclusive neg TUs (safe to cascade-disable)
+        exclusive_neg_tus = self.find_exclusive_ern_neg_tus(tu_id_to_idx)
 
         nodes_to_remove = set()
         edges_to_remove = set()
@@ -555,9 +616,13 @@ class Network(BaseModel):
                     edges_to_remove.add(
                         (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot)
                     )
+                # ONLY cascade-disable neg TUs that are exclusive to this ERN
+                # Shared neg TUs (e.g., CasE feeding 3+ ERNs) must be kept
                 for neg_edge in neg_edges:
                     tu_ids = neg_edge.extra.get("tu_id", []) if neg_edge.extra else []
-                    additional_disabled_tus.update(tu_ids)
+                    for tu_id in tu_ids:
+                        if tu_id in exclusive_neg_tus:
+                            additional_disabled_tus.add(tu_id)
 
             elif not neg_enabled:
                 # Case 2: Negative input disabled (ERN protein gone) - passthrough for positive
@@ -751,7 +816,9 @@ class Network(BaseModel):
                 continue
 
             fluo_bias = node.extra.get("fluo_bias")
-            expected_protein = fluo_bias.get("protein") if fluo_bias and isinstance(fluo_bias, dict) else None
+            expected_protein = (
+                fluo_bias.get("protein") if fluo_bias and isinstance(fluo_bias, dict) else None
+            )
 
             if expected_protein:
                 # use protein name to renumber or remove
@@ -932,7 +999,9 @@ class Network(BaseModel):
                 locked_list = node.extra.get("ratio_locked", [False] * len(sorted_ids))
 
             ratios = []
-            for base_ratio, ratio_range, is_locked in zip(base_ratios, ratio_ranges_list, locked_list):
+            for base_ratio, ratio_range, is_locked in zip(
+                base_ratios, ratio_ranges_list, locked_list
+            ):
                 if is_locked:
                     ratios.append(RatioSpec(value=base_ratio, locked=True))
                 elif ratio_range is not None and isinstance(ratio_range, dict):
@@ -1514,19 +1583,21 @@ class Network(BaseModel):
                         break
 
             # Extract ratios and compute percentages per TU
-            raw_ratios = node.extra.get("ratios", [])
-            members = node.extra.get("members", [])
+            members_data = node.extra.get("members", {})
             ratios = None
-            if raw_ratios:
-                # Normalize for display (smallest = 1)
+            if isinstance(members_data, dict) and members_data:
+                sorted_ids = sorted(members_data.keys())
+                raw_ratios = [
+                    members_data[m].get("ratio", 1.0) if isinstance(members_data[m], dict) else 1.0
+                    for m in sorted_ids
+                ]
                 min_r = (
                     min(r for r in raw_ratios if r > 0) if any(r > 0 for r in raw_ratios) else 1.0
                 )
                 ratios = [r / min_r for r in raw_ratios]
-                # Compute percentages and assign to TUs
                 total = sum(raw_ratios)
-                if total > 0 and len(members) == len(raw_ratios):
-                    for sid, ratio in zip(members, raw_ratios):
+                if total > 0:
+                    for sid, ratio in zip(sorted_ids, raw_ratios):
                         tu_id = source_id_to_tu_id.get(sid)
                         if tu_id and tu_id in tus:
                             tus[tu_id].ratio_percent = (ratio / total) * 100

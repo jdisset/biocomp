@@ -719,9 +719,23 @@ class GraphPrinter:
                 if "source_id" in node.extra:
                     extra_parts.append(f"src={node.extra['source_id']}")
             elif node.node_type == "aggregation":
-                # Show ratios with unlocked indicator
-                ratios = node.extra.get("ratios", [])
-                ratio_ranges = node.extra.get("ratio_ranges", [])
+                members_data = node.extra.get("members", {})
+                if isinstance(members_data, dict) and members_data:
+                    sorted_ids = sorted(members_data.keys())
+                    ratios = [
+                        members_data[m].get("ratio", 1.0)
+                        if isinstance(members_data[m], dict)
+                        else 1.0
+                        for m in sorted_ids
+                    ]
+                    ratio_ranges = [
+                        members_data[m].get("ratio_range")
+                        if isinstance(members_data[m], dict)
+                        else None
+                        for m in sorted_ids
+                    ]
+                else:
+                    ratios, ratio_ranges = [], []
                 if ratios:
                     ratio_strs = []
                     for i, r in enumerate(ratios):
@@ -736,7 +750,9 @@ class GraphPrinter:
                 if bias is not None:
                     if isinstance(bias, dict):
                         if "min" in bias or "max" in bias:
-                            extra_parts.append(f"bias=[{bias.get('min', '?')}-{bias.get('max', '?')}]")
+                            extra_parts.append(
+                                f"bias=[{bias.get('min', '?')}-{bias.get('max', '?')}]"
+                            )
                         elif "value" in bias:
                             extra_parts.append(f"bias={bias['value']:.2f}")
                     else:

@@ -587,3 +587,61 @@ def format_committed_network_tus(network, console=None) -> None:
         return
 
     _render_tu_table(console, tu_data)
+
+
+def _get_committed_tu_ids(network) -> set[str]:
+    """Extract TU IDs from committed network's source nodes."""
+    tu_ids: set[str] = set()
+    if network.compute_graph is None:
+        return tu_ids
+    for node in network.compute_graph.nodes.values():
+        if node.node_type == "source":
+            tu_name = node.extra.get("name", "")
+            if tu_name:
+                tu_ids.add(tu_name)
+    return tu_ids
+
+
+def format_committed_network_params_rich(
+    committed_network,
+    stack: "ComputeStack",
+    params: "ParameterTree",
+    network_id: int,
+    console=None,
+) -> None:
+    """Display committed network TUs with full parameter info.
+
+    Combines network structure (which TUs survived) with param introspection
+    (ratios, tc_rate, tl_rate) for comprehensive committed network display.
+
+    Uses same rendering as format_network_params_rich for consistency.
+    """
+    from rich.console import Console
+    from rich.panel import Panel
+
+    if console is None:
+        console = Console()
+
+    if committed_network.compute_graph is None:
+        console.print("[dim]Network has no compute_graph[/dim]")
+        return
+
+    committed_tu_ids = _get_committed_tu_ids(committed_network)
+    if not committed_tu_ids:
+        console.print("[dim]No TUs found in committed network[/dim]")
+        return
+
+    infos = introspect_stack(stack, params, network_id)
+    tu_data = aggregate_by_tu(infos)
+
+    filtered_tu_data = {
+        tu_id: entries for tu_id, entries in tu_data.items() if tu_id in committed_tu_ids
+    }
+
+    net_name = committed_network.name or "committed_network"
+    console.print(Panel(f"[bold]{net_name}[/bold] (committed)", expand=False))
+
+    if filtered_tu_data:
+        _render_tu_table(console, filtered_tu_data)
+
+    _render_ungrouped_rich(console, infos)

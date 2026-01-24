@@ -14,10 +14,11 @@ across experiments, use LATENT space. Assertions help detect accidental space mi
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import numpy as np
 from scipy import stats as scipy_stats
+
 
 NdArray: TypeAlias = np.ndarray
 
@@ -600,3 +601,47 @@ DEFAULT_GRIDSTATS_PARAMS: dict = {
 
 SPLIT_HALF_SUBSET_SIZE: int = 10000  # fixed size for fair cross-dataset comparison
 SPLIT_HALF_N_BOOTSTRAPS: int = 5  # cv ~6%, good speed/stability tradeoff
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GRIDSTATS CONFIG MIXIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class GridStatsFields:
+    """Mixin providing gridstats configuration fields for Pydantic models.
+
+    This is NOT a BaseModel subclass - it provides field annotations that Pydantic
+    will pick up when combined with a BaseModel class via multiple inheritance.
+
+    Use `get_gridstats_params()` to reconstruct the params dict.
+
+    Example:
+        class MyPredictor(GridStatsFields, BaseModel):
+            enable_gridstats: bool = True
+
+        pred = MyPredictor(gridstats_k=128)
+        params = pred.get_gridstats_params()
+    """
+
+    gridstats_hypercube_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
+    gridstats_hypercube_min: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_min"]
+    gridstats_hypercube_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
+    gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]
+    gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
+    gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
+
+    def get_gridstats_params(self) -> dict[str, Any]:
+        """Build gridstats params dict from fields."""
+        return {
+            "hypercube_res": self.gridstats_hypercube_res,
+            "hypercube_min": self.gridstats_hypercube_min,
+            "hypercube_max": self.gridstats_hypercube_max,
+            "k": self.gridstats_k,
+            "radius": self.gridstats_radius,
+            "min_points": self.gridstats_min_points,
+        }
+
+
+# alias for backwards compatibility
+GridStatsConfigMixin = GridStatsFields

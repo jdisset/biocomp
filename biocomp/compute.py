@@ -130,6 +130,64 @@ def _compute_layer_namespace(layer_id: int, node_type: str, n_outputs: int) -> s
     return f"local/{layer_id}/{layer_name}"
 
 
+def _renormalize_aggregation_after_cascade(net: "Network", disabled_source_ids: set[int]) -> None:
+    """Renormalize aggregation ratios after cascade-disabled sources are removed.
+
+    When ERN cleanup cascade-disables additional TUs, their source nodes are removed.
+    Aggregation nodes referencing these sources need their ratios updated and renormalized.
+    """
+    if not disabled_source_ids:
+        return
+    if net.compute_graph is None:
+        return
+
+    graph = net.compute_graph
+    for node in graph.get_nodes_by_type("aggregation"):
+        if node.extra is None:
+            continue
+        members = node.extra.get("members")
+        if not members or not isinstance(members, dict):
+            continue
+
+        # build source id to member id mapping
+        source_id_to_member: dict[int, str] = {}
+        for edge in graph.get_incoming_edges(node.node_id):
+            src_node = graph.nodes.get(edge.source_id)
+            if src_node and src_node.node_type == "source" and src_node.extra:
+                member_id = src_node.extra.get("member_id")
+                if member_id:
+                    source_id_to_member[edge.source_id] = str(member_id)
+
+        # find members to remove (corresponding to disabled sources)
+        members_to_remove: set[str] = set()
+        for src_id in disabled_source_ids:
+            if src_id in source_id_to_member:
+                members_to_remove.add(source_id_to_member[src_id])
+
+        if not members_to_remove:
+            continue
+
+        # remove disabled members and renormalize
+        new_members: dict[str, dict] = {}
+        for k, v in members.items():
+            if k in members_to_remove:
+                continue
+            if isinstance(v, dict):
+                new_members[k] = dict(v)
+            else:
+                new_members[k] = {
+                    "ratio": getattr(v, "ratio", 0.0),
+                    "locked": getattr(v, "locked", False),
+                }
+
+        if new_members:
+            total = sum(m.get("ratio", 0.0) for m in new_members.values())
+            if total > 1e-9:
+                for k in new_members:
+                    new_members[k]["ratio"] = new_members[k].get("ratio", 0.0) / total
+        node.extra["members"] = new_members
+
+
 @dataclass
 class StackLayer:
     nodes: list[StackNode]
@@ -358,6 +416,9 @@ class ComputeStack:
             for net in self.networks:
                 no_masking_tu_ids.update(find_topology_changing_tus(net))
 
+        # inverse TUs must never be disabled - they're essential for inversion path
+        no_masking_tu_ids.update(inverse_tu_ids)
+
         self.tu_id_to_idx = tu_id_to_idx
         self.n_tus = len(sorted_tu_ids)
         self.inverse_tu_ids = inverse_tu_ids
@@ -513,16 +574,23 @@ class ComputeStack:
 
         _t0 = _time.perf_counter()
 
-        from biocomp.tumasking import TU_LOG_ALPHA_PATH, TU_BINARY_MASK_PATH, get_final_mask
+        from biocomp.tumasking import (
+            TU_LOG_ALPHA_PATH,
+            TU_BINARY_MASK_PATH,
+            LATENT_TU_Z_PATH,
+            get_final_mask,
+            get_log_alpha_from_params,
+        )
         from biocomp.network import recipe_to_networks
         import biocomp.biorules as br
 
         tu_id_to_idx = getattr(self, "tu_id_to_idx", None)
-        has_log_alpha = TU_LOG_ALPHA_PATH in params and tu_id_to_idx
+        has_log_alpha = (TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params) and tu_id_to_idx
         has_binary_mask = TU_BINARY_MASK_PATH in params and tu_id_to_idx
         will_roundtrip = has_log_alpha or has_binary_mask
         logger.debug(
             f"COMMIT: TU_LOG_ALPHA in params={TU_LOG_ALPHA_PATH in params}, "
+            f"LATENT_TU_Z in params={LATENT_TU_Z_PATH in params}, "
             f"TU_BINARY_MASK in params={TU_BINARY_MASK_PATH in params}, "
             f"tu_id_to_idx={tu_id_to_idx is not None}, will_roundtrip={will_roundtrip}"
         )
@@ -548,8 +616,17 @@ class ComputeStack:
         # SINGLE SOURCE OF TRUTH: hard-concrete masks (tu_log_alpha) determine what's disabled
         _t5 = _time.perf_counter()
         dead_ern_recs_by_net: dict[int, set[tuple[str, str]]] = {}
-        if TU_LOG_ALPHA_PATH in params and tu_id_to_idx:
-            tu_log_alpha = params[TU_LOG_ALPHA_PATH]
+        has_direct_or_latent_alpha = (
+            TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params
+        ) and tu_id_to_idx
+        if has_direct_or_latent_alpha:
+            # decode latent if present, else use direct log_alpha
+            # build 2D array: (n_networks, n_tus)
+            tu_log_alpha_list = []
+            for net_idx in range(len(network_copies)):
+                network_tu_log_alpha = get_log_alpha_from_params(params, net_idx)
+                tu_log_alpha_list.append(network_tu_log_alpha)
+            tu_log_alpha = jnp.stack(tu_log_alpha_list)
             assert tu_log_alpha.ndim == 2, (
                 f"COMMIT: tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D"
             )
@@ -618,6 +695,9 @@ class ComputeStack:
                     for node_id in disabled_source_ids:
                         if node_id in net.compute_graph.nodes:
                             del net.compute_graph.nodes[node_id]
+
+                    # renormalize aggregation ratios after cascade-disabled sources removed
+                    _renormalize_aggregation_after_cascade(net, disabled_source_ids)
 
                 net._cleanup_orphaned_bias_nodes()
                 net._cleanup_orphaned_input_nodes(original_output_proteins)
@@ -696,6 +776,9 @@ class ComputeStack:
                     for node_id in disabled_source_ids:
                         if node_id in net.compute_graph.nodes:
                             del net.compute_graph.nodes[node_id]
+
+                    # renormalize aggregation ratios after cascade-disabled sources removed
+                    _renormalize_aggregation_after_cascade(net, disabled_source_ids)
 
                 net._cleanup_orphaned_bias_nodes()
                 net._cleanup_orphaned_input_nodes(original_output_proteins)
@@ -789,12 +872,13 @@ class ComputeStack:
                 rebuilt_dep_outputs = ()
 
             if rebuilt_dep_outputs != original_outputs:
+                # always use rebuilt network for consistency with inference
+                # (inference loads from recipe, so training should match)
                 logger.warning(
                     f"COMMIT: Recipe roundtrip changed dependent outputs from {original_outputs} "
                     f"to {rebuilt_dep_outputs}. Marker TUs may have been pruned. "
-                    f"Skipping rebuild, using pruned network directly."
+                    f"Using rebuilt network for consistency with inference."
                 )
-                return net
 
             # Check if nb_inputs changed (critical for inverted networks)
             original_nb_inputs = net.nb_inputs
