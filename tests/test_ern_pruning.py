@@ -138,8 +138,12 @@ class TestErnCleanup:
             for tu_id, part_name in strip_ern_recs:
                 assert "_rec" in part_name, f"Should strip recognition sites, got {part_name}"
 
-    def test_positive_disabled_cascades_to_negative(self, lib):
-        """When positive disabled, negative TUs are marked for cascade disable."""
+    def test_positive_disabled_only_cascades_exclusive_neg_tus(self, lib):
+        """When positive disabled, only EXCLUSIVE neg TUs are marked for cascade disable.
+
+        Neg TUs that feed multiple ERNs (shared, common case) are NOT cascade-disabled.
+        This prevents breaking other ERNs that still need the shared neg TU.
+        """
         if not SCAFFOLD_PATH.exists():
             pytest.skip("Scaffold not found")
 
@@ -149,6 +153,10 @@ class TestErnCleanup:
             network = networks[0]
 
             tu_id_to_idx = build_tu_id_to_idx(network)
+
+            # find exclusive neg TUs (safe to cascade)
+            exclusive_neg_tus = network.find_exclusive_ern_neg_tus(tu_id_to_idx)
+
             pos_tu_ids = find_tu_by_pattern(network, "_a+")
             n_tus = len(tu_id_to_idx)
             tu_log_alpha = jnp.zeros(n_tus) + 10.0
@@ -159,9 +167,35 @@ class TestErnCleanup:
             network._cleanup_ern_nodes(tu_log_alpha, tu_id_to_idx)
 
             additional_disabled = network.metadata.get("_additional_disabled_tus", set())
-            neg_patterns = ["_a-"]
-            cascaded = [tid for tid in additional_disabled if any(p in tid for p in neg_patterns)]
-            assert len(cascaded) > 0, "Should cascade disable to negative TUs"
+
+            # only exclusive neg TUs should be cascade-disabled
+            for disabled_tu in additional_disabled:
+                assert disabled_tu in exclusive_neg_tus, (
+                    f"TU {disabled_tu} was cascade-disabled but is not exclusive "
+                    f"(shared neg TUs should NOT be cascade-disabled)"
+                )
+
+    def test_find_exclusive_ern_neg_tus(self, lib):
+        """Test find_exclusive_ern_neg_tus correctly identifies exclusive vs shared neg TUs."""
+        if not SCAFFOLD_PATH.exists():
+            pytest.skip("Scaffold not found")
+
+        with LibraryContext.with_library(lib):
+            recipe = load_scaffold_recipe()
+            networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
+            network = networks[0]
+
+            tu_id_to_idx = build_tu_id_to_idx(network)
+            exclusive_neg_tus = network.find_exclusive_ern_neg_tus(tu_id_to_idx)
+
+            # in typical architectures, neg TUs are shared (e.g., CasE feeds 3+ ERNs)
+            # so exclusive_neg_tus should be a small subset (or empty)
+            neg_tu_ids = find_tu_by_pattern(network, "_a-")
+            assert len(exclusive_neg_tus) <= len(neg_tu_ids), "Exclusive can't exceed total neg TUs"
+
+            # verify exclusive TUs are valid TU IDs
+            for tu_id in exclusive_neg_tus:
+                assert tu_id in tu_id_to_idx, f"Exclusive TU {tu_id} not in tu_id_to_idx"
 
 
 class TestCommitWithErnPruning:
