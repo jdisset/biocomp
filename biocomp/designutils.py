@@ -135,7 +135,7 @@ def _extract_shapes_from_svg(svg_path, max_is_black):
             continue
 
         fill = el.fill
-        if fill is None or str(fill).lower() in ("none", "white", "#ffffff"):
+        if fill is None or str(fill).lower() == "none":
             continue
 
         path_d = el.d()

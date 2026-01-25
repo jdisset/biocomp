@@ -398,3 +398,24 @@ class TestSampleFromSvgDirectly:
         assert X[:, 1].max() <= 0.61, f"Y max should be <= 0.6, got {X[:, 1].max()}"
         assert Y.min() >= 0.09, f"Output min should be >= 0.1, got {Y.min()}"
         assert Y.max() <= 0.91, f"Output max should be <= 0.9, got {Y.max()}"
+
+
+class TestWhiteShapesInMasks:
+    """Test that white shapes inside masked groups are correctly extracted."""
+
+    def test_white_shape_inside_mask_is_extracted(self):
+        """White shapes inside masks should be processed, not skipped."""
+        svg_path = DESIGNS_DIR / "test_white_in_mask.svg"
+        paths, greys, _ = _extract_shapes_from_svg(svg_path, max_is_black=True)
+        assert len(paths) >= 2, f"Expected at least 2 shapes (grey bg + white rect), got {len(paths)}"
+        assert any(g == 0.0 for g in greys), f"Expected white shape (grey=0.0), got {greys}"
+
+    def test_white_shape_in_mask_produces_low_values(self):
+        """White shape inside mask should produce low values in output grid."""
+        svg_path = DESIGNS_DIR / "test_white_in_mask.svg"
+        target = SVGTarget(path=svg_path, name="white_in_mask")
+        _, Y_grid = target.get_lattice(resolution=(32, 32), seed=0)
+        center_region = Y_grid[12:20, 12:20].mean()
+        assert center_region < 0.2, (
+            f"Center region (white rect) should have low values, got mean={center_region:.3f}"
+        )
