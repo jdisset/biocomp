@@ -18,6 +18,7 @@ from typing import Any, TypeAlias
 
 import numpy as np
 from scipy import stats as scipy_stats
+from pydantic import BaseModel
 
 
 NdArray: TypeAlias = np.ndarray
@@ -624,6 +625,8 @@ class GridStatsFields:
         params = pred.get_gridstats_params()
     """
 
+
+class GridStatsFields(BaseModel):
     gridstats_hypercube_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
     gridstats_hypercube_min: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_min"]
     gridstats_hypercube_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
