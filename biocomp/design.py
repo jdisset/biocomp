@@ -88,9 +88,9 @@ class _PhaseTimer:
         import time
 
         self._time = time
-        self._timings = {}
+        self._timings: dict[str, float] = {}
         self._t0 = time.perf_counter()
-        self._phase_start = None
+        self._phase_start: float = time.perf_counter()
 
     def start(self, name: str, msg: str):
         logger.info(msg)
@@ -176,12 +176,14 @@ class DesignManager(BaseModel):
     def n_tus(self) -> int:
         """Number of unique TUs across all networks."""
         self._ensure_tu_mapping()
+        assert self._tu_ids is not None
         return len(self._tu_ids)
 
     @property
     def tu_id_to_idx(self) -> dict[str, int]:
         """Mapping from TU ID string to index."""
         self._ensure_tu_mapping()
+        assert self._tu_id_to_idx is not None
         return self._tu_id_to_idx
 
     def _sample_from_target(
@@ -205,7 +207,7 @@ class DesignManager(BaseModel):
         self,
         samples: int | tuple[int, ...],
         seed: int | ArrayLike | None = None,
-    ) -> tuple[jax.Array, jax.Array]:
+    ) -> tuple[list[jax.Array], list[jax.Array]]:
         if seed is None:
             seed = random.randint(0, 2**32 - 1)
         elif not isinstance(seed, int):
@@ -266,6 +268,9 @@ class DesignManager(BaseModel):
 
         n_networks = samples[0]
         requested_shape = samples[1:]
+        assert len(requested_shape) >= 1, (
+            "samples must have at least 2 elements: (n_networks, batch_size, ...)"
+        )
         n = int(np.prod(requested_shape))
 
         all_xsamples, all_ysamples = [], []
@@ -279,26 +284,29 @@ class DesignManager(BaseModel):
                 if noise_std > 0:
                     rng = np.random.default_rng(seed + t_idx * 7919 + net_idx * 6971)
                     Y_grid = Y_grid + rng.normal(0, noise_std, Y_grid.shape)
-                    if hasattr(target, "latent_out"):
-                        Y_grid = np.clip(Y_grid, target.latent_out[0], target.latent_out[1])
+                    latent_out = getattr(target, "latent_out", None)
+                    if latent_out is not None:
+                        Y_grid = np.clip(Y_grid, latent_out[0], latent_out[1])
                 xsamples.append(X)
                 ysamples.append(Y_grid)
 
-            xsamples = jnp.stack(xsamples, axis=1)
-            ysamples = jnp.stack(ysamples, axis=1)
+            xsamples_stacked = jnp.stack(xsamples, axis=1)
+            ysamples_stacked = jnp.stack(ysamples, axis=1)
 
             n_pts = n * yres * xres
-            assert_that(xsamples.shape).is_equal_to((n_pts, len(self.targets), 2))
-            assert_that(ysamples.shape).is_equal_to((n, len(self.targets), yres, xres))
+            assert_that(xsamples_stacked.shape).is_equal_to((n_pts, len(self.targets), 2))
+            assert_that(ysamples_stacked.shape).is_equal_to((n, len(self.targets), yres, xres))
 
-            ysamples_flat = ysamples.transpose(0, 2, 3, 1).reshape(n_pts, len(self.targets), 1)
+            ysamples_flat = ysamples_stacked.transpose(0, 2, 3, 1).reshape(
+                n_pts, len(self.targets), 1
+            )
 
             new_batch_shape = requested_shape[:-1] + (requested_shape[-1] * yres * xres,)
-            xsamples = xsamples.reshape(*new_batch_shape, len(self.targets), 2)
-            ysamples_flat = ysamples_flat.reshape(*new_batch_shape, len(self.targets), 1)
+            xsamples_reshaped = xsamples_stacked.reshape(*new_batch_shape, len(self.targets), 2)
+            ysamples_reshaped = ysamples_flat.reshape(*new_batch_shape, len(self.targets), 1)
 
-            all_xsamples.append(xsamples)
-            all_ysamples.append(ysamples_flat)
+            all_xsamples.append(xsamples_reshaped)
+            all_ysamples.append(ysamples_reshaped)
 
         # Debug: comprehensive snapshot of lattice sampling
         if is_design_debug_enabled() and all_xsamples:
@@ -339,12 +347,12 @@ class DesignManager(BaseModel):
     def build_stack(
         self,
         model: BiocompModel,
-        unlock_ratios=True,
+        unlock_ratios: bool = True,
         use_latent_ratios: bool = False,
         latent_dim: int = 8,
         latent_hidden_dim: int = 16,
         auto_lock_topology_tus: bool = True,
-    ):
+    ) -> ComputeStack:
         logger.info(f"Building stack with {len(self.networks)} design networks")
         logger.info(f"Design network names: {[n.name for n in self.networks]}")
         stack = ComputeStack(networks=self.networks)
@@ -494,7 +502,7 @@ def initialize_params(
 
 
 class DesignConfig(DesignOptimConfig):
-    loss_function: EncodedPartialFunction = Field(default=grid_distance_loss)
+    loss_function: EncodedPartialFunction = Field(default=grid_distance_loss)  # pyright: ignore[reportAssignmentType]
     n_replicates: int = 4
     keep_in_history: list[str] | Literal["all"] = "all"
     tu_log_alpha_init_mean: float = 2.0
@@ -516,6 +524,12 @@ class DesignConfig(DesignOptimConfig):
     )
     use_two_timescale: bool = False  # slower LR for log_alpha via optax.multi_transform
     tu_mask_lr_scale: float = 0.1  # LR multiplier for log_alpha when use_two_timescale=True
+
+    # Hard-pruning configuration - periodic removal of low-ratio TUs with stack rebuild
+    hard_pruning_enabled: bool = False
+    hard_pruning_interval: int = 500  # prune every N steps
+    hard_pruning_ratio_threshold: float = 0.01  # 1:100 threshold for normalized ratios
+    hard_pruning_preserve_minimum_tus: int = 1  # never prune below this per network
 
     pluggable_optimizer: Any = None
 
@@ -805,6 +819,358 @@ def normalize_ratio_source_arrays(params, source_paths, normalize_func):
     )
 
 
+def identify_tus_to_prune(
+    params: ParameterTree,
+    stack: ComputeStack,
+    dmanager: DesignManager,
+    ratio_threshold: float,
+    use_soft_pruning: bool,
+    preserve_minimum: int,
+) -> dict[int, set[str]]:
+    """Identify TUs to remove for each network based on normalized ratios.
+
+    Returns dict mapping network_id -> set of TU IDs to remove.
+
+    Logic:
+    1. Use introspection to get per-TU normalized ratios from aggregation nodes
+    2. For each network, collect TUs where normalized ratio < threshold
+    3. If soft-pruning enabled (tu_log_alpha present), include TUs where sigmoid(log_alpha) < 0.5
+    4. Exclude TUs in stack.no_masking_tu_ids (topology-changing TUs)
+    5. Ensure at least preserve_minimum TUs remain
+    """
+    from biocomp.paramintrospect import introspect_stack, aggregate_by_tu, ParamKind
+
+    tus_to_remove: dict[int, set[str]] = {}
+    no_masking_tu_ids = stack.no_masking_tu_ids or set()
+    tu_id_to_idx = stack.tu_id_to_idx or {}
+
+    has_tu_log_alpha = TU_LOG_ALPHA_PATH in params
+
+    for net_idx in range(len(stack.networks)):
+        infos = introspect_stack(stack, params, net_idx)
+        tu_data = aggregate_by_tu(infos)
+
+        candidates: set[str] = set()
+        all_tu_ids: set[str] = set()
+
+        for tu_id, entries in tu_data.items():
+            all_tu_ids.add(tu_id)
+            if tu_id in no_masking_tu_ids:
+                continue
+
+            for node_type, tg in entries:
+                for pv in tg.params:
+                    if pv.kind == ParamKind.RATIO:
+                        ratio_val = float(
+                            pv.value if isinstance(pv.value, (int, float)) else pv.value[0]
+                        )
+                        if ratio_val < ratio_threshold:
+                            candidates.add(tu_id)
+                            break
+                if tu_id in candidates:
+                    break
+
+        if use_soft_pruning and has_tu_log_alpha:
+            tu_log_alpha = params[TU_LOG_ALPHA_PATH]
+            assert tu_log_alpha.ndim >= 2, (
+                f"tu_log_alpha must be at least 2D, got {tu_log_alpha.ndim}D"
+            )
+            network_log_alpha = tu_log_alpha[net_idx]
+            if network_log_alpha.ndim > 1:
+                network_log_alpha = network_log_alpha.reshape(-1)
+
+            for tu_id in all_tu_ids:
+                if tu_id in no_masking_tu_ids:
+                    continue
+                if tu_id in tu_id_to_idx:
+                    tu_idx = tu_id_to_idx[tu_id]
+                    if tu_idx < len(network_log_alpha):
+                        prob = float(jax.nn.sigmoid(network_log_alpha[tu_idx]))
+                        if prob < 0.5:
+                            candidates.add(tu_id)
+
+        remaining = len(all_tu_ids) - len(candidates)
+        if remaining < preserve_minimum:
+            sorted_candidates = sorted(candidates)
+            n_to_keep = preserve_minimum - remaining
+            candidates = set(sorted_candidates[n_to_keep:])
+
+        tus_to_remove[net_idx] = candidates
+
+    return tus_to_remove
+
+
+def _remap_tu_log_alpha(
+    old_log_alpha: jnp.ndarray,
+    old_tu_id_to_idx: dict[str, int],
+    new_tu_id_to_idx: dict[str, int],
+    init_value: float = 2.0,
+) -> jnp.ndarray:
+    """Remap tu_log_alpha from old to new TU indexing.
+
+    Surviving TUs retain their log_alpha values; new array is sized for new TU count.
+    """
+    n_networks = old_log_alpha.shape[0]
+    n_new_tus = len(new_tu_id_to_idx)
+    new_log_alpha = jnp.full((n_networks, n_new_tus), init_value)
+
+    old_idx_to_id = {v: k for k, v in old_tu_id_to_idx.items()}
+
+    for old_idx in range(old_log_alpha.shape[-1]):
+        tu_id = old_idx_to_id.get(old_idx)
+        if tu_id and tu_id in new_tu_id_to_idx:
+            new_idx = new_tu_id_to_idx[tu_id]
+            new_log_alpha = new_log_alpha.at[:, new_idx].set(old_log_alpha[:, old_idx])
+
+    return new_log_alpha
+
+
+def hard_prune_and_rebuild(
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    model: "BiocompModel",
+    stack: ComputeStack,
+    params: ParameterTree,
+    tus_to_remove: dict[int, set[str]],
+    key: jax.Array,
+) -> tuple[DesignManager, ComputeStack, ParameterTree]:
+    """Execute hard pruning: mark TUs disabled, commit, rebuild.
+
+    Steps:
+    1. For TUs to remove: set their tu_log_alpha to -10.0 (marks as disabled)
+    2. Call stack.commit(params) to get committed networks
+    3. Create new DesignManager with committed networks
+    4. Rebuild ComputeStack via dmanager.build_stack()
+    5. Initialize new params, transferring what's possible
+    6. Return (new_dmanager, new_stack, new_params)
+    """
+    from copy import deepcopy
+
+    old_tu_id_to_idx = stack.tu_id_to_idx or {}
+    old_n_tus = len(old_tu_id_to_idx)
+    n_networks = len(stack.networks)
+
+    params_for_commit = deepcopy(params)
+
+    if TU_LOG_ALPHA_PATH in params_for_commit and old_tu_id_to_idx:
+        tu_log_alpha = params_for_commit[TU_LOG_ALPHA_PATH]
+        modified_log_alpha = jnp.array(tu_log_alpha)
+
+        for net_idx, tu_ids in tus_to_remove.items():
+            for tu_id in tu_ids:
+                if tu_id in old_tu_id_to_idx:
+                    tu_idx = old_tu_id_to_idx[tu_id]
+                    modified_log_alpha = modified_log_alpha.at[net_idx, tu_idx].set(-10.0)
+
+        params_for_commit.at(TU_LOG_ALPHA_PATH, modified_log_alpha, overwrite=True)
+
+    committed_networks = stack.commit(params_for_commit)
+
+    total_removed = sum(len(tus) for tus in tus_to_remove.values())
+    logger.info(f"[HARD-PRUNE] Committed networks, removed {total_removed} TUs total")
+
+    new_dmanager = DesignManager(
+        targets=dmanager.targets,
+        networks=committed_networks,
+        sampling=dmanager.sampling,
+        enable_tu_masking=dmanager.enable_tu_masking,
+    )
+
+    pkey, init_key = jax.random.split(key)
+    new_stack = new_dmanager.build_stack(
+        model,
+        unlock_ratios=True,
+        use_latent_ratios=dconf.use_latent_ratios,
+        latent_dim=dconf.latent_dim,
+        latent_hidden_dim=dconf.latent_hidden_dim,
+        auto_lock_topology_tus=dconf.auto_lock_topology_tus,
+    )
+
+    new_n_tus = new_dmanager.n_tus if new_dmanager.enable_tu_masking else 0
+    new_tu_id_to_idx = new_dmanager.tu_id_to_idx if new_dmanager.enable_tu_masking else {}
+
+    logger.info(f"[HARD-PRUNE] Rebuilt stack: {old_n_tus} -> {new_n_tus} TUs")
+
+    new_params = initialize_params(
+        new_stack,
+        dconf.n_replicates,
+        new_dmanager.n_targets,
+        model.shared_params,
+        init_key,
+        n_tus=new_n_tus,
+        n_networks=len(new_dmanager.networks),
+        tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
+        tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
+        use_latent_tu_masking=dconf.use_latent_tu_masking,
+        latent_tu_dim=dconf.latent_tu_dim,
+        latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
+        no_masking_tu_ids=new_stack.no_masking_tu_ids,
+        tu_id_to_idx=new_stack.tu_id_to_idx,
+    )
+
+    if TU_LOG_ALPHA_PATH in params and TU_LOG_ALPHA_PATH in new_params and new_n_tus > 0:
+        old_log_alpha = params[TU_LOG_ALPHA_PATH]
+        if old_log_alpha.ndim == 4:
+            old_2d = old_log_alpha[0, 0]
+        elif old_log_alpha.ndim == 2:
+            old_2d = old_log_alpha
+        else:
+            old_2d = old_log_alpha.reshape(n_networks, -1)
+
+        remapped = _remap_tu_log_alpha(old_2d, old_tu_id_to_idx, new_tu_id_to_idx)
+
+        new_log_alpha = new_params[TU_LOG_ALPHA_PATH]
+        if new_log_alpha.ndim == 4:
+            remapped_4d = jnp.tile(
+                remapped[None, None, :, :], (dconf.n_replicates, new_dmanager.n_targets, 1, 1)
+            )
+            new_params.at(TU_LOG_ALPHA_PATH, remapped_4d, overwrite=True)
+        elif new_log_alpha.ndim == 2:
+            new_params.at(TU_LOG_ALPHA_PATH, remapped, overwrite=True)
+
+    return new_dmanager, new_stack, new_params
+
+
+def _start_with_hard_pruning(
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    model: "BiocompModel",
+    loggers: list[tuple[int, Callable]] | None = None,
+    logger_objects: list | None = None,
+    async_handler=None,
+    lock_ratios: bool = False,
+):
+    """Design optimization with periodic hard-pruning.
+
+    Runs optimization in segments, hard-pruning between segments.
+    """
+    timer = _PhaseTimer()
+    logger.info("=" * 60)
+    logger.info("DESIGN OPTIMIZATION WITH HARD-PRUNING")
+    logger.info("=" * 60)
+
+    pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
+
+    steps_per_epoch = max(1, dconf.n_batches_per_epoch // dconf.batches_per_step)
+    total_steps = int(dconf.n_epochs * steps_per_epoch)
+    steps_per_segment = dconf.hard_pruning_interval
+    n_segments = (total_steps + steps_per_segment - 1) // steps_per_segment
+
+    logger.info(
+        f"[HARD-PRUNE] Total steps: {total_steps}, interval: {steps_per_segment}, segments: {n_segments}"
+    )
+
+    current_dmanager = dmanager
+    accumulated_loss_history: list = []
+    accumulated_step_history: list = []
+    global_step_offset = 0
+    segment_params: ParameterTree | None = None
+
+    for segment_idx in range(n_segments):
+        segment_start_step = segment_idx * steps_per_segment
+        segment_end_step = min((segment_idx + 1) * steps_per_segment, total_steps)
+        segment_steps = segment_end_step - segment_start_step
+
+        if segment_steps <= 0:
+            break
+
+        segment_epochs = max(1, (segment_steps + steps_per_epoch - 1) // steps_per_epoch)
+
+        segment_config = DesignConfig(
+            n_replicates=dconf.n_replicates,
+            n_epochs=segment_epochs,
+            batch_size=dconf.batch_size,
+            n_batches_per_epoch=dconf.n_batches_per_epoch,
+            batches_per_step=dconf.batches_per_step,
+            reshuffle_batches=dconf.reshuffle_batches,
+            tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
+            tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
+            use_latent_ratios=dconf.use_latent_ratios,
+            latent_dim=dconf.latent_dim,
+            latent_hidden_dim=dconf.latent_hidden_dim,
+            enable_tu_masking=dconf.enable_tu_masking,
+            use_latent_tu_masking=dconf.use_latent_tu_masking,
+            latent_tu_dim=dconf.latent_tu_dim,
+            latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
+            auto_lock_topology_tus=dconf.auto_lock_topology_tus,
+            use_probabilistic_or=dconf.use_probabilistic_or,
+            use_two_timescale=dconf.use_two_timescale,
+            tu_mask_lr_scale=dconf.tu_mask_lr_scale,
+            hard_pruning_enabled=False,
+            pluggable_optimizer=dconf.pluggable_optimizer,
+            loss_function=dconf.loss_function,
+            optimizer_stack=dconf.optimizer_stack,
+            keep_in_history=dconf.keep_in_history,
+            seed=int(jax.random.key_data(jax.random.fold_in(loop_key, segment_idx))[0]) % (2**31),
+        )
+
+        logger.info(
+            f"[HARD-PRUNE] Segment {segment_idx + 1}/{n_segments}: steps {segment_start_step}-{segment_end_step}"
+        )
+
+        segment_params, segment_loss_history, segment_step_history = start(
+            current_dmanager,
+            segment_config,
+            model,
+            loggers=loggers,
+            logger_objects=logger_objects,
+            async_handler=async_handler,
+            lock_ratios=lock_ratios,
+        )
+
+        accumulated_loss_history.extend(segment_loss_history)
+        accumulated_step_history.extend(segment_step_history)
+        global_step_offset += segment_steps
+
+        if segment_idx < n_segments - 1:
+            timer.start("prune", "[HARD-PRUNE] Identifying TUs to prune...")
+
+            temp_stack = current_dmanager.build_stack(
+                model,
+                unlock_ratios=not lock_ratios,
+                use_latent_ratios=dconf.use_latent_ratios,
+                latent_dim=dconf.latent_dim,
+                latent_hidden_dim=dconf.latent_hidden_dim,
+                auto_lock_topology_tus=dconf.auto_lock_topology_tus,
+            )
+
+            single_rep_params = jax.tree.map(lambda x: x[0] if x.ndim > 2 else x, segment_params)
+
+            tus_to_remove = identify_tus_to_prune(
+                single_rep_params,
+                temp_stack,
+                current_dmanager,
+                ratio_threshold=dconf.hard_pruning_ratio_threshold,
+                use_soft_pruning=dconf.enable_tu_masking,
+                preserve_minimum=dconf.hard_pruning_preserve_minimum_tus,
+            )
+
+            timer.end("prune")
+
+            total_to_remove = sum(len(tus) for tus in tus_to_remove.values())
+            if total_to_remove > 0:
+                prune_key = jax.random.fold_in(loop_key, segment_idx + 1000)
+                current_dmanager, _, _ = hard_prune_and_rebuild(
+                    current_dmanager,
+                    dconf,
+                    model,
+                    temp_stack,
+                    single_rep_params,
+                    tus_to_remove,
+                    prune_key,
+                )
+                logger.info(f"[HARD-PRUNE] Removed {total_to_remove} TUs, rebuilt stack")
+            else:
+                logger.info("[HARD-PRUNE] No TUs to remove, continuing with current structure")
+
+    logger.info("=" * 60)
+    logger.info(f"HARD-PRUNING OPTIMIZATION COMPLETE in {timer.total():.2f}s")
+    logger.info("=" * 60)
+
+    assert segment_params is not None, "No optimization segments were run"
+    return segment_params, accumulated_loss_history, accumulated_step_history
+
+
 def _start_pluggable(
     dmanager: DesignManager,
     dconf: DesignConfig,
@@ -885,7 +1251,9 @@ def _start_pluggable(
     timer.start("objective", "[4/5] Creating objective function...")
     effective_batch_size = dconf.batch_size
     if dmanager.is_lattice_mode:
-        effective_batch_size *= dmanager.grid_resolution[0] * dmanager.grid_resolution[1]
+        grid_res = dmanager.grid_resolution
+        assert grid_res is not None
+        effective_batch_size *= grid_res[0] * grid_res[1]
 
     xbatches_list, ybatches_list = dmanager.get_samples(
         (len(dmanager.networks), 1, 1, 1, dconf.batch_size), bkey
@@ -972,9 +1340,9 @@ def _start_pluggable(
             yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, current_step)
             step_data = {"loss": [[float(opt_state.best_loss)]], "yhatdep": yhatdep_arr, **metrics}
             needs_params = logger_objects and any(
-                'latest_params' in getattr(lo, 'required_arrays', [])
+                "latest_params" in getattr(lo, "required_arrays", [])
                 for lo in logger_objects
-                if int(opt_state.step) % getattr(lo, 'periods', 1) == 0
+                if int(opt_state.step) % getattr(lo, "periods", 1) == 0
             )
             if needs_params:
                 best_genome = opt_state.best_params
@@ -1032,6 +1400,12 @@ def start(
     async_handler=None,
     lock_ratios: bool = False,
 ):
+    if dconf.hard_pruning_enabled:
+        logger.info("Using hard-pruning mode with interval=%d", dconf.hard_pruning_interval)
+        return _start_with_hard_pruning(
+            dmanager, dconf, model, loggers, logger_objects, async_handler, lock_ratios
+        )
+
     if dconf.uses_pluggable_optimizer:
         logger.info("Using pluggable optimizer: %s", type(dconf.pluggable_optimizer).__name__)
         return _start_pluggable(
@@ -1122,7 +1496,9 @@ def start(
 
     effective_batch_size = dconf.batch_size
     if dmanager.is_lattice_mode:
-        xres, yres = dmanager.grid_resolution
+        grid_res = dmanager.grid_resolution
+        assert grid_res is not None
+        xres, yres = grid_res
         effective_batch_size *= xres * yres
 
     n_design_inputs = 2 * len(dmanager.networks)
@@ -1157,7 +1533,8 @@ def start(
             )
         if TU_LOG_ALPHA_PATH in params:
             params = params.update_leaves_by_path(
-                [TU_LOG_ALPHA_PATH], lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX)
+                [TU_LOG_ALPHA_PATH],  # pyright: ignore[reportArgumentType]
+                lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX),
             )
         return params
 
@@ -1245,7 +1622,9 @@ def sample_for_evaluation(
     seed = int(jax.random.key_data(key)[0]) % (2**31)
 
     if dmanager.is_lattice_mode:
-        xres, yres = dmanager.grid_resolution
+        grid_res = dmanager.grid_resolution
+        assert grid_res is not None
+        xres, yres = grid_res
         n_samples = xres * yres
         xlist, ylist = dmanager.get_samples((n_networks, n_replicates, 1), seed)
     else:
@@ -1277,7 +1656,7 @@ def _compute_grid_loss_for_eval(
     eps_sinkhorn: float,
     n_sinkhorn_iters: int,
     lncc_kernel: int,
-) -> float:
+) -> jax.Array | float:
     """Compute grid loss for evaluation - matches grid_distance_loss computation."""
     y_img, yhat_img = _sanitize(y_img), _sanitize(yhat_img)
     y_flat, yhat_flat = y_img.ravel(), yhat_img.ravel()
@@ -1365,7 +1744,9 @@ def evaluate_design(
     )
 
     # grid resolution for reshaping predictions
-    xres, yres = dmanager.grid_resolution
+    grid_res = dmanager.grid_resolution
+    assert grid_res is not None, "grid_resolution required for evaluation"
+    xres, yres = grid_res
     assert n_samples == xres * yres, f"n_samples={n_samples} must equal xres*yres={xres * yres}"
 
     num_z_val = int(final_params["global/number_of_random_variables"][0, 0].squeeze())
@@ -1393,9 +1774,12 @@ def evaluate_design(
 
     all_losses, all_predictions = [], [] if store_predictions else None
 
+    stack_apply = stack.apply
+    assert stack_apply is not None, "stack.apply must be set after build"
+
     def apply_with_tu_mask(params, x_batch, z_batch, keys, tu_mask):
         def apply_single(x, z, k):
-            return stack.apply(params, x, z, k, tu_enabled_random_vars=tu_mask)
+            return stack_apply(params, x, z, k, tu_enabled_random_vars=tu_mask)
 
         return vmap(apply_single)(x_batch, z_batch, keys)
 
@@ -1427,6 +1811,7 @@ def evaluate_design(
 
             yhat_dep = jnp.compress(dep_mask, jnp.concatenate(yhats, axis=0), axis=-1)
             if store_predictions:
+                assert rep_preds is not None
                 rep_preds.append(yhat_dep)
 
             # compute grid-based loss matching training (not simple MSE!)
@@ -1457,6 +1842,7 @@ def evaluate_design(
 
         all_losses.append(rep_losses)
         if store_predictions:
+            assert all_predictions is not None and rep_preds is not None
             all_predictions.append(jnp.stack(rep_preds, axis=0))
 
     pbar.close()
@@ -1466,6 +1852,7 @@ def evaluate_design(
     )
 
     if store_predictions:
+        assert all_predictions is not None
         return jnp.stack(all_predictions, axis=0).transpose(0, 2, 1, 3), losses
     return None, losses
 
