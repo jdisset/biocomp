@@ -334,7 +334,13 @@ def aggregation(
             "normalized_ratios": normalized_ratios,
         }
 
-    def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack = None, **_):
+    def commit(
+        params: ParameterTree,
+        nodelist: list[StackNode],
+        stack: ComputeStack = None,
+        lock_ratios: bool = True,
+        **_,
+    ):
         from biocomp.tumasking import get_final_mask, TU_ALWAYS_ENABLED, get_log_alpha_from_params
 
         output_tu_indices_path = f"{namespace}/output_tu_indices"
@@ -412,6 +418,23 @@ def aggregation(
                     f"Original: {original_ratios.tolist()}, Final: {normalized_ratios.tolist()}"
                 )
 
+            ratio_ranges = []
+            ratio_locked = []
+            for j in range(n_outputs):
+                min_v = float(ratio_min[j])
+                max_v = float(ratio_max[j])
+                if lock_ratios or abs(min_v - max_v) < 1e-8:
+                    ratio_ranges.append(None)
+                    ratio_locked.append(True)
+                else:
+                    init_v = float(normalized_ratios[j])
+                    if init_v < min_v:
+                        init_v = min_v
+                    elif init_v > max_v:
+                        init_v = max_v
+                    ratio_ranges.append({"min": min_v, "max": max_v, "init": init_v})
+                    ratio_locked.append(False)
+
             extra = n.get(stack).extra
             ratios_list = normalized_ratios.tolist()[:n_outputs]
             sorted_ids = extra.get("_sorted_member_ids", [])
@@ -422,13 +445,18 @@ def aggregation(
                 )
                 # Filter out disabled members (ratio=0 from TU masking)
                 updt["members"] = {
-                    mid: AggregationMember(ratio=ratios_list[j], locked=True).to_dict()
+                    mid: AggregationMember(
+                        ratio=ratios_list[j],
+                        ratio_range=ratio_ranges[j],
+                        locked=ratio_locked[j],
+                    ).to_dict()
                     for j, mid in enumerate(sorted_ids)
                     if abs(ratios_list[j]) > 1e-8
                 }
             else:
                 updt["ratios"] = ratios_list
-                updt["ratio_ranges"] = [None] * len(ratios_list)
+                updt["ratio_ranges"] = ratio_ranges
+                updt["ratio_locked"] = ratio_locked
 
             extra.update(updt)
 
@@ -497,14 +525,15 @@ def aggregation(
                 if j >= len(ratios):
                     break
 
-                ratio_val = float(np.abs(ratios[j]))
-                r_min, r_max = float(ratio_min[j]), float(ratio_max[j])
+                ratio_val = float(np.asarray(ratios[j]).item())
+                r_min = float(np.asarray(ratio_min[j]).item())
+                r_max = float(np.asarray(ratio_max[j]).item())
                 is_constrained = abs(r_min - r_max) < 1e-6
 
                 prob = 1.0
                 tu_idx = TU_ALWAYS_ENABLED
                 if tu_indices is not None and j < len(tu_indices):
-                    tu_idx = int(tu_indices[j])
+                    tu_idx = int(np.asarray(tu_indices[j]).item())
                     if tu_idx >= 0:
                         prob = get_tu_prob(params, network_id, tu_idx)
 

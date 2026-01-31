@@ -569,7 +569,13 @@ class ComputeStack:
         # we only deepcopy the layers, not the networks
         return ComputeStack(self.networks, deepcopy(self.layers))
 
-    def commit(self, params: ParameterTree, **kwargs):
+    def commit(self, params: ParameterTree, collapse_to_part=True, **kwargs):
+        # TODO: we need a complete refactor of this thing
+        # - collapse_to_part=False should allow skipping uorf "collapse" aka resolution from embedding value to quantized part (e.g. uorfs), 
+        #   i.e. if we skip this we allow the quantization mask to have multiple parts active (the same as now)
+        # - make binary masking the primary mode: log alpha is just a (optional) pre-pass to set the mask
+        # - the decode latent stuff should move to their respective node implementations (aggregations?) or at the very least outta here
+
         import time as _time
 
         _t0 = _time.perf_counter()

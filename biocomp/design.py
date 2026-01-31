@@ -834,17 +834,19 @@ def identify_tus_to_prune(
     Logic:
     1. Use introspection to get per-TU normalized ratios from aggregation nodes
     2. For each network, collect TUs where normalized ratio < threshold
-    3. If soft-pruning enabled (tu_log_alpha present), include TUs where sigmoid(log_alpha) < 0.5
+    3. If soft-pruning enabled (tu_log_alpha or latent TU masking present),
+       include TUs where sigmoid(log_alpha) < 0.5
     4. Exclude TUs in stack.no_masking_tu_ids (topology-changing TUs)
-    5. Ensure at least preserve_minimum TUs remain
+    5. Ensure at least preserve_minimum TUs remain (keeping strongest TUs)
     """
     from biocomp.paramintrospect import introspect_stack, aggregate_by_tu, ParamKind
+    from biocomp.tumasking import get_log_alpha_from_params, LATENT_TU_Z_PATH
 
     tus_to_remove: dict[int, set[str]] = {}
     no_masking_tu_ids = stack.no_masking_tu_ids or set()
     tu_id_to_idx = stack.tu_id_to_idx or {}
 
-    has_tu_log_alpha = TU_LOG_ALPHA_PATH in params
+    has_tu_masking = TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params
 
     for net_idx in range(len(stack.networks)):
         infos = introspect_stack(stack, params, net_idx)
@@ -852,9 +854,12 @@ def identify_tus_to_prune(
 
         candidates: set[str] = set()
         all_tu_ids: set[str] = set()
+        tu_strengths: dict[str, float] = {}
 
         for tu_id, entries in tu_data.items():
             all_tu_ids.add(tu_id)
+            tu_strengths[tu_id] = 0.0
+
             if tu_id in no_masking_tu_ids:
                 continue
 
@@ -864,40 +869,104 @@ def identify_tus_to_prune(
                         ratio_val = float(
                             pv.value if isinstance(pv.value, (int, float)) else pv.value[0]
                         )
-                        if ratio_val < ratio_threshold:
+                        tu_strengths[tu_id] = max(tu_strengths[tu_id], abs(ratio_val))
+                        if abs(ratio_val) < ratio_threshold:
                             candidates.add(tu_id)
                             break
                 if tu_id in candidates:
                     break
 
-        if use_soft_pruning and has_tu_log_alpha:
-            tu_log_alpha = params[TU_LOG_ALPHA_PATH]
-            assert tu_log_alpha.ndim >= 2, (
-                f"tu_log_alpha must be at least 2D, got {tu_log_alpha.ndim}D"
-            )
-            network_log_alpha = tu_log_alpha[net_idx]
-            if network_log_alpha.ndim > 1:
-                network_log_alpha = network_log_alpha.reshape(-1)
+        if use_soft_pruning and has_tu_masking:
+            try:
+                network_log_alpha = get_log_alpha_from_params(params, net_idx)
+                if network_log_alpha.ndim > 1:
+                    network_log_alpha = network_log_alpha.reshape(-1)
 
-            for tu_id in all_tu_ids:
-                if tu_id in no_masking_tu_ids:
-                    continue
-                if tu_id in tu_id_to_idx:
-                    tu_idx = tu_id_to_idx[tu_id]
-                    if tu_idx < len(network_log_alpha):
-                        prob = float(jax.nn.sigmoid(network_log_alpha[tu_idx]))
-                        if prob < 0.5:
-                            candidates.add(tu_id)
+                for tu_id in all_tu_ids:
+                    if tu_id in no_masking_tu_ids:
+                        continue
+                    if tu_id in tu_id_to_idx:
+                        tu_idx = tu_id_to_idx[tu_id]
+                        if tu_idx < len(network_log_alpha):
+                            prob = float(jax.nn.sigmoid(network_log_alpha[tu_idx]))
+                            # Update strength to include TU probability
+                            tu_strengths[tu_id] = max(tu_strengths.get(tu_id, 0.0), prob)
+                            if prob < 0.5:
+                                candidates.add(tu_id)
+            except ValueError:
+                pass  # No TU masking params - skip soft pruning
 
         remaining = len(all_tu_ids) - len(candidates)
         if remaining < preserve_minimum:
-            sorted_candidates = sorted(candidates)
             n_to_keep = preserve_minimum - remaining
-            candidates = set(sorted_candidates[n_to_keep:])
+            # Sort candidates by strength (ascending) - weakest first
+            sorted_by_strength = sorted(candidates, key=lambda x: tu_strengths.get(x, 0.0))
+            # Keep the n_to_keep strongest (remove them from candidates)
+            strongest_to_keep = set(sorted_by_strength[-n_to_keep:]) if n_to_keep > 0 else set()
+            candidates = candidates - strongest_to_keep
 
         tus_to_remove[net_idx] = candidates
 
     return tus_to_remove
+
+
+def _merge_surviving_params(
+    old_params: ParameterTree,
+    new_params: ParameterTree,
+) -> ParameterTree:
+    """Transfer compatible params from old to new by path + shape matching.
+
+    Conservative policy: copy only if path exists in both AND shapes match exactly.
+    Skips paths containing 'tu_log_alpha', 'latent_tu', 'tu_binary_mask', 'protected_tu'
+    as those are handled separately via remapping.
+    """
+    skip_patterns = ("tu_log_alpha", "latent_tu", "tu_binary_mask", "protected_tu")
+
+    for path, old_val in old_params.data.iter_leaves():
+        path_str = str(path)
+
+        if any(p in path_str for p in skip_patterns):
+            continue
+
+        try:
+            new_val = new_params[path_str]
+        except (KeyError, TypeError):
+            continue
+
+        if not hasattr(old_val, 'shape') or not hasattr(new_val, 'shape'):
+            continue
+        if old_val.shape != new_val.shape:
+            continue
+        if hasattr(old_val, "dtype") and hasattr(new_val, "dtype"):
+            old_dtype = old_val.dtype
+            new_dtype = new_val.dtype
+            new_inexact = np.issubdtype(new_dtype, np.inexact) or np.issubdtype(
+                new_dtype, np.complexfloating
+            )
+            old_inexact = np.issubdtype(old_dtype, np.inexact) or np.issubdtype(
+                old_dtype, np.complexfloating
+            )
+            if new_inexact and not old_inexact:
+                continue
+            if not new_inexact and old_dtype != new_dtype:
+                continue
+
+        tag_names = None
+        if new_params.tags is not None:
+            try:
+                tag_flags = new_params.tags[path_str]
+            except KeyError:
+                tag_flags = None
+            if tag_flags is not None:
+                tag_names = [
+                    name
+                    for name, flag in zip(new_params.tagnames, tag_flags)
+                    if flag
+                ]
+
+        new_params.at(path_str, old_val, overwrite=True, tags=tag_names)
+
+    return new_params
 
 
 def _remap_tu_log_alpha(
@@ -933,16 +1002,20 @@ def hard_prune_and_rebuild(
     params: ParameterTree,
     tus_to_remove: dict[int, set[str]],
     key: jax.Array,
+    lock_ratios: bool = False,
 ) -> tuple[DesignManager, ComputeStack, ParameterTree]:
     """Execute hard pruning: mark TUs disabled, commit, rebuild.
 
     Steps:
     1. For TUs to remove: set their tu_log_alpha to -10.0 (marks as disabled)
-    2. Call stack.commit(params) to get committed networks
+    2. Call stack.commit(params) to get committed networks <- DUMB! we need to keep embeddings unlocked. Committing would collapse them to a single part. At least add a parameter to commit() to avoid locking embeddings.
     3. Create new DesignManager with committed networks
     4. Rebuild ComputeStack via dmanager.build_stack()
     5. Initialize new params, transferring what's possible
     6. Return (new_dmanager, new_stack, new_params)
+
+    Args:
+        lock_ratios: If True, ratios remain locked in the rebuilt stack.
     """
     from copy import deepcopy
 
@@ -964,7 +1037,7 @@ def hard_prune_and_rebuild(
 
         params_for_commit.at(TU_LOG_ALPHA_PATH, modified_log_alpha, overwrite=True)
 
-    committed_networks = stack.commit(params_for_commit)
+    committed_networks = stack.commit(params_for_commit, lock_ratios=lock_ratios)
 
     total_removed = sum(len(tus) for tus in tus_to_remove.values())
     logger.info(f"[HARD-PRUNE] Committed networks, removed {total_removed} TUs total")
@@ -979,7 +1052,7 @@ def hard_prune_and_rebuild(
     pkey, init_key = jax.random.split(key)
     new_stack = new_dmanager.build_stack(
         model,
-        unlock_ratios=True,
+        unlock_ratios=not lock_ratios,
         use_latent_ratios=dconf.use_latent_ratios,
         latent_dim=dconf.latent_dim,
         latent_hidden_dim=dconf.latent_hidden_dim,
@@ -1007,6 +1080,11 @@ def hard_prune_and_rebuild(
         no_masking_tu_ids=new_stack.no_masking_tu_ids,
         tu_id_to_idx=new_stack.tu_id_to_idx,
     )
+
+    expanded_old_params = jax.tree.map(
+        lambda x: x[None, None, ...] if x.ndim >= 1 else x, params
+    )
+    new_params = _merge_surviving_params(expanded_old_params, new_params)
 
     if TU_LOG_ALPHA_PATH in params and TU_LOG_ALPHA_PATH in new_params and new_n_tus > 0:
         old_log_alpha = params[TU_LOG_ALPHA_PATH]
@@ -1043,7 +1121,22 @@ def _start_with_hard_pruning(
     """Design optimization with periodic hard-pruning.
 
     Runs optimization in segments, hard-pruning between segments.
+
+    RESTRICTION: Hard-pruning requires n_replicates=1 and n_targets=1.
+    This avoids complex indexing bugs. Run separate single-replicate
+    designs or disable hard pruning for multi-replicate scenarios.
     """
+    if dconf.n_replicates != 1:
+        raise ValueError(
+            f"hard_pruning_enabled=True requires n_replicates=1, got {dconf.n_replicates}. "
+            "Run separate single-replicate designs or disable hard pruning."
+        )
+    if dmanager.n_targets != 1:
+        raise ValueError(
+            f"hard_pruning_enabled=True requires n_targets=1, got {dmanager.n_targets}. "
+            "Run separate single-target designs or disable hard pruning."
+        )
+
     timer = _PhaseTimer()
     logger.info("=" * 60)
     logger.info("DESIGN OPTIMIZATION WITH HARD-PRUNING")
@@ -1065,6 +1158,7 @@ def _start_with_hard_pruning(
     accumulated_step_history: list = []
     global_step_offset = 0
     segment_params: ParameterTree | None = None
+    current_params: ParameterTree | None = None
 
     for segment_idx in range(n_segments):
         segment_start_step = segment_idx * steps_per_segment
@@ -1074,13 +1168,14 @@ def _start_with_hard_pruning(
         if segment_steps <= 0:
             break
 
-        segment_epochs = max(1, (segment_steps + steps_per_epoch - 1) // steps_per_epoch)
+        segment_epochs = 1
+        segment_batches_per_epoch = segment_steps * dconf.batches_per_step
 
         segment_config = DesignConfig(
             n_replicates=dconf.n_replicates,
             n_epochs=segment_epochs,
             batch_size=dconf.batch_size,
-            n_batches_per_epoch=dconf.n_batches_per_epoch,
+            n_batches_per_epoch=segment_batches_per_epoch,
             batches_per_step=dconf.batches_per_step,
             reshuffle_batches=dconf.reshuffle_batches,
             tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
@@ -1116,7 +1211,9 @@ def _start_with_hard_pruning(
             logger_objects=logger_objects,
             async_handler=async_handler,
             lock_ratios=lock_ratios,
+            initial_params=current_params,
         )
+        current_params = segment_params
 
         accumulated_loss_history.extend(segment_loss_history)
         accumulated_step_history.extend(segment_step_history)
@@ -1134,7 +1231,8 @@ def _start_with_hard_pruning(
                 auto_lock_topology_tus=dconf.auto_lock_topology_tus,
             )
 
-            single_rep_params = jax.tree.map(lambda x: x[0] if x.ndim > 2 else x, segment_params)
+            from biocomp.jaxutils import tree_get
+            single_rep_params = tree_get(segment_params, (0, 0))
 
             tus_to_remove = identify_tus_to_prune(
                 single_rep_params,
@@ -1150,7 +1248,7 @@ def _start_with_hard_pruning(
             total_to_remove = sum(len(tus) for tus in tus_to_remove.values())
             if total_to_remove > 0:
                 prune_key = jax.random.fold_in(loop_key, segment_idx + 1000)
-                current_dmanager, _, _ = hard_prune_and_rebuild(
+                current_dmanager, _, current_params = hard_prune_and_rebuild(
                     current_dmanager,
                     dconf,
                     model,
@@ -1158,6 +1256,7 @@ def _start_with_hard_pruning(
                     single_rep_params,
                     tus_to_remove,
                     prune_key,
+                    lock_ratios=lock_ratios,
                 )
                 logger.info(f"[HARD-PRUNE] Removed {total_to_remove} TUs, rebuilt stack")
             else:
@@ -1399,6 +1498,7 @@ def start(
     logger_objects: list | None = None,
     async_handler=None,
     lock_ratios: bool = False,
+    initial_params: ParameterTree | None = None,
 ):
     if dconf.hard_pruning_enabled:
         logger.info("Using hard-pruning mode with interval=%d", dconf.hard_pruning_interval)
@@ -1431,24 +1531,25 @@ def start(
     timer.end("stack")
 
     timer.start("params", "[2/5] Initializing parameters...")
-    n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
-    n_networks = len(dmanager.networks)
-    initial_params = initialize_params(
-        stack,
-        dconf.n_replicates,
-        dmanager.n_targets,
-        model.shared_params,
-        pkey,
-        n_tus=n_tus,
-        n_networks=n_networks,
-        tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
-        tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
-        use_latent_tu_masking=dconf.use_latent_tu_masking,
-        latent_tu_dim=dconf.latent_tu_dim,
-        latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
-        no_masking_tu_ids=stack.no_masking_tu_ids,
-        tu_id_to_idx=stack.tu_id_to_idx,
-    )
+    if initial_params is None:
+        n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
+        n_networks = len(dmanager.networks)
+        initial_params = initialize_params(
+            stack,
+            dconf.n_replicates,
+            dmanager.n_targets,
+            model.shared_params,
+            pkey,
+            n_tus=n_tus,
+            n_networks=n_networks,
+            tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
+            tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
+            use_latent_tu_masking=dconf.use_latent_tu_masking,
+            latent_tu_dim=dconf.latent_tu_dim,
+            latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
+            no_masking_tu_ids=stack.no_masking_tu_ids,
+            tu_id_to_idx=stack.tu_id_to_idx,
+        )
     timer.end("params")
 
     timer.start("opt_init", "[3/5] Initializing optimizer state...")
