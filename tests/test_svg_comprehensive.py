@@ -361,7 +361,8 @@ class TestTransformIntegration:
         svg_path = DESIGNS_DIR / "test_translate.svg"
         paths, greys, viewbox = _extract_shapes_from_svg(svg_path, max_is_black=True)
         assert len(paths) >= 1, "Should extract at least one path"
-        vertices = paths[0].vertices
+        idx = int(np.argmax(greys))
+        vertices = paths[idx].vertices
         xs = vertices[:, 0]
         assert xs.min() >= 25, (
             f"Translated rect should start at x>=30 (with tolerance), got min x={xs.min()}"

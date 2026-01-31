@@ -485,6 +485,8 @@ class Network(BaseModel):
         # track TUs that feed any non-ERN node
         neg_tu_other_usage: set[str] = set()
 
+        internal_node_types = {"source", "transcription", "translation", "aggregation", "passthrough"}
+
         for edge in self.compute_graph.edges.values():
             target_node = self.compute_graph.nodes.get(edge.target_id)
             if target_node is None:
@@ -494,16 +496,19 @@ class Network(BaseModel):
             if not tu_ids:
                 continue
 
-            if target_node.node_type == "sequestron_ERN" and edge.to_input_slot == 0:
-                # neg input (slot 0) to ERN
-                for tu_id in tu_ids:
-                    if tu_id in tu_id_to_idx:
-                        neg_tu_ern_usage.setdefault(tu_id, []).append(target_node.node_id)
-            elif target_node.node_type != "sequestron_ERN":
-                # feeds non-ERN node (could be translation, output, etc.)
-                for tu_id in tu_ids:
-                    if tu_id in tu_id_to_idx:
-                        neg_tu_other_usage.add(tu_id)
+            if target_node.node_type == "sequestron_ERN":
+                if edge.to_input_slot == 0:
+                    for tu_id in tu_ids:
+                        if tu_id in tu_id_to_idx:
+                            neg_tu_ern_usage.setdefault(tu_id, []).append(target_node.node_id)
+                continue
+
+            if target_node.node_type in internal_node_types:
+                continue
+
+            for tu_id in tu_ids:
+                if tu_id in tu_id_to_idx:
+                    neg_tu_other_usage.add(tu_id)
 
         # exclusive = feeds exactly 1 ERN neg input AND no other nodes
         exclusive = set()
@@ -791,6 +796,42 @@ class Network(BaseModel):
                     continue
                 incoming = list(self.compute_graph.get_incoming_edges(node.node_id))
                 if not incoming:
+                    nodes_to_remove.append(node.node_id)
+                    changed = True
+
+            if nodes_to_remove:
+                edges_to_remove = [
+                    eid
+                    for eid, e in self.compute_graph.edges.items()
+                    if e.source_id in nodes_to_remove or e.target_id in nodes_to_remove
+                ]
+                for eid in edges_to_remove:
+                    del self.compute_graph.edges[eid]
+                for nid in nodes_to_remove:
+                    del self.compute_graph.nodes[nid]
+
+    def _cleanup_orphaned_downstream_nodes(self):
+        assert self.compute_graph is not None
+        orphan_types = (
+            "source",
+            "transcription",
+            "translation",
+            "aggregation",
+            "inv_source",
+            "inv_transcription",
+            "inv_translation",
+            "inv_aggregation",
+        )
+        changed = True
+        while changed:
+            changed = False
+            nodes_to_remove = []
+
+            for node in self.compute_graph.nodes.values():
+                if node.node_type not in orphan_types:
+                    continue
+                outgoing = list(self.compute_graph.get_outgoing_edges(node.node_id))
+                if not outgoing:
                     nodes_to_remove.append(node.node_id)
                     changed = True
 

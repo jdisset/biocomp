@@ -3,11 +3,8 @@
 import pytest
 import numpy as np
 
-from biocomp.design import (
-    DesignConfig,
-    DesignManager,
-    _merge_surviving_params,
-)
+from biocomp.design import DesignConfig, DesignManager
+from biocomp.design_pruning import _merge_surviving_params
 from biocomp.tumasking import TU_LOG_ALPHA_PATH
 from biocomp.parameters import ParameterTree
 from biocomp.design_targets import SVGTarget, LatticeSampling

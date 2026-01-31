@@ -6,11 +6,9 @@ from typing import Literal, Callable, Any, TYPE_CHECKING
 import warnings
 
 import numpy as np
-import optax
 import jax
 import jax.numpy as jnp
 from jax import vmap
-from jax.tree_util import Partial
 from jax.typing import ArrayLike
 
 from assertpy import assert_that
@@ -24,7 +22,7 @@ import biocomp.nodes as nd
 from biocomp.network import Network
 from .parameters import ParameterTree
 from biocomp.logging_config import get_logger
-from biocomp.optimutils import make_training_step, per_replicate_step, optimize, DesignOptimConfig
+from biocomp.optimutils import DesignOptimConfig
 from biocomp.tumasking import PROTECTED_TU_MASK_PATH
 
 if TYPE_CHECKING:
@@ -196,7 +194,7 @@ class DesignManager(BaseModel):
     ) -> tuple[np.ndarray, np.ndarray]:
         """Sample from target using its interface methods."""
         if grid is not None:
-            X_lattice, Y_lattice = target.get_lattice(resolution=grid, seed=seed)
+            X_lattice, Y_lattice = target.get_lattice(resolution=grid, seed=seed, jitter=jitter)
             X_tiled = np.tile(X_lattice, (n, 1))
             Y_tiled = np.tile(Y_lattice[None, ...], (n, 1, 1))
             return X_tiled, Y_tiled
@@ -207,12 +205,27 @@ class DesignManager(BaseModel):
         self,
         samples: int | tuple[int, ...],
         seed: int | ArrayLike | None = None,
+        share_across_networks: bool = False,
     ) -> tuple[list[jax.Array], list[jax.Array]]:
         if seed is None:
             seed = random.randint(0, 2**32 - 1)
         elif not isinstance(seed, int):
             key_data = jax.random.key_data(seed)
             seed = int(key_data[0]) % (2**31)
+
+        if isinstance(samples, int):
+            samples = (samples,)
+
+        n_networks = samples[0]
+        if share_across_networks and n_networks > 1:
+            base_samples = (1, *samples[1:])
+            if isinstance(self.sampling, LatticeSampling):
+                xs_list, ys_list = self._get_lattice_samples(base_samples, seed)
+            else:
+                xs_list, ys_list = self._get_uniform_samples(base_samples, seed)
+            xs = [xs_list[0]] * n_networks
+            ys = [ys_list[0]] * n_networks
+            return xs, ys
 
         if isinstance(self.sampling, LatticeSampling):
             return self._get_lattice_samples(samples, seed)
@@ -819,455 +832,11 @@ def normalize_ratio_source_arrays(params, source_paths, normalize_func):
     )
 
 
-def identify_tus_to_prune(
-    params: ParameterTree,
-    stack: ComputeStack,
-    dmanager: DesignManager,
-    ratio_threshold: float,
-    use_soft_pruning: bool,
-    preserve_minimum: int,
-) -> dict[int, set[str]]:
-    """Identify TUs to remove for each network based on normalized ratios.
-
-    Returns dict mapping network_id -> set of TU IDs to remove.
-
-    Logic:
-    1. Use introspection to get per-TU normalized ratios from aggregation nodes
-    2. For each network, collect TUs where normalized ratio < threshold
-    3. If soft-pruning enabled (tu_log_alpha or latent TU masking present),
-       include TUs where sigmoid(log_alpha) < 0.5
-    4. Exclude TUs in stack.no_masking_tu_ids (topology-changing TUs)
-    5. Ensure at least preserve_minimum TUs remain (keeping strongest TUs)
-    """
-    from biocomp.paramintrospect import introspect_stack, aggregate_by_tu, ParamKind
-    from biocomp.tumasking import get_log_alpha_from_params, LATENT_TU_Z_PATH
-
-    tus_to_remove: dict[int, set[str]] = {}
-    no_masking_tu_ids = stack.no_masking_tu_ids or set()
-    tu_id_to_idx = stack.tu_id_to_idx or {}
-
-    has_tu_masking = TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params
-
-    for net_idx in range(len(stack.networks)):
-        infos = introspect_stack(stack, params, net_idx)
-        tu_data = aggregate_by_tu(infos)
-
-        candidates: set[str] = set()
-        all_tu_ids: set[str] = set()
-        tu_strengths: dict[str, float] = {}
-
-        for tu_id, entries in tu_data.items():
-            all_tu_ids.add(tu_id)
-            tu_strengths[tu_id] = 0.0
-
-            if tu_id in no_masking_tu_ids:
-                continue
-
-            for node_type, tg in entries:
-                for pv in tg.params:
-                    if pv.kind == ParamKind.RATIO:
-                        ratio_val = float(
-                            pv.value if isinstance(pv.value, (int, float)) else pv.value[0]
-                        )
-                        tu_strengths[tu_id] = max(tu_strengths[tu_id], abs(ratio_val))
-                        if abs(ratio_val) < ratio_threshold:
-                            candidates.add(tu_id)
-                            break
-                if tu_id in candidates:
-                    break
-
-        if use_soft_pruning and has_tu_masking:
-            try:
-                network_log_alpha = get_log_alpha_from_params(params, net_idx)
-                if network_log_alpha.ndim > 1:
-                    network_log_alpha = network_log_alpha.reshape(-1)
-
-                for tu_id in all_tu_ids:
-                    if tu_id in no_masking_tu_ids:
-                        continue
-                    if tu_id in tu_id_to_idx:
-                        tu_idx = tu_id_to_idx[tu_id]
-                        if tu_idx < len(network_log_alpha):
-                            prob = float(jax.nn.sigmoid(network_log_alpha[tu_idx]))
-                            # Update strength to include TU probability
-                            tu_strengths[tu_id] = max(tu_strengths.get(tu_id, 0.0), prob)
-                            if prob < 0.5:
-                                candidates.add(tu_id)
-            except ValueError:
-                pass  # No TU masking params - skip soft pruning
-
-        remaining = len(all_tu_ids) - len(candidates)
-        if remaining < preserve_minimum:
-            n_to_keep = preserve_minimum - remaining
-            # Sort candidates by strength (ascending) - weakest first
-            sorted_by_strength = sorted(candidates, key=lambda x: tu_strengths.get(x, 0.0))
-            # Keep the n_to_keep strongest (remove them from candidates)
-            strongest_to_keep = set(sorted_by_strength[-n_to_keep:]) if n_to_keep > 0 else set()
-            candidates = candidates - strongest_to_keep
-
-        tus_to_remove[net_idx] = candidates
-
-    return tus_to_remove
-
-
-def _merge_surviving_params(
-    old_params: ParameterTree,
-    new_params: ParameterTree,
-) -> ParameterTree:
-    """Transfer compatible params from old to new by path + shape matching.
-
-    Conservative policy: copy only if path exists in both AND shapes match exactly.
-    Skips paths containing 'tu_log_alpha', 'latent_tu', 'tu_binary_mask', 'protected_tu'
-    as those are handled separately via remapping.
-    """
-    skip_patterns = ("tu_log_alpha", "latent_tu", "tu_binary_mask", "protected_tu")
-
-    for path, old_val in old_params.data.iter_leaves():
-        path_str = str(path)
-
-        if any(p in path_str for p in skip_patterns):
-            continue
-
-        try:
-            new_val = new_params[path_str]
-        except (KeyError, TypeError):
-            continue
-
-        if not hasattr(old_val, 'shape') or not hasattr(new_val, 'shape'):
-            continue
-        if old_val.shape != new_val.shape:
-            continue
-        if hasattr(old_val, "dtype") and hasattr(new_val, "dtype"):
-            old_dtype = old_val.dtype
-            new_dtype = new_val.dtype
-            new_inexact = np.issubdtype(new_dtype, np.inexact) or np.issubdtype(
-                new_dtype, np.complexfloating
-            )
-            old_inexact = np.issubdtype(old_dtype, np.inexact) or np.issubdtype(
-                old_dtype, np.complexfloating
-            )
-            if new_inexact and not old_inexact:
-                continue
-            if not new_inexact and old_dtype != new_dtype:
-                continue
-
-        tag_names = None
-        if new_params.tags is not None:
-            try:
-                tag_flags = new_params.tags[path_str]
-            except KeyError:
-                tag_flags = None
-            if tag_flags is not None:
-                tag_names = [
-                    name
-                    for name, flag in zip(new_params.tagnames, tag_flags)
-                    if flag
-                ]
-
-        new_params.at(path_str, old_val, overwrite=True, tags=tag_names)
-
-    return new_params
-
-
-def _remap_tu_log_alpha(
-    old_log_alpha: jnp.ndarray,
-    old_tu_id_to_idx: dict[str, int],
-    new_tu_id_to_idx: dict[str, int],
-    init_value: float = 2.0,
-) -> jnp.ndarray:
-    """Remap tu_log_alpha from old to new TU indexing.
-
-    Surviving TUs retain their log_alpha values; new array is sized for new TU count.
-    """
-    n_networks = old_log_alpha.shape[0]
-    n_new_tus = len(new_tu_id_to_idx)
-    new_log_alpha = jnp.full((n_networks, n_new_tus), init_value)
-
-    old_idx_to_id = {v: k for k, v in old_tu_id_to_idx.items()}
-
-    for old_idx in range(old_log_alpha.shape[-1]):
-        tu_id = old_idx_to_id.get(old_idx)
-        if tu_id and tu_id in new_tu_id_to_idx:
-            new_idx = new_tu_id_to_idx[tu_id]
-            new_log_alpha = new_log_alpha.at[:, new_idx].set(old_log_alpha[:, old_idx])
-
-    return new_log_alpha
-
-
-def hard_prune_and_rebuild(
-    dmanager: DesignManager,
-    dconf: DesignConfig,
-    model: "BiocompModel",
-    stack: ComputeStack,
-    params: ParameterTree,
-    tus_to_remove: dict[int, set[str]],
-    key: jax.Array,
-    lock_ratios: bool = False,
-) -> tuple[DesignManager, ComputeStack, ParameterTree]:
-    """Execute hard pruning: mark TUs disabled, commit, rebuild.
-
-    Steps:
-    1. For TUs to remove: set their tu_log_alpha to -10.0 (marks as disabled)
-    2. Call stack.commit(params) to get committed networks <- DUMB! we need to keep embeddings unlocked. Committing would collapse them to a single part. At least add a parameter to commit() to avoid locking embeddings.
-    3. Create new DesignManager with committed networks
-    4. Rebuild ComputeStack via dmanager.build_stack()
-    5. Initialize new params, transferring what's possible
-    6. Return (new_dmanager, new_stack, new_params)
-
-    Args:
-        lock_ratios: If True, ratios remain locked in the rebuilt stack.
-    """
-    from copy import deepcopy
-
-    old_tu_id_to_idx = stack.tu_id_to_idx or {}
-    old_n_tus = len(old_tu_id_to_idx)
-    n_networks = len(stack.networks)
-
-    params_for_commit = deepcopy(params)
-
-    if TU_LOG_ALPHA_PATH in params_for_commit and old_tu_id_to_idx:
-        tu_log_alpha = params_for_commit[TU_LOG_ALPHA_PATH]
-        modified_log_alpha = jnp.array(tu_log_alpha)
-
-        for net_idx, tu_ids in tus_to_remove.items():
-            for tu_id in tu_ids:
-                if tu_id in old_tu_id_to_idx:
-                    tu_idx = old_tu_id_to_idx[tu_id]
-                    modified_log_alpha = modified_log_alpha.at[net_idx, tu_idx].set(-10.0)
-
-        params_for_commit.at(TU_LOG_ALPHA_PATH, modified_log_alpha, overwrite=True)
-
-    committed_networks = stack.commit(params_for_commit, lock_ratios=lock_ratios)
-
-    total_removed = sum(len(tus) for tus in tus_to_remove.values())
-    logger.info(f"[HARD-PRUNE] Committed networks, removed {total_removed} TUs total")
-
-    new_dmanager = DesignManager(
-        targets=dmanager.targets,
-        networks=committed_networks,
-        sampling=dmanager.sampling,
-        enable_tu_masking=dmanager.enable_tu_masking,
-    )
-
-    pkey, init_key = jax.random.split(key)
-    new_stack = new_dmanager.build_stack(
-        model,
-        unlock_ratios=not lock_ratios,
-        use_latent_ratios=dconf.use_latent_ratios,
-        latent_dim=dconf.latent_dim,
-        latent_hidden_dim=dconf.latent_hidden_dim,
-        auto_lock_topology_tus=dconf.auto_lock_topology_tus,
-    )
-
-    new_n_tus = new_dmanager.n_tus if new_dmanager.enable_tu_masking else 0
-    new_tu_id_to_idx = new_dmanager.tu_id_to_idx if new_dmanager.enable_tu_masking else {}
-
-    logger.info(f"[HARD-PRUNE] Rebuilt stack: {old_n_tus} -> {new_n_tus} TUs")
-
-    new_params = initialize_params(
-        new_stack,
-        dconf.n_replicates,
-        new_dmanager.n_targets,
-        model.shared_params,
-        init_key,
-        n_tus=new_n_tus,
-        n_networks=len(new_dmanager.networks),
-        tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
-        tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
-        use_latent_tu_masking=dconf.use_latent_tu_masking,
-        latent_tu_dim=dconf.latent_tu_dim,
-        latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
-        no_masking_tu_ids=new_stack.no_masking_tu_ids,
-        tu_id_to_idx=new_stack.tu_id_to_idx,
-    )
-
-    expanded_old_params = jax.tree.map(
-        lambda x: x[None, None, ...] if x.ndim >= 1 else x, params
-    )
-    new_params = _merge_surviving_params(expanded_old_params, new_params)
-
-    if TU_LOG_ALPHA_PATH in params and TU_LOG_ALPHA_PATH in new_params and new_n_tus > 0:
-        old_log_alpha = params[TU_LOG_ALPHA_PATH]
-        if old_log_alpha.ndim == 4:
-            old_2d = old_log_alpha[0, 0]
-        elif old_log_alpha.ndim == 2:
-            old_2d = old_log_alpha
-        else:
-            old_2d = old_log_alpha.reshape(n_networks, -1)
-
-        remapped = _remap_tu_log_alpha(old_2d, old_tu_id_to_idx, new_tu_id_to_idx)
-
-        new_log_alpha = new_params[TU_LOG_ALPHA_PATH]
-        if new_log_alpha.ndim == 4:
-            remapped_4d = jnp.tile(
-                remapped[None, None, :, :], (dconf.n_replicates, new_dmanager.n_targets, 1, 1)
-            )
-            new_params.at(TU_LOG_ALPHA_PATH, remapped_4d, overwrite=True)
-        elif new_log_alpha.ndim == 2:
-            new_params.at(TU_LOG_ALPHA_PATH, remapped, overwrite=True)
-
-    return new_dmanager, new_stack, new_params
-
-
-def _start_with_hard_pruning(
-    dmanager: DesignManager,
-    dconf: DesignConfig,
-    model: "BiocompModel",
-    loggers: list[tuple[int, Callable]] | None = None,
-    logger_objects: list | None = None,
-    async_handler=None,
-    lock_ratios: bool = False,
-):
-    """Design optimization with periodic hard-pruning.
-
-    Runs optimization in segments, hard-pruning between segments.
-
-    RESTRICTION: Hard-pruning requires n_replicates=1 and n_targets=1.
-    This avoids complex indexing bugs. Run separate single-replicate
-    designs or disable hard pruning for multi-replicate scenarios.
-    """
-    if dconf.n_replicates != 1:
-        raise ValueError(
-            f"hard_pruning_enabled=True requires n_replicates=1, got {dconf.n_replicates}. "
-            "Run separate single-replicate designs or disable hard pruning."
-        )
-    if dmanager.n_targets != 1:
-        raise ValueError(
-            f"hard_pruning_enabled=True requires n_targets=1, got {dmanager.n_targets}. "
-            "Run separate single-target designs or disable hard pruning."
-        )
-
-    timer = _PhaseTimer()
-    logger.info("=" * 60)
-    logger.info("DESIGN OPTIMIZATION WITH HARD-PRUNING")
-    logger.info("=" * 60)
-
-    pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
-
-    steps_per_epoch = max(1, dconf.n_batches_per_epoch // dconf.batches_per_step)
-    total_steps = int(dconf.n_epochs * steps_per_epoch)
-    steps_per_segment = dconf.hard_pruning_interval
-    n_segments = (total_steps + steps_per_segment - 1) // steps_per_segment
-
-    logger.info(
-        f"[HARD-PRUNE] Total steps: {total_steps}, interval: {steps_per_segment}, segments: {n_segments}"
-    )
-
-    current_dmanager = dmanager
-    accumulated_loss_history: list = []
-    accumulated_step_history: list = []
-    global_step_offset = 0
-    segment_params: ParameterTree | None = None
-    current_params: ParameterTree | None = None
-
-    for segment_idx in range(n_segments):
-        segment_start_step = segment_idx * steps_per_segment
-        segment_end_step = min((segment_idx + 1) * steps_per_segment, total_steps)
-        segment_steps = segment_end_step - segment_start_step
-
-        if segment_steps <= 0:
-            break
-
-        segment_epochs = 1
-        segment_batches_per_epoch = segment_steps * dconf.batches_per_step
-
-        segment_config = DesignConfig(
-            n_replicates=dconf.n_replicates,
-            n_epochs=segment_epochs,
-            batch_size=dconf.batch_size,
-            n_batches_per_epoch=segment_batches_per_epoch,
-            batches_per_step=dconf.batches_per_step,
-            reshuffle_batches=dconf.reshuffle_batches,
-            tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
-            tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
-            use_latent_ratios=dconf.use_latent_ratios,
-            latent_dim=dconf.latent_dim,
-            latent_hidden_dim=dconf.latent_hidden_dim,
-            enable_tu_masking=dconf.enable_tu_masking,
-            use_latent_tu_masking=dconf.use_latent_tu_masking,
-            latent_tu_dim=dconf.latent_tu_dim,
-            latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
-            auto_lock_topology_tus=dconf.auto_lock_topology_tus,
-            use_probabilistic_or=dconf.use_probabilistic_or,
-            use_two_timescale=dconf.use_two_timescale,
-            tu_mask_lr_scale=dconf.tu_mask_lr_scale,
-            hard_pruning_enabled=False,
-            pluggable_optimizer=dconf.pluggable_optimizer,
-            loss_function=dconf.loss_function,
-            optimizer_stack=dconf.optimizer_stack,
-            keep_in_history=dconf.keep_in_history,
-            seed=int(jax.random.key_data(jax.random.fold_in(loop_key, segment_idx))[0]) % (2**31),
-        )
-
-        logger.info(
-            f"[HARD-PRUNE] Segment {segment_idx + 1}/{n_segments}: steps {segment_start_step}-{segment_end_step}"
-        )
-
-        segment_params, segment_loss_history, segment_step_history = start(
-            current_dmanager,
-            segment_config,
-            model,
-            loggers=loggers,
-            logger_objects=logger_objects,
-            async_handler=async_handler,
-            lock_ratios=lock_ratios,
-            initial_params=current_params,
-        )
-        current_params = segment_params
-
-        accumulated_loss_history.extend(segment_loss_history)
-        accumulated_step_history.extend(segment_step_history)
-        global_step_offset += segment_steps
-
-        if segment_idx < n_segments - 1:
-            timer.start("prune", "[HARD-PRUNE] Identifying TUs to prune...")
-
-            temp_stack = current_dmanager.build_stack(
-                model,
-                unlock_ratios=not lock_ratios,
-                use_latent_ratios=dconf.use_latent_ratios,
-                latent_dim=dconf.latent_dim,
-                latent_hidden_dim=dconf.latent_hidden_dim,
-                auto_lock_topology_tus=dconf.auto_lock_topology_tus,
-            )
-
-            from biocomp.jaxutils import tree_get
-            single_rep_params = tree_get(segment_params, (0, 0))
-
-            tus_to_remove = identify_tus_to_prune(
-                single_rep_params,
-                temp_stack,
-                current_dmanager,
-                ratio_threshold=dconf.hard_pruning_ratio_threshold,
-                use_soft_pruning=dconf.enable_tu_masking,
-                preserve_minimum=dconf.hard_pruning_preserve_minimum_tus,
-            )
-
-            timer.end("prune")
-
-            total_to_remove = sum(len(tus) for tus in tus_to_remove.values())
-            if total_to_remove > 0:
-                prune_key = jax.random.fold_in(loop_key, segment_idx + 1000)
-                current_dmanager, _, current_params = hard_prune_and_rebuild(
-                    current_dmanager,
-                    dconf,
-                    model,
-                    temp_stack,
-                    single_rep_params,
-                    tus_to_remove,
-                    prune_key,
-                    lock_ratios=lock_ratios,
-                )
-                logger.info(f"[HARD-PRUNE] Removed {total_to_remove} TUs, rebuilt stack")
-            else:
-                logger.info("[HARD-PRUNE] No TUs to remove, continuing with current structure")
-
-    logger.info("=" * 60)
-    logger.info(f"HARD-PRUNING OPTIMIZATION COMPLETE in {timer.total():.2f}s")
-    logger.info("=" * 60)
-
-    assert segment_params is not None, "No optimization segments were run"
-    return segment_params, accumulated_loss_history, accumulated_step_history
+from .design_pruning import (  # noqa: E402
+    identify_tus_to_prune,
+    hard_prune_and_rebuild,
+    run_with_hard_pruning as _start_with_hard_pruning,
+)
 
 
 def _start_pluggable(
@@ -1279,215 +848,17 @@ def _start_pluggable(
     async_handler=None,
     lock_ratios: bool = False,
 ):
-    from .designcodec import GenomeCodec
+    from .pluggable_opt.run_pluggable import run_pluggable
 
-    timer = _PhaseTimer()
-    logger.info("=" * 60)
-    logger.info("DESIGN OPTIMIZATION (PLUGGABLE OPTIMIZER)")
-    logger.info("=" * 60)
-
-    pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
-    optimizer = dconf.pluggable_optimizer
-    from .designoptim import NSGA2DesignOptimizer
-
-    is_nsga2 = isinstance(optimizer, NSGA2DesignOptimizer)
-    n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
-    nsga2_n_tus = dmanager.n_tus if is_nsga2 else 0
-    n_networks = len(dmanager.networks)
-
-    timer.start("stack", "[1/5] Building compute stack...")
-    stack = dmanager.build_stack(
+    return run_pluggable(
+        dmanager,
+        dconf,
         model,
-        unlock_ratios=not lock_ratios,
-        use_latent_ratios=dconf.use_latent_ratios,
-        latent_dim=dconf.latent_dim,
-        latent_hidden_dim=dconf.latent_hidden_dim,
-        auto_lock_topology_tus=dconf.auto_lock_topology_tus,
+        loggers=loggers,
+        logger_objects=logger_objects,
+        async_handler=async_handler,
+        lock_ratios=lock_ratios,
     )
-    timer.end("stack")
-
-    timer.start("params", "[2/5] Initializing parameters...")
-    initial_params = initialize_params(
-        stack,
-        n_replicates=1,
-        n_targets=dmanager.n_targets,
-        shared_params=model.shared_params,
-        key=pkey,
-        n_tus=n_tus,
-        n_networks=n_networks,
-        tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
-        tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
-        use_latent_tu_masking=dconf.use_latent_tu_masking,
-        latent_tu_dim=dconf.latent_tu_dim,
-        latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
-        no_masking_tu_ids=stack.no_masking_tu_ids,
-        tu_id_to_idx=stack.tu_id_to_idx,
-    )
-    initial_params = jax.tree.map(lambda x: x.squeeze(0), initial_params)
-    timer.end("params")
-
-    timer.start("codec", "[3/5] Creating codec and loss function...")
-    codec = GenomeCodec.from_params(
-        initial_params,
-        static_tags=("shared", "non_grad"),
-        use_latent_ratios=dconf.use_latent_ratios,
-    )
-    flat_params = codec.encode(initial_params)
-    logger.info(f"  Genome dimension: {codec.param_dim}")
-
-    if codec.param_dim == 0:
-        raise ValueError(
-            "No parameters to optimize: genome dimension is 0. "
-            "This typically happens with zero-freedom recipes where all ratios are explicitly locked. "
-            "Design optimization requires at least some unlocked parameters. "
-            "Consider using a recipe with unlocked ratios (e.g., T_2_ratios_only.yaml) or "
-            "check that your recipe doesn't have `locked: true` on all ratio specifications."
-        )
-
-    loss_fn, num_z, _ = _create_loss_function(stack, dmanager, dconf, initial_params)
-    timer.end("codec")
-
-    timer.start("objective", "[4/5] Creating objective function...")
-    effective_batch_size = dconf.batch_size
-    if dmanager.is_lattice_mode:
-        grid_res = dmanager.grid_resolution
-        assert grid_res is not None
-        effective_batch_size *= grid_res[0] * grid_res[1]
-
-    xbatches_list, ybatches_list = dmanager.get_samples(
-        (len(dmanager.networks), 1, 1, 1, dconf.batch_size), bkey
-    )
-    x_samples = jnp.concatenate(xbatches_list, axis=-1).reshape(
-        effective_batch_size, dmanager.n_targets, -1
-    )
-    y_samples = ybatches_list[0].reshape(effective_batch_size, dmanager.n_targets, -1)
-    fixed_z = jnp.full((x_samples.shape[0], *num_z), 0.5)
-    fixed_key = jax.random.key(42)
-
-    def single_objective(flat_genome: jnp.ndarray, step: jnp.ndarray) -> float:
-        params = codec.decode(flat_genome, apply_constraints=True)
-        static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
-        loss, _ = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, step)
-        return loss
-
-    def get_yhatdep(flat_genome: jnp.ndarray, step: jnp.ndarray) -> jnp.ndarray:
-        params = codec.decode(flat_genome, apply_constraints=True)
-        static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
-        _, aux = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, step)
-        return aux.get("yhatdep")
-
-    def get_yhatdep_nsga2(flat_genome: jnp.ndarray, step: jnp.ndarray) -> jnp.ndarray:
-        continuous_genes = flat_genome[nsga2_n_tus:]
-        params = codec.decode(continuous_genes, apply_constraints=True)
-        static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
-        _, aux = loss_fn(dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, step)
-        return aux.get("yhatdep")
-
-    compiled_get_yhatdep = jax.jit(get_yhatdep_nsga2 if is_nsga2 else get_yhatdep)
-    timer.end("objective")
-
-    timer.start("opt_init", "[5/5] Initializing optimizer...")
-    init_key, opt_key = jax.random.split(loop_key)
-
-    if is_nsga2:
-
-        def nsga2_objective(flat_genome: jnp.ndarray) -> float:
-            continuous_genes = flat_genome[nsga2_n_tus:]
-            params = codec.decode(continuous_genes, apply_constraints=True)
-            static_p, dynamic_p = params.filter_by_tag(["non_grad", "shared"])
-            loss, _ = loss_fn(
-                dynamic_p, static_p, x_samples, y_samples, fixed_z, fixed_key, jnp.array(0)
-            )
-            return loss
-
-        opt_state = optimizer.init(
-            init_key,
-            flat_params,
-            nsga2_objective,
-            n_tus=nsga2_n_tus,
-            continuous_dim=codec.param_dim,
-        )
-        step_objective_fn = nsga2_objective
-    else:
-        compiled_pop_objective = jax.jit(jax.vmap(single_objective, in_axes=(0, None)))
-        dummy_pop = jnp.zeros((optimizer._get_pop_size(codec.param_dim), codec.param_dim))
-        _ = compiled_pop_objective(dummy_pop, jnp.array(0, dtype=jnp.int32)).block_until_ready()
-        opt_state = optimizer.init(
-            init_key, flat_params, lambda g: single_objective(g, jnp.array(0, dtype=jnp.int32))
-        )
-        step_objective_fn = compiled_pop_objective
-    logger.info(f"  Initial loss: {float(opt_state.best_loss):.6f}")
-    timer.end("opt_init")
-
-    logger.info("=" * 60)
-    logger.info("STARTING OPTIMIZATION LOOP")
-    logger.info("=" * 60)
-
-    loss_history, step_history = [], []
-    pbar = tqdm(desc="Optimizing", unit="step")
-
-    while not optimizer.should_stop(opt_state):
-        opt_key, step_key = jax.random.split(opt_key)
-        current_step = jnp.array(int(opt_state.step), dtype=jnp.int32)
-        opt_state, metrics = optimizer.step(opt_state, step_key, step_objective_fn, current_step)
-        loss_history.append(float(opt_state.best_loss))
-        step_history.append({k: float(v) if hasattr(v, "item") else v for k, v in metrics.items()})
-        pbar.update(1)
-        pbar.set_postfix(loss=f"{float(opt_state.best_loss):.4f}")
-
-        if loggers and any(int(opt_state.step) % p == 0 or p == -1 for p, _ in loggers):
-            yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, current_step)
-            step_data = {"loss": [[float(opt_state.best_loss)]], "yhatdep": yhatdep_arr, **metrics}
-            needs_params = logger_objects and any(
-                "latest_params" in getattr(lo, "required_arrays", [])
-                for lo in logger_objects
-                if int(opt_state.step) % getattr(lo, "periods", 1) == 0
-            )
-            if needs_params:
-                best_genome = opt_state.best_params
-                if is_nsga2:
-                    best_genome = best_genome[nsga2_n_tus:]
-                step_data["latest_params"] = codec.decode(best_genome, apply_constraints=True)
-            for period, callback in loggers:
-                if int(opt_state.step) % period == 0 or period == -1:
-                    callback(int(opt_state.step), None, step_history=step_data, stack=stack)
-
-    pbar.close()
-    logger.info("=" * 60)
-    logger.info(f"OPTIMIZATION COMPLETE in {timer.total():.2f}s")
-    logger.info(f"  Final loss: {float(opt_state.best_loss):.6f}, steps: {int(opt_state.step)}")
-    timer.summary()
-
-    best_genome = opt_state.best_params
-    if is_nsga2:
-        best_genome = best_genome[nsga2_n_tus:]
-    final_params = codec.decode(best_genome, apply_constraints=True)
-
-    final_step_data = {"loss": [[float(opt_state.best_loss)]], "latest_params": final_params}
-
-    from .designoptim import NSGA2DesignState
-
-    if isinstance(opt_state, NSGA2DesignState):
-        pareto_front, pareto_fitness = opt_state.pareto_front, opt_state.pareto_fitness
-        if pareto_front is not None and pareto_fitness is not None:
-            final_step_data["pareto_front"] = pareto_front
-            final_step_data["pareto_fitness"] = pareto_fitness
-            logger.info(f"  Pareto front: {pareto_fitness.shape[0]} solutions")
-            logger.info(f"    Min loss: {float(jnp.min(pareto_fitness[:, 0])):.4f}")
-            logger.info(f"    Min TU count: {float(jnp.min(pareto_fitness[:, 1])):.0f}")
-
-    if loggers:
-        yhatdep_arr = compiled_get_yhatdep(
-            opt_state.best_params, jnp.array(int(opt_state.step), dtype=jnp.int32)
-        )
-        final_step_data["yhatdep"] = yhatdep_arr
-        for period, callback in loggers:
-            if period == -1:
-                callback(int(opt_state.step), None, step_history=final_step_data, stack=stack)
-
-    step_history.append(final_step_data)
-
-    return jax.tree.map(lambda x: x[None, ...], final_params), loss_history, step_history
 
 
 def start(
@@ -1511,195 +882,17 @@ def start(
         return _start_pluggable(
             dmanager, dconf, model, loggers, logger_objects, async_handler, lock_ratios
         )
+    from .design_run import run_design
 
-    timer = _PhaseTimer()
-    logger.info("=" * 60)
-    logger.info("DESIGN OPTIMIZATION - INITIALIZATION PHASE")
-    logger.info("=" * 60)
-
-    pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
-
-    timer.start("stack", "[1/5] Building compute stack...")
-    stack = dmanager.build_stack(
+    return run_design(
+        dmanager,
+        dconf,
         model,
-        unlock_ratios=not lock_ratios,
-        use_latent_ratios=dconf.use_latent_ratios,
-        latent_dim=dconf.latent_dim,
-        latent_hidden_dim=dconf.latent_hidden_dim,
-        auto_lock_topology_tus=dconf.auto_lock_topology_tus,
-    )
-    timer.end("stack")
-
-    timer.start("params", "[2/5] Initializing parameters...")
-    if initial_params is None:
-        n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
-        n_networks = len(dmanager.networks)
-        initial_params = initialize_params(
-            stack,
-            dconf.n_replicates,
-            dmanager.n_targets,
-            model.shared_params,
-            pkey,
-            n_tus=n_tus,
-            n_networks=n_networks,
-            tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
-            tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
-            use_latent_tu_masking=dconf.use_latent_tu_masking,
-            latent_tu_dim=dconf.latent_tu_dim,
-            latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
-            no_masking_tu_ids=stack.no_masking_tu_ids,
-            tu_id_to_idx=stack.tu_id_to_idx,
-        )
-    timer.end("params")
-
-    timer.start("opt_init", "[3/5] Initializing optimizer state...")
-    static, dynamic = initial_params.filter_by_tag(["non_grad", "shared"])
-    assert_tree_shape(dynamic, (dconf.n_replicates, dmanager.n_targets))
-
-    # Check if there are any actual JAX arrays to optimize (not just ArrayRefs)
-    jax_leaves = jax.tree.leaves(dynamic)
-    if not jax_leaves:
-        raise ValueError(
-            "No parameters to optimize: all parameters are either shared or marked NON_GRAD. "
-            "This typically happens with zero-freedom recipes where all ratios are explicitly locked. "
-            "Design optimization requires at least some unlocked parameters. "
-            "Consider using a recipe with unlocked ratios (e.g., T_2_ratios_only.yaml) or "
-            "check that your recipe doesn't have `locked: true` on all ratio specifications."
-        )
-
-    initial_optimizer_state = vmap(vmap(dconf.optimizer.init))(dynamic)
-    timer.end("opt_init")
-
-    steps_per_epoch = max(1, dconf.n_batches_per_epoch // dconf.batches_per_step)
-    total_steps = int(dconf.n_epochs * steps_per_epoch)
-    assert_that(total_steps).is_greater_than(0)
-    logger.info(
-        f"  Config: {total_steps} steps, {steps_per_epoch}/epoch, "
-        f"batch={dconf.batch_size}, batches/step={dconf.batches_per_step}"
-    )
-
-    n_networks = stack.get_nb_networks()
-
-    timer.start("samples", "[4/5] Generating training samples...")
-    xbatches_list, ybatches_list = dmanager.get_samples(
-        (
-            len(dmanager.networks),
-            steps_per_epoch,
-            dconf.n_replicates,
-            dconf.batches_per_step,
-            dconf.batch_size,
-        ),
-        bkey,
-    )
-    xbatches = jnp.concatenate(xbatches_list, axis=-1)
-    ybatches = ybatches_list[0]
-    timer.end("samples")
-
-    effective_batch_size = dconf.batch_size
-    if dmanager.is_lattice_mode:
-        grid_res = dmanager.grid_resolution
-        assert grid_res is not None
-        xres, yres = grid_res
-        effective_batch_size *= xres * yres
-
-    n_design_inputs = 2 * len(dmanager.networks)
-    logger.info(f"  Data: {len(dmanager.networks)} networks, xbatches.shape={xbatches.shape}")
-
-    assert_that(xbatches).has_shape(
-        (
-            steps_per_epoch,
-            dconf.n_replicates,
-            dconf.batches_per_step,
-            effective_batch_size,
-            dmanager.n_targets,
-            n_design_inputs,
-        )
-    )
-
-    timer.start("loss_fn", "[5/5] Creating loss and step functions...")
-    loss_func, num_z, direct_ratio_paths = _create_loss_function(
-        stack, dmanager, dconf, initial_params
-    )
-    _, source_ratio_paths = get_ratio_paths_and_sources(initial_params)
-    logger.debug(
-        f"Ratio paths: {len(direct_ratio_paths)} direct + {len(source_ratio_paths)} ArrayRef"
-    )
-
-    def norm_ratios_hook(params, *a, **kw):
-        if direct_ratio_paths:
-            params = params.update_leaves_by_path(direct_ratio_paths, normalize_ratios_prune)
-        if source_ratio_paths:
-            params = normalize_ratio_source_arrays(
-                params, source_ratio_paths, normalize_ratios_prune
-            )
-        if TU_LOG_ALPHA_PATH in params:
-            params = params.update_leaves_by_path(
-                [TU_LOG_ALPHA_PATH],  # pyright: ignore[reportArgumentType]
-                lambda x: jnp.clip(x, LOG_ALPHA_MIN, LOG_ALPHA_MAX),
-            )
-        return params
-
-    step_fn = make_training_step(
-        loss_func,
-        dconf.optimizer,
-        dconf.keep_in_history,
-        scannable=True,
-        post_update_hook=norm_ratios_hook,
-        updates_need_vmap=True,
-        static_tags=["non_grad", "shared"],
-        sanitize_grads=True,
-    )
-
-    def step(params: ParameterTree, opt_state: optax.OptState, step_key, xs, ys):
-        keys = jax.random.split(step_key, dconf.n_replicates)
-        assert_that(xs).has_shape(
-            (
-                dconf.n_replicates,
-                dconf.batches_per_step,
-                effective_batch_size,
-                dmanager.n_targets,
-                n_design_inputs,
-            )
-        )
-        expected_y_last_dim = 1 if dmanager.is_lattice_mode else n_networks
-        assert_that(ys).has_shape(
-            (
-                dconf.n_replicates,
-                dconf.batches_per_step,
-                effective_batch_size,
-                dmanager.n_targets,
-                expected_y_last_dim,
-            )
-        )
-
-        return jax.vmap(
-            Partial(per_replicate_step, num_z=num_z, training_config=dconf, scannable_step=step_fn)
-        )(params, opt_state, keys, xs, ys)
-
-    timer.end("loss_fn")
-
-    logger.info("-" * 60)
-    logger.info(f"INITIALIZATION COMPLETE in {timer.total():.2f}s")
-    timer.summary()
-    logger.info("=" * 60)
-    logger.info("STARTING OPTIMIZATION LOOP")
-    logger.info("=" * 60)
-
-    return optimize(
-        step,
-        initial_params,
-        initial_optimizer_state,
-        xbatches=xbatches,
-        ybatches=ybatches,
-        config=dconf,
-        n_total_steps=total_steps,
-        steps_per_epoch=steps_per_epoch,
-        key=loop_key,
-        stack=stack,
         loggers=loggers,
         logger_objects=logger_objects,
         async_handler=async_handler,
-        verbose=True,
+        lock_ratios=lock_ratios,
+        initial_params=initial_params,
     )
 
 
@@ -1727,10 +920,14 @@ def sample_for_evaluation(
         assert grid_res is not None
         xres, yres = grid_res
         n_samples = xres * yres
-        xlist, ylist = dmanager.get_samples((n_networks, n_replicates, 1), seed)
+        xlist, ylist = dmanager.get_samples(
+            (n_networks, n_replicates, 1), seed, share_across_networks=True
+        )
     else:
         n_samples = n_eval_samples
-        xlist, ylist = dmanager.get_samples((n_networks, n_replicates, n_eval_samples), seed)
+        xlist, ylist = dmanager.get_samples(
+            (n_networks, n_replicates, n_eval_samples), seed, share_across_networks=True
+        )
 
     xraw, yraw = jnp.stack(xlist, axis=0), jnp.stack(ylist, axis=0)
     assert xraw.shape == (n_networks, n_replicates, n_samples, n_targets, 2), (

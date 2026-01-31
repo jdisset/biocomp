@@ -75,6 +75,25 @@ def _migrate_legacy_members(extra: dict) -> dict[str, AggregationMember]:
     return {}
 
 
+def renormalize_members_after_removal(extra: dict, removed_member_ids: set[str]) -> None:
+    """Remove members by id and renormalize ratios, preserving member metadata."""
+    if not removed_member_ids:
+        return
+    members = _migrate_legacy_members(extra)
+    if not members:
+        return
+    for member_id in removed_member_ids:
+        members.pop(member_id, None)
+    if not members:
+        extra["members"] = {}
+        return
+    total = sum(m.ratio for m in members.values())
+    if total > 1e-9:
+        for member in members.values():
+            member.ratio = member.ratio / total
+    extra["members"] = {mid: m.to_dict() for mid, m in members.items()}
+
+
 def _members_to_arrays(
     members: dict[str, AggregationMember],
 ) -> tuple[list[str], list[float], list[Optional[dict]], list[bool]]:
@@ -423,7 +442,10 @@ def aggregation(
             for j in range(n_outputs):
                 min_v = float(ratio_min[j])
                 max_v = float(ratio_max[j])
-                if lock_ratios or abs(min_v - max_v) < 1e-8:
+                if lock_ratios:
+                    ratio_ranges.append(None)
+                    ratio_locked.append(False)
+                elif abs(min_v - max_v) < 1e-8:
                     ratio_ranges.append(None)
                     ratio_locked.append(True)
                 else:

@@ -59,6 +59,18 @@ def find_tu_by_pattern(network, pattern: str):
     return [tid for tid in tu_ids if pattern in tid]
 
 
+def get_ern_neg_tu_ids(network) -> set[str]:
+    neg_tu_ids: set[str] = set()
+    for node in get_ern_nodes(network):
+        incoming = list(network.compute_graph.get_incoming_edges(node.node_id))
+        for edge in incoming:
+            if edge.to_input_slot != 0:
+                continue
+            if edge.extra:
+                neg_tu_ids.update(edge.extra.get("tu_id", []))
+    return neg_tu_ids
+
+
 class TestErnInputStates:
     """Test get_ern_input_states() method."""
 
@@ -188,10 +200,10 @@ class TestErnCleanup:
             tu_id_to_idx = build_tu_id_to_idx(network)
             exclusive_neg_tus = network.find_exclusive_ern_neg_tus(tu_id_to_idx)
 
-            # in typical architectures, neg TUs are shared (e.g., CasE feeds 3+ ERNs)
-            # so exclusive_neg_tus should be a small subset (or empty)
-            neg_tu_ids = find_tu_by_pattern(network, "_a-")
-            assert len(exclusive_neg_tus) <= len(neg_tu_ids), "Exclusive can't exceed total neg TUs"
+            neg_tu_ids = get_ern_neg_tu_ids(network)
+            assert exclusive_neg_tus.issubset(neg_tu_ids), (
+                "Exclusive neg TUs must be subset of ERN negative sources"
+            )
 
             # verify exclusive TUs are valid TU IDs
             for tu_id in exclusive_neg_tus:

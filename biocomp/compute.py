@@ -141,12 +141,11 @@ def _renormalize_aggregation_after_cascade(net: "Network", disabled_source_ids: 
     if net.compute_graph is None:
         return
 
+    from biocomp.nodes.aggregation import renormalize_members_after_removal
+
     graph = net.compute_graph
     for node in graph.get_nodes_by_type("aggregation"):
         if node.extra is None:
-            continue
-        members = node.extra.get("members")
-        if not members or not isinstance(members, dict):
             continue
 
         # build source id to member id mapping
@@ -167,25 +166,7 @@ def _renormalize_aggregation_after_cascade(net: "Network", disabled_source_ids: 
         if not members_to_remove:
             continue
 
-        # remove disabled members and renormalize
-        new_members: dict[str, dict] = {}
-        for k, v in members.items():
-            if k in members_to_remove:
-                continue
-            if isinstance(v, dict):
-                new_members[k] = dict(v)
-            else:
-                new_members[k] = {
-                    "ratio": getattr(v, "ratio", 0.0),
-                    "locked": getattr(v, "locked", False),
-                }
-
-        if new_members:
-            total = sum(m.get("ratio", 0.0) for m in new_members.values())
-            if total > 1e-9:
-                for k in new_members:
-                    new_members[k]["ratio"] = new_members[k].get("ratio", 0.0) / total
-        node.extra["members"] = new_members
+        renormalize_members_after_removal(node.extra, members_to_remove)
 
 
 @dataclass
@@ -614,7 +595,7 @@ class ComputeStack:
         # first, run node-level commits (they need edges to exist)
         _t3 = _time.perf_counter()
         for layer in self.layers:
-            layer.commit(params, stack=temp_stack, **kwargs)
+            layer.commit(params, stack=temp_stack, collapse_to_part=collapse_to_part, **kwargs)
         _t4 = _time.perf_counter()
         logger.debug(f"COMMIT TIMING: layer commits ({len(self.layers)} layers): {_t4 - _t3:.3f}s")
 
@@ -705,6 +686,7 @@ class ComputeStack:
                     # renormalize aggregation ratios after cascade-disabled sources removed
                     _renormalize_aggregation_after_cascade(net, disabled_source_ids)
 
+                net._cleanup_orphaned_downstream_nodes()
                 net._cleanup_orphaned_bias_nodes()
                 net._cleanup_orphaned_input_nodes(original_output_proteins)
                 net._cleanup_orphaned_transcription_nodes()
@@ -786,6 +768,7 @@ class ComputeStack:
                     # renormalize aggregation ratios after cascade-disabled sources removed
                     _renormalize_aggregation_after_cascade(net, disabled_source_ids)
 
+                net._cleanup_orphaned_downstream_nodes()
                 net._cleanup_orphaned_bias_nodes()
                 net._cleanup_orphaned_input_nodes(original_output_proteins)
                 net._cleanup_orphaned_transcription_nodes()

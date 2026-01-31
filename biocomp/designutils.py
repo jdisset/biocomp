@@ -195,6 +195,8 @@ def _generate_svg_sample_points(
             if grid_jitter_std and grid_jitter_std > 0:
                 x_spacing = (x_vals[-1] - x_vals[0]) / (xres - 1) if xres > 1 else 0
                 y_spacing = (y_vals[-1] - y_vals[0]) / (yres - 1) if yres > 1 else 0
+                x_spacing = abs(x_spacing)
+                y_spacing = abs(y_spacing)
                 sx_sample += rng.normal(0, grid_jitter_std * x_spacing, sx_sample.shape)
                 sy_sample += rng.normal(0, grid_jitter_std * y_spacing, sy_sample.shape)
             sx_list.append(sx_sample.flatten())
@@ -252,6 +254,8 @@ def _assign_greyscale_values(sx, sy, paths, greys, max_is_black, outlim, grid_sh
     default_background = 0.0 if max_is_black else 1.0
     Y = np.full(len(sx), default_background)
     pts = np.column_stack((sx, sy))
+    if len(paths) != len(greys):
+        return Y if grid_shape is None else Y.reshape(grid_shape)
     for p, g in zip(paths, greys):
         Y[p.contains_points(pts)] = g
     # Map grayscale [0,1] to latent output range

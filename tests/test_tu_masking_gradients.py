@@ -142,7 +142,7 @@ class TestMaskingLayerGradients:
     def test_aggregation_pattern_gradient(self):
         """Simulate aggregation layer masking pattern."""
 
-        def aggregation_apply(ratios, masks):
+        def aggregation_apply(ratios, masks, inputs):
             abs_ratios = jnp.abs(ratios)
             masked_ratios = abs_ratios * leaky_mask_floor(masks)
             masked_sum = jnp.sum(masked_ratios)
@@ -150,12 +150,13 @@ class TestMaskingLayerGradients:
             normalized = jnp.where(
                 masked_sum > 1e-8, masked_ratios / safe_sum, jnp.zeros_like(ratios)
             )
-            return jnp.sum(normalized)
+            return jnp.sum(normalized * inputs)
 
         ratios = jnp.array([0.3, 0.7])
         masks = jnp.array([0.0, 1.0])  # first ratio is "disabled"
 
-        grad_ratios = jax.grad(aggregation_apply)(ratios, masks)
+        inputs = jnp.array([0.2, 0.8])
+        grad_ratios = jax.grad(aggregation_apply)(ratios, masks, inputs)
 
         # Even disabled ratio should have some gradient (via leaky floor)
         assert jnp.all(jnp.isfinite(grad_ratios))

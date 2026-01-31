@@ -46,7 +46,7 @@ class TargetBase(BaseModel, ABC):
 
     @abstractmethod
     def get_lattice(
-        self, resolution: tuple[int, int], seed: int = 0
+        self, resolution: tuple[int, int], seed: int = 0, jitter: float = 0.0
     ) -> tuple[np.ndarray, np.ndarray]:
         """Returns (X_lattice, Y_lattice) where Y may contain NaN for out-of-data regions."""
         ...
@@ -73,13 +73,13 @@ class SVGTarget(TargetBase):
                 self.viewbox_y = (0.1, 1.0)
         return self
 
-    def _sample(self, n: int, seed: int, grid: Optional[tuple[int, int]]):
+    def _sample(self, n: int, seed: int, grid: Optional[tuple[int, int]], jitter: float = 0.0):
         return sample_from_svg(
             self.path,
             n=n,
             seed=seed,
             grid=grid,
-            grid_jitter_std=0.0,
+            grid_jitter_std=jitter,
             log=self.transform_to_log_space,
             viewbox_x=self.viewbox_x,
             viewbox_y=self.viewbox_y,
@@ -90,9 +90,9 @@ class SVGTarget(TargetBase):
         )
 
     def get_lattice(
-        self, resolution: tuple[int, int], seed: int = 0
+        self, resolution: tuple[int, int], seed: int = 0, jitter: float = 0.0
     ) -> tuple[np.ndarray, np.ndarray]:
-        X, Y = self._sample(n=1, seed=seed, grid=resolution)
+        X, Y = self._sample(n=1, seed=seed, grid=resolution, jitter=jitter)
         Y_out = Y[0]
         if self.blur_sigma > 0:
             from scipy.ndimage import gaussian_filter
@@ -101,7 +101,7 @@ class SVGTarget(TargetBase):
         return X, Y_out
 
     def sample_uniform(self, n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
-        return self._sample(n=n, seed=seed, grid=None)
+        return self._sample(n=n, seed=seed, grid=None, jitter=0.0)
 
 
 class Target(SVGTarget):
@@ -216,7 +216,11 @@ class DataTarget(TargetBase):
         return cls(X=X, Y=Y, name=name, **kwargs)
 
     def get_lattice(
-        self, resolution: tuple[int, int], seed: int = 0, force_recompute: bool = False
+        self,
+        resolution: tuple[int, int],
+        seed: int = 0,
+        force_recompute: bool = False,
+        jitter: float = 0.0,
     ) -> tuple[np.ndarray, np.ndarray]:
         if self._lattice_X is not None and self._lattice_Y is not None and not force_recompute:
             return self._lattice_X, self._lattice_Y

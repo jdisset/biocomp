@@ -1,9 +1,7 @@
-"""Backward-compatible re-export for pluggable optimizers.
+"""Pluggable optimization components for design mode."""
 
-Canonical location: biocomp.pluggable_opt.optimizers
-"""
-
-from .pluggable_opt.optimizers import (  # noqa: F401
+from .codec import GenomeCodec
+from .optimizers import (
     OptimPhase,
     OptimizationState,
     GradientDescentOptimizer,
@@ -16,8 +14,10 @@ from .pluggable_opt.optimizers import (  # noqa: F401
     make_objective,
     genes_to_mask,
 )
+from .run_pluggable import run_pluggable
 
 __all__ = [
+    "GenomeCodec",
     "OptimPhase",
     "OptimizationState",
     "GradientDescentOptimizer",
@@ -29,4 +29,5 @@ __all__ = [
     "ObjectiveWrapper",
     "make_objective",
     "genes_to_mask",
+    "run_pluggable",
 ]

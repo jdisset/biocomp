@@ -363,7 +363,15 @@ def transform_nn(
             **qaux,
         }
 
-    def commit(params: ParameterTree, nodelist: list[StackNode], stack: ComputeStack, **_):
+    def commit(
+        params: ParameterTree,
+        nodelist: list[StackNode],
+        stack: ComputeStack,
+        collapse_to_part: bool = True,
+        **_,
+    ):
+        if not collapse_to_part:
+            return
         def _build_ref_id_mapping(graph, emb_name: str) -> tuple[dict, dict]:
             """Build mappings: tu_id -> ref_id and ref_id -> set of tu_ids.
 
