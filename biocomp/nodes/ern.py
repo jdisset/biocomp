@@ -228,7 +228,7 @@ def sequestron_ERN(
 
             tu_indices = params[input_tu_indices_path][node_id]
             input_masks = get_tu_masks(
-                params, tu_indices, tu_enabled_random_vars, network_id, is_multi_tu=True
+                params, tu_indices, network_id, is_multi_tu=True
             )
         else:
             input_masks = jnp.ones(2)

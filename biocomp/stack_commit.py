@@ -4,7 +4,6 @@ This module provides the core commit functionality extracted from ComputeStack.c
 It handles TU pruning, network cleanup, and recipe roundtrip rebuilding.
 
 Key abstractions:
-- TUMaskProvider: Unified access to TU masks regardless of source (log_alpha vs binary_mask)
 - CommitOptions: Configuration for commit behavior
 - prune_network_tus(): Unified TU pruning for a single network
 - rebuild_network_from_recipe(): Recipe roundtrip for clean graph structure
@@ -16,12 +15,14 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 import time as _time
 
+import jax
 import jax.numpy as jnp
 
 from biocomp.logging_config import get_logger
+from biocomp.tumasking_strategy import get_full_log_alpha
 
 if TYPE_CHECKING:
     from .compute import ComputeStack, StackLayer
@@ -53,104 +54,6 @@ class CommitOptions:
         return cls(collapse_to_part=True, lock_ratios=True)
 
 
-@dataclass(frozen=True)
-class TUMaskProvider:
-    """Unified TU mask access for both log_alpha and binary_mask paths.
-
-    Abstracts the difference between:
-    - log_alpha path: sigmoid(log_alpha) >= 0.5 determines mask
-    - binary_mask path: direct binary values
-    - none: no masking (all TUs enabled)
-    """
-
-    mode: Literal["log_alpha", "binary_mask", "none"]
-    mask_data: jnp.ndarray | None  # shape: (n_networks, n_tus)
-    tu_id_to_idx: dict[str, int] | None
-
-    @classmethod
-    def from_params(
-        cls,
-        params: "ParameterTree",
-        tu_id_to_idx: dict[str, int] | None,
-        n_networks: int,
-    ) -> "TUMaskProvider":
-        """Factory: determine mode from params contents."""
-        from .tumasking import (
-            TU_LOG_ALPHA_PATH,
-            TU_BINARY_MASK_PATH,
-            LATENT_TU_Z_PATH,
-            get_log_alpha_from_params,
-        )
-
-        if tu_id_to_idx is None:
-            return cls(mode="none", mask_data=None, tu_id_to_idx=None)
-
-        has_binary_mask = TU_BINARY_MASK_PATH in params
-        has_log_alpha = TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params
-
-        if has_binary_mask:
-            binary_mask = jnp.asarray(params[TU_BINARY_MASK_PATH])
-            assert binary_mask.ndim == 2, (
-                f"binary_mask must be 2D (n_networks, n_tus), got {binary_mask.ndim}D"
-            )
-            return cls(mode="binary_mask", mask_data=binary_mask, tu_id_to_idx=tu_id_to_idx)
-
-        if has_log_alpha:
-            tu_log_alpha_list = []
-            for net_idx in range(n_networks):
-                network_tu_log_alpha = get_log_alpha_from_params(params, net_idx)
-                tu_log_alpha_list.append(network_tu_log_alpha)
-            tu_log_alpha = jnp.stack(tu_log_alpha_list)
-            assert tu_log_alpha.ndim == 2, (
-                f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D"
-            )
-            return cls(mode="log_alpha", mask_data=tu_log_alpha, tu_id_to_idx=tu_id_to_idx)
-
-        return cls(mode="none", mask_data=None, tu_id_to_idx=None)
-
-    def has_masking(self) -> bool:
-        """Check if any TU masking is active."""
-        return self.mode != "none" and self.mask_data is not None
-
-    def get_pseudo_log_alpha_for_network(self, net_idx: int) -> jnp.ndarray:
-        """Get pseudo log_alpha for a network (works for both modes).
-
-        For log_alpha mode: returns the actual log_alpha
-        For binary_mask mode: converts binary 1.0 -> 10.0, 0.0 -> -10.0
-        """
-        assert self.mask_data is not None, "No mask data available"
-        assert self.mode != "none", "No masking mode set"
-
-        if self.mode == "log_alpha":
-            return self.mask_data[net_idx]
-        else:  # binary_mask
-            network_binary_mask = self.mask_data[net_idx]
-            return jnp.where(network_binary_mask > 0.5, 10.0, -10.0)
-
-    def get_binary_mask_for_network(self, net_idx: int) -> jnp.ndarray:
-        """Returns binary mask array shape (n_tus,). Works for both modes."""
-        assert self.mask_data is not None, "No mask data available"
-
-        if self.mode == "binary_mask":
-            return self.mask_data[net_idx]
-        else:  # log_alpha
-            import jax
-
-            return (jax.nn.sigmoid(self.mask_data[net_idx]) >= 0.5).astype(jnp.float32)
-
-    def is_tu_enabled(self, net_idx: int, tu_id: str) -> bool:
-        """Check if specific TU is enabled."""
-        if self.mode == "none" or self.tu_id_to_idx is None:
-            return True
-
-        if tu_id not in self.tu_id_to_idx:
-            return True  # TUs not in mapping are always enabled
-
-        tu_idx = self.tu_id_to_idx[tu_id]
-        binary_mask = self.get_binary_mask_for_network(net_idx)
-        return float(binary_mask[tu_idx]) > 0.5
-
-
 @dataclass
 class NetworkCommitReport:
     """Report for a single network's commit process."""
@@ -175,13 +78,16 @@ class CommitReport:
 def prune_network_tus(
     net: "Network",
     net_idx: int,
-    mask_provider: TUMaskProvider,
+    log_alpha: jnp.ndarray | None,
+    tu_id_to_idx: dict[str, int] | None,
 ) -> NetworkCommitReport:
     """Unified TU pruning for a single network.
+
     Args:
         net: Network to prune (modified in place)
         net_idx: Network index in the stack
-        mask_provider: Provider for TU masks
+        log_alpha: Shape (n_networks, n_tus) log_alpha values, or None if no masking
+        tu_id_to_idx: TU ID to index mapping, or None if no masking
 
     Returns:
         NetworkCommitReport with pruning statistics
@@ -190,13 +96,11 @@ def prune_network_tus(
 
     report = NetworkCommitReport(network_idx=net_idx)
 
-    if not mask_provider.has_masking():
+    if log_alpha is None or tu_id_to_idx is None:
         net.prune_disabled_tus()
         return report
 
-    assert mask_provider.tu_id_to_idx is not None
-    tu_id_to_idx = mask_provider.tu_id_to_idx
-    pseudo_log_alpha = mask_provider.get_pseudo_log_alpha_for_network(net_idx)
+    pseudo_log_alpha = log_alpha[net_idx]
 
     original_output_proteins = net.get_output_proteins()
     net.prune_disabled_tus(pseudo_log_alpha, tu_id_to_idx)
@@ -473,12 +377,12 @@ def commit_networks(
     logger.debug(f"COMMIT TIMING: layer commits ({len(layers)} layers): {t4 - t3:.3f}s")
 
     t5 = _time.perf_counter()
-    mask_provider = TUMaskProvider.from_params(params, tu_id_to_idx, len(network_copies))
+    log_alpha = get_full_log_alpha(params)
     dead_ern_recs_by_net: dict[int, set[tuple[str, str]]] = {}
 
     if options.prune_tus:
         for net_idx, net in enumerate(network_copies):
-            net_report = prune_network_tus(net, net_idx, mask_provider)
+            net_report = prune_network_tus(net, net_idx, log_alpha, tu_id_to_idx)
             dead_ern_recs_by_net[net_idx] = net_report.dead_ern_recs
             report.per_network.append(net_report)
 

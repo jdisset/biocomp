@@ -429,18 +429,17 @@ def decode_latent_tu_masking(
 
 
 def get_log_alpha_from_params(params, network_id: int) -> jnp.ndarray:
-    """Get log_alpha for a network, decoding from latent MLP if present, else direct path."""
-    if LATENT_TU_Z_PATH in params:
-        z = params[LATENT_TU_Z_PATH][network_id]
-        W1 = params[LATENT_TU_W1_PATH][network_id]
-        b1 = params[LATENT_TU_B1_PATH][network_id]
-        W2 = params[LATENT_TU_W2_PATH][network_id]
-        b2 = params[LATENT_TU_B2_PATH][network_id]
-        return decode_latent_tu_masking(z, W1, b1, W2, b2)
-    elif TU_LOG_ALPHA_PATH in params:
-        return params[TU_LOG_ALPHA_PATH][network_id]
-    else:
+    """Get log_alpha for a network with protected TU enforcement.
+
+    DEPRECATED: Use tumasking_strategy.get_full_log_alpha() and index by network_id.
+    This function is kept for backwards compatibility but delegates to the SSOT.
+    """
+    from .tumasking_strategy import get_full_log_alpha
+
+    log_alpha_full = get_full_log_alpha(params)
+    if log_alpha_full is None:
         raise ValueError("No TU masking params found (neither latent nor direct)")
+    return log_alpha_full[network_id]
 
 
 def soft_clip(x: ArrayLike, low: float = 0.0, high: float = 1.0) -> jnp.ndarray:
@@ -851,80 +850,33 @@ def _apply_binary_masks(
 def get_tu_masks(
     params,
     tu_indices: ArrayLike,
-    tu_uniform_samples: Optional[ArrayLike],
     network_id: int,
     *,
     is_multi_tu: bool,
     use_probabilistic_or: bool = False,
 ) -> jnp.ndarray:
-    """Unified TU masking - mode determined by params contents. Returns ready-to-use masks.
+    """Unified TU masking - routes through get_full_log_alpha() for SSOT.
 
-    Priority:
-    1. Binary mask (TU_BINARY_MASK_PATH) - returns raw 0/1 masks (no leaky floor)
-    2. Latent TU masking (LATENT_TU_Z_PATH) - decodes MLP to log_alpha, then binary STE
-    3. Direct log alpha (TU_LOG_ALPHA_PATH) - uses binary masking with STE
-    4. Default - all TUs enabled (ones)
-
-    IMPORTANT: Binary masking is now the default for log_alpha path. Hard concrete
-    has been removed from default paths - use explicit hard concrete functions if needed.
-
-    The caller should use the returned masks directly without additional processing.
-    Binary STE mode: discrete forward pass, gradients flow through sigmoid(log_alpha)
+    All modes (direct log_alpha, latent MLP, binary mask) handled uniformly via get_full_log_alpha().
+    Binary STE mode: discrete forward pass, gradients flow through sigmoid(log_alpha).
 
     Args:
         params: ParameterTree or dict-like containing mask parameters
         tu_indices: TU indices for this node type
-        tu_uniform_samples: IGNORED - kept for API compatibility, will be removed
         network_id: Network index for slicing 2D mask arrays. REQUIRED.
         is_multi_tu: True for input_tu_indices (OR reduction), False for output_tu_indices
         use_probabilistic_or: If True, use P(any)=1-∏(1-p) for multi-TU edges instead of softmax OR.
     """
+    from .tumasking_strategy import get_full_log_alpha
+
     tu_indices = jnp.asarray(tu_indices)
     n_inputs = tu_indices.shape[0]
 
-    if TU_BINARY_MASK_PATH in params:
-        binary_mask = params[TU_BINARY_MASK_PATH]
-        binary_mask = jnp.asarray(binary_mask)
-        assert binary_mask.ndim == 2, (
-            f"binary_mask must be 2D (n_networks, n_tus), got {binary_mask.ndim}D. "
-            f"Shape: {binary_mask.shape}"
-        )
-        binary_mask = binary_mask[network_id]
-        return _apply_binary_masks(tu_indices, binary_mask, is_multi_tu=is_multi_tu)
+    log_alpha_full = get_full_log_alpha(params)
+    if log_alpha_full is None:
+        return jnp.ones(n_inputs)
 
-    if LATENT_TU_Z_PATH in params:
-        z = params[LATENT_TU_Z_PATH][network_id]
-        W1 = params[LATENT_TU_W1_PATH][network_id]
-        b1 = params[LATENT_TU_B1_PATH][network_id]
-        W2 = params[LATENT_TU_W2_PATH][network_id]
-        b2 = params[LATENT_TU_B2_PATH][network_id]
-        tu_log_alpha = decode_latent_tu_masking(z, W1, b1, W2, b2)
-        if PROTECTED_TU_MASK_PATH in params:
-            protected_mask = jnp.asarray(params[PROTECTED_TU_MASK_PATH])
-            tu_log_alpha = jnp.where(
-                protected_mask, jax.lax.stop_gradient(tu_log_alpha), tu_log_alpha
-            )
-        raw_masks = compute_binary_masks(
-            tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu, use_probabilistic_or=use_probabilistic_or
-        )
-        return raw_masks
-
-    if TU_LOG_ALPHA_PATH in params:
-        tu_log_alpha = params[TU_LOG_ALPHA_PATH]
-        tu_log_alpha = jnp.asarray(tu_log_alpha)
-        assert tu_log_alpha.ndim == 2, (
-            f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D. "
-            f"Shape: {tu_log_alpha.shape}"
-        )
-        tu_log_alpha = tu_log_alpha[network_id]
-        if PROTECTED_TU_MASK_PATH in params:
-            protected_mask = jnp.asarray(params[PROTECTED_TU_MASK_PATH])
-            tu_log_alpha = jnp.where(
-                protected_mask, jax.lax.stop_gradient(tu_log_alpha), tu_log_alpha
-            )
-        raw_masks = compute_binary_masks(
-            tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu, use_probabilistic_or=use_probabilistic_or
-        )
-        return raw_masks
-
-    return jnp.ones(n_inputs)
+    tu_log_alpha = log_alpha_full[network_id]
+    return compute_binary_masks(
+        tu_indices, tu_log_alpha, is_multi_tu=is_multi_tu, use_probabilistic_or=use_probabilistic_or
+    )

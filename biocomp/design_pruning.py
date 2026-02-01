@@ -46,25 +46,9 @@ def _get_node_ratios(
     node_idx: int,
     n_outputs: int,
 ) -> np.ndarray:
-    from biocomp.nodes.aggregation import _decode_latent_ratios
+    from biocomp.ratio_utils import decode_ratios_numpy
 
-    latent_z_path = f"{namespace}/latent_z"
-    if latent_z_path in params:
-        z = np.asarray(params[latent_z_path][node_idx])
-        W1 = np.asarray(params[f"{namespace}/latent_W1"][node_idx])
-        b1 = np.asarray(params[f"{namespace}/latent_b1"][node_idx])
-        W2 = np.asarray(params[f"{namespace}/latent_W2"][node_idx])
-        b2 = np.asarray(params[f"{namespace}/latent_b2"][node_idx])
-        raw_ratios = _decode_latent_ratios(z, W1, b1, W2, b2)[:n_outputs]
-        ratio_min = np.asarray(params[f"{namespace}/ratio_min"][node_idx][:n_outputs])
-        ratio_max = np.asarray(params[f"{namespace}/ratio_max"][node_idx][:n_outputs])
-        ratios = np.clip(raw_ratios, ratio_min, ratio_max)
-    else:
-        ratios = np.asarray(params[f"{namespace}/ratios"][node_idx][:n_outputs])
-        ratio_min = np.asarray(params[f"{namespace}/ratio_min"][node_idx][:n_outputs])
-        ratio_max = np.asarray(params[f"{namespace}/ratio_max"][node_idx][:n_outputs])
-        ratios = np.clip(ratios, ratio_min, ratio_max)
-    return ratios
+    return decode_ratios_numpy(params, namespace, node_idx, n_outputs)
 
 
 def _collect_ratio_pruning_candidates(
@@ -130,14 +114,15 @@ def identify_tus_to_prune(
     auto_lock_topology_tus: bool = True,
 ) -> dict[int, set[str]]:
     """Identify TUs to remove for each network based on normalized ratios."""
-    from biocomp.tumasking import get_log_alpha_from_params, LATENT_TU_Z_PATH
+    from biocomp.tumasking_strategy import get_full_log_alpha
 
     tus_to_remove: dict[int, set[str]] = {}
     stack.ensure_tu_mapping(auto_lock_topology_tus=auto_lock_topology_tus)
     no_masking_tu_ids = stack.no_masking_tu_ids or set()
     tu_id_to_idx = stack.tu_id_to_idx or {}
 
-    has_tu_masking = TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params
+    log_alpha_full = get_full_log_alpha(params)
+    has_tu_masking = log_alpha_full is not None
 
     for net_idx in range(len(stack.networks)):
         candidates, all_tu_ids, tu_strengths = _collect_ratio_pruning_candidates(
@@ -146,23 +131,21 @@ def identify_tus_to_prune(
         candidates = {tid for tid in candidates if tid not in no_masking_tu_ids}
 
         if use_soft_pruning and has_tu_masking:
-            try:
-                network_log_alpha = get_log_alpha_from_params(params, net_idx)
-                if network_log_alpha.ndim > 1:
-                    network_log_alpha = network_log_alpha.reshape(-1)
+            assert log_alpha_full is not None
+            network_log_alpha = log_alpha_full[net_idx]
+            if network_log_alpha.ndim > 1:
+                network_log_alpha = network_log_alpha.reshape(-1)
 
-                for tu_id in all_tu_ids:
-                    if tu_id in no_masking_tu_ids:
-                        continue
-                    if tu_id in tu_id_to_idx:
-                        tu_idx = tu_id_to_idx[tu_id]
-                        if tu_idx < len(network_log_alpha):
-                            prob = float(jax.nn.sigmoid(network_log_alpha[tu_idx]))
-                            tu_strengths[tu_id] = max(tu_strengths.get(tu_id, 0.0), prob)
-                            if prob < 0.5:
-                                candidates.add(tu_id)
-            except ValueError:
-                pass  # No TU masking params - skip soft pruning
+            for tu_id in all_tu_ids:
+                if tu_id in no_masking_tu_ids:
+                    continue
+                if tu_id in tu_id_to_idx:
+                    tu_idx = tu_id_to_idx[tu_id]
+                    if tu_idx < len(network_log_alpha):
+                        prob = float(jax.nn.sigmoid(network_log_alpha[tu_idx]))
+                        tu_strengths[tu_id] = max(tu_strengths.get(tu_id, 0.0), prob)
+                        if prob < 0.5:
+                            candidates.add(tu_id)
 
         remaining = len(all_tu_ids) - len(candidates)
         if remaining < preserve_minimum:
@@ -336,18 +319,6 @@ def hard_prune_and_rebuild(
         tus_to_remove,
         auto_lock_topology_tus=dconf.auto_lock_topology_tus,
     )
-
-    if TU_LOG_ALPHA_PATH in params_for_commit and old_tu_id_to_idx:
-        tu_log_alpha = params_for_commit[TU_LOG_ALPHA_PATH]
-        modified_log_alpha = jnp.array(tu_log_alpha)
-
-        for net_idx, tu_ids in tus_to_remove.items():
-            for tu_id in tu_ids:
-                if tu_id in old_tu_id_to_idx:
-                    tu_idx = old_tu_id_to_idx[tu_id]
-                    modified_log_alpha = modified_log_alpha.at[net_idx, tu_idx].set(-10.0)
-
-        params_for_commit.at(TU_LOG_ALPHA_PATH, modified_log_alpha, overwrite=True)
 
     committed_networks = commit_structure(stack, params_for_commit, lock_ratios=lock_ratios)
 

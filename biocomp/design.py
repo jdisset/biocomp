@@ -47,6 +47,12 @@ from biocomp.tumasking import (
     LATENT_TU_W2_PATH,
     LATENT_TU_B2_PATH,
 )
+from biocomp.tumasking_strategy import (
+    TUMaskingMode,
+    TUMaskingStrategy,
+    build_tu_masking_strategy,
+    build_strategy_from_config,
+)
 from biocomp.designdebug import save_debug_state, is_design_debug_enabled
 
 # re-export target classes and sampling configs for backward compatibility
@@ -86,19 +92,9 @@ class DesignManager(BaseModel):
     networks: list[Network]
     sampling: SamplingConfigUnion = Field(default_factory=LatticeSampling, discriminator="strategy")
 
-    enable_tu_masking: bool = False
-    _tu_ids: list[str] | None = None
-    _tu_id_to_idx: dict[str, int] | None = None
-
     @model_validator(mode="after")
     def _validate_input_order_consistency(self) -> "DesignManager":
-        """Warn if scaffold networks lack input_order with DataTargets.
-
-        For design with DataTargets, scaffold networks should have explicit input_order
-        to ensure correct alignment between target data X columns and network inputs.
-        Without input_order, protein-name matching is attempted which may fail or give
-        incorrect results when scaffold proteins differ from target proteins.
-        """
+        """Warn if scaffold networks lack input_order with DataTargets."""
         if not self.has_data_targets:
             return self
 
@@ -133,26 +129,6 @@ class DesignManager(BaseModel):
     @property
     def has_data_targets(self) -> bool:
         return any(isinstance(t, DataTarget) for t in self.targets)
-
-    def _ensure_tu_mapping(self):
-        """Build TU ID mapping if not already built."""
-        if self._tu_id_to_idx is None:
-            self._tu_ids, self._tu_id_to_idx = build_tu_id_mapping(self.networks)
-            logger.info(f"Built TU mapping: {len(self._tu_ids)} TUs")
-
-    @property
-    def n_tus(self) -> int:
-        """Number of unique TUs across all networks."""
-        self._ensure_tu_mapping()
-        assert self._tu_ids is not None
-        return len(self._tu_ids)
-
-    @property
-    def tu_id_to_idx(self) -> dict[str, int]:
-        """Mapping from TU ID string to index."""
-        self._ensure_tu_mapping()
-        assert self._tu_id_to_idx is not None
-        return self._tu_id_to_idx
 
     def _sample_from_target(
         self,
@@ -335,14 +311,13 @@ class DesignManager(BaseModel):
         latent_dim: int = 8,
         latent_hidden_dim: int = 16,
         auto_lock_topology_tus: bool = True,
+        enable_tu_masking: bool = False,
     ) -> ComputeStack:
         logger.info(f"Building stack with {len(self.networks)} design networks")
         logger.info(f"Design network names: {[n.name for n in self.networks]}")
         stack = ComputeStack(networks=self.networks)
         logger.info(f"Stack after creation has {len(stack.networks)} networks")
 
-        # Deep copy compute_config to avoid mutating the original model
-        # (mutation would change model.signature since it's computed from compute_config)
         compute_config = model.compute_config.model_copy(deep=True)
 
         if unlock_ratios:
@@ -361,7 +336,7 @@ class DesignManager(BaseModel):
 
         stack.build(
             compute_config,
-            enable_tu_masking=self.enable_tu_masking,
+            enable_tu_masking=enable_tu_masking,
             auto_lock_topology_tus=auto_lock_topology_tus,
         )
 
@@ -379,21 +354,17 @@ class DesignManager(BaseModel):
 
 def initialize_params(
     stack,
-    n_replicates,
-    n_targets,
+    n_replicates: int,
+    n_targets: int,
     shared_params,
     key,
+    strategy: TUMaskingStrategy | None = None,
     n_tus: int = 0,
     n_networks: int = 1,
-    tu_log_alpha_init_mean: float = 2.0,
-    tu_log_alpha_init_std: float = 0.5,
-    use_latent_tu_masking: bool = False,
-    latent_tu_dim: int = 16,
-    latent_tu_hidden_dim: int = 32,
     no_masking_tu_ids: set[str] | None = None,
     tu_id_to_idx: dict[str, int] | None = None,
 ):
-    """Initialize design params. If use_latent_tu_masking, creates MLP params instead of direct log_alpha."""
+    """Initialize design params using TU masking strategy."""
     tu_key, init_key = jax.random.split(key)
 
     def init_single(k):
@@ -407,131 +378,78 @@ def initialize_params(
 
     params = vmap(init_target_params)(jax.random.split(init_key, n_replicates))
 
-    if n_tus > 0:
+    if strategy is not None and strategy.has_masking and n_tus > 0:
         assert n_networks > 0, f"n_tus={n_tus} but n_networks={n_networks}"
-
-        if use_latent_tu_masking:
-            k_z, k_w1, k_w2, tu_key = jax.random.split(tu_key, 4)
-
-            init_log_alpha = tu_log_alpha_init_mean + tu_log_alpha_init_std * jax.random.normal(
-                tu_key, shape=(n_replicates, n_targets, n_networks, n_tus)
-            )
-            latent_z = (
-                jax.random.normal(k_z, shape=(n_replicates, n_targets, n_networks, latent_tu_dim))
-                * 0.1
-            )
-            W1 = jax.random.normal(
-                k_w1,
-                shape=(n_replicates, n_targets, n_networks, latent_tu_hidden_dim, latent_tu_dim),
-            ) * jnp.sqrt(2.0 / latent_tu_dim)
-            b1 = jnp.zeros((n_replicates, n_targets, n_networks, latent_tu_hidden_dim))
-            W2 = (
-                jax.random.normal(
-                    k_w2, shape=(n_replicates, n_targets, n_networks, n_tus, latent_tu_hidden_dim)
-                )
-                * jnp.sqrt(2.0 / latent_tu_hidden_dim)
-                * 0.1
-            )
-            b2 = init_log_alpha  # MLP(0) ≈ init_log_alpha
-
-            params.at(LATENT_TU_Z_PATH, latent_z, overwrite=None)
-            params.at(LATENT_TU_W1_PATH, W1, overwrite=None)
-            params.at(LATENT_TU_B1_PATH, b1, overwrite=None)
-            params.at(LATENT_TU_W2_PATH, W2, overwrite=None)
-            params.at(LATENT_TU_B2_PATH, b2, overwrite=None)
-            logger.info(
-                f"Initialized latent TU masking: {n_tus} TUs × {n_networks} networks, "
-                f"latent_dim={latent_tu_dim}, hidden_dim={latent_tu_hidden_dim}"
-            )
-        else:
-            expected_shape = (n_replicates, n_targets, n_networks, n_tus)
-            tu_log_alpha = tu_log_alpha_init_mean + tu_log_alpha_init_std * jax.random.normal(
-                tu_key, shape=expected_shape
-            )
-            assert tu_log_alpha.shape == expected_shape, (
-                f"tu_log_alpha shape {tu_log_alpha.shape} != {expected_shape}"
-            )
-            params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=None)
-            logger.info(
-                f"Initialized TU log_alpha: {n_tus} TUs × {n_networks} networks "
-                f"(mean={tu_log_alpha_init_mean}, std={tu_log_alpha_init_std})"
-            )
-
-        protected_tu_mask_1d = jnp.zeros(n_tus, dtype=bool)
-        if no_masking_tu_ids and tu_id_to_idx:
-            protected_indices = [
-                tu_id_to_idx[tu_id] for tu_id in no_masking_tu_ids if tu_id in tu_id_to_idx
-            ]
-            if protected_indices:
-                protected_tu_mask_1d = protected_tu_mask_1d.at[jnp.array(protected_indices)].set(
-                    True
-                )
-                idx_arr = jnp.array(protected_indices)
-                if use_latent_tu_masking:
-                    b2_val = params[LATENT_TU_B2_PATH]
-                    b2_val = b2_val.at[..., idx_arr].set(10.0)
-                    params.at(LATENT_TU_B2_PATH, b2_val, overwrite=True)
-                else:
-                    tu_log_alpha_val = params[TU_LOG_ALPHA_PATH]
-                    tu_log_alpha_val = tu_log_alpha_val.at[..., idx_arr].set(10.0)
-                    params.at(TU_LOG_ALPHA_PATH, tu_log_alpha_val, overwrite=True)
-                logger.info(f"Protected {len(protected_indices)} TUs from masking (log_alpha=10.0)")
-        protected_tu_mask = jnp.tile(
-            protected_tu_mask_1d[None, None, :], (n_replicates, n_targets, 1)
+        strategy.init_params(
+            params,
+            n_replicates=n_replicates,
+            n_targets=n_targets,
+            n_networks=n_networks,
+            n_tus=n_tus,
+            key=tu_key,
+            protected_tu_ids=no_masking_tu_ids or set(),
+            tu_id_to_idx=tu_id_to_idx or {},
         )
-        params.at(PROTECTED_TU_MASK_PATH, protected_tu_mask, overwrite=None, tags=["non_grad"])
+        logger.info(
+            f"Initialized TU masking ({strategy.mode.value}): {n_tus} TUs x {n_networks} networks"
+        )
 
     return params
+
+
+class TUMaskingParams(BaseModel):
+    """Configuration for TU masking strategy."""
+
+    mode: TUMaskingMode = TUMaskingMode.NONE
+    latent_dim: int = 16
+    hidden_dim: int = 32
+    init_mean: float = 2.0
+    init_std: float = 0.5
+
+    model_config = ConfigDict(use_enum_values=False)
 
 
 class DesignConfig(DesignOptimConfig):
     loss_function: EncodedPartialFunction = Field(default=grid_distance_loss)  # pyright: ignore[reportAssignmentType]
     n_replicates: int = 4
     keep_in_history: list[str] | Literal["all"] = "all"
-    tu_log_alpha_init_mean: float = 2.0
-    tu_log_alpha_init_std: float = 0.5
 
     use_latent_ratios: bool = False
     latent_dim: int = 8
     latent_hidden_dim: int = 16
 
-    enable_tu_masking: bool = False
-    use_latent_tu_masking: bool = False
-    latent_tu_dim: int = 16
-    latent_tu_hidden_dim: int = 32
-    auto_lock_topology_tus: bool = True  # auto-detect TUs whose masking would change topology
+    tu_masking: TUMaskingParams = Field(default_factory=TUMaskingParams)
+    auto_lock_topology_tus: bool = True
 
-    # TU masking convergence improvements (see tu_masking_introduction.md)
-    use_probabilistic_or: bool = (
-        False  # probabilistic OR for multi-TU edges (requires code integration)
-    )
-    use_two_timescale: bool = False  # slower LR for log_alpha via optax.multi_transform
-    tu_mask_lr_scale: float = 0.1  # LR multiplier for log_alpha when use_two_timescale=True
+    use_probabilistic_or: bool = False
+    use_two_timescale: bool = False
+    tu_mask_lr_scale: float = 0.1
 
-    # Hard-pruning configuration - periodic removal of low-ratio TUs with stack rebuild
     hard_pruning_enabled: bool = False
-    hard_pruning_interval: int = 500  # prune every N steps
-    hard_pruning_ratio_threshold: float = 0.01  # 1:100 threshold for normalized ratios
-    hard_pruning_preserve_minimum_tus: int = 1  # never prune below this per network
+    hard_pruning_interval: int = 500
+    hard_pruning_ratio_threshold: float = 0.01
+    hard_pruning_preserve_minimum_tus: int = 1
 
     pluggable_optimizer: Any = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @property
+    def enable_tu_masking(self) -> bool:
+        """True if TU masking is enabled (any mode except NONE)."""
+        return self.tu_masking.mode != TUMaskingMode.NONE
+
+    @property
     def uses_pluggable_optimizer(self) -> bool:
-        """Check if using new-style pluggable optimizer."""
         return self.pluggable_optimizer is not None
 
     @property
     def optimizer(self) -> Any:
-        """Return optax optimizer for backward compat, or pluggable if set."""
         if self.pluggable_optimizer is not None:
             return self.pluggable_optimizer
         return super().optimizer
 
     def get_pluggable_optimizer(self) -> Any:
-        """Get pluggable optimizer, creating from optimizer_stack if not set."""
         if self.pluggable_optimizer is not None:
             return self.pluggable_optimizer
         from biocomp.designoptim import GradientDescentOptimizer
@@ -544,6 +462,9 @@ class DesignConfig(DesignOptimConfig):
             use_two_timescale=self.use_two_timescale,
             tu_mask_lr_scale=self.tu_mask_lr_scale,
         )
+
+    def build_tu_masking_strategy(self) -> TUMaskingStrategy:
+        return build_strategy_from_config(self)
 
 
 def assert_tree_shape(tree, expected_shape, only_first_dims=True):
@@ -599,27 +520,8 @@ def get_topk_replicate_network_pairs(
     return best_per_target
 
 
-RATIO_PRUNE_THRESHOLD = BIOCOMP_CONSTANTS["ratio"]["prune_threshold"]
-
-
-def normalize_ratios_prune(current_ratios, threshold=RATIO_PRUNE_THRESHOLD, eps=1e-12):
-    A = jnp.abs(current_ratios)
-    if A.ndim == 0:
-        return A
-    if A.ndim == 1:
-        A = A[None, :]
-        m = jnp.maximum(jnp.max(A, axis=1, keepdims=True), eps)
-        norm = A / m
-        return jnp.where(norm >= threshold, norm, 0.0).squeeze(0)
-    if A.ndim > 2:
-        orig_shape = A.shape
-        A = A.reshape(-1, A.shape[-1])
-        m = jnp.maximum(jnp.max(A, axis=1, keepdims=True), eps)
-        norm = A / m
-        return jnp.where(norm >= threshold, norm, 0.0).reshape(orig_shape)
-    m = jnp.maximum(jnp.max(A, axis=1, keepdims=True), eps)
-    norm = A / m
-    return jnp.where(norm >= threshold, norm, 0.0)
+# Re-export from ratio_utils for backwards compatibility
+from .ratio_utils import RATIO_PRUNE_THRESHOLD, normalize_ratios_for_pruning as normalize_ratios_prune
 
 
 def get_ratio_paths_and_sources(params):

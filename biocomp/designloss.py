@@ -14,18 +14,12 @@ from assertpy import assert_that
 from .parameters import ParameterTree
 from .optimutils import as_schedule, jax_three_phase_schedule
 from .tumasking import (
-    TU_LOG_ALPHA_PATH,
-    LATENT_TU_Z_PATH,
-    LATENT_TU_W1_PATH,
-    LATENT_TU_B1_PATH,
-    LATENT_TU_W2_PATH,
-    LATENT_TU_B2_PATH,
     L0_PENALTY_FLOOR_PROB,
     asymmetric_l0_loss,
     commitment_penalty,
-    decode_latent_tu_masking,
     entropy_bonus,
 )
+from .tumasking_strategy import get_full_log_alpha
 from .jaxutils import check as jax_check
 from .logging_config import get_logger
 from .designdebug import is_design_debug_enabled, save_debug_state
@@ -773,16 +767,6 @@ def compute_all_losses(x, y, yhatdep, lossfunc, n_inputs_per_network=2):
     return vmap(vmap(lossfunc, in_axes=(1, 1, 1)), in_axes=(1, 1, 1))(xsplit, yhatdep, y)
 
 
-def _sample_tu_uniform(params, key, n_samples=1):
-    """Sample TU uniform random variables for Hard Concrete masking."""
-    if TU_LOG_ALPHA_PATH not in params:
-        return None
-    log_alpha = params[TU_LOG_ALPHA_PATH]
-    assert log_alpha.ndim == 3, f"expected 3D tu_log_alpha, got {log_alpha.shape}"
-    shape = log_alpha.shape if n_samples == 1 else (n_samples,) + log_alpha.shape
-    return jax.random.uniform(key, shape, minval=1e-6, maxval=1.0 - 1e-6)
-
-
 def _compute_tu_stats(params) -> dict:
     """Compute TU masking statistics for logging.
 
@@ -791,16 +775,8 @@ def _compute_tu_stats(params) -> dict:
     - boundary_count: TUs with prob in [0.3, 0.7] (still deciding)
     - below_floor_count: TUs with prob < 0.2 (in the "graveyard")
     """
-    if LATENT_TU_Z_PATH in params:
-        z = params[LATENT_TU_Z_PATH]
-        W1 = params[LATENT_TU_W1_PATH]
-        b1 = params[LATENT_TU_B1_PATH]
-        W2 = params[LATENT_TU_W2_PATH]
-        b2 = params[LATENT_TU_B2_PATH]
-        log_alpha = jax.vmap(jax.vmap(decode_latent_tu_masking))(z, W1, b1, W2, b2)
-    elif TU_LOG_ALPHA_PATH in params:
-        log_alpha = params[TU_LOG_ALPHA_PATH]
-    else:
+    log_alpha = get_full_log_alpha(params)
+    if log_alpha is None:
         return {}
 
     tu_probs = jax.nn.sigmoid(log_alpha)
@@ -1152,23 +1128,7 @@ def _make_loss_func(
         entropy_penalty = jnp.array(0.0)
         commitment_penalty_val = jnp.array(0.0)
 
-        # get log_alpha: either decode from latent MLP or use direct path
-        log_alpha = None
-        if LATENT_TU_Z_PATH in params:
-            # latent TU masking: decode MLP to get log_alpha
-            z = params[LATENT_TU_Z_PATH]
-            W1 = params[LATENT_TU_W1_PATH]
-            b1 = params[LATENT_TU_B1_PATH]
-            W2 = params[LATENT_TU_W2_PATH]
-            b2 = params[LATENT_TU_B2_PATH]
-
-            # vmap decode over (targets, networks)
-            def decode_single(z_i, W1_i, b1_i, W2_i, b2_i):
-                return decode_latent_tu_masking(z_i, W1_i, b1_i, W2_i, b2_i)
-
-            log_alpha = vmap(vmap(decode_single))(z, W1, b1, W2, b2)
-        elif TU_LOG_ALPHA_PATH in params:
-            log_alpha = params[TU_LOG_ALPHA_PATH]
+        log_alpha = get_full_log_alpha(params)
 
         if log_alpha is not None:
             assert log_alpha.ndim == 3, (
@@ -1184,16 +1144,7 @@ def _make_loss_func(
 
             from biocomp.tumasking import l0_penalty as l0_penalty_fn
 
-            # apply stop_gradient to protected TUs: they count toward L0 but can't be modified
-            log_alpha_for_l0 = log_alpha
-            if protected_tu_mask is not None:
-                log_alpha_for_l0 = jnp.where(
-                    protected_tu_mask[None, None, :],  # True = protected
-                    jax.lax.stop_gradient(log_alpha),  # no gradients for protected
-                    log_alpha,
-                )
-
-            per_tu_penalty = l0_penalty_fn(log_alpha_for_l0, leak_coef=l0_leak_coef)
+            per_tu_penalty = l0_penalty_fn(log_alpha, leak_coef=l0_leak_coef)
             if per_network_tu_mask is not None:
                 assert per_network_tu_mask.shape[0] == n_networks, (
                     f"per_network_tu_mask shape mismatch: {per_network_tu_mask.shape} vs n_networks={n_networks}"
@@ -1216,7 +1167,7 @@ def _make_loss_func(
 
                 # log_alpha shape: (n_targets, n_networks, n_tus)
                 # vmap over targets then networks (use masked log_alpha)
-                l0_raw_per_network = vmap(vmap(compute_asymmetric_l0))(log_alpha_for_l0)
+                l0_raw_per_network = vmap(vmap(compute_asymmetric_l0))(log_alpha)
             else:
                 l0_raw_per_network = expected_count_per_network
 
@@ -1234,7 +1185,7 @@ def _make_loss_func(
                 raw_coupling, raw_coupling_per_target = ratio_mask_coupling_penalty(
                     params,
                     ratio_paths,
-                    log_alpha_for_l0,
+                    log_alpha,
                     min_ratio_threshold,
                     return_per_target=True,
                 )
@@ -1246,7 +1197,7 @@ def _make_loss_func(
                     params, step, total_steps, "lambda_ern_tying", lambda_ern_tying, schedule_ns
                 )
                 # use masked log_alpha so protected TUs don't get gradient pressure
-                raw_tying = ern_tu_tying_penalty(params, ern_namespaces, log_alpha_for_l0)
+                raw_tying = ern_tu_tying_penalty(params, ern_namespaces, log_alpha)
                 ern_tying_penalty_val = tying_weight * raw_tying
                 ern_tying_penalty_val = _sanitize(jnp.atleast_1d(ern_tying_penalty_val))[0]
             else:

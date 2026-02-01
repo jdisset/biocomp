@@ -2,7 +2,7 @@
 
 Tests cover:
 - CommitOptions factory methods
-- TUMaskProvider mode detection and mask computation
+- get_full_log_alpha SSOT function
 - prune_network_tus() unified pruning
 - commit_structure() vs commit_final() behavior
 - Path equivalence between log_alpha and binary_mask
@@ -16,13 +16,13 @@ from pathlib import Path
 
 from biocomp.stack_commit import (
     CommitOptions,
-    TUMaskProvider,
     NetworkCommitReport,
     CommitReport,
     commit_structure,
     commit_final,
     commit_networks,
 )
+from biocomp.tumasking_strategy import get_full_log_alpha
 from biocomp.parameters import ParameterTree
 from biocomp.tumasking import TU_LOG_ALPHA_PATH, TU_BINARY_MASK_PATH
 
@@ -61,123 +61,55 @@ class TestCommitOptions:
             options.prune_tus = False
 
 
-class TestTUMaskProvider:
-    def test_from_params_no_masking(self):
-        """from_params() returns 'none' mode when no TU masking params."""
+class TestGetFullLogAlpha:
+    """Test get_full_log_alpha SSOT function."""
+
+    def test_returns_none_when_no_masking_params(self):
+        """Returns None when no TU masking params present."""
         params = ParameterTree()
-        provider = TUMaskProvider.from_params(params, tu_id_to_idx=None, n_networks=1)
-        assert provider.mode == "none"
-        assert provider.mask_data is None
-        assert not provider.has_masking()
+        result = get_full_log_alpha(params)
+        assert result is None
 
-    def test_from_params_no_masking_with_tu_idx(self):
-        """from_params() returns 'none' mode when tu_id_to_idx exists but no mask params."""
-        params = ParameterTree()
-        tu_id_to_idx = {"tu_a": 0, "tu_b": 1}
-        provider = TUMaskProvider.from_params(params, tu_id_to_idx=tu_id_to_idx, n_networks=1)
-        assert provider.mode == "none"
-        assert not provider.has_masking()
-
-    def test_from_params_detects_binary_mask(self):
-        """from_params() detects TU_BINARY_MASK_PATH."""
-        params = ParameterTree()
-        binary_mask = jnp.array([[1.0, 0.0, 1.0]])
-        params.at(TU_BINARY_MASK_PATH, binary_mask)
-        tu_id_to_idx = {"tu_a": 0, "tu_b": 1, "tu_c": 2}
-
-        provider = TUMaskProvider.from_params(params, tu_id_to_idx=tu_id_to_idx, n_networks=1)
-        assert provider.mode == "binary_mask"
-        assert provider.has_masking()
-        assert provider.mask_data is not None
-
-    def test_from_params_detects_log_alpha(self):
-        """from_params() detects TU_LOG_ALPHA_PATH."""
+    def test_returns_log_alpha_from_direct_path(self):
+        """Returns log_alpha when TU_LOG_ALPHA_PATH is present."""
         params = ParameterTree()
         log_alpha = jnp.array([[2.0, -2.0, 2.0]])
         params.at(TU_LOG_ALPHA_PATH, log_alpha)
-        tu_id_to_idx = {"tu_a": 0, "tu_b": 1, "tu_c": 2}
 
-        provider = TUMaskProvider.from_params(params, tu_id_to_idx=tu_id_to_idx, n_networks=1)
-        assert provider.mode == "log_alpha"
-        assert provider.has_masking()
+        result = get_full_log_alpha(params)
+        assert result is not None
+        np.testing.assert_array_almost_equal(result, log_alpha)
 
-    def test_binary_mask_priority_over_log_alpha(self):
-        """When both are present, binary_mask takes priority."""
+    def test_returns_log_alpha_from_latent_mlp(self):
+        """Decodes log_alpha from latent MLP params."""
+        from biocomp.tumasking import (
+            LATENT_TU_Z_PATH,
+            LATENT_TU_W1_PATH,
+            LATENT_TU_B1_PATH,
+            LATENT_TU_W2_PATH,
+            LATENT_TU_B2_PATH,
+        )
+
         params = ParameterTree()
-        binary_mask = jnp.array([[1.0, 0.0]])
-        log_alpha = jnp.array([[2.0, 2.0]])
-        params.at(TU_BINARY_MASK_PATH, binary_mask)
-        params.at(TU_LOG_ALPHA_PATH, log_alpha)
-        tu_id_to_idx = {"tu_a": 0, "tu_b": 1}
+        n_tgt, n_net = 1, 1
+        latent_dim, hidden_dim, n_tus = 4, 8, 3
 
-        provider = TUMaskProvider.from_params(params, tu_id_to_idx=tu_id_to_idx, n_networks=1)
-        assert provider.mode == "binary_mask"
+        z = jnp.zeros((n_tgt, n_net, latent_dim))
+        W1 = jnp.zeros((n_tgt, n_net, hidden_dim, latent_dim))
+        b1 = jnp.zeros((n_tgt, n_net, hidden_dim))
+        W2 = jnp.zeros((n_tgt, n_net, n_tus, hidden_dim))
+        b2 = jnp.ones((n_tgt, n_net, n_tus)) * 2.0  # MLP(0) ≈ b2
 
-    def test_get_binary_mask_for_network_binary_path(self):
-        """get_binary_mask_for_network() works for binary_mask mode."""
-        mask_data = jnp.array([[1.0, 0.0, 1.0]])
-        provider = TUMaskProvider(
-            mode="binary_mask",
-            mask_data=mask_data,
-            tu_id_to_idx={"tu_a": 0, "tu_b": 1, "tu_c": 2},
-        )
+        params.at(LATENT_TU_Z_PATH, z)
+        params.at(LATENT_TU_W1_PATH, W1)
+        params.at(LATENT_TU_B1_PATH, b1)
+        params.at(LATENT_TU_W2_PATH, W2)
+        params.at(LATENT_TU_B2_PATH, b2)
 
-        binary_mask = provider.get_binary_mask_for_network(0)
-        np.testing.assert_array_equal(binary_mask, jnp.array([1.0, 0.0, 1.0]))
-
-    def test_get_binary_mask_for_network_log_alpha_path(self):
-        """get_binary_mask_for_network() works for log_alpha mode."""
-        log_alpha = jnp.array([[10.0, -10.0, 10.0]])  # enabled, disabled, enabled
-        provider = TUMaskProvider(
-            mode="log_alpha",
-            mask_data=log_alpha,
-            tu_id_to_idx={"tu_a": 0, "tu_b": 1, "tu_c": 2},
-        )
-
-        binary_mask = provider.get_binary_mask_for_network(0)
-        assert float(binary_mask[0]) == 1.0
-        assert float(binary_mask[1]) == 0.0
-        assert float(binary_mask[2]) == 1.0
-
-    def test_get_pseudo_log_alpha_for_network_log_alpha_path(self):
-        """get_pseudo_log_alpha_for_network() returns actual log_alpha for log_alpha mode."""
-        log_alpha = jnp.array([[2.0, -2.0, 2.0]])
-        provider = TUMaskProvider(
-            mode="log_alpha",
-            mask_data=log_alpha,
-            tu_id_to_idx={"tu_a": 0, "tu_b": 1, "tu_c": 2},
-        )
-
-        pseudo = provider.get_pseudo_log_alpha_for_network(0)
-        np.testing.assert_array_almost_equal(pseudo, log_alpha[0])
-
-    def test_get_pseudo_log_alpha_for_network_binary_path(self):
-        """get_pseudo_log_alpha_for_network() converts binary to pseudo log_alpha."""
-        binary_mask = jnp.array([[1.0, 0.0, 1.0]])
-        provider = TUMaskProvider(
-            mode="binary_mask",
-            mask_data=binary_mask,
-            tu_id_to_idx={"tu_a": 0, "tu_b": 1, "tu_c": 2},
-        )
-
-        pseudo = provider.get_pseudo_log_alpha_for_network(0)
-        assert float(pseudo[0]) == 10.0
-        assert float(pseudo[1]) == -10.0
-        assert float(pseudo[2]) == 10.0
-
-    def test_is_tu_enabled(self):
-        """is_tu_enabled() correctly checks individual TU status."""
-        binary_mask = jnp.array([[1.0, 0.0, 1.0]])
-        provider = TUMaskProvider(
-            mode="binary_mask",
-            mask_data=binary_mask,
-            tu_id_to_idx={"tu_a": 0, "tu_b": 1, "tu_c": 2},
-        )
-
-        assert provider.is_tu_enabled(0, "tu_a") is True
-        assert provider.is_tu_enabled(0, "tu_b") is False
-        assert provider.is_tu_enabled(0, "tu_c") is True
-        assert provider.is_tu_enabled(0, "unknown_tu") is True  # unknown TUs are enabled
+        result = get_full_log_alpha(params)
+        assert result is not None
+        assert result.shape == (n_tgt, n_net, n_tus)
+        np.testing.assert_array_almost_equal(result, b2, decimal=5)
 
 
 class TestNetworkCommitReport:
@@ -201,58 +133,51 @@ class TestCommitReport:
         assert report.timings["pruning"] == 0.456
 
 
-class TestPathEquivalence:
-    """Test that log_alpha and binary_mask produce equivalent results.
+class TestLogAlphaPathEquivalence:
+    """Test that direct and latent MLP paths produce equivalent log_alpha."""
 
-    These tests verify that converting log_alpha to pseudo_log_alpha produces
-    the same pruning decisions as using binary_mask directly.
-    """
+    def test_direct_path_returns_raw_values(self):
+        """Direct log_alpha path returns the raw values."""
+        params = ParameterTree()
+        log_alpha = jnp.array([[10.0, -10.0, 10.0]])
+        params.at(TU_LOG_ALPHA_PATH, log_alpha)
 
-    def test_mask_equivalence_enabled(self):
-        """Enabled TUs produce same pseudo log_alpha from both paths."""
-        log_alpha_value = 10.0
+        result = get_full_log_alpha(params)
+        np.testing.assert_array_equal(result, log_alpha)
 
-        log_alpha_data = jnp.array([[log_alpha_value]])
-        binary_data = jnp.array([[1.0]])
+    def test_latent_path_with_zero_z_returns_bias(self):
+        """Latent MLP with z=0 returns bias (b2) as log_alpha."""
+        from biocomp.tumasking import (
+            LATENT_TU_Z_PATH,
+            LATENT_TU_W1_PATH,
+            LATENT_TU_B1_PATH,
+            LATENT_TU_W2_PATH,
+            LATENT_TU_B2_PATH,
+        )
 
-        provider_la = TUMaskProvider("log_alpha", log_alpha_data, {"tu_a": 0})
-        provider_bm = TUMaskProvider("binary_mask", binary_data, {"tu_a": 0})
+        params = ParameterTree()
+        n_tgt, n_net = 2, 2
+        latent_dim, hidden_dim, n_tus = 4, 8, 3
 
-        pseudo_la = provider_la.get_pseudo_log_alpha_for_network(0)
-        pseudo_bm = provider_bm.get_pseudo_log_alpha_for_network(0)
+        z = jnp.zeros((n_tgt, n_net, latent_dim))
+        W1 = jnp.zeros((n_tgt, n_net, hidden_dim, latent_dim))
+        b1 = jnp.zeros((n_tgt, n_net, hidden_dim))
+        W2 = jnp.zeros((n_tgt, n_net, n_tus, hidden_dim))
+        b2 = jnp.array([
+            [[2.0, -2.0, 1.0], [3.0, -3.0, 0.5]],
+            [[1.5, -1.5, 0.0], [2.5, -2.5, -0.5]],
+        ])
 
-        assert float(pseudo_la[0]) == log_alpha_value
-        assert float(pseudo_bm[0]) == 10.0
+        params.at(LATENT_TU_Z_PATH, z)
+        params.at(LATENT_TU_W1_PATH, W1)
+        params.at(LATENT_TU_B1_PATH, b1)
+        params.at(LATENT_TU_W2_PATH, W2)
+        params.at(LATENT_TU_B2_PATH, b2)
 
-    def test_mask_equivalence_disabled(self):
-        """Disabled TUs produce same pseudo log_alpha from both paths."""
-        log_alpha_value = -10.0
-
-        log_alpha_data = jnp.array([[log_alpha_value]])
-        binary_data = jnp.array([[0.0]])
-
-        provider_la = TUMaskProvider("log_alpha", log_alpha_data, {"tu_a": 0})
-        provider_bm = TUMaskProvider("binary_mask", binary_data, {"tu_a": 0})
-
-        pseudo_la = provider_la.get_pseudo_log_alpha_for_network(0)
-        pseudo_bm = provider_bm.get_pseudo_log_alpha_for_network(0)
-
-        assert float(pseudo_la[0]) == log_alpha_value
-        assert float(pseudo_bm[0]) == -10.0
-
-    def test_binary_mask_equivalence_multi_tu(self):
-        """Multiple TUs produce consistent masks from both paths."""
-        log_alpha_data = jnp.array([[10.0, -10.0, 10.0, -10.0]])
-        binary_data = jnp.array([[1.0, 0.0, 1.0, 0.0]])
-        tu_id_to_idx = {"a": 0, "b": 1, "c": 2, "d": 3}
-
-        provider_la = TUMaskProvider("log_alpha", log_alpha_data, tu_id_to_idx)
-        provider_bm = TUMaskProvider("binary_mask", binary_data, tu_id_to_idx)
-
-        mask_la = provider_la.get_binary_mask_for_network(0)
-        mask_bm = provider_bm.get_binary_mask_for_network(0)
-
-        np.testing.assert_array_equal(mask_la, mask_bm)
+        result = get_full_log_alpha(params)
+        assert result is not None
+        assert result.shape == (n_tgt, n_net, n_tus)
+        np.testing.assert_array_almost_equal(result, b2, decimal=5)
 
 
 RESOURCES_DIR = Path(__file__).parent / "resources"

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from .compute import ComputeStack
     from .parameters import ParameterTree
     from .design import DesignManager, DesignConfig
+    from .tumasking_strategy import TUMaskingStrategy
     from biocomptools.modelmodel import BiocompModel
 
 from .logging_config import get_logger
@@ -64,6 +65,7 @@ class DesignSession:
     dconf: "DesignConfig"
     model: "BiocompModel"
     stack: "ComputeStack"
+    strategy: "TUMaskingStrategy"
     initial_params: "ParameterTree"
     xbatches: jnp.ndarray
     ybatches: jnp.ndarray
@@ -92,17 +94,7 @@ class DesignSession:
         n_replicates_override: int | None = None,
         sample_shape_override: tuple[int, ...] | None = None,
     ) -> "DesignSession":
-        """Create a design session with all shared initialization.
-
-        Args:
-            dmanager: Design manager with targets and networks
-            dconf: Design configuration
-            model: Trained BiocompModel
-            lock_ratios: If True, don't unlock ratio parameters
-            initial_params: Optional pre-initialized parameters
-            n_replicates_override: Override n_replicates (for pluggable which uses 1)
-            sample_shape_override: Override sample shape tuple
-        """
+        """Create a design session with all shared initialization."""
         from .design import initialize_params, _create_loss_function, get_ratio_paths_and_sources
 
         timer = PhaseTimer()
@@ -113,6 +105,9 @@ class DesignSession:
         pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
         n_replicates = n_replicates_override if n_replicates_override is not None else dconf.n_replicates
 
+        strategy = dconf.build_tu_masking_strategy()
+        logger.info(f"TU masking strategy: {strategy.mode.value}")
+
         timer.start("stack", "[1/5] Building compute stack...")
         stack = dmanager.build_stack(
             model,
@@ -121,12 +116,13 @@ class DesignSession:
             latent_dim=dconf.latent_dim,
             latent_hidden_dim=dconf.latent_hidden_dim,
             auto_lock_topology_tus=dconf.auto_lock_topology_tus,
+            enable_tu_masking=strategy.has_masking,
         )
         timer.end("stack")
 
         timer.start("params", "[2/5] Initializing parameters...")
         if initial_params is None:
-            n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
+            n_tus = stack.n_tus if strategy.has_masking else 0
             n_networks = len(dmanager.networks)
             initial_params = initialize_params(
                 stack,
@@ -134,13 +130,9 @@ class DesignSession:
                 dmanager.n_targets,
                 model.shared_params,
                 pkey,
+                strategy=strategy,
                 n_tus=n_tus,
                 n_networks=n_networks,
-                tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
-                tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
-                use_latent_tu_masking=dconf.use_latent_tu_masking,
-                latent_tu_dim=dconf.latent_tu_dim,
-                latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
                 no_masking_tu_ids=stack.no_masking_tu_ids,
                 tu_id_to_idx=stack.tu_id_to_idx,
             )
@@ -208,6 +200,7 @@ class DesignSession:
             dconf=dconf,
             model=model,
             stack=stack,
+            strategy=strategy,
             initial_params=initial_params,
             xbatches=xbatches,
             ybatches=ybatches,
