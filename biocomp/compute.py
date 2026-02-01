@@ -2,7 +2,7 @@
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable, Optional, Union, Any, TypeVar
-from concurrent.futures import ThreadPoolExecutor
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -128,45 +128,6 @@ def _compute_layer_namespace(layer_id: int, node_type: str, n_outputs: int) -> s
 
     layer_name = f"{node_type}{type_suffix}"
     return f"local/{layer_id}/{layer_name}"
-
-
-def _renormalize_aggregation_after_cascade(net: "Network", disabled_source_ids: set[int]) -> None:
-    """Renormalize aggregation ratios after cascade-disabled sources are removed.
-
-    When ERN cleanup cascade-disables additional TUs, their source nodes are removed.
-    Aggregation nodes referencing these sources need their ratios updated and renormalized.
-    """
-    if not disabled_source_ids:
-        return
-    if net.compute_graph is None:
-        return
-
-    from biocomp.nodes.aggregation import renormalize_members_after_removal
-
-    graph = net.compute_graph
-    for node in graph.get_nodes_by_type("aggregation"):
-        if node.extra is None:
-            continue
-
-        # build source id to member id mapping
-        source_id_to_member: dict[int, str] = {}
-        for edge in graph.get_incoming_edges(node.node_id):
-            src_node = graph.nodes.get(edge.source_id)
-            if src_node and src_node.node_type == "source" and src_node.extra:
-                member_id = src_node.extra.get("member_id")
-                if member_id:
-                    source_id_to_member[edge.source_id] = str(member_id)
-
-        # find members to remove (corresponding to disabled sources)
-        members_to_remove: set[str] = set()
-        for src_id in disabled_source_ids:
-            if src_id in source_id_to_member:
-                members_to_remove.add(source_id_to_member[src_id])
-
-        if not members_to_remove:
-            continue
-
-        renormalize_members_after_removal(node.extra, members_to_remove)
 
 
 @dataclass
@@ -408,6 +369,13 @@ class ComputeStack:
             f"Built TU mapping: {self.n_tus} TUs, {len(inverse_tu_ids)} inverse, {len(no_masking_tu_ids)} no_masking"
         )
 
+    def ensure_tu_mapping(self, auto_lock_topology_tus: bool = True) -> dict[str, int]:
+        """Ensure TU ID mapping exists, building it if missing."""
+        if getattr(self, "tu_id_to_idx", None) is None:
+            self._build_tu_mapping(auto_lock_topology_tus=auto_lock_topology_tus)
+        assert self.tu_id_to_idx is not None, "TU mapping not built"
+        return self.tu_id_to_idx
+
     def get_per_network_tu_mask(self) -> jnp.ndarray:
         """Returns (n_networks, n_tus) mask: 1 if network uses TU, 0 otherwise.
 
@@ -551,374 +519,46 @@ class ComputeStack:
         return ComputeStack(self.networks, deepcopy(self.layers))
 
     def commit(self, params: ParameterTree, collapse_to_part=True, **kwargs):
-        # TODO: we need a complete refactor of this thing
-        # - collapse_to_part=False should allow skipping uorf "collapse" aka resolution from embedding value to quantized part (e.g. uorfs), 
-        #   i.e. if we skip this we allow the quantization mask to have multiple parts active (the same as now)
-        # - make binary masking the primary mode: log alpha is just a (optional) pre-pass to set the mask
-        # - the decode latent stuff should move to their respective node implementations (aggregations?) or at the very least outta here
+        """Commit trained parameters to networks, optionally collapsing embeddings.
 
-        import time as _time
+        This method delegates to commit_networks() in stack_commit.py for the actual
+        implementation. It handles:
+        1. Deep copying networks
+        2. Running node-level commits
+        3. Pruning disabled TUs (via log_alpha or binary_mask)
+        4. Rebuilding networks via recipe roundtrip for clean structure
 
-        _t0 = _time.perf_counter()
+        Args:
+            params: Trained parameter tree
+            collapse_to_part: If True, collapse embeddings to discrete parts
+            **kwargs: Additional arguments passed to layer commits
 
-        from biocomp.tumasking import (
-            TU_LOG_ALPHA_PATH,
-            TU_BINARY_MASK_PATH,
-            LATENT_TU_Z_PATH,
-            get_final_mask,
-            get_log_alpha_from_params,
-        )
-        from biocomp.network import recipe_to_networks
-        import biocomp.biorules as br
+        Returns:
+            List of committed networks
+        """
+        from .stack_commit import commit_networks, CommitOptions
 
-        tu_id_to_idx = getattr(self, "tu_id_to_idx", None)
-        has_log_alpha = (TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params) and tu_id_to_idx
-        has_binary_mask = TU_BINARY_MASK_PATH in params and tu_id_to_idx
-        will_roundtrip = has_log_alpha or has_binary_mask
-        logger.debug(
-            f"COMMIT: TU_LOG_ALPHA in params={TU_LOG_ALPHA_PATH in params}, "
-            f"LATENT_TU_Z in params={LATENT_TU_Z_PATH in params}, "
-            f"TU_BINARY_MASK in params={TU_BINARY_MASK_PATH in params}, "
-            f"tu_id_to_idx={tu_id_to_idx is not None}, will_roundtrip={will_roundtrip}"
+        options = CommitOptions(
+            prune_tus=True,
+            collapse_to_part=collapse_to_part,
+            lock_ratios=kwargs.get("lock_ratios", True),
+            roundtrip_rebuild=True,
+            preserve_input_order=True,
+            max_rebuild_workers=8,
         )
 
-        # create copies of all networks
-        _t1 = _time.perf_counter()
-        network_copies = [deepcopy(net) for net in self.networks]
-        _t2 = _time.perf_counter()
-        logger.debug(f"COMMIT TIMING: deepcopy {len(network_copies)} networks: {_t2 - _t1:.3f}s")
-
-        # create a temporary stack with network copies for commit operations
-        temp_stack = ComputeStack(network_copies, self.layers)
-        temp_stack.node_map = self.node_map
-
-        # first, run node-level commits (they need edges to exist)
-        _t3 = _time.perf_counter()
-        for layer in self.layers:
-            layer.commit(params, stack=temp_stack, collapse_to_part=collapse_to_part, **kwargs)
-        _t4 = _time.perf_counter()
-        logger.debug(f"COMMIT TIMING: layer commits ({len(self.layers)} layers): {_t4 - _t3:.3f}s")
-
-        # AFTER node commits, remove disabled TU edges and source nodes
-        # SINGLE SOURCE OF TRUTH: hard-concrete masks (tu_log_alpha) determine what's disabled
-        _t5 = _time.perf_counter()
-        dead_ern_recs_by_net: dict[int, set[tuple[str, str]]] = {}
-        has_direct_or_latent_alpha = (
-            TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params
-        ) and tu_id_to_idx
-        if has_direct_or_latent_alpha:
-            # decode latent if present, else use direct log_alpha
-            # build 2D array: (n_networks, n_tus)
-            tu_log_alpha_list = []
-            for net_idx in range(len(network_copies)):
-                network_tu_log_alpha = get_log_alpha_from_params(params, net_idx)
-                tu_log_alpha_list.append(network_tu_log_alpha)
-            tu_log_alpha = jnp.stack(tu_log_alpha_list)
-            assert tu_log_alpha.ndim == 2, (
-                f"COMMIT: tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D"
-            )
-            assert tu_log_alpha.shape[0] >= len(network_copies), (
-                f"tu_log_alpha has {tu_log_alpha.shape[0]} networks but we have {len(network_copies)}"
-            )
-
-            for net_idx, net in enumerate(network_copies):
-                network_tu_log_alpha = tu_log_alpha[net_idx]
-
-                original_output_proteins = net.get_output_proteins()
-                net.prune_disabled_tus(network_tu_log_alpha, tu_id_to_idx)
-
-                edges_to_remove = []
-                for edge_id, edge in net.compute_graph.edges.items():
-                    tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
-                    if not tu_ids:
-                        continue
-                    all_disabled = True
-                    for tu_id in tu_ids:
-                        if tu_id not in tu_id_to_idx:
-                            all_disabled = False
-                            break
-                        tu_idx = tu_id_to_idx[tu_id]
-                        assert 0 <= tu_idx < network_tu_log_alpha.shape[0], (
-                            f"tu_idx {tu_idx} out of bounds for tu_log_alpha shape {network_tu_log_alpha.shape}"
-                        )
-                        mask = get_final_mask(network_tu_log_alpha[tu_idx : tu_idx + 1])[0]
-                        if float(mask) > 0:
-                            all_disabled = False
-                            break
-                    if all_disabled and tu_ids:
-                        edges_to_remove.append(edge_id)
-                for edge_id in edges_to_remove:
-                    del net.compute_graph.edges[edge_id]
-
-                # ERN-aware cleanup: handle ERN nodes with disabled inputs
-                dead_ern_recs = net._cleanup_ern_nodes(network_tu_log_alpha, tu_id_to_idx)
-                dead_ern_recs_by_net[net_idx] = dead_ern_recs
-
-                # Handle cascade: if ERN cleanup disabled additional TUs, remove their edges AND sources
-                additional_disabled = net.metadata.pop("_additional_disabled_tus", set())
-                if additional_disabled:
-                    for edge_id, edge in list(net.compute_graph.edges.items()):
-                        tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
-                        if any(tu_id in additional_disabled for tu_id in tu_ids):
-                            del net.compute_graph.edges[edge_id]
-
-                    disabled_source_ids = set()
-                    for tu_id in additional_disabled:
-                        for node in net.compute_graph.get_nodes_by_type("source"):
-                            tu_names = node.extra.get("tu_names_by_slot", {})
-                            cotx_group = node.extra.get("cotx_group", "")
-                            for tu_name in tu_names.values():
-                                full_tu_id = f"{tu_name}_{cotx_group}" if cotx_group else tu_name
-                                if full_tu_id in additional_disabled:
-                                    disabled_source_ids.add(node.node_id)
-                                    break
-
-                    for edge_id, edge in list(net.compute_graph.edges.items()):
-                        if (
-                            edge.source_id in disabled_source_ids
-                            or edge.target_id in disabled_source_ids
-                        ):
-                            del net.compute_graph.edges[edge_id]
-                    for node_id in disabled_source_ids:
-                        if node_id in net.compute_graph.nodes:
-                            del net.compute_graph.nodes[node_id]
-
-                    # renormalize aggregation ratios after cascade-disabled sources removed
-                    _renormalize_aggregation_after_cascade(net, disabled_source_ids)
-
-                net._cleanup_orphaned_downstream_nodes()
-                net._cleanup_orphaned_bias_nodes()
-                net._cleanup_orphaned_input_nodes(original_output_proteins)
-                net._cleanup_orphaned_transcription_nodes()
-
-        elif has_binary_mask:
-            binary_mask = params[TU_BINARY_MASK_PATH]
-            assert binary_mask.ndim == 2, (
-                f"COMMIT: binary_mask must be 2D (n_networks, n_tus), got {binary_mask.ndim}D"
-            )
-            assert binary_mask.shape[0] >= len(network_copies), (
-                f"binary_mask has {binary_mask.shape[0]} networks but we have {len(network_copies)}"
-            )
-
-            for net_idx, net in enumerate(network_copies):
-                network_binary_mask = binary_mask[net_idx]
-
-                # convert binary mask to pseudo-log_alpha for prune_disabled_tus
-                # binary 1.0 → log_alpha 10.0 (enabled), binary 0.0 → log_alpha -10.0 (disabled)
-                pseudo_log_alpha = jnp.where(network_binary_mask > 0.5, 10.0, -10.0)
-
-                original_output_proteins = net.get_output_proteins()
-                net.prune_disabled_tus(pseudo_log_alpha, tu_id_to_idx)
-
-                edges_to_remove = []
-                for edge_id, edge in net.compute_graph.edges.items():
-                    tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
-                    if not tu_ids:
-                        continue
-                    all_disabled = True
-                    for tu_id in tu_ids:
-                        if tu_id not in tu_id_to_idx:
-                            all_disabled = False
-                            break
-                        tu_idx = tu_id_to_idx[tu_id]
-                        assert 0 <= tu_idx < network_binary_mask.shape[0], (
-                            f"tu_idx {tu_idx} out of bounds for binary_mask shape {network_binary_mask.shape}"
-                        )
-                        if float(network_binary_mask[tu_idx]) > 0.5:
-                            all_disabled = False
-                            break
-                    if all_disabled and tu_ids:
-                        edges_to_remove.append(edge_id)
-                for edge_id in edges_to_remove:
-                    del net.compute_graph.edges[edge_id]
-
-                # ERN-aware cleanup: handle ERN nodes with disabled inputs
-                dead_ern_recs = net._cleanup_ern_nodes(pseudo_log_alpha, tu_id_to_idx)
-                dead_ern_recs_by_net[net_idx] = dead_ern_recs
-
-                # Handle cascade: if ERN cleanup disabled additional TUs, remove their edges AND sources
-                additional_disabled = net.metadata.pop("_additional_disabled_tus", set())
-                if additional_disabled:
-                    for edge_id, edge in list(net.compute_graph.edges.items()):
-                        tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
-                        if any(tu_id in additional_disabled for tu_id in tu_ids):
-                            del net.compute_graph.edges[edge_id]
-
-                    disabled_source_ids = set()
-                    for tu_id in additional_disabled:
-                        for node in net.compute_graph.get_nodes_by_type("source"):
-                            tu_names = node.extra.get("tu_names_by_slot", {})
-                            cotx_group = node.extra.get("cotx_group", "")
-                            for tu_name in tu_names.values():
-                                full_tu_id = f"{tu_name}_{cotx_group}" if cotx_group else tu_name
-                                if full_tu_id in additional_disabled:
-                                    disabled_source_ids.add(node.node_id)
-                                    break
-
-                    for edge_id, edge in list(net.compute_graph.edges.items()):
-                        if (
-                            edge.source_id in disabled_source_ids
-                            or edge.target_id in disabled_source_ids
-                        ):
-                            del net.compute_graph.edges[edge_id]
-                    for node_id in disabled_source_ids:
-                        if node_id in net.compute_graph.nodes:
-                            del net.compute_graph.nodes[node_id]
-
-                    # renormalize aggregation ratios after cascade-disabled sources removed
-                    _renormalize_aggregation_after_cascade(net, disabled_source_ids)
-
-                net._cleanup_orphaned_downstream_nodes()
-                net._cleanup_orphaned_bias_nodes()
-                net._cleanup_orphaned_input_nodes(original_output_proteins)
-                net._cleanup_orphaned_transcription_nodes()
-
-        else:
-            # fallback: prune based on zero ratios (non-design contexts)
-            for net in network_copies:
-                net.prune_disabled_tus()
-        _t6 = _time.perf_counter()
-        logger.debug(f"COMMIT TIMING: TU pruning: {_t6 - _t5:.3f}s")
-
-        # ROUNDTRIP: export to recipe and rebuild to ensure clean graph structure
-        # This ensures orphan nodes (e.g., transcription nodes with no source) are removed
-        # and the graph is consistent. Always performed for robustness.
-        def _rebuild_network(net_idx_and_net: tuple[int, Network]):
-            """Rebuild a single network from recipe."""
-            net_idx, net = net_idx_and_net
-            strip_ern_recs = dead_ern_recs_by_net.get(net_idx, set())
-
-            try:
-                original_input_proteins = net.get_inverted_input_proteins()
-            except (AssertionError, IndexError, KeyError):
-                original_input_proteins = None
-
-            output_nodes = [n for n in net.compute_graph.nodes.values() if n.node_type == "output"]
-            if len(output_nodes) != 1:
-                original_outputs = ()
-            else:
-                try:
-                    original_outputs = tuple(sorted(net.get_dependent_output_proteins()))
-                except (AssertionError, IndexError, KeyError):
-                    original_outputs = ()
-
-            if len(original_outputs) == 0:
-                empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
-                empty_net.name = net.name
-                empty_net.metadata = net.metadata
-                return empty_net
-
-            try:
-                recipe = net.to_recipe(strip_ern_recs=strip_ern_recs)
-            except (AssertionError, IndexError, KeyError):
-                empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
-                empty_net.name = net.name
-                empty_net.metadata = net.metadata
-                return empty_net
-
-            if not recipe.content:
-                empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
-                empty_net.name = net.name
-                empty_net.metadata = net.metadata
-                return empty_net
-
-            rebuilt = recipe_to_networks(
-                recipe,
-                br.ALL_RULES,
-                invert=True,
-                inversion_mode="all",
-                skip_input_order_validation=True,
-            )
-
-            if len(rebuilt) == 0:
-                logger.warning(
-                    f"COMMIT: Recipe '{recipe.name}' produced no valid networks "
-                    f"(all inversions degenerate). Returning empty network."
-                )
-                empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
-                empty_net.name = net.name
-                empty_net.metadata = net.metadata
-                return empty_net
-
-            if len(rebuilt) == 1:
-                rebuilt_net = rebuilt[0]
-            else:
-                matching = [
-                    r
-                    for r in rebuilt
-                    if tuple(sorted(r.get_dependent_output_proteins())) == original_outputs
-                ]
-                assert len(matching) == 1, (
-                    f"COMMIT ERROR: Recipe '{recipe.name}' produced {len(rebuilt)} inversions, "
-                    f"but {len(matching)} match original outputs {original_outputs}. "
-                    f"Rebuilt: {[tuple(sorted(r.get_dependent_output_proteins())) for r in rebuilt]}"
-                )
-                rebuilt_net = matching[0]
-
-            try:
-                rebuilt_dep_outputs = tuple(sorted(rebuilt_net.get_dependent_output_proteins()))
-            except (AssertionError, KeyError):
-                rebuilt_dep_outputs = ()
-
-            if rebuilt_dep_outputs != original_outputs:
-                # always use rebuilt network for consistency with inference
-                # (inference loads from recipe, so training should match)
-                logger.warning(
-                    f"COMMIT: Recipe roundtrip changed dependent outputs from {original_outputs} "
-                    f"to {rebuilt_dep_outputs}. Marker TUs may have been pruned. "
-                    f"Using rebuilt network for consistency with inference."
-                )
-
-            # Check if nb_inputs changed (critical for inverted networks)
-            original_nb_inputs = net.nb_inputs
-            rebuilt_nb_inputs = rebuilt_net.nb_inputs
-            if rebuilt_nb_inputs != original_nb_inputs:
-                # nb_inputs changed means inverted path structure changed.
-                # We can't skip rebuild because the pruned network may have broken
-                # sources (sources without inv_aggregation input). The rebuilt
-                # network is structurally valid even if it has fewer inputs.
-                logger.warning(
-                    f"COMMIT: Recipe roundtrip changed nb_inputs from {original_nb_inputs} "
-                    f"to {rebuilt_nb_inputs}. Inverted inputs may have been lost. "
-                    f"Using rebuilt network (pruned network may have broken structure)."
-                )
-
-            rebuilt_net.name = net.name
-            rebuilt_net.metadata = net.metadata
-
-            if original_input_proteins is not None:
-                try:
-                    rebuilt_input_proteins = rebuilt_net.get_inverted_input_proteins()
-                    if set(rebuilt_input_proteins) == set(original_input_proteins):
-                        rebuilt_net.apply_input_order(original_input_proteins)
-                        logger.debug(
-                            f"COMMIT: Restored input ordering {original_input_proteins} "
-                            f"(was {rebuilt_input_proteins})"
-                        )
-                except (AssertionError, IndexError, KeyError) as e:
-                    logger.debug(f"COMMIT: Could not restore input ordering: {e}")
-
-            return rebuilt_net
-
-        # Parallelize per-network rebuilding (each is independent)
-        n_workers = min(len(network_copies), 8)
-        indexed_networks = list(enumerate(network_copies))
-        if n_workers > 1:
-            with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                final_networks = list(executor.map(_rebuild_network, indexed_networks))
-        else:
-            final_networks = [_rebuild_network(idx_net) for idx_net in indexed_networks]
-        _t7 = _time.perf_counter()
-        logger.debug(
-            f"COMMIT TIMING: roundtrip rebuild ({len(network_copies)} nets, {n_workers} workers): {_t7 - _t6:.3f}s"
+        final_networks, _ = commit_networks(
+            self.networks,
+            self.layers,
+            params,
+            options,
+            tu_id_to_idx=getattr(self, "tu_id_to_idx", None),
+            node_map=self.node_map,
         )
 
-        # verify all committed networks have valid edge slots
         for i, net in enumerate(final_networks):
             self._assert_valid_edge_slots(net, f"committed network[{i}]")
 
-        _t8 = _time.perf_counter()
-        logger.debug(f"COMMIT TIMING: TOTAL: {_t8 - _t0:.3f}s")
         return final_networks
 
     def _assert_valid_edge_slots(self, network, context: str):

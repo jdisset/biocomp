@@ -1,7 +1,6 @@
 from __future__ import annotations
 import random
 from functools import partial
-from pathlib import Path
 from typing import Literal, Callable, Any, TYPE_CHECKING
 import warnings
 
@@ -37,12 +36,11 @@ from biocomp.designloss import (  # noqa: F401 - re-exported
     spectral_loss,
     proj_nonneg_ste,
     _sanitize,
+    compute_grid_losses,
 )
 from biocomp.tumasking import (
     build_tu_id_mapping,
     TU_LOG_ALPHA_PATH,
-    LOG_ALPHA_MIN,
-    LOG_ALPHA_MAX,
     LATENT_TU_Z_PATH,
     LATENT_TU_W1_PATH,
     LATENT_TU_B1_PATH,
@@ -77,34 +75,6 @@ def set_design_debug_output_dir(output_dir: str | None):
 
 def get_design_debug_output_dir() -> str | None:
     return _debug_output_dir
-
-
-class _PhaseTimer:
-    """Minimal helper for timing optimization phases."""
-
-    def __init__(self):
-        import time
-
-        self._time = time
-        self._timings: dict[str, float] = {}
-        self._t0 = time.perf_counter()
-        self._phase_start: float = time.perf_counter()
-
-    def start(self, name: str, msg: str):
-        logger.info(msg)
-        self._phase_start = self._time.perf_counter()
-
-    def end(self, name: str):
-        self._timings[name] = self._time.perf_counter() - self._phase_start
-        logger.info(f"  -> {self._timings[name]:.2f}s")
-
-    def total(self) -> float:
-        return self._time.perf_counter() - self._t0
-
-    def summary(self):
-        total = self.total()
-        for name, t in self._timings.items():
-            logger.info(f"  {name:15s} {t:.2f}s ({t / total * 100:.1f}%)")
 
 
 class DesignManager(BaseModel):
@@ -629,125 +599,6 @@ def get_topk_replicate_network_pairs(
     return best_per_target
 
 
-def plot_design_results(
-    dmanager: DesignManager,
-    dconf: DesignConfig,
-    xraw: jax.Array,
-    yraw: jax.Array,
-    topk: list[list[tuple[int, int, float]]],
-    yhatdep: jax.Array | None = None,
-    n_eval_samples: int | None = None,
-    save_dir: Path | None = None,
-    show_difference: bool = False,
-    plot_top_k: int | None = None,
-) -> None:
-    """Plot design results for each target showing best replicate/network combination.
-
-    Args:
-        dmanager: Design manager with networks and targets
-        dconf: Design configuration
-        xraw: Input samples shape (n_networks, n_replicates, n_eval_samples, n_targets, 2)
-        yraw: Target samples shape (n_networks, n_replicates, n_eval_samples, n_targets, 1)
-        yhatdep: Predictions shape (n_replicates, n_eval_samples, n_targets, n_networks)
-        topk: Top-k results from get_topk_replicate_network_pairs
-        n_eval_samples: Maximum number of samples to plot (for performance)
-        save_dir: Directory to save figures (if None, just display)
-        show_difference: Whether to show difference plots between prediction and target
-        plot_top_k: Number of top-k designs to plot per target (default: 1, i.e., just the best)
-    """
-    import matplotlib.pyplot as plt
-    from biocomp.plotting.plotting_core import DEFAULT_CMAP_NAME
-
-    if n_eval_samples is None:
-        n_eval_samples = xraw.shape[2]
-    else:
-        n_eval_samples = min(n_eval_samples, xraw.shape[2])
-
-    n_networks = len(dmanager.networks)
-    assert_that(xraw).has_shape(
-        (n_networks, dconf.n_replicates, xraw.shape[2], dmanager.n_targets, 2)
-    )
-    assert_that(yraw).has_shape(
-        (n_networks, dconf.n_replicates, yraw.shape[2], dmanager.n_targets, 1)
-    )
-
-    if plot_top_k is None:
-        plot_top_k = 1
-
-    for tid, target in enumerate(dmanager.targets):
-        n_to_plot = min(plot_top_k, len(topk[tid]))
-
-        for rank in range(n_to_plot):
-            rep_id, net_id, loss_val = topk[tid][rank]
-
-            x_target = xraw[net_id, rep_id, :n_eval_samples, tid]
-            y_target = yraw[net_id, rep_id, :n_eval_samples, tid, 0]
-
-            assert_that(x_target).has_shape((n_eval_samples, 2))
-            assert_that(y_target).has_shape((n_eval_samples,))
-
-            nax = 3 if show_difference else 2
-            fig, axes = plt.subplots(1, nax, figsize=(nax * 5, 5), dpi=100)
-
-            sc1 = axes[0].scatter(
-                x_target[:, 0], x_target[:, 1], c=y_target, cmap=DEFAULT_CMAP_NAME, s=5, alpha=0.7
-            )
-            axes[0].set_title("Target")
-            axes[0].set_aspect("equal")
-            plt.colorbar(sc1, ax=axes[0])
-
-            if yhatdep is not None:
-                yhat_target = yhatdep[rep_id, :n_eval_samples, tid, net_id]
-                assert_that(yhat_target).has_shape((n_eval_samples,))
-                assert_that(yhatdep).has_shape(
-                    (dconf.n_replicates, yhatdep.shape[1], dmanager.n_targets, n_networks)
-                )
-                sc2 = axes[1].scatter(
-                    x_target[:, 0],
-                    x_target[:, 1],
-                    c=yhat_target,
-                    cmap=DEFAULT_CMAP_NAME,
-                    s=5,
-                    alpha=0.7,
-                )
-                axes[1].set_title(f"Prediction (rank {rank + 1}, loss={loss_val:.4f})")
-                axes[1].set_aspect("equal")
-                plt.colorbar(sc2, ax=axes[1])
-
-                if show_difference:
-                    diff = yhat_target - y_target
-                    assert_that(diff).has_shape((n_eval_samples,))
-                    vmax = jnp.abs(diff).max()
-                    sc3 = axes[2].scatter(
-                        x_target[:, 0],
-                        x_target[:, 1],
-                        c=diff,
-                        cmap="RdBu_r",
-                        s=5,
-                        alpha=0.7,
-                        vmin=-vmax,
-                        vmax=vmax,
-                    )
-                    axes[2].set_title(f"Difference (net: {dmanager.networks[net_id].name})")
-                    axes[2].set_aspect("equal")
-                    plt.colorbar(sc3, ax=axes[2])
-
-            plt.suptitle(
-                f"Target: {target.name} | Rank {rank + 1}: net {dmanager.networks[net_id].name})"
-            )
-            plt.tight_layout()
-
-            if save_dir:
-                # Use rank as prefix for consistency with recipe files
-                save_path = (
-                    Path(save_dir) / f"rank{rank + 1:02d}_{target.name}_rep{rep_id}_net{net_id}.png"
-                )
-                plt.savefig(save_path, dpi=150, bbox_inches="tight")
-                logger.info(f"Saved figure to {save_path}")
-
-            plt.show()
-
-
 RATIO_PRUNE_THRESHOLD = BIOCOMP_CONSTANTS["ratio"]["prune_threshold"]
 
 
@@ -832,33 +683,7 @@ def normalize_ratio_source_arrays(params, source_paths, normalize_func):
     )
 
 
-from .design_pruning import (  # noqa: E402
-    identify_tus_to_prune,
-    hard_prune_and_rebuild,
-    run_with_hard_pruning as _start_with_hard_pruning,
-)
-
-
-def _start_pluggable(
-    dmanager: DesignManager,
-    dconf: DesignConfig,
-    model: BiocompModel,
-    loggers: list[tuple[int, Callable]] | None = None,
-    logger_objects: list | None = None,
-    async_handler=None,
-    lock_ratios: bool = False,
-):
-    from .pluggable_opt.run_pluggable import run_pluggable
-
-    return run_pluggable(
-        dmanager,
-        dconf,
-        model,
-        loggers=loggers,
-        logger_objects=logger_objects,
-        async_handler=async_handler,
-        lock_ratios=lock_ratios,
-    )
+from .design_pruning import run_with_hard_pruning as _start_with_hard_pruning  # noqa: E402
 
 
 def start(
@@ -879,7 +704,9 @@ def start(
 
     if dconf.uses_pluggable_optimizer:
         logger.info("Using pluggable optimizer: %s", type(dconf.pluggable_optimizer).__name__)
-        return _start_pluggable(
+        from .pluggable_opt.run_pluggable import run_pluggable
+
+        return run_pluggable(
             dmanager, dconf, model, loggers, logger_objects, async_handler, lock_ratios
         )
     from .design_run import run_design
@@ -937,62 +764,6 @@ def sample_for_evaluation(
         f"yraw shape mismatch: {yraw.shape} vs expected ({n_networks}, {n_replicates}, {n_samples}, {n_targets}, 1)"
     )
     return xraw, yraw
-
-
-def _compute_grid_loss_for_eval(
-    y_img: jnp.ndarray,
-    yhat_img: jnp.ndarray,
-    w_sinkhorn: float,
-    w_lncc: float,
-    w_mse: float,
-    w_rmse: float,
-    w_simse: float,
-    w_zncc: float,
-    w_gradient: float,
-    w_spectral: float,
-    w_contrast: float,
-    eps_sinkhorn: float,
-    n_sinkhorn_iters: int,
-    lncc_kernel: int,
-) -> jax.Array | float:
-    """Compute grid loss for evaluation - matches grid_distance_loss computation."""
-    y_img, yhat_img = _sanitize(y_img), _sanitize(yhat_img)
-    y_flat, yhat_flat = y_img.ravel(), yhat_img.ravel()
-
-    sinkhorn_l = (
-        sinkhorn_divergence_conv(
-            proj_nonneg_ste(yhat_img),
-            proj_nonneg_ste(y_img),
-            eps_sinkhorn,
-            n_iters=n_sinkhorn_iters,
-        )
-        if w_sinkhorn > 0
-        else 0.0
-    )
-    lncc_l = lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel) if w_lncc > 0 else 0.0
-    mse_l = jnp.mean((y_img - yhat_img) ** 2) if (w_mse > 0 or w_rmse > 0) else 0.0
-    rmse_l = jnp.sqrt(mse_l) if w_rmse > 0 else 0.0
-    simse_l = simse_loss(None, y_flat, yhat_flat) if w_simse > 0 else 0.0
-    zncc_l = zncc_loss(None, y_flat, yhat_flat) if w_zncc > 0 else 0.0
-    spectral_l = spectral_loss(None, y_img, yhat_img) if w_spectral > 0 else 0.0
-    gradient_l = gradient_magnitude_loss(y_img, yhat_img) if w_gradient > 0 else 0.0
-    contrast_l = (
-        jax.nn.relu((jnp.max(y_img) - jnp.min(y_img)) - (jnp.max(yhat_img) - jnp.min(yhat_img)))
-        if w_contrast > 0
-        else 0.0
-    )
-
-    return (
-        w_sinkhorn * sinkhorn_l
-        + w_lncc * lncc_l
-        + w_mse * mse_l
-        + w_rmse * rmse_l
-        + w_simse * simse_l
-        + w_zncc * zncc_l
-        + w_spectral * spectral_l
-        + w_gradient * gradient_l
-        + w_contrast * contrast_l
-    )
 
 
 def evaluate_design(
@@ -1112,29 +883,19 @@ def evaluate_design(
                 assert rep_preds is not None
                 rep_preds.append(yhat_dep)
 
-            # compute grid-based loss matching training (not simple MSE!)
-            # reshape to grid format: (n_samples, n_networks) -> (n_networks, yres, xres)
             y_grid = y_slice.squeeze(-1).reshape(yres, xres)
             network_losses = []
             for net_idx in range(n_networks):
                 yhat_grid = yhat_dep[:, net_idx].reshape(yres, xres)
-                loss_val = _compute_grid_loss_for_eval(
-                    y_grid,
-                    yhat_grid,
-                    w_sinkhorn,
-                    w_lncc,
-                    w_mse,
-                    w_rmse,
-                    w_simse,
-                    w_zncc,
-                    w_gradient,
-                    w_spectral,
-                    w_contrast,
-                    eps_sinkhorn,
-                    n_sinkhorn_iters,
-                    lncc_kernel,
+                result = compute_grid_losses(
+                    yhat_grid, y_grid,
+                    w_sinkhorn=w_sinkhorn, w_lncc=w_lncc, w_mse=w_mse, w_rmse=w_rmse,
+                    w_simse=w_simse, w_spectral=w_spectral, w_gradient=w_gradient,
+                    w_contrast=w_contrast, w_zncc=w_zncc,
+                    eps_sinkhorn=eps_sinkhorn, n_sinkhorn_iters=n_sinkhorn_iters,
+                    lncc_kernel=lncc_kernel,
                 )
-                network_losses.append(float(loss_val))
+                network_losses.append(result.total)
             rep_losses.append(network_losses)
             pbar.update(1)
 

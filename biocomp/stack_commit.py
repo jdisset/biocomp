@@ -1,27 +1,556 @@
-"""Commit helpers to separate structural pruning from quantization/collapse."""
+"""Commit helpers to separate structural pruning from quantization/collapse.
+
+This module provides the core commit functionality extracted from ComputeStack.commit().
+It handles TU pruning, network cleanup, and recipe roundtrip rebuilding.
+
+Key abstractions:
+- TUMaskProvider: Unified access to TU masks regardless of source (log_alpha vs binary_mask)
+- CommitOptions: Configuration for commit behavior
+- prune_network_tus(): Unified TU pruning for a single network
+- rebuild_network_from_recipe(): Recipe roundtrip for clean graph structure
+- commit_networks(): Core orchestration function
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal
+import time as _time
+
+import jax.numpy as jnp
+
+from biocomp.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from .compute import ComputeStack
+    from .compute import ComputeStack, StackLayer
+    from .network import Network
     from .parameters import ParameterTree
+
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class CommitOptions:
+    """Configuration for commit behavior."""
+
+    prune_tus: bool = True
+    collapse_to_part: bool = True
+    lock_ratios: bool = True
+    roundtrip_rebuild: bool = True
+    preserve_input_order: bool = True
+    max_rebuild_workers: int = 8
+
+    @classmethod
+    def for_structure_only(cls) -> "CommitOptions":
+        """Commit structural changes only (pruning), no embedding collapse."""
+        return cls(collapse_to_part=False, lock_ratios=False)
+
+    @classmethod
+    def for_final(cls) -> "CommitOptions":
+        """Full commit with embedding collapse/quantization."""
+        return cls(collapse_to_part=True, lock_ratios=True)
+
+
+@dataclass(frozen=True)
+class TUMaskProvider:
+    """Unified TU mask access for both log_alpha and binary_mask paths.
+
+    Abstracts the difference between:
+    - log_alpha path: sigmoid(log_alpha) >= 0.5 determines mask
+    - binary_mask path: direct binary values
+    - none: no masking (all TUs enabled)
+    """
+
+    mode: Literal["log_alpha", "binary_mask", "none"]
+    mask_data: jnp.ndarray | None  # shape: (n_networks, n_tus)
+    tu_id_to_idx: dict[str, int] | None
+
+    @classmethod
+    def from_params(
+        cls,
+        params: "ParameterTree",
+        tu_id_to_idx: dict[str, int] | None,
+        n_networks: int,
+    ) -> "TUMaskProvider":
+        """Factory: determine mode from params contents."""
+        from .tumasking import (
+            TU_LOG_ALPHA_PATH,
+            TU_BINARY_MASK_PATH,
+            LATENT_TU_Z_PATH,
+            get_log_alpha_from_params,
+        )
+
+        if tu_id_to_idx is None:
+            return cls(mode="none", mask_data=None, tu_id_to_idx=None)
+
+        has_binary_mask = TU_BINARY_MASK_PATH in params
+        has_log_alpha = TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params
+
+        if has_binary_mask:
+            binary_mask = jnp.asarray(params[TU_BINARY_MASK_PATH])
+            assert binary_mask.ndim == 2, (
+                f"binary_mask must be 2D (n_networks, n_tus), got {binary_mask.ndim}D"
+            )
+            return cls(mode="binary_mask", mask_data=binary_mask, tu_id_to_idx=tu_id_to_idx)
+
+        if has_log_alpha:
+            tu_log_alpha_list = []
+            for net_idx in range(n_networks):
+                network_tu_log_alpha = get_log_alpha_from_params(params, net_idx)
+                tu_log_alpha_list.append(network_tu_log_alpha)
+            tu_log_alpha = jnp.stack(tu_log_alpha_list)
+            assert tu_log_alpha.ndim == 2, (
+                f"tu_log_alpha must be 2D (n_networks, n_tus), got {tu_log_alpha.ndim}D"
+            )
+            return cls(mode="log_alpha", mask_data=tu_log_alpha, tu_id_to_idx=tu_id_to_idx)
+
+        return cls(mode="none", mask_data=None, tu_id_to_idx=None)
+
+    def has_masking(self) -> bool:
+        """Check if any TU masking is active."""
+        return self.mode != "none" and self.mask_data is not None
+
+    def get_pseudo_log_alpha_for_network(self, net_idx: int) -> jnp.ndarray:
+        """Get pseudo log_alpha for a network (works for both modes).
+
+        For log_alpha mode: returns the actual log_alpha
+        For binary_mask mode: converts binary 1.0 -> 10.0, 0.0 -> -10.0
+        """
+        assert self.mask_data is not None, "No mask data available"
+        assert self.mode != "none", "No masking mode set"
+
+        if self.mode == "log_alpha":
+            return self.mask_data[net_idx]
+        else:  # binary_mask
+            network_binary_mask = self.mask_data[net_idx]
+            return jnp.where(network_binary_mask > 0.5, 10.0, -10.0)
+
+    def get_binary_mask_for_network(self, net_idx: int) -> jnp.ndarray:
+        """Returns binary mask array shape (n_tus,). Works for both modes."""
+        assert self.mask_data is not None, "No mask data available"
+
+        if self.mode == "binary_mask":
+            return self.mask_data[net_idx]
+        else:  # log_alpha
+            import jax
+
+            return (jax.nn.sigmoid(self.mask_data[net_idx]) >= 0.5).astype(jnp.float32)
+
+    def is_tu_enabled(self, net_idx: int, tu_id: str) -> bool:
+        """Check if specific TU is enabled."""
+        if self.mode == "none" or self.tu_id_to_idx is None:
+            return True
+
+        if tu_id not in self.tu_id_to_idx:
+            return True  # TUs not in mapping are always enabled
+
+        tu_idx = self.tu_id_to_idx[tu_id]
+        binary_mask = self.get_binary_mask_for_network(net_idx)
+        return float(binary_mask[tu_idx]) > 0.5
+
+
+@dataclass
+class NetworkCommitReport:
+    """Report for a single network's commit process."""
+
+    network_idx: int
+    pruned_tu_count: int = 0
+    dead_ern_recs: set[tuple[str, str]] = field(default_factory=set)
+    cascade_disabled_tus: set[str] = field(default_factory=set)
+
+
+@dataclass
+class CommitReport:
+    """Report for the entire commit process."""
+
+    per_network: list[NetworkCommitReport] = field(default_factory=list)
+    timings: dict[str, float] = field(default_factory=dict)
+
+    def add_timing(self, name: str, duration: float) -> None:
+        self.timings[name] = duration
+
+
+def prune_network_tus(
+    net: "Network",
+    net_idx: int,
+    mask_provider: TUMaskProvider,
+) -> NetworkCommitReport:
+    """Unified TU pruning for a single network.
+    Args:
+        net: Network to prune (modified in place)
+        net_idx: Network index in the stack
+        mask_provider: Provider for TU masks
+
+    Returns:
+        NetworkCommitReport with pruning statistics
+    """
+    from .tumasking import get_final_mask
+
+    report = NetworkCommitReport(network_idx=net_idx)
+
+    if not mask_provider.has_masking():
+        net.prune_disabled_tus()
+        return report
+
+    assert mask_provider.tu_id_to_idx is not None
+    tu_id_to_idx = mask_provider.tu_id_to_idx
+    pseudo_log_alpha = mask_provider.get_pseudo_log_alpha_for_network(net_idx)
+
+    original_output_proteins = net.get_output_proteins()
+    net.prune_disabled_tus(pseudo_log_alpha, tu_id_to_idx)
+
+    edges_to_remove = []
+    for edge_id, edge in net.compute_graph.edges.items():
+        tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+        if not tu_ids:
+            continue
+        all_disabled = True
+        for tu_id in tu_ids:
+            if tu_id not in tu_id_to_idx:
+                all_disabled = False
+                break
+            tu_idx = tu_id_to_idx[tu_id]
+            assert 0 <= tu_idx < pseudo_log_alpha.shape[0], (
+                f"tu_idx {tu_idx} out of bounds for mask shape {pseudo_log_alpha.shape}"
+            )
+            mask = get_final_mask(pseudo_log_alpha[tu_idx : tu_idx + 1])[0]
+            if float(mask) > 0:
+                all_disabled = False
+                break
+        if all_disabled and tu_ids:
+            edges_to_remove.append(edge_id)
+            report.pruned_tu_count += 1
+
+    for edge_id in edges_to_remove:
+        del net.compute_graph.edges[edge_id]
+
+    dead_ern_recs = net._cleanup_ern_nodes(pseudo_log_alpha, tu_id_to_idx)
+    report.dead_ern_recs = dead_ern_recs
+
+    additional_disabled = net.metadata.pop("_additional_disabled_tus", set())
+    report.cascade_disabled_tus = additional_disabled
+
+    if additional_disabled:
+        for edge_id, edge in list(net.compute_graph.edges.items()):
+            tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+            if any(tu_id in additional_disabled for tu_id in tu_ids):
+                del net.compute_graph.edges[edge_id]
+
+        disabled_source_ids = set()
+        for tu_id in additional_disabled:
+            for node in net.compute_graph.get_nodes_by_type("source"):
+                tu_names = node.extra.get("tu_names_by_slot", {})
+                cotx_group = node.extra.get("cotx_group", "")
+                for tu_name in tu_names.values():
+                    full_tu_id = f"{tu_name}_{cotx_group}" if cotx_group else tu_name
+                    if full_tu_id in additional_disabled:
+                        disabled_source_ids.add(node.node_id)
+                        break
+
+        for edge_id, edge in list(net.compute_graph.edges.items()):
+            if edge.source_id in disabled_source_ids or edge.target_id in disabled_source_ids:
+                del net.compute_graph.edges[edge_id]
+        for node_id in disabled_source_ids:
+            if node_id in net.compute_graph.nodes:
+                del net.compute_graph.nodes[node_id]
+
+        _renormalize_aggregation_after_cascade(net, disabled_source_ids)
+
+    net._cleanup_orphaned_downstream_nodes()
+    net._cleanup_orphaned_bias_nodes()
+    net._cleanup_orphaned_input_nodes(original_output_proteins)
+    net._cleanup_orphaned_transcription_nodes()
+
+    return report
+
+
+def _renormalize_aggregation_after_cascade(net: "Network", disabled_source_ids: set[int]) -> None:
+    """Renormalize aggregation ratios after cascade-disabled sources are removed."""
+    if not disabled_source_ids:
+        return
+    if net.compute_graph is None:
+        return
+
+    from biocomp.nodes.aggregation import renormalize_members_after_removal
+
+    graph = net.compute_graph
+    for node in graph.get_nodes_by_type("aggregation"):
+        if node.extra is None:
+            continue
+
+        source_id_to_member: dict[int, str] = {}
+        for edge in graph.get_incoming_edges(node.node_id):
+            src_node = graph.nodes.get(edge.source_id)
+            if src_node and src_node.node_type == "source" and src_node.extra:
+                member_id = src_node.extra.get("member_id")
+                if member_id:
+                    source_id_to_member[edge.source_id] = str(member_id)
+
+        members_to_remove: set[str] = set()
+        for src_id in disabled_source_ids:
+            if src_id in source_id_to_member:
+                members_to_remove.add(source_id_to_member[src_id])
+
+        if not members_to_remove:
+            continue
+
+        renormalize_members_after_removal(node.extra, members_to_remove)
+
+
+def rebuild_network_from_recipe(
+    net: "Network",
+    net_idx: int,
+    strip_ern_recs: set[tuple[str, str]],
+    options: CommitOptions,
+) -> "Network":
+    """Rebuild network via recipe roundtrip for clean graph structure.
+
+    This ensures orphan nodes are removed and the graph is consistent.
+
+    Args:
+        net: Network to rebuild
+        net_idx: Network index (for logging)
+        strip_ern_recs: ERN records to strip from recipe
+        options: Commit options
+
+    Returns:
+        Rebuilt network (or empty network if rebuild fails)
+    """
+    from .graphengine import GraphState
+    from .network import Network, recipe_to_networks
+    import biocomp.biorules as br
+
+    try:
+        original_input_proteins = net.get_inverted_input_proteins()
+    except (AssertionError, IndexError, KeyError):
+        original_input_proteins = None
+
+    output_nodes = [n for n in net.compute_graph.nodes.values() if n.node_type == "output"]
+    if len(output_nodes) != 1:
+        original_outputs = ()
+    else:
+        try:
+            original_outputs = tuple(sorted(net.get_dependent_output_proteins()))
+        except (AssertionError, IndexError, KeyError):
+            original_outputs = ()
+
+    if len(original_outputs) == 0:
+        empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
+        empty_net.name = net.name
+        empty_net.metadata = net.metadata
+        return empty_net
+
+    try:
+        recipe = net.to_recipe(strip_ern_recs=strip_ern_recs)
+    except (AssertionError, IndexError, KeyError):
+        empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
+        empty_net.name = net.name
+        empty_net.metadata = net.metadata
+        return empty_net
+
+    if not recipe.content:
+        empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
+        empty_net.name = net.name
+        empty_net.metadata = net.metadata
+        return empty_net
+
+    rebuilt = recipe_to_networks(
+        recipe,
+        br.ALL_RULES,
+        invert=True,
+        inversion_mode="all",
+        skip_input_order_validation=True,
+    )
+
+    if len(rebuilt) == 0:
+        logger.warning(
+            f"COMMIT: Recipe '{recipe.name}' produced no valid networks "
+            f"(all inversions degenerate). Returning empty network."
+        )
+        empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
+        empty_net.name = net.name
+        empty_net.metadata = net.metadata
+        return empty_net
+
+    if len(rebuilt) == 1:
+        rebuilt_net = rebuilt[0]
+    else:
+        matching = [
+            r
+            for r in rebuilt
+            if tuple(sorted(r.get_dependent_output_proteins())) == original_outputs
+        ]
+        assert len(matching) == 1, (
+            f"COMMIT ERROR: Recipe '{recipe.name}' produced {len(rebuilt)} inversions, "
+            f"but {len(matching)} match original outputs {original_outputs}. "
+            f"Rebuilt: {[tuple(sorted(r.get_dependent_output_proteins())) for r in rebuilt]}"
+        )
+        rebuilt_net = matching[0]
+
+    try:
+        rebuilt_dep_outputs = tuple(sorted(rebuilt_net.get_dependent_output_proteins()))
+    except (AssertionError, KeyError):
+        rebuilt_dep_outputs = ()
+
+    if rebuilt_dep_outputs != original_outputs:
+        logger.warning(
+            f"COMMIT: Recipe roundtrip changed dependent outputs from {original_outputs} "
+            f"to {rebuilt_dep_outputs}. Marker TUs may have been pruned. "
+            f"Using rebuilt network for consistency with inference."
+        )
+
+    original_nb_inputs = net.nb_inputs
+    rebuilt_nb_inputs = rebuilt_net.nb_inputs
+    if rebuilt_nb_inputs != original_nb_inputs:
+        logger.warning(
+            f"COMMIT: Recipe roundtrip changed nb_inputs from {original_nb_inputs} "
+            f"to {rebuilt_nb_inputs}. Inverted inputs may have been lost. "
+            f"Using rebuilt network (pruned network may have broken structure)."
+        )
+
+    rebuilt_net.name = net.name
+    rebuilt_net.metadata = net.metadata
+
+    if options.preserve_input_order and original_input_proteins is not None:
+        try:
+            rebuilt_input_proteins = rebuilt_net.get_inverted_input_proteins()
+            if set(rebuilt_input_proteins) == set(original_input_proteins):
+                rebuilt_net.apply_input_order(original_input_proteins)
+                logger.debug(
+                    f"COMMIT: Restored input ordering {original_input_proteins} "
+                    f"(was {rebuilt_input_proteins})"
+                )
+        except (AssertionError, IndexError, KeyError) as e:
+            logger.debug(f"COMMIT: Could not restore input ordering: {e}")
+
+    return rebuilt_net
+
+
+def commit_networks(
+    networks: list["Network"],
+    layers: list["StackLayer"],
+    params: "ParameterTree",
+    options: CommitOptions,
+    tu_id_to_idx: dict[str, int] | None = None,
+    node_map: dict[tuple[int, int], tuple[int, int]] | None = None,
+) -> tuple[list["Network"], CommitReport]:
+    """Core commit implementation.
+
+    This is the main function that ComputeStack.commit() delegates to.
+
+    Args:
+        networks: List of networks to commit
+        layers: Stack layers for node-level commits
+        params: Parameter tree with trained parameters
+        options: Commit configuration
+        tu_id_to_idx: TU ID to index mapping (for TU masking)
+        node_map: Node map for stack operations
+
+    Returns:
+        Tuple of (committed_networks, report)
+    """
+    from .compute import ComputeStack
+
+    report = CommitReport()
+    t0 = _time.perf_counter()
+
+    t1 = _time.perf_counter()
+    network_copies = [deepcopy(net) for net in networks]
+    t2 = _time.perf_counter()
+    report.add_timing("deepcopy", t2 - t1)
+    logger.debug(f"COMMIT TIMING: deepcopy {len(network_copies)} networks: {t2 - t1:.3f}s")
+
+    temp_stack = ComputeStack(network_copies, layers)
+    temp_stack.node_map = node_map
+
+    t3 = _time.perf_counter()
+    for layer in layers:
+        layer.commit(params, stack=temp_stack, collapse_to_part=options.collapse_to_part)
+    t4 = _time.perf_counter()
+    report.add_timing("layer_commits", t4 - t3)
+    logger.debug(f"COMMIT TIMING: layer commits ({len(layers)} layers): {t4 - t3:.3f}s")
+
+    t5 = _time.perf_counter()
+    mask_provider = TUMaskProvider.from_params(params, tu_id_to_idx, len(network_copies))
+    dead_ern_recs_by_net: dict[int, set[tuple[str, str]]] = {}
+
+    if options.prune_tus:
+        for net_idx, net in enumerate(network_copies):
+            net_report = prune_network_tus(net, net_idx, mask_provider)
+            dead_ern_recs_by_net[net_idx] = net_report.dead_ern_recs
+            report.per_network.append(net_report)
+
+    t6 = _time.perf_counter()
+    report.add_timing("tu_pruning", t6 - t5)
+    logger.debug(f"COMMIT TIMING: TU pruning: {t6 - t5:.3f}s")
+
+    if options.roundtrip_rebuild:
+
+        def _rebuild(net_idx_and_net: tuple[int, "Network"]) -> "Network":
+            net_idx, net = net_idx_and_net
+            strip_ern_recs = dead_ern_recs_by_net.get(net_idx, set())
+            return rebuild_network_from_recipe(net, net_idx, strip_ern_recs, options)
+
+        n_workers = min(len(network_copies), options.max_rebuild_workers)
+        indexed_networks = list(enumerate(network_copies))
+
+        if n_workers > 1:
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                final_networks = list(executor.map(_rebuild, indexed_networks))
+        else:
+            final_networks = [_rebuild(idx_net) for idx_net in indexed_networks]
+    else:
+        final_networks = network_copies
+
+    t7 = _time.perf_counter()
+    report.add_timing("roundtrip_rebuild", t7 - t6)
+    logger.debug(f"COMMIT TIMING: roundtrip rebuild ({len(network_copies)} nets): {t7 - t6:.3f}s")
+
+    report.add_timing("total", t7 - t0)
+    logger.debug(f"COMMIT TIMING: TOTAL: {t7 - t0:.3f}s")
+
+    return final_networks, report
 
 
 def commit_structure(
     stack: "ComputeStack",
     params: "ParameterTree",
+    lock_ratios: bool = False,
     **kwargs,
-):
+) -> list["Network"]:
     """Commit only structural changes (pruning, graph cleanup) without collapsing embeddings."""
-    return stack.commit(params, collapse_to_part=False, **kwargs)
+    options = CommitOptions.for_structure_only()
+    if lock_ratios:
+        from dataclasses import replace
+
+        options = replace(options, lock_ratios=True)
+
+    networks, _ = commit_networks(
+        stack.networks,
+        stack.layers,
+        params,
+        options,
+        tu_id_to_idx=getattr(stack, "tu_id_to_idx", None),
+        node_map=stack.node_map,
+    )
+    return networks
 
 
 def commit_final(
     stack: "ComputeStack",
     params: "ParameterTree",
     **kwargs,
-):
+) -> list["Network"]:
     """Full commit including collapse/quantization to discrete parts."""
-    return stack.commit(params, collapse_to_part=True, **kwargs)
+    options = CommitOptions.for_final()
+    networks, _ = commit_networks(
+        stack.networks,
+        stack.layers,
+        params,
+        options,
+        tu_id_to_idx=getattr(stack, "tu_id_to_idx", None),
+        node_map=stack.node_map,
+    )
+    return networks

@@ -19,6 +19,107 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _ensure_output_tu_indices(params: "ParameterTree", stack: "ComputeStack") -> None:
+    if stack.layers is None:
+        return
+    if stack.tu_id_to_idx is None:
+        return
+
+    from biocomp.tumasking import build_output_tu_indices
+    from biocomp.nodeutils import NON_GRAD_TAG
+
+    for layer in stack.layers:
+        if layer.f_type != "aggregation":
+            continue
+        assert layer.namespace is not None, "Aggregation layer missing namespace"
+        output_tu_path = f"{layer.namespace}/output_tu_indices"
+        if output_tu_path in params:
+            continue
+        n_outputs = layer.get_n_outputs()
+        tu_indices = build_output_tu_indices(stack, layer.nodes, stack.tu_id_to_idx, n_outputs)
+        params.at(output_tu_path, tu_indices, tags=[NON_GRAD_TAG], overwrite=None)
+
+
+def _get_node_ratios(
+    params: "ParameterTree",
+    namespace: str,
+    node_idx: int,
+    n_outputs: int,
+) -> np.ndarray:
+    from biocomp.nodes.aggregation import _decode_latent_ratios
+
+    latent_z_path = f"{namespace}/latent_z"
+    if latent_z_path in params:
+        z = np.asarray(params[latent_z_path][node_idx])
+        W1 = np.asarray(params[f"{namespace}/latent_W1"][node_idx])
+        b1 = np.asarray(params[f"{namespace}/latent_b1"][node_idx])
+        W2 = np.asarray(params[f"{namespace}/latent_W2"][node_idx])
+        b2 = np.asarray(params[f"{namespace}/latent_b2"][node_idx])
+        raw_ratios = _decode_latent_ratios(z, W1, b1, W2, b2)[:n_outputs]
+        ratio_min = np.asarray(params[f"{namespace}/ratio_min"][node_idx][:n_outputs])
+        ratio_max = np.asarray(params[f"{namespace}/ratio_max"][node_idx][:n_outputs])
+        ratios = np.clip(raw_ratios, ratio_min, ratio_max)
+    else:
+        ratios = np.asarray(params[f"{namespace}/ratios"][node_idx][:n_outputs])
+        ratio_min = np.asarray(params[f"{namespace}/ratio_min"][node_idx][:n_outputs])
+        ratio_max = np.asarray(params[f"{namespace}/ratio_max"][node_idx][:n_outputs])
+        ratios = np.clip(ratios, ratio_min, ratio_max)
+    return ratios
+
+
+def _collect_ratio_pruning_candidates(
+    params: "ParameterTree",
+    stack: "ComputeStack",
+    network_id: int,
+    ratio_threshold: float,
+) -> tuple[set[str], set[str], dict[str, float]]:
+    from biocomp.tumasking import extract_tu_ids_from_network, build_output_tu_indices
+
+    tu_id_to_idx = stack.tu_id_to_idx or {}
+    idx_to_id = {idx: tu_id for tu_id, idx in tu_id_to_idx.items()}
+
+    all_tu_ids = extract_tu_ids_from_network(stack.networks[network_id])
+    tu_strengths = {tu_id: 0.0 for tu_id in all_tu_ids}
+    candidates: set[str] = set()
+
+    if stack.layers is None:
+        return candidates, all_tu_ids, tu_strengths
+
+    for layer in stack.layers:
+        if layer.f_type != "aggregation":
+            continue
+        namespace = layer.namespace
+        assert namespace is not None, "Aggregation layer missing namespace"
+        n_outputs = layer.get_n_outputs()
+
+        output_tu_path = f"{namespace}/output_tu_indices"
+        if output_tu_path in params:
+            tu_indices = np.asarray(params[output_tu_path])
+        else:
+            tu_indices = np.asarray(
+                build_output_tu_indices(stack, layer.nodes, tu_id_to_idx, n_outputs)
+            )
+
+        for node_idx, node in enumerate(layer.nodes):
+            if node.network_id != network_id:
+                continue
+            ratios = _get_node_ratios(params, namespace, node_idx, n_outputs)
+            for slot in range(min(n_outputs, len(ratios))):
+                tu_idx = int(tu_indices[node_idx, slot])
+                if tu_idx < 0:
+                    continue
+                tu_id = idx_to_id.get(tu_idx)
+                if tu_id is None:
+                    continue
+                ratio_val = float(np.asarray(ratios[slot]).item())
+                strength = abs(ratio_val)
+                if strength > tu_strengths.get(tu_id, 0.0):
+                    tu_strengths[tu_id] = strength
+                if strength < ratio_threshold:
+                    candidates.add(tu_id)
+
+    return candidates, all_tu_ids, tu_strengths
+
 def identify_tus_to_prune(
     params: "ParameterTree",
     stack: "ComputeStack",
@@ -26,44 +127,23 @@ def identify_tus_to_prune(
     ratio_threshold: float,
     use_soft_pruning: bool,
     preserve_minimum: int,
+    auto_lock_topology_tus: bool = True,
 ) -> dict[int, set[str]]:
     """Identify TUs to remove for each network based on normalized ratios."""
-    from biocomp.paramintrospect import introspect_stack, aggregate_by_tu, ParamKind
     from biocomp.tumasking import get_log_alpha_from_params, LATENT_TU_Z_PATH
 
     tus_to_remove: dict[int, set[str]] = {}
+    stack.ensure_tu_mapping(auto_lock_topology_tus=auto_lock_topology_tus)
     no_masking_tu_ids = stack.no_masking_tu_ids or set()
     tu_id_to_idx = stack.tu_id_to_idx or {}
 
     has_tu_masking = TU_LOG_ALPHA_PATH in params or LATENT_TU_Z_PATH in params
 
     for net_idx in range(len(stack.networks)):
-        infos = introspect_stack(stack, params, net_idx)
-        tu_data = aggregate_by_tu(infos)
-
-        candidates: set[str] = set()
-        all_tu_ids: set[str] = set()
-        tu_strengths: dict[str, float] = {}
-
-        for tu_id, entries in tu_data.items():
-            all_tu_ids.add(tu_id)
-            tu_strengths[tu_id] = 0.0
-
-            if tu_id in no_masking_tu_ids:
-                continue
-
-            for node_type, tg in entries:
-                for pv in tg.params:
-                    if pv.kind == ParamKind.RATIO:
-                        ratio_val = float(
-                            pv.value if isinstance(pv.value, (int, float)) else pv.value[0]
-                        )
-                        tu_strengths[tu_id] = max(tu_strengths[tu_id], abs(ratio_val))
-                        if abs(ratio_val) < ratio_threshold:
-                            candidates.add(tu_id)
-                            break
-                if tu_id in candidates:
-                    break
+        candidates, all_tu_ids, tu_strengths = _collect_ratio_pruning_candidates(
+            params, stack, net_idx, ratio_threshold
+        )
+        candidates = {tid for tid in candidates if tid not in no_masking_tu_ids}
 
         if use_soft_pruning and has_tu_masking:
             try:
@@ -96,11 +176,60 @@ def identify_tus_to_prune(
     return tus_to_remove
 
 
+def _apply_hard_pruning_mask(
+    params: "ParameterTree",
+    stack: "ComputeStack",
+    tus_to_remove: dict[int, set[str]],
+    auto_lock_topology_tus: bool = True,
+) -> int:
+    from biocomp.tumasking import set_binary_tu_mask
+
+    tu_id_to_idx = stack.ensure_tu_mapping(auto_lock_topology_tus=auto_lock_topology_tus)
+    no_masking_tu_ids = stack.no_masking_tu_ids or set()
+
+    idx_to_id = {idx: tu_id for tu_id, idx in tu_id_to_idx.items()}
+    tu_ids = [idx_to_id[i] for i in range(len(idx_to_id))]
+
+    missing = set()
+    disabled_tus: dict[int, set[str]] = {}
+    applied_pairs: set[tuple[int, int]] = set()
+
+    for net_idx, tu_ids_in_net in tus_to_remove.items():
+        assert 0 <= net_idx < len(stack.networks), (
+            f"network_id {net_idx} out of range for {len(stack.networks)} networks"
+        )
+        for tu_id in tu_ids_in_net:
+            if tu_id in no_masking_tu_ids:
+                continue
+            if tu_id not in tu_id_to_idx:
+                missing.add(tu_id)
+                continue
+            disabled_tus.setdefault(net_idx, set()).add(tu_id)
+            applied_pairs.add((net_idx, tu_id_to_idx[tu_id]))
+
+    assert not missing, (
+        f"Hard-prune requested unknown TU IDs (sample): {sorted(list(missing))[:5]}"
+    )
+
+    set_binary_tu_mask(
+        params,
+        tu_ids=tu_ids,
+        tu_id_to_idx=tu_id_to_idx,
+        n_networks=len(stack.networks),
+        disabled_tus=disabled_tus,
+    )
+    _ensure_output_tu_indices(params, stack)
+
+    return len(applied_pairs)
+
+
 def _merge_surviving_params(
     old_params: "ParameterTree",
     new_params: "ParameterTree",
 ) -> "ParameterTree":
     """Transfer compatible params from old to new by path + shape matching."""
+    from biocomp.parameters import isArrayRef
+
     skip_patterns = ("tu_log_alpha", "latent_tu", "tu_binary_mask", "protected_tu")
 
     for path, old_val in old_params.data.iter_leaves():
@@ -109,9 +238,17 @@ def _merge_surviving_params(
         if any(p in path_str for p in skip_patterns):
             continue
 
+        if isArrayRef(old_val):
+            continue
+
         try:
-            new_val = new_params[path_str]
+            new_leaf = new_params.data.get_at(path_str, get_leaf_value=False)
         except (KeyError, TypeError):
+            continue
+
+        new_val = new_leaf.value
+
+        if isArrayRef(new_val):
             continue
 
         if not hasattr(old_val, "shape") or not hasattr(new_val, "shape"):
@@ -186,11 +323,19 @@ def hard_prune_and_rebuild(
     from .design import DesignManager, initialize_params
     from .stack_commit import commit_structure
 
+    stack.ensure_tu_mapping(auto_lock_topology_tus=dconf.auto_lock_topology_tus)
     old_tu_id_to_idx = stack.tu_id_to_idx or {}
     old_n_tus = len(old_tu_id_to_idx)
     n_networks = len(stack.networks)
 
     params_for_commit = deepcopy(params)
+
+    applied = _apply_hard_pruning_mask(
+        params_for_commit,
+        stack,
+        tus_to_remove,
+        auto_lock_topology_tus=dconf.auto_lock_topology_tus,
+    )
 
     if TU_LOG_ALPHA_PATH in params_for_commit and old_tu_id_to_idx:
         tu_log_alpha = params_for_commit[TU_LOG_ALPHA_PATH]
@@ -207,7 +352,9 @@ def hard_prune_and_rebuild(
     committed_networks = commit_structure(stack, params_for_commit, lock_ratios=lock_ratios)
 
     total_removed = sum(len(tus) for tus in tus_to_remove.values())
-    logger.info(f"[HARD-PRUNE] Committed networks, removed {total_removed} TUs total")
+    logger.info(
+        f"[HARD-PRUNE] Committed networks, requested {total_removed} TUs, applied {applied}"
+    )
 
     new_dmanager = DesignManager(
         targets=dmanager.targets,
@@ -286,7 +433,8 @@ def run_with_hard_pruning(
     lock_ratios: bool = False,
 ):
     """Design optimization with periodic hard-pruning."""
-    from .design import DesignConfig, _PhaseTimer, start
+    from .design import start
+    from .design_session import PhaseTimer as _PhaseTimer
 
     if dconf.n_replicates != 1:
         raise ValueError(
@@ -332,33 +480,14 @@ def run_with_hard_pruning(
         segment_epochs = 1
         segment_batches_per_epoch = segment_steps * dconf.batches_per_step
 
-        segment_config = DesignConfig(
-            n_replicates=dconf.n_replicates,
-            n_epochs=segment_epochs,
-            batch_size=dconf.batch_size,
-            n_batches_per_epoch=segment_batches_per_epoch,
-            batches_per_step=dconf.batches_per_step,
-            reshuffle_batches=dconf.reshuffle_batches,
-            tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
-            tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
-            use_latent_ratios=dconf.use_latent_ratios,
-            latent_dim=dconf.latent_dim,
-            latent_hidden_dim=dconf.latent_hidden_dim,
-            enable_tu_masking=dconf.enable_tu_masking,
-            use_latent_tu_masking=dconf.use_latent_tu_masking,
-            latent_tu_dim=dconf.latent_tu_dim,
-            latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
-            auto_lock_topology_tus=dconf.auto_lock_topology_tus,
-            use_probabilistic_or=dconf.use_probabilistic_or,
-            use_two_timescale=dconf.use_two_timescale,
-            tu_mask_lr_scale=dconf.tu_mask_lr_scale,
-            hard_pruning_enabled=False,
-            pluggable_optimizer=None,
-            loss_function=dconf.loss_function,
-            optimizer_stack=dconf.optimizer_stack,
-            keep_in_history=dconf.keep_in_history,
-            seed=int(jax.random.key_data(jax.random.fold_in(loop_key, segment_idx))[0]) % (2**31),
-        )
+        new_seed = int(jax.random.key_data(jax.random.fold_in(loop_key, segment_idx))[0]) % (2**31)
+        segment_config = dconf.model_copy(update={
+            "n_epochs": segment_epochs,
+            "n_batches_per_epoch": segment_batches_per_epoch,
+            "hard_pruning_enabled": False,
+            "pluggable_optimizer": None,
+            "seed": new_seed,
+        })
 
         logger.info(
             f"[HARD-PRUNE] Segment {segment_idx + 1}/{n_segments}: steps {segment_start_step}-{segment_end_step}"
@@ -401,6 +530,7 @@ def run_with_hard_pruning(
                 ratio_threshold=dconf.hard_pruning_ratio_threshold,
                 use_soft_pruning=dconf.enable_tu_masking,
                 preserve_minimum=dconf.hard_pruning_preserve_minimum_tus,
+                auto_lock_topology_tus=dconf.auto_lock_topology_tus,
             )
 
             timer.end("prune")

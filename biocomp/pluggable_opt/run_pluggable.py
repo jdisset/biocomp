@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from tqdm import tqdm
 
 from ..logging_config import get_logger
-from ..design import initialize_params, _create_loss_function, _PhaseTimer
+from ..design_session import DesignSession
 from .codec import GenomeCodec
 from .optimizers import NSGA2DesignOptimizer, NSGA2DesignState
 
@@ -18,59 +18,31 @@ logger = get_logger(__name__)
 
 
 def run_pluggable(
-    dmanager: DesignManager,
-    dconf: DesignConfig,
+    dmanager: "DesignManager",
+    dconf: "DesignConfig",
     model,
     loggers: list[tuple[int, Callable]] | None = None,
     logger_objects: list | None = None,
     async_handler=None,
     lock_ratios: bool = False,
 ):
-    timer = _PhaseTimer()
+    optimizer = dconf.pluggable_optimizer
+    is_nsga2 = isinstance(optimizer, NSGA2DesignOptimizer)
+    nsga2_n_tus = dmanager.n_tus if is_nsga2 else 0
+
+    session = DesignSession.create(
+        dmanager, dconf, model,
+        lock_ratios=lock_ratios,
+        n_replicates_override=1,
+        sample_shape_override=(len(dmanager.networks), 1, 1, 1, dconf.batch_size),
+    )
+    initial_params = jax.tree.map(lambda x: x.squeeze(0), session.initial_params)
+
     logger.info("=" * 60)
     logger.info("DESIGN OPTIMIZATION (PLUGGABLE OPTIMIZER)")
     logger.info("=" * 60)
 
-    pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
-    optimizer = dconf.pluggable_optimizer
-
-    is_nsga2 = isinstance(optimizer, NSGA2DesignOptimizer)
-    n_tus = dmanager.n_tus if dmanager.enable_tu_masking else 0
-    nsga2_n_tus = dmanager.n_tus if is_nsga2 else 0
-    n_networks = len(dmanager.networks)
-
-    timer.start("stack", "[1/5] Building compute stack...")
-    stack = dmanager.build_stack(
-        model,
-        unlock_ratios=not lock_ratios,
-        use_latent_ratios=dconf.use_latent_ratios,
-        latent_dim=dconf.latent_dim,
-        latent_hidden_dim=dconf.latent_hidden_dim,
-        auto_lock_topology_tus=dconf.auto_lock_topology_tus,
-    )
-    timer.end("stack")
-
-    timer.start("params", "[2/5] Initializing parameters...")
-    initial_params = initialize_params(
-        stack,
-        n_replicates=1,
-        n_targets=dmanager.n_targets,
-        shared_params=model.shared_params,
-        key=pkey,
-        n_tus=n_tus,
-        n_networks=n_networks,
-        tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
-        tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
-        use_latent_tu_masking=dconf.use_latent_tu_masking,
-        latent_tu_dim=dconf.latent_tu_dim,
-        latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
-        no_masking_tu_ids=stack.no_masking_tu_ids,
-        tu_id_to_idx=stack.tu_id_to_idx,
-    )
-    initial_params = jax.tree.map(lambda x: x.squeeze(0), initial_params)
-    timer.end("params")
-
-    timer.start("codec", "[3/5] Creating codec and loss function...")
+    session.timer.start("codec", "[5/5] Creating codec...")
     codec = GenomeCodec.from_params(
         initial_params,
         static_tags=("shared", "non_grad"),
@@ -82,33 +54,19 @@ def run_pluggable(
     if codec.param_dim == 0:
         raise ValueError(
             "No parameters to optimize: genome dimension is 0. "
-            "This typically happens with zero-freedom recipes where all ratios are explicitly locked. "
-            "Design optimization requires at least some unlocked parameters. "
-            "Consider using a recipe with unlocked ratios (e.g., T_2_ratios_only.yaml) or "
-            "check that your recipe doesn't have `locked: true` on all ratio specifications."
+            "This typically happens with zero-freedom recipes where all ratios are explicitly locked."
         )
+    session.timer.end("codec")
 
-    loss_fn, num_z, _ = _create_loss_function(stack, dmanager, dconf, initial_params)
-    timer.end("codec")
-
-    timer.start("objective", "[4/5] Creating objective function...")
-    effective_batch_size = dconf.batch_size
-    if dmanager.is_lattice_mode:
-        grid_res = dmanager.grid_resolution
-        assert grid_res is not None
-        effective_batch_size *= grid_res[0] * grid_res[1]
-
-    xbatches_list, ybatches_list = dmanager.get_samples(
-        (len(dmanager.networks), 1, 1, 1, dconf.batch_size),
-        bkey,
-        share_across_networks=True,
+    session.timer.start("objective", "[6/6] Creating objective function...")
+    x_samples = jnp.concatenate([session.xbatches], axis=-1).reshape(
+        session.effective_batch_size, dmanager.n_targets, -1
     )
-    x_samples = jnp.concatenate(xbatches_list, axis=-1).reshape(
-        effective_batch_size, dmanager.n_targets, -1
-    )
-    y_samples = ybatches_list[0].reshape(effective_batch_size, dmanager.n_targets, -1)
-    fixed_z = jnp.full((x_samples.shape[0], *num_z), 0.5)
+    y_samples = session.ybatches.reshape(session.effective_batch_size, dmanager.n_targets, -1)
+    fixed_z = jnp.full((x_samples.shape[0], *session.num_z), 0.5)
     fixed_key = jax.random.key(42)
+    loss_fn = session.loss_fn
+    stack = session.stack
 
     def single_objective(flat_genome: jnp.ndarray, step: jnp.ndarray) -> float:
         params = codec.decode(flat_genome, apply_constraints=True)
@@ -130,13 +88,12 @@ def run_pluggable(
         return aux.get("yhatdep")
 
     compiled_get_yhatdep = jax.jit(get_yhatdep_nsga2 if is_nsga2 else get_yhatdep)
-    timer.end("objective")
+    session.timer.end("objective")
 
-    timer.start("opt_init", "[5/5] Initializing optimizer...")
-    init_key, opt_key = jax.random.split(loop_key)
+    session.timer.start("opt_init", "[7/7] Initializing optimizer...")
+    init_key, opt_key = jax.random.split(session.loop_key)
 
     if is_nsga2:
-
         def nsga2_objective(flat_genome: jnp.ndarray) -> float:
             continuous_genes = flat_genome[nsga2_n_tus:]
             params = codec.decode(continuous_genes, apply_constraints=True)
@@ -147,11 +104,8 @@ def run_pluggable(
             return loss
 
         opt_state = optimizer.init(
-            init_key,
-            flat_params,
-            nsga2_objective,
-            n_tus=nsga2_n_tus,
-            continuous_dim=codec.param_dim,
+            init_key, flat_params, nsga2_objective,
+            n_tus=nsga2_n_tus, continuous_dim=codec.param_dim,
         )
         step_objective_fn = nsga2_objective
     else:
@@ -163,7 +117,7 @@ def run_pluggable(
         )
         step_objective_fn = compiled_pop_objective
     logger.info(f"  Initial loss: {float(opt_state.best_loss):.6f}")
-    timer.end("opt_init")
+    session.timer.end("opt_init")
 
     logger.info("=" * 60)
     logger.info("STARTING OPTIMIZATION LOOP")
@@ -200,9 +154,9 @@ def run_pluggable(
 
     pbar.close()
     logger.info("=" * 60)
-    logger.info(f"OPTIMIZATION COMPLETE in {timer.total():.2f}s")
+    logger.info(f"OPTIMIZATION COMPLETE in {session.timer.total():.2f}s")
     logger.info(f"  Final loss: {float(opt_state.best_loss):.6f}, steps: {int(opt_state.step)}")
-    timer.summary()
+    session.timer.summary()
 
     best_genome = opt_state.best_params
     if is_nsga2:
