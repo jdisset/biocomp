@@ -17,17 +17,16 @@ import numpy as np
 import dracon as dr
 
 import biocomp.biorules as br
-from biocomp.compute import ComputeStack
 from biocomp.library import LibraryContext, load_lib
 from biocomp.network import recipe_to_networks
 from biocomp.recipe import Recipe
 from biocomp.design import DesignManager, initialize_params
 from biocomp.design_targets import SVGTarget
 from biocomp.tumasking import (
-    build_tu_id_mapping,
     TU_LOG_ALPHA_PATH,
     get_final_mask,
 )
+from biocomp.tumasking_strategy import build_tu_masking_strategy, TUMaskingMode
 from biocomp.fingerprint import (
     _generate_canonical_grid,
     FINGERPRINT_SEED,
@@ -142,16 +141,18 @@ def masked_scaffold_setup(lib, scaffold_recipe, designer_model):
         n_networks = len(dmanager.networks)
         tu_id_to_idx = dmanager.tu_id_to_idx
 
+        strategy = build_tu_masking_strategy(
+            mode=TUMaskingMode.DIRECT, init_mean=10.0, init_std=0.0
+        )
         params_full = initialize_params(
             stack,
             n_replicates=n_replicates,
             n_targets=n_targets,
             shared_params=designer_model.shared_params,
             key=key,
+            strategy=strategy,
             n_tus=n_tus,
             n_networks=n_networks,
-            tu_log_alpha_init_mean=10.0,
-            tu_log_alpha_init_std=0.0,
             no_masking_tu_ids=stack.no_masking_tu_ids,
             tu_id_to_idx=tu_id_to_idx,
         )
@@ -215,7 +216,7 @@ def test_commit_consistency_with_tu_masking(lib, masked_scaffold_setup, designer
             else:
                 enabled_tu_names.append(tu_name)
 
-        print(f"\n=== TU Masking Debug ===")
+        print("\n=== TU Masking Debug ===")
         print(f"Disabled TUs ({len(disabled_tu_names)}): {disabled_tu_names}")
         print(f"Enabled TUs ({len(enabled_tu_names)}): {enabled_tu_names}")
 
@@ -251,7 +252,7 @@ def test_commit_consistency_with_tu_masking(lib, masked_scaffold_setup, designer
         mean_diff = float(np.mean(np.abs(Y_pre - Y_post)))
         corr = float(np.corrcoef(Y_pre.flatten(), Y_post.flatten())[0, 1])
 
-        print(f"\n=== Prediction Comparison ===")
+        print("\n=== Prediction Comparison ===")
         print(f"Pre-commit:  shape={Y_pre.shape}, range=[{Y_pre.min():.4f}, {Y_pre.max():.4f}]")
         print(f"Post-commit: shape={Y_post.shape}, range=[{Y_post.min():.4f}, {Y_post.max():.4f}]")
         print(f"Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}, Correlation: {corr:.6f}")
@@ -358,16 +359,18 @@ def test_commit_consistency_varying_mask_fraction(
         tu_id_to_idx = dmanager.tu_id_to_idx
         tu_ids = sorted(tu_id_to_idx.keys())
 
+        strategy = build_tu_masking_strategy(
+            mode=TUMaskingMode.DIRECT, init_mean=10.0, init_std=0.0
+        )
         params_full = initialize_params(
             stack,
             n_replicates=n_replicates,
             n_targets=n_targets,
             shared_params=designer_model.shared_params,
             key=key,
+            strategy=strategy,
             n_tus=n_tus,
             n_networks=n_networks,
-            tu_log_alpha_init_mean=10.0,
-            tu_log_alpha_init_std=0.0,
             no_masking_tu_ids=stack.no_masking_tu_ids,
             tu_id_to_idx=tu_id_to_idx,
         )

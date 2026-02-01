@@ -42,7 +42,7 @@ def hard_bias(
 
         keys = jax.random.split(key, len(nodelist))
 
-        for node, k in zip(nodelist, keys):
+        for node, k in zip(nodelist, keys, strict=False):
             extra = node.get(stack).extra
             fluo_specs = extra.get("fluo_bias") or extra.get("fluo_bias_data")
 
@@ -178,7 +178,7 @@ def bias(
 
         keys = jax.random.split(key, len(nodelist))
 
-        for node, k in zip(nodelist, keys):
+        for node, k in zip(nodelist, keys, strict=False):
             extra = node.get(stack).extra
             fluo_specs = extra.get("fluo_bias") or extra.get("fluo_bias_data")
 

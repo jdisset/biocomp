@@ -76,6 +76,9 @@ def test_logged_vs_committed_long_optimization(design_setup_long):
         enable_tu_masking=True,
     )
 
+    from biocomp.tumasking_strategy import TUMaskingMode
+    from biocomp.design import TUMaskingParams
+
     dconf = DesignConfig(
         n_epochs=10,
         n_batches_per_epoch=64,
@@ -84,8 +87,7 @@ def test_logged_vs_committed_long_optimization(design_setup_long):
         batch_size=1,
         batches_per_step=1,
         use_latent_ratios=True,
-        tu_log_alpha_init_mean=2.0,
-        tu_log_alpha_init_std=0.1,
+        tu_masking=TUMaskingParams(mode=TUMaskingMode.DIRECT, init_mean=2.0, init_std=0.1),
         seed=1920764948,
         loss_function=PartialFunction(
             func=grid_distance_loss,

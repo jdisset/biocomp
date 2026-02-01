@@ -1,12 +1,10 @@
 """Tests for biocomp.fingerprint - deterministic network fingerprinting."""
 
 import numpy as np
-import pytest
 
 from biocomp.fingerprint import (
     _generate_canonical_grid,
     _hash_output,
-    compute_fingerprint,
     compare_fingerprints,
     FINGERPRINT_RESOLUTION,
     FINGERPRINT_SEED,

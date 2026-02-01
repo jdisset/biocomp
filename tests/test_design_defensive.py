@@ -14,8 +14,6 @@ from pathlib import Path
 from jax import grad
 
 from biocomp.graphengine import GraphState, GraphNode, GraphEdge
-
-RESOURCES_DIR = Path(__file__).parent / "resources"
 from biocomp.stack_builder import topological_order
 from biocomp.tumasking import (
     hard_concrete_from_uniform,
@@ -24,6 +22,8 @@ from biocomp.tumasking import (
     get_final_mask,
     _validate_hard_concrete_params,
 )
+
+RESOURCES_DIR = Path(__file__).parent / "resources"
 
 
 # ---------------------------------------------------------------------------

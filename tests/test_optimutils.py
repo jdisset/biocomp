@@ -14,7 +14,6 @@ from biocomp.optimutils import (
     as_schedule,
     compile_step,
     run_logger_callbacks,
-    get_checkify_enabled,
     _logger_needs_params_sync,
 )
 from biocomp.utils import PartialFunction, PartialFunctionResult
@@ -359,7 +358,7 @@ class TestCreateCounter:
         state = counter.init(params)
         grads = {"w": jnp.ones(3) * 0.1}
 
-        for i in range(5):
+        for _i in range(5):
             _, state = counter.update(grads, state)
 
         assert state.count == 5

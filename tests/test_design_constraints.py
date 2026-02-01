@@ -80,7 +80,7 @@ class TestZeroFreedomConstraints:
         recipe = load_recipe(recipe_path)
         network, stack, params = build_network_and_params(recipe, designer_model)
 
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "aggregation" in ns and "inv" not in ns:
                 ratio_min_path = f"{ns}/ratio_min"
@@ -106,7 +106,7 @@ class TestZeroFreedomConstraints:
         recipe = load_recipe(recipe_path)
         network, stack, params = build_network_and_params(recipe, designer_model)
 
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "bias" in ns:
                 min_path = f"{ns}/min_value"
@@ -130,7 +130,7 @@ class TestZeroFreedomConstraints:
         recipe = load_recipe(recipe_path)
         network, stack, params = build_network_and_params(recipe, designer_model)
 
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "aggregation" in ns and "inv" not in ns:
                 ratios_path = f"{ns}/ratios"
@@ -150,7 +150,7 @@ class TestZeroFreedomConstraints:
         recipe = load_recipe(recipe_path)
         network, stack, params = build_network_and_params(recipe, designer_model)
 
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "bias" in ns:
                 raw_value_path = f"{ns}/raw_value"
@@ -249,7 +249,7 @@ class TestConstraintClipping:
         recipe = load_recipe(recipe_path)
         network, stack, params = build_network_and_params(recipe, designer_model)
 
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "aggregation" in ns and "inv" not in ns:
                 ratios = np.asarray(params[f"{ns}/ratios"])
@@ -278,7 +278,7 @@ class TestConstraintClipping:
         recipe = load_recipe(recipe_path)
         network, stack, params = build_network_and_params(recipe, designer_model)
 
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "bias" in ns:
                 if f"{ns}/raw_value" in params:
@@ -375,7 +375,7 @@ class TestHeterogeneousConstraints:
         stack_mixed.build(designer_model.compute_config, enable_tu_masking=False)
         params_mixed = stack_mixed.init(jax.random.PRNGKey(42))
 
-        for layer_idx, layer in enumerate(stack_mixed.layers):
+        for layer_idx, _layer in enumerate(stack_mixed.layers):
             ns = stack_mixed.get_layer_namespace(layer_idx)
             if "aggregation" in ns and "inv" not in ns:
                 tags = params_mixed.get_tags(f"{ns}/ratios")
@@ -390,7 +390,7 @@ class TestHeterogeneousConstraints:
         stack_locked.build(designer_model.compute_config, enable_tu_masking=False)
         params_locked = stack_locked.init(jax.random.PRNGKey(42))
 
-        for layer_idx, layer in enumerate(stack_locked.layers):
+        for layer_idx, _layer in enumerate(stack_locked.layers):
             ns = stack_locked.get_layer_namespace(layer_idx)
             if "aggregation" in ns and "inv" not in ns:
                 tags = params_locked.get_tags(f"{ns}/ratios")
@@ -465,7 +465,7 @@ class TestGenomeCodecIntegration:
 
         # Count ratio and bias params that should be excluded
         excluded_count = 0
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "aggregation" in ns and "inv" not in ns:
                 ratios = params[f"{ns}/ratios"]
@@ -479,14 +479,14 @@ class TestGenomeCodecIntegration:
                     excluded_count += np.prod(np.asarray(scale).shape)
 
         # The genome should be smaller when locked params are excluded
-        genome = codec.encode(params)
+        codec.encode(params)
 
         # Get paths in genome
         static, dynamic = params.filter_by_tag(list(codec.static_tags))
         dynamic_paths = [str(path) for path, _ in dynamic.data.iter_leaves()]
 
         # Verify locked ratio paths are not in dynamic params
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "aggregation" in ns and "inv" not in ns:
                 ratios_path = f"{ns}/ratios"
@@ -509,7 +509,7 @@ class TestGenomeCodecIntegration:
 
         # Verify unlocked ratio paths ARE in dynamic params
         found_ratios = False
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "aggregation" in ns and "inv" not in ns:
                 ratios_path = f"{ns}/ratios"
@@ -750,7 +750,7 @@ class TestHeterogeneousTransformConstraints:
         params = ParameterTree.merge(designer_model.shared_params, nonshared)
 
         found_shared_layer = False
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "inv_" in ns:
                 continue
@@ -773,7 +773,7 @@ class TestHeterogeneousTransformConstraints:
         if not found_shared_layer:
             locked_found = False
             unlocked_found = False
-            for layer_idx, layer in enumerate(stack.layers):
+            for layer_idx, _layer in enumerate(stack.layers):
                 ns = stack.get_layer_namespace(layer_idx)
                 if "inv_" in ns:
                     continue
@@ -869,7 +869,7 @@ class TestDesignModeConstraints:
         params = ParameterTree.merge(designer_model.shared_params, nonshared)
 
         # Check that ratios are still locked (min == max)
-        for layer_idx, layer in enumerate(stack.layers):
+        for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "aggregation" in ns and "inv" not in ns:
                 ratio_min_path = f"{ns}/ratio_min"
@@ -1152,7 +1152,7 @@ class TestMultiTopologyDegreesOfFreedom:
                 net1_nodes = [i for i, n in enumerate(layer.nodes) if n.network_id == 1]
 
                 # Both networks should have same constraint pattern
-                for n0, n1 in zip(net0_nodes, net1_nodes):
+                for n0, n1 in zip(net0_nodes, net1_nodes, strict=False):
                     n0_locked = np.allclose(ratio_min[n0], ratio_max[n0])
                     n1_locked = np.allclose(ratio_min[n1], ratio_max[n1])
                     assert n0_locked == n1_locked, (

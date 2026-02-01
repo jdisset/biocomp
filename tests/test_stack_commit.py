@@ -8,6 +8,8 @@ Tests cover:
 - Path equivalence between log_alpha and binary_mask
 """
 
+import dataclasses
+
 import pytest
 import jax
 import jax.numpy as jnp
@@ -24,7 +26,7 @@ from biocomp.stack_commit import (
 )
 from biocomp.tumasking_strategy import get_full_log_alpha
 from biocomp.parameters import ParameterTree
-from biocomp.tumasking import TU_LOG_ALPHA_PATH, TU_BINARY_MASK_PATH
+from biocomp.tumasking import TU_LOG_ALPHA_PATH
 
 
 class TestCommitOptions:
@@ -57,7 +59,7 @@ class TestCommitOptions:
     def test_commit_options_frozen(self):
         """CommitOptions is frozen (immutable)."""
         options = CommitOptions()
-        with pytest.raises(Exception):
+        with pytest.raises(dataclasses.FrozenInstanceError):
             options.prune_tus = False
 
 

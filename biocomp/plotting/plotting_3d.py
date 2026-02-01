@@ -398,7 +398,7 @@ def plot_3d_stack(
                 **props["labels"],
             )
 
-    for i, (f, z) in enumerate(zip(slice_functions, slice_zpositions)):
+    for _i, (f, z) in enumerate(zip(slice_functions, slice_zpositions, strict=False)):
         axin = ax.inset_axes([0, 0, 1, 1], zorder=-z)
         f(axin)
         inset_coords_world = np.array([axin.get_xlim(), axin.get_ylim()])
@@ -541,10 +541,10 @@ def smooth_3d(
     projection_diag_coef: float = PROJ_D,
     colorbar_position=(1.1, 0.4),
     colorbar_size=(0.04, 0.52),
-    colorbar_params: Dict = {},
+    colorbar_params: Dict = None,
     show_inner_spines=True,
     show_slice_ticks=True,
-    smooth_2d_params: Dict = {},
+    smooth_2d_params: Dict = None,
     show_front_face_ticks: bool = False,
     xtitle: Optional[str] = None,
     ytitle: Optional[str] = None,
@@ -559,6 +559,10 @@ def smooth_3d(
     # log warning if data contains nan/inf values
     import logging
 
+    if smooth_2d_params is None:
+        smooth_2d_params = {}
+    if colorbar_params is None:
+        colorbar_params = {}
     logger = logging.getLogger(__name__)
     if not np.all(np.isfinite(X)) or not np.all(np.isfinite(Y)):
         n_invalid = np.sum(~np.all(np.isfinite(X), axis=1) | ~np.all(np.isfinite(Y), axis=1))

@@ -3,8 +3,7 @@
 
 import pytest
 import numpy as np
-import jax.numpy as jnp
-from biocomp.datautils import DataManager, DataConfig, DEFAULT_DATA_CONFIG
+from biocomp.datautils import DataManager, DataConfig
 
 
 class MockNetwork:

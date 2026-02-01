@@ -3,11 +3,10 @@
 import pytest
 import jax
 import jax.numpy as jnp
-from jax import grad, vmap
-import numpy as np
+from jax import grad
 
 from biocomp.parameters import ParameterTree
-from biocomp.designloss import ern_tu_tying_penalty, _ern_tu_tying_single_target
+from biocomp.designloss import ern_tu_tying_penalty
 
 
 def make_ern_params(
@@ -56,7 +55,7 @@ def test_tying_penalty_zero_when_both_disabled():
 
     penalty = ern_tu_tying_penalty(params, namespaces, tu_log_alpha)
 
-    assert float(penalty) == 0.0, f"Both disabled -> neg_la == pos_la -> relu(0) = 0"
+    assert float(penalty) == 0.0, "Both disabled -> neg_la == pos_la -> relu(0) = 0"
 
 
 def test_tying_penalty_positive_when_pos_disabled_neg_enabled():
@@ -101,7 +100,7 @@ def test_gradient_flows_to_tu_log_alpha():
     grads = grad(loss_fn)(tu_log_alpha)
 
     assert jnp.any(jnp.abs(grads) > 1e-4), f"Should have non-zero gradient, got {grads}"
-    assert jnp.all(jnp.isfinite(grads)), f"Gradients should be finite"
+    assert jnp.all(jnp.isfinite(grads)), "Gradients should be finite"
 
 
 def test_gradient_pushes_neg_down():
@@ -188,7 +187,7 @@ def test_always_enabled_tu_handled():
     # should give penalty
     penalty = ern_tu_tying_penalty(params, [ns], tu_log_alpha)
 
-    assert float(penalty) > 1.0, f"neg always-enabled + pos disabled should penalize"
+    assert float(penalty) > 1.0, "neg always-enabled + pos disabled should penalize"
 
 
 def test_jit_compilation():

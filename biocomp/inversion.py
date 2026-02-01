@@ -53,7 +53,7 @@ def invert_all_paths(graph: GraphState, mode: str = "shortest") -> list[GraphSta
     inversions = (
         [{nid: min(paths, key=len) for nid, paths in inv_paths.items()}]
         if mode == "shortest"
-        else [dict(zip(inv_paths.keys(), combo)) for combo in product(*inv_paths.values())]
+        else [dict(zip(inv_paths.keys(), combo, strict=False)) for combo in product(*inv_paths.values())]
     )
 
     results = []

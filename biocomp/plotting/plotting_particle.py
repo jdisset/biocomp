@@ -85,12 +85,12 @@ def particle_plot(
     max_line_extend: int = 40,
     value_spacing: float = 25.0,
     derivative=None,
-    line_params: dict = {},
-    dot_params: dict = {},
-    arrow_params: dict = {},
-    vaxis_params: dict = {},
-    label_params: dict = {},
-    setup_yaxis_params: dict = {},
+    line_params: dict = None,
+    dot_params: dict = None,
+    arrow_params: dict = None,
+    vaxis_params: dict = None,
+    label_params: dict = None,
+    setup_yaxis_params: dict = None,
 ) -> None:
     """
     Particle plot showing current values, history trails, and trend arrows.
@@ -115,6 +115,18 @@ def particle_plot(
         label_params: {show, rotation, line_color}
         setup_yaxis_params: passed to setup_transformed_axis
     """
+    if setup_yaxis_params is None:
+        setup_yaxis_params = {}
+    if label_params is None:
+        label_params = {}
+    if vaxis_params is None:
+        vaxis_params = {}
+    if arrow_params is None:
+        arrow_params = {}
+    if dot_params is None:
+        dot_params = {}
+    if line_params is None:
+        line_params = {}
     n_vars, n_time = data.shape
     var_colors = _resolve_colors(colors, n_vars)
 
@@ -217,7 +229,7 @@ def particle_plot(
         line_c = to_rgba(lp["color"])
         line_colors = np.array([[*line_c[:3], a * line_c[3]] for a in alphas])
         halo_colors = (
-            np.array([[*halo_cmap(cv)[:3], a] for cv, a in zip(cmap_vals, alphas)])
+            np.array([[*halo_cmap(cv)[:3], a] for cv, a in zip(cmap_vals, alphas, strict=False)])
             if lp["halo"]
             else None
         )

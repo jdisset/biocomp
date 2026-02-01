@@ -3,14 +3,65 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.pyright]
-reportMissingImports = true
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
 reportMissingTypeStubs = false
-typeCheckingMode = "off"
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportMissingParameterType = false
+reportAny = false
+reportImplicitOverride = false
+reportUnusedCallResult = false
+reportDeprecated = false
+reportImportCycles = false
+# Type errors to address incrementally
+reportArgumentType = "warning"
+reportAttributeAccessIssue = "warning"
+reportOptionalMemberAccess = "warning"
+reportIndexIssue = "warning"
+reportOptionalSubscript = "warning"
+reportGeneralTypeIssues = "warning"
+reportOperatorIssue = "warning"
+reportReturnType = "warning"
+reportAssignmentType = "warning"
+reportCallIssue = "warning"
+reportOptionalIterable = "warning"
+reportOptionalCall = "warning"
+reportPrivateImportUsage = "warning"
+reportInvalidTypeForm = "warning"
+reportOptionalOperand = "warning"
+reportRedeclaration = "warning"
+
+[tool.ty.rules]
+# Type errors to address incrementally - ignore for now
+invalid-argument-type = "ignore"
+not-subscriptable = "ignore"
+unresolved-attribute = "ignore"
+unsupported-operator = "ignore"
+invalid-assignment = "ignore"
+invalid-return-type = "ignore"
+invalid-parameter-default = "ignore"
+unresolved-import = "ignore"
+invalid-type-form = "ignore"
+not-iterable = "ignore"
+no-matching-overload = "ignore"
+call-non-callable = "ignore"
+unknown-argument = "ignore"
+invalid-method-override = "ignore"
+parameter-already-assigned = "ignore"
+missing-argument = "ignore"
+invalid-key = "ignore"
+index-out-of-bounds = "ignore"
 
 [tool.ruff]
-lint.ignore = ["E741"]
 line-length = 100
-target-version = "py311" # Assume Python 3.11.
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "W"]
+ignore = ["E741", "E501", "B023"]
 
 [project]
 name = "biocomp"

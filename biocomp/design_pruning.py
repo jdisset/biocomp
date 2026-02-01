@@ -9,6 +9,7 @@ import jax.numpy as jnp
 
 from .logging_config import get_logger
 from .tumasking import TU_LOG_ALPHA_PATH
+from .tumasking_strategy import build_strategy_from_config
 
 if TYPE_CHECKING:
     from .design import DesignManager, DesignConfig
@@ -261,7 +262,7 @@ def _merge_surviving_params(
             if tag_flags is not None:
                 tag_names = [
                     name
-                    for name, flag in zip(new_params.tagnames, tag_flags)
+                    for name, flag in zip(new_params.tagnames, tag_flags, strict=False)
                     if flag
                 ]
 
@@ -355,13 +356,9 @@ def hard_prune_and_rebuild(
         new_dmanager.n_targets,
         model.shared_params,
         init_key,
+        strategy=build_strategy_from_config(dconf),
         n_tus=new_n_tus,
         n_networks=len(new_dmanager.networks),
-        tu_log_alpha_init_mean=dconf.tu_log_alpha_init_mean,
-        tu_log_alpha_init_std=dconf.tu_log_alpha_init_std,
-        use_latent_tu_masking=dconf.use_latent_tu_masking,
-        latent_tu_dim=dconf.latent_tu_dim,
-        latent_tu_hidden_dim=dconf.latent_tu_hidden_dim,
         no_masking_tu_ids=new_stack.no_masking_tu_ids,
         tu_id_to_idx=new_stack.tu_id_to_idx,
     )

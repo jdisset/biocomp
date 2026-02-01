@@ -88,7 +88,7 @@ class TestDataTargetScaling:
         assert len(valid_values) > 0, "Should have valid values"
 
         max_value = np.max(valid_values)
-        min_value = np.min(valid_values)
+        np.min(valid_values)
 
         # With SCALING: the full pattern is compressed, so max should be ~1.0 and min ~0.0
         # With CROPPING: we only see [0, 0.6] portion, so max would be ~0.6 and min ~0.0

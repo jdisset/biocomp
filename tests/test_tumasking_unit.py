@@ -12,11 +12,7 @@ from biocomp.tumasking import (
     l0_penalty,
     l0_loss,
     get_tu_mask_for_node,
-    extract_tu_ids_from_network,
-    build_tu_id_mapping,
     init_tu_log_alpha,
-    DEFAULT_GAMMA,
-    DEFAULT_ZETA,
     L0_PENALTY_FLOOR_PROB,
     asymmetric_l0_loss,
     decode_latent_tu_masking,
@@ -53,7 +49,7 @@ def test_sample_hard_concrete_sparsity():
     # P(z=0) should decrease as log_alpha increases
     for i in range(len(p_zeros) - 1):
         assert p_zeros[i] > p_zeros[i + 1], (
-            f"P(z=0) should decrease with log_alpha: {list(zip(log_alphas, p_zeros))}"
+            f"P(z=0) should decrease with log_alpha: {list(zip(log_alphas, p_zeros, strict=False))}"
         )
 
 
@@ -319,7 +315,7 @@ def test_coordinated_sampling():
 
 # --- Tests for compute_input_masks with explicit is_multi_tu flag ---
 
-from biocomp.tumasking import compute_input_masks
+from biocomp.tumasking import compute_input_masks  # noqa: E402
 
 
 def test_compute_input_masks_single_tu_requires_1d():
@@ -517,7 +513,7 @@ def test_decode_latent_tu_masking_gradient_flow():
 
     grads = jax.grad(loss_fn, argnums=(0, 1, 2, 3, 4))(z, W1, b1, W2, b2)
 
-    for i, (name, g) in enumerate(zip(["z", "W1", "b1", "W2", "b2"], grads)):
+    for _i, (name, g) in enumerate(zip(["z", "W1", "b1", "W2", "b2"], grads, strict=False)):
         assert jnp.all(jnp.isfinite(g)), f"grad_{name} should be finite"
         # z, W1, W2 should have nonzero gradients; b1 may be zero if gelu(0)=0
         if name in ["z", "W1", "W2", "b2"]:

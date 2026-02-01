@@ -6,7 +6,6 @@ Tests use real components (no mocks) to verify:
 3. Gradients flow through the full latent → ratio → loss path
 """
 
-import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np

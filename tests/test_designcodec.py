@@ -48,7 +48,7 @@ class TestCodecRoundtrip:
         decoded = codec.decode(flat, apply_constraints=False)
         orig = sorted([(str(p), v) for p, v in simple_params.data.iter_leaves()])
         dec = sorted([(str(p), v) for p, v in decoded.data.iter_leaves()])
-        for (p1, v1), (_, v2) in zip(orig, dec):
+        for (p1, v1), (_, v2) in zip(orig, dec, strict=False):
             assert v1.shape == v2.shape, f"shape mismatch at {p1}"
 
     def test_encode_decode_preserves_values(self, codec, simple_params):
@@ -56,7 +56,7 @@ class TestCodecRoundtrip:
         decoded = codec.decode(flat, apply_constraints=False)
         orig = sorted([(str(p), v) for p, v in simple_params.data.iter_leaves()])
         dec = sorted([(str(p), v) for p, v in decoded.data.iter_leaves()])
-        for (p1, v1), (_, v2) in zip(orig, dec):
+        for (p1, v1), (_, v2) in zip(orig, dec, strict=False):
             assert jnp.allclose(v1, v2, rtol=1e-5), f"value mismatch at {p1}"
 
     def test_roundtrip_dimension_matches(self, codec, simple_params):
@@ -89,7 +89,7 @@ class TestCodecValidation:
 
         nan_genome = jnp.ones(codec.param_dim).at[0].set(jnp.nan)
         err, _ = checkify.checkify(codec.validate_genome, errors=checkify.user_checks)(nan_genome)
-        with pytest.raises(Exception):
+        with pytest.raises(checkify.JaxRuntimeError):
             err.throw()
 
     def test_validate_genome_wrong_dim(self, codec):
@@ -98,7 +98,7 @@ class TestCodecValidation:
         err, _ = checkify.checkify(codec.validate_genome, errors=checkify.user_checks)(
             jnp.ones(codec.param_dim + 5)
         )
-        with pytest.raises(Exception):
+        with pytest.raises(checkify.JaxRuntimeError):
             err.throw()
 
 

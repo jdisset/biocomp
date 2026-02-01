@@ -83,7 +83,7 @@ def test_match_single_node_by_property(simple_graph):
 
     # Find the node with id 1
     gene_node = next(node for node in new_graph.nodes.values() if node.node_id == 1)
-    assert gene_node.extra["matched"] == True
+    assert gene_node.extra["matched"]
 
     # Check that node 0 is untouched
     promoter_node = next(node for node in new_graph.nodes.values() if node.node_id == 0)
@@ -106,7 +106,7 @@ def test_no_match_found(simple_graph):
     assert len(new_graph.edges) == len(simple_graph.edges)
 
     # Check nodes are the same
-    for orig_node, new_node in zip(simple_graph.nodes.values(), new_graph.nodes.values()):
+    for orig_node, new_node in zip(simple_graph.nodes.values(), new_graph.nodes.values(), strict=False):
         assert orig_node.node_id == new_node.node_id
         assert orig_node.node_type == new_node.node_type
         assert orig_node.extra == new_node.extra
@@ -136,8 +136,8 @@ def test_match_connected_nodes(simple_graph):
     gene_node = next(node for node in new_graph.nodes.values() if node.node_id == 1)
     terminator_node = next(node for node in new_graph.nodes.values() if node.node_id == 2)
 
-    assert promoter_node.extra["p_matched"] == True
-    assert gene_node.extra["g_matched"] == True
+    assert promoter_node.extra["p_matched"]
+    assert gene_node.extra["g_matched"]
     assert "p_matched" not in terminator_node.extra
 
 
@@ -158,7 +158,7 @@ def test_match_with_negative_constraint(simple_graph):
 
     # Node 0 should be marked as root
     root_node = next(node for node in new_graph.nodes.values() if node.node_id == 0)
-    assert root_node.extra["is_root"] == True
+    assert root_node.extra["is_root"]
 
     # Other nodes should not be marked as root
     for node in new_graph.nodes.values():
@@ -437,7 +437,7 @@ def test_multiple_property_constraints():
     active_gene = next(n for n in result_graph.nodes.values() if n.node_id == 0)
     inactive_gene = next(n for n in result_graph.nodes.values() if n.node_id == 1)
 
-    assert active_gene.extra["marked"] == True
+    assert active_gene.extra["marked"]
     assert "marked" not in inactive_gene.extra
 
 
@@ -696,7 +696,7 @@ def test_no_actions_rule():
 def test_edge_properties_and_content():
     from biocomp.graphengine import Part
 
-    part = Part(name="uORF1", category="regulatory")
+    Part(name="uORF1", category="regulatory")
     graph = create_graph_state([{"id": 0, "type": "promoter"}, {"id": 1, "type": "gene"}], [])
 
     rule = GraphRewritingRule(
@@ -856,7 +856,7 @@ def test_edge_constraint_none_source_var():
     result_graph = result[0]
 
     gene_node = next(node for node in result_graph.nodes.values() if node.node_type == "gene")
-    assert gene_node.extra["has_inputs"] == True
+    assert gene_node.extra["has_inputs"]
 
 
 def test_edge_constraint_none_target_var():
@@ -888,7 +888,7 @@ def test_edge_constraint_none_target_var():
     result_graph = result[0]
 
     gene_node = next(node for node in result_graph.nodes.values() if node.node_type == "gene")
-    assert gene_node.extra["has_outputs"] == True
+    assert gene_node.extra["has_outputs"]
 
 
 def test_edge_constraint_both_none():
@@ -1185,7 +1185,7 @@ def test_edge_constraint_contains_basic():
     promoter_node = next(
         node for node in result_graph.nodes.values() if node.node_type == "promoter"
     )
-    assert promoter_node.extra["has_uorf1_edges"] == True
+    assert promoter_node.extra["has_uorf1_edges"]
 
 
 def test_edge_constraint_contains_multiple_parts():
@@ -1662,7 +1662,7 @@ def test_automatic_endpoint_binding_disabled():
 
     result = apply_rule(rule, graph)
     assert len(result) == 1
-    result_graph = result[0]
+    result[0]
 
     # The automatic endpoint nodes should not be available since bind_endpoints=False
     # This test passes if no error is thrown and the rule works without the endpoint bindings
@@ -1673,7 +1673,7 @@ def test_automatic_endpoint_binding_conflict_validation():
 
     # This should raise a validation error due to naming conflict
     try:
-        rule = GraphRewritingRule(
+        GraphRewritingRule(
             name="Test naming conflict",
             query=MatchQuery(
                 bind={"test_edge_source": PropertyConstraint(properties={"type": "promoter"})},
@@ -1683,7 +1683,7 @@ def test_automatic_endpoint_binding_conflict_validation():
             ),
             actions=[AddNode(local_name="marker", properties={"type": "marker"})],
         )
-        assert False, "Should have raised a validation error due to naming conflict"
+        raise AssertionError("Should have raised a validation error due to naming conflict")
     except ValueError as e:
         assert "conflicts with manually bound node" in str(e)
 
@@ -1798,7 +1798,7 @@ def test_edit_edge_basic():
     # Check that the edge was edited
     assert len(result_graph.edges) == 1
     edge = list(result_graph.edges.values())[0]
-    assert edge.extra.get("edited") == True
+    assert edge.extra.get("edited")
     assert edge.extra.get("new_prop") == "test_value"
     # Original endpoints should be preserved
     assert edge.source_id == 0
@@ -1979,7 +1979,7 @@ def test_edit_edge_comprehensive():
     assert edge.target_id == 3  # New node
 
     # Check properties
-    assert edge.extra.get("fully_edited") == True
+    assert edge.extra.get("fully_edited")
     assert edge.extra.get("iteration") == 1
 
     # Check content
@@ -2158,8 +2158,8 @@ def test_edit_edge_nonexistent_variable():
 
     # Should raise an error when trying to apply the rule
     try:
-        result = apply_rule(rule, graph)
-        assert False, "Should have raised an error for nonexistent edge variable"
+        apply_rule(rule, graph)
+        raise AssertionError("Should have raised an error for nonexistent edge variable")
     except (KeyError, ValueError):
         pass  # Expected behavior
 
@@ -2226,7 +2226,7 @@ def test_copy_edge_basic():
     assert len(new_edge.content) == 1
     assert new_edge.content[0].name == "uORF1"
     assert new_edge.extra.get("strength") == 0.8
-    assert new_edge.extra.get("original") == True
+    assert new_edge.extra.get("original")
 
 
 def test_copy_edge_with_property_overrides():
@@ -2303,8 +2303,8 @@ def test_copy_edge_with_property_overrides():
     # Check property overrides and additions
     assert new_edge.extra.get("strength") == 1.2  # Overridden
     assert new_edge.extra.get("category") == "copied"  # Overridden
-    assert new_edge.extra.get("is_copy") == True  # Added
-    assert new_edge.extra.get("keep_me") == True  # Preserved from original
+    assert new_edge.extra.get("is_copy")  # Added
+    assert new_edge.extra.get("keep_me")  # Preserved from original
 
 
 def test_copy_edge_with_content_override():
@@ -2469,7 +2469,7 @@ def test_copy_edge_comprehensive():
     # Check properties (preserved + overridden + new)
     assert new_edge.extra.get("strength") == 0.9  # Overridden
     assert new_edge.extra.get("category") == "copied"  # Overridden
-    assert new_edge.extra.get("modified") == True  # Added
+    assert new_edge.extra.get("modified")  # Added
     assert new_edge.extra.get("keep") == "yes"  # Preserved
 
 
@@ -2598,8 +2598,8 @@ def test_copy_edge_nonexistent_source_edge():
 
     # Should raise an error when trying to apply the rule
     try:
-        result = apply_rule(rule, graph)
-        assert False, "Should have raised an error for nonexistent source edge variable"
+        apply_rule(rule, graph)
+        raise AssertionError("Should have raised an error for nonexistent source edge variable")
     except ValueError as e:
         assert "not found in match" in str(e)
 
@@ -2648,8 +2648,8 @@ def test_copy_edge_nonexistent_node_variables():
 
     # Should raise an error when trying to apply the rule
     try:
-        result = apply_rule(rule, graph)
-        assert False, "Should have raised an error for nonexistent node variables"
+        apply_rule(rule, graph)
+        raise AssertionError("Should have raised an error for nonexistent node variables")
     except ValueError as e:
         assert "not found in match" in str(e)
 

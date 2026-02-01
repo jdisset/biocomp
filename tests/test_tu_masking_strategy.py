@@ -91,7 +91,7 @@ class TestDirectLogAlphaStrategy:
         assert TU_LOG_ALPHA_PATH in params
         assert params[TU_LOG_ALPHA_PATH].shape == (n_rep, n_tgt, n_net, n_tus)
         assert PROTECTED_TU_MASK_PATH in params
-        assert params[PROTECTED_TU_MASK_PATH].shape == (n_tus,)
+        assert params[PROTECTED_TU_MASK_PATH].shape == (n_rep, n_tgt, n_tus)
 
     def test_get_log_alpha_returns_correct_shape(self):
         strategy = DirectLogAlphaStrategy()
@@ -182,7 +182,7 @@ class TestLatentMLPStrategy:
         assert params[LATENT_TU_B1_PATH].shape == (n_rep, n_tgt, n_net, hidden_dim)
         assert params[LATENT_TU_W2_PATH].shape == (n_rep, n_tgt, n_net, n_tus, hidden_dim)
         assert params[LATENT_TU_B2_PATH].shape == (n_rep, n_tgt, n_net, n_tus)
-        assert params[PROTECTED_TU_MASK_PATH].shape == (n_tus,)
+        assert params[PROTECTED_TU_MASK_PATH].shape == (n_rep, n_tgt, n_tus)
 
     def test_get_log_alpha_returns_correct_shape(self):
         latent_dim, hidden_dim = 4, 8
@@ -291,7 +291,7 @@ class TestBinaryMaskStrategy:
 
     def test_get_log_alpha_converts_binary_to_pseudo(self):
         strategy = BinaryMaskStrategy()
-        n_net, n_tus = 2, 4
+        _n_net, _n_tus = 2, 4
 
         inner_params = {
             TU_BINARY_MASK_PATH: jnp.array([[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0]]),
@@ -307,7 +307,7 @@ class TestBinaryMaskStrategy:
 
     def test_get_binary_mask_returns_raw_mask(self):
         strategy = BinaryMaskStrategy()
-        n_net, n_tus = 2, 4
+        _n_net, _n_tus = 2, 4
 
         inner_params = {
             TU_BINARY_MASK_PATH: jnp.array([[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0]]),

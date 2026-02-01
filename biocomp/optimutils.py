@@ -376,7 +376,7 @@ def per_replicate_step_nonscan(
     xs = (jnp.arange(training_config.batches_per_step), xbatches, ybatches, zbatches, batch_keys)
     history = {"loss": []}
     params, opt_state = start_params, start_opt_state
-    for i, x, y, z, k in zip(*xs):
+    for _i, x, y, z, k in zip(*xs, strict=False):
         updt = non_scannable_step(params, opt_state, x, y, z, k)
         params, opt_state = updt["params"], updt["opt"]
         history["loss"].append(updt["loss"])

@@ -147,7 +147,7 @@ class TestErnCleanup:
             strip_ern_recs = network._cleanup_ern_nodes(tu_log_alpha, tu_id_to_idx)
 
             assert len(strip_ern_recs) > 0, "Should return ERN_rec parts to strip"
-            for tu_id, part_name in strip_ern_recs:
+            for _tu_id, part_name in strip_ern_recs:
                 assert "_rec" in part_name, f"Should strip recognition sites, got {part_name}"
 
     def test_positive_disabled_only_cascades_exclusive_neg_tus(self, lib):

@@ -194,7 +194,7 @@ class TestPTree:
         assert len(leaves) == 3
 
         # Check paths and values
-        paths, values = zip(*leaves)
+        paths, values = zip(*leaves, strict=False)
         assert "a" in paths
         assert "b" in paths
         assert "c/d" in paths
@@ -206,7 +206,7 @@ class TestPTree:
 
         # Should not be able to modify read-only tree
         # Note: The actual behavior may vary - let's check what the implementation does
-        assert tree.read_only == True
+        assert tree.read_only
 
     def test_tree_validation(self):
         """Test tree structure validation."""
@@ -764,7 +764,7 @@ class TestIntegrationWithFixtures:
             trainable, fixed = params.filter_by_tag("trainable")
             # Only compute loss on trainable parameters
             total_loss = 0.0
-            for path, value in trainable.data.iter_leaves():
+            for _path, value in trainable.data.iter_leaves():
                 if isinstance(value, np.ndarray):
                     total_loss += jnp.sum(value**2)
             return total_loss
@@ -799,7 +799,7 @@ class TestPerformanceAndLargeStructures:
         # Test JAX operations on large tree
         def simple_loss(params):
             total = 0.0
-            for path, value in params.data.iter_leaves():
+            for _path, value in params.data.iter_leaves():
                 if isinstance(value, (np.ndarray, jnp.ndarray)):
                     total += jnp.sum(value**2)
             return total
@@ -918,7 +918,8 @@ class TestUpdateLeavesByPath:
     def test_basic_update(self, complex_tree):
         """Test updating a single, simple leaf."""
         paths_to_update = [ParamPath("a/x")]
-        update_func = lambda x: x * 2.0
+        def update_func(x):
+            return x * 2.0
 
         new_tree = complex_tree.update_leaves_by_path(paths_to_update, update_func)
 
@@ -936,7 +937,8 @@ class TestUpdateLeavesByPath:
     def test_multiple_updates(self, complex_tree):
         """Test updating multiple leaves at once."""
         paths_to_update = [ParamPath("a/x"), ParamPath("c")]
-        update_func = lambda x: x + 10.0
+        def update_func(x):
+            return x + 10.0
 
         new_tree = complex_tree.update_leaves_by_path(paths_to_update, update_func)
 
@@ -950,7 +952,8 @@ class TestUpdateLeavesByPath:
     def test_no_paths_to_update(self, complex_tree):
         """Test that the function returns an identical tree if no paths match."""
         paths_to_update = [ParamPath("non/existent/path")]
-        update_func = lambda x: x * 1000
+        def update_func(x):
+            return x * 1000
 
         new_tree = complex_tree.update_leaves_by_path(paths_to_update, update_func)
 
@@ -964,7 +967,8 @@ class TestUpdateLeavesByPath:
         remain self-consistent in the new tree.
         """
         paths_to_update = [ParamPath("d/ref"), ParamPath("sources/s1")]
-        update_func = lambda x: x * -1.0
+        def update_func(x):
+            return x * -1.0
 
         with patch("biocomp.parameters.logger") as mock_logger:
             new_tree = complex_tree.update_leaves_by_path(paths_to_update, update_func)

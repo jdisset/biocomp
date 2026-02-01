@@ -855,10 +855,10 @@ def get_tu_masks(
     is_multi_tu: bool,
     use_probabilistic_or: bool = False,
 ) -> jnp.ndarray:
-    """Unified TU masking - routes through get_full_log_alpha() for SSOT.
+    """Unified TU masking with mode-specific handling.
 
-    All modes (direct log_alpha, latent MLP, binary mask) handled uniformly via get_full_log_alpha().
-    Binary STE mode: discrete forward pass, gradients flow through sigmoid(log_alpha).
+    Binary mask mode: Direct mask indexing (gradients flow for mask optimization).
+    Log_alpha modes: Route through get_full_log_alpha() for protected TU enforcement.
 
     Args:
         params: ParameterTree or dict-like containing mask parameters
@@ -871,6 +871,11 @@ def get_tu_masks(
 
     tu_indices = jnp.asarray(tu_indices)
     n_inputs = tu_indices.shape[0]
+
+    if TU_BINARY_MASK_PATH in params:
+        binary_mask = jnp.asarray(params[TU_BINARY_MASK_PATH])
+        assert binary_mask.ndim == 2, f"binary_mask must be 2D, got {binary_mask.ndim}D"
+        return _apply_binary_masks(tu_indices, binary_mask[network_id], is_multi_tu=is_multi_tu)
 
     log_alpha_full = get_full_log_alpha(params)
     if log_alpha_full is None:

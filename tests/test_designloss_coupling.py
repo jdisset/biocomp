@@ -15,12 +15,10 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import checkify
 from jax import grad, vmap
-import numpy as np
 
 from biocomp.parameters import ParameterTree
 from biocomp.designloss import (
     ratio_mask_coupling_penalty,
-    _ratio_mask_coupling_single_target,
 )
 
 
@@ -413,7 +411,7 @@ def test_3d_ratios_uses_correct_target_slice():
 
     penalty_t1 = ratio_mask_coupling_penalty(params_t1, [f"{ns}/ratios"], tu_log_alpha_3d[1], min_ratio_threshold=0.005)
 
-    assert float(penalty_t1) > 0.001, f"Target 1 should have positive penalty"
+    assert float(penalty_t1) > 0.001, "Target 1 should have positive penalty"
     assert abs(float(penalty) - float(penalty_t1)) < 0.001, f"Total {penalty} should ≈ target 1's {penalty_t1}"
 
 
@@ -431,7 +429,7 @@ def test_empty_ratio_paths():
         params, [], tu_log_alpha, min_ratio_threshold=0.005
     )
 
-    assert float(penalty) == 0.0, f"Empty ratio_paths should give zero penalty"
+    assert float(penalty) == 0.0, "Empty ratio_paths should give zero penalty"
 
 
 def test_missing_tu_indices_skipped():
@@ -674,7 +672,7 @@ def test_multiple_ratio_paths():
     penalty = ratio_mask_coupling_penalty(params, paths, tu_log_alpha, min_ratio_threshold=0.005)
 
     # penalty should be positive (from layer_2's tiny ratio)
-    assert float(penalty) > 0, f"Should have positive penalty from layer_2's tiny ratio"
+    assert float(penalty) > 0, "Should have positive penalty from layer_2's tiny ratio"
 
 
 def test_jit_compilation():

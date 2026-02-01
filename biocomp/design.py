@@ -16,13 +16,11 @@ from tqdm import tqdm
 
 from biocomp.utils import encode_function, EncodedPartialFunction
 from biocomp.compute import ComputeStack
-from biocomp.config import BIOCOMP_CONSTANTS
 import biocomp.nodes as nd
 from biocomp.network import Network
 from .parameters import ParameterTree
 from biocomp.logging_config import get_logger
 from biocomp.optimutils import DesignOptimConfig
-from biocomp.tumasking import PROTECTED_TU_MASK_PATH
 
 if TYPE_CHECKING:
     from biocomptools.modelmodel import BiocompModel
@@ -41,16 +39,10 @@ from biocomp.designloss import (  # noqa: F401 - re-exported
 from biocomp.tumasking import (
     build_tu_id_mapping,
     TU_LOG_ALPHA_PATH,
-    LATENT_TU_Z_PATH,
-    LATENT_TU_W1_PATH,
-    LATENT_TU_B1_PATH,
-    LATENT_TU_W2_PATH,
-    LATENT_TU_B2_PATH,
 )
 from biocomp.tumasking_strategy import (
     TUMaskingMode,
     TUMaskingStrategy,
-    build_tu_masking_strategy,
     build_strategy_from_config,
 )
 from biocomp.designdebug import save_debug_state, is_design_debug_enabled
@@ -91,6 +83,26 @@ class DesignManager(BaseModel):
     targets: list[TargetUnion]
     networks: list[Network]
     sampling: SamplingConfigUnion = Field(default_factory=LatticeSampling, discriminator="strategy")
+    enable_tu_masking: bool = False
+
+    _tu_ids: list[str] | None = None
+    _tu_id_to_idx: dict[str, int] | None = None
+
+    def _ensure_tu_mapping(self):
+        if self._tu_id_to_idx is None:
+            self._tu_ids, self._tu_id_to_idx = build_tu_id_mapping(self.networks)
+
+    @property
+    def n_tus(self) -> int:
+        self._ensure_tu_mapping()
+        assert self._tu_ids is not None
+        return len(self._tu_ids)
+
+    @property
+    def tu_id_to_idx(self) -> dict[str, int]:
+        self._ensure_tu_mapping()
+        assert self._tu_id_to_idx is not None
+        return self._tu_id_to_idx
 
     @model_validator(mode="after")
     def _validate_input_order_consistency(self) -> "DesignManager":
@@ -311,7 +323,7 @@ class DesignManager(BaseModel):
         latent_dim: int = 8,
         latent_hidden_dim: int = 16,
         auto_lock_topology_tus: bool = True,
-        enable_tu_masking: bool = False,
+        enable_tu_masking: bool | None = None,
     ) -> ComputeStack:
         logger.info(f"Building stack with {len(self.networks)} design networks")
         logger.info(f"Design network names: {[n.name for n in self.networks]}")
@@ -334,9 +346,10 @@ class DesignManager(BaseModel):
                 )
             )
 
+        effective_tu_masking = enable_tu_masking if enable_tu_masking is not None else self.enable_tu_masking
         stack.build(
             compute_config,
-            enable_tu_masking=enable_tu_masking,
+            enable_tu_masking=effective_tu_masking,
             auto_lock_topology_tus=auto_lock_topology_tus,
         )
 
@@ -521,7 +534,8 @@ def get_topk_replicate_network_pairs(
 
 
 # Re-export from ratio_utils for backwards compatibility
-from .ratio_utils import RATIO_PRUNE_THRESHOLD, normalize_ratios_for_pruning as normalize_ratios_prune
+from .ratio_utils import RATIO_PRUNE_THRESHOLD  # noqa: F401, E402
+from .ratio_utils import normalize_ratios_for_pruning as normalize_ratios_prune  # noqa: F401, E402
 
 
 def get_ratio_paths_and_sources(params):

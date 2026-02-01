@@ -8,7 +8,6 @@ Verifies that:
 
 import jax
 import jax.numpy as jnp
-import pytest
 
 from biocomp.tumasking import (
     leaky_mask_floor,

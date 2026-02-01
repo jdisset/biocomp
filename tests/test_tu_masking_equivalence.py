@@ -428,7 +428,7 @@ def test_tu_masking_basic_equivalence(lib, base_setup):
         n_networks = len(networks)
         setup_tu_masking(params, tu_ids, tu_id_to_idx, set(), n_networks)  # All enabled initially
 
-        n_inputs = stack.get_nb_inputs()
+        stack.get_nb_inputs()
         n_z = int(params["global/number_of_random_variables"])
         X = jnp.array([0.5, 0.5])
         Z = jnp.zeros((n_z,))

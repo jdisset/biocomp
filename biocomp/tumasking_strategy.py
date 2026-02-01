@@ -160,11 +160,12 @@ class DirectLogAlphaStrategy:
         )
         params.at(TU_LOG_ALPHA_PATH, log_alpha, overwrite=None)
 
-        protected_mask = jnp.zeros(n_tus, dtype=bool)
+        protected_mask_1d = jnp.zeros(n_tus, dtype=bool)
         for tu_id in protected_tu_ids:
             if tu_id in tu_id_to_idx:
                 idx = tu_id_to_idx[tu_id]
-                protected_mask = protected_mask.at[idx].set(True)
+                protected_mask_1d = protected_mask_1d.at[idx].set(True)
+        protected_mask = jnp.tile(protected_mask_1d[None, None, :], (n_replicates, n_targets, 1))
         params.at(PROTECTED_TU_MASK_PATH, protected_mask, overwrite=None, tags=["non_grad"])
 
     def get_log_alpha(self, params: "ParameterTree", network_id: int) -> jax.Array:
@@ -255,11 +256,12 @@ class LatentMLPStrategy:
         params.at(LATENT_TU_W2_PATH, W2, overwrite=None)
         params.at(LATENT_TU_B2_PATH, b2, overwrite=None)
 
-        protected_mask = jnp.zeros(n_tus, dtype=bool)
+        protected_mask_1d = jnp.zeros(n_tus, dtype=bool)
         for tu_id in protected_tu_ids:
             if tu_id in tu_id_to_idx:
                 idx = tu_id_to_idx[tu_id]
-                protected_mask = protected_mask.at[idx].set(True)
+                protected_mask_1d = protected_mask_1d.at[idx].set(True)
+        protected_mask = jnp.tile(protected_mask_1d[None, None, :], (R, T, 1))
         params.at(PROTECTED_TU_MASK_PATH, protected_mask, overwrite=None, tags=["non_grad"])
 
     def get_log_alpha(self, params: "ParameterTree", network_id: int) -> jax.Array:

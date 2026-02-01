@@ -265,7 +265,7 @@ def heuristic(type_dict: dict[str, list[tuple]]) -> float:
         return 0
 
     min_nodes_left = float("inf")
-    for t, nodes_with_batch in type_dict.items():
+    for _t, nodes_with_batch in type_dict.items():
         nodes_left = len(nodes_with_batch)
         min_nodes_left = min(min_nodes_left, nodes_left)
 

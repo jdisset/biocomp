@@ -174,7 +174,7 @@ class Network(BaseModel):
         all_inputs.sort(key=lambda x: (0 if x[0] == "input" else 1, x[1]))
 
         # Build mapping with renumbered positions (compact, no gaps)
-        for new_pos, (node_type, _, output_pos) in enumerate(all_inputs):
+        for new_pos, (_node_type, _, output_pos) in enumerate(all_inputs):
             mapping[new_pos] = output_pos
 
         if not mapping:
@@ -1041,7 +1041,7 @@ class Network(BaseModel):
 
             ratios = []
             for base_ratio, ratio_range, is_locked in zip(
-                base_ratios, ratio_ranges_list, locked_list
+                base_ratios, ratio_ranges_list, locked_list, strict=False
             ):
                 if is_locked:
                     ratios.append(RatioSpec(value=base_ratio, locked=True))
@@ -1093,7 +1093,7 @@ class Network(BaseModel):
             tus = []
             source_id_to_ratio = {
                 sid: r
-                for sid, r in zip(info["source_ids"], info["ratios"])
+                for sid, r in zip(info["source_ids"], info["ratios"], strict=False)
                 if not (prune_zero_ratios and sid in zero_ratio_sources)
             }
 
@@ -1118,12 +1118,12 @@ class Network(BaseModel):
             # Build ratios list (one per unique source in TU order)
             seen_sources = set()
             reordered_ratios = []
-            for global_index, position, source_id, source_node, output_slot in tu_specs:
+            for _global_index, _position, source_id, _source_node, _output_slot in tu_specs:
                 if source_id not in seen_sources:
                     reordered_ratios.append(source_id_to_ratio.get(source_id, 1.0))
                     seen_sources.add(source_id)
 
-            for global_index, position, source_id, source_node, output_slot in tu_specs:
+            for _global_index, position, source_id, source_node, output_slot in tu_specs:
                 param_ref_ids = source_node.extra.get("param_ref_ids", {})
                 slots = self._extract_slots_from_source(
                     source_node, param_ref_ids, output_slot, strip_ern_recs
@@ -1247,7 +1247,7 @@ class Network(BaseModel):
 
         # Create slots
         slots = []
-        for category, name, emb in parts:
+        for _category, name, emb in parts:
             # unwrap single-element lists to a single value (for committed networks)
             is_collapsed = isinstance(name, (list, tuple)) and len(name) == 1
             if is_collapsed:
@@ -1537,7 +1537,7 @@ class Network(BaseModel):
                     continue
                 parts.append(PartData(id=f"{node.node_id}_{pname}", name=pname, role=role))
 
-            for emb_name, emb_parts in (edge.content_embedding_names or {}).items():
+            for _emb_name, emb_parts in (edge.content_embedding_names or {}).items():
                 for pname in emb_parts:
                     if not pname or pname == "00_empty_tc" or pname in seen:
                         continue
@@ -1638,7 +1638,7 @@ class Network(BaseModel):
                 ratios = [r / min_r for r in raw_ratios]
                 total = sum(raw_ratios)
                 if total > 0:
-                    for sid, ratio in zip(sorted_ids, raw_ratios):
+                    for sid, ratio in zip(sorted_ids, raw_ratios, strict=False):
                         tu_id = source_id_to_tu_id.get(sid)
                         if tu_id and tu_id in tus:
                             tus[tu_id].ratio_percent = (ratio / total) * 100
@@ -1928,7 +1928,7 @@ def preprocess_network_tus(recipe: CoTxList, lib: PartsLibrary) -> dict[str, Any
 
     for cotx_index, cotx_group in enumerate(recipe):
         group_name = cotx_group.name or f"cotx_{cotx_index + 1}"
-        for unit_index, unit in enumerate(cotx_group.units):
+        for _unit_index, unit in enumerate(cotx_group.units):
             # Create unique TUID that includes cotx group info for duplicate plasmids
             base_name = unit.name or f"TU_{global_tu_index}"
             tuid = f"{base_name}_{group_name}"
@@ -1996,7 +1996,7 @@ def _build_cdg_primal_from_preprocessed(
             tu_to_node_id[(key[0], tuid)] = group_to_node_id[key]
 
     node_id_to_info = {nid: {"type": key[0], "tu_ids": []} for key, nid in group_to_node_id.items()}
-    for (type, tuid), nid in tu_to_node_id.items():
+    for (_type, tuid), nid in tu_to_node_id.items():
         node_id_to_info[nid]["tu_ids"].append(tuid)
 
     outputs = (custom_outputs_parts or []) + lib.parts[
@@ -2122,7 +2122,7 @@ def _build_cdg_dual_from_preprocessed(
         # Map sources to their ratios
         source_to_norm_ratio_map = {}
         for source, norm_ratio, orig_ratio in zip(
-            unique_sources_ordered, normalized_ratios, raw_ratios
+            unique_sources_ordered, normalized_ratios, raw_ratios, strict=False
         ):
             source_to_norm_ratio_map[source] = (norm_ratio, orig_ratio)
 
@@ -2214,7 +2214,7 @@ def _build_cdg_dual_from_preprocessed(
                 GraphNode(node_id=source_nodes[source_key], node_type="source", extra=source_extra)
             )
 
-    for tuid, info in tu_info.items():
+    for _tuid, info in tu_info.items():
         tu = info["tu"]
 
         rna_key = (
@@ -2714,7 +2714,7 @@ def find_topology_changing_tus(network: "Network") -> set[str]:
 
 def get_uorf_names(uorf_values, ern_names):
     uorf_names = []
-    for uorf, ern_name in zip(uorf_values, ern_names):
+    for uorf, ern_name in zip(uorf_values, ern_names, strict=False):
         ERN_uorf, REC_uorf = uorf
         ERN_uorf = UORF_DICT[ERN_uorf]
         REC_uorf = UORF_DICT[REC_uorf]
@@ -2858,8 +2858,8 @@ def get_ratio(agg_node, network):
         else:
             tu_names.append("unknown")
 
-    sorted_pairs = sorted(zip(tu_names, normed_ratios[: len(tu_names)]))
-    sorted_tu_names, sorted_ratios = zip(*sorted_pairs) if sorted_pairs else ([], [])
+    sorted_pairs = sorted(zip(tu_names, normed_ratios[: len(tu_names)], strict=False))
+    sorted_tu_names, sorted_ratios = zip(*sorted_pairs, strict=False) if sorted_pairs else ([], [])
 
     return (tuple(sorted_tu_names), tuple(sorted_ratios))
 

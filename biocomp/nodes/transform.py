@@ -219,7 +219,7 @@ def transform_nn(
                 fwd_namespace = stack.get_layer_namespace(fwd_node.layer_number)
                 return fwd_namespace, fwd_node.node_position_in_layer
 
-            fwd_paths, fwd_loc = zip(*[get_fwd(node) for node in nodelist])
+            fwd_paths, fwd_loc = zip(*[get_fwd(node) for node in nodelist], strict=False)
 
             # make view will create 2 subtrees of ArrayRef, one for the rates and one for the masks
             # that point to the same underlying data as the forward nodes
@@ -313,7 +313,7 @@ def transform_nn(
         inner_keys = jax.random.split(k1, val.shape[0])
         inner_outputs = [
             inner(params, value=v, random_var=random_var[i], rate_embedding=r, key=k)
-            for i, (v, r, k) in enumerate(zip(val, qrates, inner_keys))
+            for i, (v, r, k) in enumerate(zip(val, qrates, inner_keys, strict=False))
         ]
         masked_inner_outputs = [out * input_masks[i] for i, out in enumerate(inner_outputs)]
         inner_out = sum(masked_inner_outputs)
@@ -449,7 +449,7 @@ def transform_nn(
                 network_ref_id_cache[node.network_id] = _build_ref_id_mapping(graph, rate_name)
             ref_id_mappings = network_ref_id_cache[node.network_id]
 
-            for e, pname in zip(i_edges, resolved_parameter_names):
+            for e, pname in zip(i_edges, resolved_parameter_names, strict=False):
                 committed_value = (pname,)
                 # update the incoming edge
                 e.content_embedding_names[rate_name] = committed_value

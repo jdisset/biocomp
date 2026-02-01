@@ -79,7 +79,7 @@ def test_commit_collapses_slots(lib, simple_design_recipe):
                         if isinstance(slot.part, list):
                             assert len(slot.part) == 1, f"Slot should be collapsed to single part, got {slot.part}"
                     elif isinstance(slot, list):
-                        assert False, f"Slot should not be a list after commit: {slot}"
+                        raise AssertionError(f"Slot should not be a list after commit: {slot}")
 
 
 def test_recipe_yaml_roundtrip(lib, simple_design_recipe):
@@ -225,7 +225,7 @@ def test_topk_selection_not_biased():
     key = jax.random.PRNGKey(42)
     counter = Counter()
 
-    for trial in range(20):
+    for _trial in range(20):
         key, subkey = jax.random.split(key)
         # random losses
         losses = jax.random.uniform(subkey, (n_replicates, n_targets, n_networks))
@@ -234,7 +234,7 @@ def test_topk_selection_not_biased():
 
         # collect which networks were selected as best for each target
         for target_results in topk:
-            for rep_id, net_id, loss in target_results:
+            for _rep_id, net_id, _loss in target_results:
                 counter[net_id] += 1
 
     # with random losses, each network should be selected roughly equally
@@ -725,7 +725,7 @@ def test_independent_uorf_slots_not_cross_committed(lib):
         edges = committed.compute_graph.edges
         tu1_tl_rate = None
         tu2_tl_rate = None
-        for key, edge in edges.items():
+        for _key, edge in edges.items():
             tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
             tl_rate = edge.content_embedding_names.get("tl_rate") if edge.content_embedding_names else None
             if "output1_test_cotx" in tu_ids and tl_rate:
@@ -865,7 +865,7 @@ def test_different_replicates_produce_different_commits(lib, simple_design_recip
         if len(ratios0) > 0 and len(ratios1) > 0:
             # Check if any ratios differ
             has_difference = any(
-                abs(r0 - r1) > 1e-6 for r0, r1 in zip(ratios0, ratios1)
+                abs(r0 - r1) > 1e-6 for r0, r1 in zip(ratios0, ratios1, strict=False)
                 if isinstance(r0, (int, float)) and isinstance(r1, (int, float))
             )
             assert has_difference, "Different replicates should produce different ratios"

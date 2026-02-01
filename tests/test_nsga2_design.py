@@ -189,7 +189,7 @@ class TestNSGA2DesignOptimizer:
             continuous_dim=continuous_dim,
         )
 
-        for i in range(5):
+        for _i in range(5):
             key, step_key = jax.random.split(key)
             state, metrics = optimizer.step(state, step_key, simple_objective)
 

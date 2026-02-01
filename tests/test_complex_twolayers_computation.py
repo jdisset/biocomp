@@ -144,16 +144,16 @@ def complex_twolayers_basic_stack_assertions(network, stack, params):
 def complex_twolayers_advanced_stack_assertions(
     network, stack, params, translate, nouorf_emb, test_key, intermediate_values, y_aux
 ):
-    params[stack.layers[8].namespace]
-    stack.layers[8].nodes
-    stack.layers[8].f_input_shapes
+    _ = params[stack.layers[8].namespace]
+    _ = stack.layers[8].nodes
+    _ = stack.layers[8].f_input_shapes
     test_input = [np.ones(1) * 2 * i for i in range(3)]
     tl_out, tl_aux = stack.layers[8].f_apply(
         *test_input, random_vars=np.zeros(100), params=params, node_id=0, key=test_key
     )
     manual_tl_out = translate(flat_concat(*test_input), [nouorf_emb] * 3)
     assert np.allclose(tl_out, manual_tl_out, rtol=1e-5)
-    stack.layers[13].f_input_shapes
+    _ = stack.layers[13].f_input_shapes
     ernc_test_input = [intermediate_values["Ec_negative_in"], intermediate_values["Ec_positive_in"]]
     ernc_out, ernc_aux = stack.layers[13].f_apply(
         *ernc_test_input,
@@ -169,7 +169,7 @@ def complex_twolayers_advanced_stack_assertions(
     X1_inv = intermediate_values["X1_inv"]
     X2_inv = intermediate_values["X2_inv"]
 
-    stack.layers[15].f_input_shapes
+    _ = stack.layers[15].f_input_shapes
     fl_test_input = np.array([np.ones(1) * i for i in range(4)])
     fl_out, fl_aux = stack.layers[15].f_apply(
         *fl_test_input, random_vars=np.zeros(100), params=params, node_id=0, key=test_key
@@ -606,7 +606,7 @@ def test_complex_twolayers_parameter_constraints(lib, complex_twolayers_design_n
         expected_b = jnp.array([1, 1, 1, 1, 1, 1, 1, 1], dtype=jnp.float32)
 
         expected_x1_norm = jnp.abs(expected_x1) / jnp.sum(jnp.abs(expected_x1))
-        expected_x2_norm = jnp.abs(expected_x2) / jnp.sum(jnp.abs(expected_x2))
+        jnp.abs(expected_x2) / jnp.sum(jnp.abs(expected_x2))
         expected_b_norm = jnp.abs(expected_b) / jnp.sum(jnp.abs(expected_b))
 
         ratios_norm = jnp.abs(ratios) / jnp.sum(jnp.abs(ratios), axis=1, keepdims=True)

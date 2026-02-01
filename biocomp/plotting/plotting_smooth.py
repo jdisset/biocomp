@@ -109,8 +109,10 @@ def smooth_1d(
     lineplot_props: Optional[List[Dict] | Dict] = None,
     errorbar_props: Optional[List[Dict] | Dict] = None,
     colors: Optional[List[Any]] = None,
-    knn_stats_params: Dict = {},
+    knn_stats_params: Dict = None,
 ):
+    if knn_stats_params is None:
+        knn_stats_params = {}
     knn_radius = knn_stats_params.get("radius", 0.075)
     knn_stats_params["radius"] = knn_radius
     knn_stats_params.pop("avg_method", None)
@@ -275,9 +277,11 @@ def knn_grid(
     zslice=None,
     is_density_plot=False,
     grid_resolution=200,
-    knn_stats_params={},
+    knn_stats_params=None,
 ):
     # filter out nan/inf values before processing
+    if knn_stats_params is None:
+        knn_stats_params = {}
     mask = np.all(np.isfinite(x), axis=1) if x.ndim > 1 else np.isfinite(x)
     mask = mask & (np.all(np.isfinite(y), axis=1) if y.ndim > 1 else np.isfinite(y))
 
@@ -336,15 +340,19 @@ def colorbar(
     orientation: Literal["horizontal", "vertical"] = "vertical",
     label_position: Literal["left", "right", "bottom", "top"] = "right",
     tick_position: Optional[Literal["left", "right", "bottom", "top"]] = "right",
-    label_props: Dict = {},
+    label_props: Dict = None,
     tick_props: Optional[ListOrSingle[Dict]] = None,
     border_width=0.7,
-    setup_transformed_axis_params: Dict = {},
+    setup_transformed_axis_params: Dict = None,
     threshold_below=None,
     threshold_above=None,
     alpha_opacity=1.0,
     cax=None,
 ):
+    if setup_transformed_axis_params is None:
+        setup_transformed_axis_params = {}
+    if label_props is None:
+        label_props = {}
     imlims = im.get_clim()
     c_vmin = imlims[0] if vlims[0] is None else vlims[0]
     c_vmax = imlims[1] if vlims[1] is None else vlims[1]
@@ -490,12 +498,20 @@ def smooth_2d(
     draw_ylabel=True,
     draw_colorbar=True,
     draw_colorbar_label=True,
-    colorbar_params: Dict = {},
-    knn_grid_params: Dict = {},
-    heatmap_params: Dict = {},
-    setup_transformed_axis_params: Dict = {},
+    colorbar_params: Dict = None,
+    knn_grid_params: Dict = None,
+    heatmap_params: Dict = None,
+    setup_transformed_axis_params: Dict = None,
 ) -> Tuple:
     # compute actual xlims:
+    if setup_transformed_axis_params is None:
+        setup_transformed_axis_params = {}
+    if heatmap_params is None:
+        heatmap_params = {}
+    if knn_grid_params is None:
+        knn_grid_params = {}
+    if colorbar_params is None:
+        colorbar_params = {}
     data_xlims = [X[:, 0].min(), X[:, 0].max()]
     data_ylims = [X[:, 1].min(), X[:, 1].max()]
 
@@ -584,10 +600,12 @@ def smooth_line_plot(
     marker=None,
     markevery=20,
     markoffset=0,
-    with_quantiles=[0.25, 0.75],
+    with_quantiles=None,
     sample_quantiles_at=None,
     **kw,
 ):
+    if with_quantiles is None:
+        with_quantiles = [0.25, 0.75]
     protein_order, protein_names = get_reordered_protein_names(network, **kw)
     input_order, output_pos = protein_order[:-1], protein_order[-1]
     input_names, output_name = protein_names[:-1], protein_names[-1]
@@ -662,10 +680,12 @@ def smooth_line_slices(
     xmin=0,
     xmax=None,
     color_mode="inner_slice",
-    markers=["x", "o", "^", "v", "<", ">", "1", "2", "3", "4", "8", "p", "P", "*", "h", "H"],
+    markers=None,
     **kwargs,
 ):
     # slices is a list of list of slice values. (max 2 dimensions)
+    if markers is None:
+        markers = ["x", "o", "^", "v", "<", ">", "1", "2", "3", "4", "8", "p", "P", "*", "h", "H"]
     assert len(slices) <= 2, "Can only slice maximum 2 dimensions"
     outerslices = slices[1] if len(slices) > 1 else []
     innerslices = slices[0] if len(slices) > 0 else []

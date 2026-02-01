@@ -170,7 +170,7 @@ class TestZDT1:
 
         n_steps = 50
         start = time.perf_counter()
-        for i in range(n_steps):
+        for _i in range(n_steps):
             key, k = jax.random.split(key)
             state = step(k, state)
         state.fitness.block_until_ready()

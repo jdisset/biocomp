@@ -229,7 +229,7 @@ class TestIntrospectStackReal:
         infos = introspect_stack(built_stack, initialized_params, network_id=0)
         tu_data = aggregate_by_tu(infos)
         cotx_groups_found = set()
-        for tu_id, entries in tu_data.items():
+        for _tu_id, entries in tu_data.items():
             for _, tg in entries:
                 cotx_groups_found.add(tg.cotx_group)
         assert "test_cotx" in cotx_groups_found, (

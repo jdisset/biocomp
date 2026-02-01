@@ -589,7 +589,9 @@ class PTree:
                 return False
         return True
 
-    def iter_leaves(self, path=ParamPath(), path_as_str=False, get_leaf_value=True):
+    def iter_leaves(self, path=None, path_as_str=False, get_leaf_value=True):
+        if path is None:
+            path = ParamPath()
         if self.is_empty():
             return
         if self.is_leaf(count_empty_as_leaf=False):
@@ -770,7 +772,7 @@ def unflatten_PTree(aux_data, content):
     ptree.value = None
     ptree.read_only = False
 
-    for k, v in zip(keys, content):
+    for k, v in zip(keys, content, strict=False):
         if isinstance(k, ArrayRefPath):
             ptree[k.actual_path] = ArrayRef(ptree, k.paths, k.indices)
         else:
@@ -1028,7 +1030,7 @@ class ParameterTree:
 
     def __iter__(self):
         """Iterate over the paths of the leaves in the ParameterTree."""
-        for path, content in self.data.iter_leaves():
+        for _path, content in self.data.iter_leaves():
             if isinstance(content, ArrayRef):
                 yield content.view()
             else:
@@ -1205,7 +1207,7 @@ def make_view(
     for leaf in leaves:
         leafpath = ParamPath(at_path) / leaf
         ref = ArrayRef(params.data)
-        for from_path, from_id in zip(from_paths, from_ids):
+        for from_path, from_id in zip(from_paths, from_ids, strict=False):
             ref.push_back(f"{from_path}/{leaf}", from_id)
         params[leafpath] = ref
 

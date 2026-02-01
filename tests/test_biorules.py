@@ -6,27 +6,13 @@ This test suite validates:
 3. Compute graph topology and correctness
 """
 
-import pytest
-from biocomp.network import build_central_dogma_graph_direct, old_network_compg_to_graphstate, Network
+from biocomp.network import build_central_dogma_graph_direct
 from biocomp.library import LibraryContext
 import biocomp.biorules as br
-from biocomp.graphengine import apply_rule_sequence, apply_rule, graphs_are_isomorphic
+from biocomp.graphengine import apply_rule_sequence
 from biocomp.inversion import invert_all_paths
-import biocomp.recipe as recn
-from pathlib import Path
-import os
-import json5
 
 # Import all test fixtures
-from test_declarative_recipes import (
-    lib,
-    simple_single_reporter,
-    simple_two_reporters,
-    simple_single_ern,
-    simple_single_cotx_ERN,
-    multi_aggregation_ern,
-    variable_uorf_network,
-)
 
 
 # ============================================================================
@@ -193,7 +179,7 @@ def test_compute_graph_simple_single_reporter(lib, simple_single_reporter):
         assert len(compg.edges) >= 0
 
         # Check that we still have the essential biological information
-        node_types = [n.node_type for n in compg.nodes.values()]
+        [n.node_type for n in compg.nodes.values()]
         # After rules, might have different node types depending on transformations
 
 

@@ -175,7 +175,7 @@ class TestNormalizeRatiosForPruning:
 class TestBackwardsCompatibility:
     def test_design_import_works(self):
         """Old imports from design.py still work."""
-        from biocomp.design import normalize_ratios_prune, RATIO_PRUNE_THRESHOLD as threshold
+        from biocomp.design import normalize_ratios_prune
 
         ratios = jnp.array([0.5, 0.1, 0.05])
         result = normalize_ratios_prune(ratios, threshold=0.1)

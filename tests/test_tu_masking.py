@@ -1067,7 +1067,7 @@ def test_multi_network_independent_tu_removal(lib):
 
         # create multiple networks from the same scaffold (simulates design replicates)
         networks = []
-        for i in range(3):
+        for _i in range(3):
             nets = recipe_to_networks(scaffold_recipe, br.ALL_RULES, invert=True)
             networks.extend(nets)
 
@@ -1235,7 +1235,7 @@ def test_committed_network_rebuilds_equivalent(lib, design_stack):
 
             for c_agg, r_agg in zip(
                 sorted(committed_aggs, key=lambda x: x.node_id),
-                sorted(rebuilt_aggs, key=lambda x: x.node_id),
+                sorted(rebuilt_aggs, key=lambda x: x.node_id), strict=False,
             ):
                 c_members = c_agg.extra.get("members", {})
                 r_members = r_agg.extra.get("members", {})

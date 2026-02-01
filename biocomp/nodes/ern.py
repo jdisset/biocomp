@@ -84,8 +84,10 @@ def sequestron_ERN(
         random_var: ArrayLike,
         param_f: Callable,
         key: PRNGKey,
-        layer_id_onehot: NDArray = np.empty((0,)),
+        layer_id_onehot: NDArray | None = None,
     ):
+        if layer_id_onehot is None:
+            layer_id_onehot = np.empty((0,))
         if use_ern_layer_id:
             input_values = flat_concat(neg, pos, affinity, layer_id_onehot, random_var)
             assert layer_id_onehot.shape == (max_ern_layers,), (

@@ -246,7 +246,7 @@ def test_commit_and_export(roundtrip_recipe):
         exported_recipe = committed_network.to_recipe()
 
         assert len(exported_recipe.content) == len(roundtrip_recipe.content)
-        for cotx_orig, cotx_exp in zip(roundtrip_recipe.content, exported_recipe.content):
+        for cotx_orig, cotx_exp in zip(roundtrip_recipe.content, exported_recipe.content, strict=False):
             assert len(cotx_exp.ratios) == len(set(tu.source for tu in cotx_orig.units))
 
 
@@ -458,7 +458,6 @@ def test_shared_source_network_structure(lib):
 
 
 if __name__ == "__main__":
-    import sys
 
     lib_instance = load_lib()
 

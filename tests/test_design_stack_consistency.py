@@ -170,7 +170,7 @@ class TestPredictionConsistency:
             data2, Y2 = predict_design_grid(model, committed, target, res, seed=0)
 
             np.testing.assert_array_equal(Y1, Y2, err_msg="Target grids should be identical")
-            for d1, d2 in zip(data1, data2):
+            for d1, d2 in zip(data1, data2, strict=False):
                 np.testing.assert_allclose(
                     np.asarray(d1.y),
                     np.asarray(d2.y),
@@ -211,7 +211,7 @@ class TestPredictionConsistency:
             )
             manual_data = manual_pred.get_data(rescale_latent=False)
 
-            for h, m in zip(helper_data, manual_data):
+            for h, m in zip(helper_data, manual_data, strict=False):
                 np.testing.assert_allclose(
                     np.asarray(h.y),
                     np.asarray(m.y),
@@ -360,7 +360,7 @@ class TestPredictionFlagEffects:
             data_skip = pred_skip.get_data(rescale_latent=False)
             data_no_skip = pred_no_skip.get_data(rescale_latent=False)
 
-            for ds, dns in zip(data_skip, data_no_skip):
+            for ds, dns in zip(data_skip, data_no_skip, strict=False):
                 y_skip = np.asarray(ds.y)
                 y_no_skip = np.asarray(dns.y)
                 max_diff = float(np.max(np.abs(y_skip - y_no_skip)))

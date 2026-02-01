@@ -157,7 +157,7 @@ class GraphState(BaseModel):
     def compute_dependency_map(self) -> dict[int, set[int]]:
         """Returns {node id -> set of upstream node ids}"""
         dependency_map = {}
-        for node_id, node in self.nodes.items():
+        for node_id, _node in self.nodes.items():
             incoming = self.get_incoming_edges(node_id)
             if incoming:
                 dependency_map[node_id] = set(e.source_id for e in incoming)

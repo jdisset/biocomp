@@ -6,12 +6,9 @@ complete control and understanding of the network structure.
 """
 
 import pytest
-import numpy as np
 from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot, Recipe
 from biocomp.library import load_lib, LibraryContext
 from biocomp.recipe import FluoIntensity, NumRange
-from biocomp.jaxutils import flat_concat
-from functools import partial
 
 
 @pytest.fixture

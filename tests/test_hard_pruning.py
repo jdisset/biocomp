@@ -10,7 +10,7 @@ from biocomp.design import DesignConfig, DesignManager, initialize_params
 from biocomp.design_pruning import _merge_surviving_params, identify_tus_to_prune, hard_prune_and_rebuild
 from biocomp.tumasking import TU_LOG_ALPHA_PATH
 from biocomp.parameters import ParameterTree
-from biocomp.design_targets import SVGTarget, LatticeSampling
+from biocomp.design_targets import SVGTarget
 from biocomp.config import DEFAULT_COMPUTE_CONFIG
 from biocomp.datautils import IdentityRescaler
 from biocomptools.modelmodel import BiocompModel
@@ -250,7 +250,7 @@ def test_hard_prune_removes_low_ratios_without_masking(lib):
         assert tus_to_remove[0], "No TUs selected for pruning"
 
         before = len(extract_tu_ids_from_network(networks[0]))
-        dconf = DesignConfig(n_replicates=1, n_epochs=1, enable_tu_masking=False)
+        dconf = DesignConfig(n_replicates=1, n_epochs=1)
         new_dmanager, _, _ = hard_prune_and_rebuild(
             dmanager,
             dconf,

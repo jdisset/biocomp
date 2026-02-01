@@ -2,8 +2,6 @@ import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import Dict, Any
-from functools import partial
 from biocomp.jaxutils import robust_sort, jax_log_poly_log, jax_inverse_log_poly_log
 
 

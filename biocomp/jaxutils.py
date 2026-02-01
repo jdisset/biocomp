@@ -186,7 +186,7 @@ def tree_append(t, e):
     fa, tt = jtu.tree_flatten(t)
     fb, te = jtu.tree_flatten(e)
     assert te == tt
-    return jtu.tree_unflatten(tt, [jnp.concatenate([a, jnp.array([b])]) for a, b in zip(fa, fb)])
+    return jtu.tree_unflatten(tt, [jnp.concatenate([a, jnp.array([b])]) for a, b in zip(fa, fb, strict=False)])
 
 
 def tree_get(t, i):

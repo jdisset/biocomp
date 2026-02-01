@@ -166,7 +166,6 @@ def test_design_training_predictions_match_committed_predictions(lib):
 
     from biocomp.design import DesignManager, DesignConfig, initialize_params
     from biocomptools.modelmodel import BiocompModel, NetworkModel
-    from biocomptools.toollib.networkprediction import NetworkPrediction
 
     model_path = Path(os.environ.get('BIOCOMP_DESIGNER_MODEL', ''))
     if not model_path.exists():
@@ -183,7 +182,7 @@ def test_design_training_predictions_match_committed_predictions(lib):
             networks=networks[:1],
             enable_tu_masking=False,
         )
-        dconf = DesignConfig(
+        DesignConfig(
             n_replicates=1,
             n_epochs=1,
             batch_size=64,

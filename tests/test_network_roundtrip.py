@@ -61,7 +61,7 @@ def recipe_equals_assert(r1: Recipe, r2: Recipe, check_name: bool = False, path:
         f"{path}: CoTransfection count mismatch ({len(r1.content)} vs {len(r2.content)})"
     )
 
-    for i, (c1, c2) in enumerate(zip(r1.content, r2.content)):
+    for i, (c1, c2) in enumerate(zip(r1.content, r2.content, strict=False)):
         cotx_path = f"{path}/CoTx[{i}:{c1.name if hasattr(c1, 'name') and c1.name else 'unnamed'}]"
         cotx_equals_assert(c1, c2, path=cotx_path)
 
@@ -89,7 +89,7 @@ def cotx_equals_assert(c1: CoTransfection, c2: CoTransfection, path: str):
     assert len(r1) == len(r2), f"{path}: Ratio count mismatch ({len(r1)} vs {len(r2)})"
 
     numeric_indices = []
-    for i, (ratio1, ratio2) in enumerate(zip(r1, r2)):
+    for i, (ratio1, ratio2) in enumerate(zip(r1, r2, strict=False)):
         if isinstance(ratio1, NumRange) and isinstance(ratio2, NumRange):
             assert ratio1.min == ratio2.min, (
                 f"{path}/Ratio[{i}]: NumRange.min mismatch ({ratio1.min} vs {ratio2.min})"
@@ -100,7 +100,7 @@ def cotx_equals_assert(c1: CoTransfection, c2: CoTransfection, path: str):
         elif isinstance(ratio1, NumRange) or isinstance(ratio2, NumRange):
             type1 = type(ratio1).__name__
             type2 = type(ratio2).__name__
-            assert False, f"{path}/Ratio[{i}]: Type mismatch ({type1} vs {type2})"
+            raise AssertionError(f"{path}/Ratio[{i}]: Type mismatch ({type1} vs {type2})")
         else:
             numeric_indices.append(i)
 
@@ -132,13 +132,11 @@ def cotx_equals_assert(c1: CoTransfection, c2: CoTransfection, path: str):
         else:
             type1 = type(fb1.value).__name__
             type2 = type(fb2.value).__name__
-            assert False, f"{path}/fluo_bias/value: Type mismatch ({type1} vs {type2})"
+            raise AssertionError(f"{path}/fluo_bias/value: Type mismatch ({type1} vs {type2})")
     else:
         has1 = c1.fluo_bias is not None
         has2 = c2.fluo_bias is not None
-        assert False, (
-            f"{path}/fluo_bias: Presence mismatch (original={'present' if has1 else 'absent'}, reconstructed={'present' if has2 else 'absent'})"
-        )
+        raise AssertionError(f"{path}/fluo_bias: Presence mismatch (original={'present' if has1 else 'absent'}, reconstructed={'present' if has2 else 'absent'})")
 
     if numeric_indices:
         numeric_r1 = [r1[i] for i in numeric_indices]
@@ -153,7 +151,7 @@ def cotx_equals_assert(c1: CoTransfection, c2: CoTransfection, path: str):
                 f"{path}/Ratio[{i}]: Normalized ratio mismatch ({norm1:.6f} vs {norm2:.6f})"
             )
 
-    for i, (u1, u2) in enumerate(zip(c1.units, c2.units)):
+    for i, (u1, u2) in enumerate(zip(c1.units, c2.units, strict=False)):
         tu_path = f"{path}/Unit[{i}:{u1.name if u1.name else 'unnamed'}]"
         tu_equals_assert(u1, u2, path=tu_path)
 
@@ -171,7 +169,7 @@ def tu_equals_assert(u1: TranscriptionUnit, u2: TranscriptionUnit, path: str):
         f"{path}: Slot count mismatch ({len(slots1)} vs {len(slots2)}) after filtering empty slots"
     )
 
-    for i, (s1, s2) in enumerate(zip(slots1, slots2)):
+    for i, (s1, s2) in enumerate(zip(slots1, slots2, strict=False)):
         slot_path = f"{path}/Slot[{i}]"
 
         part1 = s1.part[0] if isinstance(s1.part, list) and len(s1.part) == 1 else s1.part

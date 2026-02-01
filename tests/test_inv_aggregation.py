@@ -171,7 +171,7 @@ class TestInvAggregationEdgeCases:
             ratio_min_path = path.replace("/ratios", "/ratio_min")
             ratio_max_path = path.replace("/ratios", "/ratio_max")
             if ratio_min_path in params and ratio_max_path in params:
-                ratio_min = params[ratio_min_path]
+                params[ratio_min_path]
                 ratio_max = params[ratio_max_path]
                 assert jnp.all(ratios >= 0) or jnp.all(ratios <= ratio_max), \
                     f"Ratios should be within bounds for {path}"

@@ -609,7 +609,7 @@ SPLIT_HALF_N_BOOTSTRAPS: int = 5  # cv ~6%, good speed/stability tradeoff
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class GridStatsFields:
+class GridStatsFields(BaseModel):
     """Mixin providing gridstats configuration fields for Pydantic models.
 
     This is NOT a BaseModel subclass - it provides field annotations that Pydantic
@@ -625,8 +625,6 @@ class GridStatsFields:
         params = pred.get_gridstats_params()
     """
 
-
-class GridStatsFields(BaseModel):
     gridstats_hypercube_res: int = DEFAULT_GRIDSTATS_PARAMS["hypercube_res"]
     gridstats_hypercube_min: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_min"]
     gridstats_hypercube_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]

@@ -750,9 +750,11 @@ def histogram(
     plot_data: PlotData,
     ax,
     rescaler: Optional[DataRescaler] = None,
-    grid_histogram_params={},
+    grid_histogram_params=None,
     **kw,
 ):
+    if grid_histogram_params is None:
+        grid_histogram_params = {}
     if rescaler is None:
         rescaler = IdentityRescaler()
 
@@ -786,11 +788,17 @@ def smooth(
     ax,
     rescaler: DataRescaler,
     force_dim: Optional[int] = None,
-    smooth_1d_params={},
-    smooth_2d_params={},
-    smooth_3d_params={},
+    smooth_1d_params=None,
+    smooth_2d_params=None,
+    smooth_3d_params=None,
     **kw,
 ):
+    if smooth_3d_params is None:
+        smooth_3d_params = {}
+    if smooth_2d_params is None:
+        smooth_2d_params = {}
+    if smooth_1d_params is None:
+        smooth_1d_params = {}
     dim = plot_data.dimensions
     x = rescaler.fwd(plot_data.x)
     y = rescaler.fwd(plot_data.y)
@@ -862,13 +870,19 @@ def smooth_txt(
     ax=None,
     rescaler: DataRescaler = None,
     force_dim: Optional[int] = None,
-    smooth_1d_params={},
-    smooth_2d_params={},
-    smooth_3d_params={},
+    smooth_1d_params=None,
+    smooth_2d_params=None,
+    smooth_3d_params=None,
     **kw,
 ):
     from biocomp.plotting.plotting_txt import smooth_1d_txt, smooth_2d_txt, smooth_3d_txt
 
+    if smooth_3d_params is None:
+        smooth_3d_params = {}
+    if smooth_2d_params is None:
+        smooth_2d_params = {}
+    if smooth_1d_params is None:
+        smooth_1d_params = {}
     if rescaler is None:
         rescaler = IdentityRescaler()
 
@@ -983,8 +997,8 @@ def normalized_violin(
     draw_xlabel=True,
     draw_ylabel=True,
     cmap=pc.DEFAULT_CMAP_NAME,
-    violin_params={},
-    violin_style_params={},
+    violin_params=None,
+    violin_style_params=None,
     mean_marker="o",
     mean_color="black",
     mean_size=7,
@@ -997,6 +1011,10 @@ def normalized_violin(
     write_y_bounds=True,
     use_log_density=True,
 ):
+    if violin_style_params is None:
+        violin_style_params = {}
+    if violin_params is None:
+        violin_params = {}
     violin_params = {**DEFAULT_VIOLIN_PARAMS, **violin_params}
 
     dim = plot_data.dimensions

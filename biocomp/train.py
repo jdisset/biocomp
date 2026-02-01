@@ -1,10 +1,17 @@
 ### {{{                          --     imports     --
-from . import datautils as du
-from biocomp.utils import EncodedPartialFunction
-from .parameters import ParameterTree
-from . import utils as ut
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, List, Tuple, Callable, Optional, NamedTuple
 import time
-from typing import List, Tuple, Callable, Optional, NamedTuple
+
+from . import datautils as du
+from . import utils as ut
+from .parameters import ParameterTree
+from biocomp.utils import EncodedPartialFunction
+
+if TYPE_CHECKING:
+    import optax
+    from .compute import ComputeStack
 from pydantic import Field
 from biocomp.logging_config import get_logger
 from biocomp.optimutils import (
@@ -178,7 +185,7 @@ def compile_training_step(
 
 def expand_weights_to_outputs(weights: list[float], networks: list) -> list[float]:
     """Expand per-network weights to per-output weights."""
-    return [w for w, n in zip(weights, networks) for _ in range(n.nb_outputs)]
+    return [w for w, n in zip(weights, networks, strict=False) for _ in range(n.nb_outputs)]
 
 
 def check_XYZ(X, Y, Z, stack):

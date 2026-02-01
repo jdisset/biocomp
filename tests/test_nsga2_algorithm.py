@@ -124,7 +124,7 @@ class TestNSGA2Algorithm:
         key = jax.random.key(42)
         state = algo.init(key)
 
-        for i in range(5):
+        for _i in range(5):
             key, ask_key = jax.random.split(key)
             offspring = algo.ask(ask_key, state)
             fitness = sphere_dtlz(offspring)
@@ -175,7 +175,7 @@ class TestRunNSGA2:
         algo = NSGA2(pop_size=20, n_dims=3, n_objectives=2, lb=lb, ub=ub)
         state = algo.init(key)
 
-        for i in range(10):
+        for _i in range(10):
             key, ask_key = jax.random.split(key)
             offspring = algo.ask(ask_key, state)
             fitness = simple_mo(offspring)

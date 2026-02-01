@@ -68,7 +68,7 @@ def _migrate_legacy_members(extra: dict) -> dict[str, AggregationMember]:
 
         return {
             mid: AggregationMember(ratio=r, ratio_range=rr, locked=lk)
-            for mid, r, rr, lk in zip(member_ids, ratios, ratio_ranges, locked)
+            for mid, r, rr, lk in zip(member_ids, ratios, ratio_ranges, locked, strict=False)
         }
 
     return {}

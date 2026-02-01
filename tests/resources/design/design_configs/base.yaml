@@ -16,6 +16,7 @@
 !set_default w_gradient: 0.01   # gradient magnitude loss
 
 # TU masking settings
+!set_default tu_masking_mode: none  # "none", "direct", "latent_mlp", "binary"
 !set_default tu_log_alpha_init_mean: 2.0
 !set_default tu_log_alpha_init_std: 0.1
 !set_default tu_n_samples: 1  # Monte Carlo samples for variance reduction
@@ -77,8 +78,10 @@ design_conf: !biocomp.design.DesignConfig
   keep_in_history: all
   reshuffle_batches: false  # CRITICAL: lattice mode requires sequential order for grid reshape
 
-  tu_log_alpha_init_mean: ${float(tu_log_alpha_init_mean)}
-  tu_log_alpha_init_std: ${float(tu_log_alpha_init_std)}
+  tu_masking: !biocomp.design.TUMaskingParams
+    mode: ${tu_masking_mode}
+    init_mean: ${float(tu_log_alpha_init_mean)}
+    init_std: ${float(tu_log_alpha_init_std)}
   loss_function: !biocomp.utils.PartialFunction
     func: biocomp.design.grid_distance_loss
     kwargs:

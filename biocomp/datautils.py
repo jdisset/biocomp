@@ -251,7 +251,7 @@ def load_data_file(
         remainder = set(proteins) - available_columns
         if len(remainder) > 0:
             return error_handler(
-                f"""Proteins {remainder} was requested but not found in data. 
+                f"""Proteins {remainder} was requested but not found in data.
 Available: {available_columns}
 """
             )
@@ -761,7 +761,7 @@ class DataManager:
         self._padded_cache: dict | None = None
         if self.data_cfg.perform_data_checks:
             logger.debug("Running data checks")
-            for x, y, n in zip(self._X, self._Y, self._networks):
+            for x, y, n in zip(self._X, self._Y, self._networks, strict=False):
                 network_data_check(x, y, n)
         logger.info(f"Initialized a DataManager with {len(self._networks)} networks")
 
@@ -849,7 +849,7 @@ class DataManager:
             return np.pad(arr, (0, pad_len))
 
         X_pad, Y_pad, D_pad, M_pad = [], [], [], []
-        for x, y, d in zip(self._X, self._Y, self._densities):
+        for x, y, d in zip(self._X, self._Y, self._densities, strict=False):
             pad_len = max_pts - x.shape[0]
             X_pad.append(jax.device_put(_pad_2d(np.asarray(x), pad_len), cpu))
             Y_pad.append(jax.device_put(_pad_2d(np.asarray(y), pad_len), cpu))
@@ -881,8 +881,8 @@ class DataManager:
         xb_list, yb_list = zip(
             *[
                 sample_batches_jax(x, y, d, m, batch_size, n_batches, q, k)
-                for x, y, d, m, k in zip(X_pad, Y_pad, D_pad, M_pad, keys)
-            ]
+                for x, y, d, m, k in zip(X_pad, Y_pad, D_pad, M_pad, keys, strict=False)
+            ], strict=False
         )
 
         if concat_along_feature_axis:
@@ -919,7 +919,7 @@ class DataManager:
                 self._X,
                 self._Y,
                 self._densities,
-                all_keys,
+                all_keys, strict=False,
             )
         ]
 
@@ -934,7 +934,7 @@ class DataManager:
                 sample_batches(args) for args in tqdm(sample_args, desc="Generating batches")
             ]
 
-        xbatches, ybatches = zip(*all_batches)
+        xbatches, ybatches = zip(*all_batches, strict=False)
 
         if concat_along_feature_axis:
             xbatches = np.concatenate(xbatches, axis=2)
@@ -963,15 +963,15 @@ class DataManager:
                 )
             )
 
-        networks, samples = zip(*net_sample_pairs)
+        networks, samples = zip(*net_sample_pairs, strict=False)
 
         XY_pairs = []
-        for xp, n, s in zip(xplist, networks, samples):
+        for xp, n, s in zip(xplist, networks, samples, strict=False):
             XY_pairs.append(
                 ut.get_cache(lambda: xp.get_XY(n, s), f"{str(xp)}_XY", network_cache_location)
             )
 
-        X, Y = zip(*XY_pairs)
+        X, Y = zip(*XY_pairs, strict=False)
         # get everything as a long concatenated list
         X, Y, networks = (
             list(itertools.chain(*X)),
@@ -1081,7 +1081,7 @@ def filter_dependent_outputs(per_net_x, per_net_y, nets):
     Only keep the output that is not in the input for each network.
     """
     only_dependent_y = []
-    for xi, yi, n in zip(per_net_x, per_net_y, nets):
+    for xi, yi, n in zip(per_net_x, per_net_y, nets, strict=False):
         close_mask = np.any(np.isclose(yi[..., None], xi[..., None, :], rtol=0, atol=1e-9), axis=-1)
         equals = np.all(close_mask, axis=0)
         dep_yi = yi[:, ~equals]

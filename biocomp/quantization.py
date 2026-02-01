@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 def quantization_mask_str(names, mask) -> str:
     col_width = max(len(name) for name in names)
     result = " " * 5
-    for i, name in enumerate(names):
+    for _i, name in enumerate(names):
         result += f"{name:^{col_width}} "
     result += "\n"
     for i, row in enumerate(mask):
@@ -250,7 +250,7 @@ def get_quantized_part_names(
     )
 
     names = []
-    for v, m in zip(values_to_quantize, masks):
+    for v, m in zip(values_to_quantize, masks, strict=False):
         # v has shape (rate_dim,), needs to match possible_values dim
         if v.ndim == 0:
             v = v.reshape(1)

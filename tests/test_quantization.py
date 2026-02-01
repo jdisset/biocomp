@@ -4,7 +4,6 @@ import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import Dict, Any
 
 from biocomp.quantization import (
     quantize_all_values_to_nearest_masked_embeddings,
@@ -12,7 +11,7 @@ from biocomp.quantization import (
     get_quantized,
     get_nearest_masked_id,
 )
-from biocomp.parameters import ParameterTree, ArrayRef
+from biocomp.parameters import ParameterTree
 from biocomp import jaxutils
 
 

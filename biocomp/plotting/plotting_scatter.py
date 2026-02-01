@@ -208,8 +208,10 @@ def grid_histogram(
     cmap=None,
     margins=0.01,
     noise_smooth=0.25,
-    colorbar_params: dict = {},
+    colorbar_params: dict = None,
 ):
+    if colorbar_params is None:
+        colorbar_params = {}
     assert X.shape[1] == 1
     assert Y.shape[1] == 1
 

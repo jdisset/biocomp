@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import time as _time
 
-import jax
 import jax.numpy as jnp
 
 from biocomp.logging_config import get_logger
@@ -143,7 +142,7 @@ def prune_network_tus(
                 del net.compute_graph.edges[edge_id]
 
         disabled_source_ids = set()
-        for tu_id in additional_disabled:
+        for _tu_id in additional_disabled:
             for node in net.compute_graph.get_nodes_by_type("source"):
                 tu_names = node.extra.get("tu_names_by_slot", {})
                 cotx_group = node.extra.get("cotx_group", "")

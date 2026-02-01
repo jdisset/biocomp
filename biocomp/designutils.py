@@ -256,7 +256,7 @@ def _assign_greyscale_values(sx, sy, paths, greys, max_is_black, outlim, grid_sh
     pts = np.column_stack((sx, sy))
     if len(paths) != len(greys):
         return Y if grid_shape is None else Y.reshape(grid_shape)
-    for p, g in zip(paths, greys):
+    for p, g in zip(paths, greys, strict=False):
         Y[p.contains_points(pts)] = g
     # Map grayscale [0,1] to latent output range
     Y = Y * (outlim[1] - outlim[0]) + outlim[0]
@@ -463,7 +463,7 @@ def sample_from_data(
 
     rng = np.random.default_rng()
 
-    for i in range(n):
+    for _i in range(n):
         xy_query = xy_base.copy()
 
         # add jitter

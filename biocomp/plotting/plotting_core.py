@@ -395,10 +395,14 @@ def setup_transformed_axis(
     xaxis_lims=None,
     yaxis_lims=None,
     rescaler=None,
-    setup_xaxis_params={},
-    setup_yaxis_params={},
+    setup_xaxis_params=None,
+    setup_yaxis_params=None,
     **kw,
 ):
+    if setup_yaxis_params is None:
+        setup_yaxis_params = {}
+    if setup_xaxis_params is None:
+        setup_xaxis_params = {}
     if xaxis_lims is not None:
         xaxis_lims = setup_xaxis(
             ax,
