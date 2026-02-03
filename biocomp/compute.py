@@ -18,7 +18,16 @@ from .graphengine import GraphState
 
 from biocomp.logging_config import get_logger
 from biocomp.graphengine import GraphNode, GraphEdge
-from biocomp.designdebug import is_design_debug_enabled, save_debug_state
+from biocomp.tracing import (
+    is_design_debug_enabled,
+    save_debug_state,
+    trace_scope,
+    summarize_stack,
+    summarize_params,
+    should_save_full_objects,
+    snapshot_full_stack,
+    snapshot_full_params,
+)
 import dracon as dr
 
 
@@ -328,43 +337,107 @@ class ComputeStack:
             enable_tu_masking: If True, build TU-to-index mapping for design mode TU masking
             auto_lock_topology_tus: If True, auto-detect TUs whose masking would change topology
         """
-        with ut.timer("Building compute stack", logger):
-            self.config = config
+        with trace_scope("stack_build", component="stack") as scope:
+            scope.event("build_start", "Beginning stack build", {
+                "n_networks": len(self.networks),
+                "network_names": [n.name for n in self.networks],
+                "enable_tu_masking": enable_tu_masking,
+                "auto_lock_topology_tus": auto_lock_topology_tus,
+            })
 
-            if enable_tu_masking:
-                self._build_tu_mapping(auto_lock_topology_tus=auto_lock_topology_tus)
+            with ut.timer("Building compute stack", logger):
+                self.config = config
 
-            self._assemble_stack(**kwargs)
-            self._refresh()
-            assert self.layers is not None, "No layers"
-            for layer in self.layers:
-                layer.setup(config, stack=self)
+                if enable_tu_masking:
+                    self._build_tu_mapping(auto_lock_topology_tus=auto_lock_topology_tus)
+                    scope.event("tu_mapping_complete", "TU mapping built", {
+                        "n_tus": self.n_tus,
+                        "n_inverse_tus": len(self.inverse_tu_ids) if self.inverse_tu_ids else 0,
+                        "n_no_masking_tus": len(self.no_masking_tu_ids) if self.no_masking_tu_ids else 0,
+                    })
+                    if self.tu_id_to_idx:
+                        scope.snapshot("tu_id_to_idx", dict(self.tu_id_to_idx))
+
+                self._assemble_stack(**kwargs)
+                scope.event("assemble_complete", "Stack assembled", {
+                    "n_layers": len(self.layers) if self.layers else 0,
+                })
+
                 self._refresh()
-            self._generate_apply_method()
-            self.check()
-            self.is_built = True
+                assert self.layers is not None, "No layers"
+
+                for layer_idx, layer in enumerate(self.layers):
+                    layer.setup(config, stack=self)
+                    scope.event("layer_setup", f"Layer {layer_idx} setup complete", {
+                        "layer_id": layer_idx,
+                        "layer_type": layer.f_type,
+                        "n_nodes": len(layer.nodes),
+                        "namespace": layer.namespace,
+                    })
+                    self._refresh()
+
+                self._generate_apply_method()
+                self.check()
+                self.is_built = True
+
+            scope.event("build_complete", "Stack build complete", {
+                "n_layers": len(self.layers),
+                "total_nodes": self.number_of_nodes,
+                "output_shape": self.output_shape,
+            })
+            scope.snapshot("stack_summary", summarize_stack(self))
+            if should_save_full_objects():
+                scope.snapshot("stack_full", snapshot_full_stack(self))
 
     def _build_tu_mapping(self, auto_lock_topology_tus: bool = True):
         """Build TU ID to index mapping for all networks."""
         from biocomp.tumasking import build_tu_id_mapping_excluding_inverse
 
-        sorted_tu_ids, tu_id_to_idx, inverse_tu_ids, no_masking_tu_ids = (
-            build_tu_id_mapping_excluding_inverse(self.networks)
-        )
+        with trace_scope("build_tu_mapping", component="stack") as scope:
+            sorted_tu_ids, tu_id_to_idx, inverse_tu_ids, no_masking_tu_ids = (
+                build_tu_id_mapping_excluding_inverse(self.networks)
+            )
 
-        if auto_lock_topology_tus:
-            from biocomp.network import find_topology_changing_tus
+            scope.event("initial_mapping", "Initial TU mapping from networks", {
+                "n_sorted_tu_ids": len(sorted_tu_ids),
+                "n_inverse_tu_ids": len(inverse_tu_ids),
+                "n_no_masking_tu_ids": len(no_masking_tu_ids),
+            })
 
-            for net in self.networks:
-                no_masking_tu_ids.update(find_topology_changing_tus(net))
+            if auto_lock_topology_tus:
+                from biocomp.network import find_topology_changing_tus
 
-        # inverse TUs must never be disabled - they're essential for inversion path
-        no_masking_tu_ids.update(inverse_tu_ids)
+                for net_idx, net in enumerate(self.networks):
+                    topology_tus = find_topology_changing_tus(net)
+                    if topology_tus:
+                        scope.event("topology_tus_found", "Topology-changing TUs identified", {
+                            "network_idx": net_idx,
+                            "network_name": net.name,
+                            "topology_tu_ids": list(topology_tus),
+                        })
+                    no_masking_tu_ids.update(topology_tus)
 
-        self.tu_id_to_idx = tu_id_to_idx
-        self.n_tus = len(sorted_tu_ids)
-        self.inverse_tu_ids = inverse_tu_ids
-        self.no_masking_tu_ids = no_masking_tu_ids
+            # inverse TUs must never be disabled - they're essential for inversion path
+            no_masking_tu_ids.update(inverse_tu_ids)
+
+            self.tu_id_to_idx = tu_id_to_idx
+            self.n_tus = len(sorted_tu_ids)
+            self.inverse_tu_ids = inverse_tu_ids
+            self.no_masking_tu_ids = no_masking_tu_ids
+
+            scope.event("tu_mapping_finalized", "TU mapping finalized", {
+                "n_tus": self.n_tus,
+                "n_inverse_tus": len(inverse_tu_ids),
+                "n_no_masking_tus": len(no_masking_tu_ids),
+                "inverse_tu_ids": list(inverse_tu_ids),
+                "no_masking_tu_ids": list(no_masking_tu_ids),
+            })
+            scope.snapshot("tu_mapping", {
+                "tu_id_to_idx": dict(tu_id_to_idx),
+                "inverse_tu_ids": list(inverse_tu_ids),
+                "no_masking_tu_ids": list(no_masking_tu_ids),
+            })
+
         logger.debug(
             f"Built TU mapping: {self.n_tus} TUs, {len(inverse_tu_ids)} inverse, {len(no_masking_tu_ids)} no_masking"
         )
@@ -401,45 +474,72 @@ class ComputeStack:
         """
         Generates a randomly initilized parameter tree for the stack
         """
-        assert self.is_built, "Stack not built"
-        params = ParameterTree()
-        # for l_id, layer in enumerate(self.layers):
-        # let's initialize the stacj it in reverse order
-        # so that the inverse nodes can reference fwd ones after init
-        assert self.layers is not None, "No layers"
-        assert self.layers_start_index is not None, "No layers start index"
-        for l_id, layer in reversed(list(enumerate(self.layers))):
-            assert layer.is_built, "Layer not built"
-            assert l_id == layer.layer_id, "Layer id mismatch"
-            rng_key, _ = jax.random.split(rng_key)
-            logger.debug(
-                f"Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}"
+        with trace_scope("stack_init", component="stack") as scope:
+            assert self.is_built, "Stack not built"
+            params = ParameterTree()
+            # for l_id, layer in enumerate(self.layers):
+            # let's initialize the stacj it in reverse order
+            # so that the inverse nodes can reference fwd ones after init
+            assert self.layers is not None, "No layers"
+            assert self.layers_start_index is not None, "No layers start index"
+
+            scope.event("init_start", "Beginning parameter initialization", {
+                "n_layers": len(self.layers),
+                "init_order": "reverse",  # inverse nodes can reference fwd ones
+            })
+
+            for l_id, layer in reversed(list(enumerate(self.layers))):
+                assert layer.is_built, "Layer not built"
+                assert l_id == layer.layer_id, "Layer id mismatch"
+                rng_key, _ = jax.random.split(rng_key)
+                logger.debug(
+                    f"Initializing {len(layer.nodes)} nodes in layer {l_id}/{len(self.layers)}"
+                )
+                logger.debug(f"Layer type: {layer.f_type}")
+                logger.debug(f"Layer input shapes: {layer.f_input_shapes}")
+                logger.debug(f"Layer output shapes: {layer.f_out_shapes}")
+                if layer.f_prepare is not None:
+                    try:
+                        layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
+                        scope.event("layer_init", f"Layer {l_id} initialized", {
+                            "layer_id": l_id,
+                            "layer_type": layer.f_type,
+                            "n_nodes": len(layer.nodes),
+                            "namespace": layer.namespace,
+                        })
+                    except Exception as e:
+                        scope.event("layer_init_error", f"Layer {l_id} init failed", {
+                            "layer_id": l_id,
+                            "layer_type": layer.f_type,
+                            "error": str(e),
+                        })
+                        logger.error(f"Error in layer {l_id} preparation:")
+                        logger.error(f"Layer type: {layer.f_type}")
+                        logger.error(f"Layer input shapes: {layer.f_input_shapes}")
+                        logger.error(f"Layer output shapes: {layer.f_out_shapes}")
+                        logger.exception(e)
+                        raise e
+
+            params.tag("local", "local")
+            params.tag("shared", "shared")
+
+            from biocomp.nodeutils import NON_GRAD_TAG
+
+            params.at(
+                "global/dependent_output_mask", self.get_dependent_output_mask(), tags=[NON_GRAD_TAG]
             )
-            logger.debug(f"Layer type: {layer.f_type}")
-            logger.debug(f"Layer input shapes: {layer.f_input_shapes}")
-            logger.debug(f"Layer output shapes: {layer.f_out_shapes}")
-            if layer.f_prepare is not None:
-                try:
-                    layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
-                except Exception as e:
-                    logger.error(f"Error in layer {l_id} preparation:")
-                    logger.error(f"Layer type: {layer.f_type}")
-                    logger.error(f"Layer input shapes: {layer.f_input_shapes}")
-                    logger.error(f"Layer output shapes: {layer.f_out_shapes}")
-                    logger.exception(e)
-                    raise e
-        params.tag("local", "local")
-        params.tag("shared", "shared")
 
-        from biocomp.nodeutils import NON_GRAD_TAG
+            scope.event("init_complete", "Parameter initialization complete", {
+                "n_param_paths": len(list(params.data.iter_leaves())),
+                "tagnames": params.tagnames,
+            })
+            scope.snapshot("params_summary", summarize_params(params))
+            if should_save_full_objects():
+                scope.snapshot("params_full", snapshot_full_params(params))
 
-        params.at(
-            "global/dependent_output_mask", self.get_dependent_output_mask(), tags=[NON_GRAD_TAG]
-        )
-
-        # pp_params = self.post_process(params)
-        # assert pp_params == params, 'Post process changed params'
-        return params
+            # pp_params = self.post_process(params)
+            # assert pp_params == params, 'Post process changed params'
+            return params
 
     def get_nb_networks(self) -> int:
         return len(self.networks)
@@ -538,10 +638,12 @@ class ComputeStack:
         """
         from .stack_commit import commit_networks, CommitOptions
 
+        # Handle backward compatibility: lock_ratios=True means preserve_ratio_states=False
+        lock_ratios = kwargs.get("lock_ratios", True)
         options = CommitOptions(
             prune_tus=True,
             collapse_to_part=collapse_to_part,
-            lock_ratios=kwargs.get("lock_ratios", True),
+            preserve_ratio_states=not lock_ratios,
             roundtrip_rebuild=True,
             preserve_input_order=True,
             max_rebuild_workers=8,

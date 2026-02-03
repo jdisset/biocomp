@@ -90,7 +90,7 @@ class FluoIntensity(BaseModel):
 
 ## {{{                          --     RatioSpec     --
 
-DEFAULT_RATIO_MIN = 0.001
+DEFAULT_RATIO_MIN = 0.0125
 DEFAULT_RATIO_MAX = 10.0
 
 

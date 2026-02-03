@@ -19,6 +19,7 @@ import numpy as np
 from dataclasses import dataclass
 from copy import deepcopy
 from . import utils as ut
+from biocomp.tracing import trace_scope
 
 import base64
 
@@ -1038,59 +1039,77 @@ class ParameterTree:
 
     def filter_by_tag(self, tags, mode="any") -> tuple["ParameterTree", "ParameterTree"]:
         # modes: 'any', 'all', 'exact'
+        with trace_scope("params_filter_by_tag", component="params") as scope:
+            if isinstance(tags, str):
+                tags = [tags]
 
-        if isinstance(tags, str):
-            tags = [tags]
-        for t in tags:
-            if t not in self.tagnames:
-                # raise KeyError(f"Tag {t} not found in ParameterTree")
-                logger.debug(f"Tag {t} not found in ParameterTree")
-                return ParameterTree(), self
+            scope.event("filter_start", "Beginning parameter tree filter", {
+                "tags": tags,
+                "mode": mode,
+                "source_n_paths": len(list(self.data.iter_leaves())),
+                "source_tagnames": self.tagnames,
+            })
 
-        tag_ids = [self.__tagdict[tag] for tag in tags]
-        left_param_tree = ParameterTree(
-            tagnames=self.tagnames,
-            read_only=False,
-        )
-        right_param_tree = ParameterTree(
-            tagnames=self.tagnames,
-            read_only=False,
-        )
+            for t in tags:
+                if t not in self.tagnames:
+                    # raise KeyError(f"Tag {t} not found in ParameterTree")
+                    logger.debug(f"Tag {t} not found in ParameterTree")
+                    scope.event("tag_not_found", "Tag not found, returning empty left tree", {
+                        "missing_tag": t,
+                    })
+                    return ParameterTree(), self
 
-        if mode == "all":
+            tag_ids = [self.__tagdict[tag] for tag in tags]
+            left_param_tree = ParameterTree(
+                tagnames=self.tagnames,
+                read_only=False,
+            )
+            right_param_tree = ParameterTree(
+                tagnames=self.tagnames,
+                read_only=False,
+            )
 
-            def match_f(x):
-                return np.all(x[tag_ids])
-        elif mode == "exact":
-            target_tag_flags = np.zeros(len(self.tagnames), dtype=bool)
-            target_tag_flags[tag_ids] = True
+            if mode == "all":
 
-            def match_f(x):
-                return np.all(x == target_tag_flags)
-        else:  # default: "any"
+                def match_f(x):
+                    return np.all(x[tag_ids])
+            elif mode == "exact":
+                target_tag_flags = np.zeros(len(self.tagnames), dtype=bool)
+                target_tag_flags[tag_ids] = True
 
-            def match_f(x):
-                return np.any(x[tag_ids])
+                def match_f(x):
+                    return np.all(x == target_tag_flags)
+            else:  # default: "any"
 
-        def setval(tree, path, value, tags):
-            if isArrayRef(value):
-                newref = ArrayRef(tree.data, value.paths, value.indices)
-                tree.data[path] = newref
-            else:
-                tree.data[path] = value
-            tree.tags[path] = tags
+                def match_f(x):
+                    return np.any(x[tag_ids])
 
-        for path, data in self.data.iter_leaves():
-            tag_flags = self.tags[path]
-            if match_f(tag_flags):
-                setval(left_param_tree, path, data, tag_flags)
-            else:
-                setval(right_param_tree, path, data, tag_flags)
+            def setval(tree, path, value, tags):
+                if isArrayRef(value):
+                    newref = ArrayRef(tree.data, value.paths, value.indices)
+                    tree.data[path] = newref
+                else:
+                    tree.data[path] = value
+                tree.tags[path] = tags
 
-        left_param_tree.set_read_only(self.read_only)
-        right_param_tree.set_read_only(self.read_only)
+            for path, data in self.data.iter_leaves():
+                tag_flags = self.tags[path]
+                if match_f(tag_flags):
+                    setval(left_param_tree, path, data, tag_flags)
+                else:
+                    setval(right_param_tree, path, data, tag_flags)
 
-        return left_param_tree, right_param_tree
+            left_param_tree.set_read_only(self.read_only)
+            right_param_tree.set_read_only(self.read_only)
+
+            left_n_paths = len(list(left_param_tree.data.iter_leaves()))
+            right_n_paths = len(list(right_param_tree.data.iter_leaves()))
+            scope.event("filter_complete", "Parameter tree filter complete", {
+                "left_n_paths": left_n_paths,
+                "right_n_paths": right_n_paths,
+            })
+
+            return left_param_tree, right_param_tree
 
     def remove_empty_leaves(self):
         return ParameterTree(
@@ -1108,43 +1127,65 @@ class ParameterTree:
 
     @staticmethod
     def merge(left: Self, right: Self, which: str = "left"):
-        merged = ParameterTree()
+        with trace_scope("params_merge", component="params") as scope:
+            merged = ParameterTree()
 
-        for left_tag_name in left.tagnames:
-            merged.add_new_tag(left_tag_name)
-        for right_tag_name in right.tagnames:
-            merged.add_new_tag(right_tag_name)
+            left_paths = list(left.data.iter_leaves())
+            right_paths = list(right.data.iter_leaves())
 
-        def setval(path, data, tags):
-            if isinstance(data, ArrayRef):
-                newref = ArrayRef(merged.data, data.paths, data.indices)
-                merged.data[path] = newref
-            else:
-                merged.data[path] = data
-            merged.tags[path] = tags
+            scope.event("merge_start", "Beginning parameter tree merge", {
+                "left_n_paths": len(left_paths),
+                "right_n_paths": len(right_paths),
+                "left_tagnames": left.tagnames,
+                "right_tagnames": right.tagnames,
+                "which": which,
+            })
 
-        for path, left_data in left.data.iter_leaves():
-            if path in right.data:
-                if not which:
-                    raise ValueError(f"Path {path} found in both trees, specify which arg to merge")
-                if which == "left":
-                    setval(path, left_data, left.tags[path])
-                elif which == "right":
-                    setval(path, right.data[path], right.tags[path])
+            for left_tag_name in left.tagnames:
+                merged.add_new_tag(left_tag_name)
+            for right_tag_name in right.tagnames:
+                merged.add_new_tag(right_tag_name)
+
+            def setval(path, data, tags):
+                if isinstance(data, ArrayRef):
+                    newref = ArrayRef(merged.data, data.paths, data.indices)
+                    merged.data[path] = newref
                 else:
-                    raise ValueError(
-                        f"Unknown 'which' arg {which}. Allowed values: 'left', 'right'"
-                    )
-            else:
-                setval(path, left_data, left.tags[path])
+                    merged.data[path] = data
+                merged.tags[path] = tags
 
-        for path, right_data in right.data.iter_leaves():
-            if path not in left.data:
-                setval(path, right_data, right.tags[path])
+            conflicts = []
+            for path, left_data in left.data.iter_leaves():
+                if path in right.data:
+                    conflicts.append(str(path))
+                    if not which:
+                        raise ValueError(f"Path {path} found in both trees, specify which arg to merge")
+                    if which == "left":
+                        setval(path, left_data, left.tags[path])
+                    elif which == "right":
+                        setval(path, right.data[path], right.tags[path])
+                    else:
+                        raise ValueError(
+                            f"Unknown 'which' arg {which}. Allowed values: 'left', 'right'"
+                        )
+                else:
+                    setval(path, left_data, left.tags[path])
 
-        merged.set_read_only(left.read_only and right.read_only)
+            for path, right_data in right.data.iter_leaves():
+                if path not in left.data:
+                    setval(path, right_data, right.tags[path])
 
-        return merged
+            merged.set_read_only(left.read_only and right.read_only)
+
+            merged_paths = list(merged.data.iter_leaves())
+            scope.event("merge_complete", "Parameter tree merge complete", {
+                "merged_n_paths": len(merged_paths),
+                "n_conflicts": len(conflicts),
+                "conflicts": conflicts[:10],  # First 10
+                "merged_tagnames": merged.tagnames,
+            })
+
+            return merged
 
     def __eq__(self, other):
         if not isinstance(other, ParameterTree):

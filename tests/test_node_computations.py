@@ -13,6 +13,9 @@ from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.parameters import ParameterTree
 
+# Import test fixtures from centralized module
+pytest_plugins = ["test_declarative_recipes"]
+
 
 def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.ndarray, key):
     """

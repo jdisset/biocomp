@@ -1,9 +1,10 @@
 from typing import Optional, Literal, Union, Dict, List, Any, Set, Tuple
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from copy import deepcopy
 from itertools import chain
 from biocomp.graphrules import GraphRewritingRule, PropertyConstraint, EdgeConstraint
 from biocomp.logging_config import get_logger
+from biocomp.tracing import trace_scope
 from collections import defaultdict, Counter
 
 logger = get_logger(__name__)
@@ -42,6 +43,123 @@ class Part(BaseModel):
     category: str
 
 
+class ExtraBase(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    def to_dict(self) -> dict[str, Any]:
+        data = self.model_dump(exclude_none=True)
+        extra = dict(self.__pydantic_extra__ or {})
+        extra.update(data)
+        return extra
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in type(self).model_fields:
+            value = getattr(self, key)
+            if value is not None:
+                return value
+        return (self.__pydantic_extra__ or {}).get(key, default)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.to_dict()
+
+    def __getitem__(self, key: str) -> Any:
+        if key in type(self).model_fields:
+            return getattr(self, key)
+        extra = self.__pydantic_extra__ or {}
+        if key in extra:
+            return extra[key]
+        raise KeyError(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key in type(self).model_fields:
+            setattr(self, key, value)
+            return
+        extra = self.__pydantic_extra__ or {}
+        if not self.__pydantic_extra__:
+            object.__setattr__(self, "__pydantic_extra__", extra)
+        extra[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        if key in type(self).model_fields:
+            setattr(self, key, None)
+            return
+        extra = self.__pydantic_extra__ or {}
+        if key in extra:
+            del extra[key]
+            return
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(self.to_dict())
+
+    def __len__(self) -> int:
+        return len(self.to_dict())
+
+    def items(self):
+        return self.to_dict().items()
+
+    def keys(self):
+        return self.to_dict().keys()
+
+    def values(self):
+        return self.to_dict().values()
+
+    def update(self, data: dict[str, Any]) -> None:
+        for key, value in data.items():
+            self[key] = value
+
+
+class EdgeExtra(ExtraBase):
+    tu_id: list[str] = Field(default_factory=list)
+    no_masking_tu_ids: list[str] = Field(default_factory=list)
+
+
+class NodeExtra(ExtraBase):
+    name: str | None = None
+    tu_name: str | None = None
+    seq_name: str | None = None
+    source_id: str | None = None
+    cotx_group: str | None = None
+    cotx_index: int | None = None
+    input_position: int | None = None
+    input_from_output: int | None = None
+    position_in_source: int | None = None
+    ratio: float | None = None
+    ratio_range: dict[str, Any] | None = None
+    ratios: list[float] | None = None
+    ratio_ranges: list[Any] | None = None
+    ratio_locked: bool | list[bool] | None = None
+    members: dict[str, Any] | None = None
+    param_ref_ids: dict[str, Any] | None = None
+    tu_names_by_slot: dict[int, str] | None = None
+    tu_global_indices_by_slot: dict[int, int] | None = None
+    fluo_bias: dict[str, Any] | None = None
+    fluo_bias_data: dict[str, Any] | None = None
+    role: str | None = None
+    layer_id: int | float | None = None
+    member_id: str | None = None
+    protein: str | None = None
+    protein_name: str | None = None
+    units: str | None = None
+    value: Any | None = None
+    bias_value: Any | None = None
+    ern_type: str | None = None
+    tu_id: list[str] | None = None
+
+    @field_validator("tu_id", mode="before")
+    @classmethod
+    def _coerce_tu_id(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        if isinstance(value, (tuple, set)):
+            return [str(v) for v in value]
+        if isinstance(value, (str, int)):
+            return [str(value)]
+        return value
+
+
 class GraphEdge(BaseModel):
     source_id: int
     target_id: int
@@ -50,8 +168,8 @@ class GraphEdge(BaseModel):
     content: tuple[Part, ...]
     content_type: Optional[Literal["DNA", "RNA", "PRT"]] = None
     # Embedding choices carried by the edge; allow multiple possible values per key
-    content_embedding_names: dict[str, tuple[str, ...]] = {}
-    extra: dict = {}
+    content_embedding_names: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    extra: EdgeExtra = Field(default_factory=EdgeExtra)
 
 
 class InverseSpec(BaseModel):
@@ -64,7 +182,7 @@ class GraphNode(BaseModel):
     node_id: int
     node_type: NodeType
     is_inverse_of: Optional[InverseSpec] = None
-    extra: dict = {}
+    extra: NodeExtra = Field(default_factory=NodeExtra)
 
 
 class GraphState(BaseModel):
@@ -1047,19 +1165,53 @@ def apply_rule_sequence(
         debug: If True, print debug info during rule application
         validate: If True, validate graph integrity after each rule (defensive)
     """
-    if not isinstance(graphs, list):
-        graphs = [graphs]
+    with trace_scope("apply_rule_sequence", component="network") as scope:
+        if not isinstance(graphs, list):
+            graphs = [graphs]
 
-    current_graphs = graphs
-    for rule in rules:
-        current_graphs = list(
-            chain.from_iterable(apply_rule(rule, g, debug=debug) for g in current_graphs)
-        )
-        if validate:
-            for g in current_graphs:
-                g.validate_integrity()
+        scope.event("sequence_start", "Starting rule sequence", {
+            "n_rules": len(rules),
+            "n_input_graphs": len(graphs),
+            "rule_names": [r.name for r in rules],
+        })
 
-    return current_graphs
+        current_graphs = graphs
+        for rule_idx, rule in enumerate(rules):
+            nodes_before = sum(len(g.nodes) for g in current_graphs)
+            edges_before = sum(len(g.edges) for g in current_graphs)
+            graphs_before = len(current_graphs)
+
+            current_graphs = list(
+                chain.from_iterable(apply_rule(rule, g, debug=debug) for g in current_graphs)
+            )
+
+            nodes_after = sum(len(g.nodes) for g in current_graphs)
+            edges_after = sum(len(g.edges) for g in current_graphs)
+
+            scope.event("rule_applied", f"Rule '{rule.name}' applied", {
+                "rule_idx": rule_idx,
+                "rule_name": rule.name,
+                "graphs_before": graphs_before,
+                "graphs_after": len(current_graphs),
+                "nodes_before": nodes_before,
+                "nodes_after": nodes_after,
+                "edges_before": edges_before,
+                "edges_after": edges_after,
+                "nodes_delta": nodes_after - nodes_before,
+                "edges_delta": edges_after - edges_before,
+            })
+
+            if validate:
+                for g in current_graphs:
+                    g.validate_integrity()
+
+        scope.event("sequence_complete", "Rule sequence complete", {
+            "n_output_graphs": len(current_graphs),
+            "total_nodes": sum(len(g.nodes) for g in current_graphs),
+            "total_edges": sum(len(g.edges) for g in current_graphs),
+        })
+
+        return current_graphs
 
 
 def _make_hashable(obj):

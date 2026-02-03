@@ -12,7 +12,8 @@ import biocomp.biorules as br
 from biocomp.graphengine import apply_rule_sequence
 from biocomp.inversion import invert_all_paths
 
-# Import all test fixtures
+# Import all test fixtures from the centralized module
+pytest_plugins = ["test_declarative_recipes"]
 
 
 # ============================================================================

@@ -344,16 +344,53 @@ def test_variable_uorf_options_preserved(lib):  # noqa: F811
         networks = recipe_to_networks(original, invert=True)
         reconstructed = networks[0].to_recipe()
 
-        assert recipe_equals(original, reconstructed)
+    assert recipe_equals(original, reconstructed)
+    uorf_slot = None
+    for slot in reconstructed.content[0].units[0].slots:
+        if isinstance(slot.part, list) and "1x_uORF" in slot.part:
+            uorf_slot = slot
+            break
 
-        uorf_slot = None
-        for slot in reconstructed.content[0].units[0].slots:
-            if isinstance(slot.part, list) and "1x_uORF" in slot.part:
-                uorf_slot = slot
-                break
+    assert uorf_slot is not None
+    assert set(uorf_slot.part) == {"1x_uORF", "2x_uORF", "3x_uORF"}
 
-        assert uorf_slot is not None
-        assert set(uorf_slot.part) == {"1x_uORF", "2x_uORF", "3x_uORF"}
+
+def test_no_masking_roundtrip_preserved(lib):
+    """no_masking flag on TUs must survive recipe -> network -> recipe roundtrip."""
+    original = Recipe(
+        name="test_no_masking_roundtrip",
+        content=[
+            CoTransfection(
+                name="x",
+                units=[
+                    TranscriptionUnit(
+                        slots=[
+                            Slot("hEF1a"),
+                            Slot("mNeonGreen"),
+                            Slot("L0.T_4560"),
+                        ],
+                        name="marker",
+                        no_masking=True,
+                    ),
+                    TranscriptionUnit(
+                        slots=[Slot("hEF1a"), Slot("CasE"), Slot("L0.T_4560")],
+                        name="ern",
+                    ),
+                ],
+                ratios=[0.5, 0.5],
+            ),
+        ],
+    )
+
+    with LibraryContext.with_library(lib):
+        networks = recipe_to_networks(original, invert=True)
+        reconstructed = networks[0].to_recipe()
+
+    orig_tus = {tu.name: tu for cotx in original.content for tu in cotx.units}
+    recon_tus = {tu.name: tu for cotx in reconstructed.content for tu in cotx.units}
+
+    assert orig_tus["marker"].no_masking is True
+    assert recon_tus["marker"].no_masking is True
 
 
 def test_l1_plasmid_roundtrip(lib):  # noqa: F811

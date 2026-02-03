@@ -35,16 +35,16 @@ class TestCommitOptions:
         options = CommitOptions()
         assert options.prune_tus is True
         assert options.collapse_to_part is True
-        assert options.lock_ratios is True
+        assert options.preserve_ratio_states is False  # Don't preserve by default
         assert options.roundtrip_rebuild is True
         assert options.preserve_input_order is True
         assert options.max_rebuild_workers == 8
 
     def test_for_structure_only(self):
-        """for_structure_only() creates options without collapse."""
+        """for_structure_only() creates options without collapse but preserving ratio states."""
         options = CommitOptions.for_structure_only()
         assert options.collapse_to_part is False
-        assert options.lock_ratios is False
+        assert options.preserve_ratio_states is True  # Preserve for structure-only
         assert options.prune_tus is True
         assert options.roundtrip_rebuild is True
 
@@ -52,7 +52,7 @@ class TestCommitOptions:
         """for_final() creates options with collapse."""
         options = CommitOptions.for_final()
         assert options.collapse_to_part is True
-        assert options.lock_ratios is True
+        assert options.preserve_ratio_states is False  # Don't preserve for final
         assert options.prune_tus is True
         assert options.roundtrip_rebuild is True
 

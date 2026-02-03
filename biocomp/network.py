@@ -27,6 +27,7 @@ from biocomp.graphengine import (
     apply_rule_sequence,
 )
 from biocomp.graphrules import GraphRewritingRule
+from biocomp.tracing import trace_scope, serialize_graph, should_save_full_objects, snapshot_full_network
 import biocomp.biorules as br
 
 # TODO:
@@ -1088,6 +1089,15 @@ class Network(BaseModel):
         lib = LibraryContext.get_library() if auto_name_from_l1 else None
         tu_counter = 1
 
+        def _tu_no_masking(source_node, output_slot: int) -> bool:
+            assert self.compute_graph is not None
+            for edge in self.compute_graph.get_outgoing_edges(source_node.node_id):
+                if edge.from_output_slot != output_slot:
+                    continue
+                if edge.content_type == "DNA" and edge.extra.no_masking_tu_ids:
+                    return True
+            return False
+
         tus_and_ratios_by_cotx = {}
         for group_id, info in cotx_groups.items():
             tus = []
@@ -1143,6 +1153,7 @@ class Network(BaseModel):
                     source=source_id,
                     position_in_source=position,
                 )
+                tu.no_masking = _tu_no_masking(source_node, output_slot)
 
                 if param_ref_ids:
                     tu.param_ref_ids = dict(param_ref_ids)
@@ -1727,102 +1738,150 @@ def recipe_to_networks(
 ) -> list[Network]:
     from biocomp.inversion import invert_all_paths
 
-    rules = rules or br.ALL_RULES
-    lib = lib or LibraryContext.get_library()
-    assert lib is not None, "PartsLibrary must be provided or set in LibraryContext"
+    with trace_scope("recipe_to_networks", component="network") as scope:
+        rules = rules or br.ALL_RULES
+        lib = lib or LibraryContext.get_library()
+        assert lib is not None, "PartsLibrary must be provided or set in LibraryContext"
 
-    cdg = build_central_dogma_graph_direct(recipe.content, lib)
-    compg = apply_rule_sequence(rules, cdg)
-    assert len(compg) == 1, "Multiple computation graphs generated before inversion"
-    compg = compg[0]
-    _check_for_split_sequestron(compg, recipe.name)
-    compg = br.sort_output_edges(compg)
-    compg = br.sort_aggregation_edges(compg)
-    compg = assign_ern_layer_ids(compg)
-    graphs = invert_all_paths(compg, mode=inversion_mode) if invert else [compg]
+        scope.event("recipe_start", "Converting recipe to networks", {
+            "recipe_name": recipe.name,
+            "n_cotx": len(recipe.content) if recipe.content else 0,
+            "invert": invert,
+            "inversion_mode": inversion_mode,
+            "n_rules": len(rules),
+        })
 
-    result = []
+        cdg = build_central_dogma_graph_direct(recipe.content, lib)
+        scope.event("cdg_built", "Central dogma graph built", {
+            "n_nodes": len(cdg.nodes),
+            "n_edges": len(cdg.edges),
+        })
+        scope.snapshot("cdg_graph", serialize_graph(cdg))
 
-    for graph in graphs:
-        graph = assign_ern_layer_ids(graph)
+        compg = apply_rule_sequence(rules, cdg)
+        assert len(compg) == 1, "Multiple computation graphs generated before inversion"
+        compg = compg[0]
 
-        # Skip degenerate graphs with no output nodes (can happen when all TUs are disabled)
-        output_nodes = [n for n in graph.nodes.values() if n.node_type == "output"]
-        if len(output_nodes) == 0:
-            logger.debug(f"Skipping degenerate graph with no output nodes (recipe: {recipe.name})")
-            continue
+        scope.event("rules_applied", "Graph rewriting rules applied", {
+            "n_nodes_after": len(compg.nodes),
+            "n_edges_after": len(compg.edges),
+        })
 
-        net = Network(compute_graph=graph)
-        dependent_outputs_names = "_".join(net.get_dependent_output_proteins())
-        base_name = recipe.name or "network"
-        net.name = f"{base_name}_{dependent_outputs_names}"
+        _check_for_split_sequestron(compg, recipe.name)
+        compg = br.sort_output_edges(compg)
+        compg = br.sort_aggregation_edges(compg)
+        compg = assign_ern_layer_ids(compg)
 
-        # Apply input_order if specified (only for inverted networks with inputs)
-        effective_input_order = recipe.input_order
+        scope.snapshot("compute_graph", serialize_graph(compg))
 
-        # If no input_order but axis_mapping is specified, derive input_order from it
-        if effective_input_order is None and recipe.axis_mapping is not None and invert:
-            input_proteins = net.get_inverted_input_proteins()
-            if len(input_proteins) > 0:
-                input_protein_set = set(input_proteins)
+        graphs = invert_all_paths(compg, mode=inversion_mode) if invert else [compg]
+        scope.event("inversion_complete", "Path inversion complete", {
+            "n_graphs": len(graphs),
+            "inversion_mode": inversion_mode if invert else "none",
+        })
 
-                # Build cotx_name -> marker_protein from recipe content
-                # A marker is a TU whose output protein is in the input_proteins list
-                cotx_to_protein: dict[str, str] = {}
-                for cotx in recipe.content:
-                    cotx_name = cotx.name
-                    if not cotx_name:
-                        continue
-                    for tu in cotx.units:
-                        for slot in reversed(tu.slots or []):
-                            slot_name = slot.part if hasattr(slot, "part") else str(slot)
-                            if isinstance(slot_name, str) and slot_name in input_protein_set:
-                                cotx_to_protein[cotx_name] = slot_name
+        result = []
+
+        for graph_idx, graph in enumerate(graphs):
+            graph = assign_ern_layer_ids(graph)
+
+            # Skip degenerate graphs with no output nodes (can happen when all TUs are disabled)
+            output_nodes = [n for n in graph.nodes.values() if n.node_type == "output"]
+            if len(output_nodes) == 0:
+                logger.debug(f"Skipping degenerate graph with no output nodes (recipe: {recipe.name})")
+                scope.event("skip_degenerate", "Skipping degenerate graph", {
+                    "graph_idx": graph_idx,
+                    "reason": "no_output_nodes",
+                })
+                continue
+
+            net = Network(compute_graph=graph)
+            dependent_outputs_names = "_".join(net.get_dependent_output_proteins())
+            base_name = recipe.name or "network"
+            net.name = f"{base_name}_{dependent_outputs_names}"
+
+            # Apply input_order if specified (only for inverted networks with inputs)
+            effective_input_order = recipe.input_order
+
+            # If no input_order but axis_mapping is specified, derive input_order from it
+            if effective_input_order is None and recipe.axis_mapping is not None and invert:
+                input_proteins = net.get_inverted_input_proteins()
+                if len(input_proteins) > 0:
+                    input_protein_set = set(input_proteins)
+
+                    # Build cotx_name -> marker_protein from recipe content
+                    # A marker is a TU whose output protein is in the input_proteins list
+                    cotx_to_protein: dict[str, str] = {}
+                    for cotx in recipe.content:
+                        cotx_name = cotx.name
+                        if not cotx_name:
+                            continue
+                        for tu in cotx.units:
+                            for slot in reversed(tu.slots or []):
+                                slot_name = slot.part if hasattr(slot, "part") else str(slot)
+                                if isinstance(slot_name, str) and slot_name in input_protein_set:
+                                    cotx_to_protein[cotx_name] = slot_name
+                                    break
+                            if cotx_name in cotx_to_protein:
                                 break
-                        if cotx_name in cotx_to_protein:
-                            break
 
-                # Convert axis_mapping to input_order (x first, then y)
-                x_protein = None
-                y_protein = None
-                for cotx_name, axis in recipe.axis_mapping.items():
-                    protein = cotx_to_protein.get(cotx_name)
-                    if protein:
-                        if axis == "x":
-                            x_protein = protein
-                        elif axis == "y":
-                            y_protein = protein
+                    # Convert axis_mapping to input_order (x first, then y)
+                    x_protein = None
+                    y_protein = None
+                    for cotx_name, axis in recipe.axis_mapping.items():
+                        protein = cotx_to_protein.get(cotx_name)
+                        if protein:
+                            if axis == "x":
+                                x_protein = protein
+                            elif axis == "y":
+                                y_protein = protein
 
-                if x_protein and y_protein:
-                    effective_input_order = [x_protein, y_protein]
-                    net.metadata["axis_mapping"] = recipe.axis_mapping
+                    if x_protein and y_protein:
+                        effective_input_order = [x_protein, y_protein]
+                        net.metadata["axis_mapping"] = recipe.axis_mapping
 
-        if effective_input_order is not None and invert:
-            input_proteins = net.get_inverted_input_proteins()
-            if len(input_proteins) > 0:
-                proteins_match = set(input_proteins) == set(effective_input_order)
-                if proteins_match:
-                    # input_order applies to this inversion
-                    net.apply_input_order(effective_input_order)
-                elif skip_input_order_validation:
-                    # Skip validation (used during commit when TU pruning may invalidate input_order)
-                    pass
-                else:
-                    # Validate that input_order is correct for original recipe construction
-                    missing = set(input_proteins) - set(effective_input_order)
-                    assert not missing, (
-                        f"input_order missing proteins: {missing}. "
-                        f"Network has inputs: {input_proteins}, recipe specifies: {effective_input_order}"
-                    )
-                    extra = set(effective_input_order) - set(input_proteins)
-                    assert not extra, (
-                        f"input_order contains extra proteins not in network inputs: {extra}. "
-                        f"Network has inputs: {input_proteins}, recipe specifies: {effective_input_order}"
-                    )
+            if effective_input_order is not None and invert:
+                input_proteins = net.get_inverted_input_proteins()
+                if len(input_proteins) > 0:
+                    proteins_match = set(input_proteins) == set(effective_input_order)
+                    if proteins_match:
+                        # input_order applies to this inversion
+                        net.apply_input_order(effective_input_order)
+                    elif skip_input_order_validation:
+                        # Skip validation (used during commit when TU pruning may invalidate input_order)
+                        pass
+                    else:
+                        # Validate that input_order is correct for original recipe construction
+                        missing = set(input_proteins) - set(effective_input_order)
+                        assert not missing, (
+                            f"input_order missing proteins: {missing}. "
+                            f"Network has inputs: {input_proteins}, recipe specifies: {effective_input_order}"
+                        )
+                        extra = set(effective_input_order) - set(input_proteins)
+                        assert not extra, (
+                            f"input_order contains extra proteins not in network inputs: {extra}. "
+                            f"Network has inputs: {input_proteins}, recipe specifies: {effective_input_order}"
+                        )
 
-        result.append(net)
+            scope.event("network_created", f"Network {graph_idx} created", {
+                "graph_idx": graph_idx,
+                "network_name": net.name,
+                "n_nodes": len(graph.nodes),
+                "n_edges": len(graph.edges),
+                "n_outputs": net.nb_outputs,
+                "n_inputs": net.nb_inputs,
+            })
+            result.append(net)
 
-    return result
+        scope.event("recipe_complete", "Recipe to networks conversion complete", {
+            "recipe_name": recipe.name,
+            "n_networks": len(result),
+            "network_names": [n.name for n in result],
+        })
+        if should_save_full_objects():
+            scope.snapshot("networks_full", [snapshot_full_network(n) for n in result])
+
+        return result
 
 
 class NetworkConstructionError(Exception):
@@ -2348,19 +2407,19 @@ def _build_cdg_dual_from_preprocessed(
             unique_edges_dict[key] = e
         else:
             existing = unique_edges_dict[key]
-            existing_tu_ids = existing.extra.get("tu_id", []) if existing.extra else []
-            new_tu_ids = e.extra.get("tu_id", []) if e.extra else []
-            existing_no_mask = existing.extra.get("no_masking_tu_ids", []) if existing.extra else []
-            new_no_mask = e.extra.get("no_masking_tu_ids", []) if e.extra else []
+            existing_tu_ids = existing.extra.tu_id
+            new_tu_ids = e.extra.tu_id
+            existing_no_mask = existing.extra.no_masking_tu_ids
+            new_no_mask = e.extra.no_masking_tu_ids
             merged = sorted(set(existing_tu_ids + new_tu_ids))
             merged_no_mask = sorted(set(existing_no_mask + new_no_mask))
             if merged != existing_tu_ids or merged_no_mask != existing_no_mask:
-                merged_extra = {
-                    **(existing.extra or {}),
-                    "tu_id": merged,
-                    "no_masking_tu_ids": merged_no_mask,
-                }
-                unique_edges_dict[key] = existing.model_copy(update={"extra": merged_extra})
+                merged_extra = existing.extra.to_dict()
+                merged_extra["tu_id"] = merged
+                merged_extra["no_masking_tu_ids"] = merged_no_mask
+                merged_data = existing.model_dump()
+                merged_data["extra"] = merged_extra
+                unique_edges_dict[key] = GraphEdge.model_validate(merged_data)
 
     nodes_dict = {n.node_id: n for n in nodes}
     edges_dict = {
@@ -2672,9 +2731,9 @@ def find_topology_changing_tus(network: "Network") -> set[str]:
 
     tu_to_rna: dict[str, tuple[str, ...]] = {}
     for edge in graph.edges.values():
-        if edge.content_type == "RNA" and edge.extra:
+        if edge.content_type == "RNA":
             rna_content = tuple(p.name for p in edge.content) if edge.content else ()
-            for tu_id in edge.extra.get("tu_id", []):
+            for tu_id in edge.extra.tu_id:
                 tu_to_rna[tu_id] = rna_content
 
     dangerous_tus: set[str] = set()
@@ -2691,11 +2750,11 @@ def find_topology_changing_tus(network: "Network") -> set[str]:
 
         neg_tu_ids: set[str] = set()
         for e in neg_edges:
-            neg_tu_ids.update(e.extra.get("tu_id", []) if e.extra else [])
+            neg_tu_ids.update(e.extra.tu_id)
 
         pos_tu_ids: set[str] = set()
         for e in pos_edges:
-            pos_tu_ids.update(e.extra.get("tu_id", []) if e.extra else [])
+            pos_tu_ids.update(e.extra.tu_id)
 
         for pos_tu in pos_tu_ids:
             rna = tu_to_rna.get(pos_tu, ())
@@ -2923,13 +2982,9 @@ def get_all_parts(network, lib=None):
             for edge in edges:
                 # Get TU name from edge's extra.tu_id if available, otherwise from source node
                 tu_name = None
-                if hasattr(edge, "extra") and edge.extra and "tu_id" in edge.extra:
+                if edge.extra.tu_id:
                     # Extract TU name from tu_id (e.g., 'L1-CasER1w_eYFP_cotx2' -> 'L1-CasER1w_eYFP')
-                    tu_id_full = (
-                        edge.extra["tu_id"][0]
-                        if isinstance(edge.extra["tu_id"], list)
-                        else edge.extra["tu_id"]
-                    )
+                    tu_id_full = edge.extra.tu_id[0]
                     # Remove the _cotxN suffix
                     tu_name = tu_id_full.rsplit("_cotx", 1)[0]
                 elif node.extra and "name" in node.extra:

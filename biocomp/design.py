@@ -45,7 +45,7 @@ from biocomp.tumasking_strategy import (
     TUMaskingStrategy,
     build_strategy_from_config,
 )
-from biocomp.designdebug import save_debug_state, is_design_debug_enabled
+from biocomp.tracing import save_debug_state, is_design_debug_enabled, TracingSettings
 
 # re-export target classes and sampling configs for backward compatibility
 from biocomp.design_targets import (  # noqa: F401
@@ -442,8 +442,11 @@ class DesignConfig(DesignOptimConfig):
     hard_pruning_interval: int = 500
     hard_pruning_ratio_threshold: float = 0.01
     hard_pruning_preserve_minimum_tus: int = 1
+    hard_pruning_prune_margin: float = 0.1
 
     pluggable_optimizer: Any = None
+
+    tracing: TracingSettings = Field(default_factory=TracingSettings)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -614,9 +617,10 @@ def start(
 ):
     if dconf.hard_pruning_enabled:
         logger.info("Using hard-pruning mode with interval=%d", dconf.hard_pruning_interval)
-        return _start_with_hard_pruning(
+        params, loss, steps, _ = _start_with_hard_pruning(
             dmanager, dconf, model, loggers, logger_objects, async_handler, lock_ratios
         )
+        return params, loss, steps
 
     if dconf.uses_pluggable_optimizer:
         logger.info("Using pluggable optimizer: %s", type(dconf.pluggable_optimizer).__name__)

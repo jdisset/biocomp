@@ -22,7 +22,7 @@ from .tumasking import (
 from .tumasking_strategy import get_full_log_alpha
 from .jaxutils import check as jax_check
 from .logging_config import get_logger
-from .designdebug import is_design_debug_enabled, save_debug_state
+from .tracing import is_design_debug_enabled, save_debug_state
 
 logger = get_logger(__name__)
 

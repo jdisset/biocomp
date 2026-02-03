@@ -117,8 +117,11 @@ def _extract_shapes_from_svg(svg_path, max_is_black):
 
     vx = svg.viewbox.x if svg.viewbox else 0
     vy = svg.viewbox.y if svg.viewbox else 0
-    vw = svg.viewbox.width if svg.viewbox else 100
-    vh = svg.viewbox.height if svg.viewbox else 100
+    # Use svgelements' computed width/height which includes unit conversion (pt→px).
+    # This ensures path coordinates and sample point coordinates are in the same space.
+    # Without this, SVGs with pt units (like matplotlib exports) have mismatched coordinates.
+    vw = svg.width if svg.width else (svg.viewbox.width if svg.viewbox else 100)
+    vh = svg.height if svg.height else (svg.viewbox.height if svg.viewbox else 100)
 
     masked_elements = set()
     for el in svg.elements():

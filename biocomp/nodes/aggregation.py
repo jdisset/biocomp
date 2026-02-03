@@ -12,6 +12,7 @@ from biocomp.nodeutils import (
 )
 from biocomp.utils import get_logger
 from biocomp.config import BIOCOMP_CONSTANTS
+from biocomp.recipe import DEFAULT_RATIO_MIN
 from typing import Optional
 from dataclasses import dataclass, asdict
 
@@ -189,7 +190,7 @@ def aggregation(
                     if is_locked:
                         new_ranges.append(None)  # keep locked
                     else:
-                        new_ranges.append({"min": 0.05, "max": 1.0})
+                        new_ranges.append({"min": DEFAULT_RATIO_MIN, "max": 1.0})
                         any_unlocked = True
                 ranges = new_ranges
                 has_unlocked = any_unlocked
@@ -201,7 +202,7 @@ def aggregation(
                 for j, range_info in enumerate(ranges):
                     base_val = base_ratios[j] if j < len(base_ratios) else 1.0
                     if range_info is not None:
-                        min_v = range_info.get("min", 0.05) or 0.05
+                        min_v = range_info.get("min", DEFAULT_RATIO_MIN) or DEFAULT_RATIO_MIN
                         max_v = range_info.get("max", 1.0) or 1.0
                         init_v = range_info.get("init")
                         if init_v is not None:
@@ -356,7 +357,7 @@ def aggregation(
         params: ParameterTree,
         nodelist: list[StackNode],
         stack: ComputeStack = None,
-        lock_ratios: bool = True,
+        preserve_ratio_states: bool = False,
         **_,
     ):
         from biocomp.tumasking import get_final_mask, TU_ALWAYS_ENABLED
@@ -369,6 +370,9 @@ def aggregation(
         def get_mask_for_tu(tu_idx: int, network_id: int) -> float:
             assert log_alpha_full is not None
             tu_log_alpha = log_alpha_full[network_id]
+            if tu_log_alpha.size == 0:
+                # No TUs with masking - all TUs are enabled
+                return 1.0
             return float(get_final_mask(tu_log_alpha[tu_idx : tu_idx + 1])[0])
 
         if log_alpha_full is not None:
@@ -428,7 +432,7 @@ def aggregation(
             for j in range(n_outputs):
                 min_v = float(ratio_min[j])
                 max_v = float(ratio_max[j])
-                if lock_ratios:
+                if not preserve_ratio_states:
                     ratio_ranges.append(None)
                     ratio_locked.append(False)
                 elif abs(min_v - max_v) < 1e-8:

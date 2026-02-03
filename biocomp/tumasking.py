@@ -618,8 +618,7 @@ def extract_tu_ids_from_network(network) -> list[str]:
     """Extract all unique TU IDs from a network's edges."""
     tu_ids = set()
     for edge in network.compute_graph.edges.values():
-        if edge.extra:
-            tu_ids.update(edge.extra.get("tu_id", []))
+        tu_ids.update(edge.extra.tu_id)
     return sorted(tu_ids)
 
 
@@ -728,7 +727,7 @@ def build_input_tu_indices(
     max_tus = 1
     for node in nodelist:
         for edge in node.get_incoming_edges(stack):
-            tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+            tu_ids = edge.extra.tu_id
             valid_tu_ids = [tid for tid in tu_ids if tid in tu_id_to_idx]
             max_tus = max(max_tus, len(valid_tu_ids))
 
@@ -738,7 +737,7 @@ def build_input_tu_indices(
         edges = node.get_incoming_edges(stack)
         edges_sorted = sorted(edges, key=lambda e: e.to_input_slot)
         for j, edge in enumerate(edges_sorted):
-            tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+            tu_ids = edge.extra.tu_id
             valid_tu_ids = [tid for tid in tu_ids if tid in tu_id_to_idx]
             for k, tid in enumerate(valid_tu_ids):
                 if k < max_tus:
@@ -764,7 +763,7 @@ def build_output_tu_indices(
         for edge in edges:
             slot = edge.from_output_slot
             if slot < n_outputs:
-                tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+                tu_ids = edge.extra.tu_id
                 if len(tu_ids) == 1 and tu_ids[0] in tu_id_to_idx:
                     tu_indices[i, slot] = tu_id_to_idx[tu_ids[0]]
 
@@ -779,8 +778,7 @@ def extract_tu_ids_for_inverse_nodes(networks: list) -> set[str]:
         for edge in graph.edges.values():
             target_node = graph.nodes.get(edge.target_id)
             if target_node and target_node.node_type.startswith("inv_"):
-                tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
-                inverse_tu_ids.update(tu_ids)
+                inverse_tu_ids.update(edge.extra.tu_id)
     return inverse_tu_ids
 
 
@@ -790,8 +788,7 @@ def extract_no_masking_tu_ids(networks: list) -> set[str]:
     for net in networks:
         graph = net.compute_graph
         for edge in graph.edges.values():
-            if edge.extra:
-                no_masking_tu_ids.update(edge.extra.get("no_masking_tu_ids", []))
+            no_masking_tu_ids.update(edge.extra.no_masking_tu_ids)
     return no_masking_tu_ids
 
 

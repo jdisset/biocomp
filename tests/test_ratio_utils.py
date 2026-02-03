@@ -189,5 +189,18 @@ class TestBackwardsCompatibility:
         assert isinstance(RATIO_PRUNE_THRESHOLD, float)
 
 
+def test_aggregation_ratio_min_uses_recipe_constant():
+    """Verify aggregation.py uses DEFAULT_RATIO_MIN from recipe, not hardcoded 0.05."""
+    import importlib
+    from biocomp.recipe import DEFAULT_RATIO_MIN
+
+    assert DEFAULT_RATIO_MIN == 0.001, "recipe constant should be 0.001"
+
+    # Force module load (not the function re-exported from nodes/__init__.py)
+    aggregation_module = importlib.import_module("biocomp.nodes.aggregation")
+    assert hasattr(aggregation_module, 'DEFAULT_RATIO_MIN'), "aggregation should import DEFAULT_RATIO_MIN"
+    assert aggregation_module.DEFAULT_RATIO_MIN == DEFAULT_RATIO_MIN
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

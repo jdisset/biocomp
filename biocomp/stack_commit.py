@@ -22,6 +22,7 @@ import jax.numpy as jnp
 
 from biocomp.logging_config import get_logger
 from biocomp.tumasking_strategy import get_full_log_alpha
+from biocomp.tracing import trace_scope
 
 if TYPE_CHECKING:
     from .compute import ComputeStack, StackLayer
@@ -37,7 +38,7 @@ class CommitOptions:
 
     prune_tus: bool = True
     collapse_to_part: bool = True
-    lock_ratios: bool = True
+    preserve_ratio_states: bool = False  # If True, keep ratio min/max/init metadata
     roundtrip_rebuild: bool = True
     preserve_input_order: bool = True
     max_rebuild_workers: int = 8
@@ -45,12 +46,12 @@ class CommitOptions:
     @classmethod
     def for_structure_only(cls) -> "CommitOptions":
         """Commit structural changes only (pruning), no embedding collapse."""
-        return cls(collapse_to_part=False, lock_ratios=False)
+        return cls(collapse_to_part=False, preserve_ratio_states=True)
 
     @classmethod
     def for_final(cls) -> "CommitOptions":
         """Full commit with embedding collapse/quantization."""
-        return cls(collapse_to_part=True, lock_ratios=True)
+        return cls(collapse_to_part=True, preserve_ratio_states=False)
 
 
 @dataclass
@@ -356,71 +357,115 @@ def commit_networks(
     """
     from .compute import ComputeStack
 
-    report = CommitReport()
-    t0 = _time.perf_counter()
+    with trace_scope("commit_networks", component="commit") as scope:
+        scope.event(
+            "start",
+            "Starting network commit",
+            {
+                "n_networks": len(networks),
+                "n_layers": len(layers),
+                "prune_tus": options.prune_tus,
+                "collapse_to_part": options.collapse_to_part,
+                "roundtrip_rebuild": options.roundtrip_rebuild,
+            },
+        )
 
-    t1 = _time.perf_counter()
-    network_copies = [deepcopy(net) for net in networks]
-    t2 = _time.perf_counter()
-    report.add_timing("deepcopy", t2 - t1)
-    logger.debug(f"COMMIT TIMING: deepcopy {len(network_copies)} networks: {t2 - t1:.3f}s")
+        report = CommitReport()
+        t0 = _time.perf_counter()
 
-    temp_stack = ComputeStack(network_copies, layers)
-    temp_stack.node_map = node_map
+        t1 = _time.perf_counter()
+        network_copies = [deepcopy(net) for net in networks]
+        t2 = _time.perf_counter()
+        report.add_timing("deepcopy", t2 - t1)
+        logger.debug(f"COMMIT TIMING: deepcopy {len(network_copies)} networks: {t2 - t1:.3f}s")
 
-    t3 = _time.perf_counter()
-    for layer in layers:
-        layer.commit(params, stack=temp_stack, collapse_to_part=options.collapse_to_part)
-    t4 = _time.perf_counter()
-    report.add_timing("layer_commits", t4 - t3)
-    logger.debug(f"COMMIT TIMING: layer commits ({len(layers)} layers): {t4 - t3:.3f}s")
+        temp_stack = ComputeStack(network_copies, layers)
+        temp_stack.node_map = node_map
 
-    t5 = _time.perf_counter()
-    log_alpha = get_full_log_alpha(params)
-    dead_ern_recs_by_net: dict[int, set[tuple[str, str]]] = {}
+        t3 = _time.perf_counter()
+        for layer in layers:
+            layer.commit(
+                params,
+                stack=temp_stack,
+                collapse_to_part=options.collapse_to_part,
+                preserve_ratio_states=options.preserve_ratio_states,
+            )
+        t4 = _time.perf_counter()
+        report.add_timing("layer_commits", t4 - t3)
+        logger.debug(f"COMMIT TIMING: layer commits ({len(layers)} layers): {t4 - t3:.3f}s")
 
-    if options.prune_tus:
-        for net_idx, net in enumerate(network_copies):
-            net_report = prune_network_tus(net, net_idx, log_alpha, tu_id_to_idx)
-            dead_ern_recs_by_net[net_idx] = net_report.dead_ern_recs
-            report.per_network.append(net_report)
+        t5 = _time.perf_counter()
+        log_alpha = get_full_log_alpha(params)
+        dead_ern_recs_by_net: dict[int, set[tuple[str, str]]] = {}
 
-    t6 = _time.perf_counter()
-    report.add_timing("tu_pruning", t6 - t5)
-    logger.debug(f"COMMIT TIMING: TU pruning: {t6 - t5:.3f}s")
+        if options.prune_tus:
+            for net_idx, net in enumerate(network_copies):
+                net_report = prune_network_tus(net, net_idx, log_alpha, tu_id_to_idx)
+                dead_ern_recs_by_net[net_idx] = net_report.dead_ern_recs
+                report.per_network.append(net_report)
 
-    if options.roundtrip_rebuild:
+                # Log pruning decisions
+                if net_report.pruned_tu_count > 0:
+                    scope.decision(
+                        "prune_tus",
+                        outcome=net_report.pruned_tu_count,
+                        reason="tu_mask_disabled",
+                        inputs={
+                            "network_idx": net_idx,
+                            "network_name": net.name,
+                            "dead_ern_recs": len(net_report.dead_ern_recs),
+                            "cascade_disabled": len(net_report.cascade_disabled_tus),
+                        },
+                    )
 
-        def _rebuild(net_idx_and_net: tuple[int, "Network"]) -> "Network":
-            net_idx, net = net_idx_and_net
-            strip_ern_recs = dead_ern_recs_by_net.get(net_idx, set())
-            return rebuild_network_from_recipe(net, net_idx, strip_ern_recs, options)
+        t6 = _time.perf_counter()
+        report.add_timing("tu_pruning", t6 - t5)
+        logger.debug(f"COMMIT TIMING: TU pruning: {t6 - t5:.3f}s")
 
-        n_workers = min(len(network_copies), options.max_rebuild_workers)
-        indexed_networks = list(enumerate(network_copies))
+        if options.roundtrip_rebuild:
 
-        if n_workers > 1:
-            with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                final_networks = list(executor.map(_rebuild, indexed_networks))
+            def _rebuild(net_idx_and_net: tuple[int, "Network"]) -> "Network":
+                net_idx, net = net_idx_and_net
+                strip_ern_recs = dead_ern_recs_by_net.get(net_idx, set())
+                return rebuild_network_from_recipe(net, net_idx, strip_ern_recs, options)
+
+            n_workers = min(len(network_copies), options.max_rebuild_workers)
+            indexed_networks = list(enumerate(network_copies))
+
+            if n_workers > 1:
+                with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                    final_networks = list(executor.map(_rebuild, indexed_networks))
+            else:
+                final_networks = [_rebuild(idx_net) for idx_net in indexed_networks]
         else:
-            final_networks = [_rebuild(idx_net) for idx_net in indexed_networks]
-    else:
-        final_networks = network_copies
+            final_networks = network_copies
 
-    t7 = _time.perf_counter()
-    report.add_timing("roundtrip_rebuild", t7 - t6)
-    logger.debug(f"COMMIT TIMING: roundtrip rebuild ({len(network_copies)} nets): {t7 - t6:.3f}s")
+        t7 = _time.perf_counter()
+        report.add_timing("roundtrip_rebuild", t7 - t6)
+        logger.debug(
+            f"COMMIT TIMING: roundtrip rebuild ({len(network_copies)} nets): {t7 - t6:.3f}s"
+        )
 
-    report.add_timing("total", t7 - t0)
-    logger.debug(f"COMMIT TIMING: TOTAL: {t7 - t0:.3f}s")
+        report.add_timing("total", t7 - t0)
+        logger.debug(f"COMMIT TIMING: TOTAL: {t7 - t0:.3f}s")
 
-    return final_networks, report
+        scope.event(
+            "complete",
+            "Network commit complete",
+            {
+                "n_networks_out": len(final_networks),
+                "total_time": t7 - t0,
+                "total_pruned": sum(r.pruned_tu_count for r in report.per_network),
+            },
+        )
+
+        return final_networks, report
 
 
 def commit_structure(
     stack: "ComputeStack",
     params: "ParameterTree",
-    lock_ratios: bool = False,
+    lock_ratios: bool = False,  # Deprecated name, kept for compatibility
     **kwargs,
 ) -> list["Network"]:
     """Commit only structural changes (pruning, graph cleanup) without collapsing embeddings."""
@@ -428,7 +473,8 @@ def commit_structure(
     if lock_ratios:
         from dataclasses import replace
 
-        options = replace(options, lock_ratios=True)
+        # lock_ratios=True means DON'T preserve ratio states
+        options = replace(options, preserve_ratio_states=False)
 
     networks, _ = commit_networks(
         stack.networks,
