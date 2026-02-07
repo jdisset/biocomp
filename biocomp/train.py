@@ -1,7 +1,7 @@
 ### {{{                          --     imports     --
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Tuple, Callable, Optional, NamedTuple
+from typing import TYPE_CHECKING, Callable, Optional, NamedTuple, Tuple
 import time
 
 from . import datautils as du
@@ -20,9 +20,9 @@ from biocomp.optimutils import (
     as_schedule,
     OptimConfig,
     compile_step,
-    run_logger_callbacks,
     get_checkify_enabled,
 )
+from biocomp.logger_dispatch import LoggerDispatch, NullDispatch
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                     --     helper functions     --
@@ -371,9 +371,8 @@ def start(
     dman: du.DataManager,
     training_config: TrainingConfig,
     compute_config,
-    loggers: Optional[List[Tuple[int, Callable]]] = None,
+    dispatch: LoggerDispatch | None = None,
     xy_batches: Optional[Tuple] = None,
-    async_handler=None,
     enable_jax_tqdm: bool = False,
     init_params: Optional[ParameterTree] = None,
     cached_step: Optional[CompiledTrainingStep] = None,
@@ -562,12 +561,9 @@ def start(
             logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
 
     # --- main training loop
-    loggers = loggers or []
+    dispatch = dispatch or NullDispatch()
 
-    if async_handler:
-        async_handler.process_start_loggers(training_config, stack)
-    else:
-        run_logger_callbacks(loggers, 0, training_config, {}, stack, lambda p, s: p == 0)
+    dispatch.on_start(training_config, stack)
 
     logger.info(f"Running for {total_steps} iterations")
 
@@ -615,9 +611,7 @@ def start(
         if "loss" in step_history and not skip_loss_history:
             loss_history.append(step_history["loss"])
 
-        run_logger_callbacks(
-            loggers, i, training_config, step_history, stack, lambda p, s: p > 0 and s % p == 0
-        )
+        dispatch.on_step(i, training_config, step_history, stack)
 
     logger.info("Training loop finished, starting cleanup...")
 
@@ -631,15 +625,7 @@ def start(
         logger.info(f"GPU sync (loss_history) took {time.time() - t_sync:.2f}s")
 
     t_callbacks = time.time()
-    if not async_handler:
-        run_logger_callbacks(
-            loggers,
-            total_steps,
-            training_config,
-            step_history,
-            stack,
-            lambda p, s: p is None or p == -1,
-        )
+    dispatch.on_end(total_steps, training_config, step_history, stack)
     logger.info(f"End callbacks took {time.time() - t_callbacks:.2f}s")
 
     logger.info(f"End of training for {training_config.n_epochs} epochs")

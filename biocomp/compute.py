@@ -534,8 +534,8 @@ class ComputeStack:
                 "tagnames": params.tagnames,
             })
             scope.snapshot("params_summary", summarize_params(params))
-            if should_save_full_objects():
-                scope.snapshot("params_full", snapshot_full_params(params))
+            # Note: Full params snapshot moved to caller (e.g., initialize_params)
+            # where values are concrete (outside vmap context)
 
             # pp_params = self.post_process(params)
             # assert pp_params == params, 'Post process changed params'

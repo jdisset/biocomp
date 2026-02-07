@@ -54,11 +54,9 @@ class PhaseTimer:
 
 @dataclass
 class DesignSession:
-    """Encapsulates shared design session state and initialization.
-
-    This is the single source of truth for design session setup. All design
-    runners (run_design, run_pluggable, run_with_hard_pruning) should use
-    DesignSession.create() instead of duplicating initialization code.
+    """
+    Encapsulates shared design session state and initialization.
+    All design runners should use DesignSession.create().
     """
 
     dmanager: "DesignManager"

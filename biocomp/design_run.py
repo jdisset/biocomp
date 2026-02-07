@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -12,6 +12,7 @@ from .logging_config import get_logger
 from .optimutils import make_training_step, per_replicate_step, optimize
 from .tumasking import TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
 from .design_session import DesignSession
+from .logger_dispatch import LoggerDispatch
 
 if TYPE_CHECKING:
     from .design import DesignManager, DesignConfig
@@ -23,7 +24,8 @@ logger = get_logger(__name__)
 
 def _create_norm_ratios_hook(direct_ratio_paths: list[str], source_ratio_paths: list[str]):
     """Create post-update hook for ratio normalization and log_alpha clipping."""
-    from .design import normalize_ratios_prune, normalize_ratio_source_arrays
+    from .ratio_utils import normalize_ratios_for_pruning as normalize_ratios_prune
+    from .design import normalize_ratio_source_arrays
 
     def norm_ratios_hook(params, *a, **kw):
         if direct_ratio_paths:
@@ -44,9 +46,7 @@ def run_design(
     dmanager: "DesignManager",
     dconf: "DesignConfig",
     model: "BiocompModel",
-    loggers: list[tuple[int, Callable]] | None = None,
-    logger_objects: list | None = None,
-    async_handler=None,
+    dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
     initial_params: "ParameterTree" | None = None,
 ):
@@ -129,8 +129,6 @@ def run_design(
         steps_per_epoch=session.steps_per_epoch,
         key=session.loop_key,
         stack=session.stack,
-        loggers=loggers,
-        logger_objects=logger_objects,
-        async_handler=async_handler,
+        dispatch=dispatch,
         verbose=True,
     )

@@ -7,7 +7,8 @@ from pydantic import BaseModel, ConfigDict
 
 from ..parameters import ParameterTree
 from ..tumasking import TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
-from ..design import normalize_ratios_prune, get_ratio_paths_and_sources, RATIO_PRUNE_THRESHOLD
+from ..design import get_ratio_paths_and_sources
+from ..ratio_utils import normalize_ratios_for_pruning as normalize_ratios_prune, RATIO_PRUNE_THRESHOLD
 from ..logging_config import get_logger
 
 logger = get_logger(__name__)

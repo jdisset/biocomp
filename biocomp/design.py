@@ -21,20 +21,14 @@ from biocomp.network import Network
 from .parameters import ParameterTree
 from biocomp.logging_config import get_logger
 from biocomp.optimutils import DesignOptimConfig
+from biocomp.logger_dispatch import LoggerDispatch
 
 if TYPE_CHECKING:
     from biocomptools.modelmodel import BiocompModel
-from biocomp.designloss import (  # noqa: F401 - re-exported
+from biocomp.designloss import (
     grid_distance_loss,
-    simse_loss,
-    zncc_loss,
-    gradient_magnitude_loss,
-    lncc_grid_loss,
-    sinkhorn_divergence_conv,
-    spectral_loss,
-    proj_nonneg_ste,
-    _sanitize,
     compute_grid_losses,
+    GridLossWeights,
 )
 from biocomp.tumasking import (
     build_tu_id_mapping,
@@ -45,20 +39,20 @@ from biocomp.tumasking_strategy import (
     TUMaskingStrategy,
     build_strategy_from_config,
 )
-from biocomp.tracing import save_debug_state, is_design_debug_enabled, TracingSettings
+from biocomp.tracing import (
+    save_debug_state,
+    is_design_debug_enabled,
+    TracingSettings,
+    should_save_full_objects,
+    trace_scope,
+    snapshot_full_params,
+)
 
-# re-export target classes and sampling configs for backward compatibility
-from biocomp.design_targets import (  # noqa: F401
-    SamplingConfig,
-    UniformSampling,
+from biocomp.design_targets import (
     LatticeSampling,
     SamplingConfigUnion,
-    TargetBase,
-    SVGTarget,
-    Target,
     DataTarget,
     TargetUnion,
-    DEFAULT_RESCALE_TARGET,
 )
 
 logger = get_logger(__name__)
@@ -391,6 +385,11 @@ def initialize_params(
 
     params = vmap(init_target_params)(jax.random.split(init_key, n_replicates))
 
+    # Snapshot params after vmap where values are concrete
+    if should_save_full_objects():
+        with trace_scope("design_params_init", component="design") as scope:
+            scope.snapshot("params_full", snapshot_full_params(params))
+
     if strategy is not None and strategy.has_masking and n_tus > 0:
         assert n_networks > 0, f"n_tus={n_tus} but n_networks={n_networks}"
         strategy.init_params(
@@ -468,7 +467,7 @@ class DesignConfig(DesignOptimConfig):
     def get_pluggable_optimizer(self) -> Any:
         if self.pluggable_optimizer is not None:
             return self.pluggable_optimizer
-        from biocomp.designoptim import GradientDescentOptimizer
+        from biocomp.pluggable_opt.optimizers import GradientDescentOptimizer
 
         total_steps = int(self.n_epochs * max(1, self.n_batches_per_epoch // self.batches_per_step))
         return GradientDescentOptimizer(
@@ -536,9 +535,6 @@ def get_topk_replicate_network_pairs(
     return best_per_target
 
 
-# Re-export from ratio_utils for backwards compatibility
-from .ratio_utils import RATIO_PRUNE_THRESHOLD  # noqa: F401, E402
-from .ratio_utils import normalize_ratios_for_pruning as normalize_ratios_prune  # noqa: F401, E402
 
 
 def get_ratio_paths_and_sources(params):
@@ -609,16 +605,14 @@ def start(
     dmanager: DesignManager,
     dconf: DesignConfig,
     model: BiocompModel,
-    loggers: list[tuple[int, Callable]] | None = None,
-    logger_objects: list | None = None,
-    async_handler=None,
+    dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
     initial_params: ParameterTree | None = None,
 ):
     if dconf.hard_pruning_enabled:
         logger.info("Using hard-pruning mode with interval=%d", dconf.hard_pruning_interval)
         params, loss, steps, _ = _start_with_hard_pruning(
-            dmanager, dconf, model, loggers, logger_objects, async_handler, lock_ratios
+            dmanager, dconf, model, dispatch=dispatch, lock_ratios=lock_ratios,
         )
         return params, loss, steps
 
@@ -627,7 +621,7 @@ def start(
         from .pluggable_opt.run_pluggable import run_pluggable
 
         return run_pluggable(
-            dmanager, dconf, model, loggers, logger_objects, async_handler, lock_ratios
+            dmanager, dconf, model, dispatch=dispatch, lock_ratios=lock_ratios,
         )
     from .design_run import run_design
 
@@ -635,9 +629,7 @@ def start(
         dmanager,
         dconf,
         model,
-        loggers=loggers,
-        logger_objects=logger_objects,
-        async_handler=async_handler,
+        dispatch=dispatch,
         lock_ratios=lock_ratios,
         initial_params=initial_params,
     )
@@ -713,23 +705,12 @@ def evaluate_design(
     logger.info(f"Evaluating: {n_replicates} reps × {n_targets} targets × {n_samples} samples")
 
     # extract loss weights from dconf.loss_function (same as training)
-    loss_kwargs = getattr(dconf.loss_function, "kwargs", {}) or {}
-    w_sinkhorn = float(loss_kwargs.get("w_sinkhorn", 1.0))
-    w_lncc = float(loss_kwargs.get("w_lncc", 0.5))
-    w_mse = float(loss_kwargs.get("w_mse", 0.0))
-    w_rmse = float(loss_kwargs.get("w_rmse", 0.5))
-    w_simse = float(loss_kwargs.get("w_simse", 0.0))
-    w_zncc = float(loss_kwargs.get("w_zncc", 0.0))
-    w_gradient = float(loss_kwargs.get("w_gradient", 0.0))
-    w_spectral = float(loss_kwargs.get("w_spectral", 0.0))
-    w_contrast = float(loss_kwargs.get("w_contrast", 0.0))
-    eps_sinkhorn = float(loss_kwargs.get("eps_sinkhorn", 0.1))
-    n_sinkhorn_iters = int(loss_kwargs.get("n_sinkhorn_iters", 50))
-    lncc_kernel = int(loss_kwargs.get("lncc_kernel", 7))
+    eval_weights = GridLossWeights.from_design_config(dconf)
 
     logger.debug(
-        f"Eval loss weights: sinkhorn={w_sinkhorn}, lncc={w_lncc}, mse={w_mse}, rmse={w_rmse}, "
-        f"simse={w_simse}, zncc={w_zncc}, gradient={w_gradient}"
+        f"Eval loss weights: sinkhorn={eval_weights.w_sinkhorn}, lncc={eval_weights.w_lncc}, "
+        f"mse={eval_weights.w_mse}, rmse={eval_weights.w_rmse}, "
+        f"simse={eval_weights.w_simse}, zncc={eval_weights.w_zncc}, gradient={eval_weights.w_gradient}"
     )
 
     # grid resolution for reshaping predictions
@@ -807,14 +788,7 @@ def evaluate_design(
             network_losses = []
             for net_idx in range(n_networks):
                 yhat_grid = yhat_dep[:, net_idx].reshape(yres, xres)
-                result = compute_grid_losses(
-                    yhat_grid, y_grid,
-                    w_sinkhorn=w_sinkhorn, w_lncc=w_lncc, w_mse=w_mse, w_rmse=w_rmse,
-                    w_simse=w_simse, w_spectral=w_spectral, w_gradient=w_gradient,
-                    w_contrast=w_contrast, w_zncc=w_zncc,
-                    eps_sinkhorn=eps_sinkhorn, n_sinkhorn_iters=n_sinkhorn_iters,
-                    lncc_kernel=lncc_kernel,
-                )
+                result = compute_grid_losses(yhat_grid, y_grid, weights=eval_weights)
                 network_losses.append(result.total)
             rep_losses.append(network_losses)
             pbar.update(1)

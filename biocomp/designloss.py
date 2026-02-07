@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
@@ -25,6 +26,62 @@ from .logging_config import get_logger
 from .tracing import is_design_debug_enabled, save_debug_state
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class GridLossWeights:
+    """Typed SSOT for all grid loss weights and hyperparameters.
+
+    Every call site that needs grid loss weights should construct or receive
+    an instance of this class instead of passing individual kwargs.
+    """
+
+    w_sinkhorn: float = 1.0
+    w_lncc: float = 0.5
+    w_mse: float = 0.0
+    w_rmse: float = 0.5
+    w_simse: float = 0.0
+    w_spectral: float = 0.0
+    w_gradient: float = 0.0
+    w_contrast: float = 0.0
+    w_zncc: float = 0.0
+    eps_sinkhorn: float = 0.1
+    n_sinkhorn_iters: int = 50
+    lncc_kernel: int = 7
+
+    _FIELDS: ClassVar[tuple[str, ...]] = (
+        "w_sinkhorn", "w_lncc", "w_mse", "w_rmse", "w_simse", "w_spectral",
+        "w_gradient", "w_contrast", "w_zncc", "eps_sinkhorn", "n_sinkhorn_iters", "lncc_kernel",
+    )
+
+    @classmethod
+    def from_loss_kwargs(cls, kwargs: dict) -> GridLossWeights:
+        """Construct from a dict, accepting both 'w_sinkhorn' and 'sinkhorn' key styles."""
+        filtered: dict[str, float | int] = {}
+        for field_name in cls._FIELDS:
+            if field_name in kwargs:
+                filtered[field_name] = kwargs[field_name]
+            else:
+                # try without w_ prefix (e.g. "sinkhorn" -> "w_sinkhorn")
+                short = field_name[2:] if field_name.startswith("w_") else None
+                if short and short in kwargs:
+                    filtered[field_name] = kwargs[short]
+        return cls(**filtered)
+
+    @classmethod
+    def from_design_config(cls, dconf) -> GridLossWeights:
+        """Construct from a DesignConfig's loss_function.kwargs."""
+        lf = getattr(dconf, "loss_function", None)
+        kwargs = (getattr(lf, "kwargs", None) or {}) if lf else {}
+        return cls.from_loss_kwargs(kwargs)
+
+    def weight_names(self) -> tuple[str, ...]:
+        """Return the 9 weight field names (w_* only)."""
+        return tuple(f for f in self._FIELDS if f.startswith("w_"))
+
+    def to_dict(self) -> dict[str, float | int]:
+        """Return all fields as a dict."""
+        return {f: getattr(self, f) for f in self._FIELDS}
 
 
 @dataclass
@@ -63,22 +120,47 @@ class GridLossResult:
         }
 
 
+def _compute_raw_grid_losses(
+    Y_pred: jnp.ndarray,
+    Y_target: jnp.ndarray,
+    eps_sinkhorn: float | jnp.ndarray,
+    n_sinkhorn_iters: int,
+    lncc_kernel: int,
+) -> tuple[
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+    jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+]:
+    """Compute all 9 unweighted grid loss components. JIT-safe (no guards, no float() casts).
+
+    Returns: (sinkhorn, lncc, mse, rmse, spectral, simse, zncc, contrast, gradient)
+    """
+    Y_pred = _sanitize(Y_pred.astype(jnp.float32))
+    Y_target = _sanitize(Y_target.astype(jnp.float32))
+    y_flat, yhat_flat = Y_target.ravel(), Y_pred.ravel()
+
+    sinkhorn_l = sinkhorn_divergence_conv(
+        proj_nonneg_ste(Y_pred), proj_nonneg_ste(Y_target), eps_sinkhorn, n_iters=n_sinkhorn_iters,
+    )
+    lncc_l = lncc_grid_loss(None, Y_target, Y_pred, k=lncc_kernel)
+    mse_l = jnp.mean((Y_pred - Y_target) ** 2)
+    rmse_l = jnp.sqrt(mse_l)
+    spectral_l = spectral_loss(None, Y_target, Y_pred)
+    simse_l = simse_loss(None, y_flat, yhat_flat)
+    zncc_l = zncc_loss(None, y_flat, yhat_flat)
+    target_range = jnp.max(Y_target) - jnp.min(Y_target)
+    pred_range = jnp.max(Y_pred) - jnp.min(Y_pred)
+    contrast_l = jax.nn.relu(target_range - pred_range)
+    gradient_l = gradient_magnitude_loss(Y_target, Y_pred)
+
+    return sinkhorn_l, lncc_l, mse_l, rmse_l, spectral_l, simse_l, zncc_l, contrast_l, gradient_l
+
+
 def compute_grid_losses(
     Y_pred: jnp.ndarray,
     Y_target: jnp.ndarray,
-    w_sinkhorn: float = 1.0,
-    w_lncc: float = 0.5,
-    w_mse: float = 0.0,
-    w_rmse: float = 0.5,
-    w_simse: float = 0.0,
-    w_spectral: float = 0.0,
-    w_gradient: float = 0.0,
-    w_contrast: float = 0.0,
-    w_zncc: float = 0.0,
-    eps_sinkhorn: float = 0.1,
-    n_sinkhorn_iters: int = 50,
-    lncc_kernel: int = 7,
+    weights: GridLossWeights | None = None,
     return_contributions: bool = False,
+    **kw,
 ) -> GridLossResult:
     """Compute grid-based losses - shared between tuner and design mode.
 
@@ -88,11 +170,9 @@ def compute_grid_losses(
     Args:
         Y_pred: Predicted grid, shape (H, W)
         Y_target: Target grid, shape (H, W)
-        w_*: Loss weights
-        eps_sinkhorn: Sinkhorn regularization
-        n_sinkhorn_iters: Sinkhorn iterations
-        lncc_kernel: LNCC kernel size
+        weights: GridLossWeights instance. If None, constructed from **kw.
         return_contributions: If True, compute per-pixel LNCC contribution
+        **kw: Backward-compatible kwargs (w_sinkhorn, w_lncc, etc.) used if weights is None.
 
     Returns:
         GridLossResult with scalar losses and optional per-pixel contributions
@@ -100,55 +180,55 @@ def compute_grid_losses(
     assert Y_pred.shape == Y_target.shape, f"Shape mismatch: {Y_pred.shape} vs {Y_target.shape}"
     assert Y_pred.ndim == 2, f"Expected 2D grid, got {Y_pred.ndim}D"
 
+    if weights is None:
+        weights = GridLossWeights.from_loss_kwargs(kw)
+
+    w = weights
+
     Y_pred = _sanitize(Y_pred.astype(jnp.float32))
     Y_target = _sanitize(Y_target.astype(jnp.float32))
 
+    # sinkhorn is expensive — guard with w > 0
     sinkhorn_l = (
         sinkhorn_divergence_conv(
-            proj_nonneg_ste(Y_pred),
-            proj_nonneg_ste(Y_target),
-            eps_sinkhorn,
-            n_iters=n_sinkhorn_iters,
+            proj_nonneg_ste(Y_pred), proj_nonneg_ste(Y_target),
+            w.eps_sinkhorn, n_iters=w.n_sinkhorn_iters,
         )
-        if w_sinkhorn > 0
-        else jnp.array(0.0)
+        if w.w_sinkhorn > 0 else jnp.array(0.0)
     )
 
-    lncc_l = lncc_grid_loss(None, Y_target, Y_pred, k=lncc_kernel) if w_lncc > 0 else jnp.array(0.0)
-    mse_l = jnp.mean((Y_pred - Y_target) ** 2) if (w_mse > 0 or w_rmse > 0) else jnp.array(0.0)
-    rmse_l = jnp.sqrt(mse_l) if w_rmse > 0 else jnp.array(0.0)
-    simse_l = (
-        simse_loss(None, Y_target.flatten(), Y_pred.flatten()) if w_simse > 0 else jnp.array(0.0)
-    )
-    spectral_l = spectral_loss(None, Y_target, Y_pred) if w_spectral > 0 else jnp.array(0.0)
-    gradient_l = gradient_magnitude_loss(Y_target, Y_pred) if w_gradient > 0 else jnp.array(0.0)
-    # Contrast loss: penalize when prediction range is smaller than target range
-    if w_contrast > 0:
+    lncc_l = lncc_grid_loss(None, Y_target, Y_pred, k=w.lncc_kernel) if w.w_lncc > 0 else jnp.array(0.0)
+    mse_l = jnp.mean((Y_pred - Y_target) ** 2) if (w.w_mse > 0 or w.w_rmse > 0) else jnp.array(0.0)
+    rmse_l = jnp.sqrt(mse_l) if w.w_rmse > 0 else jnp.array(0.0)
+    simse_l = simse_loss(None, Y_target.flatten(), Y_pred.flatten()) if w.w_simse > 0 else jnp.array(0.0)
+    spectral_l = spectral_loss(None, Y_target, Y_pred) if w.w_spectral > 0 else jnp.array(0.0)
+    gradient_l = gradient_magnitude_loss(Y_target, Y_pred) if w.w_gradient > 0 else jnp.array(0.0)
+    if w.w_contrast > 0:
         target_range = jnp.max(Y_target) - jnp.min(Y_target)
         pred_range = jnp.max(Y_pred) - jnp.min(Y_pred)
         contrast_l = jax.nn.relu(target_range - pred_range)
     else:
         contrast_l = jnp.array(0.0)
-    zncc_l = zncc_loss(None, Y_target.flatten(), Y_pred.flatten()) if w_zncc > 0 else jnp.array(0.0)
+    zncc_l = zncc_loss(None, Y_target.flatten(), Y_pred.flatten()) if w.w_zncc > 0 else jnp.array(0.0)
     logger.debug(
-        f"compute_grid_losses: w_mse={w_mse}, w_rmse={w_rmse}, raw_mse={float(mse_l):.6f}, raw_rmse={float(rmse_l):.6f}"
+        f"compute_grid_losses: w_mse={w.w_mse}, w_rmse={w.w_rmse}, raw_mse={float(mse_l):.6f}, raw_rmse={float(rmse_l):.6f}"
     )
 
     total = (
-        w_sinkhorn * sinkhorn_l
-        + w_lncc * lncc_l
-        + w_mse * mse_l
-        + w_rmse * rmse_l
-        + w_simse * simse_l
-        + w_spectral * spectral_l
-        + w_gradient * gradient_l
-        + w_contrast * contrast_l
-        + w_zncc * zncc_l
+        w.w_sinkhorn * sinkhorn_l
+        + w.w_lncc * lncc_l
+        + w.w_mse * mse_l
+        + w.w_rmse * rmse_l
+        + w.w_simse * simse_l
+        + w.w_spectral * spectral_l
+        + w.w_gradient * gradient_l
+        + w.w_contrast * contrast_l
+        + w.w_zncc * zncc_l
     )
 
     lncc_contrib = None
     if return_contributions:
-        lncc_contrib = _compute_lncc_contribution(Y_pred, Y_target, lncc_kernel)
+        lncc_contrib = _compute_lncc_contribution(Y_pred, Y_target, w.lncc_kernel)
 
     return GridLossResult(
         total=float(total),
@@ -1280,18 +1360,8 @@ def grid_distance_loss(
     dmanager,
     num_z,
     ratio_paths=None,
-    w_sinkhorn=1.0,
-    w_lncc=0.5,
-    w_mse=0.0,
-    w_rmse=0.5,
-    w_spectral=0.0,
-    w_simse=0.0,
-    w_zncc=0.0,
-    w_contrast=0.0,
-    w_gradient=0.0,
-    eps_sinkhorn=0.1,
-    n_sinkhorn_iters=50,
-    lncc_kernel=7,
+    *,
+    weights: GridLossWeights | None = None,
     lambda_tucount=0.0,
     max_tus_per_cotx=5,
     lambda_spread=0.01,
@@ -1321,44 +1391,14 @@ def grid_distance_loss(
         "With reshuffle_batches=True, data is permuted and the grid becomes scrambled, "
         "making sinkhorn/lncc losses meaningless. Set reshuffle_batches: false in your config."
     )
+    if weights is None:
+        weights = GridLossWeights.from_loss_kwargs(kw)
+    glw = weights
+
     xres, yres = dmanager.grid_resolution
     n_networks = len(dmanager.networks)
     total_steps = hyperopt_total_steps or 100000
     schedule_ns = hyperopt_schedule_ns
-
-    def compute_grid_loss_single_unweighted(y_img, yhat_img, eps_sink):
-        """Compute unweighted loss components for a single image pair."""
-        y_img, yhat_img = _sanitize(y_img), _sanitize(yhat_img)
-        y_flat, yhat_flat = y_img.ravel(), yhat_img.ravel()
-
-        sinkhorn_l = sinkhorn_divergence_conv(
-            proj_nonneg_ste(yhat_img),
-            proj_nonneg_ste(y_img),
-            eps_sink,
-            n_iters=n_sinkhorn_iters,
-        )
-        lncc_l = lncc_grid_loss(None, y_img, yhat_img, k=lncc_kernel)
-        mse_l = jnp.mean((y_img - yhat_img) ** 2)
-        rmse_l = jnp.sqrt(mse_l)
-        spectral_l = spectral_loss(None, y_img, yhat_img)
-        simse_l = simse_loss(None, y_flat, yhat_flat)
-        zncc_l = zncc_loss(None, y_flat, yhat_flat)
-        target_range = jnp.max(y_img) - jnp.min(y_img)
-        pred_range = jnp.max(yhat_img) - jnp.min(yhat_img)
-        contrast_l = jax.nn.relu(target_range - pred_range)
-        gradient_l = gradient_magnitude_loss(y_img, yhat_img)
-
-        return (
-            sinkhorn_l,
-            lncc_l,
-            mse_l,
-            rmse_l,
-            spectral_l,
-            simse_l,
-            zncc_l,
-            contrast_l,
-            gradient_l,
-        )
 
     def compute_losses(params, X, Y, yhatdep, step, n_targets, n_networks_):
         yhatdep = _sanitize(yhatdep)
@@ -1393,24 +1433,24 @@ def grid_distance_loss(
         )
 
         w_sink = _get_schedule_value(
-            params, step, total_steps, "w_sinkhorn", w_sinkhorn, schedule_ns
+            params, step, total_steps, "w_sinkhorn", glw.w_sinkhorn, schedule_ns
         )
-        w_lncc_val = _get_schedule_value(params, step, total_steps, "w_lncc", w_lncc, schedule_ns)
-        w_mse_val = _get_schedule_value(params, step, total_steps, "w_mse", w_mse, schedule_ns)
-        w_rmse_val = _get_schedule_value(params, step, total_steps, "w_rmse", w_rmse, schedule_ns)
+        w_lncc_val = _get_schedule_value(params, step, total_steps, "w_lncc", glw.w_lncc, schedule_ns)
+        w_mse_val = _get_schedule_value(params, step, total_steps, "w_mse", glw.w_mse, schedule_ns)
+        w_rmse_val = _get_schedule_value(params, step, total_steps, "w_rmse", glw.w_rmse, schedule_ns)
         w_spec = _get_schedule_value(
-            params, step, total_steps, "w_spectral", w_spectral, schedule_ns
+            params, step, total_steps, "w_spectral", glw.w_spectral, schedule_ns
         )
-        w_sim = _get_schedule_value(params, step, total_steps, "w_simse", w_simse, schedule_ns)
-        w_zncc_val = _get_schedule_value(params, step, total_steps, "w_zncc", w_zncc, schedule_ns)
+        w_sim = _get_schedule_value(params, step, total_steps, "w_simse", glw.w_simse, schedule_ns)
+        w_zncc_val = _get_schedule_value(params, step, total_steps, "w_zncc", glw.w_zncc, schedule_ns)
         w_con = _get_schedule_value(
-            params, step, total_steps, "w_contrast", w_contrast, schedule_ns
+            params, step, total_steps, "w_contrast", glw.w_contrast, schedule_ns
         )
         w_grad = _get_schedule_value(
-            params, step, total_steps, "w_gradient", w_gradient, schedule_ns
+            params, step, total_steps, "w_gradient", glw.w_gradient, schedule_ns
         )
         eps_sink = _get_schedule_value(
-            params, step, total_steps, "eps_sinkhorn", eps_sinkhorn, schedule_ns
+            params, step, total_steps, "eps_sinkhorn", glw.eps_sinkhorn, schedule_ns
         )
 
         (
@@ -1423,7 +1463,7 @@ def grid_distance_loss(
             zncc_losses,
             contrast_losses,
             gradient_losses,
-        ) = vmap(vmap(lambda y, yh: compute_grid_loss_single_unweighted(y, yh, eps_sink)))(
+        ) = vmap(vmap(lambda y, yh: _compute_raw_grid_losses(y, yh, eps_sink, glw.n_sinkhorn_iters, glw.lncc_kernel)))(
             Y_images, yhat_images
         )
 
@@ -1439,35 +1479,22 @@ def grid_distance_loss(
             + w_grad * gradient_losses
         )
 
-        sublosses = {
-            "sinkhorn": _sanitize(jnp.mean(sinkhorn_losses)),
-            "lncc": _sanitize(jnp.mean(lncc_losses)),
-            "mse": _sanitize(jnp.mean(mse_losses)),
-            "rmse": _sanitize(jnp.mean(rmse_losses)),
-            "spectral": _sanitize(jnp.mean(spectral_losses)),
-            "simse": _sanitize(jnp.mean(simse_losses)),
-            "zncc": _sanitize(jnp.mean(zncc_losses)),
-            "contrast": _sanitize(jnp.mean(contrast_losses)),
-            "gradient": _sanitize(jnp.mean(gradient_losses)),
-            "sinkhorn_weighted": _sanitize(w_sink * jnp.mean(sinkhorn_losses)),
-            "lncc_weighted": _sanitize(w_lncc_val * jnp.mean(lncc_losses)),
-            "mse_weighted": _sanitize(w_mse_val * jnp.mean(mse_losses)),
-            "rmse_weighted": _sanitize(w_rmse_val * jnp.mean(rmse_losses)),
-            "spectral_weighted": _sanitize(w_spec * jnp.mean(spectral_losses)),
-            "simse_weighted": _sanitize(w_sim * jnp.mean(simse_losses)),
-            "zncc_weighted": _sanitize(w_zncc_val * jnp.mean(zncc_losses)),
-            "contrast_weighted": _sanitize(w_con * jnp.mean(contrast_losses)),
-            "gradient_weighted": _sanitize(w_grad * jnp.mean(gradient_losses)),
-            "sinkhorn_per_network": _sanitize(sinkhorn_losses),
-            "lncc_per_network": _sanitize(lncc_losses),
-            "mse_per_network": _sanitize(mse_losses),
-            "rmse_per_network": _sanitize(rmse_losses),
-            "spectral_per_network": _sanitize(spectral_losses),
-            "simse_per_network": _sanitize(simse_losses),
-            "zncc_per_network": _sanitize(zncc_losses),
-            "contrast_per_network": _sanitize(contrast_losses),
-            "gradient_per_network": _sanitize(gradient_losses),
-        }
+        _loss_components = [
+            ("sinkhorn", w_sink, sinkhorn_losses),
+            ("lncc", w_lncc_val, lncc_losses),
+            ("mse", w_mse_val, mse_losses),
+            ("rmse", w_rmse_val, rmse_losses),
+            ("spectral", w_spec, spectral_losses),
+            ("simse", w_sim, simse_losses),
+            ("zncc", w_zncc_val, zncc_losses),
+            ("contrast", w_con, contrast_losses),
+            ("gradient", w_grad, gradient_losses),
+        ]
+        sublosses = {}
+        for name, weight, losses in _loss_components:
+            sublosses[name] = _sanitize(jnp.mean(losses))
+            sublosses[f"{name}_weighted"] = _sanitize(weight * jnp.mean(losses))
+            sublosses[f"{name}_per_network"] = _sanitize(losses)
         return _sanitize(all_losses), {"yhat_images": yhat_images, "sublosses": sublosses}
 
     return _make_loss_func(

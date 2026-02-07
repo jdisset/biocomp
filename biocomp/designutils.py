@@ -12,12 +12,12 @@ import jax
 import jax.numpy as jnp
 
 from biocomp.logging_config import get_logger
+from biocomp.designloss import GridLossWeights
 from biocomp.plotting.ascii_heatmap import CMAP_S
 
 if TYPE_CHECKING:
     from biocomp.compute import ComputeStack
-    from biocomp.design import DesignManager
-    from biocomp.design_targets import Target
+    from biocomp.design_targets import SVGTarget
     from biocomp.designloss import GridLossResult
     from biocomp.network import Network
     from biocomp.parameters import ParameterTree
@@ -28,35 +28,10 @@ NdArray = np.ndarray
 logger = get_logger(__name__)
 
 
-def build_design_stack(
-    dmanager: "DesignManager",
-    model: "BiocompModel",
-    *,
-    unlock_ratios: bool = True,
-    use_latent_ratios: bool = False,
-    latent_dim: int = 0,
-    latent_hidden_dim: int = 0,
-    auto_lock_topology_tus: bool = True,
-) -> "ComputeStack":
-    """Single source of truth for design stack construction.
-
-    All design-related stack building should use this helper to ensure
-    consistent TU masking behavior across training, logging, and commit.
-    """
-    return dmanager.build_stack(
-        model,
-        unlock_ratios=unlock_ratios,
-        use_latent_ratios=use_latent_ratios,
-        latent_dim=latent_dim,
-        latent_hidden_dim=latent_hidden_dim,
-        auto_lock_topology_tus=auto_lock_topology_tus,
-    )
-
-
 def predict_design_grid(
     model: "BiocompModel",
     networks: list["Network"],
-    target: "Target",
+    target: "SVGTarget",
     resolution: tuple[int, int],
     seed: int = 0,
 ) -> tuple[list["PlotData"], np.ndarray]:
@@ -278,22 +253,11 @@ def sample_from_svg(
     max_is_black=True,
     grid=None,
     grid_jitter_std=None,
-    # New API parameters
     viewbox_x: tuple[float, float] = None,
     viewbox_y: tuple[float, float] = None,
     latent_x: tuple[float, float] = (0.0, 0.6),
     latent_y: tuple[float, float] = (0.0, 0.6),
     latent_out: tuple[float, float] = (0.0, 0.6),
-    # Legacy parameters (deprecated)
-    rescale_to=None,
-    xlim=None,
-    ylim=None,
-    outlim=None,
-    lattice_x_extent=None,
-    lattice_y_extent=None,
-    img_latent_xlim=None,
-    img_latent_ylim=None,
-    img_latent_outlim=None,
 ):
     """Sample points from an SVG file and return latent coordinates + values.
 
@@ -305,42 +269,8 @@ def sample_from_svg(
     The key semantic: viewbox crops the SVG, latent defines the output coordinate system.
     A cropped viewbox still maps to the FULL latent range.
     """
-    import warnings
-
     svg_path = Path(svg_path).expanduser().resolve()
     seed = seed or np.random.randint(0, 2**32 - 1)
-
-    # Handle legacy parameters
-    legacy_used = any(
-        p is not None
-        for p in [
-            xlim,
-            ylim,
-            outlim,
-            rescale_to,
-            lattice_x_extent,
-            lattice_y_extent,
-            img_latent_xlim,
-            img_latent_ylim,
-            img_latent_outlim,
-        ]
-    )
-    if legacy_used:
-        warnings.warn(
-            "sample_from_svg: legacy parameters are deprecated. "
-            "Use viewbox_x/y and latent_x/y/out instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        viewbox_x = viewbox_x or lattice_x_extent or xlim
-        viewbox_y = viewbox_y or lattice_y_extent or ylim
-        latent_x = img_latent_xlim or latent_x
-        latent_y = img_latent_ylim or latent_y
-        latent_out = img_latent_outlim or outlim or latent_out
-        if rescale_to:
-            viewbox_x = viewbox_x or tuple(rescale_to.get("x", (0, 1)))
-            viewbox_y = viewbox_y or tuple(rescale_to.get("y", (0, 1)))
-            latent_out = tuple(rescale_to.get("out", latent_out))
 
     # Apply defaults for viewbox
     default_viewbox = (0.1, 1.0) if log else (0.0, 1.0)
@@ -561,7 +491,6 @@ def load_target(target_path):
     import dracon as dr
     from biocomp.design_targets import (
         SVGTarget,
-        Target,
         DataTarget,
         LatticeSampling,
         UniformSampling,
@@ -571,7 +500,7 @@ def load_target(target_path):
         str(target_path),
         context={
             "SVGTarget": SVGTarget,
-            "Target": Target,
+            "Target": SVGTarget,  # backward compat for YAML files using !Target
             "DataTarget": DataTarget,
             "LatticeSampling": LatticeSampling,
             "UniformSampling": UniformSampling,
@@ -725,15 +654,7 @@ def evaluate_recipe_with_sublosses(
     Y_pred_grid = prediction.reshape(resolution[1], resolution[0])
     Y_target_2d = Y_target.reshape(resolution[1], resolution[0])
 
-    sublosses = compute_grid_losses(
-        jnp.array(Y_pred_grid),
-        jnp.array(Y_target_2d),
-        w_sinkhorn=1.0,
-        w_lncc=0.5,
-        w_mse=0.0,
-        w_rmse=0.5,
-        return_contributions=False,
-    )
+    sublosses = compute_grid_losses(jnp.array(Y_pred_grid), jnp.array(Y_target_2d))
 
     txt_result = smooth_2d_txt(
         X_latent,
@@ -836,41 +757,22 @@ LOSS_ORDER = [
     "contrast",
     "zncc",
 ]
-DEFAULT_LOSS_WEIGHTS = {
-    "sinkhorn": 1.0,
-    "lncc": 0.5,
-    "rmse": 0.5,
-    "mse": 0.0,
-    "simse": 0.0,
-    "spectral": 0.0,
-    "gradient": 0.0,
-    "contrast": 0.0,
-    "zncc": 0.0,
-}
 
 
 def compute_grid_metrics(
     target_grid: np.ndarray,
     prediction_grid: np.ndarray,
-    loss_weights: dict[str, float] | None = None,
+    loss_weights: GridLossWeights | dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Compute comprehensive grid-based metrics for target vs prediction comparison.
 
     Args:
         target_grid: 2D array (H, W) of target pattern
         prediction_grid: 2D array (H, W) of predicted pattern
-        loss_weights: Optional dict of loss weights {loss_name: weight}.
-            If None, uses DEFAULT_LOSS_WEIGHTS.
+        loss_weights: GridLossWeights, dict of weights, or None for defaults.
 
     Returns:
-        Dict containing:
-            - Individual loss values (sinkhorn, lncc, rmse, mse, etc.)
-            - Weighted versions of each loss ({name}_weighted)
-            - weighted_total: sum of weighted losses
-            - correlation: Pearson correlation coefficient
-            - pred_range: (min, max) of prediction
-            - target_range: (min, max) of target
-            - weights: the loss weights used
+        Dict containing individual/weighted losses, weighted_total, correlation, ranges.
     """
     from biocomp.designloss import compute_grid_losses
 
@@ -880,29 +782,16 @@ def compute_grid_metrics(
         f"Shape mismatch: target={target_grid.shape} vs pred={prediction_grid.shape}"
     )
 
-    # Normalize weight keys: accept both "zncc" and "w_zncc" formats
-    raw_weights = loss_weights or {}
-    normalized = {}
-    for k, v in raw_weights.items():
-        key = k[2:] if k.startswith("w_") else k
-        normalized[key] = v
-    weights = {**DEFAULT_LOSS_WEIGHTS, **normalized}
+    if isinstance(loss_weights, GridLossWeights):
+        glw = loss_weights
+    elif isinstance(loss_weights, dict):
+        glw = GridLossWeights.from_loss_kwargs(loss_weights)
+    else:
+        glw = GridLossWeights()
 
-    result = compute_grid_losses(
-        jnp.array(prediction_grid),
-        jnp.array(target_grid),
-        w_sinkhorn=weights["sinkhorn"],
-        w_lncc=weights["lncc"],
-        w_mse=weights["mse"],
-        w_rmse=weights["rmse"],
-        w_simse=weights["simse"],
-        w_spectral=weights["spectral"],
-        w_gradient=weights["gradient"],
-        w_contrast=weights["contrast"],
-        w_zncc=weights["zncc"],
-    )
-
+    result = compute_grid_losses(jnp.array(prediction_grid), jnp.array(target_grid), weights=glw)
     loss_dict_raw = result.to_dict()
+    weights_dict = glw.to_dict()
 
     metrics: dict[str, Any] = {}
     weighted_total = 0.0
@@ -910,14 +799,14 @@ def compute_grid_metrics(
     for name in LOSS_ORDER:
         if name in loss_dict_raw and name != "total":
             raw_val = float(loss_dict_raw[name])
-            weight = weights.get(name, 0.0)
+            weight = float(weights_dict.get(f"w_{name}", 0.0))
             weighted_val = raw_val * weight
             metrics[name] = raw_val
             metrics[f"{name}_weighted"] = weighted_val
             weighted_total += weighted_val
 
     metrics["weighted_total"] = weighted_total
-    metrics["weights"] = weights
+    metrics["weights"] = weights_dict
 
     correlation = float(np.corrcoef(target_grid.ravel(), prediction_grid.ravel())[0, 1])
     metrics["correlation"] = correlation

@@ -1,6 +1,5 @@
 """Target classes and sampling configs for design optimization."""
 
-import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Literal, Optional, Union
@@ -104,61 +103,6 @@ class SVGTarget(TargetBase):
         return self._sample(n=n, seed=seed, grid=None, jitter=0.0)
 
 
-class Target(SVGTarget):
-    """Legacy alias for SVGTarget with deprecated parameter names."""
-
-    xlim: Optional[tuple[float, float]] = None
-    ylim: Optional[tuple[float, float]] = None
-    outlim: Optional[tuple[float, float]] = None
-    rescale_to: Optional[dict] = None
-    lattice_x_extent: Optional[tuple[float, float]] = None
-    lattice_y_extent: Optional[tuple[float, float]] = None
-    img_latent_xlim: Optional[tuple[float, float]] = None
-    img_latent_ylim: Optional[tuple[float, float]] = None
-    img_latent_outlim: Optional[tuple[float, float]] = None
-
-    @model_validator(mode="after")
-    def _migrate_legacy_params(self):
-        def _warn(old, new):
-            warnings.warn(
-                f"Target.{old} is deprecated, use {new} instead", DeprecationWarning, stacklevel=3
-            )
-
-        if self.lattice_x_extent is not None:
-            _warn("lattice_x_extent", "viewbox_x")
-            self.viewbox_x = self.lattice_x_extent
-        if self.lattice_y_extent is not None:
-            _warn("lattice_y_extent", "viewbox_y")
-            self.viewbox_y = self.lattice_y_extent
-        if self.img_latent_xlim is not None:
-            _warn("img_latent_xlim", "latent_x")
-            self.latent_x = self.img_latent_xlim
-        if self.img_latent_ylim is not None:
-            _warn("img_latent_ylim", "latent_y")
-            self.latent_y = self.img_latent_ylim
-        if self.img_latent_outlim is not None:
-            _warn("img_latent_outlim", "latent_out")
-            self.latent_out = self.img_latent_outlim
-        if self.xlim is not None:
-            _warn("xlim", "viewbox_x")
-            self.viewbox_x = self.xlim
-        if self.ylim is not None:
-            _warn("ylim", "viewbox_y")
-            self.viewbox_y = self.ylim
-        if self.outlim is not None:
-            _warn("outlim", "latent_out")
-            self.latent_out = self.outlim
-        if self.rescale_to is not None:
-            _warn("rescale_to", "viewbox_*/latent_*")
-            if "x" in self.rescale_to:
-                self.viewbox_x = tuple(self.rescale_to["x"])
-            if "y" in self.rescale_to:
-                self.viewbox_y = tuple(self.rescale_to["y"])
-            if "out" in self.rescale_to:
-                self.latent_out = tuple(self.rescale_to["out"])
-        return self
-
-
 class DataTarget(TargetBase):
     X: np.ndarray
     Y: np.ndarray
@@ -248,4 +192,4 @@ class DataTarget(TargetBase):
         return self.X[indices], Y_sampled[:, None] if Y_sampled.ndim == 1 else Y_sampled
 
 
-TargetUnion = Union[Target, SVGTarget, DataTarget]
+TargetUnion = Union[SVGTarget, DataTarget]

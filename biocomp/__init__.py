@@ -27,9 +27,11 @@ from .recipe import (  # noqa: E402
     Slot as Slot,
 )
 
-from .designcodec import GenomeCodec as GenomeCodec  # noqa: E402
+from .designloss import GridLossWeights as GridLossWeights  # noqa: E402
 
-from .designoptim import (  # noqa: E402
+from .pluggable_opt.codec import GenomeCodec as GenomeCodec  # noqa: E402
+
+from .pluggable_opt.optimizers import (  # noqa: E402
     OptimPhase as OptimPhase,
     OptimizationState as OptimizationState,
     GradientDescentOptimizer as GradientDescentOptimizer,

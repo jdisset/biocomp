@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 from copy import deepcopy
 
 import numpy as np
@@ -11,6 +11,7 @@ from .logging_config import get_logger
 from .tumasking import TU_LOG_ALPHA_PATH
 from .tumasking_strategy import build_strategy_from_config
 from .tracing import trace_scope, trace_here
+from .logger_dispatch import LoggerDispatch
 
 if TYPE_CHECKING:
     from .design import DesignManager, DesignConfig
@@ -896,9 +897,7 @@ def run_with_hard_pruning(
     dmanager: "DesignManager",
     dconf: "DesignConfig",
     model: "BiocompModel",
-    loggers: list[tuple[int, Callable]] | None = None,
-    logger_objects: list | None = None,
-    async_handler=None,
+    dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
 ):
     """Design optimization with periodic hard-pruning."""
@@ -983,9 +982,7 @@ def run_with_hard_pruning(
             current_dmanager,
             segment_config,
             model,
-            loggers=loggers,
-            logger_objects=logger_objects,
-            async_handler=async_handler,
+            dispatch=dispatch,
             lock_ratios=lock_ratios,
             initial_params=current_params,
         )
@@ -997,6 +994,7 @@ def run_with_hard_pruning(
         if segment_idx < n_segments - 1:
             timer.start("prune", "[HARD-PRUNE] Identifying TUs to prune...")
 
+            # TODO: callsite shouldnt repeat all the dconf params here. LEt's just make build_stack take the dconf directly and pick whatevrer it needs
             temp_stack = current_dmanager.build_stack(
                 model,
                 unlock_ratios=not lock_ratios,
@@ -1010,6 +1008,7 @@ def run_with_hard_pruning(
 
             single_rep_params = tree_get(segment_params, (0, 0))
 
+            #TODO: same remark as above about passing dconf directly
             tus_to_remove = identify_tus_to_prune(
                 single_rep_params,
                 temp_stack,
@@ -1066,6 +1065,7 @@ def run_with_hard_pruning(
                             "Pre-prune evaluation failed",
                             {"error": str(e)},
                         )
+                        raise
 
                 prune_key = jax.random.fold_in(loop_key, segment_idx + 1000)
                 current_dmanager, _, current_params = hard_prune_and_rebuild(

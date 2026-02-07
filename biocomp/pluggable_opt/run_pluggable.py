@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 from ..logging_config import get_logger
 from ..design_session import DesignSession
+from ..logger_dispatch import LoggerDispatch, NullDispatch
 from .codec import GenomeCodec
 from .optimizers import NSGA2DesignOptimizer, NSGA2DesignState
 
@@ -21,9 +22,7 @@ def run_pluggable(
     dmanager: "DesignManager",
     dconf: "DesignConfig",
     model,
-    loggers: list[tuple[int, Callable]] | None = None,
-    logger_objects: list | None = None,
-    async_handler=None,
+    dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
 ):
     optimizer = dconf.pluggable_optimizer
@@ -123,6 +122,9 @@ def run_pluggable(
     logger.info("STARTING OPTIMIZATION LOOP")
     logger.info("=" * 60)
 
+    dispatch = dispatch or NullDispatch()
+    dispatch.on_start(None, stack)
+
     loss_history, step_history = [], []
     pbar = tqdm(desc="Optimizing", unit="step")
 
@@ -135,22 +137,15 @@ def run_pluggable(
         pbar.update(1)
         pbar.set_postfix(loss=f"{float(opt_state.best_loss):.4f}")
 
-        if loggers and any(int(opt_state.step) % p == 0 or p == -1 for p, _ in loggers):
-            yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, current_step)
-            step_data = {"loss": [[float(opt_state.best_loss)]], "yhatdep": yhatdep_arr, **metrics}
-            needs_params = logger_objects and any(
-                "latest_params" in getattr(lo, "required_arrays", [])
-                for lo in logger_objects
-                if int(opt_state.step) % getattr(lo, "periods", 1) == 0
-            )
-            if needs_params:
-                best_genome = opt_state.best_params
-                if is_nsga2:
-                    best_genome = best_genome[nsga2_n_tus:]
-                step_data["latest_params"] = codec.decode(best_genome, apply_constraints=True)
-            for period, callback in loggers:
-                if int(opt_state.step) % period == 0 or period == -1:
-                    callback(int(opt_state.step), None, step_history=step_data, stack=stack)
+        step_idx = int(opt_state.step)
+        yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, current_step)
+        step_data = {"loss": [[float(opt_state.best_loss)]], "yhatdep": yhatdep_arr, **metrics}
+        if dispatch.needs_params_sync(step_idx):
+            best_genome = opt_state.best_params
+            if is_nsga2:
+                best_genome = best_genome[nsga2_n_tus:]
+            step_data["latest_params"] = codec.decode(best_genome, apply_constraints=True)
+        dispatch.on_step(step_idx, None, step_data, stack)
 
     pbar.close()
     logger.info("=" * 60)
@@ -174,14 +169,11 @@ def run_pluggable(
             logger.info(f"    Min loss: {float(jnp.min(pareto_fitness[:, 0])):.4f}")
             logger.info(f"    Min TU count: {float(jnp.min(pareto_fitness[:, 1])):.0f}")
 
-    if loggers:
-        yhatdep_arr = compiled_get_yhatdep(
-            opt_state.best_params, jnp.array(int(opt_state.step), dtype=jnp.int32)
-        )
-        final_step_data["yhatdep"] = yhatdep_arr
-        for period, callback in loggers:
-            if period == -1:
-                callback(int(opt_state.step), None, step_history=final_step_data, stack=stack)
+    yhatdep_arr = compiled_get_yhatdep(
+        opt_state.best_params, jnp.array(int(opt_state.step), dtype=jnp.int32)
+    )
+    final_step_data["yhatdep"] = yhatdep_arr
+    dispatch.on_end(int(opt_state.step), None, final_step_data, stack)
 
     step_history.append(final_step_data)
 
