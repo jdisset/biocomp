@@ -51,9 +51,10 @@ def predict_design_grid(
 
     X_lat, Y_target = target.get_lattice(resolution=resolution, seed=seed)
     nm = NetworkModel(model=model, network=networks)
+    predict_at = build_design_predict_inputs(X_lat, networks)
 
     pred = NetworkPrediction(
-        predict_at=[X_lat] * len(networks),
+        predict_at=predict_at,
         network_model=nm,
         already_latent=True,
         z_value=0.0,
@@ -62,6 +63,34 @@ def predict_design_grid(
         seed=seed,
     )
     return pred.get_data(rescale_latent=False), Y_target
+
+
+def build_design_predict_inputs(X_lat: np.ndarray, networks: list["Network"]) -> list[np.ndarray]:
+    """Create per-network predict_at arrays with explicit dimensional alignment.
+
+    Committed networks can end up with fewer inputs than the original design target
+    (e.g., after pruning). For design-grid predictions we intentionally project
+    `X_lat` onto the required number of leading input dimensions per network.
+    """
+    assert X_lat.ndim == 2, f"X_lat must be 2D, got shape {X_lat.shape}"
+    n_samples, n_cols = X_lat.shape
+    predict_at: list[np.ndarray] = []
+
+    for idx, network in enumerate(networks):
+        expected_inputs = network.nb_inputs
+        if expected_inputs > n_cols:
+            raise ValueError(
+                f"Network {idx} ({network.name}) expects {expected_inputs} inputs, "
+                f"but lattice provides {n_cols}"
+            )
+        if expected_inputs == n_cols:
+            predict_at.append(X_lat)
+        elif expected_inputs == 0:
+            predict_at.append(np.zeros((n_samples, 0), dtype=X_lat.dtype))
+        else:
+            predict_at.append(X_lat[:, :expected_inputs])
+
+    return predict_at
 
 
 def _parse_svg_path(d):

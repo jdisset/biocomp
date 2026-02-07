@@ -18,7 +18,7 @@ from biocomp.compute import ComputeStack
 from biocomp.network import recipe_to_networks
 from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, NumRange
 from biocomp.design import DesignManager, initialize_params
-from biocomp.designutils import predict_design_grid
+from biocomp.designutils import predict_design_grid, build_design_predict_inputs
 from biocomp.paramintrospect import introspect_stack, aggregate_by_tu, _get_committed_tu_ids
 
 
@@ -199,9 +199,10 @@ class TestPredictionConsistency:
             helper_data, _ = predict_design_grid(model, committed, target, res, seed=0)
 
             X_lat, _ = target.get_lattice(resolution=res, seed=0)
+            predict_at = build_design_predict_inputs(X_lat, committed)
             nm = NetworkModel(model=model, network=committed)
             manual_pred = NetworkPrediction(
-                predict_at=[X_lat] * len(committed),
+                predict_at=predict_at,
                 network_model=nm,
                 already_latent=True,
                 z_value=0.0,
@@ -219,6 +220,76 @@ class TestPredictionConsistency:
                     atol=1e-6,
                     err_msg="Helper and manual prediction should match",
                 )
+
+    def test_build_design_predict_inputs_aligns_committed_input_dims(self, lib, design_scaffold):
+        """Helper must create per-network inputs with exact committed input width."""
+        model = get_model()
+
+        with LibraryContext.with_library(lib):
+            networks = recipe_to_networks(design_scaffold, br.ALL_RULES, invert=True)
+            target = get_simple_target()
+            res = (16, 16)
+
+            stack = ComputeStack(networks=networks)
+            stack.build(model.compute_config, enable_tu_masking=False)
+            params = stack.init(jax.random.key(42))
+            committed = stack.commit(params)
+
+            X_lat, _ = target.get_lattice(resolution=res, seed=0)
+            predict_at = build_design_predict_inputs(X_lat, committed)
+
+            assert len(predict_at) == len(committed)
+            for arr, net in zip(predict_at, committed, strict=True):
+                assert arr.shape[0] == X_lat.shape[0]
+                assert arr.shape[1] == net.nb_inputs
+
+    def test_networkprediction_strict_shape_enforcement_with_helper_path(self, lib, design_scaffold):
+        """Raw over-wide predict_at must fail, helper-aligned predict_at must succeed."""
+        model = get_model()
+
+        with LibraryContext.with_library(lib):
+            from biocomptools.modelmodel import NetworkModel
+            from biocomptools.toollib.networkprediction import NetworkPrediction
+            from pydantic import ValidationError
+
+            networks = recipe_to_networks(design_scaffold, br.ALL_RULES, invert=True)
+            target = get_simple_target()
+            res = (16, 16)
+
+            stack = ComputeStack(networks=networks)
+            stack.build(model.compute_config, enable_tu_masking=False)
+            params = stack.init(jax.random.key(42))
+            committed = stack.commit(params)
+
+            X_lat, _ = target.get_lattice(resolution=res, seed=0)
+            has_input_mismatch = any(net.nb_inputs != X_lat.shape[1] for net in committed)
+            if not has_input_mismatch:
+                pytest.skip("No committed input-width mismatch to validate strict shape behavior")
+
+            nm = NetworkModel(model=model, network=committed)
+            with pytest.raises(ValidationError):
+                NetworkPrediction(
+                    predict_at=[X_lat] * len(committed),
+                    network_model=nm,
+                    already_latent=True,
+                    z_value=0.0,
+                    disable_variational=True,
+                    skip_input_reorder=True,
+                    seed=0,
+                )
+
+            aligned = build_design_predict_inputs(X_lat, committed)
+            pred = NetworkPrediction(
+                predict_at=aligned,
+                network_model=nm,
+                already_latent=True,
+                z_value=0.0,
+                disable_variational=True,
+                skip_input_reorder=True,
+                seed=0,
+            )
+            data = pred.get_data(rescale_latent=False)
+            assert len(data) == len(committed)
 
 
 class TestCommittedTUConsistency:
