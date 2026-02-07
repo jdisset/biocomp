@@ -193,7 +193,7 @@ def test_aggregation_ratio_min_uses_recipe_constant():
     import importlib
     from biocomp.recipe import DEFAULT_RATIO_MIN
 
-    assert DEFAULT_RATIO_MIN == 0.001, "recipe constant should be 0.001"
+    assert DEFAULT_RATIO_MIN == 0.0125, "recipe constant should be 0.0125"
 
     # Force module load (not the function re-exported from nodes/__init__.py)
     aggregation_module = importlib.import_module("biocomp.nodes.aggregation")

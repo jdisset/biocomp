@@ -116,7 +116,7 @@ def test_logged_vs_committed_long_optimization(design_setup_long):
     )
 
     final_params, _, step_history = design_start(
-        dmanager=dmanager, dconf=dconf, model=model, loggers=None
+        dmanager=dmanager, dconf=dconf, model=model
     )
 
     logged_yhatdep = step_history.get("yhatdep")
