@@ -172,19 +172,18 @@ class TestNormalizeRatiosForPruning:
         assert RATIO_PRUNE_THRESHOLD == expected
 
 
-class TestBackwardsCompatibility:
-    def test_design_import_works(self):
-        """Old imports from design.py still work."""
-        from biocomp.design import normalize_ratios_prune
+class TestCanonicalImports:
+    def test_ratio_utils_import_works(self):
+        from biocomp.ratio_utils import normalize_ratios_for_pruning
 
         ratios = jnp.array([0.5, 0.1, 0.05])
-        result = normalize_ratios_prune(ratios, threshold=0.1)
+        result = normalize_ratios_for_pruning(ratios, threshold=0.1)
         assert float(result[0]) == 1.0
 
-    def test_pluggable_opt_import_works(self):
-        """pluggable_opt can still import from design."""
-        from biocomp.design import normalize_ratios_prune, get_ratio_paths_and_sources, RATIO_PRUNE_THRESHOLD
-        assert callable(normalize_ratios_prune)
+    def test_canonical_imports_work(self):
+        from biocomp.ratio_utils import normalize_ratios_for_pruning, RATIO_PRUNE_THRESHOLD
+        from biocomp.design import get_ratio_paths_and_sources
+        assert callable(normalize_ratios_for_pruning)
         assert callable(get_ratio_paths_and_sources)
         assert isinstance(RATIO_PRUNE_THRESHOLD, float)
 

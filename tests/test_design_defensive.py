@@ -11,16 +11,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from pathlib import Path
-from jax import grad
 
 from biocomp.graphengine import GraphState, GraphNode, GraphEdge
 from biocomp.stack_builder import topological_order
 from biocomp.tumasking import (
-    hard_concrete_from_uniform,
-    sample_hard_concrete,
     l0_penalty,
     get_final_mask,
-    _validate_hard_concrete_params,
 )
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
@@ -92,101 +88,6 @@ def test_topological_order_all_nodes_included():
     assert nodes_in_order == set(graph.nodes.keys()), (
         f"Missing nodes: {set(graph.nodes.keys()) - nodes_in_order}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Hard Concrete Gradient Flow Test
-# ---------------------------------------------------------------------------
-
-
-def test_hard_concrete_gradient_flows():
-    """Verify gradients flow through Hard Concrete STE (not blocked)."""
-    # setup: mask is OFF (log_alpha << 0), target is 1.0
-    # if gradients flow, they should push log_alpha UP to turn mask ON
-    input_val = 1.0
-    target = 1.0
-    log_alpha_init = jnp.array([-2.0])  # mask should be mostly OFF
-
-    def loss_fn(log_alpha):
-        u = jnp.array([0.5])  # deterministic uniform sample
-        mask = hard_concrete_from_uniform(u, log_alpha, temperature=0.5)
-        output = mask * input_val
-        return jnp.mean((output - target) ** 2)
-
-    # compute gradient
-    grads = grad(loss_fn)(log_alpha_init)
-
-    # gradient should be non-zero and negative (reducing loss means increasing log_alpha)
-    assert jnp.all(jnp.isfinite(grads)), "Gradients contain NaN/Inf"
-    assert grads[0] < 0, (
-        f"Gradient should be negative to increase log_alpha and turn mask ON, got {grads[0]}"
-    )
-
-
-def test_hard_concrete_gradient_magnitude():
-    """Verify gradients have meaningful magnitude (not vanishing)."""
-    log_alpha_near_zero = jnp.array([0.0])  # sigmoid active region
-
-    def loss_fn(log_alpha):
-        u = jnp.array([0.5])
-        mask = hard_concrete_from_uniform(u, log_alpha, temperature=0.5)
-        return jnp.sum(mask**2)
-
-    grads = grad(loss_fn)(log_alpha_near_zero)
-    assert jnp.abs(grads[0]) > 1e-4, (
-        f"Gradient magnitude {jnp.abs(grads[0])} is too small, possible vanishing gradient"
-    )
-
-
-def test_hard_concrete_different_temperatures():
-    """Test gradient flow at different temperatures."""
-    log_alpha = jnp.array([0.0])
-
-    def loss_fn(log_alpha, temp):
-        u = jnp.array([0.5])
-        mask = hard_concrete_from_uniform(u, log_alpha, temperature=temp)
-        return jnp.sum(mask**2)
-
-    for temp in [0.1, 0.5, 1.0, 2.0]:
-        grads = grad(lambda la: loss_fn(la, temp))(log_alpha)
-        assert jnp.all(jnp.isfinite(grads)), f"NaN/Inf gradient at temperature {temp}"
-        assert jnp.abs(grads[0]) > 1e-6, f"Vanishing gradient at temperature {temp}"
-
-
-# ---------------------------------------------------------------------------
-# Parameter Validation Tests
-# ---------------------------------------------------------------------------
-
-
-def test_validate_hard_concrete_params_valid():
-    """Valid params should not raise."""
-    _validate_hard_concrete_params(gamma=-0.1, zeta=1.1, temperature=0.5)
-
-
-def test_validate_hard_concrete_params_invalid_gamma():
-    """Positive gamma should raise."""
-    with pytest.raises(AssertionError, match="gamma must be negative"):
-        _validate_hard_concrete_params(gamma=0.1, zeta=1.1, temperature=0.5)
-
-
-def test_validate_hard_concrete_params_invalid_zeta():
-    """zeta <= 1 should raise."""
-    with pytest.raises(AssertionError, match="zeta must be > 1"):
-        _validate_hard_concrete_params(gamma=-0.1, zeta=0.9, temperature=0.5)
-
-
-def test_validate_hard_concrete_params_invalid_temperature():
-    """Negative temperature should raise."""
-    with pytest.raises(AssertionError, match="temperature must be non-negative"):
-        _validate_hard_concrete_params(gamma=-0.1, zeta=1.1, temperature=-0.1)
-
-
-def test_sample_hard_concrete_rejects_nan_log_alpha():
-    """NaN in log_alpha should raise immediately."""
-    log_alpha_with_nan = jnp.array([1.0, jnp.nan, -1.0])
-    key = jax.random.PRNGKey(0)
-    with pytest.raises(AssertionError, match="NaN/Inf in log_alpha"):
-        sample_hard_concrete(log_alpha_with_nan, key)
 
 
 # ---------------------------------------------------------------------------
@@ -629,13 +530,17 @@ def test_grid_data_sequential_order_required():
     first_row_x = X_grid[0, :, 0]
     first_row_y = X_grid[0, :, 1]
     assert jnp.allclose(first_row_y, 0.0), "First row y-coords should all be 0"
-    assert jnp.all(first_row_x[1:] > first_row_x[:-1]), "First row x-coords must be monotonically increasing"
+    assert jnp.all(first_row_x[1:] > first_row_x[:-1]), (
+        "First row x-coords must be monotonically increasing"
+    )
 
     # First column should have constant x=0 and increasing y
     first_col_x = X_grid[:, 0, 0]
     first_col_y = X_grid[:, 0, 1]
     assert jnp.allclose(first_col_x, 0.0), "First column x-coords should all be 0"
-    assert jnp.all(first_col_y[1:] > first_col_y[:-1]), "First column y-coords must be monotonically increasing"
+    assert jnp.all(first_col_y[1:] > first_col_y[:-1]), (
+        "First column y-coords must be monotonically increasing"
+    )
 
 
 def test_shuffled_grid_detection():
@@ -916,9 +821,7 @@ def test_grid_images_shape_match():
     Y = jnp.ones((batch_size, n_targets, 1))
     yhatdep = jnp.ones((batch_size, n_targets, n_networks))
 
-    Y_images = jnp.tile(
-        Y.squeeze(-1).T.reshape(n_targets, 1, yres, xres), (1, n_networks, 1, 1)
-    )
+    Y_images = jnp.tile(Y.squeeze(-1).T.reshape(n_targets, 1, yres, xres), (1, n_networks, 1, 1))
     yhat_images = yhatdep.transpose(1, 2, 0).reshape(n_targets, n_networks, yres, xres)
 
     assert Y_images.shape == yhat_images.shape, (
@@ -940,5 +843,5 @@ def test_prediction_range_plausible():
     in_range = (yhat >= -0.5) & (yhat <= 1.5)
     pct_in_range = jnp.mean(in_range)
     assert pct_in_range > 0.8, (
-        f"Most predictions should be near [0,1], only {pct_in_range*100:.0f}% in range"
+        f"Most predictions should be near [0,1], only {pct_in_range * 100:.0f}% in range"
     )

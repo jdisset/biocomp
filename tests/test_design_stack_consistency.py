@@ -18,7 +18,7 @@ from biocomp.compute import ComputeStack
 from biocomp.network import recipe_to_networks
 from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, NumRange
 from biocomp.design import DesignManager, initialize_params
-from biocomp.designutils import build_design_stack, predict_design_grid
+from biocomp.designutils import predict_design_grid
 from biocomp.paramintrospect import introspect_stack, aggregate_by_tu, _get_committed_tu_ids
 
 
@@ -107,8 +107,8 @@ class TestStackConstructionConsistency:
                 direct_stack = dmanager.build_stack(
                     model, unlock_ratios=True, auto_lock_topology_tus=auto_lock
                 )
-                helper_stack = build_design_stack(
-                    dmanager, model, unlock_ratios=True, auto_lock_topology_tus=auto_lock
+                helper_stack = dmanager.build_stack(
+                    model, unlock_ratios=True, auto_lock_topology_tus=auto_lock
                 )
 
                 assert direct_stack.no_masking_tu_ids == helper_stack.no_masking_tu_ids, (
@@ -133,11 +133,11 @@ class TestStackConstructionConsistency:
                 enable_tu_masking=True,
             )
 
-            stack_locked = build_design_stack(
-                dmanager, model, unlock_ratios=True, auto_lock_topology_tus=True
+            stack_locked = dmanager.build_stack(
+                model, unlock_ratios=True, auto_lock_topology_tus=True
             )
-            stack_unlocked = build_design_stack(
-                dmanager, model, unlock_ratios=True, auto_lock_topology_tus=False
+            stack_unlocked = dmanager.build_stack(
+                model, unlock_ratios=True, auto_lock_topology_tus=False
             )
 
             assert (

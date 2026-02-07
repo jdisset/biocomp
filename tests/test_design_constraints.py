@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from biocomp.compute import ComputeStack
-from biocomp.designcodec import GenomeCodec
+from biocomp.pluggable_opt.codec import GenomeCodec
 from biocomp.network import recipe_to_networks
 from biocomp.nodeutils import NON_GRAD_TAG
 from biocomp.parameters import ParameterTree
@@ -842,7 +842,8 @@ class TestDesignModeConstraints:
 
     def test_zero_freedom_ratios_stay_locked_in_design_mode(self, designer_model):
         """Zero-freedom recipe should have locked ratios even with random_init=True."""
-        from biocomp.design import DesignManager, Target
+        from biocomp.design import DesignManager
+        from biocomp.design_targets import SVGTarget
 
         recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         target_path = RESOURCES_DIR / "design/targets/MIT_T_only.yaml"
@@ -853,7 +854,7 @@ class TestDesignModeConstraints:
             pytest.skip(f"Target not found: {target_path}")
 
         recipe = load_recipe(recipe_path)
-        target = Target(path=str(target_path))
+        target = SVGTarget(path=str(target_path))
 
         networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="main")
         assert len(networks) == 1
@@ -888,7 +889,8 @@ class TestDesignModeConstraints:
 
     def test_zero_freedom_param_dim_zero_in_design_mode(self, designer_model):
         """Zero-freedom recipe should have param_dim=0 even in design mode."""
-        from biocomp.design import DesignManager, Target
+        from biocomp.design import DesignManager
+        from biocomp.design_targets import SVGTarget
 
         recipe_path = RESOURCES_DIR / "design/architectures/T_2_zero_freedom.yaml"
         target_path = RESOURCES_DIR / "design/targets/MIT_T_only.yaml"
@@ -899,7 +901,7 @@ class TestDesignModeConstraints:
             pytest.skip(f"Target not found: {target_path}")
 
         recipe = load_recipe(recipe_path)
-        target = Target(path=str(target_path))
+        target = SVGTarget(path=str(target_path))
 
         networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="main")
         dmanager = DesignManager(targets=[target], networks=networks, enable_tu_masking=False)
@@ -920,7 +922,8 @@ class TestDesignModeConstraints:
 
     def test_unlocked_ratios_still_unlock_in_design_mode(self, designer_model):
         """Unlocked recipes should still have unlocked ratios in design mode."""
-        from biocomp.design import DesignManager, Target
+        from biocomp.design import DesignManager
+        from biocomp.design_targets import SVGTarget
 
         recipe_path = RESOURCES_DIR / "design/architectures/T_2_ratios_only.yaml"
         target_path = RESOURCES_DIR / "design/targets/MIT_T_only.yaml"
@@ -931,7 +934,7 @@ class TestDesignModeConstraints:
             pytest.skip(f"Target not found: {target_path}")
 
         recipe = load_recipe(recipe_path)
-        target = Target(path=str(target_path))
+        target = SVGTarget(path=str(target_path))
 
         networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="main")
         dmanager = DesignManager(targets=[target], networks=networks, enable_tu_masking=False)

@@ -12,9 +12,9 @@ from biocomp.design import (
     DesignManager,
     DesignConfig,
     start as design_start,
-    Target,
-    grid_distance_loss,
 )
+from biocomp.design_targets import SVGTarget
+from biocomp.designloss import grid_distance_loss
 from biocomp.design_targets import LatticeSampling
 from biocomp.network import recipe_to_networks
 from biocomp.recipe import Recipe
@@ -44,11 +44,11 @@ def load_model():
     return BiocompModel.load(model_path)
 
 
-def load_target(target_name: str = "MIT_T") -> Target:
+def load_target(target_name: str = "MIT_T") -> SVGTarget:
     target_path = RESOURCES_DIR / "designs" / f"{target_name}.svg"
     if not target_path.exists():
         pytest.skip(f"Target file not found: {target_path}")
-    return Target(path=str(target_path), name=target_name)
+    return SVGTarget(path=str(target_path), name=target_name)
 
 
 @pytest.fixture

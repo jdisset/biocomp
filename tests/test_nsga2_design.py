@@ -6,7 +6,7 @@ import numpy as np
 import optax
 import pytest
 
-from biocomp.designoptim import (
+from biocomp.pluggable_opt.optimizers import (
     NSGA2DesignOptimizer,
     NSGA2DesignState,
     InnerGDConfig,

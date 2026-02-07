@@ -196,6 +196,13 @@ def _make_model():
     )
 
 
+def _extract_shared_params(stack) -> ParameterTree:
+    """Get properly initialized shared params from a stack."""
+    full = stack.init(jax.random.key(999))
+    shared, _ = full.filter_by_tag(["shared"])
+    return shared
+
+
 def _set_low_ratios(params: ParameterTree, stack, threshold: float) -> None:
     updated = False
     assert stack.layers is not None, "Stack must be built before setting ratios"
@@ -399,27 +406,17 @@ def _find_bias_node(stack):
 
 def _get_param_value(params: ParameterTree, path: str, node_idx: int, input_idx: int | None = None):
     arr = np.asarray(params[path])
-    if arr.ndim >= 2 and arr.shape[0] == 1 and arr.shape[1] == 1:
-        arr = arr[0, 0]
     if input_idx is None:
         return arr[node_idx]
     return arr[node_idx, input_idx]
 
 
 def _set_param_value(params: ParameterTree, path: str, node_idx: int, value, input_idx: int | None = None):
-    arr = np.asarray(params[path])
-    if arr.ndim >= 2 and arr.shape[0] == 1 and arr.shape[1] == 1:
-        arr = arr.copy()
-        if input_idx is None:
-            arr[0, 0, node_idx] = value
-        else:
-            arr[0, 0, node_idx, input_idx] = value
+    arr = np.array(params[path], copy=True)
+    if input_idx is None:
+        arr[node_idx] = value
     else:
-        arr = arr.copy()
-        if input_idx is None:
-            arr[node_idx] = value
-        else:
-            arr[node_idx, input_idx] = value
+        arr[node_idx, input_idx] = value
     params.at(path, arr, overwrite=True)
 
 
@@ -436,8 +433,6 @@ def _find_value_in_new_stack(stack, params, tu_id: str, rate_name: str):
         if rate_path not in params:
             continue
         arr = np.asarray(params[rate_path])
-        if arr.ndim >= 2 and arr.shape[0] == 1 and arr.shape[1] == 1:
-            arr = arr[0, 0]
         for node_idx, node in enumerate(layer.nodes):
             edges = sorted(node.get_incoming_edges(stack), key=lambda e: e.to_input_slot)
             for input_idx, edge in enumerate(edges):
@@ -460,8 +455,6 @@ def _find_ratio_in_new_stack(stack, params, member_id: str):
         if ratio_path not in params:
             continue
         arr = np.asarray(params[ratio_path])
-        if arr.ndim >= 2 and arr.shape[0] == 1 and arr.shape[1] == 1:
-            arr = arr[0, 0]
         for node_idx, node in enumerate(layer.nodes):
             graph_node = node.get(stack)
             members = graph_node.extra.get("members", {})
@@ -486,8 +479,6 @@ def _find_bias_in_new_stack(stack, params, protein: str):
         if raw_path not in params:
             continue
         arr = np.asarray(params[raw_path])
-        if arr.ndim >= 2 and arr.shape[0] == 1 and arr.shape[1] == 1:
-            arr = arr[0, 0]
         for node_idx, node in enumerate(layer.nodes):
             graph_node = node.get(stack)
             extra = graph_node.extra or {}
@@ -588,9 +579,10 @@ def test_hard_prune_preserves_semantic_params(lib):
             jax.random.key(4),
         )
 
-        new_rate = _find_value_in_new_stack(new_stack, new_params, tu_id, rate_name)
-        new_ratio = _find_ratio_in_new_stack(new_stack, new_params, member_id)
-        new_bias = _find_bias_in_new_stack(new_stack, new_params, protein)
+        new_params_flat = tree_get(new_params, (0, 0))
+        new_rate = _find_value_in_new_stack(new_stack, new_params_flat, tu_id, rate_name)
+        new_ratio = _find_ratio_in_new_stack(new_stack, new_params_flat, member_id)
+        new_bias = _find_bias_in_new_stack(new_stack, new_params_flat, protein)
 
         assert new_rate is not None
         assert new_ratio is not None
@@ -755,22 +747,7 @@ def test_soft_mask_vs_hard_prune_outputs_match(lib):
         )
         dmanager = DesignManager(targets=[target], networks=networks[:1], enable_tu_masking=True)
         stack = dmanager.build_stack(model, unlock_ratios=True)
-
-        dconf = DesignConfig(n_replicates=1, n_epochs=1)
-        dconf.tu_masking.mode = TUMaskingMode.DIRECT
-        params_full = initialize_params(
-            stack,
-            n_replicates=1,
-            n_targets=1,
-            shared_params=model.shared_params,
-            key=jax.random.key(9),
-            strategy=build_strategy_from_config(dconf),
-            n_tus=dmanager.n_tus,
-            n_networks=len(dmanager.networks),
-            no_masking_tu_ids=stack.no_masking_tu_ids,
-            tu_id_to_idx=stack.tu_id_to_idx,
-        )
-        params = tree_get(params_full, (0, 0))
+        model.shared_params = _extract_shared_params(stack)
 
         stack.ensure_tu_mapping()
         prunable = [t for t in stack.tu_id_to_idx.keys() if t not in (stack.no_masking_tu_ids or set())]
@@ -779,9 +756,12 @@ def test_soft_mask_vs_hard_prune_outputs_match(lib):
         tu_id = prunable[0]
         tu_idx = stack.tu_id_to_idx[tu_id]
 
-        log_alpha = np.array(params[TU_LOG_ALPHA_PATH], copy=True)
-        log_alpha[...] = 10.0
-        log_alpha[:, tu_idx] = -10.0
+        # Use stack.init() directly for forward pass (avoids vmap shape complexity)
+        params = stack.init(jax.random.key(9))
+        n_tus = len(stack.tu_id_to_idx)
+        n_networks = len(dmanager.networks)
+        log_alpha = jnp.full((n_networks, n_tus), 10.0)
+        log_alpha = log_alpha.at[:, tu_idx].set(-10.0)
         params.at(TU_LOG_ALPHA_PATH, log_alpha, overwrite=True)
 
         n_inputs = stack.get_nb_inputs()
@@ -800,7 +780,8 @@ def test_soft_mask_vs_hard_prune_outputs_match(lib):
             preserve_minimum=1,
         )
 
-        new_dmanager, new_stack, new_params = hard_prune_and_rebuild(
+        dconf = DesignConfig(n_replicates=1, n_epochs=1)
+        new_dmanager, new_stack, new_params_batched = hard_prune_and_rebuild(
             dmanager,
             dconf,
             model,
@@ -813,11 +794,17 @@ def test_soft_mask_vs_hard_prune_outputs_match(lib):
         if new_stack.get_nb_inputs() != n_inputs:
             pytest.skip("Hard prune changed input count; output comparison not meaningful")
 
-        n_z_new = int(np.asarray(new_params["global/number_of_random_variables"]).squeeze())
-        if n_z_new != n_z:
-            pytest.skip("Hard prune changed random var count; output comparison not meaningful")
+        # Strip (n_rep=1, n_tgt=1) vmap dims and ensure all leaves are JAX arrays
+        new_params = tree_get(new_params_batched, (0, 0))
+        for path, val in list(new_params.data.iter_leaves()):
+            if isinstance(val, np.ndarray):
+                new_params.at(path, jnp.asarray(val), overwrite=True)
 
-        y_hard, _ = new_stack.apply(new_params, X, Z, key, tu_enabled_random_vars=None)
+        n_z_new = int(np.asarray(new_params["global/number_of_random_variables"]).squeeze())
+
+        # Pruning may change random var count; adjust Z accordingly
+        Z_new = jnp.zeros((n_z_new,)) if n_z_new != n_z else Z
+        y_hard, _ = new_stack.apply(new_params, X, Z_new, key, tu_enabled_random_vars=None)
 
         y_soft_dep = _compress_dependent_outputs(stack, y_soft)
         y_hard_dep = _compress_dependent_outputs(new_stack, y_hard)

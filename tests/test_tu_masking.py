@@ -31,7 +31,6 @@ import biocomp.biorules as br
 from biocomp.tumasking import (
     build_tu_id_mapping,
     TU_LOG_ALPHA_PATH,
-    hard_concrete_from_uniform,
 )
 from pathlib import Path
 
@@ -229,7 +228,10 @@ def test_gradual_disabling(lib, design_stack):
             n_enabled = int(n_tus * fraction)
             # log_alpha: +10 for enabled, -10 for disabled
             log_alpha = jnp.array(
-                [[10.0 if i < n_enabled else -10.0 for i in range(n_tus)] for _ in range(n_networks)]
+                [
+                    [10.0 if i < n_enabled else -10.0 for i in range(n_tus)]
+                    for _ in range(n_networks)
+                ]
             )
             params.at(TU_LOG_ALPHA_PATH, log_alpha, overwrite=True)
             y, _ = stack.apply(params, X, Z, key, tu_enabled_random_vars=None)
@@ -293,21 +295,6 @@ def test_per_network_tu_mask(lib, design_stack):
         assert n_union == n_tus, f"Union of TUs {n_union} != total TUs {n_tus}"
 
 
-def test_hard_concrete_transformation():
-    """Verify hard concrete transformation matches expected behavior."""
-    # uniform=0.5, log_alpha=0 -> s=0.5 -> s_bar=0.5*1.2-0.1=0.5 -> z=0.5
-    z = hard_concrete_from_uniform(jnp.array(0.5), jnp.array(0.0))
-    assert 0.4 < float(z) < 0.6, f"Expected ~0.5, got {z}"
-
-    # uniform near 0, log_alpha=0 -> z=0 (disabled)
-    z_disabled = hard_concrete_from_uniform(jnp.array(1e-6), jnp.array(0.0))
-    assert float(z_disabled) < 0.1, f"Expected ~0, got {z_disabled}"
-
-    # uniform near 1, log_alpha=0 -> z=1 (enabled)
-    z_enabled = hard_concrete_from_uniform(jnp.array(1 - 1e-6), jnp.array(0.0))
-    assert float(z_enabled) > 0.9, f"Expected ~1, got {z_enabled}"
-
-
 def test_inference_mode_all_enabled(lib, design_stack):
     """When log_alpha > 0 for all TUs, output should be non-zero (all enabled)."""
     with LibraryContext.with_library(lib):
@@ -341,12 +328,8 @@ def test_inference_mode_all_enabled(lib, design_stack):
 @pytest.fixture(scope="module")
 def multi_network_stack(lib):
     """Build a stack with multiple networks. Module-scoped for speed."""
-    scaffold_path_1 = (
-        RESOURCES_DIR / "design/architectures/two_and_one.yaml"
-    )
-    scaffold_path_2 = (
-        RESOURCES_DIR / "design/architectures/three.yaml"
-    )
+    scaffold_path_1 = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
+    scaffold_path_2 = RESOURCES_DIR / "design/architectures/three.yaml"
 
     with LibraryContext.with_library(lib):
         data1 = dr.load(scaffold_path_1, context={"Recipe": Recipe})
@@ -770,9 +753,7 @@ def test_commit_without_tu_masking_unchanged(lib):
     """Verify that commit works correctly when TU masking is NOT enabled."""
     from biocomp.recipe import Recipe
 
-    scaffold_path = (
-        RESOURCES_DIR / "design/architectures/two_and_one.yaml"
-    )
+    scaffold_path = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
 
     with LibraryContext.with_library(lib):
         data = dr.load(scaffold_path, context={"Recipe": Recipe})
@@ -999,9 +980,7 @@ def test_fluo_bias_invalid_tu_id_handled(lib):
     from biocomp.network import recipe_to_networks
     import biocomp.biorules as br
 
-    scaffold_path = (
-        RESOURCES_DIR / "design/architectures/two_and_one.yaml"
-    )
+    scaffold_path = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
 
     with LibraryContext.with_library(lib):
         data = dr.load(scaffold_path, context={"Recipe": Recipe})
@@ -1056,9 +1035,7 @@ def test_multi_network_independent_tu_removal(lib):
     from biocomp.network import recipe_to_networks
     import biocomp.biorules as br
 
-    scaffold_path = (
-        RESOURCES_DIR / "design/architectures/two_and_one.yaml"
-    )
+    scaffold_path = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
 
     with LibraryContext.with_library(lib):
         data = dr.load(scaffold_path, context={"Recipe": Recipe})
@@ -1235,7 +1212,8 @@ def test_committed_network_rebuilds_equivalent(lib, design_stack):
 
             for c_agg, r_agg in zip(
                 sorted(committed_aggs, key=lambda x: x.node_id),
-                sorted(rebuilt_aggs, key=lambda x: x.node_id), strict=False,
+                sorted(rebuilt_aggs, key=lambda x: x.node_id),
+                strict=False,
             ):
                 c_members = c_agg.extra.get("members", {})
                 r_members = r_agg.extra.get("members", {})

@@ -1,7 +1,7 @@
 import pytest
 import jax.numpy as jnp
 
-from biocomp.designcodec import GenomeCodec
+from biocomp.pluggable_opt.codec import GenomeCodec
 from biocomp.parameters import ParameterTree
 
 

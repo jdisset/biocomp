@@ -2,7 +2,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from biocomp.designoptim import (
+from biocomp.pluggable_opt.optimizers import (
     OptimPhase,
     OptimizationState,
     GradientDescentOptimizer,

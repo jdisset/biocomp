@@ -13,9 +13,8 @@ from biocomp.optimutils import (
     create_counter,
     as_schedule,
     compile_step,
-    run_logger_callbacks,
-    _logger_needs_params_sync,
 )
+from biocomp.logger_dispatch import NullDispatch, LoggerDispatch
 from biocomp.utils import PartialFunction, PartialFunctionResult
 
 
@@ -157,155 +156,27 @@ class TestCompileStep:
         assert jnp.allclose(result, jnp.ones(3) * 2)
 
 
-class TestRunLoggerCallbacks:
-    """Test run_logger_callbacks function."""
+class TestNullDispatch:
+    """Test NullDispatch (no-op logger dispatch)."""
 
-    def test_period_filtering(self):
-        """Test callbacks are filtered by period correctly."""
-        called_periods = []
+    def test_satisfies_protocol(self):
+        dispatch = NullDispatch()
+        assert isinstance(dispatch, LoggerDispatch)
 
-        def make_callback(period):
-            def callback(step, config, step_history, stack):
-                called_periods.append((period, step))
+    def test_on_start_is_noop(self):
+        NullDispatch().on_start(None, None)
 
-            return callback
+    def test_on_step_is_noop(self):
+        NullDispatch().on_step(1, None, {}, None)
 
-        loggers = [
-            (1, make_callback(1)),  # every step
-            (5, make_callback(5)),  # every 5 steps
-            (10, make_callback(10)),  # every 10 steps
-        ]
+    def test_on_end_is_noop(self):
+        NullDispatch().on_end(100, None, {}, None)
 
-        # Simulate step 10
-        run_logger_callbacks(
-            loggers,
-            step=10,
-            config=None,
-            step_history={},
-            stack=None,
-            period_filter=lambda p, s: p > 0 and s % p == 0,
-        )
-
-        assert (1, 10) in called_periods
-        assert (5, 10) in called_periods
-        assert (10, 10) in called_periods
-
-    def test_start_logger(self):
-        """Test start loggers (period=0) are called correctly."""
-        called = []
-
-        def start_callback(step, config, step_history, stack):
-            called.append("start")
-
-        loggers = [(0, start_callback), (1, lambda *a, **kw: None)]
-
-        run_logger_callbacks(
-            loggers, step=0, config=None, step_history={}, stack=None, period_filter=lambda p, s: p == 0
-        )
-
-        assert called == ["start"]
-
-    def test_end_logger(self):
-        """Test end loggers (period=-1 or None) are called correctly."""
-        called = []
-
-        def end_callback(step, config, step_history, stack):
-            called.append("end")
-
-        loggers = [(-1, end_callback), (None, end_callback)]
-
-        run_logger_callbacks(
-            loggers,
-            step=100,
-            config=None,
-            step_history={},
-            stack=None,
-            period_filter=lambda p, s: p is None or p == -1,
-        )
-
-        assert called == ["end", "end"]
-
-    def test_callback_error_handling(self):
-        """Test that callback errors are logged and re-raised."""
-
-        def failing_callback(step, config, step_history, stack):
-            raise ValueError("Test error")
-
-        loggers = [(1, failing_callback)]
-
-        with pytest.raises(ValueError, match="Test error"):
-            run_logger_callbacks(
-                loggers,
-                step=1,
-                config=None,
-                step_history={},
-                stack=None,
-                period_filter=lambda p, s: p > 0 and s % p == 0,
-            )
-
-
-class TestLoggerNeedsParamsSync:
-    """Test _logger_needs_params_sync helper function."""
-
-    def test_empty_logger_list_returns_false(self):
-        assert _logger_needs_params_sync([], step=10) is False
-
-    def test_logger_without_required_arrays_returns_false(self):
-        class MockLogger:
-            periods = 10
-
-        assert _logger_needs_params_sync([MockLogger()], step=10) is False
-
-    def test_logger_with_latest_params_requirement_returns_true(self):
-        class MockLogger:
-            periods = 10
-            required_arrays = ["yhatdep", "latest_params"]
-
-        assert _logger_needs_params_sync([MockLogger()], step=10) is True
-
-    def test_logger_with_other_requirement_returns_false(self):
-        class MockLogger:
-            periods = 10
-            required_arrays = ["yhatdep"]
-
-        assert _logger_needs_params_sync([MockLogger()], step=10) is False
-
-    def test_logger_period_mismatch_returns_false(self):
-        class MockLogger:
-            periods = 10
-            required_arrays = ["latest_params"]
-
-        assert _logger_needs_params_sync([MockLogger()], step=5) is False
-        assert _logger_needs_params_sync([MockLogger()], step=0) is False
-
-    def test_uses_frequency_attribute_fallback(self):
-        class MockLogger:
-            frequency = 5
-            required_arrays = ["latest_params"]
-
-        assert _logger_needs_params_sync([MockLogger()], step=5) is True
-        assert _logger_needs_params_sync([MockLogger()], step=10) is True
-        assert _logger_needs_params_sync([MockLogger()], step=3) is False
-
-    def test_periods_list_uses_first_element(self):
-        class MockLogger:
-            periods = [5, 10]
-            required_arrays = ["latest_params"]
-
-        assert _logger_needs_params_sync([MockLogger()], step=5) is True
-        assert _logger_needs_params_sync([MockLogger()], step=10) is True
-
-    def test_multiple_loggers_any_match(self):
-        class LoggerNoReq:
-            periods = 10
-
-        class LoggerWithReq:
-            periods = 7
-            required_arrays = ["latest_params"]
-
-        loggers = [LoggerNoReq(), LoggerWithReq()]
-        assert _logger_needs_params_sync(loggers, step=7) is True
-        assert _logger_needs_params_sync(loggers, step=10) is False
+    def test_needs_params_sync_always_false(self):
+        dispatch = NullDispatch()
+        assert dispatch.needs_params_sync(0) is False
+        assert dispatch.needs_params_sync(10) is False
+        assert dispatch.needs_params_sync(100) is False
 
 
 class TestAsSchedule:
