@@ -572,6 +572,8 @@ class Network(BaseModel):
         self,
         tu_log_alpha,
         tu_id_to_idx: dict[str, int],
+        *,
+        cascade_disable_exclusive_neg_tus: bool = True,
     ) -> set[tuple[str, str]]:
         """Handle ERN nodes with disabled inputs according to biological semantics.
 
@@ -619,13 +621,14 @@ class Network(BaseModel):
                     edges_to_remove.add(
                         (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot)
                     )
-                # ONLY cascade-disable neg TUs that are exclusive to this ERN
-                # Shared neg TUs (e.g., CasE feeding 3+ ERNs) must be kept
-                for neg_edge in neg_edges:
-                    tu_ids = neg_edge.extra.get("tu_id", []) if neg_edge.extra else []
-                    for tu_id in tu_ids:
-                        if tu_id in exclusive_neg_tus:
-                            additional_disabled_tus.add(tu_id)
+                if cascade_disable_exclusive_neg_tus:
+                    # ONLY cascade-disable neg TUs that are exclusive to this ERN
+                    # Shared neg TUs (e.g., CasE feeding 3+ ERNs) must be kept
+                    for neg_edge in neg_edges:
+                        tu_ids = neg_edge.extra.get("tu_id", []) if neg_edge.extra else []
+                        for tu_id in tu_ids:
+                            if tu_id in exclusive_neg_tus:
+                                additional_disabled_tus.add(tu_id)
 
             elif not neg_enabled:
                 # Case 2: Negative input disabled (ERN protein gone) - passthrough for positive

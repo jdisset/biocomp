@@ -46,9 +46,7 @@ def _flatten_replicates_into_networks(
 
 def _expand_params_for_merge(params: "ParameterTree") -> "ParameterTree":
     return jax.tree.map(
-        lambda x: x.reshape((1, 1) + x.shape)
-        if hasattr(x, "ndim") and x.ndim >= 0
-        else x,
+        lambda x: x.reshape((1, 1) + x.shape) if hasattr(x, "ndim") and x.ndim >= 0 else x,
         params,
     )
 
@@ -100,6 +98,7 @@ def _get_node_ratios(
     from biocomp.ratio_utils import decode_ratios_numpy
 
     return decode_ratios_numpy(params, namespace, node_idx, n_outputs)
+
 
 _DEFAULT_RATIO_MIN = 0.001
 _DEFAULT_RATIO_MAX = 10.0
@@ -418,7 +417,9 @@ def identify_tus_to_prune(
                 )
                 strongest_to_keep = set(sorted_by_strength[-n_to_keep:]) if n_to_keep > 0 else set()
                 for tu_id in strongest_to_keep:
-                    keep_strength = max(ratio_strengths.get(tu_id, 0.0), mask_strengths.get(tu_id, 0.0))
+                    keep_strength = max(
+                        ratio_strengths.get(tu_id, 0.0), mask_strengths.get(tu_id, 0.0)
+                    )
                     scope.decision(
                         "preserve_tu",
                         outcome=False,
@@ -841,6 +842,7 @@ def _restore_params_by_semantics(
         "rate_edges_restored": restored_rates,
     }
 
+
 def _remap_tu_log_alpha(
     old_log_alpha: jnp.ndarray,
     old_tu_id_to_idx: dict[str, int],
@@ -985,7 +987,9 @@ def hard_prune_and_rebuild(
                         reason="zero_outputs",
                         inputs={"network_idx": i, "network_name": net.name},
                     )
-                    logger.warning(f"[HARD-PRUNE] Network {i} ({net.name}) became degenerate, removing")
+                    logger.warning(
+                        f"[HARD-PRUNE] Network {i} ({net.name}) became degenerate, removing"
+                    )
 
         if not valid_pairs:
             raise RuntimeError(
@@ -1000,8 +1004,7 @@ def hard_prune_and_rebuild(
             bad = sorted(i for i in requested if i < 0 or i > max_idx)
             if bad:
                 raise ValueError(
-                    "keep_network_indices contains out-of-range indices "
-                    f"(max={max_idx}): {bad[:5]}"
+                    f"keep_network_indices contains out-of-range indices (max={max_idx}): {bad[:5]}"
                 )
 
             selected_pairs = [(idx, net) for idx, net in valid_pairs if idx in requested]
@@ -1033,6 +1036,8 @@ def hard_prune_and_rebuild(
                 f"{len(committed_networks)} committed networks"
             )
 
+        from .design_prune_controller import build_stack_from_dconf
+
         new_dmanager = DesignManager(
             targets=dmanager.targets,
             networks=valid_networks,
@@ -1041,14 +1046,7 @@ def hard_prune_and_rebuild(
         )
 
         pkey, init_key = jax.random.split(key)
-        new_stack = new_dmanager.build_stack(
-            model,
-            unlock_ratios=not lock_ratios,
-            use_latent_ratios=dconf.use_latent_ratios,
-            latent_dim=dconf.latent_dim,
-            latent_hidden_dim=dconf.latent_hidden_dim,
-            auto_lock_topology_tus=dconf.auto_lock_topology_tus,
-        )
+        new_stack = build_stack_from_dconf(new_dmanager, dconf, model, lock_ratios=lock_ratios)
 
         new_n_tus = new_dmanager.n_tus if new_dmanager.enable_tu_masking else 0
         new_tu_id_to_idx = new_dmanager.tu_id_to_idx if new_dmanager.enable_tu_masking else {}
@@ -1152,7 +1150,6 @@ def run_with_hard_pruning(
     """Design optimization with periodic hard-pruning."""
     from .design import start
     from .design_session import PhaseTimer as _PhaseTimer
-    from .design import sample_for_evaluation, evaluate_design
 
     if dconf.n_replicates > 1:
         logger.info(
@@ -1250,21 +1247,16 @@ def run_with_hard_pruning(
         if segment_idx < n_segments - 1:
             timer.start("prune", "[HARD-PRUNE] Identifying TUs to prune...")
 
-            # TODO: callsite shouldnt repeat all the dconf params here. LEt's just make build_stack take the dconf directly and pick whatevrer it needs
-            temp_stack = current_dmanager.build_stack(
-                model,
-                unlock_ratios=not lock_ratios,
-                use_latent_ratios=dconf.use_latent_ratios,
-                latent_dim=dconf.latent_dim,
-                latent_hidden_dim=dconf.latent_hidden_dim,
-                auto_lock_topology_tus=dconf.auto_lock_topology_tus,
+            from .design_prune_controller import build_stack_from_dconf
+
+            temp_stack = build_stack_from_dconf(
+                current_dmanager, dconf, model, lock_ratios=lock_ratios
             )
 
             from biocomp.jaxutils import tree_get
 
             single_rep_params = tree_get(segment_params, (0, 0))
 
-            #TODO: same remark as above about passing dconf directly
             tus_to_remove = identify_tus_to_prune(
                 single_rep_params,
                 temp_stack,
@@ -1284,37 +1276,28 @@ def run_with_hard_pruning(
                 dconf.hard_pruning_top_percent,
                 dconf.hard_pruning_min_networks,
             )
-            use_top_network_selection = (
-                keep_count is not None and keep_count < len(current_dmanager.networks)
+            use_top_network_selection = keep_count is not None and keep_count < len(
+                current_dmanager.networks
             )
             keep_network_indices: list[int] | None = None
             loss_pre_mean: float | None = None
             if total_to_remove > 0 or use_top_network_selection:
+                from .design_prune_controller import (
+                    compare_snapshots,
+                    evaluate_segment_snapshot,
+                )
+
                 with trace_scope("hard_prune_compare", component="prune") as prune_scope:
                     try:
                         compare_key = jax.random.fold_in(loop_key, segment_idx + 2000)
-                        xraw, yraw = sample_for_evaluation(
-                            current_dmanager,
-                            dconf,
-                            segment_params,
-                            n_eval_samples=256,
-                            key=compare_key,
+                        pre_snap = evaluate_segment_snapshot(
+                            current_dmanager, dconf, model, segment_params, compare_key
                         )
-                        yhat_pre, loss_pre = evaluate_design(
-                            current_dmanager,
-                            dconf,
-                            model,
-                            segment_params,
-                            xraw,
-                            yraw,
-                            compare_key,
-                            store_predictions=True,
-                        )
-                        prune_scope.snapshot("xraw", jax.device_get(xraw))
-                        prune_scope.snapshot("yraw", jax.device_get(yraw))
-                        prune_scope.snapshot("yhat_pre", jax.device_get(yhat_pre))
-                        prune_scope.snapshot("loss_pre", jax.device_get(loss_pre))
-                        loss_pre_mean = float(np.asarray(loss_pre).mean())
+                        prune_scope.snapshot("xraw", jax.device_get(pre_snap.xraw))
+                        prune_scope.snapshot("yraw", jax.device_get(pre_snap.yraw))
+                        prune_scope.snapshot("yhat_pre", jax.device_get(pre_snap.yhat))
+                        prune_scope.snapshot("loss_pre", jax.device_get(pre_snap.loss))
+                        loss_pre_mean = pre_snap.mean_loss
                         prune_scope.event(
                             "pre_prune",
                             "Pre-prune evaluation complete",
@@ -1326,13 +1309,13 @@ def run_with_hard_pruning(
                         )
                         if use_top_network_selection:
                             assert keep_count is not None
-                            if loss_pre.shape[-1] != len(current_dmanager.networks):
+                            if pre_snap.loss.shape[-1] != len(current_dmanager.networks):
                                 raise AssertionError(
                                     "loss_pre last dimension must match number of networks, "
-                                    f"got {loss_pre.shape[-1]} vs {len(current_dmanager.networks)}"
+                                    f"got {pre_snap.loss.shape[-1]} vs {len(current_dmanager.networks)}"
                                 )
                             keep_network_indices = _select_top_network_indices_from_losses(
-                                np.asarray(loss_pre),
+                                np.asarray(pre_snap.loss),
                                 keep_count,
                             )
                             selected_names = [
@@ -1393,58 +1376,43 @@ def run_with_hard_pruning(
                 with trace_scope("hard_prune_compare", component="prune") as prune_scope:
                     try:
                         compare_key = jax.random.fold_in(loop_key, segment_idx + 2000)
-                        xraw, yraw = sample_for_evaluation(
-                            current_dmanager,
-                            dconf,
-                            current_params,
-                            n_eval_samples=256,
-                            key=compare_key,
+                        post_snap = evaluate_segment_snapshot(
+                            current_dmanager, dconf, model, current_params, compare_key
                         )
-                        yhat_post, loss_post = evaluate_design(
-                            current_dmanager,
-                            dconf,
-                            model,
-                            current_params,
-                            xraw,
-                            yraw,
-                            compare_key,
-                            store_predictions=True,
-                        )
-                        prune_scope.snapshot("xraw", jax.device_get(xraw))
-                        prune_scope.snapshot("yraw", jax.device_get(yraw))
-                        prune_scope.snapshot("yhat_post", jax.device_get(yhat_post))
-                        prune_scope.snapshot("loss_post", jax.device_get(loss_post))
-                        loss_post_mean = float(np.asarray(loss_post).mean())
+                        prune_scope.snapshot("xraw", jax.device_get(post_snap.xraw))
+                        prune_scope.snapshot("yraw", jax.device_get(post_snap.yraw))
+                        prune_scope.snapshot("yhat_post", jax.device_get(post_snap.yhat))
+                        prune_scope.snapshot("loss_post", jax.device_get(post_snap.loss))
                         prune_scope.event(
                             "post_prune",
                             "Post-prune evaluation complete",
                             {
-                                "mean_loss_post": loss_post_mean,
+                                "mean_loss_post": post_snap.mean_loss,
                                 "n_networks": len(current_dmanager.networks),
                                 "network_names": [n.name for n in current_dmanager.networks],
                             },
                         )
 
-                        if loss_pre_mean is not None and loss_pre_mean > 1e-8:
-                            loss_increase = (loss_post_mean - loss_pre_mean) / loss_pre_mean
-                            if loss_increase > 0.20:
+                        if loss_pre_mean is not None:
+                            comparison = compare_snapshots(pre_snap, post_snap)
+                            if comparison["is_regression"]:
                                 logger.warning(
                                     f"[HARD-PRUNE] Loss regression: "
-                                    f"{loss_pre_mean:.4f} -> {loss_post_mean:.4f} "
-                                    f"({loss_increase:.1%} increase)"
+                                    f"{pre_snap.mean_loss:.4f} -> {post_snap.mean_loss:.4f} "
+                                    f"({comparison['increase_pct']:.1f}% increase)"
                                 )
                                 prune_scope.event(
                                     "loss_regression",
                                     "Significant loss increase after pruning",
                                     {
-                                        "loss_pre": loss_pre_mean,
-                                        "loss_post": loss_post_mean,
-                                        "increase_pct": loss_increase * 100,
+                                        **comparison,
                                         "tus_removed": total_to_remove,
                                         "top_network_selection": keep_network_indices is not None,
                                     },
                                 )
-                                prune_scope.snapshot("current_params", jax.device_get(current_params))
+                                prune_scope.snapshot(
+                                    "current_params", jax.device_get(current_params)
+                                )
                                 prune_scope.snapshot("tus_to_remove", tus_to_remove)
                     except Exception as e:
                         prune_scope.event(
@@ -1460,5 +1428,7 @@ def run_with_hard_pruning(
     logger.info("=" * 60)
 
     assert segment_params is not None, "No optimization segments were run"
-    assert final_step_history is not None, "No step history produced during hard-pruning optimization"
+    assert final_step_history is not None, (
+        "No step history produced during hard-pruning optimization"
+    )
     return segment_params, accumulated_loss_history, final_step_history, current_dmanager
