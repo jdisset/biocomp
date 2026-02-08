@@ -9,7 +9,7 @@ from assertpy import assert_that
 from jax.tree_util import Partial
 
 from .logging_config import get_logger
-from .optimutils import make_training_step, per_replicate_step
+from .optimutils import make_training_step, per_replicate_step, set_optimizer_state_step
 from .tumasking import TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
 from .design_session import DesignSession
 from .design_runtime import GradientStepAdapter, DesignRuntimeContext, run_kernel
@@ -50,6 +50,8 @@ def run_design(
     dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
     initial_params: "ParameterTree" | None = None,
+    initial_step: int = 0,
+    select_best_synced_params: bool = False,
 ):
     from .design import assert_tree_shape
 
@@ -63,6 +65,7 @@ def run_design(
     static, dynamic = session.initial_params.filter_by_tag(["non_grad", "shared"])
     assert_tree_shape(dynamic, (dconf.n_replicates, dmanager.n_targets))
     initial_optimizer_state = jax.vmap(jax.vmap(dconf.optimizer.init))(dynamic)
+    initial_optimizer_state = set_optimizer_state_step(initial_optimizer_state, initial_step)
     session.timer.end("opt_init")
 
     n_networks = session.stack.get_nb_networks()
@@ -122,6 +125,7 @@ def run_design(
         ybatches=session.ybatches,
         steps_per_epoch=session.steps_per_epoch,
         key=session.loop_key,
+        select_best_synced_params=select_best_synced_params,
     )
     ctx = DesignRuntimeContext(
         stack=session.stack,

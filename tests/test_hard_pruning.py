@@ -3,6 +3,7 @@
 import pytest
 import numpy as np
 from pathlib import Path
+from types import SimpleNamespace
 import jax
 import jax.numpy as jnp
 import dracon as dr
@@ -216,6 +217,189 @@ class TestHardPruningTopNetworkSelection:
         losses = np.array([[[0.9, 0.2, 0.6, 0.3]]], dtype=np.float32)
         top_idx = _select_top_network_indices_from_losses(losses, keep_count=2)
         assert top_idx == [1, 3]
+
+
+def test_run_with_hard_pruning_offsets_segment_start_step(monkeypatch):
+    calls: list[int] = []
+
+    def _fake_start(
+        _dmanager,
+        _dconf,
+        _model,
+        dispatch=None,
+        lock_ratios=False,
+        initial_params=None,
+        initial_step=0,
+        select_best_synced_params=False,
+    ):
+        del dispatch, lock_ratios, initial_params, select_best_synced_params
+        calls.append(int(initial_step))
+        return (
+            jnp.zeros((1, 1), dtype=jnp.float32),
+            [0.0],
+            {"loss": jnp.array([[0.0]], dtype=jnp.float32)},
+        )
+
+    monkeypatch.setattr("biocomp.design.start", _fake_start)
+    monkeypatch.setattr(
+        "biocomp.design_prune_controller.build_stack_from_dconf",
+        lambda *args, **kwargs: SimpleNamespace(networks=[]),
+    )
+    monkeypatch.setattr(
+        "biocomp.design_prune_controller.evaluate_segment_snapshot",
+        lambda *args, **kwargs: SimpleNamespace(mean_loss=0.0),
+    )
+    monkeypatch.setattr(
+        "biocomp.design_pruning.identify_tus_to_prune",
+        lambda *args, **kwargs: {0: set()},
+    )
+
+    dmanager = SimpleNamespace(
+        n_targets=1,
+        networks=[SimpleNamespace(name="n0")],
+        enable_tu_masking=False,
+    )
+    dconf = DesignConfig(
+        n_replicates=1,
+        n_epochs=1,
+        n_batches_per_epoch=10,
+        batches_per_step=1,
+        hard_pruning_interval=5,
+    )
+
+    run_with_hard_pruning(
+        dmanager=dmanager,
+        dconf=dconf,
+        model=SimpleNamespace(),
+    )
+
+    assert calls == [0, 5]
+
+
+def test_run_with_hard_pruning_disables_masking_in_final_segment(monkeypatch):
+    modes: list[TUMaskingMode] = []
+
+    def _fake_start(
+        _dmanager,
+        _dconf,
+        _model,
+        dispatch=None,
+        lock_ratios=False,
+        initial_params=None,
+        initial_step=0,
+        select_best_synced_params=False,
+    ):
+        del dispatch, lock_ratios, initial_params, initial_step, select_best_synced_params
+        modes.append(_dconf.tu_masking.mode)
+        return (
+            jnp.zeros((1, 1), dtype=jnp.float32),
+            [0.0],
+            {"loss": jnp.array([[0.0]], dtype=jnp.float32)},
+        )
+
+    monkeypatch.setattr("biocomp.design.start", _fake_start)
+    monkeypatch.setattr(
+        "biocomp.design_prune_controller.build_stack_from_dconf",
+        lambda *args, **kwargs: SimpleNamespace(networks=[]),
+    )
+    monkeypatch.setattr(
+        "biocomp.design_prune_controller.evaluate_segment_snapshot",
+        lambda *args, **kwargs: SimpleNamespace(mean_loss=0.0),
+    )
+    monkeypatch.setattr(
+        "biocomp.design_pruning.identify_tus_to_prune",
+        lambda *args, **kwargs: {0: set()},
+    )
+
+    dmanager = SimpleNamespace(
+        n_targets=1,
+        networks=[SimpleNamespace(name="n0")],
+        enable_tu_masking=True,
+    )
+    dconf = DesignConfig(
+        n_replicates=1,
+        n_epochs=1,
+        n_batches_per_epoch=10,
+        batches_per_step=1,
+        hard_pruning_interval=5,
+        tu_masking={"mode": TUMaskingMode.DIRECT},
+        hard_pruning_disable_tu_masking_final_segment=True,
+    )
+
+    run_with_hard_pruning(
+        dmanager=dmanager,
+        dconf=dconf,
+        model=SimpleNamespace(),
+    )
+
+    assert modes == [TUMaskingMode.DIRECT, TUMaskingMode.NONE]
+
+
+def test_run_with_hard_pruning_restores_pre_final_segment_on_regression(monkeypatch):
+    def _fake_start(
+        _dmanager,
+        _dconf,
+        _model,
+        dispatch=None,
+        lock_ratios=False,
+        initial_params=None,
+        initial_step=0,
+        select_best_synced_params=False,
+    ):
+        del dispatch, lock_ratios, select_best_synced_params
+        if initial_step == 0:
+            return (
+                jnp.array([[1.0]], dtype=jnp.float32),
+                [0.0],
+                {"loss": jnp.array([[0.0]], dtype=jnp.float32)},
+            )
+        assert initial_params is not None
+        return (
+            jnp.array([[2.0]], dtype=jnp.float32),
+            [0.0],
+            {"loss": jnp.array([[0.0]], dtype=jnp.float32)},
+        )
+
+    def _fake_eval(_dmanager, _dconf, _model, params, _key):
+        val = float(jnp.ravel(params)[0])
+        # Baseline params (1.0) are better than final segment output (2.0)
+        loss = 0.10 if val == 1.0 else 0.20
+        return SimpleNamespace(mean_loss=loss)
+
+    monkeypatch.setattr("biocomp.design.start", _fake_start)
+    monkeypatch.setattr(
+        "biocomp.design_prune_controller.build_stack_from_dconf",
+        lambda *args, **kwargs: SimpleNamespace(networks=[]),
+    )
+    monkeypatch.setattr(
+        "biocomp.design_prune_controller.evaluate_segment_snapshot",
+        _fake_eval,
+    )
+    monkeypatch.setattr(
+        "biocomp.design_pruning.identify_tus_to_prune",
+        lambda *args, **kwargs: {0: set()},
+    )
+
+    dmanager = SimpleNamespace(
+        n_targets=1,
+        networks=[SimpleNamespace(name="n0")],
+        enable_tu_masking=False,
+    )
+    dconf = DesignConfig(
+        n_replicates=1,
+        n_epochs=1,
+        n_batches_per_epoch=10,
+        batches_per_step=1,
+        hard_pruning_interval=5,
+    )
+
+    params, *_ = run_with_hard_pruning(
+        dmanager=dmanager,
+        dconf=dconf,
+        model=SimpleNamespace(),
+    )
+
+    assert float(jnp.ravel(params)[0]) == pytest.approx(1.0)
 
 
 def test_run_with_hard_pruning_returns_snapshot_step_history(lib):

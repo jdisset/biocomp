@@ -74,6 +74,34 @@ def create_counter():
     return optax.GradientTransformation(init_fn, update_fn)
 
 
+def set_optimizer_state_step(opt_state, step: int):
+    """Set all optimizer `count` fields to a specific step value."""
+    if step < 0:
+        raise ValueError(f"step must be >= 0, got {step}")
+    if step == 0:
+        return opt_state
+
+    step_value = int(step)
+
+    def _map(path, leaf):
+        if not path:
+            return leaf
+        key = path[-1]
+        name = getattr(key, "name", None)
+        if name != "count":
+            return leaf
+        if not hasattr(leaf, "dtype"):
+            return leaf
+        try:
+            if not jnp.issubdtype(leaf.dtype, jnp.integer):
+                return leaf
+        except TypeError:
+            return leaf
+        return jnp.full_like(leaf, step_value)
+
+    return jax.tree_util.tree_map_with_path(_map, opt_state)
+
+
 def build_optimizer_chain(optimizer_stack: list, with_lr_injection: bool = False):
     import importlib
 
@@ -733,6 +761,7 @@ def optimize(
     sync_every: int = 0,
     precompiled: bool = False,
     skip_lifecycle: bool = False,
+    select_best_synced_params: bool = False,
 ):
     dispatch = dispatch or NullDispatch()
 
@@ -760,6 +789,9 @@ def optimize(
         dispatch.on_start(config, stack)
 
     step_history, loss_history = {}, []
+    best_params = params if select_best_synced_params else None
+    best_loss = float("inf")
+    best_step = 0
     epoch = -1
     pending_losses = []  # collect losses without forcing sync
 
@@ -847,6 +879,17 @@ def optimize(
             if "loss" in step_history:
                 loss_history.append(step_history["loss"])
 
+        if (
+            select_best_synced_params
+            and "loss" in step_history
+            and (should_sync or not defer_sync)
+        ):
+            current_loss = float(jnp.mean(step_history["loss"]))
+            if current_loss < best_loss:
+                best_loss = current_loss
+                best_step = i
+                best_params = params
+
         epoch_step_count += 1
 
         dispatch.on_step(i, config, step_history, stack)
@@ -874,6 +917,11 @@ def optimize(
     logger.info(f"  Avg step time:  {total_loop_time / n_total_steps * 1000:.2f}ms")
     if loss_history:
         logger.info(f"  Final loss:     {loss_history[-1]:.4f}")
+    if select_best_synced_params and best_params is not None and best_step > 0:
+        params = best_params
+        logger.info(
+            f"  Best synced:    step {best_step}/{n_total_steps}, loss={best_loss:.4f} (restored)"
+        )
     logger.info("=" * 60)
 
     return params, loss_history, StepHistorySnapshot.from_raw(step_history)

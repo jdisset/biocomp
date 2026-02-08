@@ -12,6 +12,7 @@ from biocomp.optimutils import (
     DesignOptimConfig,
     build_optimizer_chain,
     create_counter,
+    set_optimizer_state_step,
     as_schedule,
     compile_step,
     optimize,
@@ -221,6 +222,67 @@ class TestOptimizeContract:
         assert "loss" in step_history
 
 
+class TestOptimizeBestSyncedParams:
+    def _make_cfg(self):
+        return DesignOptimConfig(
+            loss_function=PartialFunction(func="biocomp.design.distance_loss", kwargs={}),
+            n_replicates=1,
+            batches_per_step=1,
+            n_batches_per_epoch=5,
+            n_epochs=1,
+            reshuffle_batches=False,
+        )
+
+    def test_returns_final_params_by_default(self):
+        def step(params, opt_state, step_key, xb, yb):
+            del opt_state, step_key, xb, yb
+            next_params = params + 1.0
+            loss = jnp.mean((next_params - 3.0) ** 2)
+            return next_params, None, {"loss": loss}
+
+        params, _, _ = optimize(
+            step=step,
+            params=jnp.array([0.0]),
+            opt_state=None,
+            xbatches=jnp.zeros((5, 1, 1, 1)),
+            ybatches=jnp.zeros((5, 1, 1, 1)),
+            config=self._make_cfg(),
+            n_total_steps=5,
+            steps_per_epoch=5,
+            key=jax.random.PRNGKey(0),
+            stack=cast(ComputeStack, object()),
+            dispatch=NullDispatch(),
+            precompiled=True,
+            defer_sync=False,
+        )
+        assert float(params[0]) == pytest.approx(5.0)
+
+    def test_can_restore_best_synced_params(self):
+        def step(params, opt_state, step_key, xb, yb):
+            del opt_state, step_key, xb, yb
+            next_params = params + 1.0
+            loss = jnp.mean((next_params - 3.0) ** 2)
+            return next_params, None, {"loss": loss}
+
+        params, _, _ = optimize(
+            step=step,
+            params=jnp.array([0.0]),
+            opt_state=None,
+            xbatches=jnp.zeros((5, 1, 1, 1)),
+            ybatches=jnp.zeros((5, 1, 1, 1)),
+            config=self._make_cfg(),
+            n_total_steps=5,
+            steps_per_epoch=5,
+            key=jax.random.PRNGKey(0),
+            stack=cast(ComputeStack, object()),
+            dispatch=NullDispatch(),
+            precompiled=True,
+            defer_sync=False,
+            select_best_synced_params=True,
+        )
+        assert float(params[0]) == pytest.approx(3.0)
+
+
 class TestAsSchedule:
     """Test as_schedule utility."""
 
@@ -275,6 +337,49 @@ class TestCreateCounter:
             _, state = counter.update(grads, state)
 
         assert state.count == 5
+
+
+class TestSetOptimizerStateStep:
+    def test_sets_all_count_fields(self):
+        stack = [
+            PartialFunction(func="optax.clip_by_global_norm", kwargs={"max_norm": 1.0}),
+            PartialFunction(
+                func="optax.adamw",
+                kwargs={
+                    "learning_rate": PartialFunctionResult(
+                        func="optax.warmup_cosine_decay_schedule",
+                        kwargs={
+                            "init_value": 1e-7,
+                            "peak_value": 1e-3,
+                            "warmup_steps": 10,
+                            "decay_steps": 100,
+                            "end_value": 1e-5,
+                        },
+                    )
+                },
+            ),
+        ]
+        optimizer = build_optimizer_chain(stack, with_lr_injection=False)
+        state = optimizer.init({"w": jnp.ones((3,))})
+        shifted = set_optimizer_state_step(state, 123)
+
+        count_values = []
+        for path, value in jax.tree_util.tree_flatten_with_path(shifted)[0]:
+            tail = getattr(path[-1], "name", None) if path else None
+            if tail == "count":
+                count_values.append(int(value))
+
+        assert count_values
+        assert all(v == 123 for v in count_values)
+
+    def test_rejects_negative_step(self):
+        optimizer = build_optimizer_chain(
+            [PartialFunction(func="optax.sgd", kwargs={"learning_rate": 0.01})],
+            with_lr_injection=False,
+        )
+        state = optimizer.init({"w": jnp.ones((2,))})
+        with pytest.raises(ValueError, match="step must be >= 0"):
+            set_optimizer_state_step(state, -1)
 
 
 if __name__ == "__main__":

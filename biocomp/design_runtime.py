@@ -76,6 +76,7 @@ class GradientStepAdapter:
     steps_per_epoch: int
     key: Any
     precompiled: bool = False
+    select_best_synced_params: bool = False
 
     def run(
         self,
@@ -98,6 +99,7 @@ class GradientStepAdapter:
             dispatch=ctx.dispatch,
             precompiled=self.precompiled,
             skip_lifecycle=True,
+            select_best_synced_params=self.select_best_synced_params,
         )
         return DesignRuntimeResult(
             params=params,

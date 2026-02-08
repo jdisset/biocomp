@@ -445,6 +445,7 @@ class DesignConfig(DesignOptimConfig):
     hard_pruning_ratio_threshold: float = 0.01
     hard_pruning_preserve_minimum_tus: int = 1
     hard_pruning_prune_margin: float = 0.1
+    hard_pruning_disable_tu_masking_final_segment: bool = False
     hard_pruning_top_percent: float | None = None
     hard_pruning_min_networks: int | None = None
 
@@ -625,6 +626,8 @@ def start(
     dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
     initial_params: ParameterTree | None = None,
+    initial_step: int = 0,
+    select_best_synced_params: bool = False,
 ):
     def _with_snapshot(result):
         params, losses, step_history = result
@@ -664,6 +667,8 @@ def start(
             dispatch=dispatch,
             lock_ratios=lock_ratios,
             initial_params=initial_params,
+            initial_step=initial_step,
+            select_best_synced_params=select_best_synced_params,
         )
     )
 

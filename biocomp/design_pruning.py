@@ -9,7 +9,7 @@ import jax.numpy as jnp
 
 from .logging_config import get_logger
 from .tumasking import TU_LOG_ALPHA_PATH
-from .tumasking_strategy import build_strategy_from_config
+from .tumasking_strategy import TUMaskingMode, build_strategy_from_config
 from .tracing import trace_scope, trace_here
 from .logger_dispatch import LoggerDispatch
 from .step_history import StepHistorySnapshot
@@ -1207,6 +1207,8 @@ def run_with_hard_pruning(
         segment_start_step = segment_idx * steps_per_segment
         segment_end_step = min((segment_idx + 1) * steps_per_segment, total_steps)
         segment_steps = segment_end_step - segment_start_step
+        segment_start_params = current_params
+        segment_start_eval_loss: float | None = None
 
         if segment_steps <= 0:
             break
@@ -1224,25 +1226,89 @@ def run_with_hard_pruning(
                 "seed": new_seed,
             }
         )
+        segment_dmanager = current_dmanager
+
+        # Final segment should refine the already-pruned topology with deterministic
+        # structure. Keeping TU masking active here can reintroduce mask drift
+        # without any further prune step to reconcile it.
+        if (
+            dconf.hard_pruning_disable_tu_masking_final_segment
+            and segment_idx == n_segments - 1
+            and segment_config.enable_tu_masking
+        ):
+            segment_config = segment_config.model_copy(
+                update={
+                    "tu_masking": segment_config.tu_masking.model_copy(
+                        update={"mode": TUMaskingMode.NONE}
+                    )
+                }
+            )
+            if hasattr(current_dmanager, "model_copy"):
+                segment_dmanager = current_dmanager.model_copy(update={"enable_tu_masking": False})
+            else:
+                segment_dmanager = deepcopy(current_dmanager)
+                segment_dmanager.enable_tu_masking = False
+            logger.info("[HARD-PRUNE] Final segment: TU masking disabled")
 
         logger.info(
             f"[HARD-PRUNE] Segment {segment_idx + 1}/{n_segments}: "
             f"steps {segment_start_step}-{segment_end_step}"
         )
 
+        if segment_idx == n_segments - 1 and segment_start_params is not None:
+            from .design_prune_controller import evaluate_segment_snapshot
+
+            guard_key = jax.random.fold_in(loop_key, segment_idx + 3000)
+            start_snap = evaluate_segment_snapshot(
+                current_dmanager, dconf, model, segment_start_params, guard_key
+            )
+            segment_start_eval_loss = start_snap.mean_loss
+            logger.info(
+                "[HARD-PRUNE] Final-segment guard baseline loss: %.4f",
+                segment_start_eval_loss,
+            )
+
         segment_params, segment_loss_history, segment_step_history = start(
-            current_dmanager,
+            segment_dmanager,
             segment_config,
             model,
             dispatch=dispatch,
             lock_ratios=lock_ratios,
             initial_params=current_params,
+            initial_step=segment_start_step,
+            select_best_synced_params=(segment_idx == n_segments - 1),
         )
         segment_step_history = StepHistorySnapshot.from_raw(segment_step_history)
         current_params = segment_params
 
         accumulated_loss_history.extend(segment_loss_history)
         final_step_history = segment_step_history
+
+        if segment_idx == n_segments - 1 and segment_start_params is not None:
+            from .design_prune_controller import evaluate_segment_snapshot
+
+            guard_key = jax.random.fold_in(loop_key, segment_idx + 3001)
+            end_snap = evaluate_segment_snapshot(
+                current_dmanager, dconf, model, current_params, guard_key
+            )
+            segment_end_eval_loss = end_snap.mean_loss
+            logger.info(
+                "[HARD-PRUNE] Final-segment guard end loss: %.4f",
+                segment_end_eval_loss,
+            )
+
+            if (
+                segment_start_eval_loss is not None
+                and segment_end_eval_loss > segment_start_eval_loss
+            ):
+                logger.warning(
+                    "[HARD-PRUNE] Final segment regressed (%.4f -> %.4f); restoring "
+                    "pre-segment parameters",
+                    segment_start_eval_loss,
+                    segment_end_eval_loss,
+                )
+                current_params = segment_start_params
+                segment_params = segment_start_params
 
         if segment_idx < n_segments - 1:
             timer.start("prune", "[HARD-PRUNE] Identifying TUs to prune...")
