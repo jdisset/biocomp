@@ -732,6 +732,7 @@ def optimize(
     defer_sync: bool = True,
     sync_every: int = 0,
     precompiled: bool = False,
+    skip_lifecycle: bool = False,
 ):
     dispatch = dispatch or NullDispatch()
 
@@ -755,7 +756,8 @@ def optimize(
         if not get_checkify_enabled():
             logger.info(f"[COMPILE] Step compiled in {compile_time:.2f}s")
 
-    dispatch.on_start(config, stack)
+    if not skip_lifecycle:
+        dispatch.on_start(config, stack)
 
     step_history, loss_history = {}, []
     epoch = -1
@@ -860,7 +862,8 @@ def optimize(
 
     total_loop_time = time.perf_counter() - t_loop_start
 
-    dispatch.on_end(n_total_steps, config, step_history, stack)
+    if not skip_lifecycle:
+        dispatch.on_end(n_total_steps, config, step_history, stack)
 
     # Final summary
     logger.info("=" * 60)

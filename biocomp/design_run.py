@@ -9,10 +9,11 @@ from assertpy import assert_that
 from jax.tree_util import Partial
 
 from .logging_config import get_logger
-from .optimutils import make_training_step, per_replicate_step, optimize
+from .optimutils import make_training_step, per_replicate_step
 from .tumasking import TU_LOG_ALPHA_PATH, LOG_ALPHA_MIN, LOG_ALPHA_MAX
 from .design_session import DesignSession
-from .logger_dispatch import LoggerDispatch
+from .design_runtime import GradientStepAdapter, DesignRuntimeContext, run_kernel
+from .logger_dispatch import LoggerDispatch, NullDispatch
 
 if TYPE_CHECKING:
     from .design import DesignManager, DesignConfig
@@ -114,21 +115,23 @@ def run_design(
             Partial(per_replicate_step, num_z=session.num_z, training_config=dconf, scannable_step=step_fn)
         )(params, opt_state, keys, xs, ys)
 
+    adapter = GradientStepAdapter(
+        step_fn=step,
+        optimizer_state=initial_optimizer_state,
+        xbatches=session.xbatches,
+        ybatches=session.ybatches,
+        steps_per_epoch=session.steps_per_epoch,
+        key=session.loop_key,
+    )
+    ctx = DesignRuntimeContext(
+        stack=session.stack,
+        config=dconf,
+        dispatch=dispatch or NullDispatch(),
+        total_steps=session.total_steps,
+    )
+
     logger.info("=" * 60)
     logger.info("STARTING OPTIMIZATION LOOP")
     logger.info("=" * 60)
 
-    return optimize(
-        step,
-        session.initial_params,
-        initial_optimizer_state,
-        xbatches=session.xbatches,
-        ybatches=session.ybatches,
-        config=dconf,
-        n_total_steps=session.total_steps,
-        steps_per_epoch=session.steps_per_epoch,
-        key=session.loop_key,
-        stack=session.stack,
-        dispatch=dispatch,
-        verbose=True,
-    )
+    return run_kernel(ctx, session.initial_params, adapter)
