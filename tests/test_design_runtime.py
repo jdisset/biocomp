@@ -99,6 +99,12 @@ def test_gradient_step_adapter_satisfies_protocol():
     assert issubclass(GradientStepAdapter, StepAdapter)
 
 
+def test_pluggable_step_adapter_satisfies_protocol():
+    from biocomp.pluggable_opt.run_pluggable import PluggableStepAdapter
+
+    assert issubclass(PluggableStepAdapter, StepAdapter)
+
+
 def test_fake_adapter_satisfies_protocol():
     assert isinstance(FakeAdapter("p"), StepAdapter)
 

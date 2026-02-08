@@ -1,29 +1,119 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
 from tqdm import tqdm
 
 from ..logging_config import get_logger
-from ..design_session import DesignSession
-from ..logger_dispatch import LoggerDispatch, NullDispatch
+from ..design_session import DesignSession, PhaseTimer
+from ..design_runtime import DesignRuntimeContext, DesignRuntimeResult, run_kernel
+from ..logger_dispatch import NullDispatch
 from ..step_history import StepHistorySnapshot
 from .codec import GenomeCodec
 from .optimizers import NSGA2DesignOptimizer, NSGA2DesignState
 
 if TYPE_CHECKING:
     from ..design import DesignManager, DesignConfig
+    from ..logger_dispatch import LoggerDispatch
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class PluggableStepAdapter:
+    """Wraps the pluggable optimizer loop for use with run_kernel."""
+
+    optimizer: Any
+    codec: GenomeCodec
+    opt_state: Any
+    opt_key: jax.Array
+    step_objective_fn: Any
+    compiled_get_yhatdep: Any
+    is_nsga2: bool
+    nsga2_n_tus: int
+    timer: PhaseTimer
+
+    def _decode_best(self, opt_state) -> Any:
+        best_genome = opt_state.best_params
+        if self.is_nsga2:
+            best_genome = best_genome[self.nsga2_n_tus:]
+        return self.codec.decode(best_genome, apply_constraints=True)
+
+    def run(self, ctx: DesignRuntimeContext, initial_params: Any) -> DesignRuntimeResult:
+        dispatch = ctx.dispatch
+        optimizer = self.optimizer
+        opt_state = self.opt_state
+        opt_key = self.opt_key
+
+        loss_history: list[float] = []
+        pbar = tqdm(desc="Optimizing", unit="step")
+
+        while not optimizer.should_stop(opt_state):
+            opt_key, step_key = jax.random.split(opt_key)
+            current_step = jnp.array(int(opt_state.step), dtype=jnp.int32)
+            opt_state, metrics = optimizer.step(
+                opt_state, step_key, self.step_objective_fn, current_step
+            )
+            loss_history.append(float(opt_state.best_loss))
+            pbar.update(1)
+            pbar.set_postfix(loss=f"{float(opt_state.best_loss):.4f}")
+
+            step_idx = int(opt_state.step)
+            yhatdep_arr = self.compiled_get_yhatdep(opt_state.best_params, current_step)
+            step_data: dict[str, Any] = {
+                "loss": [[float(opt_state.best_loss)]],
+                "yhatdep": yhatdep_arr,
+                **metrics,
+            }
+            if dispatch.needs_params_sync(step_idx):
+                step_data["latest_params"] = self._decode_best(opt_state)
+            dispatch.on_step(step_idx, ctx.config, step_data, ctx.stack)
+
+        pbar.close()
+
+        logger.info("=" * 60)
+        logger.info(f"OPTIMIZATION COMPLETE in {self.timer.total():.2f}s")
+        logger.info(
+            f"  Final loss: {float(opt_state.best_loss):.6f}, steps: {int(opt_state.step)}"
+        )
+        self.timer.summary()
+
+        final_params = self._decode_best(opt_state)
+        final_step_data: dict[str, Any] = {
+            "loss": [[float(opt_state.best_loss)]],
+            "latest_params": final_params,
+        }
+
+        if isinstance(opt_state, NSGA2DesignState):
+            pareto_front, pareto_fitness = opt_state.pareto_front, opt_state.pareto_fitness
+            if pareto_front is not None and pareto_fitness is not None:
+                final_step_data["pareto_front"] = pareto_front
+                final_step_data["pareto_fitness"] = pareto_fitness
+                logger.info(f"  Pareto front: {pareto_fitness.shape[0]} solutions")
+                logger.info(f"    Min loss: {float(jnp.min(pareto_fitness[:, 0])):.4f}")
+                logger.info(f"    Min TU count: {float(jnp.min(pareto_fitness[:, 1])):.0f}")
+
+        yhatdep_arr = self.compiled_get_yhatdep(
+            opt_state.best_params, jnp.array(int(opt_state.step), dtype=jnp.int32)
+        )
+        final_step_data["yhatdep"] = yhatdep_arr
+
+        return DesignRuntimeResult(
+            params=jax.tree.map(lambda x: x[None, ...], final_params),
+            loss_history=loss_history,
+            final_snapshot=StepHistorySnapshot.from_raw(final_step_data),
+            step=int(opt_state.step),
+        )
 
 
 def run_pluggable(
     dmanager: "DesignManager",
     dconf: "DesignConfig",
     model,
-    dispatch: LoggerDispatch | None = None,
+    dispatch: "LoggerDispatch | None" = None,
     lock_ratios: bool = False,
 ):
     optimizer = dconf.pluggable_optimizer
@@ -66,7 +156,6 @@ def run_pluggable(
     fixed_z = jnp.full((x_samples.shape[0], *session.num_z), 0.5)
     fixed_key = jax.random.key(42)
     loss_fn = session.loss_fn
-    stack = session.stack
 
     def single_objective(flat_genome: jnp.ndarray, step: jnp.ndarray) -> float:
         params = codec.decode(flat_genome, apply_constraints=True)
@@ -119,64 +208,26 @@ def run_pluggable(
     logger.info(f"  Initial loss: {float(opt_state.best_loss):.6f}")
     session.timer.end("opt_init")
 
+    adapter = PluggableStepAdapter(
+        optimizer=optimizer,
+        codec=codec,
+        opt_state=opt_state,
+        opt_key=opt_key,
+        step_objective_fn=step_objective_fn,
+        compiled_get_yhatdep=compiled_get_yhatdep,
+        is_nsga2=is_nsga2,
+        nsga2_n_tus=nsga2_n_tus,
+        timer=session.timer,
+    )
+    ctx = DesignRuntimeContext(
+        stack=session.stack,
+        config=None,
+        dispatch=dispatch or NullDispatch(),
+        total_steps=0,
+    )
+
     logger.info("=" * 60)
     logger.info("STARTING OPTIMIZATION LOOP")
     logger.info("=" * 60)
 
-    dispatch = dispatch or NullDispatch()
-    dispatch.on_start(None, stack)
-
-    loss_history: list[float] = []
-    pbar = tqdm(desc="Optimizing", unit="step")
-
-    while not optimizer.should_stop(opt_state):
-        opt_key, step_key = jax.random.split(opt_key)
-        current_step = jnp.array(int(opt_state.step), dtype=jnp.int32)
-        opt_state, metrics = optimizer.step(opt_state, step_key, step_objective_fn, current_step)
-        loss_history.append(float(opt_state.best_loss))
-        pbar.update(1)
-        pbar.set_postfix(loss=f"{float(opt_state.best_loss):.4f}")
-
-        step_idx = int(opt_state.step)
-        yhatdep_arr = compiled_get_yhatdep(opt_state.best_params, current_step)
-        step_data = {"loss": [[float(opt_state.best_loss)]], "yhatdep": yhatdep_arr, **metrics}
-        if dispatch.needs_params_sync(step_idx):
-            best_genome = opt_state.best_params
-            if is_nsga2:
-                best_genome = best_genome[nsga2_n_tus:]
-            step_data["latest_params"] = codec.decode(best_genome, apply_constraints=True)
-        dispatch.on_step(step_idx, None, step_data, stack)
-
-    pbar.close()
-    logger.info("=" * 60)
-    logger.info(f"OPTIMIZATION COMPLETE in {session.timer.total():.2f}s")
-    logger.info(f"  Final loss: {float(opt_state.best_loss):.6f}, steps: {int(opt_state.step)}")
-    session.timer.summary()
-
-    best_genome = opt_state.best_params
-    if is_nsga2:
-        best_genome = best_genome[nsga2_n_tus:]
-    final_params = codec.decode(best_genome, apply_constraints=True)
-
-    final_step_data = {"loss": [[float(opt_state.best_loss)]], "latest_params": final_params}
-
-    if isinstance(opt_state, NSGA2DesignState):
-        pareto_front, pareto_fitness = opt_state.pareto_front, opt_state.pareto_fitness
-        if pareto_front is not None and pareto_fitness is not None:
-            final_step_data["pareto_front"] = pareto_front
-            final_step_data["pareto_fitness"] = pareto_fitness
-            logger.info(f"  Pareto front: {pareto_fitness.shape[0]} solutions")
-            logger.info(f"    Min loss: {float(jnp.min(pareto_fitness[:, 0])):.4f}")
-            logger.info(f"    Min TU count: {float(jnp.min(pareto_fitness[:, 1])):.0f}")
-
-    yhatdep_arr = compiled_get_yhatdep(
-        opt_state.best_params, jnp.array(int(opt_state.step), dtype=jnp.int32)
-    )
-    final_step_data["yhatdep"] = yhatdep_arr
-    dispatch.on_end(int(opt_state.step), None, final_step_data, stack)
-
-    return (
-        jax.tree.map(lambda x: x[None, ...], final_params),
-        loss_history,
-        StepHistorySnapshot.from_raw(final_step_data),
-    )
+    return run_kernel(ctx, initial_params, adapter)
