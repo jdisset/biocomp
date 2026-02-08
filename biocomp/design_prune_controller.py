@@ -66,7 +66,7 @@ def evaluate_segment_snapshot(
     n_eval_samples: int = 256,
 ) -> SegmentSnapshot:
     """Run sample_for_evaluation + evaluate_design and return a frozen snapshot."""
-    from .design import evaluate_design, sample_for_evaluation
+    from .design_eval import evaluate_design, sample_for_evaluation
 
     xraw, yraw = sample_for_evaluation(
         dmanager, dconf, params, n_eval_samples=n_eval_samples, key=key
