@@ -52,6 +52,8 @@ def run_design(
     initial_params: "ParameterTree" | None = None,
     initial_step: int = 0,
     select_best_synced_params: bool = False,
+    best_synced_score_fn=None,
+    best_synced_initial_score: float | None = None,
 ):
     from .design import assert_tree_shape
 
@@ -126,6 +128,8 @@ def run_design(
         steps_per_epoch=session.steps_per_epoch,
         key=session.loop_key,
         select_best_synced_params=select_best_synced_params,
+        best_synced_score_fn=best_synced_score_fn,
+        best_synced_initial_score=best_synced_initial_score,
     )
     ctx = DesignRuntimeContext(
         stack=session.stack,

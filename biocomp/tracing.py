@@ -54,13 +54,19 @@ Full Object Saving:
 from __future__ import annotations
 
 import inspect
+import json
 import os
+import pickle
+import hashlib
 import time
+import threading
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, TypeVar
+from uuid import uuid4
 
 import numpy as np
 
@@ -165,6 +171,215 @@ def is_tracing_active(component: str) -> bool:
 def get_trace_config() -> TraceConfig:
     """Get the current trace configuration."""
     return _config
+
+
+TRACE_RUN_SCHEMA_VERSION = 1
+
+
+@dataclass
+class TraceRunContext:
+    """Canonical run-scoped trace sink for replay."""
+
+    run_id: str
+    root_dir: Path
+    run_dir: Path
+    events_path: Path
+    snapshots_dir: Path
+    manifest_path: Path
+    seq: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+_run_context: TraceRunContext | None = None
+
+
+def get_trace_run_context() -> TraceRunContext | None:
+    return _run_context
+
+
+def _now_iso_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _sanitize_name(name: str) -> str:
+    safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in name)
+    return safe.strip("._") or "item"
+
+
+def _json_safe(val: Any) -> Any:
+    """Make values JSON-serializable without exploding payload size."""
+    if val is None or isinstance(val, (str, int, float, bool)):
+        return val
+    if isinstance(val, (list, tuple)):
+        return [_json_safe(v) for v in val]
+    if isinstance(val, dict):
+        return {str(k): _json_safe(v) for k, v in val.items()}
+    if isinstance(val, np.ndarray):
+        return {
+            "__ndarray__": True,
+            "shape": list(val.shape),
+            "dtype": str(val.dtype),
+            "min": float(np.nanmin(val)) if val.size else None,
+            "max": float(np.nanmax(val)) if val.size else None,
+            "mean": float(np.nanmean(val)) if val.size else None,
+        }
+    if hasattr(val, "__array__"):
+        arr = np.asarray(val)
+        return _json_safe(arr)
+    return repr(val)
+
+
+def configure_trace_run(
+    run_id: str | None = None,
+    manifest: dict[str, Any] | None = None,
+    output_dir: Path | str | None = None,
+) -> str | None:
+    """Initialize/replace the active run-scoped trace sink."""
+    global _run_context
+    if not _config.enabled and output_dir is None:
+        return None
+
+    root = Path(output_dir) if output_dir is not None else _config.output_dir
+    if root is None:
+        return None
+
+    actual_run_id = run_id or f"run_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid4().hex[:8]}"
+    runs_root = root / "runs"
+    run_dir = runs_root / _sanitize_name(actual_run_id)
+    snapshots_dir = run_dir / "snapshots"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+
+    ctx = TraceRunContext(
+        run_id=actual_run_id,
+        root_dir=root,
+        run_dir=run_dir,
+        events_path=run_dir / "events.jsonl",
+        snapshots_dir=snapshots_dir,
+        manifest_path=run_dir / "manifest.json",
+    )
+    _run_context = ctx
+
+    manifest_payload = {
+        "schema_version": TRACE_RUN_SCHEMA_VERSION,
+        "run_id": actual_run_id,
+        "created_at": _now_iso_utc(),
+        "trace_root": str(root),
+        "manifest": _json_safe(manifest or {}),
+    }
+    ctx.manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
+    trace_run_event(
+        component="trace",
+        scope="run",
+        event_type="run_start",
+        message="trace run initialized",
+        data={"manifest": manifest_payload["manifest"]},
+    )
+    return actual_run_id
+
+
+def close_trace_run(summary: dict[str, Any] | None = None) -> None:
+    """Close active run context and append run_end event."""
+    global _run_context
+    ctx = _run_context
+    if ctx is None:
+        return
+    trace_run_event(
+        component="trace",
+        scope="run",
+        event_type="run_end",
+        message="trace run finalized",
+        data={"summary": _json_safe(summary or {})},
+    )
+    _run_context = None
+
+
+def _ensure_trace_run_for_event(component: str) -> None:
+    """Keep explicit control of canonical run tracing (no implicit runs)."""
+    _ = component
+
+
+def trace_run_snapshot(
+    *,
+    component: str,
+    scope: str,
+    name: str,
+    payload: Any,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Persist a snapshot blob and emit a snapshot event."""
+    _ensure_trace_run_for_event(component)
+    ctx = _run_context
+    if ctx is None:
+        return None
+
+    payload_np = _to_numpy(payload)
+    blob = pickle.dumps(payload_np)
+    sha = hashlib.sha256(blob).hexdigest()
+    with ctx.lock:
+        ctx.seq += 1
+        seq = ctx.seq
+    file_name = (
+        f"{seq:08d}_{_sanitize_name(component)}_{_sanitize_name(scope)}_{_sanitize_name(name)}.pkl"
+    )
+    snapshot_path = ctx.snapshots_dir / file_name
+    snapshot_path.write_bytes(blob)
+
+    ref = {
+        "kind": "pickle",
+        "path": str(snapshot_path.relative_to(ctx.run_dir)),
+        "sha256": sha,
+        "bytes": len(blob),
+        "name": name,
+    }
+    trace_run_event(
+        component=component,
+        scope=scope,
+        event_type="snapshot",
+        message=f"snapshot:{name}",
+        data={"snapshot": ref, **(data or {})},
+        seq=seq,
+    )
+    return ref
+
+
+def trace_run_event(
+    *,
+    component: str,
+    scope: str,
+    event_type: str,
+    message: str,
+    data: dict[str, Any] | None = None,
+    cause_id: str | None = None,
+    seq: int | None = None,
+    event_time: float | None = None,
+) -> int | None:
+    """Append one canonical JSONL event for replay."""
+    _ensure_trace_run_for_event(component)
+    ctx = _run_context
+    if ctx is None:
+        return None
+
+    with ctx.lock:
+        if seq is None:
+            ctx.seq += 1
+            seq = ctx.seq
+    event = {
+        "schema_version": TRACE_RUN_SCHEMA_VERSION,
+        "run_id": ctx.run_id,
+        "seq": seq,
+        "recorded_at": _now_iso_utc(),
+        "event_time": event_time if event_time is not None else time.perf_counter(),
+        "component": component,
+        "scope": scope,
+        "event_type": event_type,
+        "message": message,
+        "cause_id": cause_id,
+        "data": _json_safe(data or {}),
+    }
+    with ctx.events_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event, ensure_ascii=True) + "\n")
+    return seq
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -314,7 +529,7 @@ class trace_scope:
             _trace_context.reset(self._token)
 
     def _persist(self) -> None:
-        """Persist the trace scope to disk."""
+        """Persist scope payload to legacy pickle and canonical run stream."""
         if self._scope is None or _config.output_dir is None:
             return
 
@@ -335,6 +550,28 @@ class trace_scope:
             "snapshots": self._scope.snapshots,
             "duration": time.perf_counter() - self._scope.start_time,
         }
+
+        # Canonical SSOT stream for replay (run-scoped JSONL + snapshot blobs).
+        try:
+            for evt in self._scope.events:
+                trace_run_event(
+                    component=self._scope.component,
+                    scope=self._scope.name,
+                    event_type=evt.event_type,
+                    message=evt.message,
+                    data=evt.data,
+                    cause_id=evt.cause_id,
+                    event_time=evt.timestamp,
+                )
+            for snap_name, snap_payload in self._scope.snapshots.items():
+                trace_run_snapshot(
+                    component=self._scope.component,
+                    scope=self._scope.name,
+                    name=snap_name,
+                    payload=snap_payload,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to persist canonical run trace for scope {self._scope.name}: {e}")
 
         try:
             with open(path, "wb") as f:
@@ -523,6 +760,31 @@ def load_trace(path: Path | str) -> dict[str, Any]:
         return dill.load(f)
 
 
+def list_trace_runs(trace_root: Path | str) -> list[Path]:
+    """List run-scoped trace directories that contain events.jsonl."""
+    root = Path(trace_root)
+    runs_dir = root / "runs"
+    if not runs_dir.exists():
+        return []
+    runs = [p for p in runs_dir.iterdir() if p.is_dir() and (p / "events.jsonl").exists()]
+    return sorted(runs, key=lambda p: p.stat().st_mtime)
+
+
+def load_trace_run_events(run_dir: Path | str) -> list[dict[str, Any]]:
+    """Load canonical replay events from a run trace directory."""
+    path = Path(run_dir) / "events.jsonl"
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            events.append(json.loads(line))
+    return events
+
+
 def list_traces(
     trace_dir: Path | str,
     component: str | None = None,
@@ -627,8 +889,8 @@ def save_debug_state(
 
     Replaces: from biocomp.designdebug import save_debug_state
 
-    This function wraps the old interface to work with the new tracing system.
-    It creates an ephemeral trace scope and saves the data as a snapshot.
+    This function wraps the old interface and additionally emits to the
+    canonical run-scoped trace stream.
 
     Args:
         stage: Name/stage of the debug state
@@ -701,6 +963,30 @@ def save_debug_state(
 
     with open(filepath, "wb") as f:
         pickle.dump(payload, f)
+
+    # Emit canonical replay records from the same payload (SSOT).
+    try:
+        trace_run_event(
+            component=mode,
+            scope="save_debug_state",
+            event_type="debug_state",
+            message=stage,
+            data={
+                "legacy_path": str(filepath),
+                "metadata": metadata or {},
+                "shapes": shapes,
+                "stats": stats,
+            },
+        )
+        trace_run_snapshot(
+            component=mode,
+            scope="save_debug_state",
+            name=stage,
+            payload=data_np,
+            data={"metadata": metadata or {}, "legacy_path": str(filepath)},
+        )
+    except Exception as e:
+        logger.warning(f"[DEBUG-{mode.upper()}] Failed canonical trace emission for {stage}: {e}")
 
     logger.debug(f"[DEBUG-{mode.upper()}] Saved {stage} to {filepath}")
     return filepath
