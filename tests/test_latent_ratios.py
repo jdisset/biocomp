@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from biocomp.nodes.aggregation import _decode_latent_ratios
+from biocomp.ratio_utils import _decode_latent_ratios
 from biocomp.design import DesignConfig
 
 

@@ -8,16 +8,22 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import jax
 import numpy as np
 import jax.numpy as jnp
 
-from .nodes.aggregation import _decode_latent_ratios
 from .config import BIOCOMP_CONSTANTS
 
 if TYPE_CHECKING:
     from .parameters import ParameterTree
 
 RATIO_PRUNE_THRESHOLD = BIOCOMP_CONSTANTS["ratio"]["prune_threshold"]
+
+
+def _decode_latent_ratios(z, W1, b1, W2, b2):
+    """Decode latent code to ratios via MLP. No softmax - aggregation handles normalization."""
+    h = jax.nn.gelu(W1 @ z + b1)
+    return W2 @ h + b2
 
 
 def decode_ratios(

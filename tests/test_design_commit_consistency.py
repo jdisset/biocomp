@@ -21,7 +21,7 @@ from biocomp.library import LibraryContext, load_lib
 from biocomp.network import recipe_to_networks
 from biocomp.recipe import Recipe
 from biocomp.design_targets import SVGTarget
-from biocomp.nodes.aggregation import _decode_latent_ratios
+from biocomp.ratio_utils import _decode_latent_ratios
 from biocomp.ratio_schema import get_slot_entries
 
 RESOURCES_DIR = Path(__file__).parent / "resources"

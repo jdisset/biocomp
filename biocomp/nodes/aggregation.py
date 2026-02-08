@@ -14,6 +14,7 @@ from biocomp.utils import get_logger
 from biocomp.config import BIOCOMP_CONSTANTS
 from biocomp.recipe import DEFAULT_RATIO_MIN
 from biocomp.ratio_schema import slot_arrays, update_slots_from_arrays
+from biocomp.ratio_utils import _decode_latent_ratios, decode_ratios, decode_ratios_numpy
 from typing import Optional
 
 
@@ -26,12 +27,6 @@ logger = get_logger(__name__)
 def extract_ratios_from_extra(extra: dict) -> tuple[list[str], list[float]]:
     source_ids, ratios, _ratio_ranges, _locked = slot_arrays(extra)
     return source_ids, ratios
-
-
-def _decode_latent_ratios(z, W1, b1, W2, b2):
-    """Decode latent code to ratios via MLP. No softmax - aggregation handles normalization."""
-    h = jax.nn.gelu(W1 @ z + b1)
-    return W2 @ h + b2
 
 
 def aggregation(
@@ -190,23 +185,7 @@ def aggregation(
     ) -> tuple[ArrayLike, dict]:
         assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
 
-        latent_z_path = f"{namespace}/latent_z"
-        if latent_z_path in params:
-            z = params[latent_z_path][node_id]
-            W1 = params[f"{namespace}/latent_W1"][node_id]
-            b1 = params[f"{namespace}/latent_b1"][node_id]
-            W2 = params[f"{namespace}/latent_W2"][node_id]
-            b2 = params[f"{namespace}/latent_b2"][node_id]
-            raw_ratios = _decode_latent_ratios(z, W1, b1, W2, b2)[:n_outputs]
-            ratio_min = params[f"{namespace}/ratio_min"][node_id][:n_outputs]
-            ratio_max = params[f"{namespace}/ratio_max"][node_id][:n_outputs]
-            constrained_ratios = jnp.clip(raw_ratios, ratio_min, ratio_max)
-        else:
-            ratios = params[f"{namespace}/{PNAME}"][node_id][:n_outputs]
-            ratio_min = params[f"{namespace}/ratio_min"][node_id][:n_outputs]
-            ratio_max = params[f"{namespace}/ratio_max"][node_id][:n_outputs]
-            constrained_ratios = jnp.clip(ratios, ratio_min, ratio_max)
-
+        constrained_ratios = decode_ratios(params, namespace, node_id, n_outputs)
         abs_ratios = jnp.abs(constrained_ratios)
 
         output_tu_indices_path = f"{namespace}/output_tu_indices"
@@ -265,22 +244,9 @@ def aggregation(
             )
 
         for i, n in enumerate(nodelist):
-            latent_z_path = f"{namespace}/latent_z"
-            if latent_z_path in params:
-                z = params[latent_z_path][i]
-                W1 = params[f"{namespace}/latent_W1"][i]
-                b1 = params[f"{namespace}/latent_b1"][i]
-                W2 = params[f"{namespace}/latent_W2"][i]
-                b2 = params[f"{namespace}/latent_b2"][i]
-                raw_ratios = _decode_latent_ratios(z, W1, b1, W2, b2)[:n_outputs]
-                ratio_min = params[f"{namespace}/ratio_min"][i][:n_outputs]
-                ratio_max = params[f"{namespace}/ratio_max"][i][:n_outputs]
-                ratios = jnp.clip(raw_ratios, ratio_min, ratio_max)
-            else:
-                ratios = params[f"{namespace}/{PNAME}"][i][:n_outputs]
-                ratio_min = params[f"{namespace}/ratio_min"][i][:n_outputs]
-                ratio_max = params[f"{namespace}/ratio_max"][i][:n_outputs]
-                ratios = jnp.clip(ratios, ratio_min, ratio_max)
+            ratios = decode_ratios(params, namespace, i, n_outputs)
+            ratio_min = params[f"{namespace}/ratio_min"][i][:n_outputs]
+            ratio_max = params[f"{namespace}/ratio_max"][i][:n_outputs]
             ratios_array = jnp.abs(jnp.array(ratios))
             original_ratios = ratios_array.copy()
 
@@ -383,22 +349,9 @@ def aggregation(
                     if src_id and tu_name and src_id != tu_name:
                         source_to_tu_name[src_id] = tu_name
 
-            latent_z_path = f"{namespace}/latent_z"
-            if latent_z_path in params:
-                z = np.asarray(params[latent_z_path][i])
-                W1 = np.asarray(params[f"{namespace}/latent_W1"][i])
-                b1 = np.asarray(params[f"{namespace}/latent_b1"][i])
-                W2 = np.asarray(params[f"{namespace}/latent_W2"][i])
-                b2 = np.asarray(params[f"{namespace}/latent_b2"][i])
-                raw_ratios = _decode_latent_ratios(z, W1, b1, W2, b2)[:n_outputs]
-                ratio_min = np.asarray(params[f"{namespace}/ratio_min"][i][:n_outputs])
-                ratio_max = np.asarray(params[f"{namespace}/ratio_max"][i][:n_outputs])
-                ratios = np.clip(raw_ratios, ratio_min, ratio_max)
-            else:
-                ratios = np.asarray(params[f"{namespace}/{PNAME}"][i][:n_outputs])
-                ratio_min = np.asarray(params[f"{namespace}/ratio_min"][i][:n_outputs])
-                ratio_max = np.asarray(params[f"{namespace}/ratio_max"][i][:n_outputs])
-                ratios = np.clip(ratios, ratio_min, ratio_max)
+            ratios = decode_ratios_numpy(params, namespace, i, n_outputs)
+            ratio_min = np.asarray(params[f"{namespace}/ratio_min"][i][:n_outputs])
+            ratio_max = np.asarray(params[f"{namespace}/ratio_max"][i][:n_outputs])
 
             output_tu_path = f"{namespace}/output_tu_indices"
             tu_indices = None
