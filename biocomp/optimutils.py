@@ -16,6 +16,7 @@ from .parameters import ParameterTree
 from biocomp.logging_config import get_logger
 from biocomp.compute import ComputeStack
 from biocomp.logger_dispatch import LoggerDispatch, NullDispatch
+from biocomp.step_history import StepHistorySnapshot
 
 import jax
 from jax import vmap
@@ -872,4 +873,4 @@ def optimize(
         logger.info(f"  Final loss:     {loss_history[-1]:.4f}")
     logger.info("=" * 60)
 
-    return params, loss_history, step_history
+    return params, loss_history, StepHistorySnapshot.from_raw(step_history)

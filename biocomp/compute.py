@@ -26,7 +26,6 @@ from biocomp.tracing import (
     summarize_params,
     should_save_full_objects,
     snapshot_full_stack,
-    snapshot_full_params,
 )
 import dracon as dr
 
@@ -677,14 +676,15 @@ class ComputeStack:
                 f"{context}: Edge {eid} references missing target node {edge.target_id}"
             )
 
-            # aggregation outputs are determined by members length
+            # aggregation outputs are determined by ratio_schema slot count
             if src.node_type == "aggregation":
-                members = src.extra.get("members", {})
-                n_outputs = len(members) if isinstance(members, dict) else len(members)
+                from biocomp.ratio_schema import slot_count
+
+                n_outputs = slot_count(src.extra)
                 assert edge.from_output_slot < n_outputs, (
                     f"{context}: Edge {eid} from aggregation[{edge.source_id}] has "
                     f"from_output_slot={edge.from_output_slot} but aggregation only has "
-                    f"{n_outputs} outputs (members={members})"
+                    f"{n_outputs} outputs (ratio_schema)"
                 )
 
     def __repr__(self):

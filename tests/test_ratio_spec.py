@@ -303,6 +303,7 @@ class TestEquivalence:
 class TestNetworkIntegration:
     def test_dict_ratios_build_network(self, lib):
         from biocomp.network import recipe_to_networks
+        from biocomp.ratio_schema import get_slot_entries
         import biocomp.biorules as br
 
         with LibraryContext.with_library(lib):
@@ -339,13 +340,13 @@ class TestNetworkIntegration:
             compg = networks[0].compute_graph
             agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
             assert len(agg_nodes) == 1
-            members = agg_nodes[0].extra["members"]
-            sorted_ids = sorted(members.keys())
-            ratios = [members[m]["ratio"] for m in sorted_ids]
+            slot_entries = get_slot_entries(agg_nodes[0].extra)
+            ratios = [entry["ratio"] for entry in slot_entries]
             assert ratios == [0.6, 0.4]
 
     def test_locked_ratios_no_ratio_ranges(self, lib):
         from biocomp.network import recipe_to_networks
+        from biocomp.ratio_schema import get_slot_entries
         import biocomp.biorules as br
 
         with LibraryContext.with_library(lib):
@@ -384,15 +385,15 @@ class TestNetworkIntegration:
             compg = networks[0].compute_graph
             agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
             agg = agg_nodes[0]
-            members = agg.extra["members"]
-            sorted_ids = sorted(members.keys())
-            ratios = [members[m]["ratio"] for m in sorted_ids]
+            slot_entries = get_slot_entries(agg.extra)
+            ratios = [entry["ratio"] for entry in slot_entries]
             assert ratios == [0.6, 0.4]
-            ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
+            ratio_ranges = [entry.get("ratio_range") for entry in slot_entries]
             assert all(r is None for r in ratio_ranges)
 
     def test_unlocked_ratios_have_ratio_ranges(self, lib):
         from biocomp.network import recipe_to_networks
+        from biocomp.ratio_schema import get_slot_entries
         import biocomp.biorules as br
 
         with LibraryContext.with_library(lib):
@@ -431,9 +432,8 @@ class TestNetworkIntegration:
             compg = networks[0].compute_graph
             agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
             agg = agg_nodes[0]
-            members = agg.extra["members"]
-            sorted_ids = sorted(members.keys())
-            ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
+            slot_entries = get_slot_entries(agg.extra)
+            ratio_ranges = [entry.get("ratio_range") for entry in slot_entries]
             assert ratio_ranges[0] is not None
             assert ratio_ranges[0]["min"] == 0.3
             assert ratio_ranges[0]["max"] == 0.9

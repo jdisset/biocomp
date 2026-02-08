@@ -9,6 +9,7 @@ import pytest
 from biocomp.recipe import CoTransfection, TranscriptionUnit, Slot, Recipe
 from biocomp.library import load_lib, LibraryContext
 from biocomp.recipe import FluoIntensity, NumRange
+from biocomp.ratio_schema import get_slot_entries
 
 
 @pytest.fixture
@@ -981,10 +982,9 @@ def test_simple_aggregation_compg(lib, simple_aggregation):
         assert len(agg_nodes) == 1
 
         agg = agg_nodes[0]
-        members = agg.extra["members"]
-        assert isinstance(members, dict)
-        assert len(members) == 2
-        ratios = [members[m]["ratio"] for m in sorted(members.keys())]
+        slot_entries = get_slot_entries(agg.extra)
+        assert len(slot_entries) == 2
+        ratios = [entry["ratio"] for entry in slot_entries]
         assert ratios == [0.5, 0.5]
 
         output_nodes = [n for n in compg.nodes.values() if n.node_type == "output"]
@@ -1009,11 +1009,10 @@ def test_single_cotx_ERN(lib, simple_two_reporters):
         assert len(agg_nodes) == 1
 
         agg = agg_nodes[0]
-        members = agg.extra["members"]
-        sorted_ids = sorted(members.keys())
-        ratios = [members[m]["ratio"] for m in sorted_ids]
+        slot_entries = get_slot_entries(agg.extra)
+        ratios = [entry["ratio"] for entry in slot_entries]
         assert ratios == [0.833, 0.167]
-        assert len(members) == 2
+        assert len(slot_entries) == 2
 
         output_nodes = [n for n in compg.nodes.values() if n.node_type == "output"]
         assert len(output_nodes) == 1
@@ -1038,9 +1037,8 @@ def test_multi_cotx_aggregation_compg(lib, multi_cotx_aggregation):
 
         ratios_sets = []
         for agg in agg_nodes:
-            members = agg.extra["members"]
-            assert isinstance(members, dict)
-            ratios_sets.append(tuple(members[m]["ratio"] for m in sorted(members.keys())))
+            slot_entries = get_slot_entries(agg.extra)
+            ratios_sets.append(tuple(entry["ratio"] for entry in slot_entries))
         assert (0.5, 0.5) in ratios_sets
         assert (0.6, 0.4) in ratios_sets
 
@@ -1060,9 +1058,8 @@ def test_complex_ern_compg(lib, complex_ern_network):
         assert len(agg_nodes) == 1
         # Ratios are normalized: [0.2, 0.2, 0.1] → [0.4, 0.4, 0.2]
         agg = agg_nodes[0]
-        members = agg.extra["members"]
-        sorted_ids = sorted(members.keys())
-        ratios = [members[m]["ratio"] for m in sorted_ids]
+        slot_entries = get_slot_entries(agg.extra)
+        ratios = [entry["ratio"] for entry in slot_entries]
         assert ratios == [0.4, 0.4, 0.2]
 
         ern_nodes = [n for n in compg.nodes.values() if n.node_type == "sequestron_ERN"]
@@ -1237,9 +1234,8 @@ def test_unlocked_ratios_network_builds(lib, unlocked_ratios_network):
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
-        members = agg.extra["members"]
-        sorted_ids = sorted(members.keys())
-        ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
+        slot_entries = get_slot_entries(agg.extra)
+        ratio_ranges = [entry.get("ratio_range") for entry in slot_entries]
         # First ratio should have range info (unlocked)
         assert ratio_ranges[0] is not None
         assert ratio_ranges[0]["min"] == 0.5
@@ -1351,9 +1347,8 @@ def test_combined_unlocked_network(lib, combined_unlocked_network):
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
-        members = agg.extra["members"]
-        sorted_ids = sorted(members.keys())
-        ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
+        slot_entries = get_slot_entries(agg.extra)
+        ratio_ranges = [entry.get("ratio_range") for entry in slot_entries]
         # Both ratios should be unlocked
         assert all(r is not None for r in ratio_ranges)
 
@@ -1386,8 +1381,8 @@ def test_unlocked_ratios_commit(lib, unlocked_ratios_network):
         ]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
-        members = agg.extra["members"]
-        ratio_ranges = [members[m].get("ratio_range") for m in members]
+        slot_entries = get_slot_entries(agg.extra)
+        ratio_ranges = [entry.get("ratio_range") for entry in slot_entries]
         # After commit, all ratio_ranges should be None (locked)
         assert all(r is None for r in ratio_ranges), (
             "All ratios should be locked after commit"
@@ -1463,9 +1458,8 @@ def test_ern_with_unlocked_ratios_compg(lib, ern_with_unlocked_ratios):
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
-        members = agg.extra["members"]
-        sorted_ids = sorted(members.keys())
-        ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
+        slot_entries = get_slot_entries(agg.extra)
+        ratio_ranges = [entry.get("ratio_range") for entry in slot_entries]
         # First and third ratios should be unlocked (have ranges)
         assert ratio_ranges[0] is not None
         assert ratio_ranges[1] is None  # Locked
@@ -1613,9 +1607,8 @@ def test_complex_mixed_unlocked_compg(lib, complex_mixed_unlocked):
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
         agg = agg_nodes[0]
-        members = agg.extra["members"]
-        sorted_ids = sorted(members.keys())
-        ratio_ranges = [members[m].get("ratio_range") for m in sorted_ids]
+        slot_entries = get_slot_entries(agg.extra)
+        ratio_ranges = [entry.get("ratio_range") for entry in slot_entries]
         assert ratio_ranges[0] is not None  # Unlocked
         assert ratio_ranges[1] is None  # Locked
         assert ratio_ranges[2] is not None  # Unlocked

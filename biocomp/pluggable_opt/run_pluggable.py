@@ -9,6 +9,7 @@ from tqdm import tqdm
 from ..logging_config import get_logger
 from ..design_session import DesignSession
 from ..logger_dispatch import LoggerDispatch, NullDispatch
+from ..step_history import StepHistorySnapshot
 from .codec import GenomeCodec
 from .optimizers import NSGA2DesignOptimizer, NSGA2DesignState
 
@@ -125,7 +126,7 @@ def run_pluggable(
     dispatch = dispatch or NullDispatch()
     dispatch.on_start(None, stack)
 
-    loss_history, step_history = [], []
+    loss_history: list[float] = []
     pbar = tqdm(desc="Optimizing", unit="step")
 
     while not optimizer.should_stop(opt_state):
@@ -133,7 +134,6 @@ def run_pluggable(
         current_step = jnp.array(int(opt_state.step), dtype=jnp.int32)
         opt_state, metrics = optimizer.step(opt_state, step_key, step_objective_fn, current_step)
         loss_history.append(float(opt_state.best_loss))
-        step_history.append({k: float(v) if hasattr(v, "item") else v for k, v in metrics.items()})
         pbar.update(1)
         pbar.set_postfix(loss=f"{float(opt_state.best_loss):.4f}")
 
@@ -175,6 +175,8 @@ def run_pluggable(
     final_step_data["yhatdep"] = yhatdep_arr
     dispatch.on_end(int(opt_state.step), None, final_step_data, stack)
 
-    step_history.append(final_step_data)
-
-    return jax.tree.map(lambda x: x[None, ...], final_params), loss_history, step_history
+    return (
+        jax.tree.map(lambda x: x[None, ...], final_params),
+        loss_history,
+        StepHistorySnapshot.from_raw(final_step_data),
+    )

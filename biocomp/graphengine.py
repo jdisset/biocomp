@@ -129,7 +129,6 @@ class NodeExtra(ExtraBase):
     ratios: list[float] | None = None
     ratio_ranges: list[Any] | None = None
     ratio_locked: bool | list[bool] | None = None
-    members: dict[str, Any] | None = None
     param_ref_ids: dict[str, Any] | None = None
     tu_names_by_slot: dict[int, str] | None = None
     tu_global_indices_by_slot: dict[int, int] | None = None
@@ -137,7 +136,6 @@ class NodeExtra(ExtraBase):
     fluo_bias_data: dict[str, Any] | None = None
     role: str | None = None
     layer_id: int | float | None = None
-    member_id: str | None = None
     protein: str | None = None
     protein_name: str | None = None
     units: str | None = None
@@ -738,7 +736,7 @@ def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEd
 
     Examples:
         "{{ node.node_type }}" -> evaluates to the node type
-        "{{ len(node.extra.get('members', [])) }}" -> evaluates to integer
+        "{{ len(node.extra.get('ratio_schema', {}).get('slots', {})) }}" -> evaluates to integer
         "{{ node.extra.get('value') }}_suffix" -> NOT SUPPORTED (raises ValueError)
     """
     if not isinstance(template_str, str) or "{{" not in template_str:

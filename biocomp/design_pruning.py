@@ -12,6 +12,8 @@ from .tumasking import TU_LOG_ALPHA_PATH
 from .tumasking_strategy import build_strategy_from_config
 from .tracing import trace_scope, trace_here
 from .logger_dispatch import LoggerDispatch
+from .step_history import StepHistorySnapshot
+from .ratio_schema import get_slot_entries, set_ratio_schema_slots, source_ids_in_slot_order
 
 if TYPE_CHECKING:
     from .design import DesignManager, DesignConfig
@@ -20,6 +22,27 @@ if TYPE_CHECKING:
     from biocomptools.modelmodel import BiocompModel
 
 logger = get_logger(__name__)
+
+
+def _flatten_replicates_into_networks(
+    dmanager: "DesignManager",
+    n_replicates: int,
+) -> "DesignManager":
+    """Flatten replicates into the network dimension for hard-pruning mode.
+
+    Deep copies each network for each replicate so they can diverge independently
+    during pruning. Deep copies are essential because _store_learned_ratio_inits
+    mutates graph_node.extra["ratio_schema"] on network objects.
+    """
+    original_networks = dmanager.networks
+    flattened = []
+    for rep_idx in range(n_replicates):
+        for net in original_networks:
+            copy = net.model_copy(deep=True)
+            copy.name = f"{net.name}_rep{rep_idx}"
+            flattened.append(copy)
+    return dmanager.model_copy(update={"networks": flattened})
+
 
 def _expand_params_for_merge(params: "ParameterTree") -> "ParameterTree":
     return jax.tree.map(
@@ -86,7 +109,7 @@ def _store_learned_ratio_inits(
     params: "ParameterTree",
     stack: "ComputeStack",
 ) -> None:
-    """Update aggregation node members with learned ratios as init values.
+    """Update aggregation ratio_schema with learned ratios as init values.
 
     Sets ratio_range["init"] to the current learned ratio while keeping
     locked=False. This ensures ratios are INITIALIZED with learned values
@@ -113,31 +136,28 @@ def _store_learned_ratio_inits(
             if graph_node is None or graph_node.extra is None:
                 continue
 
-            members = graph_node.extra.get("members", {})
-            if not isinstance(members, dict):
+            slot_entries = get_slot_entries(graph_node.extra, require=False)
+            if not slot_entries:
                 continue
 
-            sorted_ids = sorted(members.keys())
-            for slot, member_id in enumerate(sorted_ids):
+            for slot, entry in enumerate(slot_entries):
                 if slot >= len(ratios):
                     break
-                if member_id not in members or not isinstance(members[member_id], dict):
-                    continue
-
-                m = members[member_id]
                 learned_ratio = float(ratios[slot])
 
-                if m.get("locked", False):
+                if bool(entry.get("locked", False)):
                     continue
 
-                existing_range = m.get("ratio_range") or {}
-                m["ratio_range"] = {
+                existing_range = entry.get("ratio_range") or {}
+                entry["ratio_range"] = {
                     "min": existing_range.get("min", _DEFAULT_RATIO_MIN),
                     "max": existing_range.get("max", _DEFAULT_RATIO_MAX),
                     "init": learned_ratio,
                 }
-                m["ratio"] = learned_ratio
-                m["locked"] = False
+                entry["ratio"] = learned_ratio
+                entry["locked"] = False
+
+            set_ratio_schema_slots(graph_node.extra, slot_entries)
 
 
 def _collect_ratio_pruning_candidates(
@@ -151,7 +171,7 @@ def _collect_ratio_pruning_candidates(
     tu_id_to_idx = stack.tu_id_to_idx or {}
     idx_to_id = {idx: tu_id for tu_id, idx in tu_id_to_idx.items()}
 
-    all_tu_ids = extract_tu_ids_from_network(stack.networks[network_id])
+    all_tu_ids = set(extract_tu_ids_from_network(stack.networks[network_id]))
     tu_strengths = {tu_id: 0.0 for tu_id in all_tu_ids}
     candidates: set[str] = set()
 
@@ -188,10 +208,83 @@ def _collect_ratio_pruning_candidates(
                 strength = abs(ratio_val)
                 if strength > tu_strengths.get(tu_id, 0.0):
                     tu_strengths[tu_id] = strength
-                if strength < ratio_threshold:
-                    candidates.add(tu_id)
+
+    # Prune only if TU is weak everywhere it appears (max strength below threshold).
+    candidates = {tu_id for tu_id, strength in tu_strengths.items() if strength < ratio_threshold}
 
     return candidates, all_tu_ids, tu_strengths
+
+
+def _compute_hard_pruning_network_keep_count(
+    n_networks: int,
+    top_percent: float | None,
+    min_networks: int | None,
+) -> int | None:
+    """Compute survivor count for hard-pruning network selection."""
+    if top_percent is None and min_networks is None:
+        return None
+
+    keep_by_percent = 0
+    if top_percent is not None:
+        keep_by_percent = int(np.ceil((top_percent / 100.0) * n_networks))
+
+    keep_by_min = min_networks or 0
+    keep_count = max(keep_by_percent, keep_by_min)
+    keep_count = max(1, keep_count)
+    return min(n_networks, keep_count)
+
+
+def _select_top_network_indices_from_losses(losses: np.ndarray, keep_count: int) -> list[int]:
+    """Select top-performing network indices (lowest mean loss)."""
+    if keep_count < 1:
+        raise ValueError(f"keep_count must be >= 1, got {keep_count}")
+
+    losses_arr = np.asarray(losses)
+    if losses_arr.ndim == 0:
+        raise ValueError("losses must have at least one dimension")
+    if not np.all(np.isfinite(losses_arr)):
+        raise ValueError("losses contains non-finite values")
+
+    if losses_arr.ndim == 1:
+        per_network_loss = losses_arr
+    else:
+        reduce_axes = tuple(range(losses_arr.ndim - 1))
+        per_network_loss = losses_arr.mean(axis=reduce_axes)
+    if per_network_loss.ndim != 1:
+        raise ValueError(f"expected per-network 1D losses, got shape {per_network_loss.shape}")
+
+    n_networks = int(per_network_loss.shape[0])
+    if keep_count >= n_networks:
+        return list(range(n_networks))
+
+    sorted_idx = np.argsort(per_network_loss, kind="stable")
+    return [int(i) for i in sorted_idx[:keep_count]]
+
+
+def _extract_output_tu_ids(network) -> set[str]:
+    """Return TU IDs found on any path upstream of output nodes."""
+    graph = network.compute_graph
+    if graph is None:
+        return set()
+    output_nodes = graph.get_nodes_by_type("output")
+    if not output_nodes:
+        return set()
+
+    tu_ids: set[str] = set()
+    visited_nodes: set[int] = set()
+    queue = [node.node_id for node in output_nodes]
+
+    while queue:
+        node_id = queue.pop()
+        if node_id in visited_nodes:
+            continue
+        visited_nodes.add(node_id)
+        for edge in graph.get_incoming_edges(node_id):
+            if edge.extra:
+                tu_ids.update(edge.extra.get("tu_id", []))
+            queue.append(edge.source_id)
+
+    return tu_ids
 
 
 def identify_tus_to_prune(
@@ -236,6 +329,8 @@ def identify_tus_to_prune(
                 params, stack, net_idx, ratio_threshold
             )
             candidates = {tid for tid in candidates if tid not in no_masking_tu_ids}
+            ratio_strengths = dict(tu_strengths)
+            mask_strengths: dict[str, float] = {}
 
             if use_soft_pruning and has_tu_masking:
                 assert log_alpha_full is not None
@@ -256,7 +351,7 @@ def identify_tus_to_prune(
                         tu_idx = tu_id_to_idx[tu_id]
                         if tu_idx < len(network_log_alpha):
                             prob = float(jax.nn.sigmoid(network_log_alpha[tu_idx]))
-                            tu_strengths[tu_id] = max(tu_strengths.get(tu_id, 0.0), prob)
+                            mask_strengths[tu_id] = prob
                             if prob < (0.5 - prune_margin):
                                 candidates.add(tu_id)
                                 decision_counts["mask_below_threshold"] += 1
@@ -274,7 +369,7 @@ def identify_tus_to_prune(
             # Log ratio-based pruning decisions
             for tu_id in candidates:
                 if tu_id not in no_masking_tu_ids:
-                    strength = tu_strengths.get(tu_id, 0.0)
+                    strength = ratio_strengths.get(tu_id, 0.0)
                     if strength < ratio_threshold:
                         decision_counts["ratio_below_threshold"] += 1
                         scope.decision(
@@ -292,9 +387,13 @@ def identify_tus_to_prune(
             remaining = len(all_tu_ids) - len(candidates)
             if remaining < preserve_minimum:
                 n_to_keep = preserve_minimum - remaining
-                sorted_by_strength = sorted(candidates, key=lambda x: tu_strengths.get(x, 0.0))
+                sorted_by_strength = sorted(
+                    candidates,
+                    key=lambda x: max(ratio_strengths.get(x, 0.0), mask_strengths.get(x, 0.0)),
+                )
                 strongest_to_keep = set(sorted_by_strength[-n_to_keep:]) if n_to_keep > 0 else set()
                 for tu_id in strongest_to_keep:
+                    keep_strength = max(ratio_strengths.get(tu_id, 0.0), mask_strengths.get(tu_id, 0.0))
                     scope.decision(
                         "preserve_tu",
                         outcome=False,
@@ -302,11 +401,34 @@ def identify_tus_to_prune(
                         inputs={
                             "tu_id": tu_id,
                             "network": net_idx,
-                            "strength": tu_strengths.get(tu_id, 0.0),
+                            "strength": keep_strength,
                             "n_to_keep": n_to_keep,
                         },
                     )
                 candidates = candidates - strongest_to_keep
+
+            output_tu_ids = _extract_output_tu_ids(stack.networks[net_idx])
+            if output_tu_ids:
+                remaining_output_tus = output_tu_ids - candidates
+                if not remaining_output_tus:
+                    prunable_output_tus = output_tu_ids & candidates
+                    if prunable_output_tus:
+                        keep_tu = max(
+                            prunable_output_tus,
+                            key=lambda x: max(
+                                ratio_strengths.get(x, 0.0), mask_strengths.get(x, 0.0)
+                            ),
+                        )
+                        candidates.remove(keep_tu)
+                        scope.decision(
+                            "preserve_tu",
+                            outcome=False,
+                            reason="preserve_output_topology",
+                            inputs={
+                                "tu_id": keep_tu,
+                                "network": net_idx,
+                            },
+                        )
 
             tus_to_remove[net_idx] = candidates
 
@@ -420,15 +542,6 @@ def _merge_surviving_params(
     return new_params
 
 
-def _get_member_ids(extra: dict) -> list[str]:
-    if "_sorted_member_ids" in extra and extra["_sorted_member_ids"]:
-        return list(extra["_sorted_member_ids"])
-    members = extra.get("members")
-    if isinstance(members, dict) and members:
-        return sorted(members.keys())
-    return []
-
-
 def _build_aggregation_ratio_map(
     params: "ParameterTree",
     stack: "ComputeStack",
@@ -448,10 +561,10 @@ def _build_aggregation_ratio_map(
         ratios = np.asarray(params[ratio_path])
         for node_idx, node in enumerate(layer.nodes):
             graph_node = node.get(stack)
-            member_ids = _get_member_ids(graph_node.extra or {})
-            if not member_ids:
+            source_ids = source_ids_in_slot_order(graph_node.extra)
+            if not source_ids:
                 continue
-            key = (node.network_id, tuple(member_ids))
+            key = (node.network_id, tuple(source_ids))
             if key not in ratio_map:
                 ratio_map[key] = ratios[node_idx]
     return ratio_map
@@ -571,10 +684,10 @@ def _restore_aggregation_ratios(
         ratios_arr, rep_tgt = _select_rep_target(ratios_arr)
         for node_idx, node in enumerate(layer.nodes):
             graph_node = node.get(stack)
-            member_ids = _get_member_ids(graph_node.extra or {})
-            if not member_ids:
+            source_ids = source_ids_in_slot_order(graph_node.extra)
+            if not source_ids:
                 continue
-            key = (node.network_id, tuple(member_ids))
+            key = (node.network_id, tuple(source_ids))
             if key not in ratio_map:
                 continue
             old_ratios = np.asarray(ratio_map[key])
@@ -742,6 +855,7 @@ def hard_prune_and_rebuild(
     tus_to_remove: dict[int, set[str]],
     key: jax.Array,
     lock_ratios: bool = False,
+    keep_network_indices: list[int] | None = None,
 ) -> tuple["DesignManager", "ComputeStack", "ParameterTree"]:
     """Execute hard pruning: mark TUs disabled, commit, rebuild."""
     from .design import DesignManager, initialize_params
@@ -756,6 +870,7 @@ def hard_prune_and_rebuild(
                 "n_networks": len(stack.networks),
                 "tus_to_remove": {k: list(v) for k, v in tus_to_remove.items()},
                 "lock_ratios": lock_ratios,
+                "keep_network_indices": keep_network_indices,
             },
         )
         scope.snapshot("params_before", jax.device_get(params))
@@ -767,45 +882,122 @@ def hard_prune_and_rebuild(
 
         _store_learned_ratio_inits(params, stack)
 
-        params_for_commit = deepcopy(params)
+        def _commit_and_filter(
+            removed_tus: dict[int, set[str]],
+        ) -> tuple["ParameterTree", list[Network], list[tuple[int, Network]], int]:
+            candidate_params = deepcopy(params)
+            applied_count = _apply_hard_pruning_mask(
+                candidate_params,
+                stack,
+                removed_tus,
+                auto_lock_topology_tus=dconf.auto_lock_topology_tus,
+            )
+            candidate_networks = commit_structure(stack, candidate_params, lock_ratios=lock_ratios)
+            valid: list[tuple[int, Network]] = []
+            for idx, candidate_net in enumerate(candidate_networks):
+                if _is_valid_network(candidate_net):
+                    valid.append((idx, candidate_net))
+            return candidate_params, candidate_networks, valid, applied_count
 
-        applied = _apply_hard_pruning_mask(
-            params_for_commit,
-            stack,
-            tus_to_remove,
-            auto_lock_topology_tus=dconf.auto_lock_topology_tus,
+        effective_tus_to_remove = {net_idx: set(tus) for net_idx, tus in tus_to_remove.items()}
+        params_for_commit, committed_networks, valid_pairs, applied = _commit_and_filter(
+            effective_tus_to_remove
         )
 
-        committed_networks = commit_structure(stack, params_for_commit, lock_ratios=lock_ratios)
-
-        # Filter degenerate networks
-        valid_networks: list[Network] = []
-        for i, net in enumerate(committed_networks):
-            if _is_valid_network(net):
-                valid_networks.append(net)
-            else:
-                scope.decision(
-                    "filter_degenerate",
-                    outcome="removed",
-                    reason="zero_outputs",
-                    inputs={"network_idx": i, "network_name": net.name},
+        if not valid_pairs:
+            logger.warning(
+                "[HARD-PRUNE] All networks degenerated after masking; backing off TU removals by ratio strength"
+            )
+            strength_rankings: dict[int, list[str]] = {}
+            for net_idx, removed_tus in effective_tus_to_remove.items():
+                _candidates, _all_tus, strengths = _collect_ratio_pruning_candidates(
+                    params, stack, net_idx, ratio_threshold=float("inf")
                 )
-                logger.warning(f"[HARD-PRUNE] Network {i} ({net.name}) became degenerate, removing")
+                strength_rankings[net_idx] = sorted(
+                    removed_tus,
+                    key=lambda tu_id: strengths.get(tu_id, 0.0),
+                    reverse=True,
+                )
 
-        if not valid_networks:
+            while not valid_pairs:
+                progress = False
+                for net_idx, ranking in strength_rankings.items():
+                    if not ranking:
+                        continue
+                    tu_to_restore = ranking.pop(0)
+                    if tu_to_restore in effective_tus_to_remove.get(net_idx, set()):
+                        effective_tus_to_remove[net_idx].remove(tu_to_restore)
+                        progress = True
+                        scope.decision(
+                            "preserve_tu",
+                            outcome=False,
+                            reason="degeneracy_backoff",
+                            inputs={"network": net_idx, "tu_id": tu_to_restore},
+                        )
+
+                if not progress:
+                    break
+
+                params_for_commit, committed_networks, valid_pairs, applied = _commit_and_filter(
+                    effective_tus_to_remove
+                )
+
+        # Filter degenerate networks while preserving original indices
+        if valid_pairs:
+            for i, net in enumerate(committed_networks):
+                if not _is_valid_network(net):
+                    scope.decision(
+                        "filter_degenerate",
+                        outcome="removed",
+                        reason="zero_outputs",
+                        inputs={"network_idx": i, "network_name": net.name},
+                    )
+                    logger.warning(f"[HARD-PRUNE] Network {i} ({net.name}) became degenerate, removing")
+
+        if not valid_pairs:
             raise RuntimeError(
                 "All networks became degenerate after pruning. "
                 "Try reducing L0 penalty, increasing preserve_minimum, or adjusting ratio_threshold."
             )
 
-        total_removed = sum(len(tus) for tus in tus_to_remove.values())
+        n_after_degenerate = len(valid_pairs)
+        if keep_network_indices is not None:
+            requested = set(keep_network_indices)
+            max_idx = len(committed_networks) - 1
+            bad = sorted(i for i in requested if i < 0 or i > max_idx)
+            if bad:
+                raise ValueError(
+                    "keep_network_indices contains out-of-range indices "
+                    f"(max={max_idx}): {bad[:5]}"
+                )
+
+            selected_pairs = [(idx, net) for idx, net in valid_pairs if idx in requested]
+            if selected_pairs:
+                valid_pairs = selected_pairs
+            else:
+                logger.warning(
+                    "[HARD-PRUNE] Requested top-network selection had no non-degenerate survivors; "
+                    "skipping network filtering for this cycle."
+                )
+
+        kept_old_network_indices = [idx for idx, _ in valid_pairs]
+        valid_networks = [net for _, net in valid_pairs]
+
+        requested_removed = sum(len(tus) for tus in tus_to_remove.values())
+        total_removed = sum(len(tus) for tus in effective_tus_to_remove.values())
         logger.info(
-            f"[HARD-PRUNE] Committed networks, requested {total_removed} TUs, applied {applied}"
+            f"[HARD-PRUNE] Committed networks, requested {requested_removed} TUs, "
+            f"effective removals {total_removed}, applied {applied}"
         )
-        if len(valid_networks) < len(committed_networks):
+        if n_after_degenerate < len(committed_networks):
             logger.info(
-                f"[HARD-PRUNE] Filtered {len(committed_networks) - len(valid_networks)} "
-                f"degenerate networks, {len(valid_networks)} remaining"
+                f"[HARD-PRUNE] Filtered {len(committed_networks) - n_after_degenerate} "
+                f"degenerate networks, {n_after_degenerate} remaining"
+            )
+        if keep_network_indices is not None:
+            logger.info(
+                f"[HARD-PRUNE] Top-network filter kept {len(valid_networks)} / "
+                f"{len(committed_networks)} committed networks"
             )
 
         new_dmanager = DesignManager(
@@ -855,8 +1047,24 @@ def hard_prune_and_rebuild(
                 old_2d = old_log_alpha
             else:
                 old_2d = old_log_alpha.reshape(n_networks, -1)
+            assert old_2d.ndim == 2, f"Expected 2D TU log-alpha, got shape {old_2d.shape}"
+            assert old_2d.shape[0] == len(committed_networks), (
+                f"TU log-alpha network axis mismatch before remap: {old_2d.shape[0]} "
+                f"vs committed networks {len(committed_networks)}"
+            )
+
+            row_idx = jnp.asarray(kept_old_network_indices, dtype=jnp.int32)
+            old_2d = jnp.take(old_2d, row_idx, axis=0)
+            assert old_2d.shape[0] == len(valid_networks), (
+                f"TU log-alpha row selection mismatch: {old_2d.shape[0]} "
+                f"vs kept networks {len(valid_networks)}"
+            )
 
             remapped = _remap_tu_log_alpha(old_2d, old_tu_id_to_idx, new_tu_id_to_idx)
+            assert remapped.shape[0] == len(valid_networks), (
+                f"Remapped TU log-alpha network axis mismatch: {remapped.shape[0]} "
+                f"vs kept networks {len(valid_networks)}"
+            )
 
             new_log_alpha = new_params[TU_LOG_ALPHA_PATH]
             if new_log_alpha.ndim == 4:
@@ -864,8 +1072,16 @@ def hard_prune_and_rebuild(
                     remapped[None, None, :, :],
                     (dconf.n_replicates, new_dmanager.n_targets, 1, 1),
                 )
+                assert remapped_4d.shape == new_log_alpha.shape, (
+                    f"TU log-alpha shape mismatch: remapped {remapped_4d.shape} "
+                    f"vs new {new_log_alpha.shape}"
+                )
                 new_params.at(TU_LOG_ALPHA_PATH, remapped_4d, overwrite=True)
             elif new_log_alpha.ndim == 2:
+                assert remapped.shape == new_log_alpha.shape, (
+                    f"TU log-alpha shape mismatch: remapped {remapped.shape} "
+                    f"vs new {new_log_alpha.shape}"
+                )
                 new_params.at(TU_LOG_ALPHA_PATH, remapped, overwrite=True)
 
         scope.event(
@@ -899,17 +1115,21 @@ def run_with_hard_pruning(
     model: "BiocompModel",
     dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
-):
+) -> tuple["ParameterTree", list, StepHistorySnapshot, "DesignManager"]:
     """Design optimization with periodic hard-pruning."""
     from .design import start
     from .design_session import PhaseTimer as _PhaseTimer
     from .design import sample_for_evaluation, evaluate_design
 
-    if dconf.n_replicates != 1:
-        raise ValueError(
-            f"hard_pruning_enabled=True requires n_replicates=1, got {dconf.n_replicates}. "
-            "Run separate single-replicate designs or disable hard pruning."
+    if dconf.n_replicates > 1:
+        logger.info(
+            f"[HARD-PRUNE] Flattening {dconf.n_replicates} replicates x "
+            f"{len(dmanager.networks)} networks -> "
+            f"{dconf.n_replicates * len(dmanager.networks)} flattened networks"
         )
+        dmanager = _flatten_replicates_into_networks(dmanager, dconf.n_replicates)
+        dconf = dconf.model_copy(update={"n_replicates": 1})
+
     if dmanager.n_targets != 1:
         raise ValueError(
             f"hard_pruning_enabled=True requires n_targets=1, got {dmanager.n_targets}. "
@@ -942,14 +1162,16 @@ def run_with_hard_pruning(
             "n_segments": n_segments,
             "n_networks": len(dmanager.networks),
             "n_targets": dmanager.n_targets,
+            "hard_pruning_top_percent": dconf.hard_pruning_top_percent,
+            "hard_pruning_min_networks": dconf.hard_pruning_min_networks,
         },
     )
 
     current_dmanager = dmanager
     accumulated_loss_history: list = []
-    accumulated_step_history: list = []
-    segment_params: "ParameterTree" | None = None
-    current_params: "ParameterTree" | None = None
+    final_step_history: StepHistorySnapshot | None = None
+    segment_params: ParameterTree | None = None
+    current_params: ParameterTree | None = None
 
     for segment_idx in range(n_segments):
         segment_start_step = segment_idx * steps_per_segment
@@ -986,10 +1208,11 @@ def run_with_hard_pruning(
             lock_ratios=lock_ratios,
             initial_params=current_params,
         )
+        segment_step_history = StepHistorySnapshot.from_raw(segment_step_history)
         current_params = segment_params
 
         accumulated_loss_history.extend(segment_loss_history)
-        accumulated_step_history.extend(segment_step_history)
+        final_step_history = segment_step_history
 
         if segment_idx < n_segments - 1:
             timer.start("prune", "[HARD-PRUNE] Identifying TUs to prune...")
@@ -1023,8 +1246,17 @@ def run_with_hard_pruning(
             timer.end("prune")
 
             total_to_remove = sum(len(tus) for tus in tus_to_remove.values())
+            keep_count = _compute_hard_pruning_network_keep_count(
+                len(current_dmanager.networks),
+                dconf.hard_pruning_top_percent,
+                dconf.hard_pruning_min_networks,
+            )
+            use_top_network_selection = (
+                keep_count is not None and keep_count < len(current_dmanager.networks)
+            )
+            keep_network_indices: list[int] | None = None
             loss_pre_mean: float | None = None
-            if total_to_remove > 0:
+            if total_to_remove > 0 or use_top_network_selection:
                 with trace_scope("hard_prune_compare", component="prune") as prune_scope:
                     try:
                         compare_key = jax.random.fold_in(loop_key, segment_idx + 2000)
@@ -1059,6 +1291,35 @@ def run_with_hard_pruning(
                                 "network_names": [n.name for n in current_dmanager.networks],
                             },
                         )
+                        if use_top_network_selection:
+                            assert keep_count is not None
+                            if loss_pre.shape[-1] != len(current_dmanager.networks):
+                                raise AssertionError(
+                                    "loss_pre last dimension must match number of networks, "
+                                    f"got {loss_pre.shape[-1]} vs {len(current_dmanager.networks)}"
+                                )
+                            keep_network_indices = _select_top_network_indices_from_losses(
+                                np.asarray(loss_pre),
+                                keep_count,
+                            )
+                            selected_names = [
+                                current_dmanager.networks[i].name for i in keep_network_indices
+                            ]
+                            logger.info(
+                                "[HARD-PRUNE] Selecting top %d/%d networks for next segment",
+                                len(keep_network_indices),
+                                len(current_dmanager.networks),
+                            )
+                            prune_scope.event(
+                                "top_network_selection",
+                                "Selected top-performing networks",
+                                {
+                                    "keep_count": len(keep_network_indices),
+                                    "total_networks": len(current_dmanager.networks),
+                                    "keep_indices": keep_network_indices,
+                                    "keep_network_names": selected_names,
+                                },
+                            )
                     except Exception as e:
                         prune_scope.event(
                             "pre_prune_error",
@@ -1067,6 +1328,7 @@ def run_with_hard_pruning(
                         )
                         raise
 
+                n_networks_before = len(current_dmanager.networks)
                 prune_key = jax.random.fold_in(loop_key, segment_idx + 1000)
                 current_dmanager, _, current_params = hard_prune_and_rebuild(
                     current_dmanager,
@@ -1077,8 +1339,23 @@ def run_with_hard_pruning(
                     tus_to_remove,
                     prune_key,
                     lock_ratios=lock_ratios,
+                    keep_network_indices=keep_network_indices,
                 )
-                logger.info(f"[HARD-PRUNE] Removed {total_to_remove} TUs, rebuilt stack")
+                if total_to_remove > 0 and keep_network_indices is not None:
+                    logger.info(
+                        "[HARD-PRUNE] Removed %d TUs and kept top %d/%d networks, rebuilt stack",
+                        total_to_remove,
+                        len(current_dmanager.networks),
+                        n_networks_before,
+                    )
+                elif total_to_remove > 0:
+                    logger.info(f"[HARD-PRUNE] Removed {total_to_remove} TUs, rebuilt stack")
+                elif keep_network_indices is not None:
+                    logger.info(
+                        "[HARD-PRUNE] Kept top %d/%d networks, rebuilt stack",
+                        len(current_dmanager.networks),
+                        n_networks_before,
+                    )
 
                 with trace_scope("hard_prune_compare", component="prune") as prune_scope:
                     try:
@@ -1131,6 +1408,7 @@ def run_with_hard_pruning(
                                         "loss_post": loss_post_mean,
                                         "increase_pct": loss_increase * 100,
                                         "tus_removed": total_to_remove,
+                                        "top_network_selection": keep_network_indices is not None,
                                     },
                                 )
                                 prune_scope.snapshot("current_params", jax.device_get(current_params))
@@ -1142,11 +1420,12 @@ def run_with_hard_pruning(
                             {"error": str(e)},
                         )
             else:
-                logger.info("[HARD-PRUNE] No TUs to remove, continuing with current structure")
+                logger.info("[HARD-PRUNE] No pruning or top-network filtering applied")
 
     logger.info("=" * 60)
     logger.info(f"HARD-PRUNING OPTIMIZATION COMPLETE in {timer.total():.2f}s")
     logger.info("=" * 60)
 
     assert segment_params is not None, "No optimization segments were run"
-    return segment_params, accumulated_loss_history, accumulated_step_history, current_dmanager
+    assert final_step_history is not None, "No step history produced during hard-pruning optimization"
+    return segment_params, accumulated_loss_history, final_step_history, current_dmanager

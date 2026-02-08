@@ -23,6 +23,7 @@ from biocomp.optimutils import (
     get_checkify_enabled,
 )
 from biocomp.logger_dispatch import LoggerDispatch, NullDispatch
+from biocomp.step_history import StepHistorySnapshot
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                     --     helper functions     --
@@ -630,7 +631,7 @@ def start(
 
     logger.info(f"End of training for {training_config.n_epochs} epochs")
 
-    return params, loss_history, step_history
+    return params, loss_history, StepHistorySnapshot.from_raw(step_history)
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}

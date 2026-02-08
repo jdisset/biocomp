@@ -6,26 +6,33 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import dracon as dr
+from pydantic import ValidationError
 
 from biocomp.design import DesignConfig, DesignManager, initialize_params
 from biocomp.design_pruning import (
     _merge_surviving_params,
     _expand_params_for_merge,
     _store_learned_ratio_inits,
+    _collect_ratio_pruning_candidates,
+    _compute_hard_pruning_network_keep_count,
+    _select_top_network_indices_from_losses,
     identify_tus_to_prune,
     hard_prune_and_rebuild,
+    run_with_hard_pruning,
 )
 from biocomp.tumasking import TU_LOG_ALPHA_PATH
 from biocomp.parameters import ParameterTree
 from biocomp.design_targets import SVGTarget
 from biocomp.config import DEFAULT_COMPUTE_CONFIG
 from biocomp.datautils import IdentityRescaler
+from biocomp.step_history import StepHistorySnapshot
 from biocomptools.modelmodel import BiocompModel
 from biocomp.library import LibraryContext, load_lib
 from biocomp.network import recipe_to_networks
 from biocomp.recipe import Recipe
 from biocomp.tumasking import extract_tu_ids_from_network
 from biocomp.tumasking_strategy import TUMaskingMode, build_strategy_from_config
+from biocomp.ratio_schema import get_slot_entries
 import biocomp.biorules as br
 from biocomp.jaxutils import tree_get
 
@@ -154,6 +161,8 @@ class TestDesignConfigHardPruning:
         assert dconf.hard_pruning_interval == 500
         assert dconf.hard_pruning_ratio_threshold == 0.01
         assert dconf.hard_pruning_preserve_minimum_tus == 1
+        assert dconf.hard_pruning_top_percent is None
+        assert dconf.hard_pruning_min_networks is None
 
     def test_hard_pruning_prune_margin_is_configurable(self):
         """Verify prune_margin parameter can be set."""
@@ -167,6 +176,152 @@ class TestDesignConfigHardPruning:
         """Verify prune_margin defaults to 0.1."""
         dconf = DesignConfig(hard_pruning_enabled=True)
         assert dconf.hard_pruning_prune_margin == 0.1
+
+    def test_hard_pruning_network_selection_fields_are_configurable(self):
+        dconf = DesignConfig(
+            hard_pruning_enabled=True,
+            hard_pruning_top_percent=25.0,
+            hard_pruning_min_networks=3,
+        )
+        assert dconf.hard_pruning_top_percent == 25.0
+        assert dconf.hard_pruning_min_networks == 3
+
+    def test_hard_pruning_top_percent_validation(self):
+        with pytest.raises(ValidationError, match="hard_pruning_top_percent"):
+            DesignConfig(hard_pruning_enabled=True, hard_pruning_top_percent=0.0)
+
+    def test_hard_pruning_min_networks_validation(self):
+        with pytest.raises(ValidationError, match="hard_pruning_min_networks"):
+            DesignConfig(hard_pruning_enabled=True, hard_pruning_min_networks=0)
+
+
+class TestHardPruningTopNetworkSelection:
+    def test_keep_count_uses_max_of_percent_and_min(self):
+        keep_count = _compute_hard_pruning_network_keep_count(
+            n_networks=20,
+            top_percent=10.0,
+            min_networks=5,
+        )
+        assert keep_count == 5
+
+    def test_keep_count_returns_none_when_disabled(self):
+        keep_count = _compute_hard_pruning_network_keep_count(
+            n_networks=20,
+            top_percent=None,
+            min_networks=None,
+        )
+        assert keep_count is None
+
+    def test_select_top_network_indices_averages_over_non_network_axes(self):
+        losses = np.array([[[0.9, 0.2, 0.6, 0.3]]], dtype=np.float32)
+        top_idx = _select_top_network_indices_from_losses(losses, keep_count=2)
+        assert top_idx == [1, 3]
+
+
+def test_run_with_hard_pruning_returns_snapshot_step_history(lib):
+    if not SCAFFOLD_PATH.exists():
+        pytest.skip(f"Scaffold not found: {SCAFFOLD_PATH}")
+
+    model = _make_model()
+
+    with LibraryContext.with_library(lib):
+        recipe = _load_scaffold_recipe()
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
+        target = SVGTarget(
+            name="MIT_T (hard prune return type)",
+            path=RESOURCES_DIR / "designs/MIT_T.svg",
+            transform_to_log_space=False,
+            latent_x=(0.0, 0.6),
+            latent_y=(0.0, 0.6),
+        )
+        dmanager = DesignManager(
+            targets=[target],
+            networks=networks[:1],
+            enable_tu_masking=False,
+        )
+        init_stack = dmanager.build_stack(model, unlock_ratios=True)
+        model.shared_params = _extract_shared_params(init_stack)
+        dconf = DesignConfig(
+            n_replicates=1,
+            n_epochs=1,
+            n_batches_per_epoch=1,
+            batch_size=1,
+            batches_per_step=1,
+            reshuffle_batches=False,
+            hard_pruning_enabled=True,
+            hard_pruning_interval=1,
+        )
+
+        _, loss_history, step_history, _ = run_with_hard_pruning(
+            dmanager=dmanager,
+            dconf=dconf,
+            model=model,
+        )
+
+    assert len(loss_history) > 0
+    assert isinstance(step_history, StepHistorySnapshot)
+    assert "loss" in step_history
+
+
+def test_run_with_hard_pruning_multiple_replicates(lib):
+    """Hard pruning with n_replicates>1 flattens replicates into networks."""
+    if not SCAFFOLD_PATH.exists():
+        pytest.skip(f"Scaffold not found: {SCAFFOLD_PATH}")
+
+    model = _make_model()
+
+    with LibraryContext.with_library(lib):
+        recipe = _load_scaffold_recipe()
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
+        n_original_networks = len(networks[:1])
+        n_replicates = 2
+
+        target = SVGTarget(
+            name="MIT_T (multi-rep hard prune)",
+            path=RESOURCES_DIR / "designs/MIT_T.svg",
+            transform_to_log_space=False,
+            latent_x=(0.0, 0.6),
+            latent_y=(0.0, 0.6),
+        )
+        dmanager = DesignManager(
+            targets=[target],
+            networks=networks[:1],
+            enable_tu_masking=False,
+        )
+        init_stack = dmanager.build_stack(model, unlock_ratios=True)
+        model.shared_params = _extract_shared_params(init_stack)
+        dconf = DesignConfig(
+            n_replicates=n_replicates,
+            n_epochs=1,
+            n_batches_per_epoch=1,
+            batch_size=1,
+            batches_per_step=1,
+            reshuffle_batches=False,
+            hard_pruning_enabled=True,
+            hard_pruning_interval=1,
+        )
+
+        params, loss_history, step_history, returned_dmanager = run_with_hard_pruning(
+            dmanager=dmanager,
+            dconf=dconf,
+            model=model,
+        )
+
+    assert len(loss_history) > 0
+    assert isinstance(step_history, StepHistorySnapshot)
+
+    # Returned dmanager should have flattened networks (n_replicates * original)
+    # or fewer if some were pruned
+    assert len(returned_dmanager.networks) <= n_replicates * n_original_networks
+    assert len(returned_dmanager.networks) >= 1
+
+    # Params should have replicate dim = 1 (flattened)
+    for _, val in params.data.iter_leaves():
+        if hasattr(val, "shape") and val.ndim >= 2:
+            assert val.shape[0] == 1, (
+                f"Expected replicate dim = 1 after flattening, got shape {val.shape}"
+            )
+            break
 
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
@@ -345,6 +500,47 @@ def test_identify_tus_to_prune_returns_mapped_ids(lib):
         assert tus_to_remove[0].issubset(tu_id_set)
 
 
+def test_collect_ratio_pruning_candidates_prunes_only_if_tu_is_weak_everywhere():
+    """A TU appearing in multiple slots should be pruned only if all slots are weak."""
+    from types import SimpleNamespace
+
+    class _FakeLayer:
+        f_type = "aggregation"
+        namespace = "local/agg"
+
+        def __init__(self):
+            self.nodes = [SimpleNamespace(network_id=0)]
+
+        def get_n_outputs(self):
+            return 2
+
+    # Same TU mapped to both slots: one strong, one weak.
+    params = ParameterTree()
+    params.at("local/agg/ratios", np.array([[0.9, 0.01]], dtype=np.float32), overwrite=None)
+    params.at("local/agg/ratio_min", np.array([[0.0, 0.0]], dtype=np.float32), overwrite=None)
+    params.at("local/agg/ratio_max", np.array([[1.0, 1.0]], dtype=np.float32), overwrite=None)
+    params.at("local/agg/output_tu_indices", np.array([[0, 0]], dtype=np.int32), overwrite=None)
+
+    fake_edge = SimpleNamespace(extra=SimpleNamespace(tu_id=["tuA"]))
+    fake_network = SimpleNamespace(compute_graph=SimpleNamespace(edges={0: fake_edge}))
+    fake_stack = SimpleNamespace(
+        tu_id_to_idx={"tuA": 0},
+        layers=[_FakeLayer()],
+        networks=[fake_network],
+    )
+
+    candidates, all_tu_ids, tu_strengths = _collect_ratio_pruning_candidates(
+        params=params,
+        stack=fake_stack,
+        network_id=0,
+        ratio_threshold=0.1,
+    )
+
+    assert "tuA" in all_tu_ids
+    assert tu_strengths["tuA"] == pytest.approx(0.9)
+    assert "tuA" not in candidates
+
+
 def _find_first_rate_edge(stack, params, rate_name: str):
     if stack.layers is None:
         return None
@@ -377,10 +573,10 @@ def _find_aggregation_member(stack):
             continue
         for node_idx, node in enumerate(layer.nodes):
             graph_node = node.get(stack)
-            members = graph_node.extra.get("members", {})
-            if isinstance(members, dict) and members:
-                member_id = sorted(members.keys())[0]
-                return namespace, node_idx, member_id
+            slot_entries = get_slot_entries(graph_node.extra, require=False)
+            if slot_entries:
+                source_id = str(slot_entries[0]["source_id"])
+                return namespace, node_idx, source_id
     return None
 
 
@@ -442,7 +638,7 @@ def _find_value_in_new_stack(stack, params, tu_id: str, rate_name: str):
     return None
 
 
-def _find_ratio_in_new_stack(stack, params, member_id: str):
+def _find_ratio_in_new_stack(stack, params, source_id: str):
     if stack.layers is None:
         return None
     for layer in stack.layers:
@@ -457,12 +653,11 @@ def _find_ratio_in_new_stack(stack, params, member_id: str):
         arr = np.asarray(params[ratio_path])
         for node_idx, node in enumerate(layer.nodes):
             graph_node = node.get(stack)
-            members = graph_node.extra.get("members", {})
-            if isinstance(members, dict) and members:
-                sorted_ids = sorted(members.keys())
-                if member_id in sorted_ids:
-                    idx = sorted_ids.index(member_id)
-                    return arr[node_idx, idx]
+            slot_entries = get_slot_entries(graph_node.extra, require=False)
+            source_ids = [str(entry["source_id"]) for entry in slot_entries]
+            if source_id in source_ids:
+                idx = source_ids.index(source_id)
+                return arr[node_idx, idx]
     return None
 
 
@@ -535,7 +730,7 @@ def test_hard_prune_preserves_semantic_params(lib):
         if agg_info is None or rate_info is None or bias_info is None:
             pytest.skip("Required nodes not found in scaffold")
 
-        agg_ns, agg_node_idx, member_id = agg_info
+        agg_ns, agg_node_idx, source_id = agg_info
         rate_ns, rate_node_idx, rate_input_idx, tu_id = rate_info
         bias_ns, bias_node_idx, protein = bias_info
 
@@ -551,10 +746,10 @@ def test_hard_prune_preserves_semantic_params(lib):
         ratios = np.array(params[ratio_path], copy=True)
         agg_layer = next(l for l in stack.layers if l.namespace == agg_ns)
         agg_node = agg_layer.nodes[agg_node_idx].get(stack)
-        sorted_ids = sorted((agg_node.extra or {}).get("members", {}).keys())
-        if member_id in sorted_ids:
-            member_idx = sorted_ids.index(member_id)
-            ratios[agg_node_idx, member_idx] = ratio_value
+        source_ids = [str(entry["source_id"]) for entry in get_slot_entries(agg_node.extra, require=False)]
+        if source_id in source_ids:
+            source_idx = source_ids.index(source_id)
+            ratios[agg_node_idx, source_idx] = ratio_value
         else:
             ratios[agg_node_idx, 0] = ratio_value
         params.at(ratio_path, ratios, overwrite=True)
@@ -581,7 +776,7 @@ def test_hard_prune_preserves_semantic_params(lib):
 
         new_params_flat = tree_get(new_params, (0, 0))
         new_rate = _find_value_in_new_stack(new_stack, new_params_flat, tu_id, rate_name)
-        new_ratio = _find_ratio_in_new_stack(new_stack, new_params_flat, member_id)
+        new_ratio = _find_ratio_in_new_stack(new_stack, new_params_flat, source_id)
         new_bias = _find_bias_in_new_stack(new_stack, new_params_flat, protein)
 
         assert new_rate is not None
@@ -662,6 +857,81 @@ def test_hard_prune_removes_masked_tus(lib):
 
         remaining = extract_tu_ids_from_network(new_dmanager.networks[0])
         assert tu_id not in remaining
+
+
+def test_hard_prune_top_network_selection_remaps_tu_log_alpha_rows(lib):
+    if not SCAFFOLD_PATH.exists():
+        pytest.skip(f"Scaffold not found: {SCAFFOLD_PATH}")
+
+    model = _make_model()
+
+    with LibraryContext.with_library(lib):
+        recipe = _load_scaffold_recipe()
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
+        if not networks:
+            pytest.skip("No networks found in scaffold")
+        net_a = networks[0].model_copy(deep=True)
+        net_b = networks[0].model_copy(deep=True)
+        net_a.name = f"{net_a.name}_A"
+        net_b.name = f"{net_b.name}_B"
+
+        target = SVGTarget(
+            name="MIT_T (top network tu remap)",
+            path=RESOURCES_DIR / "designs/MIT_T.svg",
+            transform_to_log_space=False,
+            latent_x=(0.0, 0.6),
+            latent_y=(0.0, 0.6),
+        )
+        dmanager = DesignManager(targets=[target], networks=[net_a, net_b], enable_tu_masking=True)
+        stack = dmanager.build_stack(model, unlock_ratios=True)
+
+        dconf = DesignConfig(n_replicates=1, n_epochs=1)
+        dconf.tu_masking.mode = TUMaskingMode.DIRECT
+        params_full = initialize_params(
+            stack,
+            n_replicates=1,
+            n_targets=1,
+            shared_params=model.shared_params,
+            key=jax.random.key(12),
+            strategy=build_strategy_from_config(dconf),
+            n_tus=dmanager.n_tus,
+            n_networks=len(dmanager.networks),
+            no_masking_tu_ids=stack.no_masking_tu_ids,
+            tu_id_to_idx=stack.tu_id_to_idx,
+        )
+        params = tree_get(params_full, (0, 0))
+
+        old_log_alpha = np.asarray(params[TU_LOG_ALPHA_PATH])
+        assert old_log_alpha.ndim == 2
+        assert old_log_alpha.shape[0] == 2
+
+        stack.ensure_tu_mapping()
+        tus_to_remove = {0: set(), 1: set()}
+        new_dmanager, new_stack, new_params_batched = hard_prune_and_rebuild(
+            dmanager,
+            dconf,
+            model,
+            stack,
+            params,
+            tus_to_remove,
+            jax.random.key(13),
+            keep_network_indices=[1],
+        )
+
+        assert len(new_dmanager.networks) == 1
+
+        new_params = tree_get(new_params_batched, (0, 0))
+        new_log_alpha = np.asarray(new_params[TU_LOG_ALPHA_PATH])
+        assert new_log_alpha.ndim == 2
+        assert new_log_alpha.shape[0] == 1
+
+        old_tu_map = stack.tu_id_to_idx or {}
+        new_tu_map = new_stack.tu_id_to_idx or {}
+        for tu_id, new_idx in new_tu_map.items():
+            if tu_id not in old_tu_map:
+                continue
+            old_idx = old_tu_map[tu_id]
+            assert np.allclose(new_log_alpha[0, new_idx], old_log_alpha[1, old_idx], atol=1e-6)
 
 
 def test_hard_prune_commit_keeps_outputs(lib):
@@ -921,31 +1191,94 @@ def test_store_learned_ratio_inits_sets_init_not_locked(lib):
         if agg_info is None:
             pytest.skip("No aggregation node found")
 
-        agg_ns, agg_node_idx, member_id = agg_info
+        agg_ns, agg_node_idx, source_id = agg_info
         ratio_path = f"{agg_ns}/ratios"
 
         test_ratio = 0.789
         ratios = np.array(params[ratio_path], copy=True)
         agg_layer = next(l for l in stack.layers if l.namespace == agg_ns)
         agg_node = agg_layer.nodes[agg_node_idx].get(stack)
-        sorted_ids = sorted((agg_node.extra or {}).get("members", {}).keys())
-        if member_id in sorted_ids:
-            member_idx = sorted_ids.index(member_id)
-            ratios[agg_node_idx, member_idx] = test_ratio
+        source_ids = [str(entry["source_id"]) for entry in get_slot_entries(agg_node.extra, require=False)]
+        if source_id in source_ids:
+            source_idx = source_ids.index(source_id)
+            ratios[agg_node_idx, source_idx] = test_ratio
         params.at(ratio_path, ratios, overwrite=True)
 
         _store_learned_ratio_inits(params, stack)
 
-        members = agg_node.extra.get("members", {})
-        m = members.get(member_id)
-        assert m is not None, f"Member {member_id} not found"
-        assert isinstance(m, dict), f"Member {member_id} is not a dict"
-        assert m.get("locked") is False, "Ratio should NOT be locked"
-        assert "ratio_range" in m, "ratio_range should be set"
-        assert m["ratio_range"].get("init") is not None, "init value should be set"
-        assert abs(m["ratio_range"]["init"] - test_ratio) < 1e-6, (
-            f"init should be {test_ratio}, got {m['ratio_range']['init']}"
+        slot_entries = get_slot_entries(agg_node.extra, require=False)
+        updated_entry = next(
+            (entry for entry in slot_entries if str(entry.get("source_id")) == source_id),
+            None,
         )
+        assert updated_entry is not None, f"Source {source_id} not found"
+        assert updated_entry.get("locked") is False, "Ratio should NOT be locked"
+        assert "ratio_range" in updated_entry, "ratio_range should be set"
+        assert updated_entry["ratio_range"].get("init") is not None, "init value should be set"
+        assert abs(updated_entry["ratio_range"]["init"] - test_ratio) < 1e-6, (
+            f"init should be {test_ratio}, got {updated_entry['ratio_range']['init']}"
+        )
+
+
+def test_store_learned_ratio_inits_uses_schema_slot_order(lib):
+    """Regression test: ratio init mapping follows ratio_schema slot order."""
+    if not SCAFFOLD_PATH.exists():
+        pytest.skip(f"Scaffold not found: {SCAFFOLD_PATH}")
+
+    model = _make_model()
+
+    with LibraryContext.with_library(lib):
+        recipe = _load_scaffold_recipe()
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
+        target = SVGTarget(
+            name="MIT_T (ratio sorted order)",
+            path=RESOURCES_DIR / "designs/MIT_T.svg",
+            transform_to_log_space=False,
+            latent_x=(0.0, 0.6),
+            latent_y=(0.0, 0.6),
+        )
+        dmanager = DesignManager(targets=[target], networks=networks[:1], enable_tu_masking=False)
+        stack = dmanager.build_stack(model, unlock_ratios=True)
+        params_full = initialize_params(
+            stack,
+            n_replicates=1,
+            n_targets=1,
+            shared_params=model.shared_params,
+            key=jax.random.key(102),
+            n_tus=0,
+            n_networks=len(dmanager.networks),
+            no_masking_tu_ids=stack.no_masking_tu_ids,
+            tu_id_to_idx=stack.tu_id_to_idx,
+        )
+        params = tree_get(params_full, (0, 0))
+
+        agg_info = _find_aggregation_member(stack)
+        if agg_info is None:
+            pytest.skip("No aggregation node found")
+        agg_ns, agg_node_idx, _source_id = agg_info
+        ratio_path = f"{agg_ns}/ratios"
+
+        agg_layer = next(l for l in stack.layers if l.namespace == agg_ns)
+        agg_node = agg_layer.nodes[agg_node_idx].get(stack)
+        slot_entries = get_slot_entries(agg_node.extra, require=False)
+        if len(slot_entries) < 2:
+            pytest.skip("Aggregation node has too few ratio slots")
+
+        ratios = np.array(params[ratio_path], copy=True)
+        test_vals = np.linspace(0.11, 0.89, len(slot_entries))
+        ratios[agg_node_idx, : len(slot_entries)] = test_vals
+        params.at(ratio_path, ratios, overwrite=True)
+
+        _store_learned_ratio_inits(params, stack)
+
+        updated_entries = get_slot_entries(agg_node.extra, require=False)
+        for idx, entry in enumerate(updated_entries):
+            assert "ratio_range" in entry and entry["ratio_range"].get("init") is not None
+            got = float(entry["ratio_range"]["init"])
+            expected = float(test_vals[idx])
+            assert abs(got - expected) < 1e-6, (
+                f"Slot {idx} should get init {expected}, got {got}"
+            )
 
 
 class TestCommitPreservesRatioStates:
@@ -970,7 +1303,7 @@ class TestCommitPreservesRatioStates:
         )
 
     def test_structure_commit_preserves_ratio_range_in_graph(self, lib):
-        """Verify commit_structure keeps ratio_range dict with init in aggregation members."""
+        """Verify commit_structure keeps ratio_range dict with init in ratio_schema slots."""
         from biocomp.stack_commit import commit_structure
 
         if not SCAFFOLD_PATH.exists():
@@ -1013,14 +1346,17 @@ class TestCommitPreservesRatioStates:
             if agg_info is None:
                 pytest.skip("No aggregation node found")
 
-            agg_ns, agg_node_idx, member_id = agg_info
+            agg_ns, agg_node_idx, source_id = agg_info
             agg_layer = next(l for l in stack.layers if l.namespace == agg_ns)
             agg_node = agg_layer.nodes[agg_node_idx].get(stack)
 
             # Get the init value before commit
-            members_before = agg_node.extra.get("members", {})
-            m_before = members_before.get(member_id, {})
-            init_before = m_before.get("ratio_range", {}).get("init")
+            slot_entries_before = get_slot_entries(agg_node.extra, require=False)
+            entry_before = next(
+                (entry for entry in slot_entries_before if str(entry.get("source_id")) == source_id),
+                {},
+            )
+            init_before = entry_before.get("ratio_range", {}).get("init")
             assert init_before is not None, "Init should be set before commit"
 
             # Commit with preserve_ratio_states=True (structure-only)
@@ -1032,23 +1368,26 @@ class TestCommitPreservesRatioStates:
             committed_agg = None
             for node in committed_net.compute_graph.nodes.values():
                 if node.node_type == "aggregation":
-                    members = (node.extra or {}).get("members", {})
-                    if member_id in members:
+                    entries = get_slot_entries(node.extra, require=False)
+                    if any(str(entry.get("source_id")) == source_id for entry in entries):
                         committed_agg = node
                         break
 
             if committed_agg is None:
-                pytest.skip("Member not found in committed network (may have been pruned)")
+                pytest.skip("Source slot not found in committed network (may have been pruned)")
 
-            members_after = committed_agg.extra.get("members", {})
-            m_after = members_after.get(member_id, {})
+            slot_entries_after = get_slot_entries(committed_agg.extra, require=False)
+            entry_after = next(
+                (entry for entry in slot_entries_after if str(entry.get("source_id")) == source_id),
+                {},
+            )
 
             # THE KEY ASSERTION: ratio_range with init must survive commit
-            assert "ratio_range" in m_after, (
+            assert "ratio_range" in entry_after, (
                 "ratio_range dict must be preserved after commit_structure. "
                 "This is the core fix for the hard-pruning loss regression bug."
             )
-            init_after = m_after["ratio_range"].get("init")
+            init_after = entry_after["ratio_range"].get("init")
             assert init_after is not None, "init value must be preserved after commit"
 
     def test_structure_commit_with_lock_ratios_drops_range(self, lib):
@@ -1097,11 +1436,10 @@ class TestCommitPreservesRatioStates:
             committed_net = committed_networks[0]
             for node in committed_net.compute_graph.nodes.values():
                 if node.node_type == "aggregation":
-                    members = (node.extra or {}).get("members", {})
-                    for mid, m in members.items():
-                        if isinstance(m, dict):
-                            # ratio_range should be None when lock_ratios=True
-                            assert m.get("ratio_range") is None, (
-                                f"ratio_range should be None with lock_ratios=True, "
-                                f"got {m.get('ratio_range')} for member {mid}"
-                            )
+                    entries = get_slot_entries(node.extra, require=False)
+                    for entry in entries:
+                        # ratio_range should be None when lock_ratios=True
+                        assert entry.get("ratio_range") is None, (
+                            "ratio_range should be None with lock_ratios=True, "
+                            f"got {entry.get('ratio_range')} for source {entry.get('source_id')}"
+                        )

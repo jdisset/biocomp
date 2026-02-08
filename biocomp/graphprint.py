@@ -719,23 +719,11 @@ class GraphPrinter:
                 if "source_id" in node.extra:
                     extra_parts.append(f"src={node.extra['source_id']}")
             elif node.node_type == "aggregation":
-                members_data = node.extra.get("members", {})
-                if isinstance(members_data, dict) and members_data:
-                    sorted_ids = sorted(members_data.keys())
-                    ratios = [
-                        members_data[m].get("ratio", 1.0)
-                        if isinstance(members_data[m], dict)
-                        else 1.0
-                        for m in sorted_ids
-                    ]
-                    ratio_ranges = [
-                        members_data[m].get("ratio_range")
-                        if isinstance(members_data[m], dict)
-                        else None
-                        for m in sorted_ids
-                    ]
-                else:
-                    ratios, ratio_ranges = [], []
+                from biocomp.ratio_schema import get_slot_entries
+
+                slot_entries = get_slot_entries(node.extra, require=False)
+                ratios = [float(entry.get("ratio", 1.0)) for entry in slot_entries]
+                ratio_ranges = [entry.get("ratio_range") for entry in slot_entries]
                 if ratios:
                     ratio_strs = []
                     for i, r in enumerate(ratios):

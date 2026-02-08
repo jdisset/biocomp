@@ -33,6 +33,7 @@ from biocomp.fingerprint import (
     FINGERPRINT_RESOLUTION,
 )
 from biocomp.jaxutils import tree_get
+from biocomp.ratio_schema import get_slot_entries
 
 SCAFFOLD_PATH = Path(__file__).parent.parent.parent / "biocomp-jobs/design/architectures/two_and_one_skip.yaml"
 RESOURCES_DIR = Path(__file__).parent / "resources"
@@ -232,9 +233,9 @@ def test_commit_consistency_with_tu_masking(lib, masked_scaffold_setup, designer
         # Check ratios in committed network
         for node in committed_network.compute_graph.nodes.values():
             if node.node_type == "aggregation":
-                members = node.extra.get("members", {})
-                if members:
-                    ratios = {m: members[m].get("ratio") for m in sorted(members.keys())}
+                slot_entries = get_slot_entries(node.extra, require=False)
+                if slot_entries:
+                    ratios = {entry["source_id"]: entry.get("ratio") for entry in slot_entries}
                     print(f"Aggregation node ratios: {ratios}")
 
         with tempfile.NamedTemporaryFile(suffix=".pickle", delete=False) as f:
@@ -286,9 +287,9 @@ def test_commit_preserves_ratios(lib, masked_scaffold_setup, designer_model):
                      if n.node_type == "aggregation"]
 
         for agg_node in agg_nodes:
-            members = agg_node.extra.get("members", {})
-            if members:
-                committed_ratios = [members[m]["ratio"] for m in sorted(members.keys())]
+            slot_entries = get_slot_entries(agg_node.extra, require=False)
+            if slot_entries:
+                committed_ratios = [entry["ratio"] for entry in slot_entries]
                 committed_ratios = np.array(committed_ratios)
 
                 ratio_sum = np.sum(committed_ratios)

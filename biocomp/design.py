@@ -19,6 +19,7 @@ from biocomp.compute import ComputeStack
 import biocomp.nodes as nd
 from biocomp.network import Network
 from .parameters import ParameterTree
+from .step_history import StepHistorySnapshot
 from biocomp.logging_config import get_logger
 from biocomp.optimutils import DesignOptimConfig
 from biocomp.logger_dispatch import LoggerDispatch
@@ -442,12 +443,30 @@ class DesignConfig(DesignOptimConfig):
     hard_pruning_ratio_threshold: float = 0.01
     hard_pruning_preserve_minimum_tus: int = 1
     hard_pruning_prune_margin: float = 0.1
+    hard_pruning_top_percent: float | None = None
+    hard_pruning_min_networks: int | None = None
 
     pluggable_optimizer: Any = None
 
     tracing: TracingSettings = Field(default_factory=TracingSettings)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @model_validator(mode="after")
+    def _validate_hard_pruning_network_selection(self) -> "DesignConfig":
+        if self.hard_pruning_top_percent is not None and not (
+            0.0 < self.hard_pruning_top_percent <= 100.0
+        ):
+            raise ValueError(
+                "hard_pruning_top_percent must be in (0, 100], "
+                f"got {self.hard_pruning_top_percent}"
+            )
+        if self.hard_pruning_min_networks is not None and self.hard_pruning_min_networks < 1:
+            raise ValueError(
+                "hard_pruning_min_networks must be >= 1, "
+                f"got {self.hard_pruning_min_networks}"
+            )
+        return self
 
     @property
     def enable_tu_masking(self) -> bool:
@@ -609,30 +628,34 @@ def start(
     lock_ratios: bool = False,
     initial_params: ParameterTree | None = None,
 ):
+    def _with_snapshot(result):
+        params, losses, step_history = result
+        return params, losses, StepHistorySnapshot.from_raw(step_history)
+
     if dconf.hard_pruning_enabled:
         logger.info("Using hard-pruning mode with interval=%d", dconf.hard_pruning_interval)
         params, loss, steps, _ = _start_with_hard_pruning(
             dmanager, dconf, model, dispatch=dispatch, lock_ratios=lock_ratios,
         )
-        return params, loss, steps
+        return params, loss, StepHistorySnapshot.from_raw(steps)
 
     if dconf.uses_pluggable_optimizer:
         logger.info("Using pluggable optimizer: %s", type(dconf.pluggable_optimizer).__name__)
         from .pluggable_opt.run_pluggable import run_pluggable
 
-        return run_pluggable(
+        return _with_snapshot(run_pluggable(
             dmanager, dconf, model, dispatch=dispatch, lock_ratios=lock_ratios,
-        )
+        ))
     from .design_run import run_design
 
-    return run_design(
+    return _with_snapshot(run_design(
         dmanager,
         dconf,
         model,
         dispatch=dispatch,
         lock_ratios=lock_ratios,
         initial_params=initial_params,
-    )
+    ))
 
 
 def sample_for_evaluation(
@@ -695,7 +718,11 @@ def evaluate_design(
     CRITICAL: This function uses the SAME loss as training (grid_distance_loss weights).
     This ensures evaluation loss reflects actual design performance.
     """
-    stack = dmanager.build_stack(model, unlock_ratios=False)
+    stack = dmanager.build_stack(
+        model,
+        unlock_ratios=False,
+        auto_lock_topology_tus=dconf.auto_lock_topology_tus,
+    )
     n_networks, n_replicates, n_targets, n_samples = (
         len(dmanager.networks),
         dconf.n_replicates,

@@ -32,10 +32,15 @@ from biocomp.tumasking import (
     build_tu_id_mapping,
     TU_LOG_ALPHA_PATH,
 )
+from biocomp.ratio_schema import get_slot_entries
 from pathlib import Path
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
 SCAFFOLD_PATH = RESOURCES_DIR / "design/architectures/two_and_one.yaml"
+
+
+def _ratio_slot_count(node) -> int:
+    return len(get_slot_entries(node.extra, require=False))
 
 
 @pytest.fixture(scope="module")
@@ -511,8 +516,7 @@ def test_commit_applies_tu_masks(lib, design_stack):
         for net in stack.networks:
             for node in net.compute_graph.nodes.values():
                 if "aggregation" in node.node_type.lower():
-                    members = node.extra.get("members", [])
-                    total_members_before += len(members)
+                    total_members_before += _ratio_slot_count(node)
 
         # set half TUs to disabled (negative log_alpha) and half enabled (positive)
         tu_log_alpha = jnp.zeros((n_networks, n_tus))
@@ -529,8 +533,7 @@ def test_commit_applies_tu_masks(lib, design_stack):
         for net in committed_networks:
             for node in net.compute_graph.nodes.values():
                 if "aggregation" in node.node_type.lower():
-                    members = node.extra.get("members", [])
-                    total_members_after += len(members)
+                    total_members_after += _ratio_slot_count(node)
 
         assert total_members_after < total_members_before, (
             f"Expected fewer members after commit due to disabled TU pruning. "
@@ -702,8 +705,7 @@ def test_all_tus_disabled_produces_different_commit(lib, design_stack):
             for net in networks:
                 for node in net.compute_graph.nodes.values():
                     if "aggregation" in node.node_type.lower():
-                        members = node.extra.get("members", [])
-                        total += len(members)
+                        total += _ratio_slot_count(node)
             return total
 
         members_enabled = count_members(committed_enabled)
@@ -811,8 +813,7 @@ def test_per_network_tu_mask_commit_independence(lib, multi_network_stack):
             count = 0
             for node in net.compute_graph.nodes.values():
                 if "aggregation" in node.node_type.lower():
-                    members = node.extra.get("members", [])
-                    count += len(members)
+                    count += _ratio_slot_count(node)
             return count
 
         members_net0 = count_members(committed_networks[0])
@@ -916,8 +917,7 @@ def test_disabled_tu_removed_after_commit(lib, design_stack):
         for net in committed_all_enabled:
             for node in net.compute_graph.nodes.values():
                 if "aggregation" in node.node_type.lower():
-                    members = node.extra.get("members", [])
-                    total_members_all += len(members)
+                    total_members_all += _ratio_slot_count(node)
 
         # disable first TU
         params_one_disabled = stack.init(key)
@@ -930,8 +930,7 @@ def test_disabled_tu_removed_after_commit(lib, design_stack):
         for net in committed_one_disabled:
             for node in net.compute_graph.nodes.values():
                 if "aggregation" in node.node_type.lower():
-                    members = node.extra.get("members", [])
-                    total_members_one_disabled += len(members)
+                    total_members_one_disabled += _ratio_slot_count(node)
 
         assert total_members_one_disabled < total_members_all, (
             f"Disabling a TU should reduce member count.\n"
@@ -1215,15 +1214,15 @@ def test_committed_network_rebuilds_equivalent(lib, design_stack):
                 sorted(rebuilt_aggs, key=lambda x: x.node_id),
                 strict=False,
             ):
-                c_members = c_agg.extra.get("members", {})
-                r_members = r_agg.extra.get("members", {})
+                c_slots = get_slot_entries(c_agg.extra, require=False)
+                r_slots = get_slot_entries(r_agg.extra, require=False)
                 c_out_edges = len(committed_graph.get_outgoing_edges(c_agg.node_id))
                 r_out_edges = len(rebuilt_graph.get_outgoing_edges(r_agg.node_id))
 
-                assert len(c_members) == len(r_members), (
-                    f"Network {net_idx}, Agg {c_agg.node_id}: member count mismatch.\n"
-                    f"Committed: {len(c_members)} members: {c_members}\n"
-                    f"Rebuilt: {len(r_members)} members: {r_members}"
+                assert len(c_slots) == len(r_slots), (
+                    f"Network {net_idx}, Agg {c_agg.node_id}: slot count mismatch.\n"
+                    f"Committed: {len(c_slots)} slots: {c_slots}\n"
+                    f"Rebuilt: {len(r_slots)} slots: {r_slots}"
                 )
 
                 assert c_out_edges == r_out_edges, (
@@ -1232,14 +1231,14 @@ def test_committed_network_rebuilds_equivalent(lib, design_stack):
                     f"Rebuilt: {r_out_edges} edges"
                 )
 
-                # CRITICAL: members count should match outgoing edges (the original bug!)
-                assert len(c_members) == c_out_edges, (
-                    f"Network {net_idx}, Agg {c_agg.node_id}: COMMITTED network has mismatched members/edges!\n"
-                    f"Members: {len(c_members)}, Outgoing edges: {c_out_edges}"
+                # CRITICAL: ratio slot count should match outgoing edge count.
+                assert len(c_slots) == c_out_edges, (
+                    f"Network {net_idx}, Agg {c_agg.node_id}: COMMITTED network has mismatched slots/edges!\n"
+                    f"Slots: {len(c_slots)}, Outgoing edges: {c_out_edges}"
                 )
-                assert len(r_members) == r_out_edges, (
-                    f"Network {net_idx}, Agg {c_agg.node_id}: REBUILT network has mismatched members/edges!\n"
-                    f"Members: {len(r_members)}, Outgoing edges: {r_out_edges}"
+                assert len(r_slots) == r_out_edges, (
+                    f"Network {net_idx}, Agg {c_agg.node_id}: REBUILT network has mismatched slots/edges!\n"
+                    f"Slots: {len(r_slots)}, Outgoing edges: {r_out_edges}"
                 )
 
         # verify networks can be stacked together

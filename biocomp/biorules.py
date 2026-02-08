@@ -49,7 +49,7 @@ create_aggregation_nodes = GraphRewritingRule(
             properties={
                 "type": "aggregation",
                 "cotx_group": "{{source1.extra.get('cotx_group')}}",
-                "members": {},
+                "ratio_schema": {"version": 1, "slots": {}},
                 "fluo_bias": "{{ source1.extra.get('fluo_bias') if source1.extra.get('fluo_bias') else None }}",
             },
         ),
@@ -72,7 +72,7 @@ create_aggregation_nodes_single = GraphRewritingRule(
             properties={
                 "type": "aggregation",
                 "cotx_group": "{{source.extra.get('cotx_group')}}",
-                "members": {},
+                "ratio_schema": {"version": 1, "slots": {}},
                 "fluo_bias": "{{ source.extra.get('fluo_bias') if source.extra.get('fluo_bias') else None }}",
             },
         ),
@@ -87,7 +87,7 @@ connect_sources_to_aggregation = GraphRewritingRule(
             "source": PropertyConstraint(properties={"type": "source"}),
             "aggregation": PropertyConstraint(properties={"type": "aggregation"}),
         },
-        where_filter_function="source.extra.get('cotx_group') == aggregation.extra.get('cotx_group') and source.extra.get('source_id') not in aggregation.extra.get('members', {})",
+        where_filter_function="source.extra.get('cotx_group') == aggregation.extra.get('cotx_group') and source.extra.get('source_id') not in [str(v.get('source_id')) for v in aggregation.extra.get('ratio_schema', {}).get('slots', {}).values() if isinstance(v, dict)]",
         where_not_connected=[EdgeConstraint(target_var="source")],
     ),
     actions=[
@@ -96,14 +96,14 @@ connect_sources_to_aggregation = GraphRewritingRule(
             target="source",
             properties={
                 "content_type": None,
-                "from_output_slot": "{{ len(aggregation.extra.get('members', {})) }}",
+                "from_output_slot": "{{ len(aggregation.extra.get('ratio_schema', {}).get('slots', {})) }}",
                 "tu_id": "{{ [source.extra.get('name', '') + '_' + source.extra.get('cotx_group', '')] if source.extra.get('name') else [] }}",
             },
         ),
         SetProperties(
             node_var="aggregation",
             properties={
-                "members": "{{ {**aggregation.extra.get('members', {}), source.extra.get('source_id'): {'ratio': source.extra.get('ratio', 1.0), 'ratio_range': source.extra.get('ratio_range'), 'locked': source.extra.get('ratio_locked', False)}} }}",
+                "ratio_schema": "{{ {'version': 1, 'slots': {**aggregation.extra.get('ratio_schema', {}).get('slots', {}), len(aggregation.extra.get('ratio_schema', {}).get('slots', {})): {'member_uid': source.extra.get('source_id'), 'source_id': source.extra.get('source_id'), 'ratio': source.extra.get('ratio', 1.0), 'ratio_range': source.extra.get('ratio_range'), 'locked': source.extra.get('ratio_locked', False)}}} }}",
             },
         ),
     ],
@@ -125,7 +125,7 @@ merge_aggregators_by_group = GraphRewritingRule(
         SetProperties(
             node_var="agg2",
             properties={
-                "members": "{{ {**agg1.extra.get('members', {}), **agg2.extra.get('members', {})} }}",
+                "ratio_schema": "{{ {'version': 1, 'slots': {**{int(k): v for k, v in agg1.extra.get('ratio_schema', {}).get('slots', {}).items()}, **{int(k) + len(agg1.extra.get('ratio_schema', {}).get('slots', {})): v for k, v in agg2.extra.get('ratio_schema', {}).get('slots', {}).items()}}} }}",
             },
         ),
         DeleteNode(node_var="agg1"),
@@ -134,25 +134,6 @@ merge_aggregators_by_group = GraphRewritingRule(
     yield_strategy="batched",
 )
 
-
-sort_aggregation_members = GraphRewritingRule(
-    name="sort_aggregation_members",
-    query=MatchQuery(
-        bind={
-            "aggregation": PropertyConstraint(properties={"type": "aggregation"}),
-        },
-        where_filter_function="isinstance(aggregation.extra.get('members'), list) and len(aggregation.extra.get('members', [])) > 1",
-    ),
-    actions=[
-        SetProperties(
-            node_var="aggregation",
-            properties={
-                "members": "{{ {m: {'ratio': aggregation.extra.get('ratios', [1.0]*len(aggregation.extra.get('members', [])))[i], 'ratio_range': (aggregation.extra.get('ratio_ranges') or [None]*len(aggregation.extra.get('members', [])))[i], 'locked': (aggregation.extra.get('ratio_locked') or [False]*len(aggregation.extra.get('members', [])))[i]} for i, m in enumerate(aggregation.extra.get('members', []))} }}",
-            },
-        ),
-    ],
-    yield_strategy="batched",
-)
 
 add_numeric_nodes = GraphRewritingRule(
     name="add_numeric_nodes",
@@ -300,28 +281,16 @@ def sort_output_edges(graph):
 
 
 def sort_aggregation_edges(graph):
-    """Ensure edge from_output_slot matches sorted(members.keys()) order."""
+    """Ensure edge from_output_slot matches ratio_schema slot->source_id mapping."""
     from biocomp.graphengine import GraphEdge
+    from biocomp.ratio_schema import source_slot_map
 
     for agg_node in (n for n in graph.nodes.values() if n.node_type == "aggregation"):
-        members = agg_node.extra.get("members", {})
-
-        if isinstance(members, list):
-            ratios = agg_node.extra.get("ratios", [1.0] * len(members))
-            ratio_ranges = agg_node.extra.get("ratio_ranges", [None] * len(members))
-            ratio_locked = agg_node.extra.get("ratio_locked", [False] * len(members))
-            members = {
-                m: {"ratio": ratios[i] if i < len(ratios) else 1.0,
-                    "ratio_range": ratio_ranges[i] if i < len(ratio_ranges) else None,
-                    "locked": ratio_locked[i] if i < len(ratio_locked) else False}
-                for i, m in enumerate(members)
-            }
-            agg_node.extra["members"] = members
-
-        if len(members) <= 1:
+        source_to_slot = source_slot_map(agg_node.extra)
+        if len(source_to_slot) <= 1:
             continue
 
-        sorted_ids = sorted(members.keys())
+        used_slots: set[int] = set()
 
         for edge in graph.get_outgoing_edges(agg_node.node_id):
             target = graph.nodes.get(edge.target_id)
@@ -329,10 +298,11 @@ def sort_aggregation_edges(graph):
                 continue
 
             source_id = target.extra.get("source_id")
-            if source_id not in sorted_ids:
+            if source_id not in source_to_slot:
                 continue
 
-            new_slot = sorted_ids.index(source_id)
+            new_slot = source_to_slot[source_id]
+            used_slots.add(new_slot)
             if edge.from_output_slot == new_slot:
                 continue
 
@@ -351,6 +321,12 @@ def sort_aggregation_edges(graph):
                 extra=edge.extra,
             )
             graph.edges[(new_edge.source_id, new_edge.target_id, new_edge.from_output_slot, new_edge.to_input_slot)] = new_edge
+
+        expected_slots = set(source_to_slot.values())
+        assert used_slots == expected_slots, (
+            f"Aggregation[{agg_node.node_id}] edge/source mismatch: used slots {sorted(used_slots)} "
+            f"!= ratio_schema slots {sorted(expected_slots)}"
+        )
 
     return graph
 

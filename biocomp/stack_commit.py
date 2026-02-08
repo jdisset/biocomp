@@ -143,6 +143,7 @@ def prune_network_tus(
                 del net.compute_graph.edges[edge_id]
 
         disabled_source_ids = set()
+        disabled_source_keys: set[tuple[str, str]] = set()
         for _tu_id in additional_disabled:
             for node in net.compute_graph.get_nodes_by_type("source"):
                 tu_names = node.extra.get("tu_names_by_slot", {})
@@ -151,6 +152,9 @@ def prune_network_tus(
                     full_tu_id = f"{tu_name}_{cotx_group}" if cotx_group else tu_name
                     if full_tu_id in additional_disabled:
                         disabled_source_ids.add(node.node_id)
+                        source_id = node.extra.get("source_id")
+                        if source_id is not None:
+                            disabled_source_keys.add((str(source_id), str(cotx_group)))
                         break
 
         for edge_id, edge in list(net.compute_graph.edges.items()):
@@ -160,7 +164,7 @@ def prune_network_tus(
             if node_id in net.compute_graph.nodes:
                 del net.compute_graph.nodes[node_id]
 
-        _renormalize_aggregation_after_cascade(net, disabled_source_ids)
+        _renormalize_aggregation_after_cascade(net, disabled_source_keys)
 
     net._cleanup_orphaned_downstream_nodes()
     net._cleanup_orphaned_bias_nodes()
@@ -170,37 +174,29 @@ def prune_network_tus(
     return report
 
 
-def _renormalize_aggregation_after_cascade(net: "Network", disabled_source_ids: set[int]) -> None:
+def _renormalize_aggregation_after_cascade(
+    net: "Network",
+    disabled_source_keys: set[tuple[str, str]],
+) -> None:
     """Renormalize aggregation ratios after cascade-disabled sources are removed."""
-    if not disabled_source_ids:
+    if not disabled_source_keys:
         return
     if net.compute_graph is None:
         return
 
-    from biocomp.nodes.aggregation import renormalize_members_after_removal
+    from biocomp.ratio_schema import remove_sources_and_renormalize
 
     graph = net.compute_graph
     for node in graph.get_nodes_by_type("aggregation"):
         if node.extra is None:
             continue
-
-        source_id_to_member: dict[int, str] = {}
-        for edge in graph.get_incoming_edges(node.node_id):
-            src_node = graph.nodes.get(edge.source_id)
-            if src_node and src_node.node_type == "source" and src_node.extra:
-                member_id = src_node.extra.get("member_id")
-                if member_id:
-                    source_id_to_member[edge.source_id] = str(member_id)
-
-        members_to_remove: set[str] = set()
-        for src_id in disabled_source_ids:
-            if src_id in source_id_to_member:
-                members_to_remove.add(source_id_to_member[src_id])
-
-        if not members_to_remove:
+        cotx_group = str(node.extra.get("cotx_group", ""))
+        removed_source_ids = {
+            source_id for source_id, source_group in disabled_source_keys if source_group == cotx_group
+        }
+        if not removed_source_ids:
             continue
-
-        renormalize_members_after_removal(node.extra, members_to_remove)
+        remove_sources_and_renormalize(node.extra, removed_source_ids)
 
 
 def rebuild_network_from_recipe(

@@ -33,6 +33,7 @@ from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot, FluoIntensity, NumRange, RATIO_PRECISION
 from biocomp.jaxutils import flat_concat
+from biocomp.ratio_schema import get_slot_entries
 from biocomp.nodes.ern import ERN_DEFAULT_NEG_PARTS
 
 
@@ -134,9 +135,8 @@ def complex_twolayers_basic_stack_assertions(network, stack, params):
         assert ag_layer.namespace == "local/6/aggregation8x"
         assert params[ag_layer.namespace]["ratios"].shape == (3, 8)
         param_ratios = params[ag_layer.namespace]["ratios"][ag_pos]
-        members = a.extra["members"]
-        sorted_ids = sorted(members.keys())
-        graph_ratios = [members[m]["ratio"] for m in sorted_ids]
+        slot_entries = get_slot_entries(a.extra)
+        graph_ratios = [entry["ratio"] for entry in slot_entries]
         assert np.allclose(graph_ratios, param_ratios)
     return aggs
 
@@ -480,15 +480,16 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
                 f"Expected 8 unique output slots for agg, got {unique_slots}"
             )
 
-            members = a.extra["members"]
-            sorted_member_ids = sorted(members.keys())
+            slot_entries = get_slot_entries(a.extra)
+            sorted_member_ids = [entry["source_id"] for entry in slot_entries]
+            members_by_source = {entry["source_id"]: entry for entry in slot_entries}
             for dnode, dedge in downnodes:
                 outslot = dedge.from_output_slot
                 assert dnode.node_type == "source"
                 ratio_expected = dnode.extra["ratio"]
                 source_id_expected = dnode.extra["source_id"]
                 source_id_actual = sorted_member_ids[outslot]
-                ratio_actual = members[source_id_actual]["ratio"]
+                ratio_actual = members_by_source[source_id_actual]["ratio"]
                 assert ratio_expected == ratio_actual, (
                     f"Downstream source node {dnode.node_id} ratio {ratio_expected} != aggregation ratio {ratio_actual}"
                 )
@@ -516,9 +517,9 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
                     "direct": x1ratios[7],
                 }
                 ratio_tol = 0.5 * 10 ** (-RATIO_PRECISION)
-                for src_id, member_data in members.items():
-                    assert np.isclose(member_data["ratio"], expected_ratios[src_id], atol=ratio_tol), (
-                        f"Aggregation ratio for {src_id} in cotx x1 is {member_data['ratio']}, expected {expected_ratios[src_id]}"
+                for src_id, slot_data in members_by_source.items():
+                    assert np.isclose(slot_data["ratio"], expected_ratios[src_id], atol=ratio_tol), (
+                        f"Aggregation ratio for {src_id} in cotx x1 is {slot_data['ratio']}, expected {expected_ratios[src_id]}"
                     )
 
             elif a.extra["cotx_group"] == "x2":
@@ -533,15 +534,15 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
                     "direct": x1ratios[0],
                 }
                 ratio_tol = 0.5 * 10 ** (-RATIO_PRECISION)
-                for src_id, member_data in members.items():
-                    assert np.isclose(member_data["ratio"], expected_ratios[src_id], atol=ratio_tol), (
-                        f"Aggregation ratio for {src_id} in cotx x2 is {member_data['ratio']}, expected {expected_ratios[src_id]}"
+                for src_id, slot_data in members_by_source.items():
+                    assert np.isclose(slot_data["ratio"], expected_ratios[src_id], atol=ratio_tol), (
+                        f"Aggregation ratio for {src_id} in cotx x2 is {slot_data['ratio']}, expected {expected_ratios[src_id]}"
                     )
             elif a.extra["cotx_group"] == "b":
                 ratio_tol = 0.5 * 10 ** (-RATIO_PRECISION)
-                for src_id, member_data in members.items():
-                    assert np.isclose(member_data["ratio"], 0.125, atol=ratio_tol), (
-                        f"Aggregation ratio for cotx b {src_id} is {member_data['ratio']}, expected 0.125"
+                for src_id, slot_data in members_by_source.items():
+                    assert np.isclose(slot_data["ratio"], 0.125, atol=ratio_tol), (
+                        f"Aggregation ratio for cotx b {src_id} is {slot_data['ratio']}, expected 0.125"
                     )
 
 

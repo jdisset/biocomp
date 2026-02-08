@@ -28,6 +28,7 @@ from biocomp.graphengine import (
 )
 from biocomp.graphrules import GraphRewritingRule
 from biocomp.tracing import trace_scope, serialize_graph, should_save_full_objects, snapshot_full_network
+from biocomp.ratio_schema import get_slot_entries
 import biocomp.biorules as br
 
 # TODO:
@@ -399,13 +400,9 @@ class Network(BaseModel):
         assert self.compute_graph is not None, "compute_graph must exist"
         zero_ratio_sources = set()
         for agg in self.compute_graph.get_nodes_by_type("aggregation"):
-            members = agg.extra.get("members", {})
-            if not isinstance(members, dict):
-                continue
-            for sid, data in members.items():
-                ratio = data.get("ratio", 1.0) if isinstance(data, dict) else 1.0
-                if ratio == 0:
-                    zero_ratio_sources.add(sid)
+            for entry in get_slot_entries(agg.extra, require=False):
+                if float(entry.get("ratio", 1.0)) == 0.0:
+                    zero_ratio_sources.add(str(entry["source_id"]))
         return zero_ratio_sources
 
     def get_disabled_tu_source_ids(
@@ -1017,28 +1014,11 @@ class Network(BaseModel):
 
         for node in self.compute_graph.get_nodes_by_type("aggregation"):
             group_id = node.extra["cotx_group"]
-            members = node.extra.get("members", {})
-
-            if isinstance(members, dict):
-                sorted_ids = sorted(members.keys())
-                base_ratios = []
-                ratio_ranges_list = []
-                locked_list = []
-                for mid in sorted_ids:
-                    m = members[mid]
-                    if isinstance(m, dict):
-                        base_ratios.append(m.get("ratio", 1.0))
-                        ratio_ranges_list.append(m.get("ratio_range"))
-                        locked_list.append(m.get("locked", False))
-                    else:
-                        base_ratios.append(1.0)
-                        ratio_ranges_list.append(None)
-                        locked_list.append(False)
-            else:
-                sorted_ids = list(members) if members else []
-                base_ratios = node.extra.get("ratios", [1.0] * len(sorted_ids))
-                ratio_ranges_list = node.extra.get("ratio_ranges", [None] * len(sorted_ids))
-                locked_list = node.extra.get("ratio_locked", [False] * len(sorted_ids))
+            slot_entries = get_slot_entries(node.extra)
+            sorted_ids = [str(entry["source_id"]) for entry in slot_entries]
+            base_ratios = [float(entry.get("ratio", 1.0)) for entry in slot_entries]
+            ratio_ranges_list = [entry.get("ratio_range") for entry in slot_entries]
+            locked_list = [bool(entry.get("locked", False)) for entry in slot_entries]
 
             ratios = []
             for base_ratio, ratio_range, is_locked in zip(
@@ -1635,14 +1615,11 @@ class Network(BaseModel):
                         break
 
             # Extract ratios and compute percentages per TU
-            members_data = node.extra.get("members", {})
+            slot_entries = get_slot_entries(node.extra, require=False)
             ratios = None
-            if isinstance(members_data, dict) and members_data:
-                sorted_ids = sorted(members_data.keys())
-                raw_ratios = [
-                    members_data[m].get("ratio", 1.0) if isinstance(members_data[m], dict) else 1.0
-                    for m in sorted_ids
-                ]
+            if slot_entries:
+                sorted_ids = [str(entry["source_id"]) for entry in slot_entries]
+                raw_ratios = [float(entry.get("ratio", 1.0)) for entry in slot_entries]
                 min_r = (
                     min(r for r in raw_ratios if r > 0) if any(r > 0 for r in raw_ratios) else 1.0
                 )
@@ -2889,10 +2866,13 @@ def get_network_family(network):
 
 def get_ratio(agg_node, network):
     assert network.compute_graph is not None
-    if agg_node.extra and "ratios" in agg_node.extra:
-        ratios = np.array(agg_node.extra["ratios"])
+    slot_entries = get_slot_entries(agg_node.extra, require=False)
+    if slot_entries:
+        ratios = np.array([float(entry.get("ratio", 1.0)) for entry in slot_entries], dtype=float)
+        source_ids = [str(entry["source_id"]) for entry in slot_entries]
     else:
-        ratios = np.array([1.0])
+        ratios = np.array([1.0], dtype=float)
+        source_ids = []
 
     min_ratio = np.maximum(ratios.min(), 1e-6)
     normed_ratios = np.round(ratios / min_ratio, 2)
@@ -2902,22 +2882,28 @@ def get_ratio(agg_node, network):
 
     normed_ratios = [str(int(r)) if is_round(r) else str(r) for r in normed_ratios]
 
-    incoming_edges = [
-        e for e in network.compute_graph.edges.values() if e.target_id == agg_node.node_id
-    ]
-    incoming_edges = sorted(incoming_edges, key=lambda e: e.to_input_slot)
+    source_id_to_ratio = {
+        sid: normed_ratios[idx] for idx, sid in enumerate(source_ids) if idx < len(normed_ratios)
+    }
+    tu_ratio_pairs: list[tuple[str, str]] = []
+    outgoing_edges = sorted(
+        [e for e in network.compute_graph.edges.values() if e.source_id == agg_node.node_id],
+        key=lambda e: e.from_output_slot,
+    )
+    for edge in outgoing_edges:
+        source_node = network.compute_graph.nodes.get(edge.target_id)
+        if source_node is None or source_node.node_type != "source":
+            continue
+        source_id = source_node.extra.get("source_id")
+        if source_id is None:
+            continue
+        tu_name = source_node.extra.get("name", str(source_id))
+        ratio = source_id_to_ratio.get(str(source_id))
+        if ratio is None:
+            continue
+        tu_ratio_pairs.append((tu_name, ratio))
 
-    tu_names = []
-    for edge in incoming_edges:
-        source_node = network.compute_graph.nodes[edge.source_id]
-        if source_node.extra and "tu_name" in source_node.extra:
-            tu_names.append(source_node.extra["tu_name"])
-        elif edge.content:
-            tu_names.append(str(edge.content[0]) if edge.content else "unknown")
-        else:
-            tu_names.append("unknown")
-
-    sorted_pairs = sorted(zip(tu_names, normed_ratios[: len(tu_names)], strict=False))
+    sorted_pairs = sorted(tu_ratio_pairs)
     sorted_tu_names, sorted_ratios = zip(*sorted_pairs, strict=False) if sorted_pairs else ([], [])
 
     return (tuple(sorted_tu_names), tuple(sorted_ratios))

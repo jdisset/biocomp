@@ -22,6 +22,7 @@ from biocomp.compute import ComputeStack
 from biocomp.recipe import Recipe
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.library import LibraryContext, load_lib
+from biocomp.ratio_schema import get_slot_entries
 import biocomp.biorules as br
 from pathlib import Path
 
@@ -371,7 +372,7 @@ def test_binary_mask_commit_removes_disabled_tus(lib, binary_mask_stack):
             for net in networks:
                 for node in net.compute_graph.nodes.values():
                     if "aggregation" in node.node_type.lower():
-                        total += len(node.extra.get("members", {}))
+                        total += len(get_slot_entries(node.extra, require=False))
             return total
 
         members_enabled = count_members(committed_enabled)

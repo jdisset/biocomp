@@ -22,6 +22,7 @@ from biocomp.network import recipe_to_networks
 from biocomp.recipe import Recipe
 from biocomp.design_targets import SVGTarget
 from biocomp.nodes.aggregation import _decode_latent_ratios
+from biocomp.ratio_schema import get_slot_entries
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
 
@@ -129,10 +130,9 @@ def test_latent_ratios_commit_matches_apply(lib):
                 break
         assert committed_node is not None
 
-        members = committed_node.extra.get("members", {})
-        assert len(members) > 0, "No members in committed node"
-        sorted_ids = sorted(members.keys())
-        commit_ratios = np.array([members[m]["ratio"] for m in sorted_ids])
+        slot_entries = get_slot_entries(committed_node.extra)
+        assert len(slot_entries) > 0, "No ratio_schema slots in committed node"
+        commit_ratios = np.array([entry["ratio"] for entry in slot_entries])
 
         apply_normalized = np.array(apply_normalized)
         commit_sum = np.sum(commit_ratios)

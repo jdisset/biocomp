@@ -16,6 +16,7 @@ import numpy as np
 import biocomp.parameters as pr
 from biocomp.network import recipe_to_networks
 from biocomp.library import LibraryContext, load_lib
+from biocomp.ratio_schema import get_slot_entries
 import biocomp.biorules as br
 from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
@@ -436,11 +437,11 @@ def test_shared_source_network_structure(lib):
         assert len(agglayer.nodes) == 1
         aggnode = network.compute_graph.get_node(agglayer.nodes[0].node_id)
 
-        members = aggnode.extra['members']
-        members_to_ratio = {m: members[m]['ratio'] for m in members}
+        slot_entries = get_slot_entries(aggnode.extra)
+        members_to_ratio = {entry["source_id"]: entry["ratio"] for entry in slot_entries}
         assert members_to_ratio == {'plsmd1': 0.1, 'out2_plsmd': 0.2, 'ern2_plsmd': 0.3, 'mrkr_plsmd': 0.4}
 
-        sorted_members = sorted(members.keys())
+        sorted_members = [entry["source_id"] for entry in slot_entries]
         plsmd1_idx = sorted_members.index('plsmd1')
         plsmd1_nodes = network.compute_graph.get_downstream_nodes_by_output_slot(aggnode.node_id, plsmd1_idx)
         assert len(plsmd1_nodes) == 1

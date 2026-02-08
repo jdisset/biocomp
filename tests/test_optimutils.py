@@ -5,6 +5,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 import optax
+from typing import cast
 
 from biocomp.optimutils import (
     OptimConfig,
@@ -13,8 +14,11 @@ from biocomp.optimutils import (
     create_counter,
     as_schedule,
     compile_step,
+    optimize,
 )
 from biocomp.logger_dispatch import NullDispatch, LoggerDispatch
+from biocomp.compute import ComputeStack
+from biocomp.step_history import StepHistorySnapshot
 from biocomp.utils import PartialFunction, PartialFunctionResult
 
 
@@ -177,6 +181,44 @@ class TestNullDispatch:
         assert dispatch.needs_params_sync(0) is False
         assert dispatch.needs_params_sync(10) is False
         assert dispatch.needs_params_sync(100) is False
+
+
+class TestOptimizeContract:
+    """Return-contract tests for optimize()."""
+
+    def test_optimize_returns_snapshot_step_history(self):
+        def step(params, opt_state, step_key, xb, yb):
+            del step_key, xb, yb
+            return params, opt_state, {"loss": jnp.array([[1.0]])}
+
+        cfg = DesignOptimConfig(
+            loss_function=PartialFunction(func="biocomp.design.distance_loss", kwargs={}),
+            n_replicates=1,
+            batches_per_step=1,
+            n_batches_per_epoch=1,
+            n_epochs=1,
+            reshuffle_batches=False,
+        )
+
+        params, loss_history, step_history = optimize(
+            step=step,
+            params=jnp.array([1.0]),
+            opt_state=None,
+            xbatches=jnp.zeros((1, 1, 1, 1)),
+            ybatches=jnp.zeros((1, 1, 1, 1)),
+            config=cfg,
+            n_total_steps=1,
+            steps_per_epoch=1,
+            key=jax.random.PRNGKey(0),
+            stack=cast(ComputeStack, object()),
+            dispatch=NullDispatch(),
+            precompiled=True,
+        )
+
+        assert params.shape == (1,)
+        assert len(loss_history) == 1
+        assert isinstance(step_history, StepHistorySnapshot)
+        assert "loss" in step_history
 
 
 class TestAsSchedule:

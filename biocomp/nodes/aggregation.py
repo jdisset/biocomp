@@ -13,8 +13,8 @@ from biocomp.nodeutils import (
 from biocomp.utils import get_logger
 from biocomp.config import BIOCOMP_CONSTANTS
 from biocomp.recipe import DEFAULT_RATIO_MIN
+from biocomp.ratio_schema import slot_arrays, update_slots_from_arrays
 from typing import Optional
-from dataclasses import dataclass, asdict
 
 
 PRNGKey = ArrayLike
@@ -23,103 +23,9 @@ NDArray = np.ndarray | jnp.ndarray
 logger = get_logger(__name__)
 
 
-@dataclass
-class AggregationMember:
-    ratio: float = 1.0
-    ratio_range: Optional[dict] = None
-    locked: bool = False
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "AggregationMember":
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
-
-
-def _migrate_legacy_members(extra: dict) -> dict[str, AggregationMember]:
-    members_data = extra.get("members")
-
-    if isinstance(members_data, dict):
-        result = {}
-        for source_id, val in members_data.items():
-            if isinstance(val, AggregationMember):
-                result[source_id] = val
-            elif isinstance(val, dict):
-                result[source_id] = AggregationMember.from_dict(val)
-            else:
-                raise ValueError(f"Invalid member data for {source_id}: {type(val)}")
-        return result
-
-    if isinstance(members_data, list):
-        member_ids = members_data
-        ratios = extra.get("ratios", [1.0] * len(member_ids))
-        ratio_ranges = extra.get("ratio_ranges", [None] * len(member_ids))
-        locked = extra.get("ratio_locked", [False] * len(member_ids))
-
-        assert len(ratios) == len(member_ids), (
-            f"ratios length {len(ratios)} != members {len(member_ids)}"
-        )
-        assert len(ratio_ranges) == len(member_ids), (
-            f"ratio_ranges length {len(ratio_ranges)} != members {len(member_ids)}"
-        )
-        assert len(locked) == len(member_ids), (
-            f"ratio_locked length {len(locked)} != members {len(member_ids)}"
-        )
-
-        return {
-            mid: AggregationMember(ratio=r, ratio_range=rr, locked=lk)
-            for mid, r, rr, lk in zip(member_ids, ratios, ratio_ranges, locked, strict=False)
-        }
-
-    return {}
-
-
-def renormalize_members_after_removal(extra: dict, removed_member_ids: set[str]) -> None:
-    """Remove members by id and renormalize ratios, preserving member metadata."""
-    if not removed_member_ids:
-        return
-    members = _migrate_legacy_members(extra)
-    if not members:
-        return
-    for member_id in removed_member_ids:
-        members.pop(member_id, None)
-    if not members:
-        extra["members"] = {}
-        return
-    total = sum(m.ratio for m in members.values())
-    if total > 1e-9:
-        for member in members.values():
-            member.ratio = member.ratio / total
-    extra["members"] = {mid: m.to_dict() for mid, m in members.items()}
-
-
-def _members_to_arrays(
-    members: dict[str, AggregationMember],
-) -> tuple[list[str], list[float], list[Optional[dict]], list[bool]]:
-    sorted_ids = sorted(members.keys())
-    return (
-        sorted_ids,
-        [members[m].ratio for m in sorted_ids],
-        [members[m].ratio_range for m in sorted_ids],
-        [members[m].locked for m in sorted_ids],
-    )
-
-
 def extract_ratios_from_extra(extra: dict) -> tuple[list[str], list[float]]:
-    """Extract member IDs and ratios from aggregation node extra.
-
-    Expects new dict format only. Returns (member_ids, ratios) with deterministic ordering.
-    """
-    members_data = extra.get("members", {})
-    if not isinstance(members_data, dict) or not members_data:
-        return [], []
-    sorted_ids = sorted(members_data.keys())
-    ratios = [
-        members_data[m].get("ratio", 1.0) if isinstance(members_data[m], dict) else 1.0
-        for m in sorted_ids
-    ]
-    return sorted_ids, ratios
+    source_ids, ratios, _ratio_ranges, _locked = slot_arrays(extra)
+    return source_ids, ratios
 
 
 def _decode_latent_ratios(z, W1, b1, W2, b2):
@@ -150,34 +56,12 @@ def aggregation(
         for i, node in enumerate(nodelist):
             extra = node.get(stack).extra
 
-            members = _migrate_legacy_members(extra)
-            if members:
-                sorted_ids, base_ratios, ranges, locked = _members_to_arrays(members)
-                extra["_sorted_member_ids"] = sorted_ids
-            else:
-                base_ratios = [1.0] * n_outputs
-                ranges = [None] * n_outputs
-                locked = [False] * n_outputs
-                extra["_sorted_member_ids"] = []
-
+            source_ids, base_ratios, ranges, locked = slot_arrays(extra)
             if len(base_ratios) != n_outputs:
-                if random_init:
-                    raise AssertionError(
-                        f"Aggregation ratios length mismatch: got {len(base_ratios)}, expected {n_outputs}. "
-                        f"Members: {list(members.keys()) if members else []}"
-                    )
-                logger.warning(
-                    f"Aggregation n_outputs mismatch: {len(base_ratios)} members vs {n_outputs} expected. "
-                    f"Adjusting to match (node {i})."
+                raise AssertionError(
+                    f"Aggregation ratio_schema mismatch: node {i} has {len(base_ratios)} slots "
+                    f"({source_ids}), but n_outputs={n_outputs}"
                 )
-                if len(base_ratios) < n_outputs:
-                    base_ratios = base_ratios + [0.0] * (n_outputs - len(base_ratios))
-                    ranges = ranges + [None] * (n_outputs - len(ranges))
-                    locked = locked + [True] * (n_outputs - len(locked))
-                else:
-                    base_ratios = base_ratios[:n_outputs]
-                    ranges = ranges[:n_outputs]
-                    locked = locked[:n_outputs]
 
             has_unlocked = any(r is not None for r in ranges)
 
@@ -381,7 +265,6 @@ def aggregation(
             )
 
         for i, n in enumerate(nodelist):
-            updt = {}
             latent_z_path = f"{namespace}/latent_z"
             if latent_z_path in params:
                 z = params[latent_z_path][i]
@@ -449,28 +332,18 @@ def aggregation(
 
             extra = n.get(stack).extra
             ratios_list = normalized_ratios.tolist()[:n_outputs]
-            sorted_ids = extra.get("_sorted_member_ids", [])
-
-            if sorted_ids:
-                assert len(ratios_list) == len(sorted_ids), (
-                    f"COMMIT BUG: ratios {len(ratios_list)} != members {len(sorted_ids)}"
-                )
-                # Filter out disabled members (ratio=0 from TU masking)
-                updt["members"] = {
-                    mid: AggregationMember(
-                        ratio=ratios_list[j],
-                        ratio_range=ratio_ranges[j],
-                        locked=ratio_locked[j],
-                    ).to_dict()
-                    for j, mid in enumerate(sorted_ids)
-                    if abs(ratios_list[j]) > 1e-8
-                }
-            else:
-                updt["ratios"] = ratios_list
-                updt["ratio_ranges"] = ratio_ranges
-                updt["ratio_locked"] = ratio_locked
-
-            extra.update(updt)
+            source_ids, _old_ratios, _old_ranges, _old_locked = slot_arrays(extra)
+            assert len(ratios_list) == len(source_ids), (
+                f"COMMIT BUG: ratios {len(ratios_list)} != ratio_schema slots {len(source_ids)}"
+            )
+            update_slots_from_arrays(
+                extra,
+                ratios=ratios_list,
+                ratio_ranges=ratio_ranges,
+                locked=ratio_locked,
+                remove_zero=True,
+                zero_eps=1e-8,
+            )
 
     output_shape = input_shapes * n_outputs
 
@@ -498,7 +371,7 @@ def aggregation(
 
             comp_node = node.get(stack)
             extra = comp_node.extra
-            sorted_ids = extra.get("_sorted_member_ids", [])
+            source_ids, _base_ratios, _ranges, _locked = slot_arrays(extra)
             node_name = extra.get("name", f"agg_{i}")
 
             source_to_tu_name: dict[str, str] = {}
@@ -533,7 +406,7 @@ def aggregation(
                 tu_indices = np.asarray(params[output_tu_path][i])
 
             tu_groups = []
-            for j, member_id in enumerate(sorted_ids):
+            for j, source_id in enumerate(source_ids):
                 if j >= len(ratios):
                     break
 
@@ -556,7 +429,7 @@ def aggregation(
                     bounds=None if is_constrained else (r_min, r_max),
                 )
 
-                display_name = source_to_tu_name.get(member_id, member_id)
+                display_name = source_to_tu_name.get(source_id, source_id)
                 tu_groups.append(
                     TUParamGroup(
                         tu_id=display_name,
