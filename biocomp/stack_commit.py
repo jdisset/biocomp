@@ -15,6 +15,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING
 import time as _time
 
@@ -32,6 +33,44 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class CommitStatus(Enum):
+    """Status of a single network's commit/rebuild."""
+
+    OK = "ok"
+    DEGENERATE_NO_OUTPUTS = "degenerate_no_outputs"
+    DEGENERATE_RECIPE_ERROR = "degenerate_recipe_error"
+    DEGENERATE_EMPTY_RECIPE = "degenerate_empty_recipe"
+    DEGENERATE_NO_VALID_INVERSIONS = "degenerate_no_valid_inversions"
+
+    @property
+    def is_degenerate(self) -> bool:
+        return self.name.startswith("DEGENERATE")
+
+    @property
+    def is_ok(self) -> bool:
+        return self == CommitStatus.OK
+
+
+@dataclass(frozen=True)
+class CommitResult:
+    """Result of rebuilding a single network during commit."""
+
+    status: CommitStatus
+    network: Network | None  # None for degenerate commits
+    diagnostics: dict[str, object] = field(default_factory=dict)
+
+
+def _make_empty_network(original: "Network") -> "Network":
+    """Create an empty placeholder network preserving name and metadata."""
+    from .graphengine import GraphState
+    from .network import Network
+
+    empty = Network(compute_graph=GraphState(nodes={}, edges={}))
+    empty.name = original.name
+    empty.metadata = original.metadata
+    return empty
+
+
 @dataclass(frozen=True)
 class CommitOptions:
     """Configuration for commit behavior."""
@@ -40,13 +79,21 @@ class CommitOptions:
     collapse_to_part: bool = True
     preserve_ratio_states: bool = False  # If True, keep ratio min/max/init metadata
     roundtrip_rebuild: bool = True
+    # Structure-only pruning should only remove explicitly selected TUs.
+    cascade_disable_exclusive_neg_tus: bool = True
+    cleanup_orphaned_downstream_nodes: bool = True
     preserve_input_order: bool = True
     max_rebuild_workers: int = 8
 
     @classmethod
     def for_structure_only(cls) -> "CommitOptions":
         """Commit structural changes only (pruning), no embedding collapse."""
-        return cls(collapse_to_part=False, preserve_ratio_states=True)
+        return cls(
+            collapse_to_part=False,
+            preserve_ratio_states=True,
+            cascade_disable_exclusive_neg_tus=True,
+            cleanup_orphaned_downstream_nodes=True,
+        )
 
     @classmethod
     def for_final(cls) -> "CommitOptions":
@@ -69,10 +116,19 @@ class CommitReport:
     """Report for the entire commit process."""
 
     per_network: list[NetworkCommitReport] = field(default_factory=list)
+    commit_results: list[CommitResult] = field(default_factory=list)
     timings: dict[str, float] = field(default_factory=dict)
 
     def add_timing(self, name: str, duration: float) -> None:
         self.timings[name] = duration
+
+    @property
+    def has_degenerate(self) -> bool:
+        return any(cr.status.is_degenerate for cr in self.commit_results)
+
+    @property
+    def degenerate_indices(self) -> list[int]:
+        return [i for i, cr in enumerate(self.commit_results) if cr.status.is_degenerate]
 
 
 def prune_network_tus(
@@ -80,6 +136,9 @@ def prune_network_tus(
     net_idx: int,
     log_alpha: jnp.ndarray | None,
     tu_id_to_idx: dict[str, int] | None,
+    *,
+    cascade_disable_exclusive_neg_tus: bool = True,
+    cleanup_orphaned_downstream_nodes: bool = True,
 ) -> NetworkCommitReport:
     """Unified TU pruning for a single network.
 
@@ -94,6 +153,7 @@ def prune_network_tus(
     """
     from .tumasking import get_final_mask
 
+    assert net.compute_graph is not None, f"Network {net_idx} has no compute_graph"
     report = NetworkCommitReport(network_idx=net_idx)
 
     if log_alpha is None or tu_id_to_idx is None:
@@ -130,10 +190,18 @@ def prune_network_tus(
     for edge_id in edges_to_remove:
         del net.compute_graph.edges[edge_id]
 
-    dead_ern_recs = net._cleanup_ern_nodes(pseudo_log_alpha, tu_id_to_idx)
+    dead_ern_recs = net._cleanup_ern_nodes(
+        pseudo_log_alpha,
+        tu_id_to_idx,
+        cascade_disable_exclusive_neg_tus=cascade_disable_exclusive_neg_tus,
+    )
     report.dead_ern_recs = dead_ern_recs
 
-    additional_disabled = net.metadata.pop("_additional_disabled_tus", set())
+    if cascade_disable_exclusive_neg_tus:
+        additional_disabled = net.metadata.pop("_additional_disabled_tus", set())
+    else:
+        net.metadata.pop("_additional_disabled_tus", None)
+        additional_disabled = set()
     report.cascade_disabled_tus = additional_disabled
 
     if additional_disabled:
@@ -166,7 +234,8 @@ def prune_network_tus(
 
         _renormalize_aggregation_after_cascade(net, disabled_source_keys)
 
-    net._cleanup_orphaned_downstream_nodes()
+    if cleanup_orphaned_downstream_nodes:
+        net._cleanup_orphaned_downstream_nodes()
     net._cleanup_orphaned_bias_nodes()
     net._cleanup_orphaned_input_nodes(original_output_proteins)
     net._cleanup_orphaned_transcription_nodes()
@@ -192,7 +261,9 @@ def _renormalize_aggregation_after_cascade(
             continue
         cotx_group = str(node.extra.get("cotx_group", ""))
         removed_source_ids = {
-            source_id for source_id, source_group in disabled_source_keys if source_group == cotx_group
+            source_id
+            for source_id, source_group in disabled_source_keys
+            if source_group == cotx_group
         }
         if not removed_source_ids:
             continue
@@ -204,10 +275,12 @@ def rebuild_network_from_recipe(
     net_idx: int,
     strip_ern_recs: set[tuple[str, str]],
     options: CommitOptions,
-) -> "Network":
+) -> CommitResult:
     """Rebuild network via recipe roundtrip for clean graph structure.
 
     This ensures orphan nodes are removed and the graph is consistent.
+    Returns a CommitResult with explicit status for each outcome path,
+    making degenerate commits observable rather than silent.
 
     Args:
         net: Network to rebuild
@@ -216,11 +289,14 @@ def rebuild_network_from_recipe(
         options: Commit options
 
     Returns:
-        Rebuilt network (or empty network if rebuild fails)
+        CommitResult with status, network (None if degenerate), and diagnostics.
     """
-    from .graphengine import GraphState
-    from .network import Network, recipe_to_networks
+    from .network import recipe_to_networks
     import biocomp.biorules as br
+
+    base_diag: dict[str, object] = {"network_name": net.name, "network_idx": net_idx}
+
+    assert net.compute_graph is not None, f"Network {net_idx} has no compute_graph"
 
     try:
         original_input_proteins = net.get_inverted_input_proteins()
@@ -237,24 +313,27 @@ def rebuild_network_from_recipe(
             original_outputs = ()
 
     if len(original_outputs) == 0:
-        empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
-        empty_net.name = net.name
-        empty_net.metadata = net.metadata
-        return empty_net
+        return CommitResult(
+            status=CommitStatus.DEGENERATE_NO_OUTPUTS,
+            network=None,
+            diagnostics=base_diag,
+        )
 
     try:
         recipe = net.to_recipe(strip_ern_recs=strip_ern_recs)
-    except (AssertionError, IndexError, KeyError):
-        empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
-        empty_net.name = net.name
-        empty_net.metadata = net.metadata
-        return empty_net
+    except (AssertionError, IndexError, KeyError) as exc:
+        return CommitResult(
+            status=CommitStatus.DEGENERATE_RECIPE_ERROR,
+            network=None,
+            diagnostics={**base_diag, "error": str(exc)},
+        )
 
     if not recipe.content:
-        empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
-        empty_net.name = net.name
-        empty_net.metadata = net.metadata
-        return empty_net
+        return CommitResult(
+            status=CommitStatus.DEGENERATE_EMPTY_RECIPE,
+            network=None,
+            diagnostics=base_diag,
+        )
 
     rebuilt = recipe_to_networks(
         recipe,
@@ -269,10 +348,11 @@ def rebuild_network_from_recipe(
             f"COMMIT: Recipe '{recipe.name}' produced no valid networks "
             f"(all inversions degenerate). Returning empty network."
         )
-        empty_net = Network(compute_graph=GraphState(nodes={}, edges={}))
-        empty_net.name = net.name
-        empty_net.metadata = net.metadata
-        return empty_net
+        return CommitResult(
+            status=CommitStatus.DEGENERATE_NO_VALID_INVERSIONS,
+            network=None,
+            diagnostics=base_diag,
+        )
 
     if len(rebuilt) == 1:
         rebuilt_net = rebuilt[0]
@@ -325,7 +405,7 @@ def rebuild_network_from_recipe(
         except (AssertionError, IndexError, KeyError) as e:
             logger.debug(f"COMMIT: Could not restore input ordering: {e}")
 
-    return rebuilt_net
+    return CommitResult(status=CommitStatus.OK, network=rebuilt_net)
 
 
 def commit_networks(
@@ -363,6 +443,8 @@ def commit_networks(
                 "prune_tus": options.prune_tus,
                 "collapse_to_part": options.collapse_to_part,
                 "roundtrip_rebuild": options.roundtrip_rebuild,
+                "cascade_disable_exclusive_neg_tus": options.cascade_disable_exclusive_neg_tus,
+                "cleanup_orphaned_downstream_nodes": options.cleanup_orphaned_downstream_nodes,
             },
         )
 
@@ -396,7 +478,14 @@ def commit_networks(
 
         if options.prune_tus:
             for net_idx, net in enumerate(network_copies):
-                net_report = prune_network_tus(net, net_idx, log_alpha, tu_id_to_idx)
+                net_report = prune_network_tus(
+                    net,
+                    net_idx,
+                    log_alpha,
+                    tu_id_to_idx,
+                    cascade_disable_exclusive_neg_tus=options.cascade_disable_exclusive_neg_tus,
+                    cleanup_orphaned_downstream_nodes=options.cleanup_orphaned_downstream_nodes,
+                )
                 dead_ern_recs_by_net[net_idx] = net_report.dead_ern_recs
                 report.per_network.append(net_report)
 
@@ -420,7 +509,7 @@ def commit_networks(
 
         if options.roundtrip_rebuild:
 
-            def _rebuild(net_idx_and_net: tuple[int, "Network"]) -> "Network":
+            def _rebuild(net_idx_and_net: tuple[int, "Network"]) -> CommitResult:
                 net_idx, net = net_idx_and_net
                 strip_ern_recs = dead_ern_recs_by_net.get(net_idx, set())
                 return rebuild_network_from_recipe(net, net_idx, strip_ern_recs, options)
@@ -430,10 +519,24 @@ def commit_networks(
 
             if n_workers > 1:
                 with ThreadPoolExecutor(max_workers=n_workers) as executor:
-                    final_networks = list(executor.map(_rebuild, indexed_networks))
+                    commit_results = list(executor.map(_rebuild, indexed_networks))
             else:
-                final_networks = [_rebuild(idx_net) for idx_net in indexed_networks]
+                commit_results = [_rebuild(idx_net) for idx_net in indexed_networks]
+
+            report.commit_results = commit_results
+
+            for cr in commit_results:
+                scope.event("commit_status", cr.status.value, cr.diagnostics)
+
+            final_networks = [
+                cr.network if cr.network is not None else _make_empty_network(network_copies[i])
+                for i, cr in enumerate(commit_results)
+            ]
         else:
+            # No roundtrip rebuild — all networks are OK by definition
+            report.commit_results = [
+                CommitResult(status=CommitStatus.OK, network=net) for net in network_copies
+            ]
             final_networks = network_copies
 
         t7 = _time.perf_counter()
@@ -452,6 +555,7 @@ def commit_networks(
                 "n_networks_out": len(final_networks),
                 "total_time": t7 - t0,
                 "total_pruned": sum(r.pruned_tu_count for r in report.per_network),
+                "degenerate_count": len(report.degenerate_indices),
             },
         )
 
@@ -463,8 +567,9 @@ def commit_structure(
     params: "ParameterTree",
     lock_ratios: bool = False,  # Deprecated name, kept for compatibility
     **kwargs,
-) -> list["Network"]:
+) -> tuple[list["Network"], CommitReport]:
     """Commit only structural changes (pruning, graph cleanup) without collapsing embeddings."""
+    assert stack.layers is not None, "Stack must be built before committing"
     options = CommitOptions.for_structure_only()
     if lock_ratios:
         from dataclasses import replace
@@ -472,7 +577,7 @@ def commit_structure(
         # lock_ratios=True means DON'T preserve ratio states
         options = replace(options, preserve_ratio_states=False)
 
-    networks, _ = commit_networks(
+    return commit_networks(
         stack.networks,
         stack.layers,
         params,
@@ -480,17 +585,17 @@ def commit_structure(
         tu_id_to_idx=getattr(stack, "tu_id_to_idx", None),
         node_map=stack.node_map,
     )
-    return networks
 
 
 def commit_final(
     stack: "ComputeStack",
     params: "ParameterTree",
     **kwargs,
-) -> list["Network"]:
+) -> tuple[list["Network"], CommitReport]:
     """Full commit including collapse/quantization to discrete parts."""
+    assert stack.layers is not None, "Stack must be built before committing"
     options = CommitOptions.for_final()
-    networks, _ = commit_networks(
+    return commit_networks(
         stack.networks,
         stack.layers,
         params,
@@ -498,4 +603,3 @@ def commit_final(
         tu_id_to_idx=getattr(stack, "tu_id_to_idx", None),
         node_map=stack.node_map,
     )
-    return networks

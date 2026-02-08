@@ -352,7 +352,7 @@ def identify_tus_to_prune(
                         if tu_idx < len(network_log_alpha):
                             prob = float(jax.nn.sigmoid(network_log_alpha[tu_idx]))
                             mask_strengths[tu_id] = prob
-                            if prob < (0.5 - prune_margin):
+                            if prob < 0.5:
                                 candidates.add(tu_id)
                                 decision_counts["mask_below_threshold"] += 1
                                 scope.decision(
@@ -365,6 +365,31 @@ def identify_tus_to_prune(
                                         "prob": prob,
                                     },
                                 )
+
+            # Protect confidently-enabled TUs from ratio-only pruning.
+            # This prevents low-ratio TUs that are still clearly ON from being
+            # removed and causing cascading structural deletions.
+            if use_soft_pruning and has_tu_masking:
+                for tu_id in list(candidates):
+                    prob = mask_strengths.get(tu_id)
+                    if prob is None:
+                        continue
+                    if prob > (0.5 + prune_margin):
+                        strength = ratio_strengths.get(tu_id, 0.0)
+                        if strength < ratio_threshold:
+                            candidates.remove(tu_id)
+                            scope.decision(
+                                "preserve_tu",
+                                outcome=False,
+                                reason="mask_confidently_enabled",
+                                inputs={
+                                    "tu_id": tu_id,
+                                    "network": net_idx,
+                                    "prob": prob,
+                                    "strength": strength,
+                                    "threshold": ratio_threshold,
+                                },
+                            )
 
             # Log ratio-based pruning decisions
             for tu_id in candidates:
@@ -892,7 +917,15 @@ def hard_prune_and_rebuild(
                 removed_tus,
                 auto_lock_topology_tus=dconf.auto_lock_topology_tus,
             )
-            candidate_networks = commit_structure(stack, candidate_params, lock_ratios=lock_ratios)
+            candidate_networks, commit_report = commit_structure(
+                stack, candidate_params, lock_ratios=lock_ratios
+            )
+            for cr in commit_report.commit_results:
+                if cr.status.is_degenerate:
+                    logger.debug(
+                        f"[HARD-PRUNE] Degenerate commit: {cr.status.value} "
+                        f"for {cr.diagnostics.get('network_name', '?')}"
+                    )
             valid: list[tuple[int, Network]] = []
             for idx, candidate_net in enumerate(candidate_networks):
                 if _is_valid_network(candidate_net):

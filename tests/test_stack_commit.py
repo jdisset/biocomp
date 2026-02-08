@@ -18,11 +18,13 @@ from pathlib import Path
 
 from biocomp.stack_commit import (
     CommitOptions,
-    NetworkCommitReport,
     CommitReport,
-    commit_structure,
+    CommitResult,
+    CommitStatus,
+    NetworkCommitReport,
     commit_final,
     commit_networks,
+    commit_structure,
 )
 from biocomp.tumasking_strategy import get_full_log_alpha
 from biocomp.parameters import ParameterTree
@@ -37,6 +39,8 @@ class TestCommitOptions:
         assert options.collapse_to_part is True
         assert options.preserve_ratio_states is False  # Don't preserve by default
         assert options.roundtrip_rebuild is True
+        assert options.cascade_disable_exclusive_neg_tus is True
+        assert options.cleanup_orphaned_downstream_nodes is True
         assert options.preserve_input_order is True
         assert options.max_rebuild_workers == 8
 
@@ -47,6 +51,8 @@ class TestCommitOptions:
         assert options.preserve_ratio_states is True  # Preserve for structure-only
         assert options.prune_tus is True
         assert options.roundtrip_rebuild is True
+        assert options.cascade_disable_exclusive_neg_tus is True
+        assert options.cleanup_orphaned_downstream_nodes is True
 
     def test_for_final(self):
         """for_final() creates options with collapse."""
@@ -55,6 +61,8 @@ class TestCommitOptions:
         assert options.preserve_ratio_states is False  # Don't preserve for final
         assert options.prune_tus is True
         assert options.roundtrip_rebuild is True
+        assert options.cascade_disable_exclusive_neg_tus is True
+        assert options.cleanup_orphaned_downstream_nodes is True
 
     def test_commit_options_frozen(self):
         """CommitOptions is frozen (immutable)."""
@@ -240,11 +248,12 @@ class TestCommitIntegration:
         from biocomp.library import LibraryContext
 
         with LibraryContext.with_library(lib):
-            committed = commit_structure(stack, params)
+            committed, report = commit_structure(stack, params)
 
             assert len(committed) == len(networks)
             for net in committed:
                 assert net.compute_graph is not None
+            assert isinstance(report, CommitReport)
 
     def test_commit_final_produces_networks(self, lib, simple_network_and_stack):
         """commit_final should produce valid committed networks."""
@@ -253,11 +262,12 @@ class TestCommitIntegration:
         from biocomp.library import LibraryContext
 
         with LibraryContext.with_library(lib):
-            committed = commit_final(stack, params)
+            committed, report = commit_final(stack, params)
 
             assert len(committed) == len(networks)
             for net in committed:
                 assert net.compute_graph is not None
+            assert isinstance(report, CommitReport)
 
     def test_commit_networks_returns_report(self, lib, simple_network_and_stack):
         """commit_networks returns a CommitReport with timing information."""
@@ -283,3 +293,162 @@ class TestCommitIntegration:
             assert "roundtrip_rebuild" in report.timings
             assert "total" in report.timings
             assert len(committed) == len(networks)
+
+    def test_commit_networks_populates_commit_results(self, lib, simple_network_and_stack):
+        """commit_networks populates commit_results in the report."""
+        networks, stack, params = simple_network_and_stack
+
+        from biocomp.library import LibraryContext
+
+        with LibraryContext.with_library(lib):
+            options = CommitOptions.for_final()
+            committed, report = commit_networks(
+                stack.networks,
+                stack.layers,
+                params,
+                options,
+                tu_id_to_idx=stack.tu_id_to_idx,
+                node_map=stack.node_map,
+            )
+
+            assert len(report.commit_results) == len(networks)
+            for cr in report.commit_results:
+                assert isinstance(cr, CommitResult)
+                assert isinstance(cr.status, CommitStatus)
+            # Each result is either OK (with network) or degenerate (with None)
+            for cr in report.commit_results:
+                if cr.status.is_ok:
+                    assert cr.network is not None
+                else:
+                    assert cr.network is None
+
+    def test_commit_structure_returns_report(self, lib, simple_network_and_stack):
+        """commit_structure returns (networks, report) tuple."""
+        networks, stack, params = simple_network_and_stack
+
+        from biocomp.library import LibraryContext
+
+        with LibraryContext.with_library(lib):
+            committed, report = commit_structure(stack, params)
+
+            assert len(committed) == len(networks)
+            assert isinstance(report, CommitReport)
+            assert len(report.commit_results) == len(networks)
+
+    def test_commit_final_returns_report(self, lib, simple_network_and_stack):
+        """commit_final returns (networks, report) tuple."""
+        networks, stack, params = simple_network_and_stack
+
+        from biocomp.library import LibraryContext
+
+        with LibraryContext.with_library(lib):
+            committed, report = commit_final(stack, params)
+
+            assert len(committed) == len(networks)
+            assert isinstance(report, CommitReport)
+            assert len(report.commit_results) == len(networks)
+
+
+class TestCommitStatus:
+    """Tests for CommitStatus enum."""
+
+    def test_ok_is_not_degenerate(self):
+        assert not CommitStatus.OK.is_degenerate
+        assert CommitStatus.OK.is_ok
+
+    def test_all_degenerate_variants(self):
+        degenerate_statuses = [
+            CommitStatus.DEGENERATE_NO_OUTPUTS,
+            CommitStatus.DEGENERATE_RECIPE_ERROR,
+            CommitStatus.DEGENERATE_EMPTY_RECIPE,
+            CommitStatus.DEGENERATE_NO_VALID_INVERSIONS,
+        ]
+        for status in degenerate_statuses:
+            assert status.is_degenerate, f"{status} should be degenerate"
+            assert not status.is_ok, f"{status} should not be ok"
+
+    def test_values_are_strings(self):
+        assert CommitStatus.OK.value == "ok"
+        assert CommitStatus.DEGENERATE_NO_OUTPUTS.value == "degenerate_no_outputs"
+
+
+class TestCommitResult:
+    """Tests for CommitResult frozen dataclass."""
+
+    def test_ok_result_has_network(self):
+        from biocomp.graphengine import GraphState
+        from biocomp.network import Network
+
+        net = Network(compute_graph=GraphState(nodes={}, edges={}))
+        result = CommitResult(status=CommitStatus.OK, network=net)
+        assert result.network is net
+        assert result.status.is_ok
+
+    def test_degenerate_result_has_none_network(self):
+        result = CommitResult(
+            status=CommitStatus.DEGENERATE_NO_OUTPUTS,
+            network=None,
+            diagnostics={"network_name": "test", "network_idx": 0},
+        )
+        assert result.network is None
+        assert result.status.is_degenerate
+        assert result.diagnostics["network_name"] == "test"
+
+    def test_frozen(self):
+        result = CommitResult(status=CommitStatus.OK, network=None)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            result.status = CommitStatus.DEGENERATE_NO_OUTPUTS  # type: ignore[misc]
+
+    def test_default_diagnostics(self):
+        result = CommitResult(status=CommitStatus.OK, network=None)
+        assert result.diagnostics == {}
+
+
+class TestCommitReportDegenerate:
+    """Tests for CommitReport degenerate tracking."""
+
+    def test_has_degenerate_false_when_all_ok(self):
+        report = CommitReport(
+            commit_results=[
+                CommitResult(status=CommitStatus.OK, network=None),
+                CommitResult(status=CommitStatus.OK, network=None),
+            ]
+        )
+        assert not report.has_degenerate
+        assert report.degenerate_indices == []
+
+    def test_has_degenerate_true_with_mixed(self):
+        report = CommitReport(
+            commit_results=[
+                CommitResult(status=CommitStatus.OK, network=None),
+                CommitResult(status=CommitStatus.DEGENERATE_NO_OUTPUTS, network=None),
+                CommitResult(status=CommitStatus.OK, network=None),
+                CommitResult(status=CommitStatus.DEGENERATE_RECIPE_ERROR, network=None),
+            ]
+        )
+        assert report.has_degenerate
+        assert report.degenerate_indices == [1, 3]
+
+    def test_empty_commit_results(self):
+        report = CommitReport()
+        assert not report.has_degenerate
+        assert report.degenerate_indices == []
+
+
+class TestMakeEmptyNetwork:
+    """Tests for _make_empty_network helper."""
+
+    def test_preserves_name_and_metadata(self):
+        from biocomp.graphengine import GraphState
+        from biocomp.network import Network
+        from biocomp.stack_commit import _make_empty_network
+
+        original = Network(compute_graph=GraphState(nodes={}, edges={}))
+        original.name = "test_network"
+        original.metadata = {"key": "value", "num": 42}
+
+        empty = _make_empty_network(original)
+        assert empty.name == "test_network"
+        assert empty.metadata == {"key": "value", "num": 42}
+        assert len(empty.compute_graph.nodes) == 0
+        assert len(empty.compute_graph.edges) == 0

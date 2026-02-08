@@ -407,7 +407,7 @@ def test_hard_prune_removes_low_ratios_without_masking(lib):
             enable_tu_masking=False,
         )
 
-        stack = dmanager.build_stack(model, unlock_ratios=True)
+        stack = dmanager.build_stack(model, unlock_ratios=True, auto_lock_topology_tus=False)
         params_full = initialize_params(
             stack,
             n_replicates=1,
@@ -471,7 +471,7 @@ def test_identify_tus_to_prune_returns_mapped_ids(lib):
             enable_tu_masking=False,
         )
 
-        stack = dmanager.build_stack(model, unlock_ratios=True)
+        stack = dmanager.build_stack(model, unlock_ratios=True, auto_lock_topology_tus=False)
         params_full = initialize_params(
             stack,
             n_replicates=1,
@@ -804,7 +804,7 @@ def test_hard_prune_removes_masked_tus(lib):
             latent_y=(0.0, 0.6),
         )
         dmanager = DesignManager(targets=[target], networks=networks[:1], enable_tu_masking=True)
-        stack = dmanager.build_stack(model, unlock_ratios=True)
+        stack = dmanager.build_stack(model, unlock_ratios=True, auto_lock_topology_tus=False)
 
         dconf = DesignConfig(n_replicates=1, n_epochs=1)
         dconf.tu_masking.mode = TUMaskingMode.DIRECT
@@ -857,6 +857,95 @@ def test_hard_prune_removes_masked_tus(lib):
 
         remaining = extract_tu_ids_from_network(new_dmanager.networks[0])
         assert tu_id not in remaining
+
+
+def test_identify_tus_to_prune_prefers_mask_for_borderline_conflicts(lib):
+    """Ratio-only pruning must not remove confidently-enabled TUs."""
+    if not SCAFFOLD_PATH.exists():
+        pytest.skip(f"Scaffold not found: {SCAFFOLD_PATH}")
+
+    model = _make_model()
+
+    with LibraryContext.with_library(lib):
+        recipe = _load_scaffold_recipe()
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
+        target = SVGTarget(
+            name="MIT_T (mask-vs-ratio conflict)",
+            path=RESOURCES_DIR / "designs/MIT_T.svg",
+            transform_to_log_space=False,
+            latent_x=(0.0, 0.6),
+            latent_y=(0.0, 0.6),
+        )
+        dmanager = DesignManager(targets=[target], networks=networks[:1], enable_tu_masking=True)
+        stack = dmanager.build_stack(model, unlock_ratios=True, auto_lock_topology_tus=False)
+
+        dconf = DesignConfig(n_replicates=1, n_epochs=1, hard_pruning_prune_margin=0.1)
+        dconf.tu_masking.mode = TUMaskingMode.DIRECT
+        params_full = initialize_params(
+            stack,
+            n_replicates=1,
+            n_targets=1,
+            shared_params=model.shared_params,
+            key=jax.random.key(61),
+            strategy=build_strategy_from_config(dconf),
+            n_tus=dmanager.n_tus,
+            n_networks=len(dmanager.networks),
+            no_masking_tu_ids=stack.no_masking_tu_ids,
+            tu_id_to_idx=stack.tu_id_to_idx,
+        )
+        params = tree_get(params_full, (0, 0))
+        stack.ensure_tu_mapping(auto_lock_topology_tus=False)
+
+        tu_id_to_idx = stack.tu_id_to_idx or {}
+        idx_to_tu_id = {idx: tu_id for tu_id, idx in tu_id_to_idx.items()}
+        log_alpha = np.array(params[TU_LOG_ALPHA_PATH], copy=True)
+        log_alpha[...] = 10.0
+        # Should be pruned by mask (<0.5), even with strong ratio.
+        log_alpha[:, tu_id_to_idx["x1_a-_x1"]] = -0.2
+        # Should be preserved by mask confidence (>0.5 + margin), despite weak ratio.
+        log_alpha[:, tu_id_to_idx["x2_b+_x2"]] = 1.0
+        params.at(TU_LOG_ALPHA_PATH, log_alpha, overwrite=True)
+
+        assert stack.layers is not None
+        for layer in stack.layers:
+            if layer.f_type != "aggregation":
+                continue
+            namespace = layer.namespace
+            assert namespace is not None
+            ratio_path = f"{namespace}/ratios"
+            if ratio_path not in params:
+                continue
+            out_idx_path = f"{namespace}/output_tu_indices"
+            if out_idx_path not in params:
+                continue
+            ratios = np.array(params[ratio_path], copy=True)
+            tu_indices = np.asarray(params[out_idx_path])
+            for node_idx in range(ratios.shape[0]):
+                for slot in range(ratios.shape[1]):
+                    tu_idx = int(tu_indices[node_idx, slot])
+                    if tu_idx < 0:
+                        continue
+                    tu_id = idx_to_tu_id.get(tu_idx)
+                    if tu_id == "x1_a-_x1":
+                        ratios[node_idx, slot] = 0.2
+                    if tu_id == "x2_b+_x2":
+                        ratios[node_idx, slot] = 0.005
+            params.at(ratio_path, ratios, overwrite=True)
+
+        tus_to_remove = identify_tus_to_prune(
+            params,
+            stack,
+            dmanager,
+            ratio_threshold=0.014,
+            use_soft_pruning=True,
+            preserve_minimum=1,
+            prune_margin=dconf.hard_pruning_prune_margin,
+            auto_lock_topology_tus=False,
+        )
+
+        removed = tus_to_remove[0]
+        assert "x1_a-_x1" in removed
+        assert "x2_b+_x2" not in removed
 
 
 def test_hard_prune_top_network_selection_remaps_tu_log_alpha_rows(lib):
@@ -1360,7 +1449,7 @@ class TestCommitPreservesRatioStates:
             assert init_before is not None, "Init should be set before commit"
 
             # Commit with preserve_ratio_states=True (structure-only)
-            committed_networks = commit_structure(stack, params, lock_ratios=False)
+            committed_networks, _report = commit_structure(stack, params, lock_ratios=False)
             assert len(committed_networks) > 0, "Should have committed networks"
 
             # Check the committed network's aggregation node
@@ -1429,7 +1518,7 @@ class TestCommitPreservesRatioStates:
             _store_learned_ratio_inits(params, stack)
 
             # Commit with lock_ratios=True (should drop ratio_range)
-            committed_networks = commit_structure(stack, params, lock_ratios=True)
+            committed_networks, _report = commit_structure(stack, params, lock_ratios=True)
             assert len(committed_networks) > 0
 
             # Check that ratio_range is dropped
