@@ -77,6 +77,10 @@ def sequestron_ERN(
     shared_layer_name = f"ERN_{subtype}"
     local_layer_name = namespace.split("/")[-1]  # extract layer name from namespace
 
+    quantization_values_path = "shared/quantization/values/affinity"
+    logstdevs_path = "shared/quantization/logstdevs/affinity"
+    count_array_path = "shared/quantization/counts/affinity"
+
     def MLP(
         neg: ArrayLike,
         pos: ArrayLike,
@@ -135,19 +139,26 @@ def sequestron_ERN(
         add_tu_input_mapping(params, stack, nodelist, namespace)
         add_node_network_ids(params, nodelist, namespace)
 
-        init_if_needed(
-            params,
-            f"shared/{shared_layer_name}/affinities",
-            init_f=uniform_initializer(key, (len(affinity_names), affinity_dim)),
-        )
+        # Initialize shared affinity codebook (variational, like tc_rate/tl_rate)
+        try:
+            qvalues = params[quantization_values_path]
+        except KeyError:
+            qvalues = uniform_initializer(key, (len(affinity_names), affinity_dim))()
+            params[quantization_values_path] = qvalues
+        try:
+            params[logstdevs_path]
+        except KeyError:
+            params[logstdevs_path] = jnp.zeros((len(affinity_names), affinity_dim)) - 3
 
-        # for now the ERN node does'nt use the more complex quantization,
-        # we just have one affinity value per ERN type (case, csy4, etc..)
-        # and store one reference to the affinity value per node.
+        assert qvalues.shape == (len(affinity_names), affinity_dim)
 
-        # very important to use ArrayRef so that we don't copy the data which
-        # would be catastrophic as it would create one new affinity value per node
+        # ArrayRef for values: one reference per node into the shared codebook
         ref = ArrayRef(params.data)
+        # ArrayRef for logstdevs: same index per node
+        ref_logstd = ArrayRef(params.data)
+
+        # Accumulate usage counts
+        node_counts = np.zeros(len(affinity_names), dtype=np.int32)
 
         # store node layer ids if enabled
         seq_layer_ids = []
@@ -159,7 +170,9 @@ def sequestron_ERN(
             if seq_name not in affinity_names:
                 raise ValueError(f"Unknown affinity name {seq_name}. Available: {affinity_names}")
             affinity_id = affinity_names.index(seq_name)
-            ref.push_back(f"shared/{shared_layer_name}/affinities", affinity_id)
+            ref.push_back(quantization_values_path, affinity_id)
+            ref_logstd.push_back(logstdevs_path, affinity_id)
+            node_counts[affinity_id] += 1
 
             # collect node layer ids if enabled
             if use_ern_layer_id:
@@ -173,6 +186,22 @@ def sequestron_ERN(
                 seq_layer_ids.append(node_layer_id)
 
         params.at(f"{namespace}/affinity", ref, overwrite=None)
+        params.at(f"{namespace}/affinity_logstdev", ref_logstd, overwrite=None)
+
+        # accumulate usage counts (same pattern as transform.py)
+        try:
+            params.at(
+                count_array_path,
+                node_counts + params.at(count_array_path),
+                overwrite=True,
+                tags=[NON_GRAD_TAG],
+            )
+        except KeyError:
+            params.at(
+                count_array_path,
+                node_counts,
+                tags=[NON_GRAD_TAG],
+            )
 
         # store node layer ids as a param array with non_grad tag if enabled
         if use_ern_layer_id:
@@ -212,8 +241,20 @@ def sequestron_ERN(
     ) -> tuple[ArrayLike, dict]:
         assert len(values) == len(input_shapes)
 
-        affinity = params[f"{namespace}/affinity"][node_id]
-        assert affinity.shape == (affinity_dim,)
+        key, key_affinity = jax.random.split(key)
+
+        affinity_mean = params[f"{namespace}/affinity"][node_id]
+        assert affinity_mean.shape == (affinity_dim,)
+
+        logstdev = params[f"{namespace}/affinity_logstdev"][node_id]
+        logstdev = jnp.clip(logstdev, -10.0, 5.0)
+        if dummy:
+            affinity_noise = jnp.zeros_like(affinity_mean)
+        else:
+            affinity_noise = jax.random.normal(key_affinity, affinity_mean.shape) * jnp.exp(
+                logstdev
+            )
+        affinity = affinity_mean + affinity_noise
 
         qid = params[f"{namespace}/random_variable_id"][node_id]
 
@@ -229,9 +270,7 @@ def sequestron_ERN(
             from biocomp.tumasking import get_tu_masks
 
             tu_indices = params[input_tu_indices_path][node_id]
-            input_masks = get_tu_masks(
-                params, tu_indices, network_id, is_multi_tu=True
-            )
+            input_masks = get_tu_masks(params, tu_indices, network_id, is_multi_tu=True)
         else:
             input_masks = jnp.ones(2)
 
@@ -267,6 +306,9 @@ def sequestron_ERN(
 
         aux_dict = {
             "affinity": affinity,
+            "affinity_mean": affinity_mean,
+            "affinity_logstdev": logstdev,
+            "affinity_noise": affinity_noise,
             "random_var": random_vars[qid],
             "node_layer_id": node_layer_id if use_ern_layer_id else None,
             "layer_id_onehot": layer_id_onehot,

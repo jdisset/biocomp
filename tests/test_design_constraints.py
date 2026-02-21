@@ -201,6 +201,7 @@ class TestZeroFreedomConstraints:
         def forward_pass(p, x_batch, z_batch, keys):
             def apply_single(x, z, k):
                 return stack.apply(p, x, z, k)[0]
+
             return jax.vmap(apply_single)(x_batch, z_batch, keys)
 
         forward_jit = jax.jit(forward_pass)
@@ -216,7 +217,6 @@ class TestZeroFreedomConstraints:
 
         loss_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 
-        # Run optimization
         learning_rate = 0.01
         n_steps = 50
         loss_history = []
@@ -230,9 +230,10 @@ class TestZeroFreedomConstraints:
 
         loss_std = np.std(loss_history)
 
-        # Loss should be essentially constant (allowing for float precision)
-        assert loss_std < 1e-5, (
-            f"Zero-freedom loss should be constant during optimization, "
+        # Loss should be essentially constant. Small variation from variational
+        # embedding noise (different keys per step) is acceptable.
+        assert loss_std < 1e-3, (
+            f"Zero-freedom loss should be approximately constant during optimization, "
             f"but std={loss_std:.2e}"
         )
 
@@ -317,8 +318,12 @@ class TestHeterogeneousConstraints:
         recipe_unlocked = load_recipe(unlocked_path)
 
         # Build networks
-        networks_locked = recipe_to_networks(recipe_locked, br.ALL_RULES, invert=True, inversion_mode="main")
-        networks_unlocked = recipe_to_networks(recipe_unlocked, br.ALL_RULES, invert=True, inversion_mode="main")
+        networks_locked = recipe_to_networks(
+            recipe_locked, br.ALL_RULES, invert=True, inversion_mode="main"
+        )
+        networks_unlocked = recipe_to_networks(
+            recipe_unlocked, br.ALL_RULES, invert=True, inversion_mode="main"
+        )
 
         network_locked = networks_locked[0]
         network_unlocked = networks_unlocked[0]
@@ -367,8 +372,12 @@ class TestHeterogeneousConstraints:
         recipe_locked = load_recipe(locked_path)
         recipe_unlocked = load_recipe(unlocked_path)
 
-        networks_locked = recipe_to_networks(recipe_locked, br.ALL_RULES, invert=True, inversion_mode="main")
-        networks_unlocked = recipe_to_networks(recipe_unlocked, br.ALL_RULES, invert=True, inversion_mode="main")
+        networks_locked = recipe_to_networks(
+            recipe_locked, br.ALL_RULES, invert=True, inversion_mode="main"
+        )
+        networks_unlocked = recipe_to_networks(
+            recipe_unlocked, br.ALL_RULES, invert=True, inversion_mode="main"
+        )
 
         # Mixed stack: should NOT have NON_GRAD on ratios
         stack_mixed = ComputeStack(networks=[networks_locked[0], networks_unlocked[0]])
@@ -409,8 +418,12 @@ class TestHeterogeneousConstraints:
         recipe_locked = load_recipe(locked_path)
         recipe_unlocked = load_recipe(unlocked_path)
 
-        networks_locked = recipe_to_networks(recipe_locked, br.ALL_RULES, invert=True, inversion_mode="main")
-        networks_unlocked = recipe_to_networks(recipe_unlocked, br.ALL_RULES, invert=True, inversion_mode="main")
+        networks_locked = recipe_to_networks(
+            recipe_locked, br.ALL_RULES, invert=True, inversion_mode="main"
+        )
+        networks_unlocked = recipe_to_networks(
+            recipe_unlocked, br.ALL_RULES, invert=True, inversion_mode="main"
+        )
 
         stack = ComputeStack(networks=[networks_locked[0], networks_unlocked[0]])
         stack.build(designer_model.compute_config, enable_tu_masking=False)
@@ -979,18 +992,23 @@ class TestDesignModeConstraints:
 
         # Genome should be empty
         genome = codec.encode(params)
-        assert genome.shape == (0,), f"Zero-freedom genome should be empty, got shape {genome.shape}"
+        assert genome.shape == (0,), (
+            f"Zero-freedom genome should be empty, got shape {genome.shape}"
+        )
 
 
 class TestMultiTopologyDegreesOfFreedom:
     """Tests for degrees of freedom across various network topologies."""
 
-    @pytest.mark.parametrize("recipe_name,expected_locked_rates,expected_locked_ratios", [
-        ("T_2_zero_freedom.yaml", True, True),
-        ("T_2_ratios_only.yaml", True, False),  # Rates locked, ratios unlocked
-        ("two_and_one.yaml", False, False),  # Both unlocked
-        ("two_and_one_all_uorfs.yaml", False, False),  # All unlocked
-    ])
+    @pytest.mark.parametrize(
+        "recipe_name,expected_locked_rates,expected_locked_ratios",
+        [
+            ("T_2_zero_freedom.yaml", True, True),
+            ("T_2_ratios_only.yaml", True, False),  # Rates locked, ratios unlocked
+            ("two_and_one.yaml", False, False),  # Both unlocked
+            ("two_and_one_all_uorfs.yaml", False, False),  # All unlocked
+        ],
+    )
     def test_various_topologies_respect_constraints(
         self, designer_model, recipe_name, expected_locked_rates, expected_locked_ratios
     ):
@@ -1039,7 +1057,9 @@ class TestMultiTopologyDegreesOfFreedom:
             assert any_rate_unlocked, f"{recipe_name}: Expected rates unlocked but all locked"
 
         if expected_locked_ratios:
-            assert not any_ratio_unlocked, f"{recipe_name}: Expected ratios locked but found unlocked"
+            assert not any_ratio_unlocked, (
+                f"{recipe_name}: Expected ratios locked but found unlocked"
+            )
         else:
             assert any_ratio_unlocked, f"{recipe_name}: Expected ratios unlocked but all locked"
 
@@ -1061,9 +1081,7 @@ class TestMultiTopologyDegreesOfFreedom:
         all_networks = []
         for i, path in enumerate(paths):
             recipe = load_recipe(path)
-            networks = recipe_to_networks(
-                recipe, br.ALL_RULES, invert=True, inversion_mode="main"
-            )
+            networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True, inversion_mode="main")
             networks[0].name = f"net_{i}_{path.stem}"
             all_networks.append(networks[0])
 

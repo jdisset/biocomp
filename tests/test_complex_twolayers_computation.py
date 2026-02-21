@@ -31,7 +31,15 @@ from biocomp.library import LibraryContext, load_lib
 import biocomp.biorules as br
 from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
-from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot, FluoIntensity, NumRange, RATIO_PRECISION
+from biocomp.recipe import (
+    Recipe,
+    CoTransfection,
+    TranscriptionUnit,
+    Slot,
+    FluoIntensity,
+    NumRange,
+    RATIO_PRECISION,
+)
 from biocomp.jaxutils import flat_concat
 from biocomp.ratio_schema import get_slot_entries
 from biocomp.nodes.ern import ERN_DEFAULT_NEG_PARTS
@@ -88,12 +96,18 @@ def make_units(tu_name, erns):
     u2 = Slot(part=UORFS, ref_id="U2")
     u3 = Slot(part=UORFS[1:], ref_id="U3")
     return [
-        TranscriptionUnit(slots=[P, COLORS[tu_name], T], name=f"{tu_name}_marker", source="themarker"),
+        TranscriptionUnit(
+            slots=[P, COLORS[tu_name], T], name=f"{tu_name}_marker", source="themarker"
+        ),
         TranscriptionUnit(slots=[P, u1, recs[0], erns[2], T], name=f"{tu_name}_a+", source="03"),
         TranscriptionUnit(slots=[P, erns[0], T], name=f"{tu_name}_a-", source="45"),
-        TranscriptionUnit(slots=[P, u2, recs[1], erns[2], T], name=f"{tu_name}_b+", source="haha12"),
+        TranscriptionUnit(
+            slots=[P, u2, recs[1], erns[2], T], name=f"{tu_name}_b+", source="haha12"
+        ),
         TranscriptionUnit(slots=[P, erns[1], T], name=f"{tu_name}_b-", source="wrong order 78"),
-        TranscriptionUnit(slots=[P, u3, recs[2], COLORS["y"], T], name=f"{tu_name}_c+", source="a random id"),
+        TranscriptionUnit(
+            slots=[P, u3, recs[2], COLORS["y"], T], name=f"{tu_name}_c+", source="a random id"
+        ),
         TranscriptionUnit(slots=[P, erns[2], T], name=f"{tu_name}_c-", source="00aaa"),
         TranscriptionUnit(slots=[P, COLORS["y"], T], name=f"{tu_name}_direct_out", source="direct"),
     ]
@@ -116,7 +130,12 @@ def complex_twolayers_design_network(lib):
             content=[
                 CoTransfection(name="x1", units=make_units("x1", ERNS), ratios=x1ratios.tolist()),
                 CoTransfection(name="x2", units=make_units("x2", ERNS), ratios=x2ratios.tolist()),
-                CoTransfection(name="b", units=make_units("b", ERNS), fluo_bias=BIAS_FLUO, ratios=bratios.tolist()),
+                CoTransfection(
+                    name="b",
+                    units=make_units("b", ERNS),
+                    fluo_bias=BIAS_FLUO,
+                    ratios=bratios.tolist(),
+                ),
             ],
         )
     return recipe
@@ -177,14 +196,18 @@ def complex_twolayers_advanced_stack_assertions(
     assert np.all(fl_out.flatten() == fl_test_input.flatten())
 
     ratio_output_tol = 2 * 10 ** (-RATIO_PRECISION + 1)
-    assert np.allclose(y_aux["5"]["trace"]["outputs"], np.array([[B_inv], [X1_inv], [X2_inv]]), rtol=ratio_output_tol)
+    assert np.allclose(
+        y_aux["5"]["trace"]["outputs"],
+        np.array([[B_inv], [X1_inv], [X2_inv]]),
+        rtol=ratio_output_tol,
+    )
     y_aux["7"]["trace"]["outputs"]
     for sn in stack.layers[7].nodes:
         n = network.compute_graph.get_node(sn.node_id)
         assert np.isclose(
             intermediate_values[n.extra["name"]],
             y_aux["7"]["trace"]["outputs"][sn.node_position_in_layer][0],
-            rtol=ratio_output_tol
+            rtol=ratio_output_tol,
         )
     y_aux["11"]["trace"]["outputs"]
     assert np.allclose(
@@ -251,7 +274,7 @@ def complex_twolayers_topology_assertions(network, stack, params):
             if un.extra["seq_name"] == f"ERN::{E0}#{E0}_rec":
                 eid = ERN_DEFAULT_NEG_PARTS.index(E0)
                 assert un.extra["layer_id"] == 0
-                assert params["shared/ERN_5p/affinities"][eid] == ern_affinity
+                assert params["shared/quantization/values/affinity"][eid] == ern_affinity
                 i_mask = params[tl_layer.namespace]["tl_rate_quantization_mask"][tl_pos, i, :]
                 u1_local_emb = params[tl_layer.namespace]["tl_rate"][0, i, :]
                 assert u1_local_emb.shape == EMBEDDING_SHAPE
@@ -259,7 +282,7 @@ def complex_twolayers_topology_assertions(network, stack, params):
             elif un.extra["seq_name"] == f"ERN::{E1}#{E1}_rec":
                 eid = ERN_DEFAULT_NEG_PARTS.index(E1)
                 assert un.extra["layer_id"] == 0
-                assert params["shared/ERN_5p/affinities"][eid] == ern_affinity
+                assert params["shared/quantization/values/affinity"][eid] == ern_affinity
                 i_mask = params[tl_layer.namespace]["tl_rate_quantization_mask"][tl_pos, i, :]
                 u2_local_emb = params[tl_layer.namespace]["tl_rate"][0, i, :]
                 assert u2_local_emb.shape == EMBEDDING_SHAPE
@@ -297,7 +320,7 @@ def complex_twolayers_topology_assertions(network, stack, params):
             assert un.extra["seq_name"] == f"ERN::{E2}#{E2}_rec"
             assert un.extra["layer_id"] == 1
             eid = ERN_DEFAULT_NEG_PARTS.index(E2)
-            assert params["shared/ERN_5p/affinities"][eid] == ern_affinity
+            assert params["shared/quantization/values/affinity"][eid] == ern_affinity
             i_mask = params[tl_layer2.namespace]["tl_rate_quantization_mask"][tl_pos2, i, :]
             u3_local_emb = params[tl_layer2.namespace]["tl_rate"][0, i, :]
             assert u3_local_emb.shape == EMBEDDING_SHAPE
@@ -518,7 +541,9 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
                 }
                 ratio_tol = 0.5 * 10 ** (-RATIO_PRECISION)
                 for src_id, slot_data in members_by_source.items():
-                    assert np.isclose(slot_data["ratio"], expected_ratios[src_id], atol=ratio_tol), (
+                    assert np.isclose(
+                        slot_data["ratio"], expected_ratios[src_id], atol=ratio_tol
+                    ), (
                         f"Aggregation ratio for {src_id} in cotx x1 is {slot_data['ratio']}, expected {expected_ratios[src_id]}"
                     )
 
@@ -535,7 +560,9 @@ def test_complex_twolayers_aggregations(lib, complex_twolayers_design_network):
                 }
                 ratio_tol = 0.5 * 10 ** (-RATIO_PRECISION)
                 for src_id, slot_data in members_by_source.items():
-                    assert np.isclose(slot_data["ratio"], expected_ratios[src_id], atol=ratio_tol), (
+                    assert np.isclose(
+                        slot_data["ratio"], expected_ratios[src_id], atol=ratio_tol
+                    ), (
                         f"Aggregation ratio for {src_id} in cotx x2 is {slot_data['ratio']}, expected {expected_ratios[src_id]}"
                     )
             elif a.extra["cotx_group"] == "b":
@@ -710,7 +737,9 @@ def test_complex_twolayers_reproducibility(lib, complex_twolayers_design_network
         result1, _ = stack.apply(params, inputs, random_vars, test_key)
         result2, _ = stack.apply(params, inputs, random_vars, test_key)
 
-        assert jnp.allclose(result1, result2, rtol=1e-10), "Same seed should produce identical results"
+        assert jnp.allclose(result1, result2, rtol=1e-10), (
+            "Same seed should produce identical results"
+        )
 
 
 def test_complex_twolayers_variability(lib, complex_twolayers_design_network):
@@ -783,7 +812,7 @@ def test_complex_twolayers_quantization_masks(lib, complex_twolayers_design_netw
     assert tl_rate_values.shape == (13, 1)
     tc_rate_values = params["shared/quantization/values/tc_rate"]
     assert tc_rate_values.shape == (1, 1)
-    ern_affinities = params["shared/ERN_5p/affinities"]
+    ern_affinities = params["shared/quantization/values/affinity"]
 
     def dummy_transform_fwd(value, qrate, rv_inner=0, rv_outer=0):
         value = np.atleast_1d(value).flatten()
