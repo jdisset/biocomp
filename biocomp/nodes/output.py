@@ -96,12 +96,16 @@ def grouped_output(
         masks_reshaped = input_masks.reshape(-1, *([1] * len(input_shapes[0])))
         masked_inputs = inputs_arr * masks_reshaped
         masked_res = res * input_masks.reshape(-1, 1)
+        masked_inputs_scalar = jnp.sum(
+            masked_inputs,
+            axis=tuple(range(1, masked_inputs.ndim)),
+        ).reshape(-1, 1)
 
         if dummy:
             pre = masked_res
             output = masked_res
         else:
-            pre = 0.5 * masked_res + 0.5 * masked_inputs
+            pre = 0.5 * masked_res + 0.5 * masked_inputs_scalar
             output = outer_activation(pre)
 
         return output, {
@@ -110,6 +114,7 @@ def grouped_output(
             "n_inputs": len(inputs_arr),
             "input_values": inputs_arr,
             "input_masks": input_masks,
+            "input_scalar_residual": masked_inputs_scalar,
         }
 
     output_shape = [(1,)] * len(input_shapes)

@@ -73,6 +73,8 @@ def sequestron_ERN(
         f"ERN inputs must have same shape, got {input_shapes}"
     )
     assert n_outputs == 1, f"ERN only supports 1 output, got {n_outputs}"
+    if out_dim < 1:
+        raise ValueError(f"ERN out_dim must be >= 1, got {out_dim}")
 
     shared_layer_name = f"ERN_{subtype}"
     local_layer_name = namespace.split("/")[-1]  # extract layer name from namespace
@@ -291,10 +293,11 @@ def sequestron_ERN(
             )
 
         def passthrough_pos():
-            return jnp.sum(pos_val).reshape(1)
+            pos_scalar = jnp.sum(pos_val).reshape((1,))
+            return jnp.broadcast_to(pos_scalar, (out_dim,))
 
         def zero_output():
-            return jnp.zeros(1)
+            return jnp.zeros((out_dim,))
 
         result = jnp.where(
             pos_enabled > 0.5,
@@ -325,7 +328,7 @@ def sequestron_ERN(
 
         return result, aux_dict
 
-    output_shape = [(1,)]
+    output_shape = [(out_dim,)]
 
     def introspect(
         params: ParameterTree,

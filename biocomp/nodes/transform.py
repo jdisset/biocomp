@@ -53,6 +53,7 @@ def transform_nn(
     inner_wsize: int = 64,
     inner_depth: int = 3,
     inner_outsize: int = 8,
+    out_dim: int = 1,
     rate_dim: int = 1,
     is_inverse: bool = False,
     inner_activation_name: str = DEFAULT_ACTIVATION,
@@ -68,6 +69,10 @@ def transform_nn(
     assert n_outputs == 1, f"NN transform only supports 1 output, got {n_outputs}"
     if is_inverse and len(input_shapes) != 1:
         raise ValueError(f"Inverse {transform_name} should have 1 input, got {len(input_shapes)}")
+    if out_dim < 1:
+        raise ValueError(f"{transform_name}: out_dim must be >= 1, got {out_dim}")
+    if is_inverse and out_dim != 1:
+        raise ValueError(f"Inverse {transform_name} must stay 1D, got out_dim={out_dim}")
 
     if not all(s == input_shapes[0] for s in input_shapes):
         raise ValueError(
@@ -252,7 +257,7 @@ def transform_nn(
                 mlp(
                     inner_out,
                     outer_wsize,
-                    1,
+                    out_dim,
                     depth=outer_depth,
                     param_f=partial(init_if_needed, params, base_path="shared"),
                     initializer=initializer,
@@ -262,8 +267,16 @@ def transform_nn(
                     activation=inner_activation,
                 )
             )
-        assert out.shape == (1,), f"Invalid outer output shape {out.shape}"
+        assert out.shape == (out_dim,), f"Invalid outer output shape {out.shape}"
         return out
+
+    def _align_to_out_dim(value: ArrayLike) -> ArrayLike:
+        vec = jnp.ravel(jnp.asarray(value))
+        if vec.shape[0] == out_dim:
+            return vec
+        if vec.shape[0] == 1:
+            return jnp.broadcast_to(vec, (out_dim,))
+        return jnp.broadcast_to(jnp.mean(vec, keepdims=True), (out_dim,))
 
     def apply(
         *values: ArrayLike,
@@ -326,6 +339,7 @@ def transform_nn(
 
         masked_val = val * input_masks.reshape(-1, *([1] * len(input_shapes[0])))
         input_sum = jnp.sum(masked_val, axis=0)
+        aligned_input_sum = _align_to_out_dim(input_sum)
         n_enabled = jnp.sum(input_masks)
 
         if not dummy:
@@ -335,7 +349,7 @@ def transform_nn(
             beta_norm = jnp.exp(beta) / (jnp.exp(alpha) + jnp.exp(beta))
             final_output = jnp.where(
                 n_enabled > 0,
-                alpha_norm * input_sum + beta_norm * ans,
+                alpha_norm * aligned_input_sum + beta_norm * ans,
                 jnp.zeros_like(ans),
             )
         else:
@@ -354,6 +368,7 @@ def transform_nn(
             "inner_output": inner_out,
             "outer_output": ans,
             "input_sum": input_sum,
+            "aligned_input_sum": aligned_input_sum,
             "alpha_norm": alpha_norm,
             "beta_norm": beta_norm,
             "is_inverse": is_inverse,
@@ -457,7 +472,7 @@ def transform_nn(
                 tu_ids = e.extra.get("tu_id", []) if e.extra else []
                 update_edges_by_tu_id(graph, tu_ids, rate_name, committed_value, ref_id_mappings)
 
-    output_shape = [(1,)]
+    output_shape = [(out_dim,)]
 
     def introspect(
         params: ParameterTree,
