@@ -38,3 +38,6 @@ node_functions:
 
   deadend: !biocomp.utils.PartialFunction
     func: biocomp.nodes.single_passthrough
+
+extra:
+  transform_out_dim: 1

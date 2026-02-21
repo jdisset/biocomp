@@ -117,6 +117,32 @@ class ComputeConfig(ArbitraryModel):
 
         return self.node_functions[node_name].get_impl(extra_module_names=[module_name])
 
+    def apply_transform_out_dim(self) -> int:
+        """Apply SSOT `transform_out_dim` to forward transform nodes only."""
+        if self.node_functions is None:
+            raise ValueError("No node implementations in this config")
+
+        if self.extra is None:
+            self.extra = {}
+
+        raw_out_dim = self.extra.get("transform_out_dim", 1)
+        if isinstance(raw_out_dim, bool):
+            raise ValueError(f"transform_out_dim must be an int >= 1, got {raw_out_dim!r}")
+        try:
+            out_dim = int(raw_out_dim)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"transform_out_dim must be an int >= 1, got {raw_out_dim!r}") from exc
+        if out_dim < 1:
+            raise ValueError(f"transform_out_dim must be an int >= 1, got {out_dim}")
+
+        self.extra["transform_out_dim"] = out_dim
+
+        for node_name in ("transcription", "translation", "sequestron_ERN"):
+            if node_name in self.node_functions:
+                self.node_functions[node_name].set_missing_kwargs({"out_dim": out_dim})
+
+        return out_dim
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -345,7 +371,11 @@ class ComputeStack:
             })
 
             with ut.timer("Building compute stack", logger):
-                self.config = config
+                self.config = config.model_copy(deep=True)
+                transform_out_dim = self.config.apply_transform_out_dim()
+                scope.event("transform_out_dim", "Applied transform output dimension", {
+                    "transform_out_dim": transform_out_dim,
+                })
 
                 if enable_tu_masking:
                     self._build_tu_mapping(auto_lock_topology_tus=auto_lock_topology_tus)
@@ -366,7 +396,7 @@ class ComputeStack:
                 assert self.layers is not None, "No layers"
 
                 for layer_idx, layer in enumerate(self.layers):
-                    layer.setup(config, stack=self)
+                    layer.setup(self.config, stack=self)
                     scope.event("layer_setup", f"Layer {layer_idx} setup complete", {
                         "layer_id": layer_idx,
                         "layer_type": layer.f_type,
