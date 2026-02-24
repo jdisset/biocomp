@@ -282,6 +282,97 @@ class TestOptimizeBestSyncedParams:
         )
         assert float(params[0]) == pytest.approx(3.0)
 
+    def test_can_restore_best_params_from_custom_score(self):
+        def step(params, opt_state, step_key, xb, yb):
+            del opt_state, step_key, xb, yb
+            next_params = params + 1.0
+            loss = jnp.mean((next_params - 10.0) ** 2)
+            return next_params, None, {"loss": loss}
+
+        def score_fn(params, _step_history, _step):
+            return float(jnp.abs(params[0] - 3.0))
+
+        params, _, _ = optimize(
+            step=step,
+            params=jnp.array([0.0]),
+            opt_state=None,
+            xbatches=jnp.zeros((5, 1, 1, 1)),
+            ybatches=jnp.zeros((5, 1, 1, 1)),
+            config=self._make_cfg(),
+            n_total_steps=5,
+            steps_per_epoch=5,
+            key=jax.random.PRNGKey(0),
+            stack=cast(ComputeStack, object()),
+            dispatch=NullDispatch(),
+            precompiled=True,
+            defer_sync=False,
+            select_best_synced_params=True,
+            best_synced_score_fn=score_fn,
+        )
+        assert float(params[0]) == pytest.approx(3.0)
+
+    def test_best_synced_restoration_updates_step_history_latest_params(self):
+        def step(params, opt_state, step_key, xb, yb):
+            del opt_state, step_key, xb, yb
+            next_params = params + 1.0
+            loss = jnp.mean((next_params - 10.0) ** 2)
+            return next_params, None, {"loss": loss, "latest_params": next_params}
+
+        def score_fn(params, _step_history, _step):
+            return float(jnp.abs(params[0] - 2.0))
+
+        params, _, step_history = optimize(
+            step=step,
+            params=jnp.array([0.0]),
+            opt_state=None,
+            xbatches=jnp.zeros((5, 1, 1, 1)),
+            ybatches=jnp.zeros((5, 1, 1, 1)),
+            config=self._make_cfg(),
+            n_total_steps=5,
+            steps_per_epoch=5,
+            key=jax.random.PRNGKey(0),
+            stack=cast(ComputeStack, object()),
+            dispatch=NullDispatch(),
+            precompiled=True,
+            defer_sync=False,
+            select_best_synced_params=True,
+            best_synced_score_fn=score_fn,
+        )
+        assert float(params[0]) == pytest.approx(2.0)
+        assert "latest_params" in step_history
+        assert float(step_history["latest_params"][0]) == pytest.approx(2.0)
+
+    def test_can_restore_initial_baseline_when_all_scores_worse(self):
+        def step(params, opt_state, step_key, xb, yb):
+            del opt_state, step_key, xb, yb
+            next_params = params + 1.0
+            loss = jnp.mean((next_params - 10.0) ** 2)
+            return next_params, None, {"loss": loss}
+
+        def score_fn(params, _step_history, _step):
+            del params
+            return 1.0
+
+        params, _, _ = optimize(
+            step=step,
+            params=jnp.array([0.0]),
+            opt_state=None,
+            xbatches=jnp.zeros((5, 1, 1, 1)),
+            ybatches=jnp.zeros((5, 1, 1, 1)),
+            config=self._make_cfg(),
+            n_total_steps=5,
+            steps_per_epoch=5,
+            key=jax.random.PRNGKey(0),
+            stack=cast(ComputeStack, object()),
+            dispatch=NullDispatch(),
+            precompiled=True,
+            defer_sync=False,
+            select_best_synced_params=True,
+            best_synced_score_fn=score_fn,
+            best_synced_initial_score=0.0,
+        )
+        assert float(params[0]) == pytest.approx(0.0)
+
 
 class TestAsSchedule:
     """Test as_schedule utility."""

@@ -6,6 +6,7 @@ from biocomp.fingerprint import (
     _generate_canonical_grid,
     _hash_output,
     compare_fingerprints,
+    compute_fingerprints,
     FINGERPRINT_RESOLUTION,
     FINGERPRINT_SEED,
     FINGERPRINT_DECIMALS,
@@ -121,3 +122,43 @@ class TestDefaults:
 
     def test_decimals_default(self):
         assert FINGERPRINT_DECIMALS == 4
+
+
+class TestComputeFingerprints:
+    """Tests for batched compute_fingerprints helper."""
+
+    def test_batched_prediction_and_trimming(self):
+        class _DummyNet:
+            def __init__(self, nb_inputs):
+                self.nb_inputs = nb_inputs
+
+        class _DummyStack:
+            def __init__(self, networks):
+                self.networks = networks
+
+        class _DummyModel:
+            def __init__(self):
+                self.stack = _DummyStack([_DummyNet(1), _DummyNet(2)])
+                self.captured_x = None
+
+            def predict(self, x, **_kwargs):
+                self.captured_x = x
+                return np.zeros((x.shape[0], 2), dtype=np.float32), (None, None)
+
+            def split_outputs_per_network(self, _stacked_y, max_samples):
+                out0 = np.arange(max_samples, dtype=np.float32).reshape(-1, 1)
+                out1 = np.arange(max_samples, dtype=np.float32).reshape(-1, 1) + 1000
+                return [out0, out1]
+
+        dummy = _DummyModel()
+
+        fps = compute_fingerprints(dummy, resolution=4, seed=7, decimals=4)
+
+        # n_inputs=1 -> 4 samples, n_inputs=2 -> 16 samples
+        assert dummy.captured_x is not None
+        assert dummy.captured_x.shape == (16, 3)
+        assert len(fps) == 2
+        assert fps[0] == _hash_output(np.arange(4, dtype=np.float32).reshape(-1, 1), decimals=4)
+        assert fps[1] == _hash_output(
+            (np.arange(16, dtype=np.float32).reshape(-1, 1) + 1000), decimals=4
+        )

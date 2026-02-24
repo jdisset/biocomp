@@ -13,6 +13,13 @@
 !set_default w_simse: 0.0      # scale-invariant MSE
 !set_default w_zncc: 0.0       # zero-mean normalized cross-correlation
 !set_default w_contrast: 0.01   # contrast encouragement
+!set_default contrast_mode: target_gap  # target_gap (new default) or range_relu (legacy)
+!set_default contrast_focus: 8.0        # soft high/low mask sharpness for target_gap
+!set_default contrast_gap_weight: 1.0
+!set_default contrast_hi_weight: 1.0
+!set_default contrast_lo_weight: 1.0
+!set_default contrast_barrier_weight: 1.0
+!set_default contrast_min_frac: 1.0
 !set_default w_gradient: 0.01   # gradient magnitude loss
 
 # TU masking settings
@@ -93,6 +100,13 @@ design_conf: !biocomp.design.DesignConfig
       w_simse: ${float(w_simse)}
       w_zncc: ${float(w_zncc)}
       w_contrast: ${float(w_contrast)}
+      contrast_mode: ${contrast_mode}
+      contrast_focus: ${float(contrast_focus)}
+      contrast_gap_weight: ${float(contrast_gap_weight)}
+      contrast_hi_weight: ${float(contrast_hi_weight)}
+      contrast_lo_weight: ${float(contrast_lo_weight)}
+      contrast_barrier_weight: ${float(contrast_barrier_weight)}
+      contrast_min_frac: ${float(contrast_min_frac)}
       w_gradient: ${float(w_gradient)}
       eps_sinkhorn: ${float(eps_sinkhorn)}
       n_sinkhorn_iters: ${int(n_sinkhorn_iters)}

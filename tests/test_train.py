@@ -8,7 +8,9 @@ import pytest
 import jax
 import jax.numpy as jnp
 import optax
-from biocomp.train import TrainingConfig
+from types import SimpleNamespace
+
+from biocomp.train import TrainingConfig, sorting_loss, energy_sampling_loss
 from biocomp.optimutils import make_training_step, create_counter, as_schedule
 from biocomp.parameters import ParameterTree
 from biocomp.utils import PartialFunction, PartialFunctionResult
@@ -159,6 +161,428 @@ class TestLossFunctions:
         # Updates should be unchanged (it's a counter, not a modifier)
         assert jnp.allclose(updates["weights"], grads["weights"])
         assert new_state.count == 1
+
+    class _FakeStack:
+        def __init__(self):
+            self.networks = [SimpleNamespace(nb_inputs=2, nb_outputs=2)]
+            self.total_nb_of_outputs = 2
+
+        def apply(self, _params, x, z, _key):
+            yhat = jnp.array(
+                [
+                    0.7 * x[0] + 0.3 * z[0],
+                    0.2 * x[0] + 0.8 * x[1] - 0.1 * z[0],
+                ]
+            )
+            apply_aux = {"grads_wrt_inputs": jnp.array([0.2, 0.1])}
+            full_output = jnp.concatenate([x, yhat])
+            return yhat, (apply_aux, full_output)
+
+    @staticmethod
+    def _make_sorting_loss_params() -> ParameterTree:
+        params = ParameterTree()
+        params.at(
+            "global/dependent_output_mask",
+            jnp.array([True, False]),
+            tags=["non_grad", "local"],
+            overwrite=True,
+        )
+        params.at(
+            "shared/quantization/values/tl",
+            jnp.array([[0.1], [0.2]]),
+            tags=["shared"],
+            overwrite=True,
+        )
+        params.at(
+            "shared/quantization/logstdevs/tl",
+            jnp.array([[-3.0], [-3.0]]),
+            tags=["shared"],
+            overwrite=True,
+        )
+        params.at(
+            "shared/quantization/counts/tl",
+            jnp.array([[1.0], [1.0]]),
+            tags=["shared"],
+            overwrite=True,
+        )
+        return params
+
+    def test_sorting_loss_pinball_zero_is_noop(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.3, 0.1], [0.4, 0.9], [0.6, 0.2], [0.2, 0.7]])
+        z = jnp.array([[0.1], [0.8], [0.3], [0.5]])
+        key = jax.random.PRNGKey(0)
+
+        loss_fn = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.4,
+            pinball_weight=0.0,
+            kl_weight=1e-4,
+            negative_grad_penalty=0.1,
+        )
+        loss, aux = loss_fn(params, ParameterTree(), x, y, z, key, 0)
+
+        expected = (
+            aux["sublosses"]["main_loss"] + aux["sublosses"]["kl_loss"] + aux["debug"]["ng_loss"]
+        )
+        assert jnp.allclose(loss, expected)
+        assert "pinball_loss" in aux["sublosses"]
+        assert float(aux["debug"]["pinball_weight"]) == 0.0
+
+    def test_sorting_loss_pinball_changes_main_loss_when_enabled(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.1], [0.8], [0.3], [0.5]])
+        key = jax.random.PRNGKey(1)
+
+        loss_no_pb, aux_no_pb = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.5,
+            pinball_weight=0.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_full_pb, aux_full_pb = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.5,
+            pinball_weight=1.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert not jnp.allclose(aux_no_pb["sublosses"]["main_loss"], aux_full_pb["sublosses"]["main_loss"])
+        assert not jnp.allclose(loss_no_pb, loss_full_pb)
+
+    def test_sorting_loss_z_sorting_term_changes_main_loss_when_enabled(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.8], [0.1], [0.6], [0.2]])
+        key = jax.random.PRNGKey(2)
+
+        loss_no_zsort, aux_no_zsort = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.0,
+            z_sorting_mse_weight=0.0,
+            pinball_weight=0.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_full_zsort, aux_full_zsort = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.0,
+            z_sorting_mse_weight=1.0,
+            pinball_weight=0.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert not jnp.allclose(
+            aux_no_zsort["sublosses"]["main_loss"], aux_full_zsort["sublosses"]["main_loss"]
+        )
+        assert not jnp.allclose(loss_no_zsort, loss_full_zsort)
+
+    def test_sorting_loss_pinball_z_order_changes_main_loss(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.8], [0.1], [0.6], [0.2]])
+        key = jax.random.PRNGKey(3)
+
+        loss_sorted_pb, aux_sorted_pb = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.4,
+            pinball_weight=1.0,
+            pinball_use_z_order=False,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_z_pb, aux_z_pb = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.4,
+            pinball_weight=1.0,
+            pinball_use_z_order=True,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert not jnp.allclose(
+            aux_sorted_pb["sublosses"]["main_loss"], aux_z_pb["sublosses"]["main_loss"]
+        )
+        assert not jnp.allclose(loss_sorted_pb, loss_z_pb)
+
+    def test_sorting_loss_pinball_z_tau_changes_main_loss(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.8], [0.1], [0.6], [0.2]])
+        key = jax.random.PRNGKey(6)
+
+        loss_rank_pb, aux_rank_pb = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.4,
+            pinball_weight=1.0,
+            pinball_use_z_tau=False,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_ztau_pb, aux_ztau_pb = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.4,
+            pinball_weight=1.0,
+            pinball_use_z_tau=True,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert not jnp.allclose(
+            aux_rank_pb["sublosses"]["main_loss"], aux_ztau_pb["sublosses"]["main_loss"]
+        )
+        assert not jnp.allclose(loss_rank_pb, loss_ztau_pb)
+
+    def test_sorting_loss_cdf_calibration_changes_main_loss_when_enabled(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.8], [0.1], [0.6], [0.2]])
+        key = jax.random.PRNGKey(7)
+
+        loss_no_cdf, aux_no_cdf = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.2,
+            pinball_weight=0.2,
+            cdf_calibration_weight=0.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_with_cdf, aux_with_cdf = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.2,
+            pinball_weight=0.2,
+            cdf_calibration_weight=1.0,
+            cdf_calibration_temperature=0.2,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert not jnp.allclose(
+            aux_no_cdf["sublosses"]["main_loss"], aux_with_cdf["sublosses"]["main_loss"]
+        )
+        assert not jnp.allclose(loss_no_cdf, loss_with_cdf)
+
+    def test_sorting_loss_masked_entries_do_not_create_nan(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.8], [0.1], [0.6], [0.2]])
+        key = jax.random.PRNGKey(4)
+
+        loss, aux = sorting_loss(
+            stack,
+            training_config=None,
+            sorting_mse_weight=0.0,
+            z_sorting_mse_weight=0.0,
+            pinball_weight=0.0,
+            percent_batch_used=0.5,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert jnp.isfinite(loss)
+        assert jnp.isfinite(aux["sublosses"]["main_loss"])
+        assert jnp.isfinite(aux["sublosses"]["z_sorting_mse"])
+
+    def test_energy_sampling_loss_is_finite(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.8], [0.1], [0.6], [0.2]])
+        key = jax.random.PRNGKey(8)
+
+        loss, aux = energy_sampling_loss(
+            stack,
+            training_config=None,
+            energy_n_samples=4,
+            energy_outputs_independent=True,
+            energy_weight=1.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert jnp.isfinite(loss)
+        assert jnp.isfinite(aux["sublosses"]["energy_loss"])
+        assert "energy_n_samples" in aux["debug"]
+
+    def test_energy_sampling_loss_joint_differs_from_independent(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        params.at(
+            "global/dependent_output_mask",
+            jnp.array([True, True]),
+            tags=["non_grad", "local"],
+            overwrite=True,
+        )
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.8], [0.1], [0.6], [0.2]])
+        key = jax.random.PRNGKey(9)
+
+        loss_indep, aux_indep = energy_sampling_loss(
+            stack,
+            training_config=None,
+            energy_n_samples=6,
+            energy_outputs_independent=True,
+            energy_weight=1.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_joint, aux_joint = energy_sampling_loss(
+            stack,
+            training_config=None,
+            energy_n_samples=6,
+            energy_outputs_independent=False,
+            energy_weight=1.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert not jnp.allclose(
+            aux_indep["sublosses"]["energy_loss"], aux_joint["sublosses"]["energy_loss"]
+        )
+        assert not jnp.allclose(loss_indep, loss_joint)
+
+    def test_energy_sampling_loss_pairwise_weight_changes_energy(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        params.at(
+            "global/dependent_output_mask",
+            jnp.array([True, True]),
+            tags=["non_grad", "local"],
+            overwrite=True,
+        )
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.8], [0.1], [0.6], [0.2]])
+        key = jax.random.PRNGKey(10)
+
+        loss_low, aux_low = energy_sampling_loss(
+            stack,
+            training_config=None,
+            energy_n_samples=6,
+            energy_outputs_independent=False,
+            energy_pairwise_weight=0.2,
+            energy_weight=1.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_high, aux_high = energy_sampling_loss(
+            stack,
+            training_config=None,
+            energy_n_samples=6,
+            energy_outputs_independent=False,
+            energy_pairwise_weight=0.8,
+            energy_weight=1.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert not jnp.allclose(
+            aux_low["sublosses"]["energy_loss"], aux_high["sublosses"]["energy_loss"]
+        )
+        assert not jnp.allclose(loss_low, loss_high)
+
+    def test_energy_sampling_loss_coverage_calibration_changes_main_loss(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.8], [0.1], [0.6], [0.2]])
+        key = jax.random.PRNGKey(11)
+
+        loss_no_cov, aux_no_cov = energy_sampling_loss(
+            stack,
+            training_config=None,
+            energy_n_samples=6,
+            energy_outputs_independent=True,
+            coverage_calibration_weight=0.0,
+            energy_weight=1.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_cov, aux_cov = energy_sampling_loss(
+            stack,
+            training_config=None,
+            energy_n_samples=6,
+            energy_outputs_independent=True,
+            coverage_calibration_weight=0.4,
+            coverage_interval_low=0.1,
+            coverage_interval_high=0.9,
+            coverage_temperature=0.2,
+            energy_weight=1.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert not jnp.allclose(aux_no_cov["sublosses"]["main_loss"], aux_cov["sublosses"]["main_loss"])
+        assert not jnp.allclose(aux_no_cov["sublosses"]["coverage_loss"], aux_cov["sublosses"]["coverage_loss"])
+        assert not jnp.allclose(loss_no_cov, loss_cov)
+
+    def test_energy_sampling_loss_tail_pinball_changes_main_loss(self):
+        stack = self._FakeStack()
+        params = self._make_sorting_loss_params()
+        x = jnp.array([[0.1, 0.2], [0.7, 0.3], [0.3, 0.9], [0.8, 0.6]])
+        y = jnp.array([[0.9, 0.1], [0.2, 0.9], [0.6, 0.8], [0.1, 0.3]])
+        z = jnp.array([[0.8], [0.1], [0.6], [0.2]])
+        key = jax.random.PRNGKey(12)
+
+        loss_no_tail, aux_no_tail = energy_sampling_loss(
+            stack,
+            training_config=None,
+            energy_n_samples=6,
+            energy_outputs_independent=True,
+            tail_pinball_weight=0.0,
+            energy_weight=1.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_tail, aux_tail = energy_sampling_loss(
+            stack,
+            training_config=None,
+            energy_n_samples=6,
+            energy_outputs_independent=True,
+            tail_pinball_weight=0.05,
+            tail_tau_low=0.03,
+            tail_tau_high=0.97,
+            energy_weight=1.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert "tail_pinball_loss" in aux_tail["sublosses"]
+        assert float(aux_tail["debug"]["tail_pinball_weight"]) == pytest.approx(0.05)
+        assert not jnp.allclose(aux_no_tail["sublosses"]["main_loss"], aux_tail["sublosses"]["main_loss"])
+        assert not jnp.allclose(loss_no_tail, loss_tail)
 
 
 class TestTrainingStep:

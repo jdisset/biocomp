@@ -308,9 +308,14 @@ class TestMITDesigns:
 
         paths, greys, _ = _extract_shapes_from_svg(svg_path, max_is_black=True)
 
-        assert len(paths) == 3, f"Expected 3 shapes (left, middle, right bars), got {len(paths)}"
+        # 4 shapes: white background rect (grey=0) + 3 black bars (grey=1)
+        assert len(paths) == 4, f"Expected 4 shapes (background + 3 bars), got {len(paths)}"
 
-        bboxes = [p.get_extents() for p in paths]
+        # Filter to black bars only for bbox checks
+        bar_paths = [p for p, g in zip(paths, greys) if g > 0.5]
+        assert len(bar_paths) == 3, f"Expected 3 black bars, got {len(bar_paths)}"
+
+        bboxes = [p.get_extents() for p in bar_paths]
         x_ranges = sorted([(b.x0, b.x1) for b in bboxes])
 
         assert x_ranges[0][1] < 30, f"Left leg should end before x=30, got {x_ranges[0][1]}"

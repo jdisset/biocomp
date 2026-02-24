@@ -13,6 +13,7 @@ from biocomp.design import DesignConfig, DesignManager, initialize_params
 from biocomp.design_pruning import (
     _merge_surviving_params,
     _expand_params_for_merge,
+    _restore_ratio_target,
     _store_learned_ratio_inits,
     _collect_ratio_pruning_candidates,
     _compute_hard_pruning_network_keep_count,
@@ -131,6 +132,20 @@ class TestMergeSurvivingParams:
         merged = _merge_surviving_params(old_params, new_params)
         assert np.allclose(merged["design/latent_tu_z"], new_val)
 
+    def test_merge_skips_output_tu_indices(self):
+        """output_tu_indices must not be copied across prune rebuilds."""
+        old_params = ParameterTree()
+        new_params = ParameterTree()
+
+        old_val = np.array([[9, 11, 13]], dtype=np.int32)
+        new_val = np.array([[0, 1, 2]], dtype=np.int32)
+
+        old_params.at("local/aggregation/output_tu_indices", old_val, overwrite=None)
+        new_params.at("local/aggregation/output_tu_indices", new_val, overwrite=None)
+
+        merged = _merge_surviving_params(old_params, new_params)
+        assert np.array_equal(merged["local/aggregation/output_tu_indices"], new_val)
+
     def test_merge_handles_missing_path_in_new(self):
         """Paths in old but not new are ignored."""
         old_params = ParameterTree()
@@ -195,6 +210,15 @@ class TestDesignConfigHardPruning:
         with pytest.raises(ValidationError, match="hard_pruning_min_networks"):
             DesignConfig(hard_pruning_enabled=True, hard_pruning_min_networks=0)
 
+    def test_hard_pruning_commit_aware_interval_validation(self):
+        with pytest.raises(
+            ValidationError, match="hard_pruning_commit_aware_selection_interval"
+        ):
+            DesignConfig(
+                hard_pruning_enabled=True,
+                hard_pruning_commit_aware_selection_interval=0,
+            )
+
 
 class TestHardPruningTopNetworkSelection:
     def test_keep_count_uses_max_of_percent_and_min(self):
@@ -231,8 +255,17 @@ def test_run_with_hard_pruning_offsets_segment_start_step(monkeypatch):
         initial_params=None,
         initial_step=0,
         select_best_synced_params=False,
+        best_synced_score_fn=None,
+        best_synced_initial_score=None,
     ):
-        del dispatch, lock_ratios, initial_params, select_best_synced_params
+        del (
+            dispatch,
+            lock_ratios,
+            initial_params,
+            select_best_synced_params,
+            best_synced_score_fn,
+            best_synced_initial_score,
+        )
         calls.append(int(initial_step))
         return (
             jnp.zeros((1, 1), dtype=jnp.float32),
@@ -265,6 +298,7 @@ def test_run_with_hard_pruning_offsets_segment_start_step(monkeypatch):
         n_batches_per_epoch=10,
         batches_per_step=1,
         hard_pruning_interval=5,
+        hard_pruning_commit_aware_final_guard=False,
     )
 
     run_with_hard_pruning(
@@ -288,8 +322,18 @@ def test_run_with_hard_pruning_disables_masking_in_final_segment(monkeypatch):
         initial_params=None,
         initial_step=0,
         select_best_synced_params=False,
+        best_synced_score_fn=None,
+        best_synced_initial_score=None,
     ):
-        del dispatch, lock_ratios, initial_params, initial_step, select_best_synced_params
+        del (
+            dispatch,
+            lock_ratios,
+            initial_params,
+            initial_step,
+            select_best_synced_params,
+            best_synced_score_fn,
+            best_synced_initial_score,
+        )
         modes.append(_dconf.tu_masking.mode)
         return (
             jnp.zeros((1, 1), dtype=jnp.float32),
@@ -324,6 +368,7 @@ def test_run_with_hard_pruning_disables_masking_in_final_segment(monkeypatch):
         hard_pruning_interval=5,
         tu_masking={"mode": TUMaskingMode.DIRECT},
         hard_pruning_disable_tu_masking_final_segment=True,
+        hard_pruning_commit_aware_final_guard=False,
     )
 
     run_with_hard_pruning(
@@ -345,19 +390,33 @@ def test_run_with_hard_pruning_restores_pre_final_segment_on_regression(monkeypa
         initial_params=None,
         initial_step=0,
         select_best_synced_params=False,
+        best_synced_score_fn=None,
+        best_synced_initial_score=None,
     ):
-        del dispatch, lock_ratios, select_best_synced_params
+        del (
+            dispatch,
+            lock_ratios,
+            select_best_synced_params,
+            best_synced_score_fn,
+            best_synced_initial_score,
+        )
         if initial_step == 0:
             return (
                 jnp.array([[1.0]], dtype=jnp.float32),
                 [0.0],
-                {"loss": jnp.array([[0.0]], dtype=jnp.float32)},
+                {
+                    "loss": jnp.array([[0.0]], dtype=jnp.float32),
+                    "latest_params": jnp.array([[1.0]], dtype=jnp.float32),
+                },
             )
         assert initial_params is not None
         return (
             jnp.array([[2.0]], dtype=jnp.float32),
             [0.0],
-            {"loss": jnp.array([[0.0]], dtype=jnp.float32)},
+            {
+                "loss": jnp.array([[0.0]], dtype=jnp.float32),
+                "latest_params": jnp.array([[2.0]], dtype=jnp.float32),
+            },
         )
 
     def _fake_eval(_dmanager, _dconf, _model, params, _key):
@@ -391,15 +450,113 @@ def test_run_with_hard_pruning_restores_pre_final_segment_on_regression(monkeypa
         n_batches_per_epoch=10,
         batches_per_step=1,
         hard_pruning_interval=5,
+        hard_pruning_commit_aware_final_guard=False,
     )
 
-    params, *_ = run_with_hard_pruning(
+    params, _, step_history, _ = run_with_hard_pruning(
         dmanager=dmanager,
         dconf=dconf,
         model=SimpleNamespace(),
     )
 
     assert float(jnp.ravel(params)[0]) == pytest.approx(1.0)
+    assert "latest_params" in step_history
+    assert float(jnp.ravel(step_history["latest_params"])[0]) == pytest.approx(1.0)
+
+
+def test_run_with_hard_pruning_restores_on_committed_regression(monkeypatch):
+    def _fake_start(
+        _dmanager,
+        _dconf,
+        _model,
+        dispatch=None,
+        lock_ratios=False,
+        initial_params=None,
+        initial_step=0,
+        select_best_synced_params=False,
+        best_synced_score_fn=None,
+        best_synced_initial_score=None,
+    ):
+        del (
+            dispatch,
+            lock_ratios,
+            best_synced_score_fn,
+            best_synced_initial_score,
+        )
+        if initial_step > 0:
+            assert select_best_synced_params is True
+        if initial_step == 0:
+            return (
+                jnp.array([[1.0]], dtype=jnp.float32),
+                [0.0],
+                {
+                    "loss": jnp.array([[0.0]], dtype=jnp.float32),
+                    "latest_params": jnp.array([[1.0]], dtype=jnp.float32),
+                },
+            )
+        assert initial_params is not None
+        return (
+            jnp.array([[2.0]], dtype=jnp.float32),
+            [0.0],
+            {
+                "loss": jnp.array([[0.0]], dtype=jnp.float32),
+                "latest_params": jnp.array([[2.0]], dtype=jnp.float32),
+            },
+        )
+
+    def _fake_eval_pre(_dmanager, _dconf, _model, params, _key):
+        val = float(jnp.ravel(params)[0])
+        # Pre-commit quality improves in final segment.
+        loss = 0.20 if val == 1.0 else 0.10
+        return SimpleNamespace(mean_loss=loss)
+
+    def _fake_eval_committed(_dmanager, _dconf, _model, params, _key, **_kwargs):
+        val = float(jnp.ravel(params)[0])
+        # Committed quality regresses in final segment.
+        loss = 0.10 if val == 1.0 else 0.30
+        return SimpleNamespace(mean_loss=loss)
+
+    monkeypatch.setattr("biocomp.design.start", _fake_start)
+    monkeypatch.setattr(
+        "biocomp.design_prune_controller.build_stack_from_dconf",
+        lambda *args, **kwargs: SimpleNamespace(networks=[]),
+    )
+    monkeypatch.setattr(
+        "biocomp.design_prune_controller.evaluate_segment_snapshot",
+        _fake_eval_pre,
+    )
+    monkeypatch.setattr(
+        "biocomp.design_prune_controller.evaluate_committed_snapshot",
+        _fake_eval_committed,
+    )
+    monkeypatch.setattr(
+        "biocomp.design_pruning.identify_tus_to_prune",
+        lambda *args, **kwargs: {0: set()},
+    )
+
+    dmanager = SimpleNamespace(
+        n_targets=1,
+        networks=[SimpleNamespace(name="n0")],
+        enable_tu_masking=False,
+    )
+    dconf = DesignConfig(
+        n_replicates=1,
+        n_epochs=1,
+        n_batches_per_epoch=10,
+        batches_per_step=1,
+        hard_pruning_interval=5,
+        hard_pruning_commit_aware_final_guard=True,
+    )
+
+    params, _, step_history, _ = run_with_hard_pruning(
+        dmanager=dmanager,
+        dconf=dconf,
+        model=SimpleNamespace(),
+    )
+
+    assert float(jnp.ravel(params)[0]) == pytest.approx(1.0)
+    assert "latest_params" in step_history
+    assert float(jnp.ravel(step_history["latest_params"])[0]) == pytest.approx(1.0)
 
 
 def test_run_with_hard_pruning_returns_snapshot_step_history(lib):
@@ -721,8 +878,34 @@ def test_collect_ratio_pruning_candidates_prunes_only_if_tu_is_weak_everywhere()
     )
 
     assert "tuA" in all_tu_ids
-    assert tu_strengths["tuA"] == pytest.approx(0.9)
+    assert tu_strengths["tuA"] == pytest.approx(1.0)
     assert "tuA" not in candidates
+
+
+def test_restore_ratio_target_subset_fallback_renormalizes_to_max_one():
+    target = np.zeros(4, dtype=np.float32)
+    source_ids = ["s0", "s1", "s2", "s3"]
+    exact_map: dict[tuple[int, tuple[str, ...]], np.ndarray] = {}
+    source_map = {
+        (0, "s0"): 0.101,
+        (0, "s1"): 0.1767,
+        (0, "s2"): 0.091,
+        (0, "s3"): 0.0382,
+    }
+
+    restored, did_restore = _restore_ratio_target(
+        target,
+        network_id=0,
+        source_ids=source_ids,
+        exact_ratio_map=exact_map,
+        source_ratio_map=source_map,
+        mins=np.zeros(4, dtype=np.float32),
+        maxs=np.ones(4, dtype=np.float32),
+    )
+
+    assert did_restore is True
+    assert np.allclose(np.max(restored), 1.0, atol=1e-6)
+    assert np.argmax(restored) == 1
 
 
 def _find_first_rate_edge(stack, params, rate_name: str):
@@ -842,6 +1025,28 @@ def _find_ratio_in_new_stack(stack, params, source_id: str):
             if source_id in source_ids:
                 idx = source_ids.index(source_id)
                 return arr[node_idx, idx]
+    return None
+
+
+def _source_id_to_tu_id(network, source_id: str) -> str | None:
+    cg = getattr(network, "compute_graph", None)
+    if cg is None:
+        return None
+
+    source_node_ids = {
+        node.node_id
+        for node in cg.nodes.values()
+        if node.node_type == "source" and str(node.extra.get("source_id")) == source_id
+    }
+    if not source_node_ids:
+        return None
+
+    for edge in cg.edges.values():
+        if edge.source_id not in source_node_ids:
+            continue
+        tu_ids = edge.extra.get("tu_id", []) if edge.extra else []
+        if tu_ids:
+            return str(tu_ids[0])
     return None
 
 
@@ -969,6 +1174,144 @@ def test_hard_prune_preserves_semantic_params(lib):
         assert np.allclose(new_rate, rate_value, atol=1e-6)
         assert np.allclose(new_ratio, ratio_value, atol=1e-6)
         assert np.allclose(new_bias, bias_value, atol=1e-6)
+
+
+def test_hard_prune_restores_surviving_ratios_when_slot_set_changes(lib):
+    """Surviving source ratios in a pruned aggregation must be carried over by source_id."""
+    if not SCAFFOLD_PATH.exists():
+        pytest.skip(f"Scaffold not found: {SCAFFOLD_PATH}")
+
+    model = _make_model()
+
+    with LibraryContext.with_library(lib):
+        recipe = _load_scaffold_recipe()
+        networks = recipe_to_networks(recipe, br.ALL_RULES, invert=True)
+        target = SVGTarget(
+            name="MIT_T (ratio subset carryover)",
+            path=RESOURCES_DIR / "designs/MIT_T.svg",
+            transform_to_log_space=False,
+            latent_x=(0.0, 0.6),
+            latent_y=(0.0, 0.6),
+        )
+        dmanager = DesignManager(targets=[target], networks=networks[:1], enable_tu_masking=False)
+        stack = dmanager.build_stack(model, unlock_ratios=True)
+        params_full = initialize_params(
+            stack,
+            n_replicates=1,
+            n_targets=1,
+            shared_params=model.shared_params,
+            key=jax.random.key(41),
+            n_tus=0,
+            n_networks=len(dmanager.networks),
+            no_masking_tu_ids=stack.no_masking_tu_ids,
+            tu_id_to_idx=stack.tu_id_to_idx,
+        )
+        params = tree_get(params_full, (0, 0))
+
+        no_masking = stack.no_masking_tu_ids or set()
+        target_layer = None
+        target_node_idx = None
+        source_pairs: list[tuple[int, str, str]] = []
+        for layer in stack.layers or []:
+            if layer.f_type != "aggregation":
+                continue
+            for node_idx, node in enumerate(layer.nodes):
+                if node.network_id != 0:
+                    continue
+                graph_node = node.get(stack)
+                slot_entries = get_slot_entries(graph_node.extra, require=False)
+                pairs: list[tuple[int, str, str]] = []
+                for slot, entry in enumerate(slot_entries):
+                    source_id = str(entry.get("source_id"))
+                    tu_id = _source_id_to_tu_id(stack.networks[0], source_id)
+                    if tu_id is None or tu_id in no_masking:
+                        continue
+                    pairs.append((slot, source_id, tu_id))
+                if len(pairs) >= 2:
+                    target_layer = layer
+                    target_node_idx = node_idx
+                    source_pairs = pairs
+                    break
+            if source_pairs:
+                break
+
+        if not source_pairs or target_layer is None or target_node_idx is None:
+            pytest.skip("No aggregation node with >=2 removable sources found")
+
+        keep_slot, keep_source_id, _keep_tu_id = source_pairs[0]
+        remove_slot, remove_source_id, remove_tu_id = source_pairs[1]
+        ratio_path = f"{target_layer.namespace}/ratios"
+        ratios = np.array(params[ratio_path], copy=True)
+        graph_node = target_layer.nodes[target_node_idx].get(stack)
+        slot_entries_before = get_slot_entries(graph_node.extra, require=False)
+        source_ids_before = [str(entry["source_id"]) for entry in slot_entries_before]
+        old_source_to_ratio = {
+            source_id: float(ratios[target_node_idx, slot])
+            for slot, source_id in enumerate(source_ids_before)
+        }
+        keep_ratio = 0.731
+        remove_ratio = 0.229
+        ratios[target_node_idx, keep_slot] = keep_ratio
+        ratios[target_node_idx, remove_slot] = remove_ratio
+        old_source_to_ratio[keep_source_id] = keep_ratio
+        old_source_to_ratio[remove_source_id] = remove_ratio
+        params.at(ratio_path, ratios, overwrite=True)
+
+        dconf = DesignConfig(n_replicates=1, n_epochs=1)
+        new_dmanager, new_stack, new_params = hard_prune_and_rebuild(
+            dmanager,
+            dconf,
+            model,
+            stack,
+            params,
+            {0: {remove_tu_id}},
+            jax.random.key(42),
+        )
+        assert len(new_dmanager.networks) == 1
+
+        new_params_flat = tree_get(new_params, (0, 0))
+        carried_ratio = _find_ratio_in_new_stack(new_stack, new_params_flat, keep_source_id)
+        assert carried_ratio is not None, f"Surviving source {keep_source_id} missing after prune"
+
+        survivor_node_vals: dict[str, float] | None = None
+        for layer in new_stack.layers or []:
+            if layer.f_type != "aggregation" or layer.namespace is None:
+                continue
+            ratio_arr = np.asarray(new_params_flat[f"{layer.namespace}/ratios"])
+            for node_idx, node in enumerate(layer.nodes):
+                graph_node_new = node.get(new_stack)
+                slot_entries_new = get_slot_entries(graph_node_new.extra, require=False)
+                source_ids_new = [str(entry["source_id"]) for entry in slot_entries_new]
+                if keep_source_id not in source_ids_new:
+                    continue
+                survivor_node_vals = {
+                    source_id: float(ratio_arr[node_idx, slot])
+                    for slot, source_id in enumerate(source_ids_new)
+                }
+                break
+            if survivor_node_vals is not None:
+                break
+
+        assert survivor_node_vals is not None
+        assert keep_source_id in survivor_node_vals
+
+        if remove_source_id in survivor_node_vals:
+            pytest.skip(
+                "Selected source was not removed from aggregation node in this scaffold instance; "
+                "cannot validate subset renormalization path."
+            )
+
+        old_vals = [old_source_to_ratio[sid] for sid in survivor_node_vals if sid in old_source_to_ratio]
+        assert old_vals, "Expected overlap between old/new source IDs for restored aggregation node"
+        old_max = max(old_vals)
+        expected = old_source_to_ratio[keep_source_id] / old_max if old_max > 0 else 0.0
+        assert np.allclose(survivor_node_vals[keep_source_id], expected, atol=1e-6), (
+            f"Expected max-normalized carryover {expected}, got {survivor_node_vals[keep_source_id]} "
+            f"for surviving source {keep_source_id}"
+        )
+        assert np.allclose(max(survivor_node_vals.values()), 1.0, atol=1e-6), (
+            f"Surviving node should be max-normalized to 1.0, got {survivor_node_vals}"
+        )
 
 
 def test_hard_prune_removes_masked_tus(lib):
