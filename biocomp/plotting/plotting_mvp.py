@@ -13,7 +13,13 @@ import numpy as np
 from numpy.typing import NDArray as NdArray
 
 from biocomp.metric_utils import rmse, r_squared
-from .plotting_core import configurable, setup_transformed_axis, build_tree, knn_stats
+from .plotting_core import (
+    configurable,
+    setup_transformed_axis,
+    build_tree,
+    knn_stats,
+    weighted_kde_1d,
+)
 
 if TYPE_CHECKING:
     from biocomp.datautils import DataRescaler
@@ -66,17 +72,7 @@ def _violin_half_kde(
     values: NdArray, weights: NdArray, kde_points: int = 80,
 ) -> tuple[NdArray, NdArray] | None:
     """Compute weighted KDE, return (y_grid, density) or None on failure."""
-    from scipy.stats import gaussian_kde
-
-    w = weights / weights.sum()
-    try:
-        kde = gaussian_kde(values, weights=w)
-    except (np.linalg.LinAlgError, ValueError):
-        return None
-    y_lo, y_hi = values.min(), values.max()
-    pad = (y_hi - y_lo) * 0.15
-    y_grid = np.linspace(y_lo - pad, y_hi + pad, kde_points)
-    return y_grid, kde(y_grid)
+    return weighted_kde_1d(values, weights, kde_points=kde_points, pad_frac=0.15)
 
 
 def _draw_violins(

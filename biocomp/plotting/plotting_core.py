@@ -618,6 +618,54 @@ def knn_stats(
     return res[0] if len(res) == 1 else res
 
 
+def weighted_kde_1d(
+    values,
+    weights=None,
+    *,
+    kde_points: int = 80,
+    pad_frac: float = 0.15,
+    bw_method=None,
+):
+    """Return weighted 1D KDE as ``(grid, density)`` or ``None`` when ill-posed."""
+    from scipy.stats import gaussian_kde
+
+    v = np.asarray(values).ravel()
+    if weights is None:
+        w = np.ones_like(v, dtype=float)
+    else:
+        w = np.asarray(weights, dtype=float).ravel()
+        if w.shape != v.shape:
+            raise ValueError(
+                f"weights shape {w.shape} must match values shape {v.shape}"
+            )
+
+    finite = np.isfinite(v) & np.isfinite(w) & (w > 0)
+    if finite.sum() < 3:
+        return None
+    v = v[finite]
+    w = w[finite]
+
+    if np.unique(v).size < 2:
+        return None
+
+    wsum = float(w.sum())
+    if not np.isfinite(wsum) or wsum <= 0:
+        return None
+    w = w / wsum
+
+    try:
+        kde = gaussian_kde(v, weights=w, bw_method=bw_method)
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+
+    v_lo, v_hi = float(v.min()), float(v.max())
+    span = max(v_hi - v_lo, 1e-9)
+    pad = span * float(pad_frac)
+    grid = np.linspace(v_lo - pad, v_hi + pad, int(kde_points))
+    density = np.asarray(kde(grid), dtype=float)
+    return grid, density
+
+
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
