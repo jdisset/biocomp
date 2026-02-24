@@ -166,6 +166,7 @@ def _collect_ratio_pruning_candidates(
     ratio_threshold: float,
 ) -> tuple[set[str], set[str], dict[str, float]]:
     from biocomp.tumasking import extract_tu_ids_from_network, build_output_tu_indices
+    from biocomp.ratio_utils import normalize_ratios_for_pruning
 
     tu_id_to_idx = stack.tu_id_to_idx or {}
     idx_to_id = {idx: tu_id for tu_id, idx in tu_id_to_idx.items()}
@@ -196,14 +197,15 @@ def _collect_ratio_pruning_candidates(
             if node.network_id != network_id:
                 continue
             ratios = _get_node_ratios(params, namespace, node_idx, n_outputs)
-            for slot in range(min(n_outputs, len(ratios))):
+            normalized = np.asarray(normalize_ratios_for_pruning(ratios, threshold=0.0))
+            for slot in range(min(n_outputs, len(normalized))):
                 tu_idx = int(tu_indices[node_idx, slot])
                 if tu_idx < 0:
                     continue
                 tu_id = idx_to_id.get(tu_idx)
                 if tu_id is None:
                     continue
-                ratio_val = float(np.asarray(ratios[slot]).item())
+                ratio_val = float(np.asarray(normalized[slot]).item())
                 strength = abs(ratio_val)
                 if strength > tu_strengths.get(tu_id, 0.0):
                     tu_strengths[tu_id] = strength
@@ -523,7 +525,13 @@ def _merge_surviving_params(
     """Transfer compatible params from old to new by path + shape matching."""
     from biocomp.parameters import isArrayRef
 
-    skip_patterns = ("tu_log_alpha", "latent_tu", "tu_binary_mask", "protected_tu")
+    skip_patterns = (
+        "tu_log_alpha",
+        "latent_tu",
+        "tu_binary_mask",
+        "protected_tu",
+        "output_tu_indices",
+    )
 
     for path, old_val in old_params.data.iter_leaves():
         path_str = str(path)
@@ -568,32 +576,67 @@ def _merge_surviving_params(
     return new_params
 
 
-def _build_aggregation_ratio_map(
+def transfer_params_to_new_stack(
+    old_params: "ParameterTree",
+    old_stack: "ComputeStack",
+    new_params: "ParameterTree",
+    new_stack: "ComputeStack",
+) -> tuple["ParameterTree", dict[str, int]]:
+    """Transfer compatible + semantic parameters from old stack/params to new stack/params."""
+    expanded_old_params = _expand_params_for_merge(old_params)
+    merged_params = _merge_surviving_params(expanded_old_params, new_params)
+    restore_stats = _restore_params_by_semantics(old_params, old_stack, merged_params, new_stack)
+    return merged_params, restore_stats
+
+
+def _build_aggregation_ratio_maps(
     params: "ParameterTree",
     stack: "ComputeStack",
-) -> dict[tuple[int, tuple[str, ...]], np.ndarray]:
-    ratio_map: dict[tuple[int, tuple[str, ...]], np.ndarray] = {}
+) -> tuple[dict[tuple[int, tuple[str, ...]], np.ndarray], dict[tuple[int, str], float]]:
+    """Build ratio carry-over maps for exact-node and per-source restoration.
+
+    Exact node map is keyed by full source slot order for 1:1 node matches.
+    Per-source map is keyed by source_id for subset matches after TU removal.
+    Both maps use SSOT-decoded ratios (handles latent/direct uniformly).
+    """
+    exact_map: dict[tuple[int, tuple[str, ...]], np.ndarray] = {}
+    source_map: dict[tuple[int, str], float] = {}
     if stack.layers is None:
-        return ratio_map
+        return exact_map, source_map
     for layer in stack.layers:
         if layer.f_type != "aggregation":
             continue
         namespace = layer.namespace
         if namespace is None:
             continue
-        ratio_path = f"{namespace}/ratios"
-        if ratio_path not in params:
-            continue
-        ratios = np.asarray(params[ratio_path])
+
+        n_outputs = layer.get_n_outputs()
         for node_idx, node in enumerate(layer.nodes):
             graph_node = node.get(stack)
             source_ids = source_ids_in_slot_order(graph_node.extra)
             if not source_ids:
                 continue
-            key = (node.network_id, tuple(source_ids))
-            if key not in ratio_map:
-                ratio_map[key] = ratios[node_idx]
-    return ratio_map
+
+            decoded = np.asarray(_get_node_ratios(params, namespace, node_idx, n_outputs))
+            decoded = decoded[: len(source_ids)]
+            if decoded.size == 0:
+                continue
+
+            exact_key = (node.network_id, tuple(source_ids))
+            exact_map.setdefault(exact_key, decoded.copy())
+
+            for slot, source_id in enumerate(source_ids):
+                if slot >= decoded.shape[0]:
+                    break
+                source_key = (node.network_id, str(source_id))
+                ratio_val = float(decoded[slot])
+                if source_key not in source_map:
+                    source_map[source_key] = ratio_val
+                else:
+                    # If a source appears multiple times, preserve the strongest magnitude.
+                    if abs(ratio_val) > abs(source_map[source_key]):
+                        source_map[source_key] = ratio_val
+    return exact_map, source_map
 
 
 def _get_bias_protein(extra: dict) -> str | None:
@@ -685,8 +728,59 @@ def _select_rep_target(array: np.ndarray) -> tuple[np.ndarray, tuple[int, int] |
     return array, None
 
 
+def _restore_ratio_target(
+    target: np.ndarray,
+    *,
+    network_id: int,
+    source_ids: list[str],
+    exact_ratio_map: dict[tuple[int, tuple[str, ...]], np.ndarray],
+    source_ratio_map: dict[tuple[int, str], float],
+    mins: np.ndarray | None,
+    maxs: np.ndarray | None,
+) -> tuple[np.ndarray, bool]:
+    """Restore one aggregation target vector from exact or per-source maps."""
+    slot_count = min(target.shape[0], len(source_ids))
+    if slot_count == 0:
+        return target, False
+
+    exact_key = (network_id, tuple(source_ids))
+    exact_vals = exact_ratio_map.get(exact_key)
+    if exact_vals is not None:
+        restored_vals = np.asarray(exact_vals[:slot_count], dtype=target.dtype)
+        if mins is not None and maxs is not None:
+            restored_vals = np.clip(restored_vals, mins[:slot_count], maxs[:slot_count])
+        target[:slot_count] = restored_vals
+        return target, True
+
+    restored = False
+    for slot, source_id in enumerate(source_ids[:slot_count]):
+        source_key = (network_id, str(source_id))
+        if source_key not in source_ratio_map:
+            continue
+        value = source_ratio_map[source_key]
+        if mins is not None and maxs is not None:
+            value = float(np.clip(value, mins[slot], maxs[slot]))
+        target[slot] = value
+        restored = True
+
+    # If this node was restored by per-source fallback (subset match after prune),
+    # rescale surviving slots to max=1.0 so ratio semantics remain consistent
+    # with pruning/introspection expectations.
+    if restored:
+        from biocomp.ratio_utils import normalize_ratios_for_pruning
+
+        restored_slice = np.asarray(target[:slot_count], dtype=np.float32)
+        restored_slice = np.asarray(normalize_ratios_for_pruning(restored_slice, threshold=0.0))
+        if mins is not None and maxs is not None:
+            restored_slice = np.clip(restored_slice, mins[:slot_count], maxs[:slot_count])
+        target[:slot_count] = restored_slice.astype(target.dtype, copy=False)
+
+    return target, restored
+
+
 def _restore_aggregation_ratios(
-    ratio_map: dict[tuple[int, tuple[str, ...]], np.ndarray],
+    exact_ratio_map: dict[tuple[int, tuple[str, ...]], np.ndarray],
+    source_ratio_map: dict[tuple[int, str], float],
     params: "ParameterTree",
     stack: "ComputeStack",
 ) -> int:
@@ -713,30 +807,37 @@ def _restore_aggregation_ratios(
             source_ids = source_ids_in_slot_order(graph_node.extra)
             if not source_ids:
                 continue
-            key = (node.network_id, tuple(source_ids))
-            if key not in ratio_map:
-                continue
-            old_ratios = np.asarray(ratio_map[key])
             if rep_tgt is None:
                 target = ratios_arr[node_idx]
                 mins = ratio_min[node_idx] if ratio_min is not None else None
                 maxs = ratio_max[node_idx] if ratio_max is not None else None
-                new_vals = old_ratios[: target.shape[0]]
-                if mins is not None and maxs is not None:
-                    new_vals = np.clip(new_vals, mins[: target.shape[0]], maxs[: target.shape[0]])
-                target[: new_vals.shape[0]] = new_vals
+                target, did_restore = _restore_ratio_target(
+                    target,
+                    network_id=node.network_id,
+                    source_ids=source_ids,
+                    exact_ratio_map=exact_ratio_map,
+                    source_ratio_map=source_ratio_map,
+                    mins=mins,
+                    maxs=maxs,
+                )
                 ratios_arr[node_idx] = target
             else:
                 r, t = rep_tgt
                 target = ratios_arr[r, t, node_idx]
                 mins = ratio_min[r, t, node_idx] if ratio_min is not None else None
                 maxs = ratio_max[r, t, node_idx] if ratio_max is not None else None
-                new_vals = old_ratios[: target.shape[0]]
-                if mins is not None and maxs is not None:
-                    new_vals = np.clip(new_vals, mins[: target.shape[0]], maxs[: target.shape[0]])
-                target[: new_vals.shape[0]] = new_vals
+                target, did_restore = _restore_ratio_target(
+                    target,
+                    network_id=node.network_id,
+                    source_ids=source_ids,
+                    exact_ratio_map=exact_ratio_map,
+                    source_ratio_map=source_ratio_map,
+                    mins=mins,
+                    maxs=maxs,
+                )
                 ratios_arr[r, t, node_idx] = target
-            restored += 1
+            if did_restore:
+                restored += 1
         _set_param_value(params, ratio_path, ratios_arr)
     return restored
 
@@ -828,11 +929,13 @@ def _restore_params_by_semantics(
     new_params: "ParameterTree",
     new_stack: "ComputeStack",
 ) -> dict[str, int]:
-    ratio_map = _build_aggregation_ratio_map(old_params, old_stack)
+    exact_ratio_map, source_ratio_map = _build_aggregation_ratio_maps(old_params, old_stack)
     bias_map = _build_bias_map(old_params, old_stack)
     rate_map = _build_rate_map(old_params, old_stack)
 
-    restored_ratios = _restore_aggregation_ratios(ratio_map, new_params, new_stack)
+    restored_ratios = _restore_aggregation_ratios(
+        exact_ratio_map, source_ratio_map, new_params, new_stack
+    )
     restored_bias = _restore_bias_values(bias_map, new_params, new_stack)
     restored_rates = _restore_rate_values(rate_map, new_params, new_stack)
 
@@ -1066,9 +1169,9 @@ def hard_prune_and_rebuild(
             tu_id_to_idx=new_stack.tu_id_to_idx,
         )
 
-        expanded_old_params = _expand_params_for_merge(params)
-        new_params = _merge_surviving_params(expanded_old_params, new_params)
-        restore_stats = _restore_params_by_semantics(params, stack, new_params, new_stack)
+        new_params, restore_stats = transfer_params_to_new_stack(
+            params, stack, new_params, new_stack
+        )
 
         if TU_LOG_ALPHA_PATH in params and TU_LOG_ALPHA_PATH in new_params and new_n_tus > 0:
             old_log_alpha = params[TU_LOG_ALPHA_PATH]
@@ -1209,6 +1312,9 @@ def run_with_hard_pruning(
         segment_steps = segment_end_step - segment_start_step
         segment_start_params = current_params
         segment_start_eval_loss: float | None = None
+        segment_start_committed_loss: float | None = None
+        best_synced_score_fn = None
+        best_synced_initial_score: float | None = None
 
         if segment_steps <= 0:
             break
@@ -1256,7 +1362,7 @@ def run_with_hard_pruning(
         )
 
         if segment_idx == n_segments - 1 and segment_start_params is not None:
-            from .design_prune_controller import evaluate_segment_snapshot
+            from .design_prune_controller import evaluate_committed_snapshot, evaluate_segment_snapshot
 
             guard_key = jax.random.fold_in(loop_key, segment_idx + 3000)
             start_snap = evaluate_segment_snapshot(
@@ -1267,6 +1373,44 @@ def run_with_hard_pruning(
                 "[HARD-PRUNE] Final-segment guard baseline loss: %.4f",
                 segment_start_eval_loss,
             )
+            if dconf.hard_pruning_commit_aware_final_guard:
+                start_committed = evaluate_committed_snapshot(
+                    current_dmanager,
+                    dconf,
+                    model,
+                    segment_start_params,
+                    guard_key,
+                    lock_ratios=lock_ratios,
+                )
+                segment_start_committed_loss = start_committed.mean_loss
+                logger.info(
+                    "[HARD-PRUNE] Final-segment committed baseline loss: %.4f",
+                    segment_start_committed_loss,
+                )
+                best_synced_initial_score = segment_start_committed_loss
+                checkpoint_every = max(1, int(dconf.hard_pruning_commit_aware_selection_interval))
+
+                def _committed_score_fn(params_at_step, _step_history, local_step):
+                    if local_step % checkpoint_every != 0 and local_step != segment_steps:
+                        return None
+                    eval_step = segment_start_step + local_step
+                    score_key = jax.random.fold_in(loop_key, 7000 + eval_step)
+                    snap = evaluate_committed_snapshot(
+                        current_dmanager,
+                        dconf,
+                        model,
+                        params_at_step,
+                        score_key,
+                        lock_ratios=lock_ratios,
+                    )
+                    logger.info(
+                        "[HARD-PRUNE] Final-segment committed checkpoint @ step %d: %.4f",
+                        eval_step,
+                        snap.mean_loss,
+                    )
+                    return snap.mean_loss
+
+                best_synced_score_fn = _committed_score_fn
 
         segment_params, segment_loss_history, segment_step_history = start(
             segment_dmanager,
@@ -1277,17 +1421,18 @@ def run_with_hard_pruning(
             initial_params=current_params,
             initial_step=segment_start_step,
             select_best_synced_params=(segment_idx == n_segments - 1),
+            best_synced_score_fn=best_synced_score_fn,
+            best_synced_initial_score=best_synced_initial_score,
         )
         segment_step_history = StepHistorySnapshot.from_raw(segment_step_history)
         current_params = segment_params
 
         accumulated_loss_history.extend(segment_loss_history)
-        final_step_history = segment_step_history
 
         if segment_idx == n_segments - 1 and segment_start_params is not None:
-            from .design_prune_controller import evaluate_segment_snapshot
+            from .design_prune_controller import evaluate_committed_snapshot, evaluate_segment_snapshot
 
-            guard_key = jax.random.fold_in(loop_key, segment_idx + 3001)
+            guard_key = jax.random.fold_in(loop_key, segment_idx + 3000)
             end_snap = evaluate_segment_snapshot(
                 current_dmanager, dconf, model, current_params, guard_key
             )
@@ -1297,7 +1442,33 @@ def run_with_hard_pruning(
                 segment_end_eval_loss,
             )
 
-            if (
+            should_restore = False
+            if dconf.hard_pruning_commit_aware_final_guard:
+                end_committed = evaluate_committed_snapshot(
+                    current_dmanager,
+                    dconf,
+                    model,
+                    current_params,
+                    guard_key,
+                    lock_ratios=lock_ratios,
+                )
+                segment_end_committed_loss = end_committed.mean_loss
+                logger.info(
+                    "[HARD-PRUNE] Final-segment committed end loss: %.4f",
+                    segment_end_committed_loss,
+                )
+                if (
+                    segment_start_committed_loss is not None
+                    and segment_end_committed_loss > segment_start_committed_loss
+                ):
+                    logger.warning(
+                        "[HARD-PRUNE] Final segment committed regression (%.4f -> %.4f); "
+                        "restoring pre-segment parameters",
+                        segment_start_committed_loss,
+                        segment_end_committed_loss,
+                    )
+                    should_restore = True
+            elif (
                 segment_start_eval_loss is not None
                 and segment_end_eval_loss > segment_start_eval_loss
             ):
@@ -1307,8 +1478,19 @@ def run_with_hard_pruning(
                     segment_start_eval_loss,
                     segment_end_eval_loss,
                 )
+                should_restore = True
+
+            if should_restore:
                 current_params = segment_start_params
                 segment_params = segment_start_params
+
+        # Ensure step-history params reflect the params that are actually carried
+        # forward/returned (including post-segment restoration paths).
+        segment_step_history_data = segment_step_history.to_dict()
+        segment_step_history_data["latest_params"] = segment_params
+        segment_step_history_data["params"] = segment_params
+        segment_step_history = StepHistorySnapshot.from_raw(segment_step_history_data)
+        final_step_history = segment_step_history
 
         if segment_idx < n_segments - 1:
             timer.start("prune", "[HARD-PRUNE] Identifying TUs to prune...")

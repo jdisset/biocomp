@@ -77,6 +77,8 @@ class GradientStepAdapter:
     key: Any
     precompiled: bool = False
     select_best_synced_params: bool = False
+    best_synced_score_fn: Any = None
+    best_synced_initial_score: float | None = None
 
     def run(
         self,
@@ -100,6 +102,8 @@ class GradientStepAdapter:
             precompiled=self.precompiled,
             skip_lifecycle=True,
             select_best_synced_params=self.select_best_synced_params,
+            best_synced_score_fn=self.best_synced_score_fn,
+            best_synced_initial_score=self.best_synced_initial_score,
         )
         return DesignRuntimeResult(
             params=params,

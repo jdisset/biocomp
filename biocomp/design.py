@@ -446,6 +446,8 @@ class DesignConfig(DesignOptimConfig):
     hard_pruning_preserve_minimum_tus: int = 1
     hard_pruning_prune_margin: float = 0.1
     hard_pruning_disable_tu_masking_final_segment: bool = False
+    hard_pruning_commit_aware_final_guard: bool = True
+    hard_pruning_commit_aware_selection_interval: int = 64
     hard_pruning_top_percent: float | None = None
     hard_pruning_min_networks: int | None = None
 
@@ -466,6 +468,11 @@ class DesignConfig(DesignOptimConfig):
         if self.hard_pruning_min_networks is not None and self.hard_pruning_min_networks < 1:
             raise ValueError(
                 f"hard_pruning_min_networks must be >= 1, got {self.hard_pruning_min_networks}"
+            )
+        if self.hard_pruning_commit_aware_selection_interval < 1:
+            raise ValueError(
+                "hard_pruning_commit_aware_selection_interval must be >= 1, got "
+                f"{self.hard_pruning_commit_aware_selection_interval}"
             )
         return self
 
@@ -628,6 +635,8 @@ def start(
     initial_params: ParameterTree | None = None,
     initial_step: int = 0,
     select_best_synced_params: bool = False,
+    best_synced_score_fn=None,
+    best_synced_initial_score: float | None = None,
 ):
     def _with_snapshot(result):
         params, losses, step_history = result
@@ -669,6 +678,8 @@ def start(
             initial_params=initial_params,
             initial_step=initial_step,
             select_best_synced_params=select_best_synced_params,
+            best_synced_score_fn=best_synced_score_fn,
+            best_synced_initial_score=best_synced_initial_score,
         )
     )
 

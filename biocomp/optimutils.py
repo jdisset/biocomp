@@ -762,6 +762,8 @@ def optimize(
     precompiled: bool = False,
     skip_lifecycle: bool = False,
     select_best_synced_params: bool = False,
+    best_synced_score_fn: Callable[[ParameterTree, dict, int], float | None] | None = None,
+    best_synced_initial_score: float | None = None,
 ):
     dispatch = dispatch or NullDispatch()
 
@@ -790,7 +792,11 @@ def optimize(
 
     step_history, loss_history = {}, []
     best_params = params if select_best_synced_params else None
-    best_loss = float("inf")
+    best_metric = (
+        float(best_synced_initial_score)
+        if (select_best_synced_params and best_synced_initial_score is not None)
+        else float("inf")
+    )
     best_step = 0
     epoch = -1
     pending_losses = []  # collect losses without forcing sync
@@ -879,14 +885,22 @@ def optimize(
             if "loss" in step_history:
                 loss_history.append(step_history["loss"])
 
-        if (
-            select_best_synced_params
-            and "loss" in step_history
-            and (should_sync or not defer_sync)
-        ):
-            current_loss = float(jnp.mean(step_history["loss"]))
-            if current_loss < best_loss:
-                best_loss = current_loss
+        if select_best_synced_params and (should_sync or not defer_sync):
+            metric: float | None = None
+            if best_synced_score_fn is not None:
+                try:
+                    metric = best_synced_score_fn(params, step_history, i)
+                except Exception as exc:
+                    logger.warning(
+                        "[OPTIMIZE] Best-synced score function failed at step %d: %s",
+                        i,
+                        exc,
+                    )
+            elif "loss" in step_history:
+                metric = float(jnp.mean(step_history["loss"]))
+
+            if metric is not None and metric < best_metric:
+                best_metric = metric
                 best_step = i
                 best_params = params
 
@@ -917,11 +931,25 @@ def optimize(
     logger.info(f"  Avg step time:  {total_loop_time / n_total_steps * 1000:.2f}ms")
     if loss_history:
         logger.info(f"  Final loss:     {loss_history[-1]:.4f}")
-    if select_best_synced_params and best_params is not None and best_step > 0:
-        params = best_params
-        logger.info(
-            f"  Best synced:    step {best_step}/{n_total_steps}, loss={best_loss:.4f} (restored)"
-        )
+    if select_best_synced_params and best_params is not None:
+        has_candidate = best_step > 0 or best_synced_initial_score is not None
+        if has_candidate:
+            params = best_params
+            if best_step > 0:
+                metric_name = "score" if best_synced_score_fn is not None else "loss"
+                logger.info(
+                    f"  Best synced:    step {best_step}/{n_total_steps}, "
+                    f"{metric_name}={best_metric:.4f} (restored)"
+                )
+            else:
+                logger.info(
+                    f"  Best synced:    baseline score={best_metric:.4f} (restored initial params)"
+                )
+    # Keep final step-history params aligned with returned params (important when
+    # best-synced restoration replaces the terminal optimizer state).
+    if isinstance(step_history, dict):
+        step_history["latest_params"] = params
+        step_history["params"] = params
     logger.info("=" * 60)
 
     return params, loss_history, StepHistorySnapshot.from_raw(step_history)

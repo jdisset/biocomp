@@ -218,11 +218,20 @@ def sorting_loss(
     negative_grad_penalty=1.0,
     kl_weight=0.1,
     sorting_mse_weight=0.1,
+    z_sorting_mse_weight=0.0,
+    pinball_weight=0.0,
+    pinball_use_z_order=False,
+    pinball_use_z_tau=False,
+    pinball_rank_clip_low=0.0,
+    pinball_rank_clip_high=1.0,
+    cdf_calibration_weight=0.0,
+    cdf_calibration_temperature=0.15,
     percent_batch_used=1.0,
     out_vs_in_mse_weight=0.5,
     out_vs_in_sortmse_weight=1,
     use_same_key=False,
     per_output_weights=None,
+    **_unused_kwargs,
 ):
     """MSE loss with sorted outputs to learn distribution (quantile-like)."""
     import jax
@@ -234,6 +243,10 @@ def sorting_loss(
 
     def loss_func(dynamic, static, X, Y, Z, key, step):
         check_XYZ(X, Y, Z, stack)
+        assert 0.0 <= pinball_rank_clip_low <= pinball_rank_clip_high <= 1.0, (
+            "pinball_rank_clip_low/high must satisfy 0 <= low <= high <= 1"
+        )
+        assert cdf_calibration_temperature > 0.0, "cdf_calibration_temperature must be > 0"
         params = ParameterTree.merge(dynamic, static)
 
         if use_same_key:
@@ -293,6 +306,10 @@ def sorting_loss(
         MAXFLOAT = jnp.finfo(Y.dtype).max
         sorted_yhat = robust_sort(jnp.where(selected, yhat, MAXFLOAT), axis=0)
         sorted_y = robust_sort(jnp.where(selected, Y, MAXFLOAT), axis=0)
+        z_scalar = jnp.asarray(Z[:, 0] if Z.ndim > 1 else Z, dtype=Y.dtype)
+        z_sort_key = jnp.where(selected[:, 0], z_scalar, jnp.finfo(z_scalar.dtype).max)
+        z_order = jnp.argsort(z_sort_key)
+        z_sorted_yhat = yhat[z_order]
         sort_sqdiff = (sorted_yhat - sorted_y) ** 2 * output_weights[None, :]
         out_v_in_sortmse = as_schedule(out_vs_in_sortmse_weight)(step)
         sorting_mse_dependent = (sort_sqdiff * dep_mask[None, :]).sum() / (
@@ -303,12 +320,90 @@ def sorting_loss(
         )
         sorting_mse = lerp(sorting_mse_independent, sorting_mse_dependent, out_v_in_sortmse)
 
+        rank_valid = (sorted_y < (MAXFLOAT * 0.5)).astype(Y.dtype)
+        valid_mask = rank_valid > 0
+        z_sort_err = jnp.where(valid_mask, z_sorted_yhat - sorted_y, 0.0)
+        z_sort_sqdiff = (z_sort_err**2) * output_weights[None, :]
+        z_sorting_mse_dependent = (z_sort_sqdiff * dep_mask[None, :]).sum() / (
+            eff_batch_size * dep_mask_sum
+        )
+        z_sorting_mse_independent = (z_sort_sqdiff * indep_mask[None, :]).sum() / (
+            eff_batch_size * indep_mask_sum
+        )
+        z_sorting_mse = lerp(z_sorting_mse_independent, z_sorting_mse_dependent, out_v_in_sortmse)
+
+        # Pinball objective variants:
+        # - rank-based on sorted values (legacy/default)
+        # - z-conditioned on raw predictions (quantile-regression style)
+        if pinball_use_z_tau:
+            tau = jnp.clip(z_scalar, pinball_rank_clip_low, pinball_rank_clip_high)[:, None]
+            pinball_err = Y - yhat
+            pinball = jnp.maximum(tau * pinball_err, (tau - 1.0) * pinball_err)
+            pinball_weighted = pinball * selected * output_weights[None, :]
+            pinball_dependent = (pinball_weighted * dep_mask[None, :]).sum() / (
+                eff_batch_size * dep_mask_sum
+            )
+            pinball_independent = (pinball_weighted * indep_mask[None, :]).sum() / (
+                eff_batch_size * indep_mask_sum
+            )
+        else:
+            rank_pos = (jnp.arange(X.shape[0], dtype=Y.dtype) + 0.5) / X.shape[0]
+            tau = jnp.clip(rank_pos, pinball_rank_clip_low, pinball_rank_clip_high)[:, None]
+            pinball_base = z_sorted_yhat if pinball_use_z_order else sorted_yhat
+            safe_sorted_y = jnp.where(valid_mask, sorted_y, pinball_base)
+            pinball_err = safe_sorted_y - pinball_base
+            pinball = jnp.maximum(tau * pinball_err, (tau - 1.0) * pinball_err)
+            pinball_weighted = pinball * rank_valid * output_weights[None, :]
+            rank_count = jnp.maximum(rank_valid.sum(), 1.0)
+            pinball_dependent = (pinball_weighted * dep_mask[None, :]).sum() / (
+                rank_count * dep_mask_sum
+            )
+            pinball_independent = (pinball_weighted * indep_mask[None, :]).sum() / (
+                rank_count * indep_mask_sum
+            )
+        pinball_loss = lerp(pinball_independent, pinball_dependent, out_v_in_sortmse)
+
+        # CDF calibration objective:
+        # Encourage calibrated quantiles: P(Y <= q_tau(X)) ~= tau, where tau comes from z.
+        tau_z = jnp.clip(z_scalar, pinball_rank_clip_low, pinball_rank_clip_high)[:, None]
+        selected_count_per_out = jnp.maximum(selected.sum(axis=0), 1.0)
+        selected_y = selected * Y
+        selected_mean = selected_y.sum(axis=0) / selected_count_per_out
+        selected_var = (selected * (Y - selected_mean[None, :]) ** 2).sum(axis=0) / (
+            selected_count_per_out
+        )
+        # Normalize by per-output spread so one temperature works across wide output scales.
+        y_scale = jnp.sqrt(jnp.maximum(selected_var, 1e-12))
+        calib_logits = (yhat - Y) / (cdf_calibration_temperature * y_scale[None, :] + 1e-6)
+        cdf_prob = jax.nn.sigmoid(calib_logits)
+        cdf_calibration_sqerr = (
+            (cdf_prob - tau_z) ** 2 * selected * output_weights[None, :]
+        )
+        cdf_calibration_dependent = (cdf_calibration_sqerr * dep_mask[None, :]).sum() / (
+            eff_batch_size * dep_mask_sum
+        )
+        cdf_calibration_independent = (cdf_calibration_sqerr * indep_mask[None, :]).sum() / (
+            eff_batch_size * indep_mask_sum
+        )
+        cdf_calibration_loss = lerp(
+            cdf_calibration_independent, cdf_calibration_dependent, out_v_in_sortmse
+        )
+
         smw = as_schedule(sorting_mse_weight)(step)
         main_loss = lerp(mse, sorting_mse, smw)
+        zsmw = as_schedule(z_sorting_mse_weight)(step)
+        main_loss = lerp(main_loss, z_sorting_mse, zsmw)
+        pbw = as_schedule(pinball_weight)(step)
+        main_loss = lerp(main_loss, pinball_loss, pbw)
+        cdfw = as_schedule(cdf_calibration_weight)(step)
+        main_loss = lerp(main_loss, cdf_calibration_loss, cdfw)
 
         aux["sublosses"] = {
             "mse": mse,
             "sorting_mse": sorting_mse,
+            "z_sorting_mse": z_sorting_mse,
+            "pinball_loss": pinball_loss,
+            "cdf_calibration_loss": cdf_calibration_loss,
             "kl_loss": kl_loss,
             "main_loss": main_loss,
         }
@@ -323,15 +418,31 @@ def sorting_loss(
             "full_rmse": jnp.sqrt(((yhat - Y) ** 2).mean()),
             "sorted_yhat": sorted_yhat,
             "sorted_y": sorted_y,
+            "z_scalar": z_scalar,
+            "z_order": z_order,
+            "z_sorted_yhat": z_sorted_yhat,
             "pct": pct,
             "kl_weight": klw,
             "negative_grad_penalty": ngp,
             "sqdiff": sqdiff,
             "sort_sqdiff": sort_sqdiff,
+            "z_sort_sqdiff": z_sort_sqdiff,
             "mse_dependent": mse_dependent,
             "mse_independent": mse_independent,
             "sorting_mse_dependent": sorting_mse_dependent,
             "sorting_mse_independent": sorting_mse_independent,
+            "z_sorting_mse_dependent": z_sorting_mse_dependent,
+            "z_sorting_mse_independent": z_sorting_mse_independent,
+            "z_sorting_mse_weight": zsmw,
+            "pinball_dependent": pinball_dependent,
+            "pinball_independent": pinball_independent,
+            "pinball_weight": pbw,
+            "pinball_use_z_tau": pinball_use_z_tau,
+            "cdf_calibration_dependent": cdf_calibration_dependent,
+            "cdf_calibration_independent": cdf_calibration_independent,
+            "cdf_calibration_weight": cdfw,
+            "cdf_calibration_temperature": cdf_calibration_temperature,
+            "y_scale": y_scale,
             "out_v_in_mse": out_v_in_mse,
             "out_v_in_sortmse": out_v_in_sortmse,
             "qvalues": qvalues,
@@ -339,6 +450,335 @@ def sorting_loss(
             "counts": counts,
             "step": step,
             "output_weights": output_weights,
+        }
+        aux["apply_aux"] = apply_aux
+
+        return main_loss + kl_loss + ng_loss, aux
+
+    return loss_func
+
+
+def energy_sampling_loss(
+    stack,
+    training_config,
+    negative_grad_penalty=1.0,
+    kl_weight=0.1,
+    percent_batch_used=1.0,
+    energy_n_samples=8,
+    energy_outputs_independent=True,
+    energy_include_input_z=True,
+    energy_z_distribution="uniform",
+    energy_z_normal_mean=0.5,
+    energy_z_normal_std=0.2,
+    energy_z_normal_clip=True,
+    energy_weight=1.0,
+    energy_pairwise_weight=0.5,
+    out_vs_in_energy_weight=1.0,
+    coverage_calibration_weight=0.0,
+    coverage_interval_low=0.1,
+    coverage_interval_high=0.9,
+    coverage_temperature=0.15,
+    tail_pinball_weight=0.0,
+    tail_tau_low=0.03,
+    tail_tau_high=0.97,
+    use_same_key=False,
+    per_output_weights=None,
+    **_unused_kwargs,
+):
+    """Sample-based distributional loss (CRPS / energy score).
+
+    This loss supervises only final outputs while treating internal latent variables
+    as nuisance variables. For each training (X, Y), we draw K latent samples and
+    optimize a proper scoring rule:
+      score = E||Yhat - Y|| - 0.5 * E||Yhat - Yhat'||
+
+    `energy_outputs_independent=True` computes univariate energy per output
+    (equivalent to averaged CRPS). `False` uses the joint vector norm.
+    """
+    import math
+    import jax
+    import jax.numpy as jnp
+    from jax.tree_util import tree_leaves
+    from .jaxutils import flat_concat
+
+    batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+    n_energy_samples = int(energy_n_samples)
+    assert n_energy_samples >= 1, "energy_n_samples must be >= 1"
+    z_dist = str(energy_z_distribution).lower()
+    assert z_dist in {"uniform", "normal"}, (
+        f"energy_z_distribution must be 'uniform' or 'normal', got {energy_z_distribution!r}"
+    )
+    z_normal_mean = float(energy_z_normal_mean)
+    z_normal_std = float(energy_z_normal_std)
+    assert z_normal_std > 0, "energy_z_normal_std must be > 0"
+    z_normal_clip = bool(energy_z_normal_clip)
+    qlow = float(coverage_interval_low)
+    qhigh = float(coverage_interval_high)
+    assert 0.0 <= qlow < qhigh <= 1.0, "coverage interval must satisfy 0 <= low < high <= 1"
+    target_coverage = qhigh - qlow
+    temp_cov = float(coverage_temperature)
+    assert temp_cov > 0, "coverage_temperature must be > 0"
+    tail_low = float(tail_tau_low)
+    tail_high = float(tail_tau_high)
+    assert 0.0 < tail_low < tail_high < 1.0, "tail taus must satisfy 0 < low < high < 1"
+
+    def sample_z_latents(key, shape, dtype):
+        if z_dist == "uniform":
+            return jax.random.uniform(key, shape, dtype=dtype)
+        z = z_normal_mean + z_normal_std * jax.random.normal(key, shape, dtype=dtype)
+        if z_normal_clip:
+            z = jnp.clip(z, 0.0, 1.0)
+        return z
+
+    def sample_quantile(yhat_samples_block, q):
+        """Linear-interpolated sample quantile along sample axis."""
+        sorted_samples = jnp.sort(yhat_samples_block, axis=0)
+        pos = float(q) * float(n_energy_samples - 1)
+        low_idx = int(math.floor(pos))
+        high_idx = int(math.ceil(pos))
+        alpha = pos - low_idx
+        low_val = sorted_samples[low_idx]
+        high_val = sorted_samples[high_idx]
+        return (1.0 - alpha) * low_val + alpha * high_val
+
+    def block_energy_score(
+        yhat_samples_block,
+        y_block,
+        block_weights,
+        selected_1d,
+        eff_batch_size,
+        independent,
+        pairwise_weight,
+    ):
+        k = yhat_samples_block.shape[0]
+        active_weight = block_weights.sum()
+        wsum = jnp.maximum(active_weight, 1e-12)
+
+        if independent:
+            abs_err = jnp.abs(yhat_samples_block - y_block[None, :, :]) * block_weights[None, None, :]
+            term_a = (abs_err * selected_1d[None, :, None]).sum() / (k * eff_batch_size * wsum)
+
+            pair_abs = jnp.abs(
+                yhat_samples_block[:, None, :, :] - yhat_samples_block[None, :, :, :]
+            ) * block_weights[None, None, None, :]
+            term_b = (pair_abs * selected_1d[None, None, :, None]).sum() / (
+                k * k * eff_batch_size * wsum
+            )
+        else:
+            scale = jnp.sqrt(jnp.maximum(block_weights, 0.0))
+            diff = (yhat_samples_block - y_block[None, :, :]) * scale[None, None, :]
+            dist = jnp.sqrt((diff**2).sum(axis=-1) + 1e-12)
+            term_a = (dist * selected_1d[None, :]).sum() / (k * eff_batch_size)
+
+            pair_diff = (
+                yhat_samples_block[:, None, :, :] - yhat_samples_block[None, :, :, :]
+            ) * scale[None, None, None, :]
+            pair_dist = jnp.sqrt((pair_diff**2).sum(axis=-1) + 1e-12)
+            term_b = (pair_dist * selected_1d[None, None, :]).sum() / (k * k * eff_batch_size)
+
+        gate = (active_weight > 0).astype(y_block.dtype)
+        energy = gate * (term_a - pairwise_weight * term_b)
+        return energy, {"energy_term_a": term_a, "energy_term_b": term_b}
+
+    def block_coverage_calibration(yhat_samples_block, y_block, block_weights, selected_1d, eff_batch_size):
+        active_weight = block_weights.sum()
+        wsum = jnp.maximum(active_weight, 1e-12)
+        gate = (active_weight > 0).astype(y_block.dtype)
+
+        lower = sample_quantile(yhat_samples_block, qlow)
+        upper = sample_quantile(yhat_samples_block, qhigh)
+        # Smooth interval-membership surrogate for differentiability.
+        in_low = jax.nn.sigmoid((y_block - lower) / temp_cov)
+        in_high = jax.nn.sigmoid((upper - y_block) / temp_cov)
+        inside = in_low * in_high
+
+        weighted_inside = inside * selected_1d[:, None] * block_weights[None, :]
+        coverage = weighted_inside.sum() / (eff_batch_size * wsum)
+        cov_loss = gate * (coverage - target_coverage) ** 2
+        return cov_loss, {"coverage": coverage, "target_coverage": target_coverage}
+
+    def block_tail_pinball(yhat_samples_block, y_block, block_weights, selected_1d, eff_batch_size):
+        active_weight = block_weights.sum()
+        wsum = jnp.maximum(active_weight, 1e-12)
+        gate = (active_weight > 0).astype(y_block.dtype)
+
+        qlo = sample_quantile(yhat_samples_block, tail_low)
+        qhi = sample_quantile(yhat_samples_block, tail_high)
+        lo_err = y_block - qlo
+        hi_err = y_block - qhi
+        lo_pb = jnp.maximum(tail_low * lo_err, (tail_low - 1.0) * lo_err)
+        hi_pb = jnp.maximum(tail_high * hi_err, (tail_high - 1.0) * hi_err)
+        tail_pb = 0.5 * (lo_pb + hi_pb)
+
+        weighted_pb = tail_pb * selected_1d[:, None] * block_weights[None, :]
+        loss = gate * (weighted_pb.sum() / (eff_batch_size * wsum))
+        return loss
+
+    def loss_func(dynamic, static, X, Y, Z, key, step):
+        check_XYZ(X, Y, Z, stack)
+        params = ParameterTree.merge(dynamic, static)
+
+        z_shape = Z.shape[1:]
+        z_key, apply_key = jax.random.split(key)
+        z_samples = sample_z_latents(
+            z_key,
+            (n_energy_samples, X.shape[0], *z_shape),
+            Y.dtype,
+        )
+        if energy_include_input_z:
+            z_samples = z_samples.at[0].set(Z)
+
+        if use_same_key:
+            one_batch_key = jnp.broadcast_to(key, (X.shape[0], *key.shape))
+            sample_keys = jnp.broadcast_to(
+                one_batch_key, (n_energy_samples, X.shape[0], *key.shape)
+            )
+        else:
+            sample_keys = jax.random.split(apply_key, n_energy_samples * X.shape[0]).reshape(
+                n_energy_samples, X.shape[0], -1
+            )
+
+        def predict_one(zb, kb):
+            return batch_apply(params, X, zb, kb)
+
+        yhat_samples, (apply_aux_samples, full_output_samples) = jax.vmap(
+            predict_one, in_axes=(0, 0)
+        )(z_samples, sample_keys)
+        yhat = yhat_samples[0]
+        apply_aux = jax.tree_util.tree_map(lambda v: v[0], apply_aux_samples)
+        full_output = full_output_samples[0]
+
+        grads_wrt_inputs = apply_aux["grads_wrt_inputs"]
+        aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
+
+        klw = as_schedule(kl_weight)(step)
+        qvalues = flat_concat(*tree_leaves(params["shared/quantization/values"]))
+        logstds = flat_concat(*tree_leaves(params["shared/quantization/logstdevs"]))
+        counts = flat_concat(*tree_leaves(params["shared/quantization/counts"]))
+        std = stable_sigma(logstds, min_std=1e-3)
+        counts_sum = counts.sum()
+        kl_loss = (counts * (qvalues**2 + std**2 - 1 - 2 * jnp.log(std))).sum() / counts_sum * klw
+
+        negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
+        ngp = as_schedule(negative_grad_penalty)(step)
+        ng_loss = negative_grads * ngp
+
+        dep_mask = params["global/dependent_output_mask"]
+        indep_mask = ~dep_mask
+        assert dep_mask.shape == (stack.total_nb_of_outputs,) == (Y.shape[1],)
+
+        if "global/per_output_weights" in params:
+            output_weights = params["global/per_output_weights"]
+        elif per_output_weights is not None:
+            output_weights = jnp.asarray(per_output_weights)
+        else:
+            output_weights = jnp.ones(Y.shape[1], dtype=Y.dtype)
+        assert output_weights.shape == (Y.shape[1],)
+
+        pct = as_schedule(percent_batch_used)(step)
+        selected = (jnp.linspace(0, 1, X.shape[0]) <= pct)[:, None]
+        selected_f = selected.astype(Y.dtype)
+        selected_1d = selected_f[:, 0]
+        eff_batch_size = jnp.maximum(selected_1d.sum(), 1.0)
+
+        sqdiff = (yhat - Y) ** 2 * selected_f * output_weights[None, :]
+        dep_mask_sum = jnp.maximum((dep_mask * output_weights).sum(), 1e-12)
+        indep_mask_sum = jnp.maximum((indep_mask * output_weights).sum(), 1e-12)
+        mse_dependent = (sqdiff * dep_mask[None, :]).sum() / (eff_batch_size * dep_mask_sum)
+        mse_independent = (sqdiff * indep_mask[None, :]).sum() / (
+            eff_batch_size * indep_mask_sum
+        )
+
+        dep_weights = output_weights * dep_mask.astype(Y.dtype)
+        dep_energy, dep_dbg = block_energy_score(
+            yhat_samples,
+            Y,
+            dep_weights,
+            selected_1d,
+            eff_batch_size,
+            independent=bool(energy_outputs_independent),
+            pairwise_weight=as_schedule(energy_pairwise_weight)(step),
+        )
+
+        indep_weights = output_weights * indep_mask.astype(Y.dtype)
+        indep_energy, indep_dbg = block_energy_score(
+            yhat_samples,
+            Y,
+            indep_weights,
+            selected_1d,
+            eff_batch_size,
+            independent=bool(energy_outputs_independent),
+            pairwise_weight=as_schedule(energy_pairwise_weight)(step),
+        )
+
+        ovie = as_schedule(out_vs_in_energy_weight)(step)
+        energy_loss = lerp(indep_energy, dep_energy, ovie)
+        mse = lerp(mse_independent, mse_dependent, ovie)
+        ew = as_schedule(energy_weight)(step)
+        cdep_loss, cdep_dbg = block_coverage_calibration(
+            yhat_samples, Y, dep_weights, selected_1d, eff_batch_size
+        )
+        cindep_loss, cindep_dbg = block_coverage_calibration(
+            yhat_samples, Y, indep_weights, selected_1d, eff_batch_size
+        )
+        coverage_loss = lerp(cindep_loss, cdep_loss, ovie)
+        ccw = as_schedule(coverage_calibration_weight)(step)
+        tdep_loss = block_tail_pinball(yhat_samples, Y, dep_weights, selected_1d, eff_batch_size)
+        tindep_loss = block_tail_pinball(yhat_samples, Y, indep_weights, selected_1d, eff_batch_size)
+        tail_loss = lerp(tindep_loss, tdep_loss, ovie)
+        tpw = as_schedule(tail_pinball_weight)(step)
+        main_loss = lerp(mse, energy_loss, ew) + ccw * coverage_loss + tpw * tail_loss
+
+        aux["sublosses"] = {
+            "mse": mse,
+            "energy_loss": energy_loss,
+            "coverage_loss": coverage_loss,
+            "tail_pinball_loss": tail_loss,
+            "kl_loss": kl_loss,
+            "main_loss": main_loss,
+        }
+        aux["debug"] = {
+            "negative_grads": negative_grads,
+            "ng_loss": ng_loss,
+            "effective_batch_size": eff_batch_size,
+            "selected": selected,
+            "pct": pct,
+            "std": std,
+            "qvalues": qvalues,
+            "logstds": logstds,
+            "counts": counts,
+            "step": step,
+            "output_weights": output_weights,
+            "mse_dependent": mse_dependent,
+            "mse_independent": mse_independent,
+            "dep_energy": dep_energy,
+            "indep_energy": indep_energy,
+            "out_vs_in_energy_weight": ovie,
+            "energy_weight": ew,
+            "energy_pairwise_weight": as_schedule(energy_pairwise_weight)(step),
+            "energy_n_samples": n_energy_samples,
+            "energy_outputs_independent": bool(energy_outputs_independent),
+            "energy_z_distribution": z_dist,
+            "energy_z_normal_mean": z_normal_mean,
+            "energy_z_normal_std": z_normal_std,
+            "energy_z_normal_clip": z_normal_clip,
+            "dep_energy_term_a": dep_dbg.get("energy_term_a", 0.0),
+            "dep_energy_term_b": dep_dbg.get("energy_term_b", 0.0),
+            "indep_energy_term_a": indep_dbg.get("energy_term_a", 0.0),
+            "indep_energy_term_b": indep_dbg.get("energy_term_b", 0.0),
+            "coverage_calibration_weight": ccw,
+            "coverage_interval_low": qlow,
+            "coverage_interval_high": qhigh,
+            "coverage_temperature": temp_cov,
+            "dep_coverage": cdep_dbg.get("coverage", 0.0),
+            "indep_coverage": cindep_dbg.get("coverage", 0.0),
+            "dep_target_coverage": cdep_dbg.get("target_coverage", target_coverage),
+            "indep_target_coverage": cindep_dbg.get("target_coverage", target_coverage),
+            "tail_pinball_weight": tpw,
+            "tail_tau_low": tail_low,
+            "tail_tau_high": tail_high,
+            "dep_tail_pinball_loss": tdep_loss,
+            "indep_tail_pinball_loss": tindep_loss,
         }
         aux["apply_aux"] = apply_aux
 

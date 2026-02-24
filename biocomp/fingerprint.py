@@ -102,26 +102,78 @@ def compute_fingerprint(
     Returns:
         16-character hex digest fingerprint
     """
-    from biocomptools.modelmodel import NetworkModel
+    return compute_fingerprints(
+        network_model=network_model,
+        network_indices=[network_idx],
+        resolution=resolution,
+        seed=seed,
+        decimals=decimals,
+    )[0]
 
-    networks = network_model.stack.networks
-    network = networks[network_idx]
-    n_inputs = network.nb_inputs
-    X = _generate_canonical_grid(n_inputs, resolution, seed)
 
-    if len(networks) == 1:
-        nm = network_model
-    else:
-        nm = NetworkModel(model=network_model.model, network=network)
+def compute_fingerprints(
+    network_model,
+    network_indices: list[int] | None = None,
+    resolution: int = FINGERPRINT_RESOLUTION,
+    seed: int = FINGERPRINT_SEED,
+    decimals: int = FINGERPRINT_DECIMALS,
+) -> list[str]:
+    """Compute fingerprints for one or more networks with a single stacked prediction pass.
 
-    Y, _ = nm.predict(
-        X,
+    This is the batched SSOT path used by design summary code to avoid per-network
+    recompilation overhead.
+
+    Args:
+        network_model: NetworkModel wrapping committed network(s)
+        network_indices: Optional subset of network indices (default: all)
+        resolution: Grid points per input dimension
+        seed: Fixed seed for determinism
+        decimals: Decimal places for approximate matching
+
+    Returns:
+        List of fingerprint strings in the same order as `network_indices` (or all networks)
+    """
+    networks = list(network_model.stack.networks)
+    if not networks:
+        return []
+
+    if network_indices is None:
+        network_indices = list(range(len(networks)))
+
+    invalid = [idx for idx in network_indices if idx < 0 or idx >= len(networks)]
+    if invalid:
+        raise IndexError(
+            f"network_indices out of range for {len(networks)} networks: {invalid}"
+        )
+
+    grids = [
+        _generate_canonical_grid(net.nb_inputs, resolution, seed).astype(np.float32, copy=False)
+        for net in networks
+    ]
+    sample_counts = [grid.shape[0] for grid in grids]
+    max_samples = max(sample_counts)
+
+    padded_grids: list[np.ndarray] = []
+    for grid, n_samples in zip(grids, sample_counts, strict=True):
+        if n_samples < max_samples:
+            pad = np.zeros((max_samples - n_samples, grid.shape[1]), dtype=np.float32)
+            grid = np.vstack([grid, pad])
+        padded_grids.append(grid)
+
+    stacked_x = np.column_stack(padded_grids).astype(np.float32, copy=False)
+    stacked_y, _ = network_model.predict(
+        stacked_x,
         key=jax.random.PRNGKey(seed),
         disable_variational=True,
         z_value=0.0,
     )
+    per_network_outputs = network_model.split_outputs_per_network(stacked_y, max_samples=max_samples)
 
-    return _hash_output(Y, decimals)
+    fingerprints_all = [
+        _hash_output(np.asarray(per_network_outputs[i])[: sample_counts[i]], decimals)
+        for i in range(len(networks))
+    ]
+    return [fingerprints_all[idx] for idx in network_indices]
 
 
 def compute_fingerprint_from_params(
