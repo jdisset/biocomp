@@ -710,11 +710,17 @@ def test_independent_uorf_slots_not_cross_committed(lib):
         key = jax.random.PRNGKey(42)
         params = stack.init(key)
 
+        # Find translation layer dynamically
+        tl_layer_idx = next(
+            i for i, l in enumerate(stack.layers) if l.f_type == "translation"
+        )
+        tl_namespace = stack.layers[tl_layer_idx].namespace
+
         # Manually set tl_rate values to ensure they quantize to different parts
         # The masked quantization values are [-1, -0.833, -0.667, -0.5, -0.333] for indices 0-4
         # Set node 0 close to -1.0 (index 0, 00_empty_tc)
         # Set node 1 close to -0.333 (index 4, 3x_uORF)
-        tl_rate_path = 'local/8/translation/tl_rate'
+        tl_rate_path = f'{tl_namespace}/tl_rate'
         new_tl_rate = jnp.array([[[-0.95]], [[-0.35]]])  # node 0 -> index 0, node 1 -> index 4
         params[tl_rate_path] = new_tl_rate
 

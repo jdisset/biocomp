@@ -9,6 +9,7 @@ from biocomp.parameters import ArrayRef, ParameterTree, init_if_needed, get_para
 from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
+    add_node_key_ids,
     add_tu_input_mapping,
     add_node_network_ids,
     NON_GRAD_TAG,
@@ -136,8 +137,9 @@ def sequestron_ERN(
         return out
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
-        # --------- random_var var
+        # --------- random_var var + node_key_id
         add_random_var_ids(params, len(nodelist), 1, namespace)
+        add_node_key_ids(params, len(nodelist), namespace)
         add_tu_input_mapping(params, stack, nodelist, namespace)
         add_node_network_ids(params, nodelist, namespace)
 

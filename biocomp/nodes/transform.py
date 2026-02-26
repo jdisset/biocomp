@@ -9,11 +9,13 @@ from biocomp.parameters import ParameterTree, init_if_needed, make_view
 from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
+    add_node_key_ids,
     add_tu_input_mapping,
     add_node_network_ids,
     NON_GRAD_TAG,
     get_prev_num_random_vars,
     reference_forward_random_var_ids,
+    reference_forward_key_ids,
 )
 from biocomp.utils import get_logger
 from typing import Optional
@@ -231,11 +233,13 @@ def transform_nn(
             make_view(params, namespace, fwd_paths, fwd_loc, leaves=[rate_name, mask_name])
             params.tag(f"{namespace}/{mask_name}", [NON_GRAD_TAG])
 
-        # --------- random_var var
+        # --------- random_var var + node_key_id
         if is_inverse:
             reference_forward_random_var_ids(stack, params, nodelist, namespace)
+            reference_forward_key_ids(stack, params, nodelist, namespace)
         else:
             add_random_var_ids(params, len(nodelist), len(input_shapes) + 1, namespace)
+            add_node_key_ids(params, len(nodelist), namespace)
             add_tu_input_mapping(params, stack, nodelist, namespace)
             add_node_network_ids(params, nodelist, namespace)
 

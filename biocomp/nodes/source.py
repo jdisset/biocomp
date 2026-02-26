@@ -10,9 +10,11 @@ from biocomp.parameters import ParameterTree, init_if_needed
 from biocomp.nodeutils import (
     LayerInstance,
     add_random_var_ids,
+    add_node_key_ids,
     add_node_network_ids,
     NON_GRAD_TAG,
     reference_forward_random_var_ids,
+    reference_forward_key_ids,
     empty_prepare,
 )
 from typing import Optional
@@ -83,6 +85,7 @@ def source_with_pos(
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key, **_):
         add_random_var_ids(params, len(nodelist), len(input_shapes), namespace)
+        add_node_key_ids(params, len(nodelist), namespace)
         add_node_network_ids(params, nodelist, namespace)
         MLP_head(np.zeros((2 + len(input_shapes),)), params, key)
 
@@ -160,6 +163,7 @@ def inv_source_with_pos(
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key, **_):
         reference_forward_random_var_ids(stack, params, nodelist, namespace)
+        reference_forward_key_ids(stack, params, nodelist, namespace)
 
         # store the original position for each inverse node
         positions = jnp.array(

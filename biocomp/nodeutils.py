@@ -37,11 +37,19 @@ class LayerInstance:
 NON_GRAD_TAG = "non_grad"
 
 GLOBAL_PATH_NUMBER_OF_RANDOM_VARIABLES = "global/number_of_random_variables"
+GLOBAL_PATH_NUMBER_OF_NODE_KEYS = "global/number_of_node_keys"
 
 
 def get_prev_num_random_vars(params: ParameterTree):
     try:
         return params[GLOBAL_PATH_NUMBER_OF_RANDOM_VARIABLES]
+    except KeyError:
+        return 0
+
+
+def get_prev_num_node_keys(params: ParameterTree) -> int:
+    try:
+        return params[GLOBAL_PATH_NUMBER_OF_NODE_KEYS]
     except KeyError:
         return 0
 
@@ -83,21 +91,43 @@ def add_random_var_ids(params: ParameterTree, num_nodes: int, num_per_node, name
     )
 
 
-def reference_forward_random_var_ids(stack, params, nodelist, inv_namespace):
-    # check if all forward nodes exist - skip if any are missing (pruned network)
+def add_node_key_ids(params: ParameterTree, num_nodes: int, namespace: str):
+    """Allocate sequential node_key_ids for deterministic per-node key derivation via fold_in.
+
+    Each node gets a globally unique integer ID. During apply, the node's key is
+    computed as ``jax.random.fold_in(base_key, node_key_id)`` — so forward/inverse
+    pairs that share the same ID (via ArrayRef) get identical keys.
+    """
+    prev = get_prev_num_node_keys(params)
+    ids = jnp.arange(prev, prev + num_nodes, dtype=jnp.int32)
+    params.at(f"{namespace}/node_key_id", ids, tags=[NON_GRAD_TAG], overwrite=None)
+    params.at(GLOBAL_PATH_NUMBER_OF_NODE_KEYS, prev + num_nodes, tags=[NON_GRAD_TAG], overwrite=True)
+
+
+def _reference_forward_ids(stack, params, nodelist, inv_namespace, id_name: str):
+    """Make inverse layer reference forward layer's IDs via ArrayRef.
+
+    Generic helper — works for both ``random_variable_id`` and ``node_key_id``.
+    """
     all_forward_exist = all(node.get_forward_stacknode(stack) is not None for node in nodelist)
     if not all_forward_exist:
-        # pruned network with missing forward nodes - skip reference setup
-        # the inv_* nodes will use default random variable handling
         return
 
     ref = ArrayRef(params.data)
     for node in nodelist:
         fwd_node = node.get_forward_stacknode(stack)
         fwd_namespace = stack.get_layer_namespace(fwd_node.layer_number)
-        ref.push_back(f"{fwd_namespace}/random_variable_id", fwd_node.node_position_in_layer)
+        ref.push_back(f"{fwd_namespace}/{id_name}", fwd_node.node_position_in_layer)
 
-    params.at(f"{inv_namespace}/random_variable_id", ref, overwrite=None)
+    params.at(f"{inv_namespace}/{id_name}", ref, overwrite=None)
+
+
+def reference_forward_random_var_ids(stack, params, nodelist, inv_namespace):
+    _reference_forward_ids(stack, params, nodelist, inv_namespace, "random_variable_id")
+
+
+def reference_forward_key_ids(stack, params, nodelist, inv_namespace):
+    _reference_forward_ids(stack, params, nodelist, inv_namespace, "node_key_id")
 
 
 def add_tu_input_mapping(

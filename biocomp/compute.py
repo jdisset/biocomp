@@ -549,6 +549,17 @@ class ComputeStack:
                         logger.exception(e)
                         raise e
 
+            # Ensure every non-input layer has node_key_ids.
+            # Layers whose prepare() already allocated them are skipped (overwrite=None).
+            from biocomp.nodeutils import add_node_key_ids as _add_nk
+
+            for layer in self.layers:
+                if layer.f_type == "input":
+                    continue
+                ns = layer.namespace
+                if f"{ns}/node_key_id" not in params:
+                    _add_nk(params, len(layer.nodes), ns)
+
             params.tag("local", "local")
             params.tag("shared", "shared")
 
@@ -1117,6 +1128,9 @@ class ComputeStack:
 
         w_grads = [l.f_type in get_grads_for for l in self.layers]
 
+        # Pre-build namespace list for fold_in key lookup
+        layer_namespaces = [l.namespace for l in self.layers]
+
         # Pre-build network_ids arrays for each layer (node_position -> network_id)
         # Used for per-network TU masking
         n_networks_total = len(self.networks)
@@ -1185,6 +1199,12 @@ class ComputeStack:
             stack_aux = {}
             stack_grad_wrt_inputs = jnp.array([])
 
+            # Derive a single base key for fold_in — each node derives its own
+            # key deterministically via jax.random.fold_in(base_node_key, node_key_id).
+            # Forward/inverse pairs share the same node_key_id (via ArrayRef),
+            # so they get identical keys regardless of layer ordering.
+            key, base_node_key = jax.random.split(key)
+
             for lid in range(start_layer, len(self.layers)):
                 assert running_output.shape[0] == self.layers_start_index[lid]
 
@@ -1204,8 +1224,6 @@ class ComputeStack:
 
                 assert len(layer_inputs) == n_inputs
 
-                keys = jax.random.split(key, n_nodes)
-
                 apply_f = self.layers[lid].f_apply
                 net_ids = layer_network_ids[lid]  # shape (n_nodes,)
 
@@ -1214,8 +1232,12 @@ class ComputeStack:
                     return out  # drop the aux
 
                 def node_apply(
-                    node_id: ArrayLike, network_id: ArrayLike, key: PRNGKey, *inputs: ArrayLike
+                    node_id: ArrayLike, network_id: ArrayLike, *inputs: ArrayLike
                 ):
+                    # Derive per-node key from globally unique node_key_id
+                    nk_id = params[f"{layer_namespaces[lid]}/node_key_id"][node_id]
+                    node_key = jax.random.fold_in(base_node_key, nk_id)
+
                     node_tu_uniform = (
                         tu_enabled_random_vars[network_id]
                         if tu_enabled_random_vars is not None
@@ -1226,7 +1248,7 @@ class ComputeStack:
                         params=params,
                         random_vars=random_vars,
                         node_id=node_id,
-                        key=key,
+                        key=node_key,
                         tu_enabled_random_vars=node_tu_uniform,
                         network_id=network_id,
                     )
@@ -1237,7 +1259,7 @@ class ComputeStack:
                             params=params,
                             random_vars=random_vars,
                             node_id=node_id,
-                            key=key,
+                            key=node_key,
                             tu_enabled_random_vars=node_tu_uniform,
                             network_id=network_id,
                         )
@@ -1252,7 +1274,7 @@ class ComputeStack:
                     return res, node_aux
 
                 def layer_apply(*inputs):
-                    return vmap(node_apply)(jnp.arange(n_nodes), net_ids, keys, *inputs)
+                    return vmap(node_apply)(jnp.arange(n_nodes), net_ids, *inputs)
 
                 layer_out, layer_aux = layer_apply(*layer_inputs)
                 layer_grad_wrt_inputs = layer_aux.get("grads_wrt_inputs", jnp.array([])).ravel()

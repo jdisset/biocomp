@@ -11,7 +11,9 @@ from biocomp.nodeutils import (
     add_tu_input_mapping,
     add_node_network_ids,
     add_random_var_ids,
+    add_node_key_ids,
     reference_forward_random_var_ids,
+    reference_forward_key_ids,
     NON_GRAD_TAG,
 )
 from typing import Optional
@@ -73,6 +75,7 @@ def grouped_output(
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
         MLP_head(x=np.zeros(input_shapes[0]), random_var=np.zeros(()), rng_key=key, params=params)
         add_random_var_ids(params, len(nodelist), len(input_shapes), namespace)
+        add_node_key_ids(params, len(nodelist), namespace)
         add_tu_input_mapping(params, stack, nodelist, namespace)
         add_node_network_ids(params, nodelist, namespace)
 
@@ -181,6 +184,7 @@ def inv_output(
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
         MLP_head(x=np.zeros(input_shapes[0]), random_var=np.zeros(()), rng_key=key, params=params)
         reference_forward_random_var_ids(stack, params, nodelist, namespace)
+        reference_forward_key_ids(stack, params, nodelist, namespace)
         output_slots = jnp.array(
             [n.get(stack).is_inverse_of.output_slot for n in nodelist], dtype=jnp.int32
         )
