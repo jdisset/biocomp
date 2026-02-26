@@ -1619,9 +1619,10 @@ class Network(BaseModel):
                         marker = reporter
                         break
 
-            # Extract ratios and compute percentages per TU
+            # Extract ratios and compute min-normalized values per TU
             slot_entries = get_slot_entries(node.extra, require=False)
             ratios = None
+            marker_ratio = None
             if slot_entries:
                 sorted_ids = [str(entry["source_id"]) for entry in slot_entries]
                 raw_ratios = [float(entry.get("ratio", 1.0)) for entry in slot_entries]
@@ -1629,10 +1630,25 @@ class Network(BaseModel):
                     min(r for r in raw_ratios if r > 0) if any(r > 0 for r in raw_ratios) else 1.0
                 )
                 ratios = [r / min_r for r in raw_ratios]
-                for sid, normalized in zip(sorted_ids, ratios, strict=False):
-                    tu_id = source_id_to_tu_id.get(sid)
-                    if tu_id and tu_id in tus:
-                        tus[tu_id].ratio_normalized = normalized
+                source_id_to_normalized = dict(zip(sorted_ids, ratios, strict=False))
+                # Match slot entries to TUs within THIS aggregation's tu_ids
+                # (same source_id can appear in multiple cotransfections)
+                for sid, norm_ratio in zip(sorted_ids, ratios, strict=False):
+                    for tid in tu_ids:
+                        if tid in tus and tus[tid].source_id == sid:
+                            tus[tid].ratio_normalized = norm_ratio
+                            break
+
+                # Find the marker source's normalized ratio
+                if marker:
+                    for edge in graph.get_outgoing_edges(agg_id):
+                        src_node = graph.nodes.get(edge.target_id)
+                        if src_node and src_node.node_type == "source":
+                            reporter = source_to_reporter.get(src_node.node_id)
+                            if reporter == marker:
+                                sid = str(src_node.extra.get("source_id", src_node.node_id))
+                                marker_ratio = source_id_to_normalized.get(sid)
+                                break
 
             sources.append(
                 SourceData(
@@ -1642,6 +1658,7 @@ class Network(BaseModel):
                     tu_ids=tu_ids,
                     ratios=ratios,
                     marker=marker,
+                    marker_ratio=marker_ratio,
                 )
             )
 
