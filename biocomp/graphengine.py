@@ -22,6 +22,7 @@ NodeType = Union[
         "inv_source",
         "inv_transcription",
         "inv_translation",
+        "inv_output",
         "input",
     ],
     str,

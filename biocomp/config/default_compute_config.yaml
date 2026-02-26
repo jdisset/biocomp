@@ -36,6 +36,9 @@ node_functions:
   output: !biocomp.utils.PartialFunction
     func: biocomp.nodes.grouped_output
 
+  inv_output: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.inv_output
+
   deadend: !biocomp.utils.PartialFunction
     func: biocomp.nodes.single_passthrough
 

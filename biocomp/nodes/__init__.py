@@ -1,7 +1,7 @@
 from .aggregation import aggregation as aggregation, inv_aggregation as inv_aggregation
 from .bias import bias as bias, hard_bias as hard_bias
 from .ern import sequestron_ERN as sequestron_ERN, ERN5p as ERN5p
-from .output import grouped_output as grouped_output
+from .output import grouped_output as grouped_output, inv_output as inv_output
 from .source import (
     source as source,
     inv_source as inv_source,

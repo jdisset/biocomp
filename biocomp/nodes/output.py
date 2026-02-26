@@ -123,3 +123,78 @@ def grouped_output(
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}##
+
+
+### {{{                    --     inv_output (inverse fluorescence) node     --
+
+
+def inv_output(
+    input_shapes: list[tuple[int, ...]],
+    n_outputs: int,
+    stack: ComputeStack,
+    namespace: str,
+    wsize: int = 64,
+    depth: int = 4,
+    bias_offset: float = 0.0,
+    inner_activation_name: str = DEFAULT_ACTIVATION,
+    outer_activation_name: str = DEFAULT_OUT_ACTIVATION,
+    initializer_name: str = DEFAULT_INITIALIZER,
+    dummy: bool = False,
+    **_,
+):
+    assert len(input_shapes) == 1, f"inv_output should have 1 input, got {len(input_shapes)}"
+    assert n_outputs == 1, f"inv_output should have 1 output, got {n_outputs}"
+
+    inner_activation = ACTIVATION_FUNCTIONS[inner_activation_name]
+    outer_activation = ACTIVATION_FUNCTIONS[outer_activation_name]
+    initializer = INITIALIZERS[initializer_name]
+
+    mlp = dummy_mlp if dummy else dense_mlp
+
+    def MLP_head(x, rng_key, params):
+        return mlp(
+            x,
+            wsize,
+            1,
+            depth,
+            param_f=partial(init_if_needed, params, base_path="shared"),
+            initializer=initializer,
+            bias_offset=bias_offset,
+            key=rng_key,
+            name="NN/inv_output",
+            activation=inner_activation,
+        )
+
+    def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
+        MLP_head(x=np.zeros(input_shapes[0]), rng_key=key, params=params)
+        add_node_network_ids(params, nodelist, namespace)
+
+    def apply(
+        value: ArrayLike,
+        *,
+        params: ParameterTree,
+        node_id: ArrayLike,
+        key,
+        **_kwargs,
+    ) -> tuple[ArrayLike, dict]:
+        assert value.shape == input_shapes[0], f"inv_output: expected {input_shapes[0]}, got {value.shape}"
+
+        mlp_out = MLP_head(value, key, params)
+
+        if dummy:
+            result = mlp_out
+        else:
+            pre = 0.5 * mlp_out + 0.5 * value
+            result = outer_activation(pre)
+
+        return result, {
+            "mlp_output": mlp_out,
+            "input_value": value,
+        }
+
+    output_shape = list(input_shapes)
+
+    return LayerInstance(prepare, apply, output_shape)
+
+
+##────────────────────────────────────────────────────────────────────────────}}}##

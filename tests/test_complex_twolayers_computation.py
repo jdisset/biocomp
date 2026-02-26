@@ -145,13 +145,13 @@ def complex_twolayers_basic_stack_assertions(network, stack, params):
     aggs = network.compute_graph.get_nodes_by_type("aggregation")
     for a in aggs:
         ag_layer_num, ag_pos = stack.node_map[(0, a.node_id)]
-        assert ag_layer_num == 6
+        assert ag_layer_num == 7
         ag_layer = stack.layers[ag_layer_num]
         assert len(ag_layer.nodes) == 3
         assert list(ag_layer.f_out_shapes) == [(1,)] * 8
         assert list(ag_layer.f_input_shapes) == [(1,)]
         assert ag_layer.f_type == "aggregation"
-        assert ag_layer.namespace == "local/6/aggregation8x"
+        assert ag_layer.namespace == "local/7/aggregation8x"
         assert params[ag_layer.namespace]["ratios"].shape == (3, 8)
         param_ratios = params[ag_layer.namespace]["ratios"][ag_pos]
         slot_entries = get_slot_entries(a.extra)
@@ -163,18 +163,18 @@ def complex_twolayers_basic_stack_assertions(network, stack, params):
 def complex_twolayers_advanced_stack_assertions(
     network, stack, params, translate, nouorf_emb, test_key, intermediate_values, y_aux
 ):
-    _ = params[stack.layers[8].namespace]
-    _ = stack.layers[8].nodes
-    _ = stack.layers[8].f_input_shapes
+    _ = params[stack.layers[9].namespace]
+    _ = stack.layers[9].nodes
+    _ = stack.layers[9].f_input_shapes
     test_input = [np.ones(1) * 2 * i for i in range(3)]
-    tl_out, tl_aux = stack.layers[8].f_apply(
+    tl_out, tl_aux = stack.layers[9].f_apply(
         *test_input, random_vars=np.zeros(100), params=params, node_id=0, key=test_key
     )
     manual_tl_out = translate(flat_concat(*test_input), [nouorf_emb] * 3)
     assert np.allclose(tl_out, manual_tl_out, rtol=1e-5)
-    _ = stack.layers[13].f_input_shapes
+    _ = stack.layers[14].f_input_shapes
     ernc_test_input = [intermediate_values["Ec_negative_in"], intermediate_values["Ec_positive_in"]]
-    ernc_out, ernc_aux = stack.layers[13].f_apply(
+    ernc_out, ernc_aux = stack.layers[14].f_apply(
         *ernc_test_input,
         random_vars=np.zeros(100),
         params=params,
@@ -188,44 +188,44 @@ def complex_twolayers_advanced_stack_assertions(
     X1_inv = intermediate_values["X1_inv"]
     X2_inv = intermediate_values["X2_inv"]
 
-    _ = stack.layers[15].f_input_shapes
+    _ = stack.layers[16].f_input_shapes
     fl_test_input = np.array([np.ones(1) * i for i in range(4)])
-    fl_out, fl_aux = stack.layers[15].f_apply(
+    fl_out, fl_aux = stack.layers[16].f_apply(
         *fl_test_input, random_vars=np.zeros(100), params=params, node_id=0, key=test_key
     )
     assert np.all(fl_out.flatten() == fl_test_input.flatten())
 
     ratio_output_tol = 2 * 10 ** (-RATIO_PRECISION + 1)
     assert np.allclose(
-        y_aux["5"]["trace"]["outputs"],
+        y_aux["6"]["trace"]["outputs"],
         np.array([[B_inv], [X1_inv], [X2_inv]]),
         rtol=ratio_output_tol,
     )
-    y_aux["7"]["trace"]["outputs"]
-    for sn in stack.layers[7].nodes:
+    y_aux["8"]["trace"]["outputs"]
+    for sn in stack.layers[8].nodes:
         n = network.compute_graph.get_node(sn.node_id)
         assert np.isclose(
             intermediate_values[n.extra["name"]],
-            y_aux["7"]["trace"]["outputs"][sn.node_position_in_layer][0],
+            y_aux["8"]["trace"]["outputs"][sn.node_position_in_layer][0],
             rtol=ratio_output_tol,
         )
-    y_aux["11"]["trace"]["outputs"]
+    y_aux["12"]["trace"]["outputs"]
     assert np.allclose(
-        y_aux["11"]["trace"]["outputs"][0][0],
+        y_aux["12"]["trace"]["outputs"][0][0],
         Eb,
         rtol=ratio_output_tol,
-    ), f"Eb: {Eb}, aux: {y_aux['11']['trace']['outputs'][0][0]}"
+    ), f"Eb: {Eb}, aux: {y_aux['12']['trace']['outputs'][0][0]}"
     assert np.allclose(
-        y_aux["11"]["trace"]["outputs"][1][0],
+        y_aux["12"]["trace"]["outputs"][1][0],
         Ea,
         rtol=ratio_output_tol,
-    ), f"Ea: {Ea}, aux: {y_aux['11']['trace']['outputs'][1][0]}"
-    y_aux["13"]["trace"]["outputs"]
+    ), f"Ea: {Ea}, aux: {y_aux['12']['trace']['outputs'][1][0]}"
+    y_aux["14"]["trace"]["outputs"]
     assert np.allclose(
-        y_aux["13"]["trace"]["outputs"][0][0],
+        y_aux["14"]["trace"]["outputs"][0][0],
         Ec,
         rtol=ratio_output_tol,
-    ), f"Ec: {Ec}, aux: {y_aux['13']['trace']['outputs'][0][0]}"
+    ), f"Ec: {Ec}, aux: {y_aux['14']['trace']['outputs'][0][0]}"
 
     assert np.allclose(ernc_out, Ec, rtol=ratio_output_tol), f"ernc_out: {ernc_out}, Ec: {Ec}"
 
@@ -238,14 +238,14 @@ def complex_twolayers_topology_assertions(network, stack, params):
     tlnode = network.compute_graph.get_node(27)
     assert tlnode.node_type == "translation"
     tl_layer_num, tl_pos = stack.node_map[(0, 27)]
-    assert tl_layer_num == 12
+    assert tl_layer_num == 13
     assert tl_pos == 0
     assert stack.layers is not None
     tl_layer = stack.layers[tl_layer_num]
     assert tl_layer.f_type == "translation"
     assert tl_layer.f_out_shapes == [(1,)]
     assert tl_layer.f_input_shapes == ((1,), (1,), (1,))
-    assert tl_layer.namespace == "local/12/translation"
+    assert tl_layer.namespace == "local/13/translation"
     assert len(tl_layer.nodes) == 1
     assert tl_layer.nodes[0].node_id == 27
     assert tl_layer.nodes[0].layer_number == tl_layer_num
@@ -266,7 +266,7 @@ def complex_twolayers_topology_assertions(network, stack, params):
             assert ern_layer.f_type == "sequestron_ERN"
             assert ern_layer.f_out_shapes == [(1,)]
             assert ern_layer.f_input_shapes == ((1,), (1,))
-            assert ern_layer.namespace == "local/11/sequestron_ERN"
+            assert ern_layer.namespace == "local/12/sequestron_ERN"
             assert len(ern_layer.nodes) == 2
             assert ern_layer.nodes[ern_pos].node_id == un.node_id
             ern_affinity = params[ern_layer.namespace]["affinity"][ern_pos]
@@ -297,7 +297,7 @@ def complex_twolayers_topology_assertions(network, stack, params):
     assert tlnode2.node_type == "translation"
     tl_layer_num2, tl_pos2 = stack.node_map[(0, 34)]
     tl_layer2 = stack.layers[tl_layer_num2]
-    assert tl_layer_num2 == 14
+    assert tl_layer_num2 == 15
     assert tl_pos2 == 0
     upnodes2 = network.compute_graph.get_upstream_nodes(tlnode2.node_id)
     assert len(upnodes2) == 2
@@ -312,7 +312,7 @@ def complex_twolayers_topology_assertions(network, stack, params):
             assert ern_layer.f_type == "sequestron_ERN"
             assert ern_layer.f_out_shapes == [(1,)]
             assert ern_layer.f_input_shapes == ((1,), (1,))
-            assert ern_layer.namespace == "local/13/sequestron_ERN"
+            assert ern_layer.namespace == "local/14/sequestron_ERN"
             assert len(ern_layer.nodes) == 1
             assert ern_layer.nodes[ern_pos].node_id == un.node_id
             ern_affinity = params[ern_layer.namespace]["affinity"][ern_pos]
@@ -384,6 +384,7 @@ def test_complex_twolayers_compg_structure(lib, complex_twolayers_design_network
         assert node_types["source"] == 24
         assert node_types["sequestron_ERN"] == 3
         assert node_types["output"] == 1
+        assert node_types["inv_output"] == 3
         assert node_types["bias"] == 1
         assert node_types["input"] == 2
 
@@ -462,12 +463,13 @@ def test_complex_twolayers_outputs(lib, complex_twolayers_design_network):
         for a in aggs:
             upnodes = network.compute_graph.get_upstream_nodes(a.node_id, recursive=True)
             upnode_types = [n.node_type for n, e in upnodes]
-            assert len(upnodes) == 5
+            assert len(upnodes) == 6
             assert upnode_types[:-1] == [
                 "inv_aggregation",
                 "inv_source",
                 "inv_transcription",
                 "inv_translation",
+                "inv_output",
             ]
             root_node = upnodes[-1][0]
             if a.extra["cotx_group"] == "x1":
@@ -581,11 +583,12 @@ def test_complex_twolayers_structure(lib, complex_twolayers_design_network):
         stack = ComputeStack([network])
         stack.build(config=SIMPLE_NODES_COMPUTE_CONFIG)
 
-        assert len(stack.layers) == 16, f"Expected 16 layers, got {len(stack.layers)}"
+        assert len(stack.layers) == 17, f"Expected 17 layers, got {len(stack.layers)}"
 
         expected_structure = [
             ("input", 2),
             ("bias", 1),
+            ("inv_output", 3),
             ("inv_translation", 3),
             ("inv_transcription", 3),
             ("inv_source", 3),
@@ -623,7 +626,7 @@ def test_complex_twolayers_parameter_constraints(lib, complex_twolayers_design_n
         init_key = jax.random.PRNGKey(42)
         params = stack.init(init_key)
 
-        agg_layer_idx = 6
+        agg_layer_idx = 7
         agg_namespace = stack.layers[agg_layer_idx].namespace
         ratios = params[f"{agg_namespace}/ratios"]
         assert ratios.shape == (3, 8), f"Expected (3, 8) ratios, got {ratios.shape}"
@@ -666,30 +669,30 @@ def test_complex_twolayers_parameter_constraints(lib, complex_twolayers_design_n
             f"Expected b (sorted): {b_sorted}"
         )
 
-        tl_masks_10 = params["local/10/translation/tl_rate_quantization_mask"]
-        assert tl_masks_10.shape == (5, 1, 13), (
-            f"Layer 10 TL masks: expected (5, 1, 13), got {tl_masks_10.shape}"
+        tl_masks_11 = params["local/11/translation/tl_rate_quantization_mask"]
+        assert tl_masks_11.shape == (5, 1, 13), (
+            f"Layer 11 TL masks: expected (5, 1, 13), got {tl_masks_11.shape}"
         )
         for node_idx in range(5):
-            mask = tl_masks_10[node_idx]
+            mask = tl_masks_11[node_idx]
             assert jnp.sum(mask) == 1, f"Node {node_idx} should have exactly 1 uORF option"
             assert mask[0, 0], f"Node {node_idx} should have no-uORF (index 0) available"
 
-        tl_masks_12 = params["local/12/translation/tl_rate_quantization_mask"]
-        assert tl_masks_12.shape == (1, 3, 13), (
-            f"Layer 12 TL masks: expected (1, 3, 13), got {tl_masks_12.shape}"
+        tl_masks_13 = params["local/13/translation/tl_rate_quantization_mask"]
+        assert tl_masks_13.shape == (1, 3, 13), (
+            f"Layer 13 TL masks: expected (1, 3, 13), got {tl_masks_13.shape}"
         )
-        mask_27 = tl_masks_12[0]
+        mask_27 = tl_masks_13[0]
         assert jnp.sum(mask_27[0]) == 1, "Input 0 should have 1 option (u1=none)"
         assert mask_27[0, 0], "Input 0 should have index 0 available"
         assert jnp.sum(mask_27[1]) == 9, "Input 1 should have 9 options (u2=all)"
         assert jnp.sum(mask_27[2]) == 1, "Input 2 should have 1 option (no uORF)"
 
-        tl_masks_14 = params["local/14/translation/tl_rate_quantization_mask"]
-        assert tl_masks_14.shape == (1, 2, 13), (
-            f"Layer 14 TL masks: expected (1, 2, 13), got {tl_masks_14.shape}"
+        tl_masks_15 = params["local/15/translation/tl_rate_quantization_mask"]
+        assert tl_masks_15.shape == (1, 2, 13), (
+            f"Layer 15 TL masks: expected (1, 2, 13), got {tl_masks_15.shape}"
         )
-        mask_34 = tl_masks_14[0]
+        mask_34 = tl_masks_15[0]
         assert jnp.sum(mask_34[0]) == 1, "Input 0 should have 1 option (no uORF)"
         assert jnp.sum(mask_34[1]) == 8, "Input 1 should have 8 options (u3=all except none)"
         assert not mask_34[1, 0], "Input 1 should NOT have index 0 (none)"

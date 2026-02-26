@@ -84,7 +84,9 @@ class TestInvAggregationBasicFunctionality:
         key = jax.random.key(42)
         params = multi_aggregation_stack.init(key)
 
-        inv_ns = 'local/5/inv_aggregation'
+        inv_paths = get_inv_aggregation_paths(params)
+        assert len(inv_paths) > 0, "Should have at least one inv_aggregation path"
+        inv_ns = inv_paths[0].rsplit("/ratios", 1)[0]
         ratio_ref = params.data.get_at(f'{inv_ns}/ratios', get_leaf_value=False).value
 
         assert len(ratio_ref.paths) > 0, "ArrayRef should have at least one path"

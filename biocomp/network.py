@@ -822,6 +822,7 @@ class Network(BaseModel):
             "inv_transcription",
             "inv_translation",
             "inv_aggregation",
+            "inv_output",
         )
         changed = True
         while changed:

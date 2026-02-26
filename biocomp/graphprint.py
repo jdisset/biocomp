@@ -32,6 +32,7 @@ NODE_COLORS = {
     "inv_translation": "#F5F5DC",
     "inv_aggregation": "#FFDAB9",
     "inv_source": "#F0FFF0",
+    "inv_output": "#FFE4E1",
 }
 
 LAYOUTS = {
@@ -556,6 +557,7 @@ TYPE_SHORTNAMES = {
     "inv_transcription": "i_tc",
     "inv_translation": "i_tl",
     "inv_aggregation": "i_agg",
+    "inv_output": "i_out",
 }
 
 

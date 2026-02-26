@@ -53,6 +53,11 @@ node_functions:
     kwargs:
       dummy: True
 
+  inv_output: !biocomp.utils.PartialFunction
+    func: biocomp.nodes.inv_output
+    kwargs:
+      dummy: True
+
   deadend: !biocomp.utils.PartialFunction
     func: biocomp.nodes.single_passthrough
 

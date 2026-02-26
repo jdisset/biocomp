@@ -70,7 +70,19 @@ def invert_all_paths(graph: GraphState, mode: str = "shortest") -> list[GraphSta
             for node_id, slot in path[1:]:
                 node = nodes_by_id[node_id]
                 if node.node_type == "output":
-                    # Create input or bias node based on original type
+                    # Create inv_output node for the output → protein inversion
+                    output_len = len([e for e in graph.edges.values() if e.target_id == node_id])
+                    inv_out_id = builder.add_node(
+                        "inv_output",
+                        extra={"original_output_slot": slot, "original_output_len": output_len},
+                        is_inverse_of=InverseSpec(
+                            node_id=node_id, output_slot=slot, output_len=output_len
+                        ),
+                    )
+                    builder.add_edge(inv_out_id, prev_id, from_output_slot=0, to_input_slot=0)
+                    prev_id = inv_out_id
+
+                    # Create input or bias node based on original type, linked to inv_output
                     if original_node.node_type == "bias":
                         inp_extra = {**original_node.extra, "input_from_output": slot}
                         node_type = "bias"

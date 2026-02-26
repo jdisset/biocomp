@@ -309,6 +309,36 @@ def test_inversion_finds_all_paths(lib, multi_aggregation_ern):
                 assert inv_node.is_inverse_of.node_id >= 0
 
 
+def test_inversion_creates_inv_output_nodes(lib, multi_aggregation_ern):
+    """Test that inversion creates inv_output nodes linked to output nodes"""
+    with LibraryContext.with_library(lib):
+        recipe = multi_aggregation_ern
+        cdg = build_central_dogma_graph_direct(recipe.content, lib, dual=True)
+        forward_compg = apply_rule_sequence(br.ALL_RULES, cdg)[0]
+
+        inverted_graphs = invert_all_paths(forward_compg, mode="all")
+
+        for inv_g in inverted_graphs:
+            inv_output_nodes = [n for n in inv_g.nodes.values() if n.node_type == "inv_output"]
+            assert len(inv_output_nodes) > 0, "Inverted graph should contain inv_output nodes"
+
+            for inv_out in inv_output_nodes:
+                assert inv_out.is_inverse_of is not None
+                orig_node = forward_compg.nodes.get(inv_out.is_inverse_of.node_id)
+                assert orig_node is not None
+                assert orig_node.node_type == "output"
+
+                # inv_output should have exactly 1 incoming edge (from input/bias)
+                incoming = list(inv_g.get_incoming_edges(inv_out.node_id))
+                assert len(incoming) == 1
+                source_node = inv_g.nodes[incoming[0].source_id]
+                assert source_node.node_type in ("input", "bias")
+
+                # inv_output should have exactly 1 outgoing edge (to inv_translation)
+                outgoing = list(inv_g.get_outgoing_edges(inv_out.node_id))
+                assert len(outgoing) == 1
+
+
 def test_inversion_produces_input_nodes(lib, multi_aggregation_ern):
     """Test that inversion creates input nodes for each inverted path"""
     with LibraryContext.with_library(lib):

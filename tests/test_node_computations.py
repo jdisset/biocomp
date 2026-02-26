@@ -25,7 +25,7 @@ def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.nda
     - Transcription uses hEF1a (only option)
     - Translation uses 00_empty_tc (no uORF, only option)
 
-    Path: input → inv_translation → inv_transcription → inv_source → source → transcription → translation → output
+    Path: input → inv_output → inv_translation → inv_transcription → inv_source → source → transcription → translation → output
 
     This computation is completely hardcoded - we manually:
     1. Look up the exact embeddings we know should be used
@@ -44,40 +44,44 @@ def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.nda
     assert y0.shape == (1,)
     print(f"Input: {y0}")
 
-    # ========== Layer 1: inv_translation (dummy inverse) ==========
-    # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y1 = (y0[0] - random_vars[1]) / 8 - qrate_tl - random_vars[0]
-    print(f"After inv_translation: {y1}")
+    # ========== Layer 1: inv_output (dummy = identity) ==========
+    y1 = y0[0]
+    print(f"After inv_output: {y1}")
 
-    # ========== Layer 2: inv_transcription (dummy inverse) ==========
+    # ========== Layer 2: inv_translation (dummy inverse) ==========
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y2 = (y1 - random_vars[3]) / 8 - qrate_tc - random_vars[2]
-    print(f"After inv_transcription: {y2}")
+    y2 = (y1 - random_vars[1]) / 8 - qrate_tl - random_vars[0]
+    print(f"After inv_translation: {y2}")
 
-    # ========== Layer 3: inv_source (position 0) ==========
+    # ========== Layer 3: inv_transcription (dummy inverse) ==========
+    # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
+    y3 = (y2 - random_vars[3]) / 8 - qrate_tc - random_vars[2]
+    print(f"After inv_transcription: {y3}")
+
+    # ========== Layer 4: inv_source (position 0) ==========
     # Divides by 0.9^0 = 1.0 (passthrough)
-    y3 = y2
-
-    # ========== Layer 4: source (position 0) ==========
-    # Multiplies by 0.9^0 = 1.0 (passthrough)
     y4 = y3
 
-    # ========== Layer 5: transcription (dummy forward) ==========
+    # ========== Layer 5: source (position 0) ==========
+    # Multiplies by 0.9^0 = 1.0 (passthrough)
+    y5 = y4
+
+    # ========== Layer 6: transcription (dummy forward) ==========
     # Dummy forward: inner = sum([value, qrate, rv])
     #                outer = sum([inner×8, rv_extra])
     # Uses random_vars[2] and [3] (shared with inverse)
-    inner_sum = jnp.sum(jnp.array([y4, qrate_tc, random_vars[2]]))
-    y5 = inner_sum * 8 + random_vars[3]
-    print(f"After transcription: {y5}")
+    inner_sum = jnp.sum(jnp.array([y5, qrate_tc, random_vars[2]]))
+    y6 = inner_sum * 8 + random_vars[3]
+    print(f"After transcription: {y6}")
 
-    # ========== Layer 6: translation (dummy forward) ==========
+    # ========== Layer 7: translation (dummy forward) ==========
     # Uses random_vars[0] and [1] (shared with inverse)
-    inner_sum = jnp.sum(jnp.array([y5, qrate_tl, random_vars[0]]))
-    y6 = inner_sum * 8 + random_vars[1]
-    print(f"After translation: {y6}")
+    inner_sum = jnp.sum(jnp.array([y6, qrate_tl, random_vars[0]]))
+    y7 = inner_sum * 8 + random_vars[1]
+    print(f"After translation: {y7}")
 
-    # ========== Layer 7: output ==========
-    return y6
+    # ========== Layer 8: output ==========
+    return y7
 
 
 def jax_json_dumps(obj):
@@ -100,7 +104,7 @@ def manual_simple_two_reporters(params: ParameterTree, X, random_vars: jnp.ndarr
     - Both use 00_empty_tc for translation (no uORF, only option)
 
     Path for output 0 (eBFP2):
-      input → inv_translation[0,2] → inv_transcription[0,2] → inv_source → inv_aggregation(÷0.833)
+      input → inv_output → inv_translation[0,2] → inv_transcription[0,2] → inv_source → inv_aggregation(÷0.833)
       → aggregation(×[0.833,0.167]) → [source0, source1]
       → [transcription0[4,5], transcription1[6,7]]
       → [translation0[0,1], translation1[2,3]]
@@ -111,66 +115,69 @@ def manual_simple_two_reporters(params: ParameterTree, X, random_vars: jnp.ndarr
     qrate_tl = params["shared/quantization/values/tl_rate"][0, 0]
 
     # Aggregation ratios
-    ratios = params["local/5/aggregation2x/ratios"][0]  # [0.833, 0.167]
+    ratios = params["local/6/aggregation2x/ratios"][0]  # [0.833, 0.167]
 
     # ========== Layer 0: input ==========
     y0 = X
     assert y0.shape == (1,)
 
-    # ========== Layer 1: inv_translation (slot 0) ==========
+    # ========== Layer 1: inv_output (dummy = identity) ==========
+    y1 = y0[0]
+
+    # ========== Layer 2: inv_translation (slot 0) ==========
     # Uses random_vars[0] and [1] (shared with translation node 0)
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y1 = (y0[0] - random_vars[1]) / 8 - qrate_tl - random_vars[0]
+    y2 = (y1 - random_vars[1]) / 8 - qrate_tl - random_vars[0]
 
-    # ========== Layer 2: inv_transcription (slot 0) ==========
+    # ========== Layer 3: inv_transcription (slot 0) ==========
     # Uses random_vars[4] and [5] (shared with transcription node 0)
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y2 = (y1 - random_vars[5]) / 8 - qrate_tc - random_vars[4]
+    y3 = (y2 - random_vars[5]) / 8 - qrate_tc - random_vars[4]
 
-    # ========== Layer 3: inv_source (position 0) ==========
+    # ========== Layer 4: inv_source (position 0) ==========
     # Divides by 0.9^0 = 1.0 (passthrough)
-    y3 = y2
+    y4 = y3
 
-    # ========== Layer 4: inv_aggregation ==========
+    # ========== Layer 5: inv_aggregation ==========
     # Divides by ratio for slot 0 (0.833)
-    y4 = y3 / jnp.abs(ratios[0])
+    y5 = y4 / jnp.abs(ratios[0])
 
-    # ========== Layer 5: aggregation ==========
+    # ========== Layer 6: aggregation ==========
     # Multiplies by [0.833, 0.167], creates 2 outputs
-    y5_0 = jnp.abs(ratios[0]) * y4
-    y5_1 = jnp.abs(ratios[1]) * y4
+    y6_0 = jnp.abs(ratios[0]) * y5
+    y6_1 = jnp.abs(ratios[1]) * y5
 
-    # ========== Layer 6: source (2 nodes, both position 0) ==========
+    # ========== Layer 7: source (2 nodes, both position 0) ==========
     # Both multiply by 0.9^0 = 1.0 (passthrough)
-    y6_0 = y5_0
-    y6_1 = y5_1
+    y7_0 = y6_0
+    y7_1 = y6_1
 
-    # ========== Layer 7: transcription (2 nodes) ==========
+    # ========== Layer 8: transcription (2 nodes) ==========
     # Node 0 uses random_vars[4,5], Node 1 uses random_vars[6,7]
     # Dummy forward: inner = sum([value, qrate, rv])
     #                outer = sum([inner×8, rv_extra])
 
     # Transcription node 0
-    inner_sum_0 = jnp.sum(jnp.array([y6_0, qrate_tc, random_vars[4]]))
-    y7_0 = inner_sum_0 * 8 + random_vars[5]
+    inner_sum_0 = jnp.sum(jnp.array([y7_0, qrate_tc, random_vars[4]]))
+    y8_0 = inner_sum_0 * 8 + random_vars[5]
 
     # Transcription node 1
-    inner_sum_1 = jnp.sum(jnp.array([y6_1, qrate_tc, random_vars[6]]))
-    y7_1 = inner_sum_1 * 8 + random_vars[7]
+    inner_sum_1 = jnp.sum(jnp.array([y7_1, qrate_tc, random_vars[6]]))
+    y8_1 = inner_sum_1 * 8 + random_vars[7]
 
-    # ========== Layer 8: translation (2 nodes) ==========
+    # ========== Layer 9: translation (2 nodes) ==========
     # Node 0 uses random_vars[0,1], Node 1 uses random_vars[2,3]
 
     # Translation node 0
-    inner_sum_0 = jnp.sum(jnp.array([y7_0, qrate_tl, random_vars[0]]))
-    y8_0 = inner_sum_0 * 8 + random_vars[1]
+    inner_sum_0 = jnp.sum(jnp.array([y8_0, qrate_tl, random_vars[0]]))
+    y9_0 = inner_sum_0 * 8 + random_vars[1]
 
     # Translation node 1
-    inner_sum_1 = jnp.sum(jnp.array([y7_1, qrate_tl, random_vars[2]]))
-    y8_1 = inner_sum_1 * 8 + random_vars[3]
+    inner_sum_1 = jnp.sum(jnp.array([y8_1, qrate_tl, random_vars[2]]))
+    y9_1 = inner_sum_1 * 8 + random_vars[3]
 
-    # ========== Layer 9: output ==========
-    return jnp.array([y8_0, y8_1])
+    # ========== Layer 10: output ==========
+    return jnp.array([y9_0, y9_1])
 
 
 def find_layer_idx(stack, layer_type):
@@ -341,7 +348,7 @@ def manual_simple_single_ern(params: ParameterTree, X, random_vars: jnp.ndarray,
     The ERN path (output slot 0) is NOT tested since ERN nodes are non-invertible.
 
     Invertible path:
-      input → inv_translation → inv_transcription → inv_source → inv_aggregation(÷1/3, slot 2)
+      input → inv_output → inv_translation → inv_transcription → inv_source → inv_aggregation(÷1/3, slot 2)
       → aggregation(×[1/3,1/3,1/3]) → source2 → transcription2 → translation2 → output[1]
     """
     # Extract embeddings
@@ -349,47 +356,50 @@ def manual_simple_single_ern(params: ParameterTree, X, random_vars: jnp.ndarray,
     qrate_tl = params["shared/quantization/values/tl_rate"][0, 0]
 
     # Aggregation ratios (3 branches, all 1/3)
-    ratios = params["local/5/aggregation3x/ratios"][0]  # [1/3, 1/3, 1/3]
+    ratios = params["local/6/aggregation3x/ratios"][0]  # [1/3, 1/3, 1/3]
 
     # ========== Layer 0: input ==========
     y0 = X
     assert y0.shape == (1,)
 
-    # ========== Layer 1: inv_translation ==========
-    # Shares random_vars with translation node 1 (layer 8): [5,6]
+    # ========== Layer 1: inv_output (dummy = identity) ==========
+    y1 = y0[0]
+
+    # ========== Layer 2: inv_translation ==========
+    # Shares random_vars with translation node 1 (layer 9): [5,6]
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y1 = (y0[0] - random_vars[6]) / 8 - qrate_tl - random_vars[5]
+    y2 = (y1 - random_vars[6]) / 8 - qrate_tl - random_vars[5]
 
-    # ========== Layer 2: inv_transcription ==========
-    # Shares random_vars with transcription node 2 (layer 7): [11,12]
+    # ========== Layer 3: inv_transcription ==========
+    # Shares random_vars with transcription node 2 (layer 8): [11,12]
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y2 = (y1 - random_vars[12]) / 8 - qrate_tc - random_vars[11]
+    y3 = (y2 - random_vars[12]) / 8 - qrate_tc - random_vars[11]
 
-    # ========== Layer 3: inv_source (position 0) ==========
-    y3 = y2  # passthrough (÷1.0)
+    # ========== Layer 4: inv_source (position 0) ==========
+    y4 = y3  # passthrough (÷1.0)
 
-    # ========== Layer 4: inv_aggregation (slot 2) ==========
-    y4 = y3 / jnp.abs(ratios[2])
+    # ========== Layer 5: inv_aggregation (slot 2) ==========
+    y5 = y4 / jnp.abs(ratios[2])
 
-    # ========== Layer 5: aggregation ==========
+    # ========== Layer 6: aggregation ==========
     # Creates 3 outputs, we follow slot 2
-    y5_2 = jnp.abs(ratios[2]) * y4
+    y6_2 = jnp.abs(ratios[2]) * y5
 
-    # ========== Layer 6: source 2 (position 0) ==========
-    y6_2 = y5_2  # passthrough (×1.0)
+    # ========== Layer 7: source 2 (position 0) ==========
+    y7_2 = y6_2  # passthrough (×1.0)
 
-    # ========== Layer 7: transcription 2 ==========
+    # ========== Layer 8: transcription 2 ==========
     # Node 2 uses random_vars[11,12]
-    inner_sum = jnp.sum(jnp.array([y6_2, qrate_tc, random_vars[11]]))
-    y7_2 = inner_sum * 8 + random_vars[12]
+    inner_sum = jnp.sum(jnp.array([y7_2, qrate_tc, random_vars[11]]))
+    y8_2 = inner_sum * 8 + random_vars[12]
 
-    # ========== Layer 8: translation (node 1) ==========
+    # ========== Layer 9: translation (node 1) ==========
     # Node 1 uses random_vars[5,6]
-    inner_sum = jnp.sum(jnp.array([y7_2, qrate_tl, random_vars[5]]))
-    y8_1 = inner_sum * 8 + random_vars[6]
+    inner_sum = jnp.sum(jnp.array([y8_2, qrate_tl, random_vars[5]]))
+    y9_1 = inner_sum * 8 + random_vars[6]
 
-    # ========== Layer 11: output (slot 1 = mNeonGreen) ==========
-    return y8_1
+    # ========== Layer 12: output (slot 1 = mNeonGreen) ==========
+    return y9_1
 
 
 def test_simple_single_ern_computation(lib, simple_single_ern):
