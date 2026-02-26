@@ -16,6 +16,7 @@ from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.parameters import ParameterTree, isArrayRef
 import biocomp.biorules as br
+from biocomp.graphengine import is_inverse_node_type
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
 
@@ -48,7 +49,8 @@ def get_aggregation_paths(params: ParameterTree) -> list[str]:
     return [
         str(path)
         for path, _ in params.data.iter_leaves()
-        if "aggregation" in str(path) and "ratios" in str(path) and "inv_" not in str(path)
+        if "aggregation" in str(path) and "ratios" in str(path)
+        and not any(is_inverse_node_type(part) for part in str(path).split("/"))
     ]
 
 
@@ -92,7 +94,8 @@ class TestInvAggregationBasicFunctionality:
         assert len(ratio_ref.paths) > 0, "ArrayRef should have at least one path"
         for path in ratio_ref.paths:
             assert 'aggregation' in path, f"Path should reference forward aggregation: {path}"
-            assert 'inv_' not in path, f"Path should not reference inv_aggregation: {path}"
+            assert not any(is_inverse_node_type(p) for p in path.split("/")), \
+                f"Path should not reference inv_aggregation: {path}"
 
     def test_output_changes_with_ratio_change(self, multi_aggregation_stack):
         """Verify that changing ratios changes output (not testing invariance, just that ratios matter)."""
@@ -120,7 +123,7 @@ def get_unique_aggregation_types(agg_paths: list[str]) -> set[str]:
     unique_layer_names = set()
     for path in agg_paths:
         for part in path.split("/"):
-            if "aggregation" in part and "inv_" not in part:
+            if "aggregation" in part and not is_inverse_node_type(part):
                 unique_layer_names.add(part)
     return unique_layer_names
 

@@ -22,6 +22,7 @@ from biocomp.network import recipe_to_networks
 from biocomp.nodeutils import NON_GRAD_TAG
 from biocomp.parameters import ParameterTree
 import biocomp.biorules as br
+from biocomp.graphengine import is_inverse_node_type
 import dracon as dr
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
@@ -549,7 +550,7 @@ class TestRecipeToMaskIntegration:
         # Verify: every tl_rate mask has exactly 1 choice per slot
         for layer_idx, _ in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
-            if "translation" in ns and "inv_" not in ns:
+            if stack.layers[layer_idx].f_type == "translation":
                 mask_path = f"{ns}/tl_rate_quantization_mask"
                 if mask_path in params:
                     masks = np.asarray(params[mask_path])
@@ -571,7 +572,7 @@ class TestRecipeToMaskIntegration:
         found_multi = False
         for layer_idx, _ in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
-            if "translation" in ns and "inv_" not in ns:
+            if stack.layers[layer_idx].f_type == "translation":
                 mask_path = f"{ns}/tl_rate_quantization_mask"
                 if mask_path in params:
                     masks = np.asarray(params[mask_path])
@@ -598,7 +599,7 @@ class TestRecipeToMaskIntegration:
         found_multi = False
         for layer_idx, _ in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
-            if "translation" in ns and "inv_" not in ns:
+            if stack.layers[layer_idx].f_type == "translation":
                 mask_path = f"{ns}/tl_rate_quantization_mask"
                 if mask_path in params:
                     masks = np.asarray(params[mask_path])
@@ -656,7 +657,7 @@ class TestTransformNodeConstraints:
         for layer_idx, _ in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             # Skip inverse layers (they use RefArrays to forward rates)
-            if "inv_" in ns:
+            if is_inverse_node_type(stack.layers[layer_idx].f_type):
                 continue
             for rate_name in ["tc_rate", "tl_rate"]:
                 mask_path = f"{ns}/{rate_name}_quantization_mask"
@@ -686,7 +687,7 @@ class TestTransformNodeConstraints:
         found_multi = False
         for layer_idx, _ in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
-            if "inv_" in ns:
+            if is_inverse_node_type(stack.layers[layer_idx].f_type):
                 continue
             for rate_name in ["tc_rate", "tl_rate"]:
                 mask_path = f"{ns}/{rate_name}_quantization_mask"
@@ -765,7 +766,7 @@ class TestHeterogeneousTransformConstraints:
         found_shared_layer = False
         for layer_idx, _layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
-            if "inv_" in ns:
+            if is_inverse_node_type(stack.layers[layer_idx].f_type):
                 continue
             for rate_name in ["tc_rate", "tl_rate"]:
                 mask_path = f"{ns}/{rate_name}_quantization_mask"
@@ -788,7 +789,7 @@ class TestHeterogeneousTransformConstraints:
             unlocked_found = False
             for layer_idx, _layer in enumerate(stack.layers):
                 ns = stack.get_layer_namespace(layer_idx)
-                if "inv_" in ns:
+                if is_inverse_node_type(stack.layers[layer_idx].f_type):
                     continue
                 for rate_name in ["tc_rate", "tl_rate"]:
                     mask_path = f"{ns}/{rate_name}_quantization_mask"
@@ -1026,7 +1027,7 @@ class TestMultiTopologyDegreesOfFreedom:
         any_rate_unlocked = False
         for layer_idx, _ in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
-            if "inv_" in ns:
+            if is_inverse_node_type(stack.layers[layer_idx].f_type):
                 continue
             for rate_name in ["tc_rate", "tl_rate"]:
                 mask_path = f"{ns}/{rate_name}_quantization_mask"
@@ -1104,11 +1105,11 @@ class TestMultiTopologyDegreesOfFreedom:
 
         for layer_idx, layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
-            if "inv_" in ns:
+            if is_inverse_node_type(stack.layers[layer_idx].f_type):
                 continue
 
             # Collect translation rate lock stats per network
-            if "translation" in ns:
+            if layer.f_type == "translation":
                 mask_path = f"{ns}/tl_rate_quantization_mask"
                 if mask_path in params:
                     masks = np.asarray(params[mask_path])

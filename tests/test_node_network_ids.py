@@ -9,6 +9,7 @@ from biocomp.network import recipe_to_networks
 from biocomp.recipe import Recipe
 from biocomp.library import LibraryContext, load_lib
 import biocomp.biorules as br
+from biocomp.graphengine import is_inverse_node_type
 from pathlib import Path
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
@@ -74,7 +75,7 @@ def test_node_network_ids_present_in_all_layers(multi_network_stack):
     for ns, f_type, _ in layers_with_node_params:
         base_type = f_type.split("_")[0] if "_" in f_type else f_type
         # Skip inverse nodes - they share with forward
-        if f_type.startswith("inv_"):
+        if is_inverse_node_type(f_type):
             continue
         if base_type in required_types or any(t in f_type for t in required_types):
             path = f"{ns}/node_network_ids"

@@ -25,6 +25,7 @@ from biocomp.graphengine import (
     Part,
     InverseSpec,
     apply_rule_sequence,
+    is_inverse_node_type,
 )
 from biocomp.graphrules import GraphRewritingRule
 from biocomp.tracing import trace_scope, serialize_graph, should_save_full_objects, snapshot_full_network
@@ -753,7 +754,7 @@ class Network(BaseModel):
         existing_node_ids = set(self.compute_graph.nodes.keys())
         inv_nodes_to_remove = []
         for node in self.compute_graph.nodes.values():
-            if not node.node_type.startswith("inv_"):
+            if not is_inverse_node_type(node.node_type):
                 continue
             if node.is_inverse_of is None:
                 continue

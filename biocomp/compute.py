@@ -17,7 +17,7 @@ from .parameters import ParameterTree
 from .graphengine import GraphState
 
 from biocomp.logging_config import get_logger
-from biocomp.graphengine import GraphNode, GraphEdge
+from biocomp.graphengine import GraphNode, GraphEdge, is_inverse_node_type
 from biocomp.tracing import (
     is_design_debug_enabled,
     save_debug_state,
@@ -157,7 +157,7 @@ def _compute_layer_namespace(layer_id: int, node_type: str, n_outputs: int) -> s
     type_suffix = ""
     if node_type in ["aggregation", "source"]:
         type_suffix = f"{n_outputs}x"
-    elif node_type.startswith("inv_"):
+    elif is_inverse_node_type(node_type):
         type_suffix = ""
 
     layer_name = f"{node_type}{type_suffix}"

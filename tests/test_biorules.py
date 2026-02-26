@@ -9,7 +9,7 @@ This test suite validates:
 from biocomp.network import build_central_dogma_graph_direct
 from biocomp.library import LibraryContext
 import biocomp.biorules as br
-from biocomp.graphengine import apply_rule_sequence
+from biocomp.graphengine import apply_rule_sequence, is_inverse_node_type
 from biocomp.inversion import invert_all_paths
 
 # Import all test fixtures from the centralized module
@@ -298,7 +298,7 @@ def test_inversion_finds_all_paths(lib, multi_aggregation_ern):
         for inv_g in inverted_graphs:
             # Check for input and inverse nodes
             input_nodes = [n for n in inv_g.nodes.values() if n.node_type == "input"]
-            inv_nodes = [n for n in inv_g.nodes.values() if n.node_type.startswith("inv_")]
+            inv_nodes = [n for n in inv_g.nodes.values() if is_inverse_node_type(n.node_type)]
 
             assert len(input_nodes) > 0
             assert len(inv_nodes) > 0

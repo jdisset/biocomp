@@ -28,6 +28,14 @@ NodeType = Union[
     str,
 ]
 
+INVERSE_NODE_TYPES: frozenset[str] = frozenset(
+    {"inv_aggregation", "inv_source", "inv_transcription", "inv_translation", "inv_output"}
+)
+
+
+def is_inverse_node_type(node_type: str) -> bool:
+    return node_type in INVERSE_NODE_TYPES
+
 
 """
 Some notes on input/output slots (for me, mostly):

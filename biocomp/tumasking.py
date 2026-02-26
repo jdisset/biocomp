@@ -12,6 +12,8 @@ import jax.numpy as jnp
 from jax.typing import ArrayLike
 import numpy as np
 
+from biocomp.graphengine import is_inverse_node_type
+
 LOG_ALPHA_MIN = -3.0
 LOG_ALPHA_MAX = 4.0
 TU_ALWAYS_ENABLED = -1
@@ -525,7 +527,7 @@ def extract_tu_ids_for_inverse_nodes(networks: list) -> set[str]:
         graph = net.compute_graph
         for edge in graph.edges.values():
             target_node = graph.nodes.get(edge.target_id)
-            if target_node and target_node.node_type.startswith("inv_"):
+            if target_node and is_inverse_node_type(target_node.node_type):
                 inverse_tu_ids.update(edge.extra.tu_id)
     return inverse_tu_ids
 

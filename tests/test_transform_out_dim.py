@@ -4,6 +4,7 @@ import numpy as np
 
 import biocomp.biorules as br
 from biocomp.compute import ComputeStack
+from biocomp.graphengine import is_inverse_node_type
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.library import LibraryContext
 from biocomp.network import recipe_to_networks
@@ -82,7 +83,7 @@ def test_transform_out_dim_nd_forward_only(lib, simple_single_ern):
     for layer in stack.layers:
         if layer.f_type in FORWARD_TRANSFORM_NODES:
             assert layer.f_out_shapes == [(out_dim,)]
-        if layer.f_type.startswith("inv_"):
+        if is_inverse_node_type(layer.f_type):
             assert all(tuple(shape) == (1,) for shape in layer.f_out_shapes)
         if layer.f_type == "output":
             assert all(shape == (1,) for shape in layer.f_out_shapes)
