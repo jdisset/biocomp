@@ -5,7 +5,15 @@ import jax.numpy as jnp
 from jax import vmap
 import numpy as np
 from biocomp.parameters import ParameterTree, init_if_needed
-from biocomp.nodeutils import LayerInstance, add_tu_input_mapping, add_node_network_ids
+from biocomp.jaxutils import flat_concat
+from biocomp.nodeutils import (
+    LayerInstance,
+    add_tu_input_mapping,
+    add_node_network_ids,
+    add_random_var_ids,
+    reference_forward_random_var_ids,
+    NON_GRAD_TAG,
+)
 from typing import Optional
 
 from biocomp.neuralutils import (
@@ -48,9 +56,9 @@ def grouped_output(
 
     mlp = dummy_mlp if dummy else dense_mlp
 
-    def MLP_head(x, rng_key, params):
+    def MLP_head(x, random_var, rng_key, params):
         return mlp(
-            x,
+            flat_concat(x, random_var),
             wsize,
             1,
             depth,
@@ -63,7 +71,8 @@ def grouped_output(
         )
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
-        MLP_head(x=np.zeros(input_shapes[0]), rng_key=key, params=params)
+        MLP_head(x=np.zeros(input_shapes[0]), random_var=np.zeros(()), rng_key=key, params=params)
+        add_random_var_ids(params, len(nodelist), len(input_shapes), namespace)
         add_tu_input_mapping(params, stack, nodelist, namespace)
         add_node_network_ids(params, nodelist, namespace)
 
@@ -80,6 +89,9 @@ def grouped_output(
         inputs_arr = jnp.array(inputs)
         assert len(inputs_arr) == len(input_shapes)
 
+        rvid = params[f"{namespace}/random_variable_id"][node_id]
+        random_var = random_vars[rvid]
+
         input_tu_indices_path = f"{namespace}/input_tu_indices"
         if input_tu_indices_path in params:
             from biocomp.tumasking import get_tu_masks
@@ -91,7 +103,7 @@ def grouped_output(
         else:
             input_masks = jnp.ones(len(input_shapes))
 
-        res = vmap(partial(MLP_head, rng_key=key, params=params))(inputs_arr)
+        res = vmap(lambda x, rv: MLP_head(x, rv, rng_key=key, params=params))(inputs_arr, random_var)
 
         masks_reshaped = input_masks.reshape(-1, *([1] * len(input_shapes[0])))
         masked_inputs = inputs_arr * masks_reshaped
@@ -115,6 +127,7 @@ def grouped_output(
             "input_values": inputs_arr,
             "input_masks": input_masks,
             "input_scalar_residual": masked_inputs_scalar,
+            "random_var": random_var,
         }
 
     output_shape = [(1,)] * len(input_shapes)
@@ -151,9 +164,9 @@ def inv_output(
 
     mlp = dummy_mlp if dummy else dense_mlp
 
-    def MLP_head(x, rng_key, params):
+    def MLP_head(x, random_var, rng_key, params):
         return mlp(
-            x,
+            flat_concat(x, random_var),
             wsize,
             1,
             depth,
@@ -166,12 +179,18 @@ def inv_output(
         )
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
-        MLP_head(x=np.zeros(input_shapes[0]), rng_key=key, params=params)
+        MLP_head(x=np.zeros(input_shapes[0]), random_var=np.zeros(()), rng_key=key, params=params)
+        reference_forward_random_var_ids(stack, params, nodelist, namespace)
+        output_slots = jnp.array(
+            [n.get(stack).is_inverse_of.output_slot for n in nodelist], dtype=jnp.int32
+        )
+        params.at(f"{namespace}/output_slots", output_slots, tags=[NON_GRAD_TAG])
         add_node_network_ids(params, nodelist, namespace)
 
     def apply(
         value: ArrayLike,
         *,
+        random_vars: NDArray,
         params: ParameterTree,
         node_id: ArrayLike,
         key,
@@ -179,7 +198,11 @@ def inv_output(
     ) -> tuple[ArrayLike, dict]:
         assert value.shape == input_shapes[0], f"inv_output: expected {input_shapes[0]}, got {value.shape}"
 
-        mlp_out = MLP_head(value, key, params)
+        rvid = params[f"{namespace}/random_variable_id"][node_id]
+        output_slot = params[f"{namespace}/output_slots"][node_id]
+        random_var = random_vars[rvid[output_slot]]
+
+        mlp_out = MLP_head(value, random_var, key, params)
 
         if dummy:
             result = mlp_out
@@ -190,6 +213,7 @@ def inv_output(
         return result, {
             "mlp_output": mlp_out,
             "input_value": value,
+            "random_var": random_var,
         }
 
     output_shape = list(input_shapes)

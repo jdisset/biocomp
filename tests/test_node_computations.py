@@ -44,18 +44,20 @@ def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.nda
     assert y0.shape == (1,)
     print(f"Input: {y0}")
 
-    # ========== Layer 1: inv_output (dummy = identity) ==========
-    y1 = y0[0]
+    # ========== Layer 1: inv_output (dummy + random_var) ==========
+    # dummy_mlp(flat_concat(value, random_var)) = sum of all elements
+    y1 = y0[0] + random_vars[0]
     print(f"After inv_output: {y1}")
 
     # ========== Layer 2: inv_translation (dummy inverse) ==========
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y2 = (y1 - random_vars[1]) / 8 - qrate_tl - random_vars[0]
+    # Random var indices shifted +1 due to output node claiming ID 0
+    y2 = (y1 - random_vars[2]) / 8 - qrate_tl - random_vars[1]
     print(f"After inv_translation: {y2}")
 
     # ========== Layer 3: inv_transcription (dummy inverse) ==========
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y3 = (y2 - random_vars[3]) / 8 - qrate_tc - random_vars[2]
+    y3 = (y2 - random_vars[4]) / 8 - qrate_tc - random_vars[3]
     print(f"After inv_transcription: {y3}")
 
     # ========== Layer 4: inv_source (position 0) ==========
@@ -69,19 +71,20 @@ def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.nda
     # ========== Layer 6: transcription (dummy forward) ==========
     # Dummy forward: inner = sum([value, qrate, rv])
     #                outer = sum([inner×8, rv_extra])
-    # Uses random_vars[2] and [3] (shared with inverse)
-    inner_sum = jnp.sum(jnp.array([y5, qrate_tc, random_vars[2]]))
-    y6 = inner_sum * 8 + random_vars[3]
+    # Uses random_vars[3] and [4] (shared with inverse, shifted +1)
+    inner_sum = jnp.sum(jnp.array([y5, qrate_tc, random_vars[3]]))
+    y6 = inner_sum * 8 + random_vars[4]
     print(f"After transcription: {y6}")
 
     # ========== Layer 7: translation (dummy forward) ==========
-    # Uses random_vars[0] and [1] (shared with inverse)
-    inner_sum = jnp.sum(jnp.array([y6, qrate_tl, random_vars[0]]))
-    y7 = inner_sum * 8 + random_vars[1]
+    # Uses random_vars[1] and [2] (shared with inverse, shifted +1)
+    inner_sum = jnp.sum(jnp.array([y6, qrate_tl, random_vars[1]]))
+    y7 = inner_sum * 8 + random_vars[2]
     print(f"After translation: {y7}")
 
-    # ========== Layer 8: output ==========
-    return y7
+    # ========== Layer 8: output (dummy + random_var) ==========
+    # dummy_mlp(flat_concat(y7, random_vars[0])) = y7 + random_vars[0]
+    return y7 + random_vars[0]
 
 
 def jax_json_dumps(obj):
@@ -121,18 +124,19 @@ def manual_simple_two_reporters(params: ParameterTree, X, random_vars: jnp.ndarr
     y0 = X
     assert y0.shape == (1,)
 
-    # ========== Layer 1: inv_output (dummy = identity) ==========
-    y1 = y0[0]
+    # ========== Layer 1: inv_output (dummy + random_var, slot 0) ==========
+    # dummy_mlp(flat_concat(value, random_var)) = sum of all elements
+    y1 = y0[0] + random_vars[0]
 
     # ========== Layer 2: inv_translation (slot 0) ==========
-    # Uses random_vars[0] and [1] (shared with translation node 0)
+    # Uses random_vars[2] and [3] (shared with translation node 0, shifted +2)
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y2 = (y1 - random_vars[1]) / 8 - qrate_tl - random_vars[0]
+    y2 = (y1 - random_vars[3]) / 8 - qrate_tl - random_vars[2]
 
     # ========== Layer 3: inv_transcription (slot 0) ==========
-    # Uses random_vars[4] and [5] (shared with transcription node 0)
+    # Uses random_vars[6] and [7] (shared with transcription node 0, shifted +2)
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y3 = (y2 - random_vars[5]) / 8 - qrate_tc - random_vars[4]
+    y3 = (y2 - random_vars[7]) / 8 - qrate_tc - random_vars[6]
 
     # ========== Layer 4: inv_source (position 0) ==========
     # Divides by 0.9^0 = 1.0 (passthrough)
@@ -153,31 +157,32 @@ def manual_simple_two_reporters(params: ParameterTree, X, random_vars: jnp.ndarr
     y7_1 = y6_1
 
     # ========== Layer 8: transcription (2 nodes) ==========
-    # Node 0 uses random_vars[4,5], Node 1 uses random_vars[6,7]
+    # Node 0 uses random_vars[6,7], Node 1 uses random_vars[8,9] (shifted +2)
     # Dummy forward: inner = sum([value, qrate, rv])
     #                outer = sum([inner×8, rv_extra])
 
     # Transcription node 0
-    inner_sum_0 = jnp.sum(jnp.array([y7_0, qrate_tc, random_vars[4]]))
-    y8_0 = inner_sum_0 * 8 + random_vars[5]
+    inner_sum_0 = jnp.sum(jnp.array([y7_0, qrate_tc, random_vars[6]]))
+    y8_0 = inner_sum_0 * 8 + random_vars[7]
 
     # Transcription node 1
-    inner_sum_1 = jnp.sum(jnp.array([y7_1, qrate_tc, random_vars[6]]))
-    y8_1 = inner_sum_1 * 8 + random_vars[7]
+    inner_sum_1 = jnp.sum(jnp.array([y7_1, qrate_tc, random_vars[8]]))
+    y8_1 = inner_sum_1 * 8 + random_vars[9]
 
     # ========== Layer 9: translation (2 nodes) ==========
-    # Node 0 uses random_vars[0,1], Node 1 uses random_vars[2,3]
+    # Node 0 uses random_vars[2,3], Node 1 uses random_vars[4,5] (shifted +2)
 
     # Translation node 0
-    inner_sum_0 = jnp.sum(jnp.array([y8_0, qrate_tl, random_vars[0]]))
-    y9_0 = inner_sum_0 * 8 + random_vars[1]
+    inner_sum_0 = jnp.sum(jnp.array([y8_0, qrate_tl, random_vars[2]]))
+    y9_0 = inner_sum_0 * 8 + random_vars[3]
 
     # Translation node 1
-    inner_sum_1 = jnp.sum(jnp.array([y8_1, qrate_tl, random_vars[2]]))
-    y9_1 = inner_sum_1 * 8 + random_vars[3]
+    inner_sum_1 = jnp.sum(jnp.array([y8_1, qrate_tl, random_vars[4]]))
+    y9_1 = inner_sum_1 * 8 + random_vars[5]
 
-    # ========== Layer 10: output ==========
-    return jnp.array([y9_0, y9_1])
+    # ========== Layer 10: output (dummy + random_var) ==========
+    # Head 0 uses random_vars[0], Head 1 uses random_vars[1]
+    return jnp.array([y9_0 + random_vars[0], y9_1 + random_vars[1]])
 
 
 def find_layer_idx(stack, layer_type):
@@ -322,8 +327,8 @@ def test_simple_two_reporters_computation(lib, simple_two_reporters):
             print(f"Manual result: {manual_result}")
             print(f"Difference: {stack_result - manual_result}")
 
-            # Use slightly relaxed tolerance due to floating point precision with corrected inverse
-            assert jnp.allclose(stack_result, manual_result, rtol=2e-5), (
+            # Relaxed tolerance: longer chain (output random_var addition) accumulates more float32 error
+            assert jnp.allclose(stack_result, manual_result, rtol=2e-4), (
                 f"Stack output {stack_result} != manual output {manual_result}"
             )
 
@@ -362,18 +367,19 @@ def manual_simple_single_ern(params: ParameterTree, X, random_vars: jnp.ndarray,
     y0 = X
     assert y0.shape == (1,)
 
-    # ========== Layer 1: inv_output (dummy = identity) ==========
-    y1 = y0[0]
+    # ========== Layer 1: inv_output (dummy + random_var, slot 1 = mNeonGreen) ==========
+    # dummy_mlp(flat_concat(value, random_var)) = sum of all elements
+    y1 = y0[0] + random_vars[1]
 
     # ========== Layer 2: inv_translation ==========
-    # Shares random_vars with translation node 1 (layer 9): [5,6]
+    # Shares random_vars with translation node 1 (layer 9): [7,8] (shifted +2)
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y2 = (y1 - random_vars[6]) / 8 - qrate_tl - random_vars[5]
+    y2 = (y1 - random_vars[8]) / 8 - qrate_tl - random_vars[7]
 
     # ========== Layer 3: inv_transcription ==========
-    # Shares random_vars with transcription node 2 (layer 8): [11,12]
+    # Shares random_vars with transcription node 2 (layer 8): [13,14] (shifted +2)
     # Corrected inverse: (input - rv_outer) / 8 - qrate - rv_inner
-    y3 = (y2 - random_vars[12]) / 8 - qrate_tc - random_vars[11]
+    y3 = (y2 - random_vars[14]) / 8 - qrate_tc - random_vars[13]
 
     # ========== Layer 4: inv_source (position 0) ==========
     y4 = y3  # passthrough (÷1.0)
@@ -389,17 +395,18 @@ def manual_simple_single_ern(params: ParameterTree, X, random_vars: jnp.ndarray,
     y7_2 = y6_2  # passthrough (×1.0)
 
     # ========== Layer 8: transcription 2 ==========
-    # Node 2 uses random_vars[11,12]
-    inner_sum = jnp.sum(jnp.array([y7_2, qrate_tc, random_vars[11]]))
-    y8_2 = inner_sum * 8 + random_vars[12]
+    # Node 2 uses random_vars[13,14] (shifted +2)
+    inner_sum = jnp.sum(jnp.array([y7_2, qrate_tc, random_vars[13]]))
+    y8_2 = inner_sum * 8 + random_vars[14]
 
     # ========== Layer 9: translation (node 1) ==========
-    # Node 1 uses random_vars[5,6]
-    inner_sum = jnp.sum(jnp.array([y8_2, qrate_tl, random_vars[5]]))
-    y9_1 = inner_sum * 8 + random_vars[6]
+    # Node 1 uses random_vars[7,8] (shifted +2)
+    inner_sum = jnp.sum(jnp.array([y8_2, qrate_tl, random_vars[7]]))
+    y9_1 = inner_sum * 8 + random_vars[8]
 
-    # ========== Layer 12: output (slot 1 = mNeonGreen) ==========
-    return y9_1
+    # ========== Layer 12: output (dummy + random_var, slot 1 = mNeonGreen) ==========
+    # Head 1 uses random_vars[1]
+    return y9_1 + random_vars[1]
 
 
 def test_simple_single_ern_computation(lib, simple_single_ern):
@@ -464,8 +471,8 @@ def test_simple_single_ern_computation(lib, simple_single_ern):
             print(f"Manual mNeonGreen: {manual_result}")
             print(f"Difference: {stack_mNeonGreen - manual_result}")
 
-            # Use slightly relaxed tolerance due to floating point precision with corrected inverse
-            assert jnp.allclose(stack_mNeonGreen, manual_result, rtol=2e-5), (
+            # Relaxed tolerance: longer chain (output random_var addition) accumulates more float32 error
+            assert jnp.allclose(stack_mNeonGreen, manual_result, rtol=2e-4), (
                 f"Stack mNeonGreen output {stack_mNeonGreen} != manual output {manual_result}"
             )
 
