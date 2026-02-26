@@ -290,6 +290,7 @@ def transform_nn(
         key: PRNGKey,
         tu_enabled_random_vars: Optional[ArrayLike] = None,
         network_id: Optional[ArrayLike] = None,
+        rate_override: Optional[ArrayLike] = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         k1, k2, k3 = jax.random.split(key, 3)
@@ -299,7 +300,10 @@ def transform_nn(
 
         val = jnp.array(values)
 
-        rates = params[f"{namespace}/{rate_name}"][node_id]
+        if rate_override is None:
+            rates = params[f"{namespace}/{rate_name}"][node_id]
+        else:
+            rates = jnp.asarray(rate_override)
 
         assert val.shape == (len(input_shapes), *input_shapes[0])
         assert rates.shape == (len(input_shapes), rate_dim)

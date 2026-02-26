@@ -212,6 +212,329 @@ def stable_sigma(logstd, *, min_std=1e-3):
     return sigma_fwd + jax.lax.stop_gradient(sigma_grad - sigma_fwd)
 
 
+class InversePairSpec(NamedTuple):
+    pair_type: str
+    network_id: int
+    fwd_layer_id: int
+    fwd_node_pos: int
+    inv_layer_id: int
+    inv_node_pos: int
+    output_slot: int
+    n_fwd_inputs: int
+    fwd_input_shape: tuple[int, ...]
+    rate_path: Optional[str] = None
+
+
+def _discover_inverse_pair_specs(stack) -> tuple[list[InversePairSpec], dict[str, int]]:
+    from .graphengine import is_inverse_node_type
+
+    allowed_pair_types = {"source", "transcription", "translation", "output"}
+    counts = {
+        "source": 0,
+        "transcription": 0,
+        "translation": 0,
+        "output": 0,
+    }
+    pair_specs: list[InversePairSpec] = []
+
+    layers = getattr(stack, "layers", None)
+    each_node = getattr(stack, "each_node", None)
+    if layers is None or each_node is None:
+        return pair_specs, counts
+
+    for inv_stacknode in each_node():
+        inv_node = inv_stacknode.get(stack)
+        if inv_node.is_inverse_of is None:
+            continue
+        if not is_inverse_node_type(inv_node.node_type):
+            continue
+
+        fwd_stacknode = inv_stacknode.get_forward_stacknode(stack)
+        if fwd_stacknode is None:
+            continue
+        if fwd_stacknode.layer_number is None or inv_stacknode.layer_number is None:
+            continue
+
+        fwd_node = fwd_stacknode.get(stack)
+        pair_type = fwd_node.node_type
+        if pair_type not in allowed_pair_types:
+            continue
+
+        fwd_layer = layers[fwd_stacknode.layer_number]
+        if fwd_layer.f_input_shapes is None or len(fwd_layer.f_input_shapes) == 0:
+            continue
+
+        rate_path = None
+        if pair_type in {"transcription", "translation"}:
+            rate_path = (
+                f"{stack.get_layer_namespace(fwd_stacknode.layer_number)}/{pair_type}_rate"
+            )
+
+        pair_specs.append(
+            InversePairSpec(
+                pair_type=pair_type,
+                network_id=inv_stacknode.network_id,
+                fwd_layer_id=fwd_stacknode.layer_number,
+                fwd_node_pos=int(fwd_stacknode.node_position_in_layer),
+                inv_layer_id=inv_stacknode.layer_number,
+                inv_node_pos=int(inv_stacknode.node_position_in_layer),
+                output_slot=int(inv_node.is_inverse_of.output_slot),
+                n_fwd_inputs=len(fwd_layer.f_input_shapes),
+                fwd_input_shape=tuple(int(d) for d in fwd_layer.f_input_shapes[0]),
+                rate_path=rate_path,
+            )
+        )
+        counts[pair_type] += 1
+
+    return pair_specs, counts
+
+
+def _apply_pair_node(
+    apply_f,
+    *inputs,
+    random_vars,
+    params,
+    node_id,
+    key,
+    network_id,
+    rate_override=None,
+):
+    kwargs = {
+        "random_vars": random_vars,
+        "params": params,
+        "node_id": node_id,
+        "key": key,
+        "network_id": network_id,
+    }
+    if rate_override is not None:
+        kwargs["rate_override"] = rate_override
+    return apply_f(*inputs, **kwargs)
+
+
+def _single_inverse_cycle_sample(
+    params,
+    stack,
+    spec: InversePairSpec,
+    x_scalar,
+    random_vars,
+    sample_key,
+    rate_override,
+):
+    import jax.numpy as jnp
+
+    assert stack.layers is not None, "Stack layers are required for inverse consistency loss"
+
+    fwd_layer = stack.layers[spec.fwd_layer_id]
+    inv_layer = stack.layers[spec.inv_layer_id]
+    assert fwd_layer.f_apply is not None and inv_layer.f_apply is not None
+
+    dtype = random_vars.dtype
+    x0 = jnp.asarray(x_scalar, dtype=dtype).reshape(())
+    x_target = jnp.array([x0], dtype=dtype)
+    fwd_input = jnp.broadcast_to(x0, spec.fwd_input_shape)
+
+    fwd_node_id = jnp.asarray(spec.fwd_node_pos, dtype=jnp.int32)
+    inv_node_id = jnp.asarray(spec.inv_node_pos, dtype=jnp.int32)
+    network_id = jnp.asarray(spec.network_id, dtype=jnp.int32)
+
+    if spec.pair_type == "output":
+        zeros = jnp.zeros((spec.n_fwd_inputs, *spec.fwd_input_shape), dtype=dtype)
+        stacked_inputs = zeros.at[spec.output_slot].set(fwd_input)
+        fwd_inputs = tuple(stacked_inputs[i] for i in range(spec.n_fwd_inputs))
+        fwd_out_all, _ = _apply_pair_node(
+            fwd_layer.f_apply,
+            *fwd_inputs,
+            random_vars=random_vars,
+            params=params,
+            node_id=fwd_node_id,
+            key=sample_key,
+            network_id=network_id,
+            rate_override=rate_override,
+        )
+        inv_input = jnp.ravel(fwd_out_all[spec.output_slot])[:1]
+    elif spec.pair_type == "source":
+        fwd_out_all, _ = _apply_pair_node(
+            fwd_layer.f_apply,
+            fwd_input,
+            random_vars=random_vars,
+            params=params,
+            node_id=fwd_node_id,
+            key=sample_key,
+            network_id=network_id,
+            rate_override=rate_override,
+        )
+        inv_input = jnp.ravel(fwd_out_all[spec.output_slot])[:1]
+    else:
+        fwd_out, _ = _apply_pair_node(
+            fwd_layer.f_apply,
+            fwd_input,
+            random_vars=random_vars,
+            params=params,
+            node_id=fwd_node_id,
+            key=sample_key,
+            network_id=network_id,
+            rate_override=rate_override,
+        )
+        assert inv_layer.f_input_shapes is not None and len(inv_layer.f_input_shapes) == 1
+        inv_input = jnp.asarray(fwd_out).reshape(inv_layer.f_input_shapes[0])
+
+    inv_out, _ = _apply_pair_node(
+        inv_layer.f_apply,
+        inv_input,
+        random_vars=random_vars,
+        params=params,
+        node_id=inv_node_id,
+        key=sample_key,
+        network_id=network_id,
+        rate_override=rate_override,
+    )
+    recon = jnp.ravel(inv_out)[:1]
+    return jnp.mean((recon - x_target) ** 2)
+
+
+def _inverse_pair_cycle_loss(
+    params,
+    stack,
+    spec: InversePairSpec,
+    pair_key,
+    *,
+    num_random_vars: int,
+    batch_size: int,
+    dtype,
+    sample_embeddings: bool,
+    embedding_low: float,
+    embedding_high: float,
+):
+    import jax
+    import jax.numpy as jnp
+
+    kx, krv, ksample, kemb = jax.random.split(pair_key, 4)
+    x_samples = jax.random.uniform(kx, (batch_size,), minval=0.0, maxval=1.0, dtype=dtype)
+    rv_samples = jax.random.uniform(
+        krv, (batch_size, num_random_vars), minval=0.0, maxval=1.0, dtype=dtype
+    )
+    sample_keys = jax.random.split(ksample, batch_size)
+
+    rate_samples = None
+    if sample_embeddings and spec.rate_path is not None:
+        base_rate = jnp.asarray(params[spec.rate_path][spec.fwd_node_pos])
+        rate_samples = jax.random.uniform(
+            kemb,
+            (batch_size, *base_rate.shape),
+            minval=embedding_low,
+            maxval=embedding_high,
+            dtype=base_rate.dtype,
+        )
+
+    if rate_samples is None:
+        losses = jax.vmap(
+            lambda x, rv, sk: _single_inverse_cycle_sample(
+                params=params,
+                stack=stack,
+                spec=spec,
+                x_scalar=x,
+                random_vars=rv,
+                sample_key=sk,
+                rate_override=None,
+            )
+        )(x_samples, rv_samples, sample_keys)
+    else:
+        losses = jax.vmap(
+            lambda x, rv, sk, rs: _single_inverse_cycle_sample(
+                params=params,
+                stack=stack,
+                spec=spec,
+                x_scalar=x,
+                random_vars=rv,
+                sample_key=sk,
+                rate_override=rs,
+            )
+        )(x_samples, rv_samples, sample_keys, rate_samples)
+    return jnp.mean(losses)
+
+
+def _compute_inverse_consistency_loss(
+    params,
+    stack,
+    pair_specs: list[InversePairSpec],
+    pair_counts: dict[str, int],
+    key,
+    *,
+    num_random_vars: int,
+    batch_size: int,
+    dtype,
+    sample_embeddings: bool,
+    embedding_low: float,
+    embedding_high: float,
+):
+    import jax
+    import jax.numpy as jnp
+
+    zero = jnp.asarray(0.0, dtype=dtype)
+    if not pair_specs:
+        return zero, {
+            "inverse_consistency_n_pairs": 0,
+            "inverse_consistency_batch_size": batch_size,
+            "inverse_consistency_n_source_pairs": 0,
+            "inverse_consistency_n_transcription_pairs": 0,
+            "inverse_consistency_n_translation_pairs": 0,
+            "inverse_consistency_n_output_pairs": 0,
+        }
+
+    pair_keys = jax.random.split(key, len(pair_specs))
+    pair_losses = [
+        _inverse_pair_cycle_loss(
+            params=params,
+            stack=stack,
+            spec=spec,
+            pair_key=pk,
+            num_random_vars=num_random_vars,
+            batch_size=batch_size,
+            dtype=dtype,
+            sample_embeddings=sample_embeddings,
+            embedding_low=embedding_low,
+            embedding_high=embedding_high,
+        )
+        for spec, pk in zip(pair_specs, pair_keys, strict=False)
+    ]
+    pair_losses_arr = jnp.stack(pair_losses)
+    return jnp.mean(pair_losses_arr), {
+        "inverse_consistency_n_pairs": len(pair_specs),
+        "inverse_consistency_batch_size": batch_size,
+        "inverse_consistency_n_source_pairs": pair_counts.get("source", 0),
+        "inverse_consistency_n_transcription_pairs": pair_counts.get("transcription", 0),
+        "inverse_consistency_n_translation_pairs": pair_counts.get("translation", 0),
+        "inverse_consistency_n_output_pairs": pair_counts.get("output", 0),
+    }
+
+
+def _prepare_inverse_consistency_context(
+    *,
+    stack,
+    batch_size,
+    sample_embeddings,
+    embedding_low,
+    embedding_high,
+):
+    pair_specs, pair_counts = _discover_inverse_pair_specs(stack)
+    inverse_batch_size = int(batch_size)
+    assert inverse_batch_size >= 1, "inverse_consistency_batch_size must be >= 1"
+    inverse_embed_low = float(embedding_low)
+    inverse_embed_high = float(embedding_high)
+    assert inverse_embed_low < inverse_embed_high, (
+        "inverse_consistency_embedding_low must be < inverse_consistency_embedding_high"
+    )
+    inverse_sample_embeddings = bool(sample_embeddings)
+    return (
+        pair_specs,
+        pair_counts,
+        inverse_batch_size,
+        inverse_sample_embeddings,
+        inverse_embed_low,
+        inverse_embed_high,
+    )
+
+
 def sorting_loss(
     stack,
     training_config,
@@ -231,6 +554,11 @@ def sorting_loss(
     out_vs_in_sortmse_weight=1,
     use_same_key=False,
     per_output_weights=None,
+    inverse_consistency_weight=0.0,
+    inverse_consistency_batch_size=64,
+    inverse_consistency_sample_embeddings=True,
+    inverse_consistency_embedding_low=-1.0,
+    inverse_consistency_embedding_high=1.0,
     **_unused_kwargs,
 ):
     """MSE loss with sorted outputs to learn distribution (quantile-like)."""
@@ -240,6 +568,20 @@ def sorting_loss(
     from .jaxutils import flat_concat, robust_sort
 
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+    (
+        inverse_pair_specs,
+        inverse_pair_counts,
+        inverse_batch_size,
+        inverse_sample_embeddings,
+        inverse_embed_low,
+        inverse_embed_high,
+    ) = _prepare_inverse_consistency_context(
+        stack=stack,
+        batch_size=inverse_consistency_batch_size,
+        sample_embeddings=inverse_consistency_sample_embeddings,
+        embedding_low=inverse_consistency_embedding_low,
+        embedding_high=inverse_consistency_embedding_high,
+    )
 
     def loss_func(dynamic, static, X, Y, Z, key, step):
         check_XYZ(X, Y, Z, stack)
@@ -397,6 +739,21 @@ def sorting_loss(
         main_loss = lerp(main_loss, pinball_loss, pbw)
         cdfw = as_schedule(cdf_calibration_weight)(step)
         main_loss = lerp(main_loss, cdf_calibration_loss, cdfw)
+        icw = as_schedule(inverse_consistency_weight)(step)
+        inverse_consistency_loss, inverse_dbg = _compute_inverse_consistency_loss(
+            params=params,
+            stack=stack,
+            pair_specs=inverse_pair_specs,
+            pair_counts=inverse_pair_counts,
+            key=jax.random.fold_in(key, 33),
+            num_random_vars=Z.shape[1],
+            batch_size=inverse_batch_size,
+            dtype=Y.dtype,
+            sample_embeddings=inverse_sample_embeddings,
+            embedding_low=inverse_embed_low,
+            embedding_high=inverse_embed_high,
+        )
+        main_loss = main_loss + icw * inverse_consistency_loss
 
         aux["sublosses"] = {
             "mse": mse,
@@ -404,6 +761,7 @@ def sorting_loss(
             "z_sorting_mse": z_sorting_mse,
             "pinball_loss": pinball_loss,
             "cdf_calibration_loss": cdf_calibration_loss,
+            "inverse_consistency_loss": inverse_consistency_loss,
             "kl_loss": kl_loss,
             "main_loss": main_loss,
         }
@@ -450,6 +808,8 @@ def sorting_loss(
             "counts": counts,
             "step": step,
             "output_weights": output_weights,
+            "inverse_consistency_weight": icw,
+            **inverse_dbg,
         }
         aux["apply_aux"] = apply_aux
 
@@ -483,6 +843,11 @@ def energy_sampling_loss(
     tail_tau_high=0.97,
     use_same_key=False,
     per_output_weights=None,
+    inverse_consistency_weight=0.0,
+    inverse_consistency_batch_size=64,
+    inverse_consistency_sample_embeddings=True,
+    inverse_consistency_embedding_low=-1.0,
+    inverse_consistency_embedding_high=1.0,
     **_unused_kwargs,
 ):
     """Sample-based distributional loss (CRPS / energy score).
@@ -502,6 +867,20 @@ def energy_sampling_loss(
     from .jaxutils import flat_concat
 
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
+    (
+        inverse_pair_specs,
+        inverse_pair_counts,
+        inverse_batch_size,
+        inverse_sample_embeddings,
+        inverse_embed_low,
+        inverse_embed_high,
+    ) = _prepare_inverse_consistency_context(
+        stack=stack,
+        batch_size=inverse_consistency_batch_size,
+        sample_embeddings=inverse_consistency_sample_embeddings,
+        embedding_low=inverse_consistency_embedding_low,
+        embedding_high=inverse_consistency_embedding_high,
+    )
     n_energy_samples = int(energy_n_samples)
     assert n_energy_samples >= 1, "energy_n_samples must be >= 1"
     z_dist = str(energy_z_distribution).lower()
@@ -728,12 +1107,28 @@ def energy_sampling_loss(
         tail_loss = lerp(tindep_loss, tdep_loss, ovie)
         tpw = as_schedule(tail_pinball_weight)(step)
         main_loss = lerp(mse, energy_loss, ew) + ccw * coverage_loss + tpw * tail_loss
+        icw = as_schedule(inverse_consistency_weight)(step)
+        inverse_consistency_loss, inverse_dbg = _compute_inverse_consistency_loss(
+            params=params,
+            stack=stack,
+            pair_specs=inverse_pair_specs,
+            pair_counts=inverse_pair_counts,
+            key=jax.random.fold_in(key, 33),
+            num_random_vars=Z.shape[1],
+            batch_size=inverse_batch_size,
+            dtype=Y.dtype,
+            sample_embeddings=inverse_sample_embeddings,
+            embedding_low=inverse_embed_low,
+            embedding_high=inverse_embed_high,
+        )
+        main_loss = main_loss + icw * inverse_consistency_loss
 
         aux["sublosses"] = {
             "mse": mse,
             "energy_loss": energy_loss,
             "coverage_loss": coverage_loss,
             "tail_pinball_loss": tail_loss,
+            "inverse_consistency_loss": inverse_consistency_loss,
             "kl_loss": kl_loss,
             "main_loss": main_loss,
         }
@@ -779,6 +1174,8 @@ def energy_sampling_loss(
             "tail_tau_high": tail_high,
             "dep_tail_pinball_loss": tdep_loss,
             "indep_tail_pinball_loss": tindep_loss,
+            "inverse_consistency_weight": icw,
+            **inverse_dbg,
         }
         aux["apply_aux"] = apply_aux
 

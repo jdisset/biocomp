@@ -178,6 +178,114 @@ class TestLossFunctions:
             full_output = jnp.concatenate([x, yhat])
             return yhat, (apply_aux, full_output)
 
+    class _ToyInverseSpec:
+        def __init__(self, node_id: int, output_slot: int):
+            self.node_id = node_id
+            self.output_slot = output_slot
+
+    class _ToyGraphNode:
+        def __init__(self, node_type: str, is_inverse_of=None):
+            self.node_type = node_type
+            self.is_inverse_of = is_inverse_of
+
+    class _ToyStackNode:
+        def __init__(self, network_id: int, node_id: int, layer_number: int, node_position_in_layer: int):
+            self.network_id = network_id
+            self.node_id = node_id
+            self.layer_number = layer_number
+            self.node_position_in_layer = node_position_in_layer
+
+        def get(self, stack):
+            return stack._nodes[self.node_id]
+
+        def get_forward_stacknode(self, stack):
+            if self.node_id == 1:
+                return stack._fwd_stacknode
+            return None
+
+    class _PairStack:
+        """Minimal stack exposing one transcription/inv_transcription pair."""
+
+        def __init__(self, inv_scale: float):
+            self.networks = [SimpleNamespace(nb_inputs=1, nb_outputs=2)]
+            self.total_nb_of_outputs = 2
+            self.layers = [
+                SimpleNamespace(f_apply=self._fwd_apply, f_input_shapes=[(1,)]),
+                SimpleNamespace(f_apply=self._inv_apply, f_input_shapes=[(1,)]),
+            ]
+            self._inv_scale = inv_scale
+            self._nodes = {
+                0: TestLossFunctions._ToyGraphNode("transcription"),
+                1: TestLossFunctions._ToyGraphNode(
+                    "inv_transcription",
+                    TestLossFunctions._ToyInverseSpec(node_id=0, output_slot=0),
+                ),
+            }
+            self._fwd_stacknode = TestLossFunctions._ToyStackNode(
+                network_id=0, node_id=0, layer_number=0, node_position_in_layer=0
+            )
+            self._inv_stacknode = TestLossFunctions._ToyStackNode(
+                network_id=0, node_id=1, layer_number=1, node_position_in_layer=0
+            )
+
+        def each_node(self):
+            yield self._inv_stacknode
+
+        def get_layer_namespace(self, layer_id: int) -> str:
+            if layer_id == 0:
+                return "local/0/fwd_transcription"
+            return "local/1/inv_transcription"
+
+        def _fwd_apply(
+            self,
+            value,
+            *,
+            random_vars,
+            params,
+            node_id,
+            key,
+            network_id=None,
+            rate_override=None,
+            **_,
+        ):
+            del random_vars, key, network_id
+            rate = (
+                rate_override
+                if rate_override is not None
+                else params["local/0/fwd_transcription/transcription_rate"][node_id]
+            )
+            slope = jnp.ravel(rate)[0]
+            return jnp.array([value[0] * slope]), {}
+
+        def _inv_apply(
+            self,
+            value,
+            *,
+            random_vars,
+            params,
+            node_id,
+            key,
+            network_id=None,
+            rate_override=None,
+            **_,
+        ):
+            del random_vars, key, node_id, network_id
+            rate = (
+                rate_override
+                if rate_override is not None
+                else params["local/0/fwd_transcription/transcription_rate"][0]
+            )
+            slope = jnp.ravel(rate)[0]
+            recon = self._inv_scale * value[0] / (slope + 1e-6)
+            return jnp.array([recon]), {}
+
+        def apply(self, _params, x, z, _key):
+            del z
+            yhat = jnp.array([x[0], 0.5 * x[0]])
+            apply_aux = {"grads_wrt_inputs": jnp.array([0.2])}
+            full_output = yhat
+            return yhat, (apply_aux, full_output)
+
     @staticmethod
     def _make_sorting_loss_params() -> ParameterTree:
         params = ParameterTree()
@@ -203,6 +311,41 @@ class TestLossFunctions:
             "shared/quantization/counts/tl",
             jnp.array([[1.0], [1.0]]),
             tags=["shared"],
+            overwrite=True,
+        )
+        return params
+
+    @staticmethod
+    def _make_inverse_pair_params() -> ParameterTree:
+        params = ParameterTree()
+        params.at(
+            "global/dependent_output_mask",
+            jnp.array([True, False]),
+            tags=["non_grad", "local"],
+            overwrite=True,
+        )
+        params.at(
+            "shared/quantization/values/tl",
+            jnp.array([[0.1], [0.2]]),
+            tags=["shared"],
+            overwrite=True,
+        )
+        params.at(
+            "shared/quantization/logstdevs/tl",
+            jnp.array([[-3.0], [-3.0]]),
+            tags=["shared"],
+            overwrite=True,
+        )
+        params.at(
+            "shared/quantization/counts/tl",
+            jnp.array([[1.0], [1.0]]),
+            tags=["shared"],
+            overwrite=True,
+        )
+        params.at(
+            "local/0/fwd_transcription/transcription_rate",
+            jnp.array([[[0.7]]]),
+            tags=["local"],
             overwrite=True,
         )
         return params
@@ -412,6 +555,53 @@ class TestLossFunctions:
         assert jnp.isfinite(aux["sublosses"]["main_loss"])
         assert jnp.isfinite(aux["sublosses"]["z_sorting_mse"])
 
+    def test_sorting_loss_inverse_consistency_penalizes_bad_inverse_pair(self):
+        params = self._make_inverse_pair_params()
+        x = jnp.array([[0.2], [0.4], [0.6], [0.8]])
+        y = jnp.concatenate([x, 0.5 * x], axis=1)
+        z = jnp.array(
+            [
+                [0.1, 0.2, 0.3],
+                [0.4, 0.5, 0.6],
+                [0.7, 0.8, 0.9],
+                [0.3, 0.2, 0.1],
+            ]
+        )
+        key = jax.random.PRNGKey(123)
+
+        stack_good = self._PairStack(inv_scale=1.0)
+        stack_bad = self._PairStack(inv_scale=0.65)
+
+        loss_good, aux_good = sorting_loss(
+            stack_good,
+            training_config=None,
+            sorting_mse_weight=0.0,
+            pinball_weight=0.0,
+            cdf_calibration_weight=0.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+            inverse_consistency_weight=1.0,
+            inverse_consistency_batch_size=32,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_bad, aux_bad = sorting_loss(
+            stack_bad,
+            training_config=None,
+            sorting_mse_weight=0.0,
+            pinball_weight=0.0,
+            cdf_calibration_weight=0.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+            inverse_consistency_weight=1.0,
+            inverse_consistency_batch_size=32,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert "inverse_consistency_loss" in aux_good["sublosses"]
+        assert float(aux_good["debug"]["inverse_consistency_n_pairs"]) == 1.0
+        assert aux_bad["sublosses"]["inverse_consistency_loss"] > aux_good["sublosses"][
+            "inverse_consistency_loss"
+        ]
+        assert loss_bad > loss_good
+
     def test_energy_sampling_loss_is_finite(self):
         stack = self._FakeStack()
         params = self._make_sorting_loss_params()
@@ -433,6 +623,55 @@ class TestLossFunctions:
         assert jnp.isfinite(loss)
         assert jnp.isfinite(aux["sublosses"]["energy_loss"])
         assert "energy_n_samples" in aux["debug"]
+
+    def test_energy_sampling_loss_inverse_consistency_penalizes_bad_inverse_pair(self):
+        params = self._make_inverse_pair_params()
+        x = jnp.array([[0.2], [0.4], [0.6], [0.8]])
+        y = jnp.concatenate([x, 0.5 * x], axis=1)
+        z = jnp.array(
+            [
+                [0.1, 0.2, 0.3],
+                [0.4, 0.5, 0.6],
+                [0.7, 0.8, 0.9],
+                [0.3, 0.2, 0.1],
+            ]
+        )
+        key = jax.random.PRNGKey(321)
+
+        stack_good = self._PairStack(inv_scale=1.0)
+        stack_bad = self._PairStack(inv_scale=0.65)
+
+        loss_good, aux_good = energy_sampling_loss(
+            stack_good,
+            training_config=None,
+            energy_n_samples=4,
+            energy_weight=0.0,
+            coverage_calibration_weight=0.0,
+            tail_pinball_weight=0.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+            inverse_consistency_weight=1.0,
+            inverse_consistency_batch_size=32,
+        )(params, ParameterTree(), x, y, z, key, 0)
+        loss_bad, aux_bad = energy_sampling_loss(
+            stack_bad,
+            training_config=None,
+            energy_n_samples=4,
+            energy_weight=0.0,
+            coverage_calibration_weight=0.0,
+            tail_pinball_weight=0.0,
+            kl_weight=0.0,
+            negative_grad_penalty=0.0,
+            inverse_consistency_weight=1.0,
+            inverse_consistency_batch_size=32,
+        )(params, ParameterTree(), x, y, z, key, 0)
+
+        assert "inverse_consistency_loss" in aux_good["sublosses"]
+        assert float(aux_good["debug"]["inverse_consistency_n_pairs"]) == 1.0
+        assert aux_bad["sublosses"]["inverse_consistency_loss"] > aux_good["sublosses"][
+            "inverse_consistency_loss"
+        ]
+        assert loss_bad > loss_good
 
     def test_energy_sampling_loss_joint_differs_from_independent(self):
         stack = self._FakeStack()
