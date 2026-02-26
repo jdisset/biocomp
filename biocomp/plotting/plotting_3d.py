@@ -7,9 +7,11 @@ from .plotting_core import (
 )
 from .plotting_smooth import (
     smooth_2d,
+    GridData,
 )
 
 from . import plotting_core as pc
+from biocomp.plotutils import PlotFunctionResult
 from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable
 from functools import partial
 
@@ -571,6 +573,8 @@ def smooth_3d(
             f"Data contains {n_invalid}/{n_total} rows with NaN/inf values. These will be filtered out."
         )
 
+    all_grid_data: list[GridData] = []
+
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
 
     if isinstance(ax, Axes):
@@ -598,7 +602,7 @@ def smooth_3d(
         show_spines=show_inner_spines,
         slice_index: Optional[int] = None,
     ):
-        im, contour = smooth_2d(
+        res = smooth_2d(
             X,
             Y,
             input_names,
@@ -615,6 +619,28 @@ def smooth_3d(
                 ),
             },
         )
+        im, contour = res
+
+        if isinstance(res, PlotFunctionResult) and "grid_data" in res.metadata:
+            z_val = (
+                float(zslice[0])
+                if hasattr(zslice, "__len__") and len(zslice) > 0
+                else float(zslice)
+            )
+            for gd in res.metadata["grid_data"]:
+                all_grid_data.append(
+                    GridData(
+                        x_coords=gd.x_coords,
+                        y_coords=gd.y_coords,
+                        values=gd.values,
+                        xlims=gd.xlims,
+                        ylims=gd.ylims,
+                        resolution=gd.resolution,
+                        input_names=gd.input_names,
+                        output_name=gd.output_name,
+                        z_value=z_val,
+                    )
+                )
 
         # remove x and y labels
         sl_ax.set_xlabel("")
@@ -740,3 +766,6 @@ def smooth_3d(
 
     if title is not None:
         ax[0].set_title(title)
+
+    if all_grid_data:
+        return PlotFunctionResult(rendering=None, metadata={"grid_data": all_grid_data})

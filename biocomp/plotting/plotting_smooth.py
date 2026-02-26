@@ -1,6 +1,7 @@
 # {{{                          --     imports     --
 # ···············································································
 
+from dataclasses import dataclass
 from functools import partial
 import matplotlib as mpl
 
@@ -10,7 +11,6 @@ from typing import (
     Union,
     Sequence,
     List,
-    Tuple,
     Dict,
     Any,
     Optional,
@@ -22,6 +22,7 @@ from . import plotting_core as pc
 
 from biocomp.plotutils import (
     make_xy_grid,
+    PlotFunctionResult,
 )
 
 
@@ -45,6 +46,101 @@ T = TypeVar("T")
 ListOrSingle: TypeAlias = Union[List[T], T]
 NdArray = np.ndarray
 configurable = pc.configurable
+
+##────────────────────────────────────────────────────────────────────────────}}}
+
+## {{{                       --     grid data     --
+
+
+@dataclass(frozen=True)
+class GridData:
+    """Raw grid data from smooth_2d. values[yi, xi] = value at (x_coords[xi], y_coords[yi])."""
+
+    x_coords: np.ndarray  # (R,)
+    y_coords: np.ndarray  # (R,)
+    values: np.ndarray  # (R, R)
+    xlims: tuple[float, float]
+    ylims: tuple[float, float]
+    resolution: int
+    input_names: list[str]
+    output_name: str
+    z_value: float | None = None
+
+
+def extract_grid_data(
+    output_values: np.ndarray,
+    xlims: tuple[float, float],
+    ylims: tuple[float, float],
+    resolution: int,
+    input_names: Sequence[str],
+    output_name: str,
+    z_value: float | None = None,
+) -> GridData:
+    return GridData(
+        x_coords=np.linspace(xlims[0], xlims[1], resolution),
+        y_coords=np.linspace(ylims[0], ylims[1], resolution),
+        values=output_values.reshape(resolution, resolution),
+        xlims=tuple(xlims),
+        ylims=tuple(ylims),
+        resolution=resolution,
+        input_names=list(input_names),
+        output_name=output_name,
+        z_value=z_value,
+    )
+
+
+def grid_data_to_b64(grids: list[GridData]) -> str:
+    """Serialize list of GridData to base64-encoded compressed npz."""
+    import base64
+    import io
+    import json
+
+    arrays: dict[str, np.ndarray] = {}
+    meta: list[dict[str, Any]] = []
+    for i, gd in enumerate(grids):
+        p = f"t{i}_"
+        arrays[f"{p}x"] = gd.x_coords.astype(np.float32)
+        arrays[f"{p}y"] = gd.y_coords.astype(np.float32)
+        arrays[f"{p}v"] = gd.values.astype(np.float32)
+        meta.append(
+            {
+                "xlims": [float(gd.xlims[0]), float(gd.xlims[1])],
+                "ylims": [float(gd.ylims[0]), float(gd.ylims[1])],
+                "resolution": int(gd.resolution),
+                "input_names": list(gd.input_names),
+                "output_name": str(gd.output_name),
+                "z_value": float(gd.z_value) if gd.z_value is not None else None,
+            }
+        )
+    buf = io.BytesIO()
+    np.savez_compressed(buf, _meta=np.array(json.dumps(meta)), _n=np.array(len(grids)), **arrays)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def grid_data_from_b64(b64_string: str) -> list[GridData]:
+    """Deserialize list of GridData from base64-encoded npz."""
+    import base64
+    import io
+    import json
+
+    data = np.load(io.BytesIO(base64.b64decode(b64_string)), allow_pickle=False)
+    n = int(data["_n"])
+    meta: list[dict[str, Any]] = json.loads(str(data["_meta"]))
+    return [
+        GridData(
+            x_coords=data[f"t{i}_x"],
+            y_coords=data[f"t{i}_y"],
+            values=data[f"t{i}_v"],
+            xlims=tuple(m["xlims"]),
+            ylims=tuple(m["ylims"]),
+            resolution=m["resolution"],
+            input_names=m["input_names"],
+            output_name=m["output_name"],
+            z_value=m.get("z_value"),
+        )
+        for i, m in enumerate(meta[:n])
+    ]
+
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -504,7 +600,7 @@ def smooth_2d(
     knn_grid_params: Dict = None,
     heatmap_params: Dict = None,
     setup_transformed_axis_params: Dict = None,
-) -> Tuple:
+) -> PlotFunctionResult:
     # compute actual xlims:
     if setup_transformed_axis_params is None:
         setup_transformed_axis_params = {}
@@ -537,12 +633,23 @@ def smooth_2d(
 
     zslice = np.asarray(zslice) if zslice is not None else None
 
+    resolution = knn_grid_params.get("grid_resolution", 200)
+
     input_coords, output_values = knn_grid(
         X,
         Y,
         xlims,
         ylims,
         **{**knn_grid_params, "zslice": zslice},
+    )
+
+    grid_data = extract_grid_data(
+        np.asarray(output_values),
+        xlims=tuple(xlims),
+        ylims=tuple(ylims),
+        resolution=resolution,
+        input_names=list(input_names),
+        output_name=output_name,
     )
 
     im, cntrs = heatmap(ax, input_coords, output_values, **{**heatmap_params, "vlims": vlims})
@@ -579,7 +686,10 @@ def smooth_2d(
             **{**colorbar_params, "label": vlabel},
         )
 
-    return im, cntrs
+    return PlotFunctionResult(
+        rendering=(im, cntrs),
+        metadata={"grid_data": [grid_data]},
+    )
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -600,9 +710,7 @@ def _as_xy_arrays(X, Y):
     if y.ndim != 2:
         raise ValueError(f"Y must be 1D or 2D, got shape {y.shape}")
     if y.shape[1] != 1:
-        raise ValueError(
-            f"Only single-output Y is supported for this plot, got shape {y.shape}"
-        )
+        raise ValueError(f"Only single-output Y is supported for this plot, got shape {y.shape}")
     if x.shape[0] != y.shape[0]:
         raise ValueError(
             f"X and Y must have the same number of rows, got {x.shape[0]} and {y.shape[0]}"
@@ -624,9 +732,7 @@ def _make_voxel_query_grid(X, grid_resolution=8, max_voxels=None):
     else:
         res = [int(v) for v in grid_resolution]
         if len(res) != dim:
-            raise ValueError(
-                f"grid_resolution length must match input dim {dim}, got {len(res)}"
-            )
+            raise ValueError(f"grid_resolution length must match input dim {dim}, got {len(res)}")
 
     # Guard against combinatorial explosion for higher-dimensional inputs.
     if max_voxels is not None:
@@ -700,9 +806,7 @@ def _compute_voxel_distributions(
         voxel_counts.append(int(valid.sum()))
 
     means_arr = np.asarray(voxel_means, dtype=float)
-    means_tree = (
-        build_tree(means_arr[:, None], use_jax=False) if len(means_arr) > 0 else None
-    )
+    means_tree = build_tree(means_arr[:, None], use_jax=False) if len(means_arr) > 0 else None
 
     return {
         "means": means_arr,
@@ -1387,7 +1491,9 @@ def smooth_voxel_conditioned_violin(
                 )
                 _draw_tick_stats(x_draw, agg_r, color_r)
 
-    axis_ticks = np.asarray(plotted_centers if len(plotted_centers) > 0 else display_ticks, dtype=float)
+    axis_ticks = np.asarray(
+        plotted_centers if len(plotted_centers) > 0 else display_ticks, dtype=float
+    )
     xmin = float(np.nanmin(axis_ticks)) if xlims[0] is None else float(xlims[0])
     xmax = float(np.nanmax(axis_ticks)) if xlims[1] is None else float(xlims[1])
     ymin = float(ylims[0]) if ylims[0] is not None else float(ax.get_ylim()[0])
