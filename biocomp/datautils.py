@@ -499,26 +499,6 @@ def sample_batches_jax(
     return Xb, Yb
 
 
-def sample_batches_uniform_query(
-    X: NdArray,
-    Y: NdArray,
-    tree: cKDTree,
-    batch_size: int,
-    n_batches: int,
-    xlim_low: float,
-    xlim_high: float,
-    rng: np.random.RandomState,
-) -> tuple[NdArray, NdArray]:
-    """Sample batches by querying uniform random points and snapping to nearest real data."""
-    total = batch_size * n_batches
-    queries = rng.uniform(xlim_low, xlim_high, size=(total, X.shape[1]))
-    _, indices = tree.query(queries, k=1)
-    return (
-        X[indices].reshape(n_batches, batch_size, -1),
-        Y[indices].reshape(n_batches, batch_size, -1),
-    )
-
-
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 # {{{                       --     data manager     --
@@ -526,7 +506,6 @@ def sample_batches_uniform_query(
 
 
 class ResamplingConfig(BaseModel):
-    sampling_strategy: Literal["density", "uniform_query"] = "density"
     method: Literal["kde", "knn"] = "knn"
     kde_bw_method: float = 0.02
     kde_samples: int = 4000
@@ -534,7 +513,6 @@ class ResamplingConfig(BaseModel):
     density_chunksize: int = 50000
     density_threshold_quantile: float = 0.025
     density_threshold_coords: float = 0.15
-    uniform_query_xlim: tuple[float, float] = (0.0, 0.7)
 
 
 class DataConfig(BaseModel):
@@ -778,7 +756,6 @@ class DataManager:
 
         self.compute_stack = None
         self._densities = None
-        self._uq_cache: dict | None = None  # uniform_query cache (trees + data)
         self.individual_compute_stacks = {}
         # cache for padded arrays (populated on first get_batches call)
         self._padded_cache: dict | None = None
@@ -846,13 +823,6 @@ class DataManager:
         Generate batches of data from the dataset.
         Uses JAX sampling if jax_sampling=True for improved performance.
         """
-        strategy = self.data_cfg.resampling.sampling_strategy
-
-        if strategy == "uniform_query":
-            return self._get_batches_uniform_query(
-                n_batches, batch_size, rng_key, concat_along_feature_axis
-            )
-
         if not self._densities:
             self.compute_densities()
 
@@ -887,58 +857,6 @@ class DataManager:
             mask = np.concatenate([np.ones(x.shape[0], dtype=bool), np.zeros(pad_len, dtype=bool)])
             M_pad.append(jax.device_put(mask, cpu))
         self._padded_cache = {"X": X_pad, "Y": Y_pad, "D": D_pad, "M": M_pad}
-
-    def _ensure_uq_cache(self):
-        """Build and cache cKDTrees + numpy data for uniform_query sampling."""
-        if self._uq_cache is not None:
-            return
-        assert self._X, "Cannot build uniform_query cache after clear_source_data()"
-        X_np = [np.asarray(x) for x in self._X]
-        Y_np = [np.asarray(y) for y in self._Y]
-        trees = [cKDTree(x) for x in X_np]
-        self._uq_cache = {"X": X_np, "Y": Y_np, "trees": trees}
-        logger.debug(f"Built uniform_query cache with {len(trees)} cKDTree(s)")
-
-    def _get_batches_uniform_query(
-        self,
-        n_batches: int,
-        batch_size: int,
-        rng_key,
-        concat_along_feature_axis: bool,
-    ):
-        """Generate batches by uniform random sampling in latent space, snapped to nearest data."""
-        self._ensure_uq_cache()
-        xlim_low, xlim_high = self.data_cfg.resampling.uniform_query_xlim
-        rng = np.random.RandomState(rng_key if isinstance(rng_key, int) else int(rng_key[0]))
-
-        xb_list, yb_list = zip(
-            *[
-                sample_batches_uniform_query(
-                    x, y, tree,
-                    batch_size, n_batches, xlim_low, xlim_high, rng,
-                )
-                for x, y, tree in zip(
-                    self._uq_cache["X"], self._uq_cache["Y"],
-                    self._uq_cache["trees"], strict=False,
-                )
-            ],
-            strict=False,
-        )
-
-        if concat_along_feature_axis:
-            xbatches = np.concatenate(xb_list, axis=2)
-            ybatches = np.concatenate(yb_list, axis=2)
-            assert xbatches.shape[2] == sum(n.get_nb_inputs() for n in self._networks)
-            assert ybatches.shape[2] == sum(n.get_nb_outputs() for n in self._networks)
-        else:
-            xbatches, ybatches = xb_list, yb_list
-
-        if self.jax_sampling:
-            gpu = jax.devices("gpu")[0] if jax.devices("gpu") else jax.devices()[0]
-            xbatches = jax.device_put(jnp.asarray(xbatches), gpu)
-            ybatches = jax.device_put(jnp.asarray(ybatches), gpu)
-
-        return xbatches, ybatches
 
     def _get_batches_jax(
         self,
