@@ -213,7 +213,7 @@ def stable_sigma(logstd, *, min_std=1e-3):
 
 
 class InversePairSpec(NamedTuple):
-    pair_type: str
+    pair_type: str  # kept for logging only
     network_id: int
     fwd_layer_id: int
     fwd_node_pos: int
@@ -223,18 +223,14 @@ class InversePairSpec(NamedTuple):
     n_fwd_inputs: int
     fwd_input_shape: tuple[int, ...]
     rate_path: Optional[str] = None
+    is_multi_input: bool = False
+    is_slotted_output: bool = False
 
 
 def _discover_inverse_pair_specs(stack) -> tuple[list[InversePairSpec], dict[str, int]]:
     from .graphengine import is_inverse_node_type
 
-    allowed_pair_types = {"source", "transcription", "translation", "output"}
-    counts = {
-        "source": 0,
-        "transcription": 0,
-        "translation": 0,
-        "output": 0,
-    }
+    counts: dict[str, int] = {}
     pair_specs: list[InversePairSpec] = []
 
     layers = getattr(stack, "layers", None)
@@ -255,20 +251,23 @@ def _discover_inverse_pair_specs(stack) -> tuple[list[InversePairSpec], dict[str
         if fwd_stacknode.layer_number is None or inv_stacknode.layer_number is None:
             continue
 
-        fwd_node = fwd_stacknode.get(stack)
-        pair_type = fwd_node.node_type
-        if pair_type not in allowed_pair_types:
-            continue
-
         fwd_layer = layers[fwd_stacknode.layer_number]
         if fwd_layer.f_input_shapes is None or len(fwd_layer.f_input_shapes) == 0:
             continue
 
+        fwd_node = fwd_stacknode.get(stack)
+        pair_type = fwd_node.node_type
+
+        # rate_path: derive from edge content_embedding_names (SSOT)
         rate_path = None
-        if pair_type in {"transcription", "translation"}:
-            rate_path = (
-                f"{stack.get_layer_namespace(fwd_stacknode.layer_number)}/{pair_type}_rate"
-            )
+        fwd_edges = fwd_stacknode.get_incoming_edges(stack)
+        if fwd_edges:
+            emb_keys = list(fwd_edges[0].content_embedding_names.keys())
+            if emb_keys:
+                rate_path = f"{stack.get_layer_namespace(fwd_stacknode.layer_number)}/{emb_keys[0]}"
+
+        n_fwd_inputs = len(fwd_layer.f_input_shapes)
+        is_slotted = inv_node.is_inverse_of.output_len > 1
 
         pair_specs.append(
             InversePairSpec(
@@ -279,12 +278,14 @@ def _discover_inverse_pair_specs(stack) -> tuple[list[InversePairSpec], dict[str
                 inv_layer_id=inv_stacknode.layer_number,
                 inv_node_pos=int(inv_stacknode.node_position_in_layer),
                 output_slot=int(inv_node.is_inverse_of.output_slot),
-                n_fwd_inputs=len(fwd_layer.f_input_shapes),
+                n_fwd_inputs=n_fwd_inputs,
                 fwd_input_shape=tuple(int(d) for d in fwd_layer.f_input_shapes[0]),
                 rate_path=rate_path,
+                is_multi_input=n_fwd_inputs > 1,
+                is_slotted_output=is_slotted,
             )
         )
-        counts[pair_type] += 1
+        counts[pair_type] = counts.get(pair_type, 0) + 1
 
     return pair_specs, counts
 
@@ -337,44 +338,30 @@ def _single_inverse_cycle_sample(
     inv_node_id = jnp.asarray(spec.inv_node_pos, dtype=jnp.int32)
     network_id = jnp.asarray(spec.network_id, dtype=jnp.int32)
 
-    if spec.pair_type == "output":
+    # --- Input construction (multi-input vs single-input) ---
+    if spec.is_multi_input:
         zeros = jnp.zeros((spec.n_fwd_inputs, *spec.fwd_input_shape), dtype=dtype)
         stacked_inputs = zeros.at[spec.output_slot].set(fwd_input)
         fwd_inputs = tuple(stacked_inputs[i] for i in range(spec.n_fwd_inputs))
-        fwd_out_all, _ = _apply_pair_node(
-            fwd_layer.f_apply,
-            *fwd_inputs,
-            random_vars=random_vars,
-            params=params,
-            node_id=fwd_node_id,
-            key=sample_key,
-            network_id=network_id,
-            rate_override=rate_override,
-        )
-        inv_input = jnp.ravel(fwd_out_all[spec.output_slot])[:1]
-    elif spec.pair_type == "source":
-        fwd_out_all, _ = _apply_pair_node(
-            fwd_layer.f_apply,
-            fwd_input,
-            random_vars=random_vars,
-            params=params,
-            node_id=fwd_node_id,
-            key=sample_key,
-            network_id=network_id,
-            rate_override=rate_override,
-        )
-        inv_input = jnp.ravel(fwd_out_all[spec.output_slot])[:1]
     else:
-        fwd_out, _ = _apply_pair_node(
-            fwd_layer.f_apply,
-            fwd_input,
-            random_vars=random_vars,
-            params=params,
-            node_id=fwd_node_id,
-            key=sample_key,
-            network_id=network_id,
-            rate_override=rate_override,
-        )
+        fwd_inputs = (fwd_input,)
+
+    # --- Forward pass ---
+    fwd_out, _ = _apply_pair_node(
+        fwd_layer.f_apply,
+        *fwd_inputs,
+        random_vars=random_vars,
+        params=params,
+        node_id=fwd_node_id,
+        key=sample_key,
+        network_id=network_id,
+        rate_override=rate_override,
+    )
+
+    # --- Output extraction (slotted tuple vs scalar) ---
+    if spec.is_slotted_output:
+        inv_input = jnp.ravel(fwd_out[spec.output_slot])[:1]
+    else:
         assert inv_layer.f_input_shapes is not None and len(inv_layer.f_input_shapes) == 1
         inv_input = jnp.asarray(fwd_out).reshape(inv_layer.f_input_shapes[0])
 

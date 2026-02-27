@@ -179,21 +179,27 @@ class TestLossFunctions:
             return yhat, (apply_aux, full_output)
 
     class _ToyInverseSpec:
-        def __init__(self, node_id: int, output_slot: int):
+        def __init__(self, node_id: int, output_slot: int, output_len: int = 1):
             self.node_id = node_id
             self.output_slot = output_slot
+            self.output_len = output_len
 
     class _ToyGraphNode:
         def __init__(self, node_type: str, is_inverse_of=None):
             self.node_type = node_type
             self.is_inverse_of = is_inverse_of
 
+    class _ToyEdge:
+        def __init__(self, content_embedding_names: dict[str, tuple[str, ...]] | None = None):
+            self.content_embedding_names = content_embedding_names or {}
+
     class _ToyStackNode:
-        def __init__(self, network_id: int, node_id: int, layer_number: int, node_position_in_layer: int):
+        def __init__(self, network_id: int, node_id: int, layer_number: int, node_position_in_layer: int, incoming_edges=None):
             self.network_id = network_id
             self.node_id = node_id
             self.layer_number = layer_number
             self.node_position_in_layer = node_position_in_layer
+            self._incoming_edges = incoming_edges or []
 
         def get(self, stack):
             return stack._nodes[self.node_id]
@@ -202,6 +208,9 @@ class TestLossFunctions:
             if self.node_id == 1:
                 return stack._fwd_stacknode
             return None
+
+        def get_incoming_edges(self, stack):
+            return self._incoming_edges
 
     class _PairStack:
         """Minimal stack exposing one transcription/inv_transcription pair."""
@@ -221,8 +230,12 @@ class TestLossFunctions:
                     TestLossFunctions._ToyInverseSpec(node_id=0, output_slot=0),
                 ),
             }
+            tc_edge = TestLossFunctions._ToyEdge(
+                content_embedding_names={"tc_rate": ("00_empty_tc",)}
+            )
             self._fwd_stacknode = TestLossFunctions._ToyStackNode(
-                network_id=0, node_id=0, layer_number=0, node_position_in_layer=0
+                network_id=0, node_id=0, layer_number=0, node_position_in_layer=0,
+                incoming_edges=[tc_edge],
             )
             self._inv_stacknode = TestLossFunctions._ToyStackNode(
                 network_id=0, node_id=1, layer_number=1, node_position_in_layer=0
@@ -343,7 +356,7 @@ class TestLossFunctions:
             overwrite=True,
         )
         params.at(
-            "local/0/fwd_transcription/transcription_rate",
+            "local/0/fwd_transcription/tc_rate",
             jnp.array([[[0.7]]]),
             tags=["local"],
             overwrite=True,
