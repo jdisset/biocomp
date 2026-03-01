@@ -13,6 +13,9 @@ import jax as _jax  # noqa: E402
 _jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 _jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 
+if _os.environ.get("BIOCOMP_DEBUG_CACHE", "").lower() in ("true", "1"):
+    _jax.config.update("jax_explain_cache_misses", True)
+
 from .library import PartsLibrary as PartsLibrary  # noqa: E402
 
 from .network import (  # noqa: E402

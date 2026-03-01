@@ -119,6 +119,7 @@ def get_cache(
     signature: str,
     cache_location: Optional[PathLike],
     create_dir: bool = True,
+    serializer: Optional[dict[str, Callable]] = None,
 ) -> T:
     """
     Get a cached value or generate it if it doesn't exist.
@@ -127,10 +128,23 @@ def get_cache(
     signature: unique signature for the value
     cache_location: path to the cache directory
     create_dir: whether to create the cache directory if it doesn't exist
+    serializer: optional dict with 'save(data, path)' and 'load(path)' callables.
+                Defaults to pickle if not provided.
     Returns:
     the cached value or the generated value
     """
     import pickle
+
+    def _default_save(data, path):
+        with open(path, "wb") as f:
+            pickle.dump(data, f)
+
+    def _default_load(path):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+
+    save_fn = serializer["save"] if serializer else _default_save
+    load_fn = serializer["load"] if serializer else _default_load
 
     if cache_location is not None:
         sighash = xxhash.xxh128(signature).hexdigest()
@@ -151,17 +165,15 @@ def get_cache(
             return gen_f()
         if cachepath.exists():
             logger.debug(f"Loading {sighash} from cache.")
-            with open(cachepath, "rb") as file:
-                data = pickle.load(file)
+            data = load_fn(cachepath)
         else:
             logger.debug(f"No such signature in cache: {signature}")
             logger.debug(f"Generating {sighash} and saving to cache.")
             data = gen_f()
             try:
-                with open(cachepath, "wb") as file:
-                    pickle.dump(data, file)
+                save_fn(data, cachepath)
             except Exception as e:
-                logger.error(f"Error generating {sighash}: {e}")
+                logger.error(f"Error saving {sighash} to cache: {e}")
     else:
         # no cache location = caching is disabled
         data = gen_f()
@@ -730,7 +742,7 @@ class Timer:
 
 def logb(x, base=10):
     """Compute log of x in base b, handling zeros gracefully."""
-    with np.errstate(divide='ignore', invalid='ignore'):
+    with np.errstate(divide="ignore", invalid="ignore"):
         result = np.log(x) / np.log(base)
     return result
 

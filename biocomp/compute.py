@@ -285,7 +285,15 @@ class StackLayer:
         return f"Layer {layer_id} ({ftype}) with {len(self.nodes)} nodes"
 
     def __hash__(self):
-        return hash(tuple(self.nodes))
+        return hash(
+            (
+                tuple(self.nodes),
+                self.f_type,
+                self.namespace,
+                self.f_input_shapes,
+                tuple(self.f_out_shapes) if self.f_out_shapes else None,
+            )
+        )
 
     def check(self):
         """Ensure all nodes in the layer have the same type signature"""
@@ -363,57 +371,83 @@ class ComputeStack:
             auto_lock_topology_tus: If True, auto-detect TUs whose masking would change topology
         """
         with trace_scope("stack_build", component="stack") as scope:
-            scope.event("build_start", "Beginning stack build", {
-                "n_networks": len(self.networks),
-                "network_names": [n.name for n in self.networks],
-                "enable_tu_masking": enable_tu_masking,
-                "auto_lock_topology_tus": auto_lock_topology_tus,
-            })
+            scope.event(
+                "build_start",
+                "Beginning stack build",
+                {
+                    "n_networks": len(self.networks),
+                    "network_names": [n.name for n in self.networks],
+                    "enable_tu_masking": enable_tu_masking,
+                    "auto_lock_topology_tus": auto_lock_topology_tus,
+                },
+            )
 
             with ut.timer("Building compute stack", logger):
                 self.config = config.model_copy(deep=True)
                 transform_out_dim = self.config.apply_transform_out_dim()
-                scope.event("transform_out_dim", "Applied transform output dimension", {
-                    "transform_out_dim": transform_out_dim,
-                })
+                scope.event(
+                    "transform_out_dim",
+                    "Applied transform output dimension",
+                    {
+                        "transform_out_dim": transform_out_dim,
+                    },
+                )
 
                 if enable_tu_masking:
                     self._build_tu_mapping(auto_lock_topology_tus=auto_lock_topology_tus)
-                    scope.event("tu_mapping_complete", "TU mapping built", {
-                        "n_tus": self.n_tus,
-                        "n_inverse_tus": len(self.inverse_tu_ids) if self.inverse_tu_ids else 0,
-                        "n_no_masking_tus": len(self.no_masking_tu_ids) if self.no_masking_tu_ids else 0,
-                    })
+                    scope.event(
+                        "tu_mapping_complete",
+                        "TU mapping built",
+                        {
+                            "n_tus": self.n_tus,
+                            "n_inverse_tus": len(self.inverse_tu_ids) if self.inverse_tu_ids else 0,
+                            "n_no_masking_tus": len(self.no_masking_tu_ids)
+                            if self.no_masking_tu_ids
+                            else 0,
+                        },
+                    )
                     if self.tu_id_to_idx:
                         scope.snapshot("tu_id_to_idx", dict(self.tu_id_to_idx))
 
                 self._assemble_stack(**kwargs)
-                scope.event("assemble_complete", "Stack assembled", {
-                    "n_layers": len(self.layers) if self.layers else 0,
-                })
+                scope.event(
+                    "assemble_complete",
+                    "Stack assembled",
+                    {
+                        "n_layers": len(self.layers) if self.layers else 0,
+                    },
+                )
 
                 self._refresh()
                 assert self.layers is not None, "No layers"
 
                 for layer_idx, layer in enumerate(self.layers):
                     layer.setup(self.config, stack=self)
-                    scope.event("layer_setup", f"Layer {layer_idx} setup complete", {
-                        "layer_id": layer_idx,
-                        "layer_type": layer.f_type,
-                        "n_nodes": len(layer.nodes),
-                        "namespace": layer.namespace,
-                    })
+                    scope.event(
+                        "layer_setup",
+                        f"Layer {layer_idx} setup complete",
+                        {
+                            "layer_id": layer_idx,
+                            "layer_type": layer.f_type,
+                            "n_nodes": len(layer.nodes),
+                            "namespace": layer.namespace,
+                        },
+                    )
                     self._refresh()
 
                 self._generate_apply_method()
                 self.check()
                 self.is_built = True
 
-            scope.event("build_complete", "Stack build complete", {
-                "n_layers": len(self.layers),
-                "total_nodes": self.number_of_nodes,
-                "output_shape": self.output_shape,
-            })
+            scope.event(
+                "build_complete",
+                "Stack build complete",
+                {
+                    "n_layers": len(self.layers),
+                    "total_nodes": self.number_of_nodes,
+                    "output_shape": self.output_shape,
+                },
+            )
             scope.snapshot("stack_summary", summarize_stack(self))
             if should_save_full_objects():
                 scope.snapshot("stack_full", snapshot_full_stack(self))
@@ -427,11 +461,15 @@ class ComputeStack:
                 build_tu_id_mapping_excluding_inverse(self.networks)
             )
 
-            scope.event("initial_mapping", "Initial TU mapping from networks", {
-                "n_sorted_tu_ids": len(sorted_tu_ids),
-                "n_inverse_tu_ids": len(inverse_tu_ids),
-                "n_no_masking_tu_ids": len(no_masking_tu_ids),
-            })
+            scope.event(
+                "initial_mapping",
+                "Initial TU mapping from networks",
+                {
+                    "n_sorted_tu_ids": len(sorted_tu_ids),
+                    "n_inverse_tu_ids": len(inverse_tu_ids),
+                    "n_no_masking_tu_ids": len(no_masking_tu_ids),
+                },
+            )
 
             if auto_lock_topology_tus:
                 from biocomp.network import find_topology_changing_tus
@@ -439,11 +477,15 @@ class ComputeStack:
                 for net_idx, net in enumerate(self.networks):
                     topology_tus = find_topology_changing_tus(net)
                     if topology_tus:
-                        scope.event("topology_tus_found", "Topology-changing TUs identified", {
-                            "network_idx": net_idx,
-                            "network_name": net.name,
-                            "topology_tu_ids": list(topology_tus),
-                        })
+                        scope.event(
+                            "topology_tus_found",
+                            "Topology-changing TUs identified",
+                            {
+                                "network_idx": net_idx,
+                                "network_name": net.name,
+                                "topology_tu_ids": list(topology_tus),
+                            },
+                        )
                     no_masking_tu_ids.update(topology_tus)
 
             # inverse TUs must never be disabled - they're essential for inversion path
@@ -454,18 +496,25 @@ class ComputeStack:
             self.inverse_tu_ids = inverse_tu_ids
             self.no_masking_tu_ids = no_masking_tu_ids
 
-            scope.event("tu_mapping_finalized", "TU mapping finalized", {
-                "n_tus": self.n_tus,
-                "n_inverse_tus": len(inverse_tu_ids),
-                "n_no_masking_tus": len(no_masking_tu_ids),
-                "inverse_tu_ids": list(inverse_tu_ids),
-                "no_masking_tu_ids": list(no_masking_tu_ids),
-            })
-            scope.snapshot("tu_mapping", {
-                "tu_id_to_idx": dict(tu_id_to_idx),
-                "inverse_tu_ids": list(inverse_tu_ids),
-                "no_masking_tu_ids": list(no_masking_tu_ids),
-            })
+            scope.event(
+                "tu_mapping_finalized",
+                "TU mapping finalized",
+                {
+                    "n_tus": self.n_tus,
+                    "n_inverse_tus": len(inverse_tu_ids),
+                    "n_no_masking_tus": len(no_masking_tu_ids),
+                    "inverse_tu_ids": list(inverse_tu_ids),
+                    "no_masking_tu_ids": list(no_masking_tu_ids),
+                },
+            )
+            scope.snapshot(
+                "tu_mapping",
+                {
+                    "tu_id_to_idx": dict(tu_id_to_idx),
+                    "inverse_tu_ids": list(inverse_tu_ids),
+                    "no_masking_tu_ids": list(no_masking_tu_ids),
+                },
+            )
 
         logger.debug(
             f"Built TU mapping: {self.n_tus} TUs, {len(inverse_tu_ids)} inverse, {len(no_masking_tu_ids)} no_masking"
@@ -512,10 +561,14 @@ class ComputeStack:
             assert self.layers is not None, "No layers"
             assert self.layers_start_index is not None, "No layers start index"
 
-            scope.event("init_start", "Beginning parameter initialization", {
-                "n_layers": len(self.layers),
-                "init_order": "reverse",  # inverse nodes can reference fwd ones
-            })
+            scope.event(
+                "init_start",
+                "Beginning parameter initialization",
+                {
+                    "n_layers": len(self.layers),
+                    "init_order": "reverse",  # inverse nodes can reference fwd ones
+                },
+            )
 
             for l_id, layer in reversed(list(enumerate(self.layers))):
                 assert layer.is_built, "Layer not built"
@@ -530,18 +583,26 @@ class ComputeStack:
                 if layer.f_prepare is not None:
                     try:
                         layer.f_prepare(params, nodelist=layer.nodes, key=rng_key)
-                        scope.event("layer_init", f"Layer {l_id} initialized", {
-                            "layer_id": l_id,
-                            "layer_type": layer.f_type,
-                            "n_nodes": len(layer.nodes),
-                            "namespace": layer.namespace,
-                        })
+                        scope.event(
+                            "layer_init",
+                            f"Layer {l_id} initialized",
+                            {
+                                "layer_id": l_id,
+                                "layer_type": layer.f_type,
+                                "n_nodes": len(layer.nodes),
+                                "namespace": layer.namespace,
+                            },
+                        )
                     except Exception as e:
-                        scope.event("layer_init_error", f"Layer {l_id} init failed", {
-                            "layer_id": l_id,
-                            "layer_type": layer.f_type,
-                            "error": str(e),
-                        })
+                        scope.event(
+                            "layer_init_error",
+                            f"Layer {l_id} init failed",
+                            {
+                                "layer_id": l_id,
+                                "layer_type": layer.f_type,
+                                "error": str(e),
+                            },
+                        )
                         logger.error(f"Error in layer {l_id} preparation:")
                         logger.error(f"Layer type: {layer.f_type}")
                         logger.error(f"Layer input shapes: {layer.f_input_shapes}")
@@ -566,13 +627,19 @@ class ComputeStack:
             from biocomp.nodeutils import NON_GRAD_TAG
 
             params.at(
-                "global/dependent_output_mask", self.get_dependent_output_mask(), tags=[NON_GRAD_TAG]
+                "global/dependent_output_mask",
+                self.get_dependent_output_mask(),
+                tags=[NON_GRAD_TAG],
             )
 
-            scope.event("init_complete", "Parameter initialization complete", {
-                "n_param_paths": len(list(params.data.iter_leaves())),
-                "tagnames": params.tagnames,
-            })
+            scope.event(
+                "init_complete",
+                "Parameter initialization complete",
+                {
+                    "n_param_paths": len(list(params.data.iter_leaves())),
+                    "tagnames": params.tagnames,
+                },
+            )
             scope.snapshot("params_summary", summarize_params(params))
             # Note: Full params snapshot moved to caller (e.g., initialize_params)
             # where values are concrete (outside vmap context)
@@ -735,9 +802,25 @@ class ComputeStack:
         return "\n".join([l.__repr__() for l in self.layers])
 
     def __hash__(self):
-        if self.layers is None:
-            return hash(tuple(self.networks))
-        return hash((tuple(self.networks), tuple(self.layers)))
+        parts: list = [tuple(self.networks)]
+        if self.layers is not None:
+            parts.append(tuple(self.layers))
+        if self.config is not None:
+            import json
+
+            parts.append(
+                hash(
+                    json.dumps(
+                        self.config.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            )
+        parts.append(self.n_tus)
+        if self.tu_id_to_idx:
+            parts.append(tuple(sorted(self.tu_id_to_idx.items())))
+        return hash(tuple(parts))
 
     def __call__(self, *args, **kwargs):
         if not self.is_built:
@@ -1231,9 +1314,7 @@ class ComputeStack:
                     out, _aux = apply_f(*node_args, **node_kwargs)
                     return out  # drop the aux
 
-                def node_apply(
-                    node_id: ArrayLike, network_id: ArrayLike, *inputs: ArrayLike
-                ):
+                def node_apply(node_id: ArrayLike, network_id: ArrayLike, *inputs: ArrayLike):
                     # Derive per-node key from globally unique node_key_id
                     nk_id = params[f"{layer_namespaces[lid]}/node_key_id"][node_id]
                     node_key = jax.random.fold_in(base_node_key, nk_id)
