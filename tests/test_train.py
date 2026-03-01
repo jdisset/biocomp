@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import optax
 from types import SimpleNamespace
 
-from biocomp.train import TrainingConfig, sorting_loss, energy_sampling_loss
+from biocomp.train import TrainingConfig, sorting_loss, energy_sampling_loss, _quantization_kl_loss
 from biocomp.optimutils import make_training_step, create_counter, as_schedule
 from biocomp.parameters import ParameterTree
 from biocomp.utils import PartialFunction, PartialFunctionResult
@@ -1125,6 +1125,201 @@ class TestIntegration:
         # dynamic should contain parameters without non_grad tag
         assert "dynamic_param" in dynamic.data
         assert "dynamic_param" not in static.data
+
+
+class TestKLNormalization:
+    """Test KL loss normalization for multi-dimensional embeddings."""
+
+    @staticmethod
+    def _make_kl_params(rate_dim: int, values: list[list[float]], logstds: list[list[float]], counts: list[float]) -> ParameterTree:
+        params = ParameterTree()
+        params.at(
+            "shared/quantization/values/tc",
+            jnp.array(values),
+            tags=["shared"],
+            overwrite=True,
+        )
+        params.at(
+            "shared/quantization/logstdevs/tc",
+            jnp.array(logstds),
+            tags=["shared"],
+            overwrite=True,
+        )
+        params.at(
+            "shared/quantization/counts/tc",
+            jnp.array(counts).reshape(-1, 1),
+            tags=["shared"],
+            overwrite=True,
+        )
+        return params
+
+    def test_kl_loss_covers_all_embedding_dimensions(self):
+        """Verify per-dimension KL behavior for multi-dim embeddings.
+
+        With the normalization fix, KL is a weighted average over *embeddings*
+        of the full multi-dim KL (sum over dims).  So rate_dim=2 with identical
+        per-dim params should give exactly 2x the KL of rate_dim=1.
+
+        Note: stable_sigma means the formula isn't a pure Gaussian KL, so we
+        test relative behavior (zeroing a dim reduces KL) rather than KL=0.
+        """
+        logstd = -3.0  # matches existing test params; KL is clearly positive here
+
+        # rate_dim=2: two embeddings with non-zero mu in both dims
+        params_2d = self._make_kl_params(
+            rate_dim=2,
+            values=[[0.5, 0.8], [0.3, 0.6]],
+            logstds=[[logstd, logstd], [logstd, logstd]],
+            counts=[2.0, 3.0],
+        )
+        kl_2d, klw, _, _, _, _ = _quantization_kl_loss(params_2d, kl_weight=1.0, step=0)
+        assert float(kl_2d) > 0, "KL should be positive for non-zero means"
+
+        # Zero out dim 0 mu → reduces its contribution, dim 1 still active
+        params_dim1_only = self._make_kl_params(
+            rate_dim=2,
+            values=[[0.0, 0.8], [0.0, 0.6]],
+            logstds=[[logstd, logstd], [logstd, logstd]],
+            counts=[2.0, 3.0],
+        )
+        kl_dim1, _, _, _, _, _ = _quantization_kl_loss(params_dim1_only, kl_weight=1.0, step=0)
+        assert float(kl_dim1) > 0, "KL should be positive (dim 1 still active)"
+        assert float(kl_dim1) < float(kl_2d), "Zeroing dim 0 mu should decrease KL"
+
+        # Zero out both dims mu → KL still positive (logstd term), but smaller
+        params_zero_mu = self._make_kl_params(
+            rate_dim=2,
+            values=[[0.0, 0.0], [0.0, 0.0]],
+            logstds=[[logstd, logstd], [logstd, logstd]],
+            counts=[2.0, 3.0],
+        )
+        kl_zero_mu, _, _, _, _, _ = _quantization_kl_loss(params_zero_mu, kl_weight=1.0, step=0)
+        assert float(kl_zero_mu) < float(kl_dim1), "Zeroing both mu dims should further decrease KL"
+
+    def test_kl_rate_dim2_is_2x_rate_dim1(self):
+        """rate_dim=2 with identical per-dim params gives 2x the KL of rate_dim=1."""
+        mu_val, logstd_val = 0.5, 0.2
+        counts = [2.0, 3.0]
+
+        # rate_dim=1
+        params_1d = self._make_kl_params(
+            rate_dim=1,
+            values=[[mu_val], [mu_val]],
+            logstds=[[logstd_val], [logstd_val]],
+            counts=counts,
+        )
+        kl_1d, _, _, _, _, _ = _quantization_kl_loss(params_1d, kl_weight=1.0, step=0)
+
+        # rate_dim=2 with same value in both dims
+        params_2d = self._make_kl_params(
+            rate_dim=2,
+            values=[[mu_val, mu_val], [mu_val, mu_val]],
+            logstds=[[logstd_val, logstd_val], [logstd_val, logstd_val]],
+            counts=counts,
+        )
+        kl_2d, _, _, _, _, _ = _quantization_kl_loss(params_2d, kl_weight=1.0, step=0)
+
+        assert float(kl_2d) == pytest.approx(2.0 * float(kl_1d), rel=1e-5), (
+            f"rate_dim=2 KL ({float(kl_2d):.6f}) should be 2x rate_dim=1 KL ({float(kl_1d):.6f})"
+        )
+
+    def test_kl_gradient_reaches_every_dimension(self):
+        """Both dimensions of a rate_dim=2 embedding receive independent gradient pressure.
+
+        This is the definitive test: differentiate KL w.r.t. the values array and
+        verify every element (embedding x dim) has a non-zero gradient.  A bug that
+        routes all pressure to dim 0 would leave dim 1 gradients at zero.
+        """
+        values = jnp.array([[0.5, 0.8], [0.3, 0.6]])
+        logstds = jnp.array([[-3.0, -3.0], [-3.0, -3.0]])
+        counts = jnp.array([[2.0], [3.0]])
+
+        def kl_of_values(vals):
+            params = ParameterTree()
+            params.at("shared/quantization/values/tc", vals, tags=["shared"], overwrite=True)
+            params.at("shared/quantization/logstdevs/tc", logstds, tags=["shared"], overwrite=True)
+            params.at("shared/quantization/counts/tc", counts, tags=["shared"], overwrite=True)
+            kl, *_ = _quantization_kl_loss(params, kl_weight=1.0, step=0)
+            return kl
+
+        grad_vals = jax.grad(kl_of_values)(values)
+
+        # Every element must have non-zero gradient
+        assert grad_vals.shape == (2, 2), f"Expected (2,2) grad shape, got {grad_vals.shape}"
+        for emb_idx in range(2):
+            for dim_idx in range(2):
+                g = float(grad_vals[emb_idx, dim_idx])
+                assert abs(g) > 1e-6, (
+                    f"Gradient for embedding {emb_idx}, dim {dim_idx} is ~0 ({g:.2e}); "
+                    f"dim {dim_idx} is not receiving KL pressure"
+                )
+
+    def test_kl_gradient_per_dim_matches_1d_gradient(self):
+        """Each dimension's gradient in rate_dim=2 matches what rate_dim=1 would give.
+
+        Constructs rate_dim=2 with *different* values per dim, then checks that the
+        gradient for each dim column equals the gradient from an equivalent rate_dim=1
+        problem using that column's values.  This rules out any cross-dim coupling or
+        single-dim doubling.
+        """
+        mu_d0 = [0.5, 0.3]
+        mu_d1 = [0.8, 0.6]
+        logstd_val = -3.0
+        count_vals = [2.0, 3.0]
+
+        # rate_dim=2 gradients
+        values_2d = jnp.array([[mu_d0[0], mu_d1[0]], [mu_d0[1], mu_d1[1]]])
+        logstds_2d = jnp.full((2, 2), logstd_val)
+        counts = jnp.array(count_vals).reshape(-1, 1)
+
+        def kl_2d(vals):
+            p = ParameterTree()
+            p.at("shared/quantization/values/tc", vals, tags=["shared"], overwrite=True)
+            p.at("shared/quantization/logstdevs/tc", logstds_2d, tags=["shared"], overwrite=True)
+            p.at("shared/quantization/counts/tc", counts, tags=["shared"], overwrite=True)
+            kl, *_ = _quantization_kl_loss(p, kl_weight=1.0, step=0)
+            return kl
+
+        grad_2d = jax.grad(kl_2d)(values_2d)
+
+        # rate_dim=1 gradient for dim 0's values
+        def kl_1d_d0(vals):
+            p = ParameterTree()
+            p.at("shared/quantization/values/tc", vals, tags=["shared"], overwrite=True)
+            p.at("shared/quantization/logstdevs/tc", jnp.full((2, 1), logstd_val), tags=["shared"], overwrite=True)
+            p.at("shared/quantization/counts/tc", counts, tags=["shared"], overwrite=True)
+            kl, *_ = _quantization_kl_loss(p, kl_weight=1.0, step=0)
+            return kl
+
+        grad_1d_d0 = jax.grad(kl_1d_d0)(jnp.array([[mu_d0[0]], [mu_d0[1]]]))
+
+        # rate_dim=1 gradient for dim 1's values
+        grad_1d_d1 = jax.grad(kl_1d_d0)(jnp.array([[mu_d1[0]], [mu_d1[1]]]))
+
+        # dim 0 column of 2D grad should match the 1D-d0 grad
+        assert jnp.allclose(grad_2d[:, 0], grad_1d_d0.ravel(), atol=1e-6), (
+            f"Dim 0 grad mismatch: 2D={grad_2d[:, 0]}, 1D={grad_1d_d0.ravel()}"
+        )
+        # dim 1 column of 2D grad should match the 1D-d1 grad
+        assert jnp.allclose(grad_2d[:, 1], grad_1d_d1.ravel(), atol=1e-6), (
+            f"Dim 1 grad mismatch: 2D={grad_2d[:, 1]}, 1D={grad_1d_d1.ravel()}"
+        )
+
+    def test_kl_rate_dim1_unchanged(self):
+        """For rate_dim=1, the fix is a no-op — original_counts_sum == counts.sum()."""
+        params = self._make_kl_params(
+            rate_dim=1,
+            values=[[0.3], [0.7]],
+            logstds=[[-1.0], [0.5]],
+            counts=[1.0, 4.0],
+        )
+        kl, klw, qvalues, logstds, counts, std = _quantization_kl_loss(params, kl_weight=1.0, step=0)
+
+        from biocomp.train import stable_sigma
+        mu = qvalues
+        s = stable_sigma(logstds, min_std=1e-3)
+        expected = 0.5 * (counts * (mu**2 + s**2 - 1 - 2 * logstds)).sum() / counts.sum()
+        assert float(kl) == pytest.approx(float(expected), rel=1e-6)
 
 
 if __name__ == "__main__":

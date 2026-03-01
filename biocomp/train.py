@@ -55,6 +55,10 @@ def _aligned_quantization_kl_inputs(params):
     Counts are per-embedding-name (1D per type), but values/logstdevs are
     per-embedding-dimension ((n, rate_dim) per type). Repeat each count
     across its embedding's dimensions so broadcasting works.
+
+    Returns (qvalues, logstds, aligned_counts, original_counts_sum) where
+    original_counts_sum is the sum of counts *before* repeating across
+    dimensions, for correct KL normalization.
     """
     import jax.numpy as jnp
     from jax.tree_util import tree_leaves
@@ -64,9 +68,11 @@ def _aligned_quantization_kl_inputs(params):
     logstd_leaves = tree_leaves(params["shared/quantization/logstdevs"])
     count_leaves = tree_leaves(params["shared/quantization/counts"])
 
+    original_counts_sum = jnp.array(0.0)
     aligned_counts = []
     for count_leaf, value_leaf in zip(count_leaves, value_leaves, strict=True):
         c = jnp.asarray(count_leaf).ravel()
+        original_counts_sum = original_counts_sum + c.sum()
         v = jnp.asarray(value_leaf)
         if v.ndim == 2 and v.shape[1] > 1:
             c = jnp.repeat(c, v.shape[1])
@@ -75,16 +81,21 @@ def _aligned_quantization_kl_inputs(params):
     qvalues = flat_concat(*value_leaves)
     logstds = flat_concat(*logstd_leaves)
     counts = jnp.concatenate(aligned_counts)
-    return qvalues, logstds, counts
+    return qvalues, logstds, counts, original_counts_sum
 
 
 def _quantization_kl_loss(params, kl_weight, step):
-    """KL(q || N(0,1)) for variational codebook embeddings, weighted by usage counts."""
+    """KL(q || N(0,1)) for variational codebook embeddings, weighted by usage counts.
+
+    Normalization uses the original (pre-repeat) counts sum so the formula is a
+    weighted average over *embeddings* of the full multi-dim KL.  For rate_dim=1
+    this is identical to the old behavior; for rate_dim>1 each dimension now gets
+    full KL pressure instead of diluted-by-rate_dim pressure.
+    """
     klw = as_schedule(kl_weight)(step)
-    qvalues, logstds, counts = _aligned_quantization_kl_inputs(params)
+    qvalues, logstds, counts, original_counts_sum = _aligned_quantization_kl_inputs(params)
     std = stable_sigma(logstds, min_std=1e-3)
-    counts_sum = counts.sum()
-    kl = 0.5 * (counts * (qvalues**2 + std**2 - 1 - 2 * logstds)).sum() / counts_sum * klw
+    kl = 0.5 * (counts * (qvalues**2 + std**2 - 1 - 2 * logstds)).sum() / original_counts_sum * klw
     return kl, klw, qvalues, logstds, counts, std
 
 
@@ -204,14 +215,36 @@ def compile_training_step(
             )
         )(params, opt_state, keys, xs, ys)
 
-    logger.info("Compiling training step (for caching)...")
+    logger.info("Compiling training step...")
     t0 = time.time()
     jitable_base = Partial(step, num_z=num_z)
-    compiled = compile_step(
-        jitable_base, (sample_params, sample_opt_state, key, sample_xb, sample_yb)
-    )
+    sample_args = (sample_params, sample_opt_state, key, sample_xb, sample_yb)
+
     if not get_checkify_enabled():
-        logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
+        from biocomp.compilation_cache import (
+            CompilationSignature,
+            cached_compile,
+            loss_function_source_hash,
+            extract_arg_shapes,
+            training_config_compilation_dump,
+        )
+
+        stack_sig = CompilationSignature.for_stack(stack)
+        training_sig = CompilationSignature.for_training_step(
+            stack_sig=stack_sig,
+            training_config_dump=training_config_compilation_dump(training_config),
+            loss_source_hash=loss_function_source_hash(training_config),
+            arg_shapes=extract_arg_shapes(*sample_args),
+        )
+
+        def _do_compile():
+            lowered = jax.jit(jitable_base).lower(*sample_args)
+            return lowered.compile()
+
+        compiled = cached_compile(_do_compile, signature=training_sig)
+        logger.info(f"Training step ready in {time.time() - t0:.2f}s (cached or compiled)")
+    else:
+        compiled = compile_step(jitable_base, sample_args)
 
     return CompiledTrainingStep(
         compiled_step=compiled, stack=stack, optimizer=optimizer, num_z=num_z
@@ -735,9 +768,7 @@ def sorting_loss(
         y_scale = jnp.sqrt(jnp.maximum(selected_var, 1e-12))
         calib_logits = (yhat - Y) / (cdf_calibration_temperature * y_scale[None, :] + 1e-6)
         cdf_prob = jax.nn.sigmoid(calib_logits)
-        cdf_calibration_sqerr = (
-            (cdf_prob - tau_z) ** 2 * selected * output_weights[None, :]
-        )
+        cdf_calibration_sqerr = (cdf_prob - tau_z) ** 2 * selected * output_weights[None, :]
         cdf_calibration_dependent = (cdf_calibration_sqerr * dep_mask[None, :]).sum() / (
             eff_batch_size * dep_mask_sum
         )
@@ -949,12 +980,15 @@ def energy_sampling_loss(
         wsum = jnp.maximum(active_weight, 1e-12)
 
         if independent:
-            abs_err = jnp.abs(yhat_samples_block - y_block[None, :, :]) * block_weights[None, None, :]
+            abs_err = (
+                jnp.abs(yhat_samples_block - y_block[None, :, :]) * block_weights[None, None, :]
+            )
             term_a = (abs_err * selected_1d[None, :, None]).sum() / (k * eff_batch_size * wsum)
 
-            pair_abs = jnp.abs(
-                yhat_samples_block[:, None, :, :] - yhat_samples_block[None, :, :, :]
-            ) * block_weights[None, None, None, :]
+            pair_abs = (
+                jnp.abs(yhat_samples_block[:, None, :, :] - yhat_samples_block[None, :, :, :])
+                * block_weights[None, None, None, :]
+            )
             term_b = (pair_abs * selected_1d[None, None, :, None]).sum() / (
                 k * k * eff_batch_size * wsum
             )
@@ -974,7 +1008,9 @@ def energy_sampling_loss(
         energy = gate * (term_a - pairwise_weight * term_b)
         return energy, {"energy_term_a": term_a, "energy_term_b": term_b}
 
-    def block_coverage_calibration(yhat_samples_block, y_block, block_weights, selected_1d, eff_batch_size):
+    def block_coverage_calibration(
+        yhat_samples_block, y_block, block_weights, selected_1d, eff_batch_size
+    ):
         active_weight = block_weights.sum()
         wsum = jnp.maximum(active_weight, 1e-12)
         gate = (active_weight > 0).astype(y_block.dtype)
@@ -1073,9 +1109,7 @@ def energy_sampling_loss(
         dep_mask_sum = jnp.maximum((dep_mask * output_weights).sum(), 1e-12)
         indep_mask_sum = jnp.maximum((indep_mask * output_weights).sum(), 1e-12)
         mse_dependent = (sqdiff * dep_mask[None, :]).sum() / (eff_batch_size * dep_mask_sum)
-        mse_independent = (sqdiff * indep_mask[None, :]).sum() / (
-            eff_batch_size * indep_mask_sum
-        )
+        mse_independent = (sqdiff * indep_mask[None, :]).sum() / (eff_batch_size * indep_mask_sum)
 
         dep_weights = output_weights * dep_mask.astype(Y.dtype)
         dep_energy, dep_dbg = block_energy_score(
@@ -1112,7 +1146,9 @@ def energy_sampling_loss(
         coverage_loss = lerp(cindep_loss, cdep_loss, ovie)
         ccw = as_schedule(coverage_calibration_weight)(step)
         tdep_loss = block_tail_pinball(yhat_samples, Y, dep_weights, selected_1d, eff_batch_size)
-        tindep_loss = block_tail_pinball(yhat_samples, Y, indep_weights, selected_1d, eff_batch_size)
+        tindep_loss = block_tail_pinball(
+            yhat_samples, Y, indep_weights, selected_1d, eff_batch_size
+        )
         tail_loss = lerp(tindep_loss, tdep_loss, ovie)
         tpw = as_schedule(tail_pinball_weight)(step)
         main_loss = lerp(mse, energy_loss, ew) + ccw * coverage_loss + tpw * tail_loss
