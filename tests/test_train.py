@@ -376,7 +376,7 @@ class TestLossFunctions:
             training_config=None,
             sorting_mse_weight=0.4,
             pinball_weight=0.0,
-            kl_weight=1e-4,
+            kl_weight=2e-4,
             negative_grad_penalty=0.1,
         )
         loss, aux = loss_fn(params, ParameterTree(), x, y, z, key, 0)

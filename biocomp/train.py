@@ -49,6 +49,45 @@ def init_stack(
     return stack, params
 
 
+def _aligned_quantization_kl_inputs(params):
+    """Extract quantization values, logstdevs, counts with aligned shapes.
+
+    Counts are per-embedding-name (1D per type), but values/logstdevs are
+    per-embedding-dimension ((n, rate_dim) per type). Repeat each count
+    across its embedding's dimensions so broadcasting works.
+    """
+    import jax.numpy as jnp
+    from jax.tree_util import tree_leaves
+    from .jaxutils import flat_concat
+
+    value_leaves = tree_leaves(params["shared/quantization/values"])
+    logstd_leaves = tree_leaves(params["shared/quantization/logstdevs"])
+    count_leaves = tree_leaves(params["shared/quantization/counts"])
+
+    aligned_counts = []
+    for count_leaf, value_leaf in zip(count_leaves, value_leaves, strict=True):
+        c = jnp.asarray(count_leaf).ravel()
+        v = jnp.asarray(value_leaf)
+        if v.ndim == 2 and v.shape[1] > 1:
+            c = jnp.repeat(c, v.shape[1])
+        aligned_counts.append(c)
+
+    qvalues = flat_concat(*value_leaves)
+    logstds = flat_concat(*logstd_leaves)
+    counts = jnp.concatenate(aligned_counts)
+    return qvalues, logstds, counts
+
+
+def _quantization_kl_loss(params, kl_weight, step):
+    """KL(q || N(0,1)) for variational codebook embeddings, weighted by usage counts."""
+    klw = as_schedule(kl_weight)(step)
+    qvalues, logstds, counts = _aligned_quantization_kl_inputs(params)
+    std = stable_sigma(logstds, min_std=1e-3)
+    counts_sum = counts.sum()
+    kl = 0.5 * (counts * (qvalues**2 + std**2 - 1 - 2 * logstds)).sum() / counts_sum * klw
+    return kl, klw, qvalues, logstds, counts, std
+
+
 def generate_batches(
     datamanager: du.DataManager,
     n_replicates: int,
@@ -526,7 +565,7 @@ def sorting_loss(
     stack,
     training_config,
     negative_grad_penalty=1.0,
-    kl_weight=0.1,
+    kl_weight=0.2,
     sorting_mse_weight=0.1,
     z_sorting_mse_weight=0.0,
     pinball_weight=0.0,
@@ -551,8 +590,7 @@ def sorting_loss(
     """MSE loss with sorted outputs to learn distribution (quantile-like)."""
     import jax
     import jax.numpy as jnp
-    from jax.tree_util import tree_leaves
-    from .jaxutils import flat_concat, robust_sort
+    from .jaxutils import robust_sort
 
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
     (
@@ -594,15 +632,7 @@ def sorting_loss(
             f"yhat and Y must have the same shape, got {yhat.shape} and {Y.shape}"
         )
 
-        # kl divergence for smooth embeddings
-        klw = as_schedule(kl_weight)(step)
-        qvalues = flat_concat(*tree_leaves(params["shared/quantization/values"]))
-        logstds = flat_concat(*tree_leaves(params["shared/quantization/logstdevs"]))
-        counts = flat_concat(*tree_leaves(params["shared/quantization/counts"]))
-
-        std = stable_sigma(logstds, min_std=1e-3)
-        counts_sum = counts.sum()
-        kl_loss = (counts * (qvalues**2 + std**2 - 1 - 2 * jnp.log(std))).sum() / counts_sum * klw
+        kl_loss, klw, qvalues, logstds, counts, std = _quantization_kl_loss(params, kl_weight, step)
 
         negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
         ngp = as_schedule(negative_grad_penalty)(step)
@@ -809,7 +839,7 @@ def energy_sampling_loss(
     stack,
     training_config,
     negative_grad_penalty=1.0,
-    kl_weight=0.1,
+    kl_weight=0.2,
     percent_batch_used=1.0,
     energy_n_samples=8,
     energy_outputs_independent=True,
@@ -850,8 +880,6 @@ def energy_sampling_loss(
     import math
     import jax
     import jax.numpy as jnp
-    from jax.tree_util import tree_leaves
-    from .jaxutils import flat_concat
 
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
     (
@@ -1017,13 +1045,7 @@ def energy_sampling_loss(
         grads_wrt_inputs = apply_aux["grads_wrt_inputs"]
         aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
 
-        klw = as_schedule(kl_weight)(step)
-        qvalues = flat_concat(*tree_leaves(params["shared/quantization/values"]))
-        logstds = flat_concat(*tree_leaves(params["shared/quantization/logstdevs"]))
-        counts = flat_concat(*tree_leaves(params["shared/quantization/counts"]))
-        std = stable_sigma(logstds, min_std=1e-3)
-        counts_sum = counts.sum()
-        kl_loss = (counts * (qvalues**2 + std**2 - 1 - 2 * jnp.log(std))).sum() / counts_sum * klw
+        kl_loss, klw, qvalues, logstds, counts, std = _quantization_kl_loss(params, kl_weight, step)
 
         negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
         ngp = as_schedule(negative_grad_penalty)(step)
