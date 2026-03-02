@@ -427,6 +427,7 @@ class FigureSpec(ArbitraryModel):
     output_file: Optional[str] = "unnamed.png"
     extra_args: Dict[str, Any] = {}
     layout: FigureLayout = Field(default_factory=SimpleLayout)
+    dpi: int = 300
     metadata: Dict[str, Any] = {}
 
     @property
@@ -490,7 +491,7 @@ class FigureSpec(ArbitraryModel):
 
         if str(output_path).lower().endswith(".png"):
             buf = io.BytesIO()
-            figax.figure.savefig(buf, format="png", bbox_inches="tight")
+            figax.figure.savefig(buf, format="png", bbox_inches="tight", dpi=self.dpi)
             buf.seek(0)
             with Image.open(buf) as img:
                 metadata = PngInfo()
