@@ -143,6 +143,40 @@ class CompiledTrainingStep(NamedTuple):
     num_z: int
 
 
+def _compile_with_cache(jitable_base, sample_args, stack, training_config):
+    """Compile a training step, using the compilation cache when available."""
+    import jax
+
+    t0 = time.time()
+    if not get_checkify_enabled():
+        from biocomp.compilation_cache import (
+            CompilationSignature,
+            cached_compile,
+            extract_arg_shapes,
+            loss_function_source_hash,
+            training_config_compilation_dump,
+        )
+
+        stack_sig = CompilationSignature.for_stack(stack)
+        training_sig = CompilationSignature.for_training_step(
+            stack_sig=stack_sig,
+            training_config_dump=training_config_compilation_dump(training_config),
+            loss_source_hash=loss_function_source_hash(training_config),
+            arg_shapes=extract_arg_shapes(*sample_args),
+        )
+
+        def _do_compile():
+            lowered = jax.jit(jitable_base).lower(*sample_args)
+            compiled = lowered.compile()
+            return compiled
+
+        compiled = cached_compile(_do_compile, signature=training_sig)
+        logger.info(f"Training step ready in {time.time() - t0:.2f}s (cached or compiled)")
+    else:
+        compiled = compile_step(jitable_base, sample_args)
+    return compiled
+
+
 def compile_training_step(
     dman: du.DataManager,
     training_config: "TrainingConfig",
@@ -216,35 +250,9 @@ def compile_training_step(
         )(params, opt_state, keys, xs, ys)
 
     logger.info("Compiling training step...")
-    t0 = time.time()
     jitable_base = Partial(step, num_z=num_z)
     sample_args = (sample_params, sample_opt_state, key, sample_xb, sample_yb)
-
-    if not get_checkify_enabled():
-        from biocomp.compilation_cache import (
-            CompilationSignature,
-            cached_compile,
-            loss_function_source_hash,
-            extract_arg_shapes,
-            training_config_compilation_dump,
-        )
-
-        stack_sig = CompilationSignature.for_stack(stack)
-        training_sig = CompilationSignature.for_training_step(
-            stack_sig=stack_sig,
-            training_config_dump=training_config_compilation_dump(training_config),
-            loss_source_hash=loss_function_source_hash(training_config),
-            arg_shapes=extract_arg_shapes(*sample_args),
-        )
-
-        def _do_compile():
-            lowered = jax.jit(jitable_base).lower(*sample_args)
-            return lowered.compile()
-
-        compiled = cached_compile(_do_compile, signature=training_sig)
-        logger.info(f"Training step ready in {time.time() - t0:.2f}s (cached or compiled)")
-    else:
-        compiled = compile_step(jitable_base, sample_args)
+    compiled = _compile_with_cache(jitable_base, sample_args, stack, training_config)
 
     return CompiledTrainingStep(
         compiled_step=compiled, stack=stack, optimizer=optimizer, num_z=num_z
@@ -254,6 +262,16 @@ def compile_training_step(
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ### {{{                      --     loss functions     --
+
+_GRAD_NODE_TYPES = ["translation", "transcription", "output", "source_new", "source"]
+
+
+def _enable_jacfwd_if_needed(stack, negative_grad_penalty) -> None:
+    """Regenerate stack.apply with jacfwd gradients when negative_grad_penalty is active."""
+    if isinstance(negative_grad_penalty, (int, float)) and negative_grad_penalty == 0:
+        return
+    if hasattr(stack, "_generate_apply_method"):
+        stack._generate_apply_method(get_grads_for=_GRAD_NODE_TYPES)
 
 
 def expand_weights_to_outputs(weights: list[float], networks: list) -> list[float]:
@@ -284,26 +302,33 @@ def stable_sigma(logstd, *, min_std=1e-3):
     return sigma_fwd + jax.lax.stop_gradient(sigma_grad - sigma_fwd)
 
 
-class InversePairSpec(NamedTuple):
-    pair_type: str  # kept for logging only
-    network_id: int
+class InverseLayerPairSpec(NamedTuple):
+    """One entry per unique (fwd_layer, inv_layer) pair — not per node.
+
+    All nodes within a layer share MLP weights and (with sample_embeddings=True)
+    draw IID rate overrides, so a single representative evaluation suffices.
+    """
+
+    pair_type: str
     fwd_layer_id: int
-    fwd_node_pos: int
     inv_layer_id: int
-    inv_node_pos: int
     output_slot: int
     n_fwd_inputs: int
     fwd_input_shape: tuple[int, ...]
-    rate_path: Optional[str] = None
-    is_multi_input: bool = False
-    is_slotted_output: bool = False
+    rate_path: str | None
+    is_multi_input: bool
+    is_slotted_output: bool
+    n_node_pairs: int  # how many individual node pairs this group represents
 
 
-def _discover_inverse_pair_specs(stack) -> tuple[list[InversePairSpec], dict[str, int]]:
+def _discover_inverse_layer_pair_specs(
+    stack,
+) -> tuple[list[InverseLayerPairSpec], dict[str, int]]:
     from .graphengine import is_inverse_node_type
 
     counts: dict[str, int] = {}
-    pair_specs: list[InversePairSpec] = []
+    seen: dict[tuple[int, int], None] = {}
+    pair_specs: list[InverseLayerPairSpec] = []
 
     layers = getattr(stack, "layers", None)
     each_node = getattr(stack, "each_node", None)
@@ -329,8 +354,18 @@ def _discover_inverse_pair_specs(stack) -> tuple[list[InversePairSpec], dict[str
 
         fwd_node = fwd_stacknode.get(stack)
         pair_type = fwd_node.node_type
+        counts[pair_type] = counts.get(pair_type, 0) + 1
 
-        # rate_path: derive from edge content_embedding_names (SSOT)
+        layer_key = (fwd_stacknode.layer_number, inv_stacknode.layer_number)
+        if layer_key in seen:
+            # Increment n_node_pairs on the existing spec
+            idx = next(i for i, s in enumerate(pair_specs) if (s.fwd_layer_id, s.inv_layer_id) == layer_key)
+            pair_specs[idx] = pair_specs[idx]._replace(
+                n_node_pairs=pair_specs[idx].n_node_pairs + 1,
+            )
+            continue
+        seen[layer_key] = None
+
         rate_path = None
         fwd_edges = fwd_stacknode.get_incoming_edges(stack)
         if fwd_edges:
@@ -342,22 +377,19 @@ def _discover_inverse_pair_specs(stack) -> tuple[list[InversePairSpec], dict[str
         is_slotted = inv_node.is_inverse_of.output_len > 1
 
         pair_specs.append(
-            InversePairSpec(
+            InverseLayerPairSpec(
                 pair_type=pair_type,
-                network_id=inv_stacknode.network_id,
                 fwd_layer_id=fwd_stacknode.layer_number,
-                fwd_node_pos=int(fwd_stacknode.node_position_in_layer),
                 inv_layer_id=inv_stacknode.layer_number,
-                inv_node_pos=int(inv_stacknode.node_position_in_layer),
                 output_slot=int(inv_node.is_inverse_of.output_slot),
                 n_fwd_inputs=n_fwd_inputs,
                 fwd_input_shape=tuple(int(d) for d in fwd_layer.f_input_shapes[0]),
                 rate_path=rate_path,
                 is_multi_input=n_fwd_inputs > 1,
                 is_slotted_output=is_slotted,
+                n_node_pairs=1,
             )
         )
-        counts[pair_type] = counts.get(pair_type, 0) + 1
 
     return pair_specs, counts
 
@@ -387,7 +419,7 @@ def _apply_pair_node(
 def _single_inverse_cycle_sample(
     params,
     stack,
-    spec: InversePairSpec,
+    spec: InverseLayerPairSpec,
     x_scalar,
     random_vars,
     sample_key,
@@ -406,11 +438,11 @@ def _single_inverse_cycle_sample(
     x_target = jnp.array([x0], dtype=dtype)
     fwd_input = jnp.broadcast_to(x0, spec.fwd_input_shape)
 
-    fwd_node_id = jnp.asarray(spec.fwd_node_pos, dtype=jnp.int32)
-    inv_node_id = jnp.asarray(spec.inv_node_pos, dtype=jnp.int32)
-    network_id = jnp.asarray(spec.network_id, dtype=jnp.int32)
+    # Representative node: node_id=0, network_id=0 — all nodes in a layer
+    # share MLP weights and (with sample_embeddings) draw IID rate overrides.
+    node_id = jnp.asarray(0, dtype=jnp.int32)
+    network_id = jnp.asarray(0, dtype=jnp.int32)
 
-    # --- Input construction (multi-input vs single-input) ---
     if spec.is_multi_input:
         zeros = jnp.zeros((spec.n_fwd_inputs, *spec.fwd_input_shape), dtype=dtype)
         stacked_inputs = zeros.at[spec.output_slot].set(fwd_input)
@@ -418,19 +450,17 @@ def _single_inverse_cycle_sample(
     else:
         fwd_inputs = (fwd_input,)
 
-    # --- Forward pass ---
     fwd_out, _ = _apply_pair_node(
         fwd_layer.f_apply,
         *fwd_inputs,
         random_vars=random_vars,
         params=params,
-        node_id=fwd_node_id,
+        node_id=node_id,
         key=sample_key,
         network_id=network_id,
         rate_override=rate_override,
     )
 
-    # --- Output extraction (slotted tuple vs scalar) ---
     if spec.is_slotted_output:
         inv_input = jnp.ravel(fwd_out[spec.output_slot])[:1]
     else:
@@ -442,7 +472,7 @@ def _single_inverse_cycle_sample(
         inv_input,
         random_vars=random_vars,
         params=params,
-        node_id=inv_node_id,
+        node_id=node_id,
         key=sample_key,
         network_id=network_id,
         rate_override=rate_override,
@@ -451,10 +481,10 @@ def _single_inverse_cycle_sample(
     return jnp.mean((recon - x_target) ** 2)
 
 
-def _inverse_pair_cycle_loss(
+def _inverse_layer_pair_cycle_loss(
     params,
     stack,
-    spec: InversePairSpec,
+    spec: InverseLayerPairSpec,
     pair_key,
     *,
     num_random_vars: int,
@@ -476,7 +506,7 @@ def _inverse_pair_cycle_loss(
 
     rate_samples = None
     if sample_embeddings and spec.rate_path is not None:
-        base_rate = jnp.asarray(params[spec.rate_path][spec.fwd_node_pos])
+        base_rate = jnp.asarray(params[spec.rate_path][0])  # node 0 (representative)
         rate_samples = jax.random.uniform(
             kemb,
             (batch_size, *base_rate.shape),
@@ -515,7 +545,7 @@ def _inverse_pair_cycle_loss(
 def _compute_inverse_consistency_loss(
     params,
     stack,
-    pair_specs: list[InversePairSpec],
+    pair_specs: list[InverseLayerPairSpec],
     pair_counts: dict[str, int],
     key,
     *,
@@ -529,9 +559,11 @@ def _compute_inverse_consistency_loss(
     import jax
     import jax.numpy as jnp
 
+    total_node_pairs = sum(s.n_node_pairs for s in pair_specs)
     zero = jnp.asarray(0.0, dtype=dtype)
     if not pair_specs:
         return zero, {
+            "inverse_consistency_n_groups": 0,
             "inverse_consistency_n_pairs": 0,
             "inverse_consistency_batch_size": batch_size,
             "inverse_consistency_n_source_pairs": 0,
@@ -540,13 +572,13 @@ def _compute_inverse_consistency_loss(
             "inverse_consistency_n_output_pairs": 0,
         }
 
-    pair_keys = jax.random.split(key, len(pair_specs))
-    pair_losses = [
-        _inverse_pair_cycle_loss(
+    group_keys = jax.random.split(key, len(pair_specs))
+    group_losses = [
+        _inverse_layer_pair_cycle_loss(
             params=params,
             stack=stack,
             spec=spec,
-            pair_key=pk,
+            pair_key=gk,
             num_random_vars=num_random_vars,
             batch_size=batch_size,
             dtype=dtype,
@@ -554,11 +586,12 @@ def _compute_inverse_consistency_loss(
             embedding_low=embedding_low,
             embedding_high=embedding_high,
         )
-        for spec, pk in zip(pair_specs, pair_keys, strict=False)
+        for spec, gk in zip(pair_specs, group_keys, strict=False)
     ]
-    pair_losses_arr = jnp.stack(pair_losses)
-    return jnp.mean(pair_losses_arr), {
-        "inverse_consistency_n_pairs": len(pair_specs),
+    group_losses_arr = jnp.stack(group_losses)
+    return jnp.mean(group_losses_arr), {
+        "inverse_consistency_n_groups": len(pair_specs),
+        "inverse_consistency_n_pairs": total_node_pairs,
         "inverse_consistency_batch_size": batch_size,
         "inverse_consistency_n_source_pairs": pair_counts.get("source", 0),
         "inverse_consistency_n_transcription_pairs": pair_counts.get("transcription", 0),
@@ -574,8 +607,18 @@ def _prepare_inverse_consistency_context(
     sample_embeddings,
     embedding_low,
     embedding_high,
+    weight=None,
 ):
-    pair_specs, pair_counts = _discover_inverse_pair_specs(stack)
+    # Skip pair discovery entirely when weight is statically zero —
+    # avoids tracing layer-pair HLO ops that would be dead code.
+    if isinstance(weight, (int, float)) and weight == 0:
+        return [], {}, int(batch_size), bool(sample_embeddings), float(embedding_low), float(embedding_high)
+
+    pair_specs, pair_counts = _discover_inverse_layer_pair_specs(stack)
+    total_node_pairs = sum(s.n_node_pairs for s in pair_specs)
+    logger.info(
+        f"Inverse consistency: {len(pair_specs)} layer groups ({total_node_pairs} node pairs), counts={pair_counts}"
+    )
     inverse_batch_size = int(batch_size)
     assert inverse_batch_size >= 1, "inverse_consistency_batch_size must be >= 1"
     inverse_embed_low = float(embedding_low)
@@ -625,6 +668,7 @@ def sorting_loss(
     import jax.numpy as jnp
     from .jaxutils import robust_sort
 
+    _enable_jacfwd_if_needed(stack, negative_grad_penalty)
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
     (
         inverse_pair_specs,
@@ -639,6 +683,7 @@ def sorting_loss(
         sample_embeddings=inverse_consistency_sample_embeddings,
         embedding_low=inverse_consistency_embedding_low,
         embedding_high=inverse_consistency_embedding_high,
+        weight=inverse_consistency_weight,
     )
 
     def loss_func(dynamic, static, X, Y, Z, key, step):
@@ -667,9 +712,14 @@ def sorting_loss(
 
         kl_loss, klw, qvalues, logstds, counts, std = _quantization_kl_loss(params, kl_weight, step)
 
-        negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
-        ngp = as_schedule(negative_grad_penalty)(step)
-        ng_loss = negative_grads * ngp
+        if grads_wrt_inputs.size > 0:
+            negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
+            ngp = as_schedule(negative_grad_penalty)(step)
+            ng_loss = negative_grads * ngp
+        else:
+            negative_grads = jnp.float32(0.0)
+            ngp = jnp.float32(0.0)
+            ng_loss = jnp.float32(0.0)
 
         dep_mask = params["global/dependent_output_mask"]
         indep_mask = ~dep_mask
@@ -912,6 +962,7 @@ def energy_sampling_loss(
     import jax
     import jax.numpy as jnp
 
+    _enable_jacfwd_if_needed(stack, negative_grad_penalty)
     batch_apply = jax.vmap(stack.apply, in_axes=(None, 0, 0, 0))
     (
         inverse_pair_specs,
@@ -926,6 +977,7 @@ def energy_sampling_loss(
         sample_embeddings=inverse_consistency_sample_embeddings,
         embedding_low=inverse_consistency_embedding_low,
         embedding_high=inverse_consistency_embedding_high,
+        weight=inverse_consistency_weight,
     )
     n_energy_samples = int(energy_n_samples)
     assert n_energy_samples >= 1, "energy_n_samples must be >= 1"
@@ -1083,9 +1135,14 @@ def energy_sampling_loss(
 
         kl_loss, klw, qvalues, logstds, counts, std = _quantization_kl_loss(params, kl_weight, step)
 
-        negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
-        ngp = as_schedule(negative_grad_penalty)(step)
-        ng_loss = negative_grads * ngp
+        if grads_wrt_inputs.size > 0:
+            negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
+            ngp = as_schedule(negative_grad_penalty)(step)
+            ng_loss = negative_grads * ngp
+        else:
+            negative_grads = jnp.float32(0.0)
+            ngp = jnp.float32(0.0)
+            ng_loss = jnp.float32(0.0)
 
         dep_mask = params["global/dependent_output_mask"]
         indep_mask = ~dep_mask
@@ -1438,10 +1495,9 @@ def start(
         num_z = int(num_z[0])
 
         logger.info("Compiling training step...")
-        t0 = time.time()
-        compiled_step = compile_step(Partial(step, num_z=num_z), (params, opt_state, key, xb, yb))
-        if not get_checkify_enabled():
-            logger.info(f"Compiled training step in {time.time() - t0:.2f} seconds")
+        jitable_base = Partial(step, num_z=num_z)
+        sample_args = (params, opt_state, key, xb, yb)
+        compiled_step = _compile_with_cache(jitable_base, sample_args, stack, training_config)
 
     # --- main training loop
     dispatch = dispatch or NullDispatch()

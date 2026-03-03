@@ -1192,7 +1192,7 @@ class ComputeStack:
         # each layer is taking inputs from a layer that has already been applied.
 
         if get_grads_for is None:
-            get_grads_for = ["translation", "transcription", "output", "source_new", "source"]
+            get_grads_for = []
         assert self.layers is not None, "No layers"
         assert self.layers_start_index is not None, "No layers start index"
         assert self.node_map is not None, "No node map"

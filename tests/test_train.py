@@ -609,6 +609,7 @@ class TestLossFunctions:
         )(params, ParameterTree(), x, y, z, key, 0)
 
         assert "inverse_consistency_loss" in aux_good["sublosses"]
+        assert float(aux_good["debug"]["inverse_consistency_n_groups"]) == 1.0
         assert float(aux_good["debug"]["inverse_consistency_n_pairs"]) == 1.0
         assert aux_bad["sublosses"]["inverse_consistency_loss"] > aux_good["sublosses"][
             "inverse_consistency_loss"
@@ -680,6 +681,7 @@ class TestLossFunctions:
         )(params, ParameterTree(), x, y, z, key, 0)
 
         assert "inverse_consistency_loss" in aux_good["sublosses"]
+        assert float(aux_good["debug"]["inverse_consistency_n_groups"]) == 1.0
         assert float(aux_good["debug"]["inverse_consistency_n_pairs"]) == 1.0
         assert aux_bad["sublosses"]["inverse_consistency_loss"] > aux_good["sublosses"][
             "inverse_consistency_loss"
