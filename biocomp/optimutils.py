@@ -764,6 +764,7 @@ def optimize(
     select_best_synced_params: bool = False,
     best_synced_score_fn: Callable[[ParameterTree, dict, int], float | None] | None = None,
     best_synced_initial_score: float | None = None,
+    step_offset: int = 0,
 ):
     dispatch = dispatch or NullDispatch()
 
@@ -817,7 +818,8 @@ def optimize(
 
     for i, step_key in enumerate(jax.random.split(key, n_total_steps), 1):
         is_epoch_boundary = i % steps_per_epoch == 0
-        logger_needs_sync = dispatch.needs_params_sync(i)
+        global_step = step_offset + i
+        logger_needs_sync = dispatch.needs_params_sync(global_step)
         should_sync = (
             not defer_sync
             or (i % effective_sync_every == 0)
@@ -906,7 +908,7 @@ def optimize(
 
         epoch_step_count += 1
 
-        dispatch.on_step(i, config, step_history, stack)
+        dispatch.on_step(global_step, config, step_history, stack)
 
     t_sync = time.perf_counter()
     jax.block_until_ready(params)
@@ -920,7 +922,7 @@ def optimize(
     total_loop_time = time.perf_counter() - t_loop_start
 
     if not skip_lifecycle:
-        dispatch.on_end(n_total_steps, config, step_history, stack)
+        dispatch.on_end(step_offset + n_total_steps, config, step_history, stack)
 
     # Final summary
     logger.info("=" * 60)

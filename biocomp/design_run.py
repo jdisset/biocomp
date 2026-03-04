@@ -130,6 +130,7 @@ def run_design(
         select_best_synced_params=select_best_synced_params,
         best_synced_score_fn=best_synced_score_fn,
         best_synced_initial_score=best_synced_initial_score,
+        step_offset=initial_step,
     )
     ctx = DesignRuntimeContext(
         stack=session.stack,
