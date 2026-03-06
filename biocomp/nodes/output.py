@@ -108,13 +108,13 @@ def grouped_output(
             from biocomp.tumasking import get_tu_masks
 
             tu_indices = params[input_tu_indices_path][node_id]
-            input_masks = get_tu_masks(
-                params, tu_indices, network_id, is_multi_tu=True
-            )
+            input_masks = get_tu_masks(params, tu_indices, network_id, is_multi_tu=True)
         else:
             input_masks = jnp.ones(len(input_shapes))
 
-        res = vmap(lambda x, rv: MLP_head(x, rv, rng_key=key, params=params))(inputs_arr, random_var)
+        res = vmap(lambda x, rv: MLP_head(x, rv, rng_key=key, params=params))(
+            inputs_arr, random_var
+        )
 
         masks_reshaped = input_masks.reshape(-1, *([1] * len(input_shapes[0])))
         masked_inputs = inputs_arr * masks_reshaped
@@ -208,7 +208,9 @@ def inv_output(
         key,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
-        assert value.shape == input_shapes[0], f"inv_output: expected {input_shapes[0]}, got {value.shape}"
+        assert value.shape == input_shapes[0], (
+            f"inv_output: expected {input_shapes[0]}, got {value.shape}"
+        )
 
         rvid = params[f"{namespace}/random_variable_id"][node_id]
         output_slot = params[f"{namespace}/output_slots"][node_id]
