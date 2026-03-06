@@ -58,9 +58,17 @@ def grouped_output(
 
     mlp = dummy_mlp if dummy else dense_mlp
 
+    # Check if model was trained with random_var in output MLP (set by build_stack)
+    _use_random_var = (
+        stack.config is not None
+        and stack.config.extra is not None
+        and stack.config.extra.get("output_has_random_var", True)
+    )
+
     def MLP_head(x, random_var, rng_key, params):
+        inp = flat_concat(x, random_var) if _use_random_var else flat_concat(x)
         return mlp(
-            flat_concat(x, random_var),
+            inp,
             wsize,
             1,
             depth,

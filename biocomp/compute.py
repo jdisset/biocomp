@@ -1,7 +1,7 @@
 ### {{{                          --     imports     --
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Callable, Optional, Union, Any, TypeVar
+from typing import ClassVar, Callable, Optional, Union, Any, TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -109,6 +109,8 @@ class ComputeConfig(ArbitraryModel):
     node_functions: Optional[dict[str, EncodedPartialFunction]] = None
     extra: Optional[dict[str, Any]] = None
 
+    OUTPUT_WEIGHT_PATH: ClassVar[str] = "shared/NN/grouped_output/l0/w"
+
     def get_node_implementation(self, node_name: str, module_name: str = "biocomp.nodes"):
         if self.node_functions is None:
             raise ValueError("No node implementations in this config")
@@ -116,6 +118,26 @@ class ComputeConfig(ArbitraryModel):
             raise ValueError(f"No node implementation for {node_name}")
 
         return self.node_functions[node_name].get_impl(extra_module_names=[module_name])
+
+    def backfill_from_defaults(self) -> None:
+        """Fill missing node functions from DEFAULT_COMPUTE_CONFIG (for older pickled models)."""
+        if self.node_functions is None or DEFAULT_COMPUTE_CONFIG.node_functions is None:
+            return
+        for name, impl in DEFAULT_COMPUTE_CONFIG.node_functions.items():
+            if name not in self.node_functions:
+                self.node_functions[name] = impl
+                logger.info(f"Backfilled missing node function: {name}")
+
+    def detect_output_compat(self, shared_params: "ParameterTree") -> None:
+        """Detect whether the model was trained with random_var in output MLP."""
+        if self.OUTPUT_WEIGHT_PATH not in shared_params:
+            return
+        w_shape = shared_params[self.OUTPUT_WEIGHT_PATH].shape
+        if self.extra is None:
+            self.extra = {}
+        self.extra["output_has_random_var"] = w_shape[0] != 1
+        if w_shape[0] == 1:
+            logger.info("Model output MLP trained without random_var (backward compat)")
 
     def apply_transform_out_dim(self) -> int:
         """Apply SSOT `transform_out_dim` to forward transform nodes only."""

@@ -326,6 +326,8 @@ class DesignManager(BaseModel):
         logger.info(f"Stack after creation has {len(stack.networks)} networks")
 
         compute_config = model.compute_config.model_copy(deep=True)
+        compute_config.backfill_from_defaults()
+        compute_config.detect_output_compat(model.shared_params)
 
         if unlock_ratios:
             assert compute_config is not None

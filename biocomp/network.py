@@ -1629,12 +1629,10 @@ class Network(BaseModel):
                     min(r for r in raw_ratios if r > 0) if any(r > 0 for r in raw_ratios) else 1.0
                 )
                 ratios = [r / min_r for r in raw_ratios]
-                total = sum(raw_ratios)
-                if total > 0:
-                    for sid, ratio in zip(sorted_ids, raw_ratios, strict=False):
-                        tu_id = source_id_to_tu_id.get(sid)
-                        if tu_id and tu_id in tus:
-                            tus[tu_id].ratio_percent = (ratio / total) * 100
+                for sid, normalized in zip(sorted_ids, ratios, strict=False):
+                    tu_id = source_id_to_tu_id.get(sid)
+                    if tu_id and tu_id in tus:
+                        tus[tu_id].ratio_normalized = normalized
 
             sources.append(
                 SourceData(
