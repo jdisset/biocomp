@@ -1218,7 +1218,7 @@ def flatten_ParameterTree(ptree):
 def unflatten_ParameterTree(aux_data, flat_contents):
     data = flat_contents[0]
     read_only, tagnames, tags = aux_data
-    return ParameterTree(data=data, read_only=read_only, tags=tags, tagnames=tagnames)
+    return ParameterTree(data=data, read_only=read_only, tags=deepcopy(tags), tagnames=tagnames)
 
 
 jtu.register_pytree_node(ParameterTree, flatten_ParameterTree, unflatten_ParameterTree)
@@ -1227,11 +1227,12 @@ jtu.register_pytree_node(ParameterTree, flatten_ParameterTree, unflatten_Paramet
 
 
 def init_if_needed(params, path, init_f, base_path=""):
+    full_path = f"{base_path}/{path}"
     try:
-        return params[f"{base_path}/{path}"]
+        return params[full_path]
     except KeyError:
-        params[f"{base_path}/{path}"] = init_f()
-        return params[f"{base_path}/{path}"]
+        params[full_path] = init_f()
+        return params[full_path]
 
 
 def get_param(params, path, base_path="", **_):

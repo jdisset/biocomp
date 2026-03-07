@@ -1362,7 +1362,7 @@ def run_with_hard_pruning(
         )
 
         if segment_idx == n_segments - 1 and segment_start_params is not None:
-            from .design_prune_controller import evaluate_committed_snapshot, evaluate_segment_snapshot
+            from .design_prune_controller import evaluate_segment_snapshot
 
             guard_key = jax.random.fold_in(loop_key, segment_idx + 3000)
             start_snap = evaluate_segment_snapshot(
@@ -1374,6 +1374,7 @@ def run_with_hard_pruning(
                 segment_start_eval_loss,
             )
             if dconf.hard_pruning_commit_aware_final_guard:
+                from .design_prune_controller import evaluate_committed_snapshot
                 start_committed = evaluate_committed_snapshot(
                     current_dmanager,
                     dconf,
@@ -1430,7 +1431,7 @@ def run_with_hard_pruning(
         accumulated_loss_history.extend(segment_loss_history)
 
         if segment_idx == n_segments - 1 and segment_start_params is not None:
-            from .design_prune_controller import evaluate_committed_snapshot, evaluate_segment_snapshot
+            from .design_prune_controller import evaluate_segment_snapshot
 
             guard_key = jax.random.fold_in(loop_key, segment_idx + 3000)
             end_snap = evaluate_segment_snapshot(
@@ -1444,6 +1445,7 @@ def run_with_hard_pruning(
 
             should_restore = False
             if dconf.hard_pruning_commit_aware_final_guard:
+                from .design_prune_controller import evaluate_committed_snapshot
                 end_committed = evaluate_committed_snapshot(
                     current_dmanager,
                     dconf,
