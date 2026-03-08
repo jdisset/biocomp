@@ -128,8 +128,11 @@ class ComputeConfig(ArbitraryModel):
                 self.node_functions[name] = impl
                 logger.info(f"Backfilled missing node function: {name}")
 
+    INV_OUTPUT_WEIGHT_PATH: ClassVar[str] = "shared/NN/inv_output/l0/w"
+
     def detect_output_compat(self, shared_params: "ParameterTree") -> None:
-        """Detect whether the model was trained with random_var in output MLP."""
+        """Detect whether the model was trained with random_var in output MLP,
+        and whether inv_output was trained (vs backfilled for an older model)."""
         if self.OUTPUT_WEIGHT_PATH not in shared_params:
             return
         w_shape = shared_params[self.OUTPUT_WEIGHT_PATH].shape
@@ -138,6 +141,20 @@ class ComputeConfig(ArbitraryModel):
         self.extra["output_has_random_var"] = w_shape[0] != 1
         if w_shape[0] == 1:
             logger.info("Model output MLP trained without random_var (backward compat)")
+
+        if (
+            self.node_functions
+            and "inv_output" in self.node_functions
+            and self.INV_OUTPUT_WEIGHT_PATH not in shared_params
+        ):
+            from biocomp.utils import PartialFunction
+
+            self.node_functions["inv_output"] = PartialFunction(
+                func="biocomp.nodes.single_passthrough"
+            )
+            logger.info(
+                "inv_output replaced with passthrough (model lacks trained inv_output weights)"
+            )
 
     def apply_transform_out_dim(self) -> int:
         """Apply SSOT `transform_out_dim` to forward transform nodes only."""
