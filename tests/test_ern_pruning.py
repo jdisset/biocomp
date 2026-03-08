@@ -10,7 +10,7 @@ from biocomp.library import LibraryContext, load_lib
 from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.network import recipe_to_networks
-from biocomp.recipe import Recipe
+from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit
 from biocomp.tumasking import TU_LOG_ALPHA_PATH
 from pathlib import Path
 
@@ -352,8 +352,6 @@ class TestEdgeCases:
     def test_no_ern_nodes_noop(self, lib):
         """Networks without ERN nodes pass through unchanged."""
         with LibraryContext.with_library(lib):
-            from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit
-
             simple_recipe = Recipe(
                 name="simple_no_ern",
                 content=[
@@ -377,3 +375,104 @@ class TestEdgeCases:
 
             strip_ern_recs = network._cleanup_ern_nodes(tu_log_alpha, tu_id_to_idx)
             assert len(strip_ern_recs) == 0
+
+
+class TestOrphanErnProteinStripping:
+    """Test Recipe.strip_orphan_ern_proteins()."""
+
+    def test_strips_orphan_ern_protein_tus(self, lib):
+        """ERN protein TUs with no matching rec sites are removed."""
+        with LibraryContext.with_library(lib):
+            recipe = Recipe(
+                name="orphan_test",
+                content=[
+                    CoTransfection(
+                        name="x1",
+                        units=[
+                            TranscriptionUnit(name="marker", slots=["hEF1a", "mKO2"], no_masking=True),
+                            TranscriptionUnit(name="case_protein", slots=["hEF1a", "CasE"]),
+                            TranscriptionUnit(name="pgu_protein", slots=["hEF1a", "PgU"]),
+                        ],
+                        ratios=[0.3, 0.3, 0.4],
+                    ),
+                    CoTransfection(
+                        name="b",
+                        units=[
+                            TranscriptionUnit(name="output", slots=["hEF1a", "PgU_rec", "mNeonGreen"]),
+                        ],
+                    ),
+                ],
+            )
+
+            recipe.strip_orphan_ern_proteins()
+
+            x1_names = [tu.name for tu in recipe.content[0].units]
+            assert "case_protein" not in x1_names, "Orphan CasE should be stripped"
+            assert "pgu_protein" in x1_names, "PgU with matching PgU_rec should be kept"
+            assert "marker" in x1_names, "Marker (no_masking) should be kept"
+
+            # ratios renormalized
+            x1_ratios = recipe.content[0].ratios
+            assert len(x1_ratios) == 2
+            assert abs(sum(x1_ratios) - 1.0) < 1e-4
+
+    def test_preserves_all_when_recs_present(self, lib):
+        """No stripping when all ERN proteins have matching rec sites."""
+        with LibraryContext.with_library(lib):
+            recipe = Recipe(
+                name="no_orphan",
+                content=[
+                    CoTransfection(
+                        name="x1",
+                        units=[
+                            TranscriptionUnit(name="case_protein", slots=["hEF1a", "CasE"]),
+                            TranscriptionUnit(name="target", slots=["hEF1a", "CasE_rec", "mNeonGreen"]),
+                        ],
+                        ratios=[0.5, 0.5],
+                    ),
+                ],
+            )
+
+            recipe.strip_orphan_ern_proteins()
+
+            names = [tu.name for tu in recipe.content[0].units]
+            assert "case_protein" in names
+            assert "target" in names
+
+    def test_no_ern_parts_noop(self, lib):
+        """Recipe without any ERN parts passes through unchanged."""
+        with LibraryContext.with_library(lib):
+            recipe = Recipe(
+                name="simple",
+                content=[
+                    CoTransfection(
+                        name="x1",
+                        units=[
+                            TranscriptionUnit(name="tu1", slots=["hEF1a", "mNeonGreen"]),
+                        ],
+                    ),
+                ],
+            )
+
+            recipe.strip_orphan_ern_proteins()
+            assert len(recipe.content[0].units) == 1
+
+    def test_no_masking_tus_preserved(self, lib):
+        """ERN protein TUs with no_masking=True are never stripped."""
+        with LibraryContext.with_library(lib):
+            recipe = Recipe(
+                name="protected_ern",
+                content=[
+                    CoTransfection(
+                        name="x1",
+                        units=[
+                            TranscriptionUnit(
+                                name="case_protein", slots=["hEF1a", "CasE"], no_masking=True
+                            ),
+                        ],
+                    ),
+                ],
+            )
+
+            recipe.strip_orphan_ern_proteins()
+            assert len(recipe.content[0].units) == 1

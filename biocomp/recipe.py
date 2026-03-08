@@ -337,6 +337,18 @@ class TranscriptionUnit(BaseModel):
                 self.params[emb.name] = [emb.default_part]
                 self.param_ref_ids[emb.name] = None  # default parameters have no ref_id
 
+    def get_part_names(self) -> set[str]:
+        """All unique part name strings across all slots."""
+        parts: set[str] = set()
+        for slot in self.slots:
+            assert isinstance(slot, Slot)
+            p = slot.part
+            if isinstance(p, str):
+                parts.add(p)
+            elif isinstance(p, list):
+                parts.update(name for name in p if isinstance(name, str))
+        return parts
+
     def to_parts(self) -> list[Union[str, list[str]]]:
         """Convert slots back to a parts representation"""
         return [s.part if not isinstance(s.part, list) else s.part for s in self.slots]  # type: ignore
@@ -569,6 +581,67 @@ class Recipe(BaseModel):
         valid_axes = {"x", "y"}
         for cotx, axis in self.axis_mapping.items():
             assert axis in valid_axes, f"axis_mapping[{cotx}] must be 'x' or 'y', got '{axis}'"
+        return self
+
+    def strip_orphan_ern_proteins(self) -> "Recipe":
+        """Remove ERN protein TUs that have no matching rec sites anywhere in the recipe.
+
+        After design pruning, ERN protein TUs (CasE, Csy4, PgU) may survive even when
+        all their target rec sites have been pruned. These orphan proteins are biologically
+        useless and should be removed. Mutates in place and returns self.
+        """
+        from biocomp.nodes.ern import ERN_DEFAULT_NEG_PARTS, ERN_DEFAULT_POS_PARTS
+
+        ern_to_recs = {
+            neg: set(pos_list)
+            for neg, pos_list in zip(ERN_DEFAULT_NEG_PARTS, ERN_DEFAULT_POS_PARTS, strict=True)
+        }
+        all_rec_names = {r for recs in ern_to_recs.values() for r in recs}
+
+        present_recs: set[str] = set()
+        for cotx in self.content:
+            for tu in cotx.units:
+                present_recs.update(tu.get_part_names() & all_rec_names)
+
+        orphan_proteins = {
+            ern for ern, recs in ern_to_recs.items() if not (recs & present_recs)
+        }
+        if not orphan_proteins:
+            return self
+
+        for cotx in self.content:
+            original_units = cotx.units
+            original_ratios = cotx.ratios
+            keep_indices = [
+                i for i, tu in enumerate(original_units)
+                if not (tu.get_part_names() & orphan_proteins) or tu.no_masking
+            ]
+            for i, tu in enumerate(original_units):
+                if i not in set(keep_indices):
+                    logger.info(
+                        f"Stripping orphan ERN protein TU '{tu.name}' "
+                        f"(orphan proteins={tu.get_part_names() & orphan_proteins}) "
+                        f"from cotx '{cotx.name}'"
+                    )
+
+            if len(keep_indices) < len(original_units):
+                idx_map = {old: new for new, old in enumerate(keep_indices)}
+                cotx.units = [original_units[i] for i in keep_indices]
+                if original_ratios is not None and len(original_ratios) == len(original_units):
+                    kept_ratios = [original_ratios[i] for i in keep_indices]
+                    total = sum(cotx._get_ratio_value(r) for r in kept_ratios)
+                    cotx.ratios = [
+                        round(cotx._get_ratio_value(r) / total, RATIO_PRECISION)
+                        for r in kept_ratios
+                    ] if total > 0 else kept_ratios
+                if cotx.fluo_bias is not None:
+                    new_idx = idx_map.get(cotx.fluo_bias.tu_id)
+                    cotx.fluo_bias = (
+                        cotx.fluo_bias.model_copy(update={"tu_id": new_idx})
+                        if new_idx is not None else None
+                    )
+
+        self.content = [c for c in self.content if c.units]
         return self
 
     def has_input_order(self) -> bool:

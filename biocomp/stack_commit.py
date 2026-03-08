@@ -321,6 +321,7 @@ def rebuild_network_from_recipe(
 
     try:
         recipe = net.to_recipe(strip_ern_recs=strip_ern_recs)
+        recipe.strip_orphan_ern_proteins()
     except (AssertionError, IndexError, KeyError) as exc:
         return CommitResult(
             status=CommitStatus.DEGENERATE_RECIPE_ERROR,
