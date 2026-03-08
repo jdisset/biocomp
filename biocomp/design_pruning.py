@@ -1249,7 +1249,7 @@ def run_with_hard_pruning(
     model: "BiocompModel",
     dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
-) -> tuple["ParameterTree", list, StepHistorySnapshot, "DesignManager"]:
+) -> tuple["ParameterTree", list, StepHistorySnapshot, "DesignManager", "DesignConfig"]:
     """Design optimization with periodic hard-pruning."""
     from .design import start
     from .design_session import PhaseTimer as _PhaseTimer
@@ -1681,4 +1681,4 @@ def run_with_hard_pruning(
     assert final_step_history is not None, (
         "No step history produced during hard-pruning optimization"
     )
-    return segment_params, accumulated_loss_history, final_step_history, current_dmanager
+    return segment_params, accumulated_loss_history, final_step_history, current_dmanager, dconf
