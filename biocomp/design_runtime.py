@@ -80,6 +80,7 @@ class GradientStepAdapter:
     best_synced_score_fn: Any = None
     best_synced_initial_score: float | None = None
     step_offset: int = 0
+    emit_step_zero: bool = True
 
     def run(
         self,
@@ -106,6 +107,7 @@ class GradientStepAdapter:
             best_synced_score_fn=self.best_synced_score_fn,
             best_synced_initial_score=self.best_synced_initial_score,
             step_offset=self.step_offset,
+            emit_step_zero=(self.emit_step_zero and self.step_offset == 0),
         )
         return DesignRuntimeResult(
             params=params,

@@ -765,6 +765,7 @@ def optimize(
     best_synced_score_fn: Callable[[ParameterTree, dict, int], float | None] | None = None,
     best_synced_initial_score: float | None = None,
     step_offset: int = 0,
+    emit_step_zero: bool = False,
 ):
     dispatch = dispatch or NullDispatch()
 
@@ -811,6 +812,14 @@ def optimize(
     logger.info(f"[OPTIMIZE] Starting {config.n_epochs} epochs, {n_total_steps} total steps")
     logger.info(f"[OPTIMIZE] Config: {steps_per_epoch} steps/epoch, defer_sync={defer_sync}")
     logger.info(f"[OPTIMIZE] Dispatch: {type(dispatch).__name__}")
+
+    if emit_step_zero:
+        xb0, yb0 = xbatches[0], ybatches[0]
+        step0_key = jax.random.fold_in(key, 0)
+        _, _, step0_history = compiled_step(params, opt_state, step0_key, xb0, yb0)
+        jax.block_until_ready(step0_history)
+        step0_history["latest_params"] = params
+        dispatch.on_step(step_offset, config, step0_history, stack)
 
     t_loop_start = time.perf_counter()
     epoch_start_time = t_loop_start
