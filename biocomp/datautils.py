@@ -523,6 +523,10 @@ class DataConfig(BaseModel):
     rescaler: DataRescaler = Field(default_factory=CompressedSymLogRescaler)
     calibration_artifact_threshold_low: float = -700.0
     calibration_artifact_threshold_high: float = 2e7
+    build_inverse: bool | str = Field(
+        default='all',
+        description="Whether to build inverse nodes. 'all' = all inversions, True = all, False = no inversion.",
+    )
 
 
 DEFAULT_DATA_CONFIG = DataConfig(rescaler=CompressedSymLogRescaler())

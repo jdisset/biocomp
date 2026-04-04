@@ -54,11 +54,18 @@ class StackNode:
 
         Uses get_max_output_slot() to determine required outputs, not unique slot count.
         This handles sparse slots correctly (e.g., slots 0,7 requires 8 outputs, not 2).
+
+        For inverse nodes, includes the forward node's output_len to prevent grouping
+        inverse nodes whose forward counterparts have different parameter shapes (e.g.,
+        different random_variable_id widths).
         """
         node = graph.nodes[node_id]
         n_inputs = len(graph.get_incoming_edges(node_id))
         n_outputs = graph.get_max_output_slot(node_id)
-        return f"{node.node_type}_{n_inputs}_{n_outputs}"
+        sig = f"{node.node_type}_{n_inputs}_{n_outputs}"
+        if node.is_inverse_of is not None:
+            sig += f"_fwd{node.is_inverse_of.output_len}"
+        return sig
 
     def _get_compute_graph(self, stack: "ComputeStack") -> GraphState:
         assert stack.networks is not None, "Stack has no networks"

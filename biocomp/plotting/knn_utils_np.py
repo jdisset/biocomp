@@ -108,34 +108,32 @@ def get_gaussian_weighted_knn(
     eps = 1e-12
 
     if adaptive_sigma:
-        distances, indices = tree.query(x, k=k)
-        empty_neighbor_mask = ~np.isfinite(distances)
+        distances, indices = tree.query(x, k=k, workers=-1)
+        finite_mask = np.isfinite(distances)
 
-        # per-query sigma from the distance to the k-th neighbor
-        # use the largest finite distance in the row if the k-th is inf
-        kth = distances.copy()
-        # with finite neighbors, take the maximum finite distance
-        max_finite = np.where(np.isfinite(kth), kth, -np.inf).max(axis=1)
+        # per-query sigma from the largest finite distance in each row
+        max_finite = np.where(finite_mask, distances, -np.inf).max(axis=1)
         sigma = (max_finite / sigma_in_radius).reshape(-1, 1) + eps
-        # if a row has no finite neighbors, sigma will be eps (we'll NaN it below)
 
         if max_radius is not None:
-            beyond_max = distances > max_radius
-            empty_neighbor_mask = empty_neighbor_mask | beyond_max
+            valid_mask = finite_mask & (distances <= max_radius)
+        else:
+            valid_mask = finite_mask
 
-        nb_points = (~empty_neighbor_mask).sum(axis=1)
+        nb_points = valid_mask.sum(axis=1)
     else:
         # fixed-radius
-        distances, indices = tree.query(x, k=k, distance_upper_bound=radius)
-        empty_neighbor_mask = ~np.isfinite(distances)
-        nb_points = (~empty_neighbor_mask).sum(axis=1)
+        distances, indices = tree.query(x, k=k, distance_upper_bound=radius, workers=-1)
+        valid_mask = np.isfinite(distances)
+        nb_points = valid_mask.sum(axis=1)
         sigma = (radius / sigma_in_radius) + 0.0  # scalar
 
     Z = np.exp(-0.5 * (distances / sigma) ** 2)
 
-    Z[empty_neighbor_mask] = 0.0
+    invalid_mask = ~valid_mask
+    Z[invalid_mask] = 0.0
     indices = indices.copy()
-    indices[empty_neighbor_mask] = 0
+    indices[invalid_mask] = 0
 
     if densities is not None and density_power > 0.0:  # density reweighting
         dens_nei = densities[indices]
