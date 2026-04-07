@@ -1043,20 +1043,28 @@ class ParameterTree:
             if isinstance(tags, str):
                 tags = [tags]
 
-            scope.event("filter_start", "Beginning parameter tree filter", {
-                "tags": tags,
-                "mode": mode,
-                "source_n_paths": len(list(self.data.iter_leaves())),
-                "source_tagnames": self.tagnames,
-            })
+            scope.event(
+                "filter_start",
+                "Beginning parameter tree filter",
+                {
+                    "tags": tags,
+                    "mode": mode,
+                    "source_n_paths": len(list(self.data.iter_leaves())),
+                    "source_tagnames": self.tagnames,
+                },
+            )
 
             for t in tags:
                 if t not in self.tagnames:
                     # raise KeyError(f"Tag {t} not found in ParameterTree")
                     logger.debug(f"Tag {t} not found in ParameterTree")
-                    scope.event("tag_not_found", "Tag not found, returning empty left tree", {
-                        "missing_tag": t,
-                    })
+                    scope.event(
+                        "tag_not_found",
+                        "Tag not found, returning empty left tree",
+                        {
+                            "missing_tag": t,
+                        },
+                    )
                     return ParameterTree(), self
 
             tag_ids = [self.__tagdict[tag] for tag in tags]
@@ -1104,10 +1112,14 @@ class ParameterTree:
 
             left_n_paths = len(list(left_param_tree.data.iter_leaves()))
             right_n_paths = len(list(right_param_tree.data.iter_leaves()))
-            scope.event("filter_complete", "Parameter tree filter complete", {
-                "left_n_paths": left_n_paths,
-                "right_n_paths": right_n_paths,
-            })
+            scope.event(
+                "filter_complete",
+                "Parameter tree filter complete",
+                {
+                    "left_n_paths": left_n_paths,
+                    "right_n_paths": right_n_paths,
+                },
+            )
 
             return left_param_tree, right_param_tree
 
@@ -1133,13 +1145,17 @@ class ParameterTree:
             left_paths = list(left.data.iter_leaves())
             right_paths = list(right.data.iter_leaves())
 
-            scope.event("merge_start", "Beginning parameter tree merge", {
-                "left_n_paths": len(left_paths),
-                "right_n_paths": len(right_paths),
-                "left_tagnames": left.tagnames,
-                "right_tagnames": right.tagnames,
-                "which": which,
-            })
+            scope.event(
+                "merge_start",
+                "Beginning parameter tree merge",
+                {
+                    "left_n_paths": len(left_paths),
+                    "right_n_paths": len(right_paths),
+                    "left_tagnames": left.tagnames,
+                    "right_tagnames": right.tagnames,
+                    "which": which,
+                },
+            )
 
             for left_tag_name in left.tagnames:
                 merged.add_new_tag(left_tag_name)
@@ -1159,7 +1175,9 @@ class ParameterTree:
                 if path in right.data:
                     conflicts.append(str(path))
                     if not which:
-                        raise ValueError(f"Path {path} found in both trees, specify which arg to merge")
+                        raise ValueError(
+                            f"Path {path} found in both trees, specify which arg to merge"
+                        )
                     if which == "left":
                         setval(path, left_data, left.tags[path])
                     elif which == "right":
@@ -1178,12 +1196,16 @@ class ParameterTree:
             merged.set_read_only(left.read_only and right.read_only)
 
             merged_paths = list(merged.data.iter_leaves())
-            scope.event("merge_complete", "Parameter tree merge complete", {
-                "merged_n_paths": len(merged_paths),
-                "n_conflicts": len(conflicts),
-                "conflicts": conflicts[:10],  # First 10
-                "merged_tagnames": merged.tagnames,
-            })
+            scope.event(
+                "merge_complete",
+                "Parameter tree merge complete",
+                {
+                    "merged_n_paths": len(merged_paths),
+                    "n_conflicts": len(conflicts),
+                    "conflicts": conflicts[:10],  # First 10
+                    "merged_tagnames": merged.tagnames,
+                },
+            )
 
             return merged
 
@@ -1224,6 +1246,25 @@ def unflatten_ParameterTree(aux_data, flat_contents):
 jtu.register_pytree_node(ParameterTree, flatten_ParameterTree, unflatten_ParameterTree)
 
 ##────────────────────────────────────────────────────────────────────────────}}}
+
+
+def overlay_shared_params(
+    init_shared: ParameterTree,
+    shared_override: ParameterTree,
+    local: ParameterTree | None = None,
+) -> ParameterTree:
+    """Overlay trained shared params onto a parameter tree, preserving local params.
+
+    If ``local`` is None, ``init_shared`` is treated as a full param tree and
+    split by the ``"shared"`` tag to extract local params.  If ``local`` is
+    provided, ``init_shared`` must already be the shared-only subtree.
+
+    The override wins on path conflicts (trained values replace init values).
+    """
+    if local is None:
+        init_shared, local = init_shared.filter_by_tag(["shared"])
+    merged_shared = ParameterTree.merge(init_shared, shared_override, which="right")
+    return ParameterTree.merge(merged_shared, local)
 
 
 def init_if_needed(params, path, init_f, base_path=""):

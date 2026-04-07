@@ -1364,8 +1364,6 @@ def start(
                 if x is None:
                     return None
                 x_arr = jnp.asarray(x)
-                if x_arr.ndim == 0:
-                    x_arr = x_arr[None]
                 return jnp.repeat(x_arr[None, ...], n_reps, axis=0)
 
             params = jax.tree.map(replicate_leaf, params)
