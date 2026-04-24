@@ -644,6 +644,30 @@ class Recipe(BaseModel):
         self.content = [c for c in self.content if c.units]
         return self
 
+    @classmethod
+    def load_from_paper_yaml(cls, path: "str | Path") -> "Recipe":
+        """Load a Recipe from a paper-recipe YAML that may carry a leading
+        `_metadata:` block before `!biocomp.recipe.Recipe`.
+
+        Handles the design-pipeline convention where recipe files are written
+        as `yaml.dump({'_metadata': ...}) + dracon.dump(recipe)` — stripping
+        the metadata preamble before handing the remainder to Dracon.
+        """
+        import dracon as dr
+
+        content = Path(path).read_text()
+        tag = '!biocomp.recipe.Recipe'
+        if f'\n{tag}' in content:
+            content = content[content.index(f'\n{tag}') + 1:]
+        obj = dr.loads(content, context={'Recipe': cls, 'biocomp.recipe.Recipe': cls})
+        if isinstance(obj, cls):
+            return obj
+        if hasattr(obj, 'get'):
+            recipe = obj.get('recipe', obj)
+            if isinstance(recipe, cls):
+                return recipe
+        raise TypeError(f"loaded object is not a Recipe: {type(obj)}")
+
     def has_input_order(self) -> bool:
         """Check if recipe has explicit input order defined."""
         return self.input_order is not None and len(self.input_order) > 0
