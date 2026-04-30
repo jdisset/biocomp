@@ -37,9 +37,9 @@ def scatter_3d_interactive(
 
     xmin, xmax = xlims  # noqa: F841
 
-    protein_order, protein_names = get_reordered_protein_names(network, **kw)
-    input_order, output_pos = protein_order[:-1], protein_order[-1]
-    input_names, output_name = protein_names[:-1], protein_names[-1]
+    input_order, output_pos, input_names, output_name = get_reordered_protein_names(
+        network, **kw
+    )
 
     random_order = np.random.permutation(len(x))
     y = y[random_order, output_pos]
@@ -126,8 +126,8 @@ def scatter_3d(
 ):
     (
         input_order,
-        input_names,
         output_pos,
+        input_names,
         output_name,
         ticks,
         ticklabels,

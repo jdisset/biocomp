@@ -1663,9 +1663,9 @@ def smooth_line_plot(
 ):
     if with_quantiles is None:
         with_quantiles = [0.25, 0.75]
-    protein_order, protein_names = get_reordered_protein_names(network, **kw)
-    input_order, output_pos = protein_order[:-1], protein_order[-1]
-    input_names, output_name = protein_names[:-1], protein_names[-1]
+    input_order, output_pos, input_names, output_name = get_reordered_protein_names(
+        network, **kw
+    )
 
     y = y[:, output_pos]
 
@@ -1747,9 +1747,9 @@ def smooth_line_slices(
     outerslices = slices[1] if len(slices) > 1 else []
     innerslices = slices[0] if len(slices) > 0 else []
 
-    protein_order, protein_names = get_reordered_protein_names(network, input_order=input_order)
-    input_order, _output_pos = protein_order[:-1], protein_order[-1]
-    input_names, _output_name = protein_names[:-1], protein_names[-1]
+    input_order, _output_pos, input_names, _output_name = get_reordered_protein_names(
+        network, input_order=input_order
+    )
 
     x = x[:, input_order]
 

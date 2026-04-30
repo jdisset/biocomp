@@ -96,6 +96,15 @@ class PlotData(ArbitraryModel):
     input_names: List[str] = []
     output_name: str | List[str] = "output"
 
+    # Canonical protein-name identity of each X column, in the network's
+    # `get_inverted_input_proteins()` namespace (no display aliases applied).
+    # `None` means "X is not anchored to a specific network's wiring" — the
+    # boundary assertions at NetworkPrediction will skip identity checking
+    # in that case (used for design-space PlotData with placeholder X1/X2
+    # labels). Producers of network-aligned PlotData (extract_*_from_network)
+    # MUST set this so X-column scrambling can be detected at handoff.
+    column_proteins: Optional[List[str]] = None
+
     metadata: Dict[str, Any] = {}
 
     force_single_output: bool = True
@@ -610,27 +619,9 @@ class FigureSpec(ArbitraryModel):
 ## {{{                       --     network utils     --
 
 
-def get_reordered_protein_names(
-    network: Network,
-    input_order: Optional[Sequence[int] | Sequence[str] | Literal["inv"]] = None,
-    protein_aliases: Optional[Dict[str, str]] = None,
-    only_dependent_outputs: bool = True,
-) -> Tuple[list[int], int, list[str], str]:
-    protein_aliases = protein_aliases or {}
-    protein_order, protein_names, noutputs = pc.get_reordered_protein_names(
-        network,
-        input_order,
-        protein_aliases,
-        only_dependent_outputs=only_dependent_outputs,
-    )
-    input_order, output_pos = protein_order[:-noutputs], protein_order[-noutputs:]
-    input_names, output_name = protein_names[:-noutputs], protein_names[-noutputs:]
-
-    if noutputs == 1:
-        output_pos = output_pos[0]
-        output_name = output_name[0]
-
-    return input_order, output_pos, input_names, output_name
+# SSOT re-export: the canonical definition lives in biocomp.plotting.plotting_core.
+# Returns (in_order, output_pos, reordered_input_names, output_name).
+get_reordered_protein_names = pc.get_reordered_protein_names
 
 
 def extract_plot_data_from_network(
@@ -652,11 +643,15 @@ def extract_plot_data_from_network(
     assert x.shape[1] == len(input_order), f"X shape: {x.shape}, input_order: {input_order}"
     assert y.shape[0] == x.shape[0], f"y shape: {y.shape}, x shape: {x.shape}"
 
+    raw_input_names = network.get_inverted_input_proteins()
+    column_proteins = [raw_input_names[i] for i in input_order]
+
     d = PlotData(
         xval=x,
         yval=y,
         input_names=input_names,
         output_name=output_name,
+        column_proteins=column_proteins,
         **kw,
     )
 
@@ -695,10 +690,14 @@ def extract_lazy_plot_data_from_network(
         logger.debug(f"get_xy: x{x.shape} y{y.shape}")
         return x, y
 
+    raw_input_names = network.get_inverted_input_proteins()
+    column_proteins = [raw_input_names[i] for i in input_order]
+
     d = LazyPlotData(
         get_xy=get_xy,
         input_names=input_names,
         output_name=output_name,
+        column_proteins=column_proteins,
         **kw,
     )
 

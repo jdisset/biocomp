@@ -79,13 +79,25 @@ def get_bio_color(name, default="k"):
 def get_reordered_protein_names(
     network, input_order=None, protein_aliases=None, only_dependent_outputs=True, **_
 ):
-    """
-    input_order can be a mix of protein names, protein aliases, integers, and '*'
-    - protein names and aliases will be converted to lowercase to find matches
-    - integers will be used as indices
-    - '*' will be replaced by the missing indices
-    """
+    """Resolve a column convention for X (and the dependent-output positions for Y).
 
+    `input_order` semantics:
+      - ``None``: identity. X is assumed to already be in network order
+        (see `network.get_inverted_input_proteins()`). No reorder applied.
+      - ``"inv"``: reverse network order.
+      - list of ints / protein names / aliases / ``"*"``: explicit permutation
+        into network order.
+
+    Never silently falls back to alphabetical or any other heuristic — that
+    fallback was the root cause of the X-column scrambling bug class
+    (see bugs/eval-x-axis-permutation-iRFP720.md). Callers wanting a
+    display-order sort must request it explicitly via the protein-name list
+    form (typically `recipe.input_order` on the network's recipe).
+
+    Returns a 4-tuple: ``(in_order, output_pos, reordered_input_names, output_name)``.
+    `output_pos` and `output_name` are scalars when there's a single dependent
+    output; lists otherwise.
+    """
     input_names = network.get_inverted_input_proteins()
     output_names = network.get_output_proteins(only_dependent_outputs=only_dependent_outputs)
 
@@ -94,62 +106,63 @@ def get_reordered_protein_names(
         {k.lower(): v for k, v in protein_aliases.items()} if protein_aliases else {}
     )
 
-    if input_order is not None and input_order != "inv":
+    if input_order is None:
+        # Identity: X is already in network order.
+        in_order = list(range(len(input_names)))
+        reordered_input_names = list(input_names)
+    elif input_order == "inv":
+        in_order = list(range(len(input_names) - 1, -1, -1))
+        reordered_input_names = [input_names[i] for i in in_order]
+    else:
         old_order = deepcopy(input_order)
-
+        resolved: list = []
         if any(isinstance(i, str) for i in old_order):
-            input_order = []
             for iname in old_order:
                 if isinstance(iname, str):
                     if iname == "*":
-                        input_order.append("*")
+                        resolved.append("*")
                     else:
-                        iname = iname.lower()
-                        if iname in lower_input_names:
-                            input_order.append(lower_input_names.index(iname))
-                        elif iname in lower_protein_aliases:
-                            input_order.append(
-                                lower_input_names.index(lower_protein_aliases[iname])
+                        iname_low = iname.lower()
+                        if iname_low in lower_input_names:
+                            resolved.append(lower_input_names.index(iname_low))
+                        elif iname_low in lower_protein_aliases:
+                            resolved.append(
+                                lower_input_names.index(lower_protein_aliases[iname_low])
                             )
                         else:
                             raise ValueError(f"Invalid protein name: {iname}")
                 else:
-                    # should be a regular index
                     assert isinstance(iname, (int, np.integer)), f"Invalid protein index: {iname}"
                     assert iname in range(len(input_names)), f"Invalid protein index: {iname}"
-                    input_order.append(iname)
+                    resolved.append(int(iname))
+        else:
+            resolved = [int(i) for i in old_order]
 
-        assert len(input_order) == len(input_names), (
-            f"Wrong number of inputs: {input_order=}, {input_names=}"
+        assert len(resolved) == len(input_names), (
+            f"Wrong number of inputs: {resolved=}, {input_names=}"
         )
 
-        if "*" in input_order:
-            missing = set(range(len(input_names))) - set(input_order)
-            input_order = [i if i != "*" else missing.pop() for i in input_order]
+        if "*" in resolved:
+            missing = set(range(len(input_names))) - set(resolved)
+            resolved = [i if i != "*" else missing.pop() for i in resolved]
 
-        reordered_input_names = [input_names[i] for i in input_order]
-        in_order = input_order
-    else:
-        reordered_input_names = sorted(input_names, reverse=input_order == "inv")
-
-        in_order = [input_names.index(i) for i in reordered_input_names]
+        in_order = resolved
+        reordered_input_names = [input_names[i] for i in in_order]
 
     # output_names already respects only_dependent_outputs from get_output_proteins
-    output_name = list(output_names)  # Make a copy
-
+    output_name = list(output_names)
     if len(output_name) > 1:
         logger.debug(f"multiple output proteins found: {output_name}")
-    # Get positions of outputs in the full output list (before any filtering)
     all_outputs = network.get_output_proteins(only_dependent_outputs=False)
     output_pos = [all_outputs.index(n) for n in output_name]
-
-    noutput = len(output_pos)
 
     if protein_aliases is not None:
         reordered_input_names = [protein_aliases.get(n, n) for n in reordered_input_names]
         output_name = [protein_aliases.get(n, n) for n in output_name]
 
-    return list(in_order) + output_pos, list(reordered_input_names) + output_name, noutput
+    if len(output_pos) == 1:
+        return in_order, output_pos[0], reordered_input_names, output_name[0]
+    return in_order, output_pos, reordered_input_names, output_name
 
 
 def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):

@@ -692,6 +692,25 @@ class Recipe(BaseModel):
         return [x_cotx, y_cotx]
 
 
+def default_input_order_for_network(network) -> list[str]:
+    """Single source of truth for the default input_order heuristic.
+
+    Used by:
+    - the recipe migration tool to fill `input_order` on recipes that
+      lack it on disk
+    - `recipe_to_networks()` final fallback when a Recipe somehow reaches
+      runtime without `input_order` set (and no axis_mapping derivation
+      applies)
+
+    Currently: freeze whatever the post-rewriting natural input order is.
+    This makes the runtime fallback a structural no-op (apply_input_order
+    becomes identity) while still anchoring `recipe.input_order` on disk
+    against future graph-rewriting drift after migration. Replace this body
+    to switch heuristics; nothing else needs to change.
+    """
+    return list(network.get_inverted_input_proteins())
+
+
 ## {{{                      --     recipe loading     --
 
 
