@@ -449,15 +449,11 @@ class FigureSpec(ArbitraryModel):
         return fax
 
     def save_figure(self, figax: FigAx) -> None:
-        import io
         import json
         import shutil
         import tempfile
         import time
         from datetime import datetime
-
-        from PIL import Image
-        from PIL.PngImagePlugin import PngInfo
 
         assert self.output_file is not None
         output_path = self.output_path
@@ -499,14 +495,13 @@ class FigureSpec(ArbitraryModel):
         }
 
         if str(output_path).lower().endswith(".png"):
-            buf = io.BytesIO()
-            figax.figure.savefig(buf, format="png", bbox_inches="tight", dpi=self.dpi)
-            buf.seek(0)
-            with Image.open(buf) as img:
-                metadata = PngInfo()
-                for key, value in full_metadata.items():
-                    metadata.add_text(key, value)
-                img.save(temp_path, pnginfo=metadata)
+            figax.figure.savefig(
+                temp_path,
+                format="png",
+                bbox_inches="tight",
+                dpi=self.dpi,
+                metadata={k: str(v) for k, v in full_metadata.items()},
+            )
         elif str(output_path).lower().endswith(".pdf"):
             full_metadata["CreationDate"] = datetime.now()  # type: ignore
             figax.figure.savefig(temp_path, metadata=full_metadata, bbox_inches="tight")
