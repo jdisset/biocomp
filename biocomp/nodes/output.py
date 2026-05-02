@@ -12,7 +12,6 @@ from biocomp.nodeutils import (
     add_node_network_ids,
     add_random_var_ids,
     add_node_key_ids,
-    reference_forward_random_var_ids,
     reference_forward_key_ids,
     NON_GRAD_TAG,
 )
@@ -191,12 +190,41 @@ def inv_output(
 
     def prepare(params: ParameterTree, nodelist: list[StackNode], key: PRNGKey):
         MLP_head(x=np.zeros(input_shapes[0]), random_var=np.zeros(()), rng_key=key, params=params)
-        reference_forward_random_var_ids(stack, params, nodelist, namespace)
-        reference_forward_key_ids(stack, params, nodelist, namespace)
-        output_slots = jnp.array(
-            [n.get(stack).is_inverse_of.output_slot for n in nodelist], dtype=jnp.int32
+        # Resolve each inverse-output node's forward random_variable_id at its
+        # specific output_slot, eagerly, into a plain 1-D int array. The
+        # forward output layers run earlier in the reverse-order init loop, so
+        # their random_variable_id arrays already exist in params here.
+        #
+        # Why eager rather than an ArrayRef across forward layers:
+        #
+        # 1. Heterogeneous slot widths. Forward output layers bucket networks
+        #    by signature, so num_per_node varies (e.g. 3 vs 4 input edges)
+        #    across forward output layers in the same dataset. A row-style
+        #    ArrayRef requires uniform inner shape. A scalar (fwd_pos, slot)
+        #    ArrayRef survives heterogeneity but produces a multi-index gather
+        #    in the JIT'd apply graph.
+        #
+        # 2. The multi-index gather pattern, fused with the rest of the apply
+        #    pipeline on heterogeneous-output datasets, has hit XLA runtime
+        #    dispatch failures (`Function copy_gather_fusion.* not found`) on
+        #    JAX 0.6.0 / Apple Silicon. Pre-resolving to a plain int array
+        #    bypasses the ArrayRef gather entirely.
+        #
+        # The ID values are non-grad and allocated exactly once by the forward
+        # output layer's prepare(), so eager resolution is safe.
+        rvids_resolved = []
+        for node in nodelist:
+            fwd_node = node.get_forward_stacknode(stack)
+            fwd_namespace = stack.get_layer_namespace(fwd_node.layer_number)
+            slot = node.get(stack).is_inverse_of.output_slot
+            fwd_rvid_arr = params.data[f"{fwd_namespace}/random_variable_id"]
+            rvids_resolved.append(int(fwd_rvid_arr[fwd_node.node_position_in_layer, slot]))
+        params.at(
+            f"{namespace}/random_variable_id",
+            jnp.array(rvids_resolved, dtype=jnp.int32),
+            tags=[NON_GRAD_TAG],
         )
-        params.at(f"{namespace}/output_slots", output_slots, tags=[NON_GRAD_TAG])
+        reference_forward_key_ids(stack, params, nodelist, namespace)
         add_node_network_ids(params, nodelist, namespace)
 
     def apply(
@@ -213,8 +241,7 @@ def inv_output(
         )
 
         rvid = params[f"{namespace}/random_variable_id"][node_id]
-        output_slot = params[f"{namespace}/output_slots"][node_id]
-        random_var = random_vars[rvid[output_slot]]
+        random_var = random_vars[rvid]
 
         mlp_out = MLP_head(value, random_var, key, params)
 
