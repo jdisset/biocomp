@@ -940,3 +940,5 @@ color_maps:
     - "#7C003C"
 
 default_color_map: bc_blues
+
+#compute relative nrmse delta

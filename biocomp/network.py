@@ -28,7 +28,12 @@ from biocomp.graphengine import (
     is_inverse_node_type,
 )
 from biocomp.graphrules import GraphRewritingRule
-from biocomp.tracing import trace_scope, serialize_graph, should_save_full_objects, snapshot_full_network
+from biocomp.tracing import (
+    trace_scope,
+    serialize_graph,
+    should_save_full_objects,
+    snapshot_full_network,
+)
 from biocomp.ratio_schema import get_slot_entries
 import biocomp.biorules as br
 
@@ -484,7 +489,13 @@ class Network(BaseModel):
         # track TUs that feed any non-ERN node
         neg_tu_other_usage: set[str] = set()
 
-        internal_node_types = {"source", "transcription", "translation", "aggregation", "passthrough"}
+        internal_node_types = {
+            "source",
+            "transcription",
+            "translation",
+            "aggregation",
+            "passthrough",
+        }
 
         for edge in self.compute_graph.edges.values():
             target_node = self.compute_graph.nodes.get(edge.target_id)
@@ -1740,29 +1751,41 @@ def recipe_to_networks(
         lib = lib or LibraryContext.get_library()
         assert lib is not None, "PartsLibrary must be provided or set in LibraryContext"
 
-        scope.event("recipe_start", "Converting recipe to networks", {
-            "recipe_name": recipe.name,
-            "n_cotx": len(recipe.content) if recipe.content else 0,
-            "invert": invert,
-            "inversion_mode": inversion_mode,
-            "n_rules": len(rules),
-        })
+        scope.event(
+            "recipe_start",
+            "Converting recipe to networks",
+            {
+                "recipe_name": recipe.name,
+                "n_cotx": len(recipe.content) if recipe.content else 0,
+                "invert": invert,
+                "inversion_mode": inversion_mode,
+                "n_rules": len(rules),
+            },
+        )
 
         cdg = build_central_dogma_graph_direct(recipe.content, lib)
-        scope.event("cdg_built", "Central dogma graph built", {
-            "n_nodes": len(cdg.nodes),
-            "n_edges": len(cdg.edges),
-        })
+        scope.event(
+            "cdg_built",
+            "Central dogma graph built",
+            {
+                "n_nodes": len(cdg.nodes),
+                "n_edges": len(cdg.edges),
+            },
+        )
         scope.snapshot("cdg_graph", serialize_graph(cdg))
 
         compg = apply_rule_sequence(rules, cdg)
         assert len(compg) == 1, "Multiple computation graphs generated before inversion"
         compg = compg[0]
 
-        scope.event("rules_applied", "Graph rewriting rules applied", {
-            "n_nodes_after": len(compg.nodes),
-            "n_edges_after": len(compg.edges),
-        })
+        scope.event(
+            "rules_applied",
+            "Graph rewriting rules applied",
+            {
+                "n_nodes_after": len(compg.nodes),
+                "n_edges_after": len(compg.edges),
+            },
+        )
 
         _check_for_split_sequestron(compg, recipe.name)
         compg = br.sort_output_edges(compg)
@@ -1772,10 +1795,14 @@ def recipe_to_networks(
         scope.snapshot("compute_graph", serialize_graph(compg))
 
         graphs = invert_all_paths(compg, mode=inversion_mode) if invert else [compg]
-        scope.event("inversion_complete", "Path inversion complete", {
-            "n_graphs": len(graphs),
-            "inversion_mode": inversion_mode if invert else "none",
-        })
+        scope.event(
+            "inversion_complete",
+            "Path inversion complete",
+            {
+                "n_graphs": len(graphs),
+                "inversion_mode": inversion_mode if invert else "none",
+            },
+        )
 
         result = []
 
@@ -1785,14 +1812,21 @@ def recipe_to_networks(
             # Skip degenerate graphs with no output nodes (can happen when all TUs are disabled)
             output_nodes = [n for n in graph.nodes.values() if n.node_type == "output"]
             if len(output_nodes) == 0:
-                logger.debug(f"Skipping degenerate graph with no output nodes (recipe: {recipe.name})")
-                scope.event("skip_degenerate", "Skipping degenerate graph", {
-                    "graph_idx": graph_idx,
-                    "reason": "no_output_nodes",
-                })
+                logger.debug(
+                    f"Skipping degenerate graph with no output nodes (recipe: {recipe.name})"
+                )
+                scope.event(
+                    "skip_degenerate",
+                    "Skipping degenerate graph",
+                    {
+                        "graph_idx": graph_idx,
+                        "reason": "no_output_nodes",
+                    },
+                )
                 continue
 
             net = Network(compute_graph=graph)
+            net.metadata["cell_type"] = recipe.cell_type
             dependent_outputs_names = "_".join(net.get_dependent_output_proteins())
             base_name = recipe.name or "network"
             net.name = f"{base_name}_{dependent_outputs_names}"
@@ -1860,21 +1894,29 @@ def recipe_to_networks(
                             f"Network has inputs: {input_proteins}, recipe specifies: {effective_input_order}"
                         )
 
-            scope.event("network_created", f"Network {graph_idx} created", {
-                "graph_idx": graph_idx,
-                "network_name": net.name,
-                "n_nodes": len(graph.nodes),
-                "n_edges": len(graph.edges),
-                "n_outputs": net.nb_outputs,
-                "n_inputs": net.nb_inputs,
-            })
+            scope.event(
+                "network_created",
+                f"Network {graph_idx} created",
+                {
+                    "graph_idx": graph_idx,
+                    "network_name": net.name,
+                    "n_nodes": len(graph.nodes),
+                    "n_edges": len(graph.edges),
+                    "n_outputs": net.nb_outputs,
+                    "n_inputs": net.nb_inputs,
+                },
+            )
             result.append(net)
 
-        scope.event("recipe_complete", "Recipe to networks conversion complete", {
-            "recipe_name": recipe.name,
-            "n_networks": len(result),
-            "network_names": [n.name for n in result],
-        })
+        scope.event(
+            "recipe_complete",
+            "Recipe to networks conversion complete",
+            {
+                "recipe_name": recipe.name,
+                "n_networks": len(result),
+                "network_names": [n.name for n in result],
+            },
+        )
         if should_save_full_objects():
             scope.snapshot("networks_full", [snapshot_full_network(n) for n in result])
 
@@ -2778,52 +2820,91 @@ def get_uorf_names(uorf_values, ern_names):
     return uorf_names
 
 
-def get_all_uorf_values(network):
+def _uorf_values_for_ern_slot(network, ern_id: int, slot: int, tu_info) -> int:
+    """Max uORF value across all TUs that feed `ern_id`'s input slot `slot`.
+
+    Each TU is identified by a unique `tu_id` on its DNA edge (source -> transcription).
+    This walk collects every such tu_id reachable backwards from the ERN's slot-`slot`
+    incoming edge, and returns the MAX uORF value across the contributing TUs.
+
+    MAX is chosen so that "is this input uORF-free?" filters work correctly:
+    if any contributor carries a uORF, the value is non-zero.
+
+    Fixes two earlier bugs:
+      - `incoming_to_tl[0]` silently dropped additional contributors when
+        multiple RNAs merged into one translation node (ConstraintsV2_3
+        ERN_ERNuORFsum_NxCasE case).
+      - Source nodes carrying multiple TUs (e.g. L2 plasmids expanded into
+        CasER+eYFP *and* eBFP2 TUs) collapsed to one entry when keyed by
+        source_id — the CasER1x uORF got clobbered by the eBFP2 TU.
+    """
+    graph = network.compute_graph
+    assert graph is not None
+
+    incoming = [
+        e for e in graph.edges.values() if e.target_id == ern_id and e.to_input_slot == slot
+    ]
+    if not incoming:
+        return 0
+
+    # One entry per TU (not per source — L2 plasmids expand to multiple TUs
+    # sharing a source node).
+    tu_by_id = {tu["tu_id"]: tu for tu in tu_info if tu["tu_id"]}
+
+    visited_nodes: set[int] = set()
+    contributor_tu_ids: set[str] = set()
+
+    def walk(node_id: int):
+        if node_id in visited_nodes:
+            return
+        visited_nodes.add(node_id)
+        node = graph.nodes.get(node_id)
+        if node is None:
+            return
+        # When we reach a transcription node, identify the TU via the DNA
+        # edge feeding it (one-to-one: transcription <- DNA <- source).
+        if node.node_type == "transcription":
+            for e in graph.edges.values():
+                if e.target_id == node_id and e.content_type == "DNA" and e.extra.tu_id:
+                    contributor_tu_ids.update(e.extra.tu_id)
+            return  # no further walk needed past transcription
+        for e in graph.edges.values():
+            if e.target_id == node_id:
+                walk(e.source_id)
+
+    for edge in incoming:
+        walk(edge.source_id)
+
+    values = [tu_by_id[tid]["uorf_value"] for tid in contributor_tu_ids if tid in tu_by_id]
+    return max(values, default=0)
+
+
+def get_all_uorf_values(network, lib=None):
+    """Per-ERN (uORF_on_slot0, uORF_on_slot1) values.
+
+    Derives from `get_all_tu_info` + graph-backward walk. Slot 0 is the
+    ERN's negative (protein) input; slot 1 is the positive (RNA) input.
+    Each scalar is the MAX uORF value across all TUs feeding that slot.
+    See `_uorf_values_for_ern_slot` for rationale.
+    """
+    from biocomp.library import load_lib
+
+    if lib is None:
+        lib = load_lib()
+
     assert network.compute_graph is not None
+    tu_info = get_all_tu_info(network, lib)
+
     ERN_ids = get_all_ERN_ids(network)
     ERN_names = get_all_ERNs_names(network)
     values = []
-
     for ern_id in ERN_ids:
-        incoming_edges = [e for e in network.compute_graph.edges.values() if e.target_id == ern_id]
-        incoming_edges = sorted(incoming_edges, key=lambda e: e.to_input_slot)
-
-        if len(incoming_edges) >= 2:
-            edge0 = incoming_edges[0]
-            edge1 = incoming_edges[1]
-
-            # Try to get embedding names from edge, or trace back to translation node
-            val0 = _get_uorf_value_from_edge_or_source(network.compute_graph, edge0)
-            val1 = _get_uorf_value_from_edge_or_source(network.compute_graph, edge1)
-            values.append((val0, val1))
-        else:
-            values.append((0, 0))
+        val0 = _uorf_values_for_ern_slot(network, ern_id, 0, tu_info)
+        val1 = _uorf_values_for_ern_slot(network, ern_id, 1, tu_info)
+        values.append((val0, val1))
 
     names = get_uorf_names(values, ERN_names)
     return tuple(values), tuple(names)
-
-
-def _get_uorf_value_from_edge_or_source(graph, edge):
-    """Get uORF value from edge's content_embedding_names, or trace back to find it."""
-    # First try direct embedding names on the edge
-    if hasattr(edge, "content_embedding_names") and edge.content_embedding_names:
-        return get_uorf_value(edge.content_embedding_names)
-
-    # If edge has no embedding info, trace back through the source node
-    source_node = graph.nodes.get(edge.source_id)
-    if source_node and source_node.node_type == "translation":
-        # Find the incoming edge to this translation node
-        incoming_to_tl = [e for e in graph.edges.values() if e.target_id == source_node.node_id]
-        if incoming_to_tl:
-            # Get the first incoming edge (should be from transcription)
-            tl_input_edge = incoming_to_tl[0]
-            if (
-                hasattr(tl_input_edge, "content_embedding_names")
-                and tl_input_edge.content_embedding_names
-            ):
-                return get_uorf_value(tl_input_edge.content_embedding_names)
-
-    return 0
 
 
 def get_ERN_ids(network):
@@ -2967,59 +3048,164 @@ def get_tu_parts(tu, lib):
     return get_parts_categories(parts, lib)
 
 
-def get_all_parts(network, lib=None):
+def _embedding_part_names(embedding_value) -> list[str]:
+    """Extract part-name strings from an edge's content_embedding_names entry.
+
+    Values are typically tuples of strings (e.g. `('3x_uORF',)`) but may be a
+    single string in legacy data. Filters out the sentinel `00_empty_tc` used
+    to mark "no uORF" / "no promoter".
+    """
+    if not embedding_value:
+        return []
+    if isinstance(embedding_value, (list, tuple)):
+        items = list(embedding_value)
+    else:
+        items = [embedding_value]
+    return [str(x) for x in items if x and x != "00_empty_tc"]
+
+
+def get_all_tu_info(network, lib=None) -> list[dict]:
+    """Canonical per-TU extraction (SSOT for parts / uORF / promoter info).
+
+    Walks the compute graph once, iterating over source nodes and their
+    outgoing DNA edges (one TU per (source, cotx-group)). For each TU it
+    collects:
+
+    - `source_id`:      compute_graph node id of the source
+    - `tu_id`:          full tu_id string (includes _cotxN suffix)
+    - `tu_name`:        the L1/L2 plasmid name stripped of _cotxN
+    - `cotx`:           cotx-group index parsed from tu_id, or None
+    - `translation_id`: compute_graph node id of the downstream translation
+                         node this TU feeds (for ERN-side lookups)
+    - `parts`:          {part_name: category} union of edge.content parts
+                         AND the parts carried as `tc_rate` / `tl_rate`
+                         embeddings (promoter + 5'UTR/uORF)
+    - `promoter_parts`: list[str] from tc_rate embedding
+    - `uorf_parts`:     list[str] from tl_rate embedding (stripped of the
+                         `00_empty_tc` sentinel)
+    - `uorf_value`:     int (UORF_DICT-scale) parsed from the first uorf_part;
+                         0 when no uORF
+
+    Both `get_all_parts` and `get_all_uorf_values` derive from this.
+    """
     from biocomp.library import load_lib
 
     if lib is None:
         lib = load_lib()
 
-    # Try to get transcription_units if they exist (old system compatibility)
-    if hasattr(network, "transcription_units") and network.transcription_units:
-        return {tname: get_tu_parts(t, lib) for tname, t in network.transcription_units.items()}
+    if not network.compute_graph:
+        return []
 
-    # Otherwise, extract from the graph (new system)
-    result = {}
-    if network.compute_graph:
-        # Find source nodes which represent transcription units (node_type is "source" in new system)
-        source_nodes = [n for n in network.compute_graph.nodes.values() if n.node_type == "source"]
-        for node in source_nodes:
-            # Look for parts in outgoing edges - each edge may represent a different TU
-            edges = [e for e in network.compute_graph.edges.values() if e.source_id == node.node_id]
-            for edge in edges:
-                # Get TU name from edge's extra.tu_id if available, otherwise from source node
-                tu_name = None
-                if edge.extra.tu_id:
-                    # Extract TU name from tu_id (e.g., 'L1-CasER1w_eYFP_cotx2' -> 'L1-CasER1w_eYFP')
-                    tu_id_full = edge.extra.tu_id[0]
-                    # Remove the _cotxN suffix
-                    tu_name = tu_id_full.rsplit("_cotx", 1)[0]
-                elif node.extra and "name" in node.extra:
-                    tu_name = node.extra["name"]
+    tus: list[dict] = []
+    for node in network.compute_graph.nodes.values():
+        if node.node_type != "source":
+            continue
 
-                if tu_name:
-                    parts = {}
-                    # Check for Part objects in content
-                    if hasattr(edge, "content") and edge.content:
-                        for item in edge.content:
-                            if hasattr(item, "name"):
-                                # It's a Part object
-                                part_name = item.name
-                                if part_name in lib.parts.index:
-                                    parts[part_name] = lib.parts.loc[part_name].category
-                            elif isinstance(item, str) and item in lib.parts.index:
-                                # It's a string part name
-                                parts[item] = lib.parts.loc[item].category
+        outgoing_dna = [
+            e
+            for e in network.compute_graph.edges.values()
+            if e.source_id == node.node_id and e.content_type == "DNA"
+        ]
 
-                    if parts:
-                        # Add a suffix to distinguish multiple TUs from same source
-                        # Count how many TUs we've already seen with this base name
-                        base_name = tu_name
-                        counter = 1
-                        final_name = f"{base_name}_{counter}"
-                        while final_name in result:
-                            counter += 1
-                            final_name = f"{base_name}_{counter}"
-                        result[final_name] = parts
+        for edge in outgoing_dna:
+            tu_id_full = edge.extra.tu_id[0] if edge.extra.tu_id else None
+            tu_name: Optional[str]
+            cotx_idx: Optional[int] = None
+            if tu_id_full:
+                tu_name = tu_id_full.rsplit("_cotx", 1)[0]
+                suffix = tu_id_full.rsplit("_cotx", 1)
+                if len(suffix) == 2:
+                    try:
+                        cotx_idx = int(suffix[1])
+                    except ValueError:
+                        cotx_idx = None
+            else:
+                tu_name = (node.extra or {}).get("name") if node.extra else None
+
+            # Downstream translation node (via RNA edge out of the transcription
+            # node that `edge` targets). Used by uORF-per-ERN extraction.
+            translation_id: Optional[int] = None
+            for rna in network.compute_graph.edges.values():
+                if rna.source_id == edge.target_id and rna.content_type == "RNA":
+                    tgt = network.compute_graph.nodes.get(rna.target_id)
+                    if tgt and tgt.node_type == "translation":
+                        translation_id = tgt.node_id
+                        break
+
+            parts: dict[str, str] = {}
+
+            def _add(name):
+                if name and name in lib.parts.index:
+                    parts[name] = lib.parts.loc[name].category
+
+            if edge.content:
+                for item in edge.content:
+                    if hasattr(item, "name"):
+                        _add(item.name)
+                    elif isinstance(item, str):
+                        _add(item)
+
+            cen = edge.content_embedding_names or {}
+            promoter_parts = _embedding_part_names(cen.get("tc_rate"))
+            uorf_parts = _embedding_part_names(cen.get("tl_rate"))
+            for p in (*promoter_parts, *uorf_parts):
+                _add(p)
+
+            uorf_value = 0
+            for up in uorf_parts:
+                try:
+                    n = (
+                        int(up[:-1].split("_")[0][:-1]) * 10
+                        if up.split("_")[0][:-1].isdigit()
+                        else 0
+                    )
+                except (ValueError, IndexError):
+                    n = 0
+                # More robust re-parse via get_uorf_value on the embedding dict:
+                n = get_uorf_value({"tl_rate": (up,)})
+                uorf_value = max(uorf_value, n)
+
+            tus.append(
+                dict(
+                    source_id=node.node_id,
+                    tu_id=tu_id_full,
+                    tu_name=tu_name,
+                    cotx=cotx_idx,
+                    translation_id=translation_id,
+                    parts=parts,
+                    promoter_parts=promoter_parts,
+                    uorf_parts=uorf_parts,
+                    uorf_value=uorf_value,
+                )
+            )
+
+    return tus
+
+
+def get_all_parts(network, lib=None):
+    """Per-TU parts (name → category) — includes content AND embedded parts.
+
+    Fix: earlier versions missed the promoter and 5'UTR/uORF because those
+    parts are carried on edges as `tc_rate` / `tl_rate` embedding names
+    rather than in `edge.content`. Derives from `get_all_tu_info` which is
+    the single source of truth.
+    """
+    from biocomp.library import load_lib
+
+    if lib is None:
+        lib = load_lib()
+
+    result: dict[str, dict[str, str]] = {}
+    for tu in get_all_tu_info(network, lib):
+        if not tu["parts"] or not tu["tu_name"]:
+            continue
+        base = tu["tu_name"]
+        counter = 1
+        final = f"{base}_{counter}"
+        while final in result:
+            counter += 1
+            final = f"{base}_{counter}"
+        result[final] = dict(tu["parts"])
 
     return result
 

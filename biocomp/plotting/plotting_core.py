@@ -225,12 +225,17 @@ def format_powers(x, *_, n_decimals=1):
             return rf"${int(x)}$"  # No decimal point
         else:
             return rf"${x:.1f}$"  # Up to 1 decimal point
-    else:
-        E = int(np.log10(abs_x))
-        if x == int(x):
-            return r"${0:.0f}e{1}$".format(x // 10**E, E)
-        else:
-            return r"${0:.{2}f}e{1}$".format(x / 10**E, E, n_decimals)
+    sign = "-" if x < 0 else ""
+    E = int(np.floor(np.log10(abs_x)))
+    mantissa = round(abs_x / 10**E, n_decimals)
+    # Renormalize when rounding overflows the mantissa (e.g. 9.99 → 10 with
+    # n_decimals=0, which would print "10e3" instead of "1e4").
+    if mantissa >= 10:
+        mantissa /= 10
+        E += 1
+    if abs(mantissa - round(mantissa)) < 10 ** (-n_decimals - 1):
+        return r"${0}{1:.0f}e{2}$".format(sign, mantissa, E)
+    return r"${0}{1:.{3}f}e{2}$".format(sign, mantissa, E, n_decimals)
 
 
 class PowerFormatter(ticker.Formatter):
@@ -267,6 +272,48 @@ def get_transformed_ticks_and_labels(axis_lims: Sequence[float], rescaler: DataR
     return ticks, labels
 
 
+def _install_overlap_skip(ax, axis: str, min_gap_px: float = 2.0):
+    """Hide tick labels that overlap with their next-higher-value neighbor.
+
+    Walks the rendered tick labels once on the first ``draw_event`` after
+    layout is settled, then disconnects. Iterates from the high-value end
+    so the largest values always win — matches user intuition (`1e6` is
+    more important than `1e3` to keep when they collide).
+
+    Idempotent across redraws: state flag prevents re-firing, and
+    ``set_visible(False)`` persists on the original Text objects (which
+    matplotlib reuses across draws as long as the locator isn't reset).
+    """
+    state = {"done": False}
+
+    def cb(event):
+        if state["done"]:
+            return
+        labels = (ax.get_xticklabels() if axis == "x" else ax.get_yticklabels())
+        labels = [l for l in labels if l.get_visible() and l.get_text().strip()]
+        if len(labels) < 2:
+            state["done"] = True
+            return
+        try:
+            renderer = event.renderer
+            keep_bb = labels[-1].get_window_extent(renderer)
+            for label in reversed(labels[:-1]):
+                bb = label.get_window_extent(renderer)
+                if axis == "x":
+                    overlaps = bb.x1 > keep_bb.x0 - min_gap_px
+                else:
+                    overlaps = bb.y1 > keep_bb.y0 - min_gap_px
+                if overlaps:
+                    label.set_visible(False)
+                else:
+                    keep_bb = bb
+            state["done"] = True
+        except Exception:
+            pass
+
+    ax.figure.canvas.mpl_connect("draw_event", cb)
+
+
 def setup_transformed_axis_generic(
     ax,
     axis_lims,
@@ -282,6 +329,7 @@ def setup_transformed_axis_generic(
     show_labels=True,
     spine_position=None,
     force_spine_only=False,
+    auto_skip_overlap: bool = True,
     **kw,
 ):
     # Get the appropriate axis object and methods based on axis parameter
@@ -380,10 +428,20 @@ def setup_transformed_axis_generic(
             ax.tick_params(axis=axis, labelsize=label_fontsize)
 
         if not show_labels:
+            sides = ("bottom", "top") if axis == "x" else ("left", "right")
+            ax.tick_params(
+                axis=axis,
+                which="both",
+                **{f"label{s}": False for s in sides},
+            )
             if axis == "x":
                 ax.set_xticklabels([])
+                ax.set_xticklabels([], minor=True)
             else:
                 ax.set_yticklabels([])
+                ax.set_yticklabels([], minor=True)
+        elif auto_skip_overlap:
+            _install_overlap_skip(ax, axis)
 
     except ValueError as e:
         logger.error(f"Error setting up {axis}-axis")
@@ -685,6 +743,96 @@ def weighted_kde_1d(
 # ╭─────────────────────────────────────────────╮
 # │             PLOTTING PRIMITIVES             │
 # ╰───────────────────── ⟱ ─────────────────────╯
+
+
+def _smooth_otsu_threshold(values: np.ndarray, bias: float = 0.5) -> float:
+    """Otsu's method with a smooth bias knob.
+
+    Standard Otsu maximizes `w0 * w1 * (mu0 - mu1)**2` — the product
+    `w0 * w1` (balanced-split term) penalizes thresholds far from the
+    median while `(mu0 - mu1)**2` rewards class separation.
+
+    The bias generalizes the weight exponents from (1, 1) to
+    (2*bias, 2*(1-bias)):
+
+        objective(t, bias) = w0(t)**(2*bias) * w1(t)**(2*(1-bias)) * (mu0 - mu1)**2
+
+    - bias = 0.5  -> w0**1 * w1**1 = w0*w1, i.e. vanilla Otsu.
+    - bias -> 0   -> w0 term drops out, threshold is pushed LOW so that
+                     w1 is large (more pixels classified "above").
+    - bias -> 1   -> w1 term drops out, threshold is pushed HIGH so that
+                     w0 is large (fewer pixels classified "above").
+
+    bias is clamped to [0, 1].
+    """
+    bias = float(np.clip(bias, 0.0, 1.0))
+    vals = values[np.isfinite(values)]
+    nbins = min(256, max(16, len(vals) // 100))
+    counts, bin_edges = np.histogram(vals, bins=nbins)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    total = counts.sum()
+    if total == 0:
+        return float(np.median(vals))
+    w0 = np.cumsum(counts).astype(float)
+    w1 = (total - w0).astype(float)
+    mu0 = np.cumsum(counts * bin_centers)
+    mu0 = np.where(w0 > 0, mu0 / w0, 0)
+    mu1 = np.cumsum((counts * bin_centers)[::-1])[::-1]
+    mu1 = np.where(w1 > 0, mu1 / w1, 0)
+
+    # Avoid 0**0 surprises at the endpoints by treating power=0 as an
+    # indicator (1 where the count is positive, 0 elsewhere).
+    if bias > 0:
+        w0_term = w0 ** (2.0 * bias)
+    else:
+        w0_term = np.where(w0 > 0, 1.0, 0.0)
+    if bias < 1:
+        w1_term = w1 ** (2.0 * (1.0 - bias))
+    else:
+        w1_term = np.where(w1 > 0, 1.0, 0.0)
+
+    objective = w0_term * w1_term * (mu0 - mu1) ** 2
+    return float(bin_centers[np.argmax(objective)])
+
+
+def _otsu_threshold(values: np.ndarray) -> float:
+    """Otsu's method: find threshold that minimizes within-class variance.
+
+    Convenience alias for `_smooth_otsu_threshold(values, bias=0.5)`.
+    """
+    return _smooth_otsu_threshold(values, bias=0.5)
+
+
+def _resolve_symbolic_level(level, finite_values: np.ndarray):
+    """Resolve a contour-level token against a finite values array.
+
+    Recognised string forms:
+        "otsu"          -> vanilla Otsu's threshold (bias=0.5)
+        "otsu:<bias>"   -> smooth-Otsu with the given bias in [0, 1]
+        "X%"            -> Xth percentile (e.g. "75%")
+
+    Anything else (numbers, etc.) is passed through unchanged. Empty
+    `finite_values` yields the original token (no resolution possible).
+    """
+    if not isinstance(level, str) or len(finite_values) == 0:
+        return level
+    if level == "otsu":
+        return _smooth_otsu_threshold(finite_values, bias=0.5)
+    if level.startswith("otsu:"):
+        try:
+            bias = float(level.split(":", 1)[1])
+        except ValueError:
+            return level
+        return _smooth_otsu_threshold(finite_values, bias=bias)
+    if level.endswith("%"):
+        try:
+            pct = float(level.rstrip("%"))
+        except ValueError:
+            return level
+        return float(np.percentile(finite_values, pct))
+    return level
+
+
 ## {{{                          --     heatmap     --
 @configurable
 def heatmap(
@@ -708,6 +856,7 @@ def heatmap(
     opacity=1,
     bad_color="#EEEEEE00",
     clip_to_lowest_contour=False,
+    flat_fill=None,
 ):
     if isinstance(ax, list):
         ax = ax[0]
@@ -751,6 +900,14 @@ def heatmap(
         Z_contour[:, -1] = 0
         Z_contour[0, :] = 0
         Z_contour[-1, :] = 0
+
+        # resolve symbolic contour levels:
+        #   "X%"           → Xth percentile of the slice's grid output
+        #   "otsu"         → vanilla Otsu's threshold
+        #   "otsu:<bias>"  → smooth-Otsu, bias in [0,1] (0.5 == vanilla)
+        if isinstance(contours, (list, np.ndarray)):
+            finite_vals = output_values[np.isfinite(output_values)]
+            contours = [_resolve_symbolic_level(c, finite_vals) for c in contours]
 
         # main visible contours (solid lines)
         cntrs = ax.contour(
@@ -806,24 +963,39 @@ def heatmap(
         if clip_to_lowest_contour and cntrs is not None:
             Z = np.nan_to_num(Z)
 
-        im = ax.imshow(
-            Z.T,
-            origin="lower",
-            aspect=1,
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-            interpolation=image_interpolation,
-            alpha=opacities.T,
-            extent=[*xlims, *ylims],
-        )
-
-        if clip_to_lowest_contour and clip_cntrs is not None:
+        # Flat-fill mode: draw the clipped region as a solid-color patch instead
+        # of an imshow'd colormap. Requires clip_to_lowest_contour so we have a
+        # path to fill. Falls through to the regular imshow path otherwise.
+        if flat_fill is not None and clip_to_lowest_contour and clip_cntrs is not None:
             lowest_contour_path = clip_cntrs.get_paths()[0]
-            clip_path = mpl.patches.PathPatch(lowest_contour_path, transform=ax.transData)
-            im.set_clip_path(clip_path)
-            if len(lowest_contour_path.vertices) == 0:
-                im.remove()
+            if len(lowest_contour_path.vertices) > 0:
+                im = mpl.patches.PathPatch(
+                    lowest_contour_path,
+                    transform=ax.transData,
+                    facecolor=flat_fill,
+                    edgecolor="none",
+                    alpha=opacity,
+                )
+                ax.add_patch(im)
+        else:
+            im = ax.imshow(
+                Z.T,
+                origin="lower",
+                aspect=1,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                interpolation=image_interpolation,
+                alpha=opacities.T,
+                extent=[*xlims, *ylims],
+            )
+
+            if clip_to_lowest_contour and clip_cntrs is not None:
+                lowest_contour_path = clip_cntrs.get_paths()[0]
+                clip_path = mpl.patches.PathPatch(lowest_contour_path, transform=ax.transData)
+                im.set_clip_path(clip_path)
+                if len(lowest_contour_path.vertices) == 0:
+                    im.remove()
 
     return im, cntrs
 

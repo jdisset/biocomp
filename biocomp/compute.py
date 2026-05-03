@@ -18,6 +18,7 @@ from .graphengine import GraphState
 
 from biocomp.logging_config import get_logger
 from biocomp.graphengine import GraphNode, GraphEdge, is_inverse_node_type
+from biocomp.context import resolve_context_vector, init_context_params
 from biocomp.tracing import (
     is_design_debug_enabled,
     save_debug_state,
@@ -615,6 +616,11 @@ class ComputeStack:
                     "init_order": "reverse",  # inverse nodes can reference fwd ones
                 },
             )
+
+            ctx_key = jax.random.fold_in(
+                rng_key, 0xC0117E47
+            )  # deterministic subkey, doesn't consume rng_key
+            init_context_params(params, self.networks, ctx_key)
 
             for l_id, layer in reversed(list(enumerate(self.layers))):
                 assert layer.is_built, "Layer not built"
@@ -1365,6 +1371,10 @@ class ComputeStack:
                     nk_id = params[f"{layer_namespaces[lid]}/node_key_id"][node_id]
                     node_key = jax.random.fold_in(base_node_key, nk_id)
 
+                    # Resolve context embedding for this node's network
+                    k_ctx = jax.random.fold_in(base_node_key, nk_id + 1_000_000)
+                    context_vec = resolve_context_vector(params, network_id, k_ctx)
+
                     node_tu_uniform = (
                         tu_enabled_random_vars[network_id]
                         if tu_enabled_random_vars is not None
@@ -1378,6 +1388,7 @@ class ComputeStack:
                         key=node_key,
                         tu_enabled_random_vars=node_tu_uniform,
                         network_id=network_id,
+                        context_vector=context_vec,
                     )
                     if w_grads[lid]:
                         # using jax.jacfwd, we can just grab the first output wrt the first input
@@ -1389,6 +1400,7 @@ class ComputeStack:
                             key=node_key,
                             tu_enabled_random_vars=node_tu_uniform,
                             network_id=network_id,
+                            context_vector=context_vec,
                         )
                         first_output_grad = grad[0]
                         grad = first_output_grad.reshape(-1)

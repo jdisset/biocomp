@@ -31,6 +31,7 @@ from biocomp.neuralutils import (
 )
 
 import biocomp.quantization as qz
+from biocomp.context import total_context_dim
 
 
 PRNGKey = ArrayLike
@@ -102,7 +103,9 @@ def transform_nn(
     i_activation = identity if dummy else inner_activation
     o_activation = identity if dummy else outer_activation
 
-    def inner(params, value: NDArray, random_var, rate_embedding: NDArray, key: PRNGKey):
+    def inner(
+        params, value: NDArray, random_var, rate_embedding: NDArray, key: PRNGKey, context=None
+    ):
         """For a single source, computes a latent output from the concatenation of
         the rate embedding and the source value.
         All of these outputs will then be summed up and passed through a final layer.
@@ -130,6 +133,7 @@ def transform_nn(
                 key=key,
                 param_f=partial(init_if_needed, params, base_path="shared"),
                 name=f"NN/{shared_layer_name}/inner",
+                context=context,
             )
         )
         if dummy and is_inverse:
@@ -244,6 +248,8 @@ def transform_nn(
             add_node_network_ids(params, nodelist, namespace)
 
         fake_vals = [np.zeros(s) for s in input_shapes]
+        _ctx_dim = total_context_dim()
+        _dummy_ctx = np.zeros(_ctx_dim) if _ctx_dim > 0 else None
 
         apply(
             *fake_vals,
@@ -251,9 +257,10 @@ def transform_nn(
             params=params,
             node_id=0,
             key=key1,
+            context_vector=_dummy_ctx,
         )
 
-    def outer(inner_out: ArrayLike, params, key: PRNGKey):
+    def outer(inner_out: ArrayLike, params, key: PRNGKey, context=None):
         if dummy and is_inverse:
             out = jnp.array([(inner_out[0] - inner_out[-1]) / inner_outsize])
         else:
@@ -269,6 +276,7 @@ def transform_nn(
                     key=key,
                     name=f"NN/{shared_layer_name}/outer",
                     activation=inner_activation,
+                    context=context,
                 )
             )
         assert out.shape == (out_dim,), f"Invalid outer output shape {out.shape}"
@@ -294,6 +302,7 @@ def transform_nn(
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         k1, k2, k3 = jax.random.split(key, 3)
+        context_vector = _kwargs.get("context_vector")
 
         rvid = params[f"{namespace}/random_variable_id"][node_id]
         random_var = random_vars[rvid]
@@ -325,15 +334,20 @@ def transform_nn(
             from biocomp.tumasking import get_tu_masks
 
             tu_indices = params[input_tu_indices_path][node_id]
-            input_masks = get_tu_masks(
-                params, tu_indices, network_id, is_multi_tu=True
-            )
+            input_masks = get_tu_masks(params, tu_indices, network_id, is_multi_tu=True)
         else:
             input_masks = jnp.ones(len(input_shapes))
 
         inner_keys = jax.random.split(k1, val.shape[0])
         inner_outputs = [
-            inner(params, value=v, random_var=random_var[i], rate_embedding=r, key=k)
+            inner(
+                params,
+                value=v,
+                random_var=random_var[i],
+                rate_embedding=r,
+                key=k,
+                context=context_vector,
+            )
             for i, (v, r, k) in enumerate(zip(val, qrates, inner_keys, strict=False))
         ]
         masked_inner_outputs = [out * input_masks[i] for i, out in enumerate(inner_outputs)]
@@ -343,7 +357,7 @@ def transform_nn(
 
         assert inner_out.shape == (inner_outsize + 1,)
 
-        ans = outer(inner_out, params, k2)
+        ans = outer(inner_out, params, k2, context=context_vector)
 
         masked_val = val * input_masks.reshape(-1, *([1] * len(input_shapes[0])))
         input_sum = jnp.sum(masked_val, axis=0)
@@ -395,6 +409,7 @@ def transform_nn(
     ):
         if not collapse_to_part:
             return
+
         def _build_ref_id_mapping(graph, emb_name: str) -> tuple[dict, dict]:
             """Build mappings: tu_id -> ref_id and ref_id -> set of tu_ids.
 

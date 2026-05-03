@@ -27,6 +27,7 @@ from biocomp.neuralutils import (
     uniform_initializer,
 )
 from typing import Callable
+from biocomp.context import total_context_dim
 
 
 PRNGKey = ArrayLike
@@ -92,6 +93,7 @@ def sequestron_ERN(
         param_f: Callable,
         key: PRNGKey,
         layer_id_onehot: NDArray | None = None,
+        context=None,
     ):
         if layer_id_onehot is None:
             layer_id_onehot = np.empty((0,))
@@ -116,6 +118,7 @@ def sequestron_ERN(
             key=key,
             name=f"NN/ERN_{subtype}",
             activation=i_activation,
+            context=context,
         )
 
         # add residual connections
@@ -223,6 +226,8 @@ def sequestron_ERN(
         # initialize MLP with dummy inputs
         # include dummy one-hot layer id if needed
         layer_id_onehot = jnp.zeros(max_ern_layers) if use_ern_layer_id else np.empty((0,))
+        _ctx_dim = total_context_dim()
+        _dummy_ctx = np.zeros(_ctx_dim) if _ctx_dim > 0 else None
 
         MLP(
             *[np.zeros(shape) for shape in input_shapes],
@@ -231,6 +236,7 @@ def sequestron_ERN(
             param_f=partial(init_if_needed, params, base_path="shared"),
             key=key,
             layer_id_onehot=layer_id_onehot,
+            context=_dummy_ctx,
         )
 
     def apply(
@@ -244,6 +250,7 @@ def sequestron_ERN(
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         assert len(values) == len(input_shapes)
+        context_vector = _kwargs.get("context_vector")
 
         key, key_affinity = jax.random.split(key)
 
@@ -291,6 +298,7 @@ def sequestron_ERN(
                     param_f=partial(get_param, params, base_path="shared"),
                     key=key,
                     layer_id_onehot=layer_id_onehot,
+                    context=context_vector,
                 )
             )
 

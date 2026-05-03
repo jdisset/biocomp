@@ -564,6 +564,7 @@ class Recipe(BaseModel):
     content: CoTxList = []
     input_order: Optional[list[str]] = None  # ordered list of input protein names
     axis_mapping: Optional[dict[str, str]] = None  # cotx_name -> axis (x, y)
+    cell_type: str = "HEK293FT"
 
     @model_validator(mode="after")
     def _validate_input_order(self) -> "Recipe":
@@ -818,9 +819,25 @@ def parse_description(desc):
 def expand_all_tus_from_lib(recipe: Recipe, lib: PartsLibrary) -> Recipe:
     expanded_cotx_list = []
     for cotx in recipe.content:
-        expanded_units = flatten(
-            [expand_tu_from_lib(unit.name, lib, source=unit.source) for unit in cotx.units]
-        )
+        expanded_units = []
+        for unit in cotx.units:
+            # Preserve TUs that already carry an explicit decomposition
+            # (e.g. from an inline `slots:` in the recipe JSON5). Only
+            # expand when the unit has no slots or a single trivial slot
+            # equal to its plasmid name — the shape produced by
+            # `TranscriptionUnit(name=plasmid, source=plasmid)` when no
+            # slots were given.
+            slots = list(unit.slots or [])
+            is_trivial = (
+                not slots
+                or (len(slots) == 1 and getattr(slots[0], "part", None) == unit.name)
+            )
+            if is_trivial:
+                expanded_units.extend(
+                    expand_tu_from_lib(unit.name, lib, source=unit.source)
+                )
+            else:
+                expanded_units.append(unit)
         expanded_cotx_list.append(
             CoTransfection(name=cotx.name, units=expanded_units, ratios=cotx.ratios)
         )
@@ -829,6 +846,9 @@ def expand_all_tus_from_lib(recipe: Recipe, lib: PartsLibrary) -> Recipe:
         description=recipe.description,
         metadata=recipe.metadata,
         content=expanded_cotx_list,
+        input_order=recipe.input_order,
+        axis_mapping=recipe.axis_mapping,
+        cell_type=recipe.cell_type,
     )
 
 
@@ -860,18 +880,26 @@ def dict_to_recipe(raw_recipe_object):
             raw_recipe_object["metadata"].update(desc_dict)
         raw_recipe_object["description"] = desc
 
+    # First-class Recipe fields that should go on the model directly rather
+    # than getting swept into `metadata`.
+    FIRST_CLASS_FIELDS = {"name", "description", "metadata", "content",
+                          "input_order", "axis_mapping", "cell_type"}
     metadata = raw_recipe_object.get("metadata", {})
     for k, v in raw_recipe_object.items():
-        if k not in ["name", "description", "metadata", "content"]:
+        if k not in FIRST_CLASS_FIELDS:
             print(f"Adding extra field '{k}' to recipe metadata")
             metadata[k] = v
 
-    recipe = Recipe(
+    recipe_kwargs = dict(
         name=raw_recipe_object.get("name", f"recipe{len(raw_recipe_object)}"),
         description=raw_recipe_object.get("description"),
         metadata=raw_recipe_object.get("metadata"),
         content=cotxlist,
     )
+    for optional_field in ("input_order", "axis_mapping", "cell_type"):
+        if optional_field in raw_recipe_object:
+            recipe_kwargs[optional_field] = raw_recipe_object[optional_field]
+    recipe = Recipe(**recipe_kwargs)
     return expand_all_tus_from_lib(recipe, lib)
 
 

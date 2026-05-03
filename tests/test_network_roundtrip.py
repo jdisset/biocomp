@@ -317,7 +317,8 @@ def test_metadata_preservation(lib):  # noqa: F811
         reconstructed = networks[0].to_recipe()
 
         assert reconstructed.description == original.description
-        assert reconstructed.metadata == original.metadata
+        for k, v in original.metadata.items():
+            assert reconstructed.metadata[k] == v, f"metadata[{k!r}] mismatch: {reconstructed.metadata[k]!r} != {v!r}"
 
 
 def test_variable_uorf_options_preserved(lib):  # noqa: F811

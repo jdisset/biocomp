@@ -8,7 +8,6 @@ from pathlib import Path
 from .compute import ComputeStack
 from tqdm import tqdm
 from scipy.stats import gaussian_kde
-from scipy.spatial import cKDTree
 from multiprocessing import Pool
 import itertools
 from .network import Network
@@ -359,101 +358,56 @@ def sample_batches_w_coord_threshold(
     batch_size: int,
     n_batches: int,
     kde,
-    densities: NdArray,  # densities at each point in X
+    densities: NdArray,
     rng,
-    density_threshold_quantile=0.05,  # Compute the density threshold using the quantile of the density distribution
-    density_threshold_coords=0.3,  # Compute the density threshold using the value of the density at this coordinate
+    density_threshold_quantile=0.05,
+    density_threshold_coords=0.3,
 ):
-    """
-    Sample batches from X and Y, with a probability of including a point
-    inversely proportional to the density at that point.
-    This is done to avoid oversampling of high-density regions (usually untransfected cells),
-    which can lead to overfitting.
-    We use a threshold on the density distribution to decide which points to always include, and
-    which to randomly sample:below this threshold density, points are always selected,
-    above this density, points are selected with a probability inversely proportional
-    to their density.
-    2 ways of setting the threshold:
-    - using a quantile of the density distribution (quantile_threshold)
-        i.e. if quantile_threshold=0.05, any point that is in a neighborhood that's
-        more dense than 95% of the data sees its probability of being selected reduced.
-    - using the value of the density at a specific coordinate (density_coords)
-    when both are set, the minimum of the two is used as the threshold.
-    """
+    """Density-balanced batch sampler with an optional KDE-coord threshold.
 
+    Selection probabilities flow through ``compute_selection_probabilities``
+    (kde-coord branch) or ``density_balanced_selection_proba`` (quantile-only),
+    so the formula stays in one place.
+    """
     assert X.shape[0] == Y.shape[0]
     assert densities.shape == (X.shape[0],)
 
-    EPSILON = BIOCOMP_CONSTANTS["sampling"]["epsilon_probability"]
-    HIGH_DENSITIES_PENALTY = BIOCOMP_CONSTANTS["sampling"]["high_density_penalty"]
-
-    threshold = np.inf
-    if density_threshold_quantile is not None:
-        threshold = np.quantile(densities + EPSILON, density_threshold_quantile)
     if density_threshold_coords is not None:
-        midX = np.ones((X.shape[1],)) * density_threshold_coords
-        density_at_midX = kde.evaluate(midX.T)
-        if density_at_midX > 0:
-            threshold = np.minimum(threshold, density_at_midX)
+        kde_points = kde.dataset if hasattr(kde, 'dataset') else None
+        kde_bw = kde.factor if hasattr(kde, 'factor') else None
+        p = compute_selection_probabilities(
+            X, densities, density_threshold_quantile, density_threshold_coords,
+            kde_points, kde_bw,
+        )
+    else:
+        p = density_balanced_selection_proba(densities, density_threshold_quantile)
 
-    selection_proba = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
-    selection_proba[np.isnan(selection_proba)] = 0.0
-    selection_proba /= np.sum(selection_proba)
-
-    total_indices = batch_size * n_batches
-    random_seed = np.random.randint(0, 2**28)
-    rng = np.random.RandomState(random_seed)
-
-    indices = rng.choice(len(selection_proba), size=total_indices, p=selection_proba, replace=True)
-
-    # reshape to (n_batches, batch_size, n_features)
+    indices = density_balanced_indices(
+        X, n_samples=batch_size * n_batches,
+        selection_proba=p,
+        seed=int(np.random.randint(0, 2**28)),
+    )
     Xbatches = X[indices].reshape(n_batches, batch_size, X.shape[1])
     Ybatches = Y[indices].reshape(n_batches, batch_size, Y.shape[1])
-
     return Xbatches, Ybatches
 
 
-def sample_batches(
-    args: tuple,
-) -> Tuple[NdArray, NdArray]:
+def sample_batches(args: tuple) -> Tuple[NdArray, NdArray]:
+    """Density-balanced training batches.
+
+    Thin wrapper over ``density_balanced_indices`` for the
+    ``DataManager.get_batches`` numpy path. The JAX path
+    (``sample_batches_jax``) keeps its own jit-friendly inline copy.
     """
-    Sample batches from X and Y, with a probability of including a point
-    inversely proportional to the density at that point.
-    This is done to avoid oversampling of high-density regions (usually untransfected cells),
-    which can lead to overfitting.
-    We use a threshold on the density distribution to decide which points to always include, and
-    which to randomly sample:below this threshold density, points are always selected,
-    above this density, points are selected with a probability inversely proportional
-    to their density.
-    setting the threshold is done using a quantile of the density distribution (quantile_threshold)
-        i.e. if quantile_threshold=0.05, any point that is in a neighborhood that's
-        more dense than 95% of the data sees its probability of being selected reduced.
-    """
-
-    (
-        X,
-        Y,
-        batch_size,
-        n_batches,
-        densities,
-        density_threshold_quantile,
-        key,
-    ) = args
-
-    EPSILON = BIOCOMP_CONSTANTS["sampling"]["epsilon_probability"]
-    HIGH_DENSITIES_PENALTY = BIOCOMP_CONSTANTS["sampling"]["high_density_penalty"]
-    threshold = np.quantile(densities + EPSILON, density_threshold_quantile)
-
-    p_select = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
-    p_select[np.isnan(p_select)] = 0.0
-    p_select /= np.sum(p_select)
-
-    rng = np.random.RandomState(key)
-    indices = rng.choice(len(p_select), size=batch_size * n_batches, p=p_select, replace=True)
-
+    X, Y, batch_size, n_batches, densities, density_threshold_quantile, key = args
+    indices = density_balanced_indices(
+        X, n_samples=batch_size * n_batches,
+        densities=densities,
+        density_threshold_quantile=density_threshold_quantile,
+        seed=int(key),
+    )
     Xbatches = X[indices].reshape(n_batches, batch_size, X.shape[1])
     Ybatches = Y[indices].reshape(n_batches, batch_size, Y.shape[1])
-
     return Xbatches, Ybatches
 
 
@@ -544,6 +498,8 @@ def compute_single_density(args):
     Helper function to compute density for a single file/sample.
     Supports both KDE and kNN methods. Rebuilds estimator in worker process.
     """
+    from biocomp.plotting.knn_utils_np import knn_density_chunked
+
     method, x, chunksize, cache_dir, signature, method_params = args
 
     def compute_kde(kde_points, kde_bw, x, chunksize):
@@ -554,25 +510,66 @@ def compute_single_density(args):
             allarr.append(kde.evaluate(x[i : min(i + chunksize, n)].T))
         return np.concatenate(allarr)
 
-    def compute_knn(x, k, chunksize):
-        tree = cKDTree(x)
-        n, dim = x.shape
-        eps = 1e-12
-        result = np.empty(n, dtype=np.float64)
-        for i in range(0, n, chunksize):
-            end = min(i + chunksize, n)
-            d, _ = tree.query(x[i:end], k=k + 1)
-            d_k = d[:, -1]
-            result[i:end] = 1.0 / np.power(d_k + eps, dim)
-        return result
-
     def compute_d():
         if method == "kde":
             return compute_kde(method_params["kde_points"], method_params["kde_bw"], x, chunksize)
-        else:
-            return compute_knn(x, method_params["k"], chunksize)
+        return knn_density_chunked(x, k=method_params["k"], chunksize=chunksize)
 
     return ut.get_cache(compute_d, signature, cache_dir)
+
+
+def _selection_proba_from_threshold(densities: NdArray, threshold: float) -> NdArray:
+    """Selection-probability formula given a density threshold.
+
+    SSOT for the per-point inclusion probability used by every density-
+    balanced sampler. Below threshold → full mass; above → damped by
+    ``threshold / (density * HIGH_DENSITIES_PENALTY)``. Renormalises to 1.
+    """
+    EPSILON = BIOCOMP_CONSTANTS["sampling"]["epsilon_probability"]
+    HIGH_DENSITIES_PENALTY = BIOCOMP_CONSTANTS["sampling"]["high_density_penalty"]
+    p = np.minimum(1.0, threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON))
+    p[~np.isfinite(p)] = 0.0
+    total = float(p.sum())
+    return p / total if total > 0 else np.full_like(p, 1.0 / max(len(p), 1))
+
+
+def density_balanced_selection_proba(
+    densities: NdArray,
+    density_threshold_quantile: float = 0.025,
+) -> NdArray:
+    """Selection probabilities driven solely by a density quantile threshold."""
+    EPSILON = BIOCOMP_CONSTANTS["sampling"]["epsilon_probability"]
+    threshold = float(np.quantile(densities + EPSILON, density_threshold_quantile))
+    return _selection_proba_from_threshold(densities, threshold)
+
+
+def density_balanced_indices(
+    X: NdArray,
+    n_samples: int,
+    knn_k: int = 64,
+    density_threshold_quantile: float = 0.025,
+    seed: int = 0,
+    densities: Optional[NdArray] = None,
+    selection_proba: Optional[NdArray] = None,
+) -> NdArray:
+    """Density-balanced bootstrap indices via kNN density + quantile threshold.
+
+    SSOT for "sample N indices weighted away from dense regions". Used both
+    by training (``sample_batches``) and by metric subsampling. Pass
+    pre-computed ``densities`` or ``selection_proba`` to skip the kNN /
+    threshold steps.
+    """
+    if X.shape[0] == 0 or n_samples <= 0:
+        return np.array([], dtype=np.intp)
+    if selection_proba is None:
+        if densities is None:
+            from biocomp.plotting.knn_utils_np import knn_density_chunked
+            densities = knn_density_chunked(X, k=knn_k)
+        selection_proba = density_balanced_selection_proba(
+            densities, density_threshold_quantile,
+        )
+    rng = np.random.RandomState(seed)
+    return rng.choice(len(selection_proba), size=int(n_samples), p=selection_proba, replace=True)
 
 
 def compute_selection_probabilities(
@@ -584,29 +581,26 @@ def compute_selection_probabilities(
     kde_bw: float,
 ) -> NdArray:
     """
-    Precompute selection probabilities for batch sampling.
-    Vectorized operations for better performance.
+    Selection probabilities with quantile + KDE-coord threshold.
+
+    Threshold = ``min(quantile(densities), kde(density_threshold_coords))``.
+    Falls back to ``density_balanced_selection_proba`` when no coord is given.
     """
+    if density_threshold_coords is None:
+        return density_balanced_selection_proba(densities, density_threshold_quantile)
+
     EPSILON = BIOCOMP_CONSTANTS["sampling"]["epsilon_probability"]
-    HIGH_DENSITIES_PENALTY = BIOCOMP_CONSTANTS["sampling"]["high_density_penalty"]
-
-    threshold = np.inf
-    if density_threshold_quantile is not None:
-        threshold = np.quantile(densities + EPSILON, density_threshold_quantile)
-    if density_threshold_coords is not None:
-        # Create KDE only once if needed
-        kde = gaussian_kde(kde_points, bw_method=kde_bw)
-        midX = np.ones((X.shape[1],)) * density_threshold_coords
-        density_at_midX = kde.evaluate(midX.T)
-        if density_at_midX > 0:
-            threshold = np.minimum(threshold, density_at_midX)
-
-    # Vectorized probability computation
-    selection_proba = np.minimum(1.0, (threshold / (densities * HIGH_DENSITIES_PENALTY + EPSILON)))
-    selection_proba[np.isnan(selection_proba)] = 0.0
-    selection_proba /= np.sum(selection_proba)
-
-    return selection_proba
+    threshold = (
+        float(np.quantile(densities + EPSILON, density_threshold_quantile))
+        if density_threshold_quantile is not None
+        else np.inf
+    )
+    kde = gaussian_kde(kde_points, bw_method=kde_bw)
+    midX = np.ones((X.shape[1],)) * density_threshold_coords
+    density_at_midX = float(np.asarray(kde.evaluate(midX.T)).item())
+    if density_at_midX > 0:
+        threshold = min(threshold, density_at_midX)
+    return _selection_proba_from_threshold(densities, threshold)
 
 
 def generate_batch_indices(

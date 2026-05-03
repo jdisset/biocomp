@@ -575,6 +575,19 @@ def smooth_3d(
 
     all_grid_data: list[GridData] = []
 
+    # Resolve symbolic contour thresholds globally across all Y values, so
+    # every slice in the cube clips against the same level. Supports the
+    # same string forms as smooth_2d: "otsu", "otsu:<bias>", "X%".
+    hp = smooth_2d_params.get("heatmap_params", {})
+    contours = hp.get("contours")
+    if isinstance(contours, list) and any(isinstance(c, str) for c in contours):
+        finite_y = Y[np.isfinite(Y)]
+        if len(finite_y) > 0:
+            from .plotting_core import _resolve_symbolic_level
+
+            resolved = [_resolve_symbolic_level(c, finite_y) for c in contours]
+            smooth_2d_params = {**smooth_2d_params, "heatmap_params": {**hp, "contours": resolved}}
+
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
 
     if isinstance(ax, Axes):
@@ -590,7 +603,7 @@ def smooth_3d(
     ylims = xlims if ylims == (None, None) else ylims
     zlims = xlims if zlims == (None, None) else zlims
 
-    colorbar_location = colorbar_position + colorbar_size
+    colorbar_location = tuple(colorbar_position) + tuple(colorbar_size)
 
     def format_value(x: float):
         return f"{format_powers(rescaler.inv(x), n_decimals=0)}"

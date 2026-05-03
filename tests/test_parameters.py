@@ -597,7 +597,6 @@ class TestSerializationAndHDF5:
         jax_array = jnp.array([1.0, 2.0, 3.0])
         p["jax_data"] = jax_array
 
-        # Should handle JAX arrays seamlessly
         assert isinstance(p["jax_data"], jnp.ndarray)
         assert np.array_equal(p["jax_data"], jax_array)
 
@@ -670,12 +669,9 @@ class TestEdgeCasesAndErrors:
         """Test tagging a parameter that doesn't exist."""
         p = ParameterTree()
 
-        # Based on the implementation, tagging requires the parameter to exist first
-        # Let's test what actually happens
         with pytest.raises(KeyError):
             p.tag("nonexistent", "tag1")
 
-        # Add parameter first, then tag should work
         p["existing"] = 42
         p.tag("existing", "tag1")
         assert "tag1" in p.tagnames

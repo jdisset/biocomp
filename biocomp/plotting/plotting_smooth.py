@@ -1,6 +1,7 @@
 # {{{                          --     imports     --
 # ···············································································
 
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 import matplotlib as mpl
@@ -14,6 +15,7 @@ from typing import (
     Dict,
     Any,
     Optional,
+    Tuple,
     TypeVar,
     TypeAlias,
     Literal,
@@ -449,6 +451,18 @@ def colorbar(
 ):
     if setup_transformed_axis_params is None:
         setup_transformed_axis_params = {}
+    else:
+        setup_transformed_axis_params = deepcopy(setup_transformed_axis_params)
+    # The colorbar's scale axis must always show its tick labels — a colorbar
+    # without numbers is useless. Override any inherited show_labels=False that
+    # cascaded down via nested_resolve from the heatmap's cell-level config
+    # (where show_labels is used to hide ticks on non-edge cells).
+    _active_axis_key = "setup_yaxis_params" if orientation == "vertical" else "setup_xaxis_params"
+    _sub = setup_transformed_axis_params.get(_active_axis_key) or {}
+    if not isinstance(_sub, dict):
+        _sub = {}
+    _sub["show_labels"] = True
+    setup_transformed_axis_params[_active_axis_key] = _sub
     if label_props is None:
         label_props = {}
     imlims = im.get_clim()
@@ -586,12 +600,16 @@ def smooth_2d(
     ax,
     zslice: Optional[NdArray] = None,
     title: Optional[str] = None,
+    title_kwargs: Optional[Dict] = None,
     xtitle: Optional[str] = None,
     ytitle: Optional[str] = None,
     vtitle: Optional[str] = None,
     xlims=(0, 1),
     ylims=(None, None),
     vlims=(None, None),
+    vlim_quantiles: Optional[Tuple[Optional[float], Optional[float]]] = (0.01, 0.99),
+    vlim_min_floor: Optional[float] = None,  # vlim[0] capped: vlim[0] = min(vlim[0], floor)
+    vlim_min_range: Optional[float] = None,  # vlim[1]-vlim[0] >= min_range; expand vlim[1] up to satisfy
     draw_xlabel=True,
     draw_ylabel=True,
     draw_colorbar=True,
@@ -652,6 +670,38 @@ def smooth_2d(
         output_name=output_name,
     )
 
+    # Resolve None entries in vlims via vlim_quantiles. Quantiles ignore
+    # outliers — the default (0.01, 0.99) gives most heatmaps a more usable
+    # contrast than the raw min/max. Setting vlim_quantiles to None reverts
+    # to the previous min/max fallback inside heatmap/colorbar.
+    if vlim_quantiles is not None:
+        finite_vals = np.asarray(output_values)
+        finite_vals = finite_vals[np.isfinite(finite_vals)]
+        q_lo, q_hi = vlim_quantiles
+        vlims = (
+            (
+                float(np.quantile(finite_vals, q_lo))
+                if vlims[0] is None and q_lo is not None and finite_vals.size
+                else vlims[0]
+            ),
+            (
+                float(np.quantile(finite_vals, q_hi))
+                if vlims[1] is None and q_hi is not None and finite_vals.size
+                else vlims[1]
+            ),
+        )
+
+    # Floor vlim[0] (so a flat slice keeps a tiny negative margin and
+    # doesn't render its noise as full-contrast signal). Then enforce a
+    # minimum dynamic range by extending vlim[1] upward.
+    vlims = list(vlims)
+    if vlim_min_floor is not None and vlims[0] is not None:
+        vlims[0] = float(min(vlims[0], vlim_min_floor))
+    if vlim_min_range is not None and vlims[0] is not None and vlims[1] is not None:
+        if (vlims[1] - vlims[0]) < vlim_min_range:
+            vlims[1] = float(vlims[0] + vlim_min_range)
+    vlims = tuple(vlims)
+
     im, cntrs = heatmap(ax, input_coords, output_values, **{**heatmap_params, "vlims": vlims})
 
     # as latex if xtitle not none
@@ -664,7 +714,7 @@ def smooth_2d(
         ax.set_ylabel(ylabel)
 
     if title is not None:
-        ax.set_title(title)
+        ax.set_title(title, **(title_kwargs or {}))
 
     setup_transformed_axis(
         ax,

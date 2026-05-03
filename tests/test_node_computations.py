@@ -12,9 +12,21 @@ import biocomp.biorules as br
 from biocomp.compute import ComputeStack
 from biocomp.config import SIMPLE_NODES_COMPUTE_CONFIG
 from biocomp.parameters import ParameterTree
+from biocomp.context import CONTEXT_EMBEDDINGS, _codebook_means_path, _codebook_logstdevs_path, _indices_path
 
 # Import test fixtures from centralized module
 pytest_plugins = ["test_declarative_recipes"]
+
+
+def disable_context_params(params: ParameterTree):
+    """Remove context codebook so resolve_context_vector returns None.
+
+    This keeps manual dummy_mlp computations unchanged (no context concat path).
+    """
+    for ce in CONTEXT_EMBEDDINGS:
+        for path in [_codebook_means_path(ce.name), _codebook_logstdevs_path(ce.name), _indices_path(ce.name)]:
+            if path in params:
+                del params.data[path]
 
 
 def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.ndarray, key):
@@ -204,6 +216,7 @@ def test_simple_single_reporter_computation(lib, simple_single_reporter):
         # Initialize parameters once
         init_key = jax.random.PRNGKey(42)
         params = stack.init(init_key)
+        disable_context_params(params)
 
         # Find layer indices dynamically (they may change as graph building evolves)
         tc_layer_idx = find_layer_idx(stack, "transcription")
@@ -228,6 +241,7 @@ def test_simple_single_reporter_computation(lib, simple_single_reporter):
         all_res = []
         for test_key in test_keys:
             params = stack.init(test_key)
+            disable_context_params(params)
 
             inputs = jnp.ones((1,))
             n_random_vars = params["global/number_of_random_variables"]
@@ -281,6 +295,7 @@ def test_simple_two_reporters_computation(lib, simple_two_reporters):
         # Initialize parameters once
         init_key = jax.random.PRNGKey(42)
         params = stack.init(init_key)
+        disable_context_params(params)
 
         # Find layer indices dynamically
         tc_layer_idx = find_layer_idx(stack, "transcription")
@@ -315,6 +330,7 @@ def test_simple_two_reporters_computation(lib, simple_two_reporters):
         all_res = []
         for test_key in test_keys:
             params = stack.init(test_key)
+            disable_context_params(params)
 
             inputs = jnp.ones((1,))
             n_random_vars = params["global/number_of_random_variables"]
@@ -420,6 +436,7 @@ def test_simple_single_ern_computation(lib, simple_single_ern):
         # Initialize parameters once
         init_key = jax.random.PRNGKey(42)
         params = stack.init(init_key)
+        disable_context_params(params)
 
         # Find layer indices dynamically
         tc_layer_idx = find_layer_idx(stack, "transcription")
@@ -455,6 +472,7 @@ def test_simple_single_ern_computation(lib, simple_single_ern):
         all_res = []
         for test_key in test_keys:
             params = stack.init(test_key)
+            disable_context_params(params)
 
             inputs = jnp.ones((1,))
             n_random_vars = params["global/number_of_random_variables"]

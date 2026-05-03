@@ -31,6 +31,8 @@ from biocomp.neuralutils import (
 )
 
 
+from biocomp.context import total_context_dim
+
 PRNGKey = ArrayLike
 NDArray = np.ndarray | jnp.ndarray
 
@@ -87,9 +89,11 @@ def source_with_pos(
         add_random_var_ids(params, len(nodelist), len(input_shapes), namespace)
         add_node_key_ids(params, len(nodelist), namespace)
         add_node_network_ids(params, nodelist, namespace)
-        MLP_head(np.zeros((2 + len(input_shapes),)), params, key)
+        _ctx_dim = total_context_dim()
+        _dummy_ctx = np.zeros(_ctx_dim) if _ctx_dim > 0 else None
+        MLP_head(np.zeros((2 + len(input_shapes),)), params, key, context=_dummy_ctx)
 
-    def MLP_head(vals, params, key):
+    def MLP_head(vals, params, key, context=None):
         return dense_mlp(
             vals,
             hidden_s,
@@ -101,6 +105,7 @@ def source_with_pos(
             key=key,
             param_f=partial(init_if_needed, params, base_path="shared"),
             name="NN/source_w_pos",
+            context=context,
         )
 
     def apply(
@@ -110,15 +115,19 @@ def source_with_pos(
         node_id: ArrayLike,
         key,
         tu_enabled_random_vars: Optional[ArrayLike] = None,
+        network_id: Optional[ArrayLike] = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
+        context_vector = _kwargs.get("context_vector")
         qid = params[f"{namespace}/random_variable_id"][node_id]
         random_var = random_vars[qid]
 
         # process each output position
         positions = np.arange(max_L1s)[:n_outputs] / max_L1s
         ans = jax.vmap(
-            lambda position: MLP_head(flat_concat(value, position, random_var), params, key)
+            lambda position: MLP_head(
+                flat_concat(value, position, random_var), params, key, context=context_vector
+            )
         )(positions)
 
         # add skip connection and apply activation
@@ -179,9 +188,11 @@ def inv_source_with_pos(
         )
 
         # inputs are: value (1) + position (1) + random_var (1) = 3 total
-        MLP_head(np.zeros((3,)), params, key)
+        _ctx_dim = total_context_dim()
+        _dummy_ctx = np.zeros(_ctx_dim) if _ctx_dim > 0 else None
+        MLP_head(np.zeros((3,)), params, key, context=_dummy_ctx)
 
-    def MLP_head(vals, params, key):
+    def MLP_head(vals, params, key, context=None):
         """
         MLP for inverse transformation.
         Uses separate parameters from forward node (different namespace).
@@ -197,6 +208,7 @@ def inv_source_with_pos(
             key=key,
             param_f=partial(init_if_needed, params, base_path="shared"),
             name="NN/inv_source_w_pos",
+            context=context,
         )
 
     def apply(
@@ -206,8 +218,10 @@ def inv_source_with_pos(
         node_id: ArrayLike,
         key,
         tu_enabled_random_vars: Optional[ArrayLike] = None,
+        network_id: Optional[ArrayLike] = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
+        context_vector = _kwargs.get("context_vector")
         assert value.shape == input_shapes[0], f"Invalid input shape {value.shape}"
 
         qid = params.at(f"{namespace}/random_variable_id")[node_id]
@@ -225,7 +239,7 @@ def inv_source_with_pos(
 
         # apply inverse transformation for this specific position
         mlp_input = flat_concat(value_flat, normalized_position, random_var)
-        mlp_out = MLP_head(mlp_input, params, key)
+        mlp_out = MLP_head(mlp_input, params, key, context=context_vector)
 
         # add skip connection and apply activation
         mlp_out_reshaped = mlp_out.reshape(value.shape)

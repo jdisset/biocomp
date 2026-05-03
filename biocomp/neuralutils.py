@@ -136,7 +136,10 @@ def dense_mlp(
     key: PRNGKey,
     name: str,
     activation: Callable[[ArrayLike], ArrayLike],
+    context: ArrayLike | None = None,
 ):
+    if context is not None and context.shape[0] > 0:
+        input_values = jnp.concatenate([input_values, context])
     assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
     assert isinstance(depth, int) and depth >= 1, (
         f"In {name}: depth should be an integer greater than or equal to 1."
@@ -174,9 +177,12 @@ def dummy_mlp(
     key: PRNGKey,
     name: str,
     activation: Callable[[ArrayLike], ArrayLike],
+    context: ArrayLike | None = None,
 ):
     """A dummy non-neural module that just returns the sum of the input repeated to match output size."""
 
+    if context is not None and context.shape[0] > 0:
+        input_values = jnp.concatenate([input_values, context])
     assert len(input_values.shape) == 1, f"In {name}: input_values should be a 1D array."
     assert isinstance(depth, int) and depth >= 1, (
         f"In {name}: depth should be an integer greater than or equal to 1."

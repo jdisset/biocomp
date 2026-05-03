@@ -32,6 +32,7 @@ from pydantic import (
     BaseModel,
     Field,
     BeforeValidator,
+    PrivateAttr,
 )
 
 from pathlib import Path
@@ -237,6 +238,7 @@ class FigAx(ArbitraryModel):
     figure: Figure
     ax: Annotated[Optional[SequenceND[Axes]], BeforeValidator(ax_to_list)] = None
     subfigs: Any = None
+    _subax_cache: Dict[int, Dict[str, Any]] = PrivateAttr(default_factory=dict)
 
     @property
     def flat_ax(self) -> List[Axes]:
@@ -245,6 +247,100 @@ class FigAx(ArbitraryModel):
     @property
     def n_axes(self) -> int:
         return len(self.flat_ax)
+
+    def subdivide(self, axnum: int, spec: Dict[str, Any]) -> Dict[str, Any]:
+        """Subdivide ``flat_ax[axnum]`` into named sub-axes per ``spec``.
+
+        Idempotent + cached by ``axnum``: multiple plot tasks targeting the
+        same parent cell can each call ``subdivide(axnum, spec)`` and share
+        the resulting layout. The first call removes the parent ax and
+        creates the sub-axes; subsequent calls return the cached dict.
+
+        ``spec`` shape::
+
+            {
+              "regions": {
+                "<name>": {
+                  "x": float, "y": float,        # bottom-left corner, frac of parent bbox
+                  "w": float, "h": float,        # size, frac of parent bbox
+                  "grid": [R, C]?,               # optional sub-grid
+                  "vgap_frac": float?,           # row gap, frac of region height
+                  "hgap_frac": float?,           # col gap, frac of region width
+                },
+                ...
+              }
+            }
+
+        Without ``grid``, the entry maps to a single ``Axes``. With
+        ``grid: [R, C]``, the entry maps to a nested ``list[R][C]`` of
+        ``Axes`` with row 0 on top (matplotlib data-coord convention).
+        """
+        cache = self._subax_cache
+        if axnum in cache:
+            return cache[axnum]
+
+        parent = self.flat_ax[axnum]
+        bbox = parent.get_position()
+        parent.remove()
+        fig = self.figure
+
+        out: Dict[str, Any] = {}
+        for name, region in spec["regions"].items():
+            x = bbox.x0 + region["x"] * bbox.width
+            y = bbox.y0 + region["y"] * bbox.height
+            w = region["w"] * bbox.width
+            h = region["h"] * bbox.height
+
+            grid = region.get("grid")
+            if grid is None:
+                out[name] = fig.add_axes((x, y, w, h))
+                continue
+
+            R, C = int(grid[0]), int(grid[1])
+            assert R > 0 and C > 0, f"grid must have positive dims, got {grid}"
+            vgap = float(region.get("vgap_frac", 0.0)) * h
+            hgap = float(region.get("hgap_frac", 0.0)) * w
+            cell_h = (h - (R - 1) * vgap) / R
+            cell_w = (w - (C - 1) * hgap) / C
+            assert cell_h > 0 and cell_w > 0, (
+                f"subdivide: gaps too large for region {name!r} ({R}x{C}, h={h}, w={w})"
+            )
+
+            rows = []
+            for r in range(R):
+                cells = []
+                for c in range(C):
+                    cx = x + c * (cell_w + hgap)
+                    cy = y + (R - 1 - r) * (cell_h + vgap)
+                    cells.append(fig.add_axes((cx, cy, cell_w, cell_h)))
+                rows.append(cells)
+            out[name] = rows
+
+        cache[axnum] = out
+        return out
+
+
+def compute_shared_vlims(
+    y,
+    quantiles: Sequence[float] = (0.01, 0.99),
+    rescaler: Optional[DataRescaler] = None,
+) -> tuple:
+    """Quantile-based shared color scale for a Y array (in latent space).
+
+    Used to share vlims across the cube view's internal slices and across
+    grid-mode side slices when consistency is preferred over per-cell
+    contrast. Returns ``(None, None)`` for empty / all-NaN inputs.
+    """
+    arr = np.asarray(y)
+    if rescaler is not None:
+        arr = np.asarray(rescaler.fwd(arr))
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return (None, None)
+    return (
+        float(np.quantile(finite, quantiles[0])),
+        float(np.quantile(finite, quantiles[1])),
+    )
 
 
 class FigureLayout(ArbitraryModel):
@@ -370,6 +466,86 @@ class GridLayout(FigureLayout):
             figax.figure.tight_layout()
 
 
+class MultiRowGridLayout(FigureLayout):
+    """A figure laid out as a vertical stack of rows where each row has its
+    own column count. Each row gets an independent ``subgridspec`` so rows
+    don't have to share a column structure.
+
+    ``rows`` is a list of per-row column-width lists (relative within the row).
+    ``row_heights`` is a list of relative row heights. Both are normalised
+    internally — the absolute scale is set by ``figure_size``.
+
+    ``flat_ax`` ordering is row-major: row 0 cells first (left-to-right),
+    then row 1, etc. That matches the ``axnum`` convention the row template
+    uses to dispatch atomic tasks.
+    """
+
+    rows: List[List[float]]
+    row_heights: List[float]
+    figure_size: Pair[float] = (12.0, 8.0)
+    wspace: float = 0.2
+    hspace: float = 0.2
+    margin: float = 0.05
+    # `gap_mask[i][j] == True` marks cell (i,j) as a layout-only spacer:
+    # the axes is created so `flat_ax` indexing stays aligned with the
+    # original column count, but its frame/spines/ticks are hidden so the
+    # column reads as pure whitespace. Same shape as `rows`. Default
+    # `None` = no gaps (preserves original behaviour).
+    gap_mask: Optional[List[List[bool]]] = None
+    kwargs: Dict[str, Any] = {}
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        assert len(self.rows) == len(self.row_heights), (
+            f"rows ({len(self.rows)}) / row_heights ({len(self.row_heights)}) length mismatch"
+        )
+        for i, r in enumerate(self.rows):
+            assert len(r) > 0, f"row {i} has no columns"
+            assert all(w > 0 for w in r), f"row {i} has non-positive widths: {r}"
+        assert all(h > 0 for h in self.row_heights), (
+            f"row_heights must be positive: {self.row_heights}"
+        )
+        if self.gap_mask is not None:
+            assert len(self.gap_mask) == len(self.rows), (
+                f"gap_mask rows ({len(self.gap_mask)}) != rows ({len(self.rows)})"
+            )
+            for i, (gm, r) in enumerate(zip(self.gap_mask, self.rows)):
+                assert len(gm) == len(r), (
+                    f"gap_mask row {i} length ({len(gm)}) != row width count ({len(r)})"
+                )
+
+    def make_figure(self, **kw) -> FigAx:
+        fig = plt.figure(figsize=tuple(self.figure_size))
+        outer = fig.add_gridspec(
+            len(self.rows),
+            1,
+            height_ratios=self.row_heights,
+            hspace=self.hspace,
+            top=1 - self.margin,
+            bottom=self.margin,
+            left=self.margin,
+            right=1 - self.margin,
+            **self.kwargs,
+            **kw,
+        )
+        axes: List[List[Axes]] = []
+        for i, row_widths in enumerate(self.rows):
+            inner = outer[i].subgridspec(
+                1, len(row_widths), width_ratios=row_widths, wspace=self.wspace
+            )
+            row_axes = [fig.add_subplot(inner[0, j]) for j in range(len(row_widths))]
+            if self.gap_mask is not None:
+                for j, is_gap in enumerate(self.gap_mask[i]):
+                    if is_gap:
+                        row_axes[j].set_axis_off()
+            axes.append(row_axes)
+        return FigAx(figure=fig, ax=axes)
+
+    def finalize(self, figax: FigAx) -> None:
+        # Explicit gridspec; do not let tight_layout override our spacing.
+        return None
+
+
 FIGURE_METADATA_KEY = "FigureMetadata"
 
 
@@ -432,8 +608,19 @@ class MergeSpec(ArbitraryModel):
 class FigureSpec(ArbitraryModel):
     title: Optional[str] = None
     title_kwargs: Dict[str, Any] = {}
+    # Optional second line rendered separately via `fig.text()` so it can
+    # carry different kwargs (e.g. `fontweight: normal` while the bold
+    # `figure.titleweight` rcParam keeps the main title bold). Positioned
+    # via its own `subtitle_kwargs` (x/y in figure-coord fractions);
+    # defaults sit just below the title.
+    subtitle: Optional[str] = None
+    subtitle_kwargs: Dict[str, Any] = {}
     output_dir: str = "./"
     output_file: Optional[str] = "unnamed.png"
+    # Additional output paths to write the same figure to (each may use a
+    # different format/extension). Useful when one render should be saved as
+    # both PDF and SVG, etc. Paths are resolved exactly like `output_path`.
+    extra_output_paths: List[str] = []
     extra_args: Dict[str, Any] = {}
     layout: FigureLayout = Field(default_factory=SimpleLayout)
     dpi: int = 300
@@ -450,13 +637,32 @@ class FigureSpec(ArbitraryModel):
 
     def save_figure(self, figax: FigAx) -> None:
         import json
+        from datetime import datetime
+
+        assert self.output_file is not None
+
+        sanitized_metadata = sanitize_for_json(self.metadata)
+        metadata_json = json.dumps({FIGURE_METADATA_KEY: sanitized_metadata}, indent=2)
+        full_metadata = {
+            "Creator": "biocomp",
+            "Author": "biocomp",
+            "Subject": metadata_json,
+            "Title": self.title or "Biocomp Figure",
+            "CreationDate": datetime.now().isoformat(),
+        }
+
+        paths = [self.output_path] + [Path(p) for p in self.extra_output_paths]
+        for path in paths:
+            self._save_to_path(figax, path, full_metadata)
+
+    def _save_to_path(
+        self, figax: FigAx, output_path: Path, full_metadata: Dict[str, Any]
+    ) -> None:
         import shutil
         import tempfile
         import time
         from datetime import datetime
 
-        assert self.output_file is not None
-        output_path = self.output_path
         parent_dir = output_path.parent
 
         # For cloud-synced dirs (Dropbox, etc.), save to temp then move atomically
@@ -480,20 +686,6 @@ class FigureSpec(ArbitraryModel):
             else:
                 raise FileNotFoundError(f"Could not create directory: {parent_dir}")
 
-        # sanitize metadata to handle tuple keys, numpy arrays, etc.
-        sanitized_metadata = sanitize_for_json(self.metadata)
-        metadata_json = json.dumps({FIGURE_METADATA_KEY: sanitized_metadata}, indent=2)
-
-        timestamp = datetime.now().isoformat()
-
-        full_metadata = {
-            "Creator": "biocomp",
-            "Author": "biocomp",
-            "Subject": metadata_json,
-            "Title": self.title or "Biocomp Figure",
-            "CreationDate": timestamp,
-        }
-
         if str(output_path).lower().endswith(".png"):
             figax.figure.savefig(
                 temp_path,
@@ -503,8 +695,8 @@ class FigureSpec(ArbitraryModel):
                 metadata={k: str(v) for k, v in full_metadata.items()},
             )
         elif str(output_path).lower().endswith(".pdf"):
-            full_metadata["CreationDate"] = datetime.now()  # type: ignore
-            figax.figure.savefig(temp_path, metadata=full_metadata, bbox_inches="tight")
+            pdf_metadata = {**full_metadata, "CreationDate": datetime.now()}
+            figax.figure.savefig(temp_path, metadata=pdf_metadata, bbox_inches="tight")
         elif str(output_path).lower().endswith(".svg"):
             figax.figure.savefig(temp_path, format="svg", bbox_inches="tight")
             self._postprocess_svg(temp_path, full_metadata)
@@ -603,6 +795,36 @@ class FigureSpec(ArbitraryModel):
     def finalize(self, figax: FigAx) -> None:
         if self.title is not None:
             figax.figure.suptitle(self.title, **self.title_kwargs)
+        if self.subtitle is not None:
+            # Subtitle inherits horizontal placement from title (so they're
+            # vertically stacked at the same x) but pins `va: top` so the
+            # subtitle hangs *below* the title's anchor. The y offset
+            # approximates the title's vertical footprint in figure-frac
+            # coords using its fontsize and the figure height.
+            tk = self.title_kwargs
+            title_y = float(tk.get("y", 0.98))
+            title_fs = float(tk.get("fontsize", 12))
+            fig_h_in = float(figax.figure.get_size_inches()[1])
+            # 1 pt = 1/72 in. Approx line height = 1.4 * fontsize.
+            title_height_frac = (1.4 * title_fs) / 72.0 / max(fig_h_in, 1e-3)
+            # If title's `va` puts the anchor at its bottom, the title
+            # text rises above `title_y` and the subtitle must drop
+            # *below* `title_y` (no extra offset). For other anchors,
+            # offset down by the title's footprint.
+            if tk.get("va", "top") == "bottom":
+                default_sub_y = title_y - 0.005
+            else:
+                default_sub_y = title_y - title_height_frac
+            sk = {
+                "x": tk.get("x", 0.5),
+                "y": default_sub_y,
+                "ha": tk.get("ha", "center"),
+                "va": "top",
+                "fontweight": "normal",
+                "fontsize": max(int(title_fs) - 2, 7),
+                **self.subtitle_kwargs,
+            }
+            figax.figure.text(sk.pop("x"), sk.pop("y"), self.subtitle, **sk)
         self.layout.finalize(figax)
         if self.output_file is not None:
             self.save_figure(figax)

@@ -381,6 +381,41 @@ def compute_nrmse(
     return float(np.sqrt(np.average(norm_sq_flat[mask], weights=weights_flat[mask])))
 
 
+def compute_nrmse_pointwise(
+    gt: NdArray,
+    pred: NdArray,
+    sigma_local: NdArray,
+    *,
+    gt_mean_local: NdArray | None = None,
+    global_range: float = 1.0,
+    rel_tolerance: float = 0.05,
+    abs_tolerance: float = 0.01,
+) -> float:
+    """Per-point (subsample) version of nRMSE with local noise scale.
+
+    Each squared residual is normalized by ``σ_local² + tolerance²`` so
+    errors in low-noise regions count more than errors in noisy regions.
+    The tolerance term ``(rel_tolerance * |gt_mean_local| + abs_tolerance)²``
+    floors the denominator where ``σ_local`` is near zero. Returns
+    ``sqrt(mean(normalized_sq_error))``.
+
+    ``gt_mean_local`` defaults to ``gt`` itself (the data point); pass the
+    kernel-smoothed mean if available for a slightly smoother tolerance.
+    """
+    if gt_mean_local is None:
+        gt_mean_local = gt
+    sq_error = (np.asarray(gt) - np.asarray(pred)) ** 2
+    robust_eps = max(abs_tolerance, ROBUST_EPSILON_FRACTION * global_range)
+    tolerance_var = (rel_tolerance * np.abs(gt_mean_local) + abs_tolerance) ** 2
+    denom_var = np.asarray(sigma_local) ** 2 + tolerance_var
+    safe_denom = np.maximum(np.sqrt(denom_var), robust_eps)
+    norm_sq = sq_error / (safe_denom ** 2)
+    finite = np.isfinite(norm_sq)
+    if not finite.any():
+        return float("nan")
+    return float(np.sqrt(np.mean(norm_sq[finite])))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NOISE-RELATIVE ERROR (NRE)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -592,12 +627,20 @@ class GridStats:
 # nre = grid_nrmse / data_nrmse. normalizes for scale + heteroscedasticity.
 # k=64 gives ~4x higher noise floor than k=1024
 DEFAULT_GRIDSTATS_PARAMS: dict = {
-    "hypercube_res": 10,
+    "hypercube_res": 64,
     "hypercube_min": 0.0,
-    "hypercube_max": 0.8,
-    "k": 64,
-    "radius": 0.3,
+    "hypercube_max": 0.7,
+    "k": 256,
+    "radius": 0.1,
     "min_points": 20,
+    # Density-balanced subsample (same selection logic as training batches)
+    # used to evaluate `model_rmse_latent` / `kernel_rmse_latent`. Removes
+    # the heavy weighting of dense low-fluo regions (untransfected cells),
+    # so the model/kernel ratio reflects predictor quality across the
+    # whole cube view rather than a transfection-efficiency proxy.
+    "subsample_n": 64000,
+    "subsample_knn_k": 64,
+    "subsample_density_quantile": 0.025,
 }
 
 SPLIT_HALF_SUBSET_SIZE: int = 10000  # fixed size for fair cross-dataset comparison
@@ -631,6 +674,11 @@ class GridStatsFields(BaseModel):
     gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]
     gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
     gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
+    gridstats_subsample_n: int = DEFAULT_GRIDSTATS_PARAMS["subsample_n"]
+    gridstats_subsample_knn_k: int = DEFAULT_GRIDSTATS_PARAMS["subsample_knn_k"]
+    gridstats_subsample_density_quantile: float = DEFAULT_GRIDSTATS_PARAMS[
+        "subsample_density_quantile"
+    ]
 
     def get_gridstats_params(self) -> dict[str, Any]:
         """Build gridstats params dict from fields."""
@@ -641,6 +689,9 @@ class GridStatsFields(BaseModel):
             "k": self.gridstats_k,
             "radius": self.gridstats_radius,
             "min_points": self.gridstats_min_points,
+            "subsample_n": self.gridstats_subsample_n,
+            "subsample_knn_k": self.gridstats_subsample_knn_k,
+            "subsample_density_quantile": self.gridstats_subsample_density_quantile,
         }
 
 
