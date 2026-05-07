@@ -1,5 +1,12 @@
+import os
 import numpy as np
 from scipy.spatial import cKDTree
+
+
+try:
+    KNN_WORKERS = int(os.environ.get("BIOCOMP_KNN_WORKERS", "-1"))
+except ValueError:
+    KNN_WORKERS = -1
 
 
 def knn_density(
@@ -26,18 +33,23 @@ def knn_density_chunked(
     k: int = 64,
     eps: float = 1e-12,
     chunksize: int = 50000,
+    tree: cKDTree | None = None,
 ) -> np.ndarray:
     """
     Chunked version for large datasets to control memory usage.
     Builds tree once, queries in chunks.
+
+    Pass an existing ``tree`` (built on X) to skip the rebuild.
+    Queries use ``workers=KNN_WORKERS`` to fan out across cores.
     """
-    tree = cKDTree(X)
+    if tree is None:
+        tree = cKDTree(X)
     n = X.shape[0]
     dim = X.shape[1]
     result = np.empty(n, dtype=np.float64)
     for i in range(0, n, chunksize):
         end = min(i + chunksize, n)
-        d, _ = tree.query(X[i:end], k=k + 1)
+        d, _ = tree.query(X[i:end], k=k + 1, workers=KNN_WORKERS)
         d_k = d[:, -1]
         result[i:end] = 1.0 / np.power(d_k + eps, dim)
     return result
@@ -108,7 +120,7 @@ def get_gaussian_weighted_knn(
     eps = 1e-12
 
     if adaptive_sigma:
-        distances, indices = tree.query(x, k=k, workers=-1)
+        distances, indices = tree.query(x, k=k, workers=KNN_WORKERS)
         finite_mask = np.isfinite(distances)
 
         # per-query sigma from the largest finite distance in each row
@@ -123,30 +135,64 @@ def get_gaussian_weighted_knn(
         nb_points = valid_mask.sum(axis=1)
     else:
         # fixed-radius
-        distances, indices = tree.query(x, k=k, distance_upper_bound=radius, workers=-1)
+        distances, indices = tree.query(x, k=k, distance_upper_bound=radius, workers=KNN_WORKERS)
         valid_mask = np.isfinite(distances)
         nb_points = valid_mask.sum(axis=1)
         sigma = (radius / sigma_in_radius) + 0.0  # scalar
 
-    Z = np.exp(-0.5 * (distances / sigma) ** 2)
-
+    too_few = nb_points < min_points
+    enough = ~too_few
     invalid_mask = ~valid_mask
-    Z[invalid_mask] = 0.0
-    indices = indices.copy()
-    indices[invalid_mask] = 0
+    if invalid_mask.any():
+        indices = indices.copy()
+        indices[invalid_mask] = 0
 
-    if densities is not None and density_power > 0.0:  # density reweighting
+    if too_few.any() and not enough.any():
+        return indices, np.full_like(distances, np.nan)
+
+    if too_few.any():
+        d_v = distances[enough]
+        v_v = valid_mask[enough]
+        inv_sigma_v = 1.0 / (sigma[enough] if not np.isscalar(sigma) else sigma)
+        Z_v = d_v * inv_sigma_v
+        Z_v *= Z_v
+        Z_v *= -0.5
+        np.exp(Z_v, out=Z_v)
+        Z_v[~v_v] = 0.0
+
+        if densities is not None and density_power > 0.0:
+            dens_nei = densities[indices[enough]]
+            if density_floor is not None:
+                dens_nei = np.maximum(dens_nei, density_floor)
+            if density_cap is not None:
+                dens_nei = np.minimum(dens_nei, density_cap)
+            Z_v *= np.power(dens_nei + eps, -density_power)
+
+        if normed_w:
+            row_sums = np.nansum(Z_v, axis=1, keepdims=True)
+            W_v = np.full_like(Z_v, np.nan)
+            np.divide(Z_v, row_sums, out=W_v, where=row_sums > 0)
+            W = np.full_like(distances, np.nan)
+            W[enough] = W_v
+            return indices, W
+        Z = np.full_like(distances, np.nan)
+        Z[enough] = Z_v
+        return indices, Z
+
+    inv_sigma = 1.0 / sigma
+    Z = distances * inv_sigma
+    Z *= Z
+    Z *= -0.5
+    np.exp(Z, out=Z)
+    Z[invalid_mask] = 0.0
+
+    if densities is not None and density_power > 0.0:
         dens_nei = densities[indices]
         if density_floor is not None:
             dens_nei = np.maximum(dens_nei, density_floor)
         if density_cap is not None:
             dens_nei = np.minimum(dens_nei, density_cap)
         Z *= np.power(dens_nei + eps, -density_power)
-
-    # too few neighbors -> NaN weights
-    too_few = nb_points < min_points
-    if np.any(too_few):
-        Z[too_few, :] = np.nan
 
     if normed_w:
         row_sums = np.nansum(Z, axis=1, keepdims=True)
@@ -157,23 +203,42 @@ def get_gaussian_weighted_knn(
     return indices, Z
 
 
-def get_knn_mean_and_variance(x, y, tree=None, iw=None, **kw):
+def get_knn_mean_and_variance(x, y, tree=None, iw=None, compute_variance=True, **kw):
     indices, weights = iw if iw is not None else get_gaussian_weighted_knn(x, tree=tree, **kw)
 
-    y_neighbors = y[indices]  # (m, k, p)
-    w = weights[..., None]  # (m, k, 1)
-    weighted_mean = np.nansum(w * y_neighbors, axis=1)
+    n_grid = indices.shape[0]
+    valid_rows = np.isfinite(weights[:, 0])
+    n_outs = y.shape[1] if y.ndim > 1 else 1
+    all_valid = valid_rows.all()
 
-    diff = y_neighbors - weighted_mean[:, None, :]
-    var_num = np.nansum(w * (diff**2), axis=1)
+    if all_valid:
+        ind_v, w_v = indices, weights
+    else:
+        ind_v, w_v = indices[valid_rows], weights[valid_rows]
 
-    # DoF correction: divide by (1 - sum(w^2))
-    w2sum = np.nansum((weights**2), axis=1, keepdims=True)
-    denom = np.maximum(1.0 - w2sum, 1e-12)
-    variance = var_num / denom
+    y_neighbors = y[ind_v]
+    w = w_v[..., None]
+    wy = w * y_neighbors
+    mean_v = np.nansum(wy, axis=1)
+    if compute_variance:
+        second_moment = np.nansum(wy * y_neighbors, axis=1)
+        w2sum = np.nansum(w_v * w_v, axis=1, keepdims=True)
+        var_v = (second_moment - mean_v * mean_v) / np.maximum(1.0 - w2sum, 1e-12)
+    else:
+        var_v = None
 
-    # clean rows with all-NaN weights
-    all_nan = np.all(np.isnan(weights), axis=1)
-    weighted_mean[all_nan] = np.nan
-    variance[all_nan] = np.nan
+    if all_valid:
+        all_nan = np.all(np.isnan(weights), axis=1)
+        if all_nan.any():
+            mean_v[all_nan] = np.nan
+            if var_v is not None:
+                var_v[all_nan] = np.nan
+        return mean_v, var_v
+
+    weighted_mean = np.full((n_grid, n_outs), np.nan, dtype=mean_v.dtype)
+    weighted_mean[valid_rows] = mean_v
+    variance = None
+    if var_v is not None:
+        variance = np.full((n_grid, n_outs), np.nan, dtype=var_v.dtype)
+        variance[valid_rows] = var_v
     return weighted_mean, variance

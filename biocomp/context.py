@@ -97,11 +97,12 @@ def init_context_params(
     params: ParameterTree,
     networks: list,
     key: ArrayLike,
+    allow_create: bool = True,
 ) -> None:
     """Initialize context embedding codebooks and per-network index mapping.
 
-    Called once during ComputeStack.init(), BEFORE the layer prepare loop.
-    Idempotent: skips if paths already exist (backward compat with loaded models).
+    Idempotent. `allow_create=False` skips creation when params lack the codebook —
+    required back-compat for models trained before context embeddings existed.
     """
     if not CONTEXT_EMBEDDINGS:
         return
@@ -111,7 +112,10 @@ def init_context_params(
         logstdevs_path = _codebook_logstdevs_path(ce.name)
         indices_path = _indices_path(ce.name)
 
-        # Skip if already initialized (e.g. loaded from a saved model)
+        if not allow_create and means_path not in params:
+            logger.info(f"Context embedding '{ce.name}' not in loaded params; skipping (back-compat).")
+            continue
+
         if means_path in params:
             logger.debug(f"Context embedding '{ce.name}' already initialized, skipping")
             continue

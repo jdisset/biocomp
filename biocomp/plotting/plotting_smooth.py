@@ -368,6 +368,27 @@ def smooth_1d(
 ### {{{        --     2D     --
 
 
+_KNN_GRID_CACHE: dict = {}
+_KNN_GRID_CACHE_MAX = 8
+
+
+def _knn_grid_cache_key(x, y, xlims, ylims, zslice, is_density_plot, grid_resolution, knn_stats_params):
+    kx = pc.array_content_key(x)
+    ky = pc.array_content_key(y)
+    if kx is None or ky is None:
+        return None
+    kz = pc.array_content_key(np.asarray(zslice)) if zslice is not None else None
+    return (
+        kx, ky,
+        tuple(xlims) if xlims is not None else None,
+        tuple(ylims) if ylims is not None else None,
+        kz,
+        bool(is_density_plot),
+        int(grid_resolution),
+        tuple(sorted((knn_stats_params or {}).items())),
+    )
+
+
 @configurable
 def knn_grid(
     x: NdArray,
@@ -379,28 +400,33 @@ def knn_grid(
     grid_resolution=200,
     knn_stats_params=None,
 ):
-    # filter out nan/inf values before processing
     if knn_stats_params is None:
         knn_stats_params = {}
+
+    cache_key = _knn_grid_cache_key(
+        x, y, xlims, ylims, zslice, is_density_plot, grid_resolution, knn_stats_params,
+    )
+    if cache_key is not None:
+        cached = _KNN_GRID_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
     mask = np.all(np.isfinite(x), axis=1) if x.ndim > 1 else np.isfinite(x)
     mask = mask & (np.all(np.isfinite(y), axis=1) if y.ndim > 1 else np.isfinite(y))
 
-    x_clean = x[mask]
-    y_clean = y[mask]
-
-    if len(x_clean) == 0:
-        # return empty grid if no valid data
-        xmin, xmax = xlims
-        ymin, ymax = ylims or xlims
-        xy = make_xy_grid(
-            xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution
-        )
-        output_values = np.full(xy.shape[0], np.nan)
-        return xy, output_values
+    if mask.all():
+        x_clean, y_clean = x, y
+    else:
+        x_clean = x[mask]
+        y_clean = y[mask]
 
     xmin, xmax = xlims
     ymin, ymax = ylims or xlims
     xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
+
+    if len(x_clean) == 0:
+        return xy, np.full(xy.shape[0], np.nan)
+
     if x_clean.shape[1] > 2:
         assert zslice is not None
         if zslice.shape != (x_clean.shape[1] - 2,):
@@ -410,20 +436,18 @@ def knn_grid(
         xquery = xy
 
     tree = build_tree(x_clean)
-    output_values, density = knn_stats(
-        xquery, y_clean, tree=tree, stats=["mean", "density"], **knn_stats_params
-    )
-
-    output_values = output_values.squeeze()
+    stats = "density" if is_density_plot else "mean"
+    output_values = knn_stats(
+        xquery, y_clean, tree=tree, stats=stats, **knn_stats_params
+    ).squeeze()
 
     if output_values.shape != (xy.shape[0],):
         raise ValueError(f"output_values.shape = {output_values.shape} != {xy.shape[0]}")
-    if density.shape != (xy.shape[0],):
-        raise ValueError(f"density.shape = {density.shape} != {xy.shape[0]}")
 
-    if is_density_plot:
-        output_values = density
-
+    if cache_key is not None:
+        if len(_KNN_GRID_CACHE) >= _KNN_GRID_CACHE_MAX:
+            _KNN_GRID_CACHE.pop(next(iter(_KNN_GRID_CACHE)))
+        _KNN_GRID_CACHE[cache_key] = (xy, output_values)
     return xy, output_values
 
 

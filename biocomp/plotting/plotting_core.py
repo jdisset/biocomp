@@ -6,6 +6,7 @@
 
 from os import getenv
 from functools import partial
+import threading
 import numpy as np
 from biocomp import utils as ut
 from biocomp.datautils import DataRescaler
@@ -535,29 +536,52 @@ def setup_symlog_axis(
 
 USE_KNN_JAX = getenv("BC_KNN_USE_JAX", default=False)
 
+_TREE_CACHE: dict = {}
+_TREE_CACHE_MAX = 8
+_TREE_CACHE_LOCK = threading.Lock()
+
+
+def array_content_key(x):
+    if not isinstance(x, np.ndarray):
+        return None
+    a = x if x.flags["C_CONTIGUOUS"] else np.ascontiguousarray(x)
+    try:
+        h = hash(bytes(memoryview(a).cast("B")))
+    except Exception:
+        return None
+    return (h, x.shape, x.dtype.str)
+
 
 def build_tree(x, use_jax=USE_KNN_JAX):
-    # filter out nan/inf values before building tree
-    import numpy as np
-
-    if not use_jax:
-        mask = np.all(np.isfinite(x), axis=1) if x.ndim > 1 else np.isfinite(x)
-        x_clean = x[mask]
-        if len(x_clean) == 0:
-            raise ValueError("No finite data points available for building KD-tree")
-
     if use_jax:
         import jaxkd as jk
         import jax
 
-        tree = jax.jit(jk.build_tree)(x)
-    else:
-        from scipy.spatial import KDTree
+        return jax.jit(jk.build_tree)(x)
 
-        tree = KDTree(x_clean)
-        # store the mask to use later for filtering other arrays
-        tree._finite_mask = mask
-        tree._original_x = x
+    key = array_content_key(x)
+    if key is not None:
+        with _TREE_CACHE_LOCK:
+            cached = _TREE_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+    mask = np.all(np.isfinite(x), axis=1) if x.ndim > 1 else np.isfinite(x)
+    x_clean = x if mask.all() else x[mask]
+    if len(x_clean) == 0:
+        raise ValueError("No finite data points available for building KD-tree")
+
+    from scipy.spatial import KDTree
+
+    tree = KDTree(x_clean)
+    tree._finite_mask = mask
+    tree._original_x = x
+
+    if key is not None:
+        with _TREE_CACHE_LOCK:
+            if len(_TREE_CACHE) >= _TREE_CACHE_MAX:
+                _TREE_CACHE.pop(next(iter(_TREE_CACHE)))
+            _TREE_CACHE[key] = tree
     return tree
 
 
@@ -660,9 +684,13 @@ def knn_stats(
         f"Wrong shape for indices and weights: {iw[0].shape=}, {iw[1].shape=}, {xquery.shape=}"
     )
 
+    need_var = {"variance", "std"} & set(stats)
     need_mv = {"mean", "variance", "std"} & set(stats)
     mean, var = (  # type: ignore
-        get_knn_mean_and_variance(xquery, y, iw=iw, k=k, min_points=min_points, **kw)
+        get_knn_mean_and_variance(
+            xquery, y, iw=iw, k=k, min_points=min_points,
+            compute_variance=bool(need_var), **kw,
+        )
         if need_mv
         else (None, None)
     )
@@ -671,7 +699,6 @@ def knn_stats(
         if s == "iw":
             return iw
         if s == "density":
-            # (left as-is to minimize changes; note this is not a calibrated density)
             return xnp.nansum(iw[1], 1)
         if s == "quantile":
             from .knn_utils_jax import get_knn_quantile

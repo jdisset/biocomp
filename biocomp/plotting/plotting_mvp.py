@@ -589,15 +589,32 @@ def measured_vs_predicted(
     knn_stats_params.setdefault("radius", 0.1)
     tree = build_tree(measured[:, None], use_jax=False)
 
-    # --- density cutoff: mask eval points in low-density regions ---
+    needs_dense_mask = (
+        show_trendline or show_violins or show_bias
+        or model_samples is not None or show_calibration_rms
+        or (show_noise_floor and noise_local
+            and (noise_floor is not None or noise_nrmse is not None))
+    )
+    needs_data_density = show_spread or needs_dense_mask
+    needs_eval_density = needs_dense_mask or show_calibration_rms
+
     query = eval_x[:, None]
-    eval_density = np.asarray(knn_stats(query, tree=tree, stats="density", use_jax=False, **knn_stats_params)).ravel()
-    data_density = np.asarray(knn_stats(measured[:, None], tree=tree, stats="density", use_jax=False, **knn_stats_params)).ravel()
-    density_threshold = np.quantile(data_density[np.isfinite(data_density)], density_cutoff_q)
-    dense_mask = eval_density >= density_threshold
-    # Also mask raw measured points by the same density floor so spread /
-    # local-noise estimators don't include extrapolated tails.
-    dense_mask_at_measured = data_density >= density_threshold
+    eval_density = (
+        np.asarray(knn_stats(query, tree=tree, stats="density", use_jax=False, **knn_stats_params)).ravel()
+        if needs_eval_density else None
+    )
+    if needs_data_density:
+        data_density = np.asarray(knn_stats(measured[:, None], tree=tree, stats="density", use_jax=False, **knn_stats_params)).ravel()
+        density_threshold = np.quantile(data_density[np.isfinite(data_density)], density_cutoff_q)
+        dense_mask_at_measured = data_density >= density_threshold
+    else:
+        data_density = None
+        density_threshold = None
+        dense_mask_at_measured = np.ones(measured.shape[0], dtype=bool)
+    dense_mask = (
+        eval_density >= density_threshold if needs_dense_mask
+        else np.ones(eval_x.shape[0], dtype=bool)
+    )
 
     # ── Conditional-median trend (single fit, shared everywhere) ────────
     # Compute once with `trendline_quantiles` + `trendline_degree` so the

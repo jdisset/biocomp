@@ -652,16 +652,31 @@ class FigureSpec(ArbitraryModel):
         }
 
         paths = [self.output_path] + [Path(p) for p in self.extra_output_paths]
+        tight_bbox = None
+        if len(paths) > 1:
+            try:
+                tight_bbox = self._compute_tight_bbox(figax.figure, pad=0.1)
+            except Exception as e:
+                logger.debug(f"tight bbox precompute failed: {e}; falling back to per-save")
         for path in paths:
-            self._save_to_path(figax, path, full_metadata)
+            self._save_to_path(figax, path, full_metadata, bbox_inches=tight_bbox)
+
+    @staticmethod
+    def _compute_tight_bbox(figure, pad: float = 0.1):
+        bbox = figure.get_tightbbox(figure._get_renderer())
+        return bbox.padded(pad, pad) if pad else bbox
 
     def _save_to_path(
-        self, figax: FigAx, output_path: Path, full_metadata: Dict[str, Any]
+        self, figax: FigAx, output_path: Path, full_metadata: Dict[str, Any],
+        bbox_inches=None,
     ) -> None:
         import shutil
         import tempfile
         import time
         from datetime import datetime
+
+        if bbox_inches is None:
+            bbox_inches = "tight"
 
         parent_dir = output_path.parent
 
@@ -690,22 +705,22 @@ class FigureSpec(ArbitraryModel):
             figax.figure.savefig(
                 temp_path,
                 format="png",
-                bbox_inches="tight",
+                bbox_inches=bbox_inches,
                 dpi=self.dpi,
                 metadata={k: str(v) for k, v in full_metadata.items()},
             )
         elif str(output_path).lower().endswith(".pdf"):
             pdf_metadata = {**full_metadata, "CreationDate": datetime.now()}
-            figax.figure.savefig(temp_path, metadata=pdf_metadata, bbox_inches="tight")
+            figax.figure.savefig(temp_path, metadata=pdf_metadata, bbox_inches=bbox_inches)
         elif str(output_path).lower().endswith(".svg"):
-            figax.figure.savefig(temp_path, format="svg", bbox_inches="tight")
+            figax.figure.savefig(temp_path, format="svg", bbox_inches=bbox_inches)
             self._postprocess_svg(temp_path, full_metadata)
         else:
             logger.warning(
                 f"Saving figure to {output_path} in {output_path.suffix} format. "
                 f"Only PNG, PDF, and SVG formats have full metadata support."
             )
-            figax.figure.savefig(temp_path, metadata=full_metadata, bbox_inches="tight")
+            figax.figure.savefig(temp_path, metadata=full_metadata, bbox_inches=bbox_inches)
 
         # Move from temp to final destination for cloud-synced directories
         if is_cloud_sync:

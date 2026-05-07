@@ -52,13 +52,16 @@ def get_gaussian_weighted_knn(
 
 
 @partial(jax.jit, static_argnames=["k", "min_points", "normed_w"])
-def get_knn_mean_and_variance(x, y, iw=None, **kw):
+def get_knn_mean_and_variance(x, y, iw=None, compute_variance=True, **kw):
     indices, weights = iw if iw is not None else get_gaussian_weighted_knn(x, **kw)
 
     y_neighbors = y[indices]
     weighted_mean = jnp.nansum(y_neighbors * weights[:, :, None], axis=1)
-    squared_diff = (y_neighbors - weighted_mean[:, None, :]) ** 2
-    variance = jnp.nansum(squared_diff * weights[:, :, None], axis=1)
+    if compute_variance:
+        squared_diff = (y_neighbors - weighted_mean[:, None, :]) ** 2
+        variance = jnp.nansum(squared_diff * weights[:, :, None], axis=1)
+    else:
+        variance = None
 
     return weighted_mean, variance
 

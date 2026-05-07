@@ -595,10 +595,8 @@ class ComputeStack:
                     mask[net_idx, tu_idx] = 1.0
         return jnp.array(mask)
 
-    def init(self, rng_key: PRNGKey) -> ParameterTree:
-        """
-        Generates a randomly initilized parameter tree for the stack
-        """
+    def init(self, rng_key: PRNGKey, allow_create_context: bool = True) -> ParameterTree:
+        """Generate a randomly initialized parameter tree for the stack."""
         with trace_scope("stack_init", component="stack") as scope:
             assert self.is_built, "Stack not built"
             params = ParameterTree()
@@ -620,7 +618,7 @@ class ComputeStack:
             ctx_key = jax.random.fold_in(
                 rng_key, 0xC0117E47
             )  # deterministic subkey, doesn't consume rng_key
-            init_context_params(params, self.networks, ctx_key)
+            init_context_params(params, self.networks, ctx_key, allow_create=allow_create_context)
 
             for l_id, layer in reversed(list(enumerate(self.layers))):
                 assert layer.is_built, "Layer not built"
