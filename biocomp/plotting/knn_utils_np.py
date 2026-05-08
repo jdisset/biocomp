@@ -8,23 +8,36 @@ try:
 except ValueError:
     KNN_WORKERS = -1
 
-
-def _query(tree, x, **kw):
-    if not hasattr(tree, "leafsize"):
-        kw.pop("workers", None)
-    return tree.query(x, **kw)
-
 try:
     KNN_MEAN_CHUNK_SIZE = int(os.environ.get("BIOCOMP_KNN_MEAN_CHUNK_SIZE", "2500"))
 except ValueError:
     KNN_MEAN_CHUNK_SIZE = 2500
+
+try:
+    from pykdtree.kdtree import KDTree as _PKDTree
+    if KNN_WORKERS == 1:
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+except ImportError:
+    _PKDTree = None
+
+
+def make_tree(x: np.ndarray):
+    if _PKDTree is not None:
+        return _PKDTree(np.ascontiguousarray(x, dtype=np.float64))
+    return cKDTree(x, leafsize=32)
+
+
+def _query(tree, x, **kw):
+    if _PKDTree is not None and isinstance(tree, _PKDTree):
+        kw.pop("workers", None)
+    return tree.query(x, **kw)
 
 
 def knn_density(
     X: np.ndarray,
     k: int = 64,
     eps: float = 1e-12,
-    tree: cKDTree | None = None,
+    tree=None,
 ) -> np.ndarray:
     """
     Compute density proxy using k-th nearest neighbor distance.
@@ -32,7 +45,7 @@ def knn_density(
     Returns unnormalized density values suitable for importance sampling.
     """
     if tree is None:
-        tree = cKDTree(X)
+        tree = make_tree(X)
     d, _ = _query(tree, X, k=k + 1)
     d_k = d[:, -1]
     dim = X.shape[1]
@@ -44,17 +57,14 @@ def knn_density_chunked(
     k: int = 64,
     eps: float = 1e-12,
     chunksize: int = 50000,
-    tree: cKDTree | None = None,
+    tree=None,
 ) -> np.ndarray:
     """
     Chunked version for large datasets to control memory usage.
     Builds tree once, queries in chunks.
-
-    Pass an existing ``tree`` (built on X) to skip the rebuild.
-    Queries use ``workers=KNN_WORKERS`` to fan out across cores.
     """
     if tree is None:
-        tree = cKDTree(X)
+        tree = make_tree(X)
     n = X.shape[0]
     dim = X.shape[1]
     result = np.empty(n, dtype=np.float64)

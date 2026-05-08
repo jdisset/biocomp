@@ -10,7 +10,7 @@ import threading
 import numpy as np
 from biocomp import utils as ut
 from biocomp.datautils import DataRescaler
-from biocomp.plotting.knn_utils_np import KNN_WORKERS as _KNN_WORKERS, _query as _tree_query
+from biocomp.plotting.knn_utils_np import _query as _tree_query, make_tree as _make_tree
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -20,13 +20,6 @@ from typing import Sequence
 from matplotlib import colors as mcolors
 import dracon as dr
 from biocomp.logging_config import get_logger
-
-try:
-    from pykdtree.kdtree import KDTree as _PKDTree
-    if _KNN_WORKERS == 1:
-        os.environ.setdefault("OMP_NUM_THREADS", "1")
-except ImportError:
-    _PKDTree = None
 
 logger = get_logger(__name__)
 
@@ -579,11 +572,7 @@ def build_tree(x, use_jax=USE_KNN_JAX):
     if len(x_clean) == 0:
         raise ValueError("No finite data points available for building KD-tree")
 
-    if _PKDTree is not None:
-        tree = _PKDTree(np.ascontiguousarray(x_clean, dtype=np.float64))
-    else:
-        from scipy.spatial import cKDTree
-        tree = cKDTree(x_clean, leafsize=32)
+    tree = _make_tree(x_clean)
 
     if key is not None:
         with _TREE_CACHE_LOCK:

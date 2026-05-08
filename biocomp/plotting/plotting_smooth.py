@@ -2,7 +2,6 @@
 # ···············································································
 
 from dataclasses import dataclass
-from functools import partial
 import matplotlib as mpl
 
 import numpy as np
@@ -38,10 +37,7 @@ from .plotting_core import (
     weighted_kde_1d,
 )
 
-from scipy.spatial import KDTree
 from scipy.optimize import minimize
-
-KDtree = partial(KDTree, leafsize=32)
 
 T = TypeVar("T")
 ListOrSingle: TypeAlias = Union[List[T], T]
