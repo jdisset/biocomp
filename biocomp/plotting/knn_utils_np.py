@@ -72,6 +72,12 @@ def _resolve_backend(requested: str) -> str:
 _BACKEND = _resolve_backend(KNN_BACKEND)
 
 
+def _resolve_threads() -> int:
+    """Re-read at call time so PlotJob can flip it before worker spawn."""
+    raw = _env_int("BIOCOMP_KNN_WORKERS", -1)
+    return 0 if raw in (-1, 0) else max(1, raw)
+
+
 class _UsearchTree:
     """Adapter so usearch HNSW Index quacks like scipy.cKDTree.query.
 
@@ -93,14 +99,15 @@ class _UsearchTree:
             expansion_add=KNN_ANN_EF_CONSTRUCTION,
             expansion_search=KNN_ANN_EF_SEARCH,
         )
-        idx.add(np.arange(n, dtype=np.int64), np.ascontiguousarray(x, dtype=np.float32))
+        idx.add(np.arange(n, dtype=np.int64), np.ascontiguousarray(x, dtype=np.float32),
+                threads=_resolve_threads())
         self._index = idx
         self._n = n
 
     def query(self, x, k, distance_upper_bound=None, **_):
         n = self._n
         x = np.atleast_2d(np.ascontiguousarray(x, dtype=np.float32))
-        m = self._index.search(x, k)
+        m = self._index.search(x, k, threads=_resolve_threads())
         labels = m.keys
         sq = m.distances
         counts = m.counts
