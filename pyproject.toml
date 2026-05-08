@@ -100,6 +100,8 @@ dependencies = [
 
 [project.optional-dependencies]
 ann = ["usearch>=2.0"]
+fastknn = ["numba>=0.59"]
+perf = ["usearch>=2.0", "numba>=0.59"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["biocomp"]

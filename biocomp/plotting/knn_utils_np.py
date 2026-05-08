@@ -30,6 +30,35 @@ try:
 except ImportError:
     _UIndex = None
 
+try:
+    import numba as _nb
+
+    @_nb.njit(cache=True, parallel=False, fastmath=True)
+    def _kernel_mean_numba(indices, weights, y, out):
+        n_grid, k = indices.shape
+        n_outs = y.shape[1]
+        for i in range(n_grid):
+            row_sum = 0.0
+            valid = True
+            for j in range(k):
+                w = weights[i, j]
+                if not np.isfinite(w):
+                    valid = False
+                    break
+                row_sum += w
+            if not valid or row_sum <= 0.0:
+                for o in range(n_outs):
+                    out[i, o] = np.nan
+                continue
+            inv = 1.0 / row_sum
+            for o in range(n_outs):
+                acc = 0.0
+                for j in range(k):
+                    acc += weights[i, j] * inv * y[indices[i, j], o]
+                out[i, o] = acc
+except ImportError:
+    _kernel_mean_numba = None
+
 
 def _resolve_backend(requested: str) -> str:
     if requested in ("usearch", "ann"):
@@ -341,9 +370,14 @@ def get_knn_mean_and_variance(x, y, tree=None, iw=None, compute_variance=True, *
 
 def _knn_mean_from_indices_weights(indices, weights, y):
     n_grid = indices.shape[0]
-    valid_rows = np.isfinite(weights[:, 0])
     n_outs = y.shape[1] if y.ndim > 1 else 1
 
+    if _kernel_mean_numba is not None and y.ndim == 2:
+        out = np.empty((n_grid, n_outs), dtype=y.dtype)
+        _kernel_mean_numba(indices, weights, y, out)
+        return out
+
+    valid_rows = np.isfinite(weights[:, 0])
     if valid_rows.all():
         row_sums = weights.sum(axis=1, keepdims=True)
         np.divide(weights, row_sums, out=weights, where=row_sums > 0)
