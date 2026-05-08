@@ -24,7 +24,6 @@ from biocomp.metric_utils import (
     grid_snr,
     grid_kl_divergence,
     compute_nrmse,
-    noise_relative_error,
     extract_metric_values,
     compute_validation_objective,
 )
@@ -367,35 +366,6 @@ class TestComputeNRMSE:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NOISE-RELATIVE ERROR
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestNoiseRelativeError:
-    @pytest.mark.parametrize(
-        "grid_nrmse,data_nrmse,expected",
-        [
-            (0.5, 0.25, 2.0),
-            (0.25, 0.5, 0.5),
-            (1.0, 1.0, 1.0),
-        ],
-    )
-    def test_is_ratio(self, grid_nrmse, data_nrmse, expected):
-        result = noise_relative_error(grid_nrmse, data_nrmse)
-        assert np.isclose(result, expected, rtol=1e-10)
-
-    def test_zero_data_nrmse_is_nan(self):
-        assert np.isnan(noise_relative_error(0.5, 0.0))
-
-    def test_negative_data_nrmse_is_nan(self):
-        assert np.isnan(noise_relative_error(0.5, -0.1))
-
-    def test_nan_inputs_is_nan(self):
-        assert np.isnan(noise_relative_error(np.nan, 0.5))
-        assert np.isnan(noise_relative_error(0.5, np.nan))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # VALIDATION OBJECTIVES
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -469,27 +439,6 @@ class TestValidationObjectives:
     def test_unknown_objective_raises(self):
         with pytest.raises(AssertionError, match="unknown objective"):
             compute_validation_objective([{"rmse": 0.1}], "unknown_objective")
-
-    def test_geomean_nre(self):
-        stats = [
-            {"noise_relative_error": 0.8},
-            {"noise_relative_error": 1.0},
-            {"noise_relative_error": 1.2},
-        ]
-        result = compute_validation_objective(stats, "geomean_nre")
-        expected = (0.8 * 1.0 * 1.2) ** (1 / 3)
-        assert np.isclose(result, expected, rtol=1e-5)
-
-    def test_powermean_nre(self):
-        stats = [
-            {"noise_relative_error": 1.0},
-            {"noise_relative_error": 2.0},
-            {"noise_relative_error": 3.0},
-        ]
-        # power mean with p=2 is RMS
-        result = compute_validation_objective(stats, "powermean_nre", powermean_p=2.0)
-        expected = np.sqrt(np.mean(np.array([1.0, 2.0, 3.0]) ** 2))
-        assert np.isclose(result, expected, rtol=1e-5)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

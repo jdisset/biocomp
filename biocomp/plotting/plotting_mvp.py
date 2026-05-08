@@ -446,16 +446,13 @@ def measured_vs_predicted(
     show_calibration_rms: bool = True,      # L2 magnitude of miscalibration
     show_spread: bool = True,               # RMS conditional dispersion around trend
     show_crps: bool = True,                 # only fires when model_samples is set
-    extra_metrics: dict | None = None,      # appended to RMSE / R² (e.g. {"NRE": 0.42})
-    # noise floor band — shaded envelope along y=x. Pass either an
-    # explicit `noise_floor` (y-units) or `noise_nrmse` (dimensionless,
-    # converted to y-units via `noise_nrmse * std(measured)`).
+    extra_metrics: dict | None = None,      # appended to RMSE / R²
+    # noise floor band — shaded envelope along y=x in measured y-units.
     # When `noise_local=True` the band's half-width *fluctuates* with
     # measured value: a knn-smoothed std of the residuals around the
     # median trend, calibrated to integrate to the global `noise_floor`.
     # Set `noise_local=False` to keep the constant-band behaviour.
     noise_floor: float | None = None,
-    noise_nrmse: float | None = None,
     noise_local: bool = True,
     noise_local_radius: float = 0.08,
     noise_local_min_points: int = 30,
@@ -592,8 +589,7 @@ def measured_vs_predicted(
     needs_dense_mask = (
         show_trendline or show_violins or show_bias
         or model_samples is not None or show_calibration_rms
-        or (show_noise_floor and noise_local
-            and (noise_floor is not None or noise_nrmse is not None))
+        or (show_noise_floor and noise_local and noise_floor is not None)
     )
     needs_data_density = show_spread or needs_dense_mask
     needs_eval_density = needs_dense_mask or show_calibration_rms
@@ -670,13 +666,6 @@ def measured_vs_predicted(
     # (measured − median_trend), calibrated so its mean matches the global
     # noise scale derived above.
     _noise_half = noise_floor
-    if (
-        _noise_half is None
-        and noise_nrmse is not None
-        and np.isfinite(noise_nrmse)
-        and measured.size
-    ):
-        _noise_half = float(noise_nrmse * np.std(measured))
     if show_noise_floor and _noise_half is not None and np.isfinite(_noise_half) and _noise_half > 0:
         if noise_local and trend_at_measured is not None:
             try:

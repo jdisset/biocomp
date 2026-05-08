@@ -417,30 +417,6 @@ def compute_nrmse_pointwise(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NOISE-RELATIVE ERROR (NRE)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def noise_relative_error(grid_nrmse: float, data_nrmse: float) -> float:
-    """Noise-Relative Error: grid_nrmse normalized by data noise floor.
-
-    NRE = grid_nrmse / data_nrmse
-
-    NRE interpretation:
-      <1: model predicts better than data consistency
-      ~1: model matches intrinsic data noise
-      >1: model worse than data noise
-
-    data_nrmse is the split-half nRMSE (intrinsic noise floor).
-    """
-    if not np.isfinite(data_nrmse) or data_nrmse <= 0:
-        return float("nan")
-    if not np.isfinite(grid_nrmse):
-        return float("nan")
-    return float(grid_nrmse / data_nrmse)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # VALIDATION OBJECTIVES (for hyperopt)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -488,52 +464,23 @@ def objective_geomean_nrmse(stats: list[dict]) -> float:
     return float(gmean(vals))
 
 
-def objective_geomean_nre(stats: list[dict]) -> float:
-    """geometric mean of noise_relative_error."""
-    from scipy.stats import gmean
-
-    vals = extract_metric_values(stats, "noise_relative_error", positive_only=True)
-    if len(vals) == 0:
-        vals = extract_metric_values(stats, "rmse")
-        if len(vals) == 0:
-            return float("inf")
-        return float(np.mean(vals)) * 10.0  # scale for comparability
-    return float(gmean(vals))
-
-
-def objective_powermean_nre(stats: list[dict], p: float = 2.0) -> float:
-    """power mean of noise_relative_error (p=2 is RMS)."""
-    vals = extract_metric_values(stats, "noise_relative_error", positive_only=True)
-    if len(vals) == 0:
-        vals = extract_metric_values(stats, "rmse")
-        if len(vals) == 0:
-            return float("inf")
-        return float(np.mean(vals)) * 10.0
-    return float(np.power(np.mean(np.power(vals, p)), 1.0 / p))
-
-
 def compute_validation_objective(
     stats: list[dict],
     objective: str,
     *,
     softmax_alpha: float = 5.0,
-    powermean_p: float = 2.0,
 ) -> float:
     """compute validation loss from network statistics.
 
     args:
         stats: list of per-network stat dicts
-        objective: one of 'mean_rmse', 'softmax_nrmse', 'geomean_nrmse',
-                   'geomean_nre', 'powermean_nre'
+        objective: one of 'mean_rmse', 'softmax_nrmse', 'geomean_nrmse'
         softmax_alpha: sharpness for softmax objective
-        powermean_p: exponent for power mean
     """
     objectives = {
         "mean_rmse": lambda: objective_mean_rmse(stats),
         "softmax_nrmse": lambda: objective_softmax_nrmse(stats, softmax_alpha),
         "geomean_nrmse": lambda: objective_geomean_nrmse(stats),
-        "geomean_nre": lambda: objective_geomean_nre(stats),
-        "powermean_nre": lambda: objective_powermean_nre(stats, powermean_p),
     }
     assert objective in objectives, (
         f"unknown objective '{objective}'. valid: {list(objectives.keys())}"
@@ -642,10 +589,6 @@ DEFAULT_GRIDSTATS_PARAMS: dict = {
     "subsample_knn_k": 64,
     "subsample_density_quantile": 0.025,
 }
-
-SPLIT_HALF_SUBSET_SIZE: int = 10000  # fixed size for fair cross-dataset comparison
-SPLIT_HALF_N_BOOTSTRAPS: int = 5  # cv ~6%, good speed/stability tradeoff
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GRIDSTATS CONFIG MIXIN
