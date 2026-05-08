@@ -3,15 +3,20 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 
-try:
-    KNN_WORKERS = int(os.environ.get("BIOCOMP_KNN_WORKERS", "-1"))
-except ValueError:
-    KNN_WORKERS = -1
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
 
-try:
-    KNN_MEAN_CHUNK_SIZE = int(os.environ.get("BIOCOMP_KNN_MEAN_CHUNK_SIZE", "2500"))
-except ValueError:
-    KNN_MEAN_CHUNK_SIZE = 2500
+
+KNN_BACKEND = os.environ.get("BIOCOMP_KNN_BACKEND", "pykdtree").lower()
+KNN_WORKERS = _env_int("BIOCOMP_KNN_WORKERS", -1)
+KNN_MEAN_CHUNK_SIZE = _env_int("BIOCOMP_KNN_MEAN_CHUNK_SIZE", 2500)
+KNN_ANN_M = _env_int("BIOCOMP_KNN_ANN_M", 4)
+KNN_ANN_EF_CONSTRUCTION = _env_int("BIOCOMP_KNN_ANN_EF_CONSTRUCTION", 30)
+KNN_ANN_EF_SEARCH = _env_int("BIOCOMP_KNN_ANN_EF_SEARCH", 64)
+
 
 try:
     from pykdtree.kdtree import KDTree as _PKDTree
@@ -20,14 +25,84 @@ try:
 except ImportError:
     _PKDTree = None
 
+try:
+    from usearch.index import Index as _UIndex
+except ImportError:
+    _UIndex = None
+
+
+def _resolve_backend(requested: str) -> str:
+    if requested in ("usearch", "ann"):
+        if _UIndex is not None:
+            return "usearch"
+    if _PKDTree is not None:
+        return "pykdtree"
+    return "scipy"
+
+
+_BACKEND = _resolve_backend(KNN_BACKEND)
+
+
+class _UsearchTree:
+    """Adapter so usearch HNSW Index quacks like scipy.cKDTree.query.
+
+    Output contract: ``(distances, indices)`` where invalid neighbors carry
+    ``inf`` distance and ``n`` (the data size, sentinel) index. Invalid
+    covers two cases: padding when ``k > n_data``, and (post-filter)
+    distances above ``distance_upper_bound``. Distances are true L2
+    (not squared). Native dtypes are kept (float32 / uint64) — callers
+    only inspect values, not dtypes.
+    """
+    __slots__ = ("_index", "_n")
+
+    def __init__(self, x: np.ndarray):
+        n, d = x.shape
+        idx = _UIndex(
+            ndim=d,
+            metric="l2sq",
+            connectivity=KNN_ANN_M,
+            expansion_add=KNN_ANN_EF_CONSTRUCTION,
+            expansion_search=KNN_ANN_EF_SEARCH,
+        )
+        idx.add(np.arange(n, dtype=np.int64), np.ascontiguousarray(x, dtype=np.float32))
+        self._index = idx
+        self._n = n
+
+    def query(self, x, k, distance_upper_bound=None, **_):
+        n = self._n
+        x = np.atleast_2d(np.ascontiguousarray(x, dtype=np.float32))
+        m = self._index.search(x, k)
+        labels = m.keys
+        sq = m.distances
+        counts = m.counts
+        if (counts < k).any():
+            col = np.arange(k)
+            invalid = col[None, :] >= counts[:, None]
+            sq[invalid] = 0.0
+            distances = np.sqrt(sq, out=sq)
+            distances[invalid] = np.inf
+            labels[invalid] = n
+        else:
+            distances = np.sqrt(sq, out=sq)
+        if distance_upper_bound is not None:
+            mask = distances > distance_upper_bound
+            distances[mask] = np.inf
+            labels[mask] = n
+        return distances, labels
+
 
 def make_tree(x: np.ndarray):
-    if _PKDTree is not None:
+    if _BACKEND == "usearch":
+        return _UsearchTree(x)
+    if _BACKEND == "pykdtree":
         return _PKDTree(np.ascontiguousarray(x, dtype=np.float64))
     return cKDTree(x, leafsize=32)
 
 
 def _query(tree, x, **kw):
+    if isinstance(tree, _UsearchTree):
+        kw.pop("workers", None)
+        return tree.query(x, **kw)
     if _PKDTree is not None and isinstance(tree, _PKDTree):
         kw.pop("workers", None)
     return tree.query(x, **kw)
