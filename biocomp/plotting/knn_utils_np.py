@@ -10,7 +10,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-KNN_BACKEND = os.environ.get("BIOCOMP_KNN_BACKEND", "pykdtree").lower()
+KNN_BACKEND = os.environ.get("BIOCOMP_KNN_BACKEND", "usearch").lower()
 KNN_WORKERS = _env_int("BIOCOMP_KNN_WORKERS", -1)
 KNN_MEAN_CHUNK_SIZE = _env_int("BIOCOMP_KNN_MEAN_CHUNK_SIZE", 2500)
 KNN_ANN_M = _env_int("BIOCOMP_KNN_ANN_M", 4)

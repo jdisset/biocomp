@@ -714,7 +714,8 @@ class FigureSpec(ArbitraryModel):
             )
         elif str(output_path).lower().endswith(".pdf"):
             pdf_metadata = {**full_metadata, "CreationDate": datetime.now()}
-            figax.figure.savefig(temp_path, metadata=pdf_metadata, bbox_inches=bbox_inches)
+            with mpl.rc_context({"pdf.compression": 1}):
+                figax.figure.savefig(temp_path, metadata=pdf_metadata, bbox_inches=bbox_inches)
         elif str(output_path).lower().endswith(".svg"):
             figax.figure.savefig(temp_path, format="svg", bbox_inches=bbox_inches)
             self._postprocess_svg(temp_path, full_metadata)
