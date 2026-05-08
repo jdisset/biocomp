@@ -234,6 +234,13 @@ def cached_compile(
         logger.debug(f"In-process cache hit for {signature[:16]}")
         return _PROCESS_CACHE[signature]  # type: ignore[return-value]
 
+    if signature.startswith("inference_") and os.environ.get(
+        "BIOCOMP_ENABLE_SERIALIZED_INFERENCE_CACHE", ""
+    ).lower() not in {"1", "true", "yes", "on"}:
+        result = compile_fn()
+        _PROCESS_CACHE[signature] = result
+        return result
+
     if cache_dir is None:
         cache_dir = COMPILATION_CACHE_DIR
     if isinstance(cache_dir, str):

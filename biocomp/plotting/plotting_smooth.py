@@ -1,7 +1,6 @@
 # {{{                          --     imports     --
 # ···············································································
 
-from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 import matplotlib as mpl
@@ -476,7 +475,7 @@ def colorbar(
     if setup_transformed_axis_params is None:
         setup_transformed_axis_params = {}
     else:
-        setup_transformed_axis_params = deepcopy(setup_transformed_axis_params)
+        setup_transformed_axis_params = dict(setup_transformed_axis_params)
     # The colorbar's scale axis must always show its tick labels — a colorbar
     # without numbers is useless. Override any inherited show_labels=False that
     # cascaded down via nested_resolve from the heatmap's cell-level config
@@ -485,6 +484,8 @@ def colorbar(
     _sub = setup_transformed_axis_params.get(_active_axis_key) or {}
     if not isinstance(_sub, dict):
         _sub = {}
+    else:
+        _sub = dict(_sub)
     _sub["show_labels"] = True
     setup_transformed_axis_params[_active_axis_key] = _sub
     if label_props is None:

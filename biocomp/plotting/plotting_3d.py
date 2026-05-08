@@ -707,8 +707,6 @@ def smooth_3d(
     zticks["minor"] = np.asarray(zticks["minor"])
     zticks["minor"] = zticks["minor"][zticks["minor"] > 0.0]
 
-    import copy
-
     ztitle = ztitle if ztitle is not None else input_names[2]
 
     # for i, s in enumerate(zslices):
@@ -721,8 +719,8 @@ def smooth_3d(
 
         data_slices_positions = np.atleast_1d(s)
 
-        s_zticks = copy.deepcopy(zticks)
-        s_zlabels = copy.deepcopy(major_zlabels)
+        s_zticks = dict(zticks)
+        s_zlabels = list(major_zlabels)
         cbar_should_be_drawn = draw_colorbar if draw_colorbar is not None else i == len(zslices) - 1
         cbar_ax = slice_ax.inset_axes(colorbar_location) if cbar_should_be_drawn else None
 

@@ -10,6 +10,7 @@ import threading
 import numpy as np
 from biocomp import utils as ut
 from biocomp.datautils import DataRescaler
+from biocomp.plotting.knn_utils_np import KNN_WORKERS as _KNN_WORKERS, _query as _tree_query
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -17,9 +18,15 @@ import difflib
 import os
 from typing import Sequence
 from matplotlib import colors as mcolors
-from copy import deepcopy
 import dracon as dr
 from biocomp.logging_config import get_logger
+
+try:
+    from pykdtree.kdtree import KDTree as _PKDTree
+    if _KNN_WORKERS == 1:
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+except ImportError:
+    _PKDTree = None
 
 logger = get_logger(__name__)
 
@@ -115,7 +122,7 @@ def get_reordered_protein_names(
         in_order = list(range(len(input_names) - 1, -1, -1))
         reordered_input_names = [input_names[i] for i in in_order]
     else:
-        old_order = deepcopy(input_order)
+        old_order = list(input_order)
         resolved: list = []
         if any(isinstance(i, str) for i in old_order):
             for iname in old_order:
@@ -536,6 +543,7 @@ def setup_symlog_axis(
 
 USE_KNN_JAX = getenv("BC_KNN_USE_JAX", default=False)
 
+
 _TREE_CACHE: dict = {}
 _TREE_CACHE_MAX = 8
 _TREE_CACHE_LOCK = threading.Lock()
@@ -571,11 +579,11 @@ def build_tree(x, use_jax=USE_KNN_JAX):
     if len(x_clean) == 0:
         raise ValueError("No finite data points available for building KD-tree")
 
-    from scipy.spatial import KDTree
-
-    tree = KDTree(x_clean)
-    tree._finite_mask = mask
-    tree._original_x = x
+    if _PKDTree is not None:
+        tree = _PKDTree(np.ascontiguousarray(x_clean, dtype=np.float64))
+    else:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(x_clean, leafsize=32)
 
     if key is not None:
         with _TREE_CACHE_LOCK:
@@ -586,7 +594,6 @@ def build_tree(x, use_jax=USE_KNN_JAX):
 
 
 def _ball_volume(d: int) -> float:
-    # Volume of the unit d-ball
     from scipy.special import gamma
 
     return (np.pi ** (d / 2.0)) / gamma(d / 2.0 + 1.0)
@@ -605,7 +612,7 @@ def per_point_knn_density(tree, X_ref=None, kdensity: int = 50):
                 "Pass X_ref or use a tree exposing `.data`."
             )
 
-    dists, _ = tree.query(X_ref, k=kdensity + 1)
+    dists, _ = _tree_query(tree, X_ref, k=kdensity + 1)
     rk = dists[:, -1]
 
     d = X_ref.shape[1]
@@ -651,7 +658,11 @@ def knn_stats(
         from .knn_utils_jax import get_gaussian_weighted_knn, get_knn_mean_and_variance
         from jax import numpy as xnp
     else:
-        from .knn_utils_np import get_gaussian_weighted_knn, get_knn_mean_and_variance
+        from .knn_utils_np import (
+            get_gaussian_weighted_knn,
+            get_knn_mean_and_variance,
+            get_knn_mean_only,
+        )
 
         xnp = np
 
@@ -668,6 +679,16 @@ def knn_stats(
             kw["density_cap"] = float(xnp.quantile(densities, density_cap_q))
         kw["densities"] = densities
         kw["density_power"] = density_power
+
+    if not use_jax and iw is None and stats == ["mean"]:
+        return get_knn_mean_only(
+            xquery,
+            y,
+            tree=tree,
+            k=k,
+            min_points=min_points,
+            **kw,
+        )
 
     iw = iw or get_gaussian_weighted_knn(
         xquery,
@@ -699,7 +720,15 @@ def knn_stats(
         if s == "iw":
             return iw
         if s == "density":
-            return xnp.nansum(iw[1], 1)
+            weights = iw[1]
+            if use_jax:
+                return xnp.nansum(weights, 1)
+            valid = np.isfinite(weights[:, 0])
+            out = weights.sum(axis=1)
+            if not valid.all():
+                out = out.copy()
+                out[~valid] = 0.0
+            return out
         if s == "quantile":
             from .knn_utils_jax import get_knn_quantile
 
@@ -803,9 +832,11 @@ def _smooth_otsu_threshold(values: np.ndarray, bias: float = 0.5) -> float:
     w0 = np.cumsum(counts).astype(float)
     w1 = (total - w0).astype(float)
     mu0 = np.cumsum(counts * bin_centers)
-    mu0 = np.where(w0 > 0, mu0 / w0, 0)
+    mu0[w0 <= 0] = 0.0
+    np.divide(mu0, w0, out=mu0, where=w0 > 0)
     mu1 = np.cumsum((counts * bin_centers)[::-1])[::-1]
-    mu1 = np.where(w1 > 0, mu1 / w1, 0)
+    mu1[w1 <= 0] = 0.0
+    np.divide(mu1, w1, out=mu1, where=w1 > 0)
 
     # Avoid 0**0 surprises at the endpoints by treating power=0 as an
     # indicator (1 where the count is positive, 0 elsewhere).

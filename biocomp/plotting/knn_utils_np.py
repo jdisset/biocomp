@@ -9,6 +9,17 @@ except ValueError:
     KNN_WORKERS = -1
 
 
+def _query(tree, x, **kw):
+    if not hasattr(tree, "leafsize"):
+        kw.pop("workers", None)
+    return tree.query(x, **kw)
+
+try:
+    KNN_MEAN_CHUNK_SIZE = int(os.environ.get("BIOCOMP_KNN_MEAN_CHUNK_SIZE", "2500"))
+except ValueError:
+    KNN_MEAN_CHUNK_SIZE = 2500
+
+
 def knn_density(
     X: np.ndarray,
     k: int = 64,
@@ -22,8 +33,8 @@ def knn_density(
     """
     if tree is None:
         tree = cKDTree(X)
-    d, _ = tree.query(X, k=k + 1)  # +1 because closest is self
-    d_k = d[:, -1]  # distance to k-th neighbor
+    d, _ = _query(tree, X, k=k + 1)
+    d_k = d[:, -1]
     dim = X.shape[1]
     return 1.0 / np.power(d_k + eps, dim)
 
@@ -49,7 +60,7 @@ def knn_density_chunked(
     result = np.empty(n, dtype=np.float64)
     for i in range(0, n, chunksize):
         end = min(i + chunksize, n)
-        d, _ = tree.query(X[i:end], k=k + 1, workers=KNN_WORKERS)
+        d, _ = _query(tree, X[i:end], k=k + 1, workers=KNN_WORKERS)
         d_k = d[:, -1]
         result[i:end] = 1.0 / np.power(d_k + eps, dim)
     return result
@@ -120,7 +131,7 @@ def get_gaussian_weighted_knn(
     eps = 1e-12
 
     if adaptive_sigma:
-        distances, indices = tree.query(x, k=k, workers=KNN_WORKERS)
+        distances, indices = _query(tree, x, k=k, workers=KNN_WORKERS)
         finite_mask = np.isfinite(distances)
 
         # per-query sigma from the largest finite distance in each row
@@ -134,8 +145,7 @@ def get_gaussian_weighted_knn(
 
         nb_points = valid_mask.sum(axis=1)
     else:
-        # fixed-radius
-        distances, indices = tree.query(x, k=k, distance_upper_bound=radius, workers=KNN_WORKERS)
+        distances, indices = _query(tree, x, k=k, distance_upper_bound=radius, workers=KNN_WORKERS)
         valid_mask = np.isfinite(distances)
         nb_points = valid_mask.sum(axis=1)
         sigma = (radius / sigma_in_radius) + 0.0  # scalar
@@ -169,7 +179,7 @@ def get_gaussian_weighted_knn(
             Z_v *= np.power(dens_nei + eps, -density_power)
 
         if normed_w:
-            row_sums = np.nansum(Z_v, axis=1, keepdims=True)
+            row_sums = Z_v.sum(axis=1, keepdims=True)
             W_v = np.full_like(Z_v, np.nan)
             np.divide(Z_v, row_sums, out=W_v, where=row_sums > 0)
             W = np.full_like(distances, np.nan)
@@ -195,7 +205,7 @@ def get_gaussian_weighted_knn(
         Z *= np.power(dens_nei + eps, -density_power)
 
     if normed_w:
-        row_sums = np.nansum(Z, axis=1, keepdims=True)
+        row_sums = Z.sum(axis=1, keepdims=True)
         W = np.full_like(Z, np.nan)
         np.divide(Z, row_sums, out=W, where=row_sums > 0)
         return indices, W
@@ -219,10 +229,10 @@ def get_knn_mean_and_variance(x, y, tree=None, iw=None, compute_variance=True, *
     y_neighbors = y[ind_v]
     w = w_v[..., None]
     wy = w * y_neighbors
-    mean_v = np.nansum(wy, axis=1)
+    mean_v = wy.sum(axis=1)
     if compute_variance:
-        second_moment = np.nansum(wy * y_neighbors, axis=1)
-        w2sum = np.nansum(w_v * w_v, axis=1, keepdims=True)
+        second_moment = (wy * y_neighbors).sum(axis=1)
+        w2sum = (w_v * w_v).sum(axis=1, keepdims=True)
         var_v = (second_moment - mean_v * mean_v) / np.maximum(1.0 - w2sum, 1e-12)
     else:
         var_v = None
@@ -242,3 +252,60 @@ def get_knn_mean_and_variance(x, y, tree=None, iw=None, compute_variance=True, *
         variance = np.full((n_grid, n_outs), np.nan, dtype=var_v.dtype)
         variance[valid_rows] = var_v
     return weighted_mean, variance
+
+
+def _knn_mean_from_indices_weights(indices, weights, y):
+    n_grid = indices.shape[0]
+    valid_rows = np.isfinite(weights[:, 0])
+    n_outs = y.shape[1] if y.ndim > 1 else 1
+
+    if valid_rows.all():
+        row_sums = weights.sum(axis=1, keepdims=True)
+        np.divide(weights, row_sums, out=weights, where=row_sums > 0)
+        y_neighbors = y[indices]
+        if y.ndim == 1:
+            y_neighbors *= weights
+            return y_neighbors.sum(axis=1, keepdims=True)
+        y_neighbors *= weights[..., None]
+        return y_neighbors.sum(axis=1)
+
+    if not valid_rows.any():
+        return np.full((n_grid, n_outs), np.nan, dtype=y.dtype)
+
+    ind_v = indices[valid_rows]
+    w_v = weights[valid_rows]
+    row_sums = w_v.sum(axis=1, keepdims=True)
+    np.divide(w_v, row_sums, out=w_v, where=row_sums > 0)
+    y_neighbors = y[ind_v]
+    if y.ndim == 1:
+        y_neighbors *= w_v
+        mean_v = y_neighbors.sum(axis=1, keepdims=True)
+    else:
+        y_neighbors *= w_v[..., None]
+        mean_v = y_neighbors.sum(axis=1)
+
+    weighted_mean = np.full((n_grid, n_outs), np.nan, dtype=mean_v.dtype)
+    weighted_mean[valid_rows] = mean_v
+    return weighted_mean
+
+
+def get_knn_mean_only(x, y, tree=None, iw=None, **kw):
+    if iw is not None:
+        return _knn_mean_from_indices_weights(iw[0], iw[1], y)
+
+    chunk_size = KNN_MEAN_CHUNK_SIZE
+    if chunk_size > 0 and x.shape[0] > chunk_size:
+        chunks = []
+        for start in range(0, x.shape[0], chunk_size):
+            stop = min(start + chunk_size, x.shape[0])
+            indices, weights = get_gaussian_weighted_knn(
+                x[start:stop],
+                tree=tree,
+                normed_w=False,
+                **kw,
+            )
+            chunks.append(_knn_mean_from_indices_weights(indices, weights, y))
+        return np.concatenate(chunks, axis=0)
+
+    indices, weights = get_gaussian_weighted_knn(x, tree=tree, normed_w=False, **kw)
+    return _knn_mean_from_indices_weights(indices, weights, y)

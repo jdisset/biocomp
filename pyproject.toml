@@ -79,6 +79,7 @@ dependencies = [
     "evosax",
     "pandas",
     "scipy",
+    "pykdtree",
     "matplotlib",
     "matplotlib-label-lines",
     "pydantic",

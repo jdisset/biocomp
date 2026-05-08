@@ -642,7 +642,10 @@ class FigureSpec(ArbitraryModel):
         assert self.output_file is not None
 
         sanitized_metadata = sanitize_for_json(self.metadata)
-        metadata_json = json.dumps({FIGURE_METADATA_KEY: sanitized_metadata}, indent=2)
+        metadata_json = json.dumps(
+            {FIGURE_METADATA_KEY: sanitized_metadata},
+            separators=(",", ":"),
+        )
         full_metadata = {
             "Creator": "biocomp",
             "Author": "biocomp",
