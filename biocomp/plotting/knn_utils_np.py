@@ -73,7 +73,6 @@ _BACKEND = _resolve_backend(KNN_BACKEND)
 
 
 def _resolve_threads() -> int:
-    """Re-read at call time so PlotJob can flip it before worker spawn."""
     raw = _env_int("BIOCOMP_KNN_WORKERS", -1)
     return 0 if raw in (-1, 0) else max(1, raw)
 
@@ -81,12 +80,8 @@ def _resolve_threads() -> int:
 class _UsearchTree:
     """Adapter so usearch HNSW Index quacks like scipy.cKDTree.query.
 
-    Output contract: ``(distances, indices)`` where invalid neighbors carry
-    ``inf`` distance and ``n`` (the data size, sentinel) index. Invalid
-    covers two cases: padding when ``k > n_data``, and (post-filter)
-    distances above ``distance_upper_bound``. Distances are true L2
-    (not squared). Native dtypes are kept (float32 / uint64) — callers
-    only inspect values, not dtypes.
+    Returns (distances, indices); invalid neighbors get inf distance and n
+    (sentinel) index. Distances are true L2.
     """
     __slots__ = ("_index", "_n")
 
