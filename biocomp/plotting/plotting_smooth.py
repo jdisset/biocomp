@@ -367,7 +367,12 @@ _KNN_GRID_CACHE: dict = {}
 _KNN_GRID_CACHE_MAX = 8
 
 
-def _knn_grid_cache_key(x, y, xlims, ylims, zslice, is_density_plot, grid_resolution, knn_stats_params):
+def _knn_grid_cache_key(
+    x, y, xlims, ylims, zslice, is_density_plot, grid_resolution, knn_stats_params,
+    max_centroid_offset_frac=0.0,
+    query_mode="grid",
+    query_seed=0,
+):
     kx = pc.array_content_key(x)
     ky = pc.array_content_key(y)
     if kx is None or ky is None:
@@ -381,6 +386,9 @@ def _knn_grid_cache_key(x, y, xlims, ylims, zslice, is_density_plot, grid_resolu
         bool(is_density_plot),
         int(grid_resolution),
         tuple(sorted((knn_stats_params or {}).items())),
+        float(max_centroid_offset_frac),
+        str(query_mode),
+        int(query_seed),
     )
 
 
@@ -394,12 +402,29 @@ def knn_grid(
     is_density_plot=False,
     grid_resolution=200,
     knn_stats_params=None,
+    max_centroid_offset_frac: float = 0.0,
+    query_mode: Literal["grid", "uniform"] = "grid",
+    query_seed: int = 0,
 ):
+    """KNN-smoothed (X, Y) at query points covering xlims × ylims.
+
+    `query_mode="grid"` (default) places `grid_resolution²` query points on
+    a regular lattice. `query_mode="uniform"` draws the same number of
+    query points uniformly at random — useful when lattice alignment with
+    underlying data structure causes visible aliasing.
+
+    `max_centroid_offset_frac > 0` masks (NaN-fills) cells where the
+    Gaussian-weighted centroid of neighbor positions sits more than
+    `frac · kernel_sigma` from the cell center — the direct measure of
+    Nadaraya-Watson boundary asymmetry. Recommended values: 0.8–1.5;
+    1.0 is a clean cut between interior and one-sided support.
+    """
     if knn_stats_params is None:
         knn_stats_params = {}
 
     cache_key = _knn_grid_cache_key(
         x, y, xlims, ylims, zslice, is_density_plot, grid_resolution, knn_stats_params,
+        max_centroid_offset_frac, query_mode, query_seed,
     )
     if cache_key is not None:
         cached = _KNN_GRID_CACHE.get(cache_key)
@@ -417,7 +442,15 @@ def knn_grid(
 
     xmin, xmax = xlims
     ymin, ymax = ylims or xlims
-    xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
+    if query_mode == "uniform":
+        rng = np.random.default_rng(int(query_seed))
+        n_query = int(grid_resolution) ** 2
+        xy = np.column_stack([
+            rng.uniform(xmin, xmax, size=n_query),
+            rng.uniform(ymin, ymax, size=n_query),
+        ]).astype(np.float64)
+    else:
+        xy = make_xy_grid(xmin, xmax, xres=grid_resolution, ymin=ymin, ymax=ymax, yres=grid_resolution)
 
     if len(x_clean) == 0:
         return xy, np.full(xy.shape[0], np.nan)
@@ -431,10 +464,18 @@ def knn_grid(
         xquery = xy
 
     tree = build_tree(x_clean)
-    stats = "density" if is_density_plot else "mean"
-    output_values = knn_stats(
-        xquery, y_clean, tree=tree, stats=stats, **knn_stats_params
-    ).squeeze()
+    primary = "density" if is_density_plot else "mean"
+    requested = [primary, "centroid_offset"] if max_centroid_offset_frac > 0.0 else primary
+    result = knn_stats(xquery, y_clean, tree=tree, stats=requested, **knn_stats_params)
+    if max_centroid_offset_frac > 0.0:
+        output_values, offset = result
+        output_values = output_values.squeeze()
+        radius = float(knn_stats_params.get("radius", 0.1))
+        sigma_in_radius = float(knn_stats_params.get("sigma_in_radius", 3.0))
+        boundary = np.asarray(offset) > max_centroid_offset_frac * (radius / sigma_in_radius)
+        output_values = np.where(boundary, np.nan, output_values)
+    else:
+        output_values = result.squeeze()
 
     if output_values.shape != (xy.shape[0],):
         raise ValueError(f"output_values.shape = {output_values.shape} != {xy.shape[0]}")

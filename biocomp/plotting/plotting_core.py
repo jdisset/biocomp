@@ -705,6 +705,15 @@ def knn_stats(
         else (None, None)
     )
 
+    def _centroid():
+        pts = xnp.asarray(getattr(tree, "data", None))
+        if pts is None:
+            raise ValueError("centroid stats require a tree exposing `.data`")
+        nbr = pts[iw[0]]
+        w = xnp.where(xnp.isfinite(iw[1]), iw[1], 0.0)
+        wsum = w.sum(axis=1, keepdims=True)
+        return (w[..., None] * nbr).sum(axis=1) / xnp.maximum(wsum, 1e-12)
+
     def calc(s):
         if s == "iw":
             return iw
@@ -728,6 +737,10 @@ def knn_stats(
             return var
         if s == "std":
             return xnp.sqrt(var)  # type: ignore
+        if s == "centroid":
+            return _centroid()
+        if s == "centroid_offset":
+            return xnp.linalg.norm(_centroid() - xnp.asarray(xquery), axis=1)
         raise ValueError(f"Unknown stat: {s}")
 
     res = tuple([calc(s) for s in stats])
