@@ -1,125 +1,127 @@
-from sqlmodel import Field, SQLModel, create_engine, Session, select
-from sqlalchemy.orm import registry
+"""Pure Pydantic schema for the parts database.
+
+Each model is the source of truth for one parts-db table — used by dracon as a
+typed YAML tag (!Part, !L0, !L1, ...) and as the validation surface for both
+direct construction and field-by-field FK checks (performed in library.py).
+
+No SQL: the parts database is yaml-on-disk with a pickle cache (see
+biocomp.library). Field aliases (5'UTR, 3'UTR) are pure Pydantic — they survive
+yaml round-trip via the alias_generator on Pydantic's ConfigDict.
+"""
+
 from typing import Optional
-from pydantic import ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+import json5
 
 
-class PartsDB(SQLModel, registry=registry()):
-    pass
-
-
-# SUPER HACKY but waiting for sqlmodel to fix serialization_alias support:
+# Legacy gsheet columns 5'UTR / 3'UTR are not valid Python identifiers,
+# so we expose them via aliases and use utr5 / utr3 on the Python side.
 ALIASES = {"utr5": "5'UTR", "utr3": "3'UTR", "uid": "UID"}
 
 
-class Category(PartsDB, table=True):
-    name: str = Field(primary_key=True)
+class PartsRecord(BaseModel):
+    """Common base for every parts-db record class.
+
+    Pydantic config enables aliasing (`5'UTR`) and lets construction accept
+    either the alias or the python attribute name (populate_by_name).
+    """
+
+    model_config = ConfigDict(
+        alias_generator=lambda field_name: ALIASES.get(field_name, field_name),
+        populate_by_name=True,
+    )
+
+
+def _coerce_json_list(v):
+    """Pre-validator for list[str] fields that were historically JSON-encoded strings.
+
+    Kept for resilience: a hand-edited yaml file or a hand-written record dict
+    can still pass `'["x","y"]'` and we'll accept it. New records arrive as
+    real lists.
+    """
+    if isinstance(v, str):
+        parsed = json5.loads(v)
+        if not isinstance(parsed, list):
+            raise ValueError(f"Expected JSON array, got {type(parsed).__name__}")
+        return [str(x) for x in parsed]
+    return v
+
+
+class Category(PartsRecord):
+    name: str
     transcripted: bool
     translated: bool
 
 
-def int_or_none(s: str) -> Optional[int]:
-    try:
-        return int(s)
-    except Exception:
-        return None
+class Part(PartsRecord):
+    name: str
+    category: str
 
 
-class Part(PartsDB, table=True):
-    model_config = ConfigDict(
-        alias_generator=lambda field_name: ALIASES.get(field_name, field_name)
-    )
-
-    name: str = Field(primary_key=True)
-    category: str = Field(foreign_key="category.name")
-
-
-class L0(PartsDB, table=True):
-    id: str = Field(primary_key=True)
+class L0(PartsRecord):
+    id: str
     notes: Optional[str] = None
     constructed: bool
     backbone: str
-    part_1: Optional[str] = Field(default=None, foreign_key="part.name")
-    part_2: Optional[str] = Field(default=None, foreign_key="part.name")
-    part_3: Optional[str] = Field(default=None, foreign_key="part.name")
-    part_4: Optional[str] = Field(default=None, foreign_key="part.name")
-    part_5: Optional[str] = Field(default=None, foreign_key="part.name")
-    part_6: Optional[str] = Field(default=None, foreign_key="part.name")
+    part_1: Optional[str] = None
+    part_2: Optional[str] = None
+    part_3: Optional[str] = None
+    part_4: Optional[str] = None
+    part_5: Optional[str] = None
+    part_6: Optional[str] = None
 
 
-class L1(PartsDB, table=True):
-    model_config = ConfigDict(
-        alias_generator=lambda field_name: ALIASES.get(field_name, field_name)
-    )
-
-    id: str = Field(primary_key=True)
+class L1(PartsRecord):
+    id: str
     notes: Optional[str] = None
     constructed: bool
     backbone: str
-    insulator: Optional[str] = Field(default=None, foreign_key="l0.id")
-    promoter: Optional[str] = Field(default=None, foreign_key="l0.id")
-    utr5: Optional[str] = Field(
-        default=None, foreign_key="l0.id", sa_column_kwargs={"name": "5'UTR"}, alias="5'UTR"
-    )
-    gene: Optional[str] = Field(default=None, foreign_key="l0.id")
-    utr3: Optional[str] = Field(
-        default=None, foreign_key="l0.id", sa_column_kwargs={"name": "3'UTR"}, alias="3'UTR"
-    )
-    terminator: Optional[str] = Field(default=None, foreign_key="l0.id")
+    insulator: Optional[str] = None
+    promoter: Optional[str] = None
+    utr5: Optional[str] = None
+    gene: Optional[str] = None
+    utr3: Optional[str] = None
+    terminator: Optional[str] = None
 
 
-class L2(PartsDB, table=True):
-    id: str = Field(primary_key=True)
+class L2(PartsRecord):
+    id: str
     notes: Optional[str] = None
     constructed: bool
     backbone: str
-    slot_1: Optional[str] = Field(default=None, foreign_key="l1.id")
-    slot_2: Optional[str] = Field(default=None, foreign_key="l1.id")
-    slot_3: Optional[str] = Field(default=None, foreign_key="l1.id")
-    slot_4: Optional[str] = Field(default=None, foreign_key="l1.id")
-    slot_5: Optional[str] = Field(default=None, foreign_key="l1.id")
-    slot_6: Optional[str] = Field(default=None, foreign_key="l1.id")
+    slot_1: Optional[str] = None
+    slot_2: Optional[str] = None
+    slot_3: Optional[str] = None
+    slot_4: Optional[str] = None
+    slot_5: Optional[str] = None
+    slot_6: Optional[str] = None
 
 
-class SequestronType(PartsDB, table=True):
-    name: str = Field(primary_key=True)
-    negative_category: str = Field(foreign_key="category.name")
-    positive_category: str = Field(foreign_key="category.name")
+class SequestronType(PartsRecord):
+    name: str
+    negative_category: str
+    positive_category: str
     negative_level: str
     positive_level: str
     output_level: str
     output_side: str
-    output_category: str
-    parameter_list: str
+    output_category: list[str] = Field(default_factory=list)
+    parameter_list: list[str] = Field(default_factory=list)
+
+    @field_validator("output_category", "parameter_list", mode="before")
+    @classmethod
+    def _parse_json_list(cls, v):
+        return _coerce_json_list(v)
 
 
-class Sequestron(PartsDB, table=True):
-    id: int = Field(primary_key=True)
-    type: str = Field(foreign_key="sequestrontype.name")
-    negative_part: str = Field(foreign_key="part.name")
-    positive_part: str = Field(foreign_key="part.name")
-    output_part: str
+class Sequestron(PartsRecord):
+    id: int
+    type: str
+    negative_part: str
+    positive_part: str
+    output_part: list[str] = Field(default_factory=list)
 
-
-def get_all_parts_from_database(db_url: str):
-    engine = create_engine(db_url)
-    SQLModel.metadata.create_all(engine)
-
-    with Session(engine) as session:
-        categories = session.exec(select(Category)).all()
-        parts = session.exec(select(Part)).all()
-        L0s = session.exec(select(L0)).all()
-        L1s = session.exec(select(L1)).all()
-        L2s = session.exec(select(L2)).all()
-        sequestron_types = session.exec(select(SequestronType)).all()
-        sequestrons = session.exec(select(Sequestron)).all()
-
-    return {
-        "categories": categories,
-        "parts": parts,
-        "L0s": L0s,
-        "L1s": L1s,
-        "L2s": L2s,
-        "sequestron_types": sequestron_types,
-        "sequestrons": sequestrons,
-    }
+    @field_validator("output_part", mode="before")
+    @classmethod
+    def _parse_json_list(cls, v):
+        return _coerce_json_list(v)
