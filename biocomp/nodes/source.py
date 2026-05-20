@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.jaxutils import flat_concat
 from biocomp.compute import StackNode, ComputeStack
 import jax
@@ -17,7 +19,6 @@ from biocomp.nodeutils import (
     reference_forward_key_ids,
     empty_prepare,
 )
-from typing import Optional
 
 from .passthrough import single_passthrough
 from biocomp.utils import get_logger
@@ -114,8 +115,8 @@ def source_with_pos(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-        tu_enabled_random_vars: Optional[ArrayLike] = None,
-        network_id: Optional[ArrayLike] = None,
+        tu_enabled_random_vars: ArrayLike | None = None,
+        network_id: ArrayLike | None = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         context_vector = _kwargs.get("context_vector")
@@ -217,8 +218,8 @@ def inv_source_with_pos(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-        tu_enabled_random_vars: Optional[ArrayLike] = None,
-        network_id: Optional[ArrayLike] = None,
+        tu_enabled_random_vars: ArrayLike | None = None,
+        network_id: ArrayLike | None = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         context_vector = _kwargs.get("context_vector")

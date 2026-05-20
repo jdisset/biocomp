@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.compute import StackNode, ComputeStack
 from jax.tree_util import Partial as partial
 from jax.typing import ArrayLike
@@ -15,7 +17,6 @@ from biocomp.nodeutils import (
     reference_forward_key_ids,
     NON_GRAD_TAG,
 )
-from typing import Optional
 
 from biocomp.neuralutils import (
     ACTIVATION_FUNCTIONS,
@@ -92,8 +93,8 @@ def grouped_output(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-        tu_enabled_random_vars: Optional[ArrayLike] = None,
-        network_id: Optional[ArrayLike] = None,
+        tu_enabled_random_vars: ArrayLike | None = None,
+        network_id: ArrayLike | None = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         inputs_arr = jnp.array(inputs)

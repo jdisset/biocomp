@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 # ruff: noqa: F811
 """Regression tests for uORF / parts extraction in network_info.
 
@@ -5,15 +7,13 @@ Originally motivated by the ConstraintsV2_3 ERN_ERNuORFsum_NxCasE networks in
 the production DB, whose extracted `uorf_values` reported [[0, 0]] and
 `uorf_names` reported "No uORF" regardless of the 5'UTR part actually
 attached (0x-inert, 1x-, 3x-, 8x-uORF). The parts DB itself stored the
-correct L0-5.2_Nx-uORF parts — only the extraction was broken.
+correct L0-5.2_Nx-uORF parts -- only the extraction was broken.
 
 Each test builds a Recipe by hand, compiles to a Network, and asserts that
 `generate_network_info` produces the correct `uorf_values`, `uorf_names`,
 and `all_parts`. Fixtures cover CasE and Pgu conventions plus the "weak"
 (1w) variant.
 """
-
-from __future__ import annotations
 
 import pytest
 
@@ -159,7 +159,7 @@ def test_uorf_values_zero_when_no_ern(lib):
 
 
 def _multi_source_ern_recipe(lib, uorfs_per_source: list[str | None], name: str) -> Recipe:
-    """Multi-source single-ERN recipe — multiple CasE source plasmids with
+    """Multi-source single-ERN recipe -- multiple CasE source plasmids with
     different uORF counts, each in its own cotx group.
 
     Matches the ConstraintsV2_3 ERN_ERNuORFsum topology where N CasE source
@@ -299,7 +299,7 @@ def test_pgu_style_plasmid_naming(lib):
     """Pgu TUs historically use L1.ST1-2_<N>x_pguCas13[_REAL] naming.
 
     The critical thing is that the extraction doesn't depend on the plasmid
-    NAME but on the actual slots/parts — this test builds a Pgu-style
+    NAME but on the actual slots/parts -- this test builds a Pgu-style
     recipe and asserts the uORF value still comes through correctly.
     """
     with LibraryContext.with_library(lib):

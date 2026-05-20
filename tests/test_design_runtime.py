@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for design_runtime: types, protocol, and kernel lifecycle."""
 
 import pytest

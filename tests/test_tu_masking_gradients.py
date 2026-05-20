@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for TU masking gradient flow.
 
 Verifies that:

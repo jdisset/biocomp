@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from functools import partial
 from biocomp.logging_config import get_logger
 import jax

@@ -1,6 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for canonical run-scoped tracing stream."""
-
-from __future__ import annotations
 
 import json
 import tempfile

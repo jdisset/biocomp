@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for tumasking_strategy.py - the SSOT for TU masking behavior.
 
 Tests cover:

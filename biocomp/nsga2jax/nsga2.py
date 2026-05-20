@@ -1,6 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """NSGA-II multi-objective optimization algorithm in JAX."""
-
-from __future__ import annotations
 
 from typing import NamedTuple
 

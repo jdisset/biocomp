@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Measured vs Predicted scatter plot with density and trendline.
 
 Optional generative-model diagnostics (pass ``model_samples``):
@@ -94,8 +96,8 @@ def _draw_violins(
 ):
     """Mirrored conditional violins.
 
-    Right half: P(predicted | measured ≈ t) — "truth is t, where do predictions land?"
-    Left half:  P(measured | predicted ≈ t) — "model says t, what was the truth?"
+    Right half: P(predicted | measured ≈ t) -- "truth is t, where do predictions land?"
+    Left half:  P(measured | predicted ≈ t) -- "model says t, what was the truth?"
     """
     dense_x = eval_x[dense_mask]
     if len(dense_x) < 2:
@@ -156,7 +158,7 @@ def fit_median_trend(
 
     The underlying ``fit_stacked_poly_at_quantiles`` requires at least
     two distinct quantiles (it builds Gaussian-weighted segments between
-    them), so this helper defaults to a tight band around 0.5 — the
+    them), so this helper defaults to a tight band around 0.5 -- the
     average across these quantiles approximates the conditional median
     while staying numerically stable.
     """
@@ -199,7 +201,7 @@ def calibration_rms(
     so `sqrt(cal_rms² + spread²)` is the model-only RMSE (noise excluded).
 
     Pass `trend_y` to skip the (cached) fit and reuse a precomputed
-    conditional-median trend — useful when many metrics share one fit.
+    conditional-median trend -- useful when many metrics share one fit.
     """
     measured, predicted = _clean_paired(np.asarray(measured).ravel(), np.asarray(predicted).ravel())
     if measured.size < max(2, degree + 1):
@@ -232,7 +234,7 @@ def conditional_spread(
 ) -> float:
     """RMS of `(predicted − conditional_median(predicted | measured))`.
 
-    Captures the stochastic component of the model's MSE — how much the
+    Captures the stochastic component of the model's MSE -- how much the
     predictions disperse around their conditional median trend. This is
     the natural variance-side companion to :func:`calibration_rms`.
 
@@ -276,7 +278,7 @@ def crps_empirical(
     if samp.ndim == 1:
         samp = samp[:, None]
     if samp.shape[1] != obs.size:
-        # accept (n_obs, n_samples) — transpose if needed
+        # accept (n_obs, n_samples) -- transpose if needed
         if samp.shape[0] == obs.size:
             samp = samp.T
         else:
@@ -314,12 +316,12 @@ def bias_area(
     Mathematically: ``∫ [f(x) - x] dx / Δx`` over the support, where
     ``f(x) = median(predicted | measured = x)`` is fit with a stacked
     polynomial. The result is in y-units and represents the mean
-    *systematic* bias of the model — distinct from RMSE, which folds in
+    *systematic* bias of the model -- distinct from RMSE, which folds in
     both bias and variance. Switch `signed=False` for the unsigned
     (mean absolute calibration error) variant.
 
     Interpretation:
-      ≈ 0   : the trend tracks y=x → well-calibrated on average
+      ≈ 0   : the trend tracks y=x -> well-calibrated on average
       > 0   : model systematically over-predicts
       < 0   : model systematically under-predicts
 
@@ -447,7 +449,7 @@ def measured_vs_predicted(
     show_spread: bool = True,               # RMS conditional dispersion around trend
     show_crps: bool = True,                 # only fires when model_samples is set
     extra_metrics: dict | None = None,      # appended to RMSE / R²
-    # noise floor band — shaded envelope along y=x in measured y-units.
+    # noise floor band -- shaded envelope along y=x in measured y-units.
     # When `noise_local=True` the band's half-width *fluctuates* with
     # measured value: a knn-smoothed std of the residuals around the
     # median trend, calibrated to integrate to the global `noise_floor`.
@@ -519,7 +521,7 @@ def measured_vs_predicted(
     trendline_label: str = "median trend",
     legend_kwargs: dict | None = None,
     # ── per-pair density weights ──
-    # When set, the density heatmap is built with `np.histogram2d(weights=…)`
+    # When set, the density heatmap is built with `np.histogram2d(weights=...)`
     # so each (measured, predicted) pair contributes proportionally to its
     # weight rather than uniformly. Used by the noise-floor panel to feed
     # Gaussian-kernel weights through, so close kernel neighbours dominate
@@ -529,7 +531,7 @@ def measured_vs_predicted(
     # Per-data-point kernel-smoother prediction aligned with `measured` /
     # `predicted`. When set, attaches a marginal strip below the cloud
     # showing 2D density of (measured_latent, model_pred_latent − kernel_pred_latent)
-    # — the "extra information" the model contributes beyond the optimal
+    # -- the "extra information" the model contributes beyond the optimal
     # nonparametric predictor at the cube-view bandwidth. Zero-line means
     # the model agrees with the kernel-smoother; spread is structural
     # disagreement.
@@ -762,7 +764,7 @@ def measured_vs_predicted(
             trend_at_measured=trend_at_measured,
             dense_mask_at_measured=dense_mask_at_measured,
         )
-        derived: list[tuple[bool, str, "object", bool]] = [
+        derived: list[tuple[bool, str, object, bool]] = [
             (True, "RMSE", lambda: rmse(measured, predicted), False),
             (True, "R²", lambda: r_squared(measured, predicted), False),
             (
@@ -797,7 +799,7 @@ def measured_vs_predicted(
         kw = max(len(k) for k, _, _ in rows)
         lines = []
         for k, v, signed in rows:
-            if isinstance(v, (int, float)):
+            if isinstance(v, int | float):
                 fmt = f"{v:+.4f}" if signed else f"{v:.4f}"
             else:
                 fmt = str(v)

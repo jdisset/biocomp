@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for full object saving in tracing system."""
 
 import pickle
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from biocomp.tracing import (
     TraceConfig,

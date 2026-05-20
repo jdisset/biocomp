@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Comprehensive tests for SVG parsing and sampling."""
 
 import io
@@ -115,7 +117,7 @@ class TestPathParsingVsReference:
 
 
 class TestShapeSampling:
-    """Test complete SVG → lattice sampling pipeline."""
+    """Test complete SVG -> lattice sampling pipeline."""
 
     def test_rectangle_coverage(self):
         target = SVGTarget(path=DESIGNS_DIR / "test_top_bar.svg", name="top_bar")

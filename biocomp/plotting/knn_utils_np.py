@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import os
 import numpy as np
 from scipy.spatial import cKDTree

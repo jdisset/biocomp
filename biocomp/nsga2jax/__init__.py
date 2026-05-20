@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.nsga2jax.crowding import crowding_distance
 from biocomp.nsga2jax.nsga2 import NSGA2, NSGA2Params, NSGA2State, run_nsga2
 from biocomp.nsga2jax.operators import polynomial_mutation, sbx_crossover

@@ -1,12 +1,13 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Graph visualization for GraphState objects.
 
 Interactive HTML visualization using Dash Cytoscape and text-based ASCII visualization
 for console debugging.
 """
 
-from __future__ import annotations
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 from collections import defaultdict
 
 if TYPE_CHECKING:
@@ -71,7 +72,7 @@ def _edge_label(edge: GraphEdge) -> str:
     if edge.content_type:
         parts.append(edge.content_type)
     if edge.from_output_slot or edge.to_input_slot:
-        parts.append(f"{edge.from_output_slot}→{edge.to_input_slot}")
+        parts.append(f"{edge.from_output_slot}->{edge.to_input_slot}")
     return " ".join(parts)
 
 
@@ -405,7 +406,7 @@ def show_graph(
                     [
                         html.Span("🔗 ", style={"fontSize": "16px"}),
                         html.Span(
-                            f"EDGE {edge.source_id} → {edge.target_id}",
+                            f"EDGE {edge.source_id} -> {edge.target_id}",
                             style={"fontWeight": "bold", "color": "#2c3e50", "fontSize": "15px"},
                         ),
                     ],
@@ -419,7 +420,7 @@ def show_graph(
                         [
                             html.Span("Slots: ", style={"fontWeight": "600", "color": "#34495e"}),
                             html.Span(
-                                f"{edge.from_output_slot} → {edge.to_input_slot}",
+                                f"{edge.from_output_slot} -> {edge.to_input_slot}",
                                 style={"color": "#e67e22", "fontFamily": "monospace"},
                             ),
                         ],
@@ -460,7 +461,7 @@ def show_graph(
                     content.append(
                         html.Div(
                             [
-                                html.Span("  • ", style={"color": "#95a5a6"}),
+                                html.Span("  * ", style={"color": "#95a5a6"}),
                                 html.Span(
                                     part.name, style={"fontWeight": "500", "color": "#2c3e50"}
                                 ),
@@ -522,7 +523,7 @@ def show_graph(
                 ),
                 None,
             )
-            return format_edge(edge) if edge else f"EDGE {source_id} → {target_id} not found"
+            return format_edge(edge) if edge else f"EDGE {source_id} -> {target_id} not found"
         else:
             return html.Div(
                 "Click a node or edge to see details",
@@ -575,7 +576,7 @@ def _get_tu_name(node: GraphNode, graph: GraphState) -> str:
     return name
 
 
-def _build_layer_info(network: "Network") -> tuple[list[dict], dict[int, int]]:
+def _build_layer_info(network: Network) -> tuple[list[dict], dict[int, int]]:
     """Build layer information from a single network using topological ordering.
 
     Returns:
@@ -622,13 +623,13 @@ def _format_embedding_value(value) -> str:
 
 def _is_unlocked(value) -> bool:
     """Check if an embedding value is unlocked (multiple options)."""
-    return isinstance(value, (list, tuple)) and len(value) > 1
+    return isinstance(value, list | tuple) and len(value) > 1
 
 
 class GraphPrinter:
     """ASCII graph printer for Network objects."""
 
-    def __init__(self, network: "Network"):
+    def __init__(self, network: Network):
         self.network = network
         self.graph = network.compute_graph
         self.layers, self.node_to_layer = _build_layer_info(network)
@@ -765,7 +766,7 @@ class GraphPrinter:
 
     def format_edge_table(
         self,
-        embedding: Optional[str] = None,
+        embedding: str | None = None,
         unlocked_only: bool = False,
     ) -> str:
         """Format the edge table with optional filtering."""
@@ -790,7 +791,7 @@ class GraphPrinter:
         lines = [
             f"\nEDGES ({len(edges)} total)",
             "─" * 110,
-            f" {'From → To':<20} │ {'Embeddings':<50} │ tu_id",
+            f" {'From -> To':<20} │ {'Embeddings':<50} │ tu_id",
             "─" * 110,
         ]
 
@@ -799,7 +800,7 @@ class GraphPrinter:
             tgt_node = self.graph.nodes.get(edge.target_id)
             src_short = _get_type_short(src_node.node_type) if src_node else "?"
             tgt_short = _get_type_short(tgt_node.node_type) if tgt_node else "?"
-            from_to = f"{src_short}:{edge.source_id} → {tgt_short}:{edge.target_id}"
+            from_to = f"{src_short}:{edge.source_id} -> {tgt_short}:{edge.target_id}"
 
             # Format all embeddings
             emb_parts = []
@@ -835,12 +836,12 @@ class GraphPrinter:
 
 
 def print_graph(
-    network: "Network",
+    network: Network,
     show_nodes: bool = True,
     show_edges: bool = True,
-    output: Optional[Path] = None,
+    output: Path | None = None,
     return_string: bool = False,
-) -> Optional[str]:
+) -> str | None:
     """Print node and edge tables for a network's compute graph.
 
     Args:
@@ -869,13 +870,13 @@ def print_graph(
 
 
 def print_paths(
-    network: "Network",
-    to_node: Optional[int] = None,
-    from_node: Optional[int] = None,
+    network: Network,
+    to_node: int | None = None,
+    from_node: int | None = None,
     max_length: int = 10,
     show_edge_details: bool = True,
     return_string: bool = False,
-) -> Optional[str]:
+) -> str | None:
     """Print all paths to or from a specific node.
 
     Args:
@@ -1036,12 +1037,12 @@ def print_paths(
 
 
 def print_edges(
-    network: "Network",
-    embedding: Optional[str] = None,
+    network: Network,
+    embedding: str | None = None,
     unlocked_only: bool = False,
-    tu_filter: Optional[list[int]] = None,
+    tu_filter: list[int] | None = None,
     return_string: bool = False,
-) -> Optional[str]:
+) -> str | None:
     """Print edge information with optional filtering.
 
     Args:

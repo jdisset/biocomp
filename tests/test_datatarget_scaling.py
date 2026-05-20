@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test DataTarget scaling behavior.
 
 When latent_x/latent_y extents are smaller than the data range, the target

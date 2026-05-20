@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Unified design optimization runtime kernel.
 
 Provides shared types and dispatch lifecycle management for
 gradient descent and pluggable optimizer paths.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,21 +23,21 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True)
 class StepArtifact:
-    """Single optimization step output — shared schema across all paths."""
+    """Single optimization step output -- shared schema across all paths."""
 
     step: int
     loss: float
     step_data: dict[str, Any]
-    params: "ParameterTree | None" = None
+    params: ParameterTree | None = None
 
 
 @dataclass(frozen=True)
 class DesignRuntimeContext:
     """Immutable context for a design optimization run."""
 
-    stack: "ComputeStack"
+    stack: ComputeStack
     config: object
-    dispatch: "LoggerDispatch"
+    dispatch: LoggerDispatch
     total_steps: int
 
 
@@ -44,7 +45,7 @@ class DesignRuntimeContext:
 class DesignRuntimeResult:
     """Output of an optimization adapter's run."""
 
-    params: "ParameterTree"
+    params: ParameterTree
     loss_history: list[float]
     final_snapshot: StepHistorySnapshot
     step: int
@@ -61,7 +62,7 @@ class StepAdapter(Protocol):
     def run(
         self,
         ctx: DesignRuntimeContext,
-        initial_params: "ParameterTree",
+        initial_params: ParameterTree,
     ) -> DesignRuntimeResult: ...
 
 
@@ -85,7 +86,7 @@ class GradientStepAdapter:
     def run(
         self,
         ctx: DesignRuntimeContext,
-        initial_params: "ParameterTree",
+        initial_params: ParameterTree,
     ) -> DesignRuntimeResult:
         from .optimutils import optimize
 
@@ -119,9 +120,9 @@ class GradientStepAdapter:
 
 def run_kernel(
     ctx: DesignRuntimeContext,
-    initial_params: "ParameterTree",
+    initial_params: ParameterTree,
     adapter: StepAdapter,
-) -> tuple["ParameterTree", list[float], StepHistorySnapshot]:
+) -> tuple[ParameterTree, list[float], StepHistorySnapshot]:
     """Unified design optimization kernel.
 
     Owns dispatch lifecycle (on_start/on_end).

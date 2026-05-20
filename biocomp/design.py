@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from __future__ import annotations
 import random
 from functools import partial
-from typing import Literal, Callable, Any, TYPE_CHECKING
+from typing import Literal, Any, TYPE_CHECKING
+from collections.abc import Callable
 import warnings
 
 import numpy as np
@@ -100,7 +103,7 @@ class DesignManager(BaseModel):
         return self._tu_id_to_idx
 
     @model_validator(mode="after")
-    def _validate_input_order_consistency(self) -> "DesignManager":
+    def _validate_input_order_consistency(self) -> DesignManager:
         """Warn if scaffold networks lack input_order with DataTargets."""
         if not self.has_data_targets:
             return self
@@ -460,7 +463,7 @@ class DesignConfig(DesignOptimConfig):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @model_validator(mode="after")
-    def _validate_hard_pruning_network_selection(self) -> "DesignConfig":
+    def _validate_hard_pruning_network_selection(self) -> DesignConfig:
         if self.hard_pruning_top_percent is not None and not (
             0.0 < self.hard_pruning_top_percent <= 100.0
         ):

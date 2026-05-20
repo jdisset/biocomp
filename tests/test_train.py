@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 
 """
 Tests for the training module (biocomp/train.py).
@@ -1177,7 +1179,7 @@ class TestKLNormalization:
         kl_2d, klw, _, _, _, _ = _quantization_kl_loss(params_2d, kl_weight=1.0, step=0)
         assert float(kl_2d) > 0, "KL should be positive for non-zero means"
 
-        # Zero out dim 0 mu → reduces its contribution, dim 1 still active
+        # Zero out dim 0 mu -> reduces its contribution, dim 1 still active
         params_dim1_only = self._make_kl_params(
             rate_dim=2,
             values=[[0.0, 0.8], [0.0, 0.6]],
@@ -1188,7 +1190,7 @@ class TestKLNormalization:
         assert float(kl_dim1) > 0, "KL should be positive (dim 1 still active)"
         assert float(kl_dim1) < float(kl_2d), "Zeroing dim 0 mu should decrease KL"
 
-        # Zero out both dims mu → KL still positive (logstd term), but smaller
+        # Zero out both dims mu -> KL still positive (logstd term), but smaller
         params_zero_mu = self._make_kl_params(
             rate_dim=2,
             values=[[0.0, 0.0], [0.0, 0.0]],
@@ -1308,7 +1310,7 @@ class TestKLNormalization:
         )
 
     def test_kl_rate_dim1_unchanged(self):
-        """For rate_dim=1, the fix is a no-op — original_counts_sum == counts.sum()."""
+        """For rate_dim=1, the fix is a no-op -- original_counts_sum == counts.sum()."""
         params = self._make_kl_params(
             rate_dim=1,
             values=[[0.3], [0.7]],

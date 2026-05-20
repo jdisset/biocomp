@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Centralized metric calculations for biocomp.
 
 Single source of truth for all validation metrics: MSE, RMSE, MAE, nRMSE, NRE, SNR, R², etc.
@@ -80,10 +82,7 @@ def _warn_space_mismatch(y_true: NdArray, y_pred: NdArray) -> None:
 
 
 def mse(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> float:
-    """mean squared error, ignoring non-finite values.
-
-    returns nan if no valid pairs exist.
-    """
+    """mean squared error, ignoring non-finite values (nan if no valid pairs)."""
     yt, yp = _to_1d(y_true), _to_1d(y_pred)
     if validate:
         _validate_same_length(yt, yp)
@@ -112,11 +111,7 @@ def mae(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> float:
 
 
 def r_squared(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> float:
-    """coefficient of determination (R²).
-
-    R² = 1 - SS_res / SS_tot
-    returns nan if SS_tot is zero (constant y_true).
-    """
+    """R² = 1 - SS_res/SS_tot (nan if SS_tot is zero / constant y_true)."""
     yt, yp = _to_1d(y_true), _to_1d(y_pred)
     if validate:
         _validate_same_length(yt, yp)
@@ -133,10 +128,7 @@ def r_squared(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> flo
 
 
 def pearson_r(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> tuple[float, float]:
-    """pearson correlation coefficient and p-value.
-
-    returns (nan, nan) if fewer than 3 valid pairs.
-    """
+    """pearson correlation coefficient and p-value ((nan, nan) if <3 valid pairs)."""
     yt, yp = _to_1d(y_true), _to_1d(y_pred)
     if validate:
         _validate_same_length(yt, yp)
@@ -283,12 +275,7 @@ def grid_r_squared(yhat_mean: NdArray, gt_mean: NdArray) -> float:
 
 
 def grid_snr(gt_mean: NdArray, local_var: NdArray, *, epsilon: float = EPSILON) -> float:
-    """Signal-to-Noise Ratio in dB.
-
-    SNR = 10 * log10(signal_power / noise_power)
-    signal_power = variance of local means around global mean
-    noise_power = average local variance
-    """
+    """SNR (dB) = 10·log10(var(local means around global mean) / mean(local var))."""
     local_var_safe = np.maximum(local_var, epsilon)
     avg_noise = float(np.nanmean(local_var_safe))
     avg_signal = float(np.nanmean((gt_mean - np.nanmean(gt_mean)) ** 2))
@@ -303,11 +290,9 @@ def grid_kl_divergence(
     *,
     epsilon: float = EPSILON,
 ) -> tuple[float, float]:
-    """KL divergence between prediction and ground truth Gaussians.
+    """KL divergence between prediction and ground-truth Gaussians.
 
-    returns (kl_mean, kl_similarity) where:
-      kl_mean = mean KL divergence across grid
-      kl_similarity = mean(exp(-kl)) * 100  (percentage-like similarity)
+    Returns (mean KL across grid, similarity = mean(exp(-kl)) * 100).
     """
     yhat_std_safe = np.maximum(yhat_std, epsilon)
     gt_std_safe = np.maximum(gt_std, epsilon)
@@ -334,28 +319,9 @@ def compute_nrmse(
     weight_cap_fraction: float = 0.1,
     k: int = 1024,
 ) -> float:
-    """Compute normalized RMSE with Bayesian variance smoothing.
+    """Bayesian-smoothed nRMSE: error / local_variance (fair across noise levels).
 
-    nRMSE normalizes prediction error by local variance, making it fair
-    for comparison across experiments with different noise levels.
-
-    nRMSE interpretation:
-      ~0: perfect prediction
-      ~1: error equals local variance (random noise level)
-      >1: worse than predicting local mean
-
-    args:
-        sq_error: squared error (yhat_mean - gt_mean)^2
-        local_var: local variance estimates (gt_std^2)
-        n_eff: effective sample size per grid point
-        global_var: global variance of ground truth
-        global_range: range (max - min) of ground truth
-        gt_mean: local mean of ground truth
-        prior_strength: Bayesian smoothing strength
-        rel_tolerance: relative error tolerance (fraction of signal)
-        abs_tolerance: absolute tolerance floor
-        weight_cap_fraction: fraction of k for weight capping
-        k: number of KNN neighbors
+    Interpretation: ~0 perfect, ~1 error = local noise, >1 worse than predicting local mean.
     """
     assert sq_error.shape == local_var.shape == n_eff.shape == gt_mean.shape, (
         f"shape mismatch: sq_error={sq_error.shape}, local_var={local_var.shape}, "
@@ -391,16 +357,9 @@ def compute_nrmse_pointwise(
     rel_tolerance: float = 0.05,
     abs_tolerance: float = 0.01,
 ) -> float:
-    """Per-point (subsample) version of nRMSE with local noise scale.
+    """Per-point nRMSE: each residual normalized by σ_local² + (rel·|μ_local|+abs)².
 
-    Each squared residual is normalized by ``σ_local² + tolerance²`` so
-    errors in low-noise regions count more than errors in noisy regions.
-    The tolerance term ``(rel_tolerance * |gt_mean_local| + abs_tolerance)²``
-    floors the denominator where ``σ_local`` is near zero. Returns
-    ``sqrt(mean(normalized_sq_error))``.
-
-    ``gt_mean_local`` defaults to ``gt`` itself (the data point); pass the
-    kernel-smoothed mean if available for a slightly smoother tolerance.
+    `gt_mean_local` defaults to `gt`; pass kernel-smoothed mean for a smoother tolerance.
     """
     if gt_mean_local is None:
         gt_mean_local = gt
@@ -470,13 +429,7 @@ def compute_validation_objective(
     *,
     softmax_alpha: float = 5.0,
 ) -> float:
-    """compute validation loss from network statistics.
-
-    args:
-        stats: list of per-network stat dicts
-        objective: one of 'mean_rmse', 'softmax_nrmse', 'geomean_nrmse'
-        softmax_alpha: sharpness for softmax objective
-    """
+    """compute validation loss; `objective` is one of 'mean_rmse' | 'softmax_nrmse' | 'geomean_nrmse'."""
     objectives = {
         "mean_rmse": lambda: objective_mean_rmse(stats),
         "softmax_nrmse": lambda: objective_softmax_nrmse(stats, softmax_alpha),
@@ -517,16 +470,7 @@ class GridStats:
         *,
         k: int = 1024,
     ) -> GridStats:
-        """compute all grid statistics from KNN-smoothed data.
-
-        args:
-            yhat_mean: KNN-smoothed prediction means
-            yhat_std: KNN-smoothed prediction stdevs
-            gt_mean: KNN-smoothed ground truth means
-            gt_std: KNN-smoothed ground truth stdevs
-            n_eff: effective sample size per grid point
-            k: number of KNN neighbors
-        """
+        """compute all grid statistics from KNN-smoothed (yhat_*, gt_*, n_eff)."""
         assert yhat_mean.shape == yhat_std.shape == gt_mean.shape == gt_std.shape, (
             f"shape mismatch in grid stats inputs: yhat_mean={yhat_mean.shape}, yhat_std={yhat_std.shape}, "
             f"gt_mean={gt_mean.shape}, gt_std={gt_std.shape}"

@@ -1,5 +1,5 @@
-from __future__ import annotations
-
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.step_history import StepHistoryLike
 from typing import Protocol, runtime_checkable
 

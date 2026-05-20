@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test fixtures for declarative network recipes
 
 This module provides centralized test network fixtures used throughout the test suite.
@@ -1056,7 +1058,7 @@ def test_complex_ern_compg(lib, complex_ern_network):
 
         agg_nodes = [n for n in compg.nodes.values() if n.node_type == "aggregation"]
         assert len(agg_nodes) == 1
-        # Ratios are normalized: [0.2, 0.2, 0.1] → [0.4, 0.4, 0.2]
+        # Ratios are normalized: [0.2, 0.2, 0.1] -> [0.4, 0.4, 0.2]
         agg = agg_nodes[0]
         slot_entries = get_slot_entries(agg.extra)
         ratios = [entry["ratio"] for entry in slot_entries]
@@ -1094,7 +1096,7 @@ def test_uorf_ern_compg(lib, uorf_ern_network):
         compg = networks[0].compute_graph
         assert compg is not None
 
-        # Check for translation nodes (central dogma: DNA → RNA → Protein)
+        # Check for translation nodes (central dogma: DNA -> RNA -> Protein)
         translation_nodes = [n for n in compg.nodes.values() if n.node_type == "translation"]
         assert len(translation_nodes) == 2  # One for Csy4, one for Csy4_rec+eYFP
 
@@ -1199,7 +1201,7 @@ def test_unlocked_ratios_fixture(unlocked_ratios_network):
     assert cotx.ratios[0].min == 0.5
     assert cotx.ratios[0].max == 0.9
     # Second ratio should be locked (float)
-    assert isinstance(cotx.ratios[1], (int, float))
+    assert isinstance(cotx.ratios[1], int | float)
     assert cotx.ratios[1] == 0.2
 
 
@@ -1441,7 +1443,7 @@ def test_ern_with_unlocked_ratios_structure(ern_with_unlocked_ratios):
     assert len(cotx.ratios) == 3
     # Check mixed locked/unlocked ratios
     assert isinstance(cotx.ratios[0], NumRange)  # Unlocked
-    assert isinstance(cotx.ratios[1], (int, float))  # Locked
+    assert isinstance(cotx.ratios[1], int | float)  # Locked
     assert isinstance(cotx.ratios[2], NumRange)  # Unlocked
 
 
@@ -1576,7 +1578,7 @@ def test_complex_mixed_unlocked_structure(complex_mixed_unlocked):
     # Check mixed ratios
     assert len(cotx.ratios) == 3
     assert isinstance(cotx.ratios[0], NumRange)  # Unlocked
-    assert isinstance(cotx.ratios[1], (int, float))  # Locked
+    assert isinstance(cotx.ratios[1], int | float)  # Locked
     assert isinstance(cotx.ratios[2], NumRange)  # Unlocked
 
     # Check unlocked bias

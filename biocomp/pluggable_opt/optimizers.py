@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from enum import IntEnum
-from typing import NamedTuple, Any, Callable
+from typing import NamedTuple, Any
+from collections.abc import Callable
 import math
 
 import jax

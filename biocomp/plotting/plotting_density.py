@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import numpy as np
 from scipy.stats import gaussian_kde
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-from typing import Sequence
+from collections.abc import Sequence
 from biocomp.plotting.plotting_core import get_bio_color, get_transformed_ticks_and_labels
 from biocomp.datautils import LogPolyLogRescaler
 

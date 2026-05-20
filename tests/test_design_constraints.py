@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """
 Tests for design constraint mechanisms (ratio and bias locking).
 
@@ -535,7 +537,7 @@ class TestGenomeCodecIntegration:
 
 
 class TestRecipeToMaskIntegration:
-    """Integration tests: recipe part definitions → quantization mask choices."""
+    """Integration tests: recipe part definitions -> quantization mask choices."""
 
     def test_single_part_slot_creates_single_choice_mask(self, designer_model):
         """Recipe with single fixed part should create single-choice quantization mask."""
@@ -1162,7 +1164,7 @@ class TestMultiTopologyDegreesOfFreedom:
         _, nonshared = init_params.filter_by_tag(["shared"])
         params = ParameterTree.merge(designer_model.shared_params, nonshared)
 
-        # Both networks have same topology → same constraints per position
+        # Both networks have same topology -> same constraints per position
         for layer_idx, layer in enumerate(stack.layers):
             ns = stack.get_layer_namespace(layer_idx)
             if "aggregation" in ns and "inv" not in ns:

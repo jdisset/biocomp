@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for design module defensive programming and critical functionality.
 
 These tests verify:
@@ -486,16 +488,15 @@ def test_network_input_order_propagation():
 def test_network_has_input_order():
     """Test that Network.has_input_order returns correct value."""
     from biocomp.network import Network
+    from biocomp.recipe import InputAxis
 
-    # Network without input_order
     net_no_order = Network(name="test_net", metadata={})
     assert not net_no_order.has_input_order()
     assert net_no_order.get_input_order() is None
 
-    # Network with input_order
     net_with_order = Network(
         name="test_net",
-        metadata={"input_order": ["mKO2", "eBFP2"]},
+        metadata={"input_axes": [InputAxis(name="mKO2"), InputAxis(name="eBFP2")]},
     )
     assert net_with_order.has_input_order()
     assert net_with_order.get_input_order() == ["mKO2", "eBFP2"]

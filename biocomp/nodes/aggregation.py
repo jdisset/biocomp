@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.compute import StackNode, ComputeStack
 import jax
 from jax.typing import ArrayLike
@@ -15,7 +17,6 @@ from biocomp.config import BIOCOMP_CONSTANTS
 from biocomp.recipe import DEFAULT_RATIO_MIN
 from biocomp.ratio_schema import slot_arrays, update_slots_from_arrays
 from biocomp.ratio_utils import _decode_latent_ratios, decode_ratios, decode_ratios_numpy
-from typing import Optional
 
 
 PRNGKey = ArrayLike
@@ -167,7 +168,7 @@ def aggregation(
             params[f"{namespace}/latent_W2"] = jnp.stack(latent_W2_list)
             params[f"{namespace}/latent_b2"] = jnp.stack(latent_b2_list)
             logger.info(
-                f"Latent ratios enabled: {n_nodes} nodes × {latent_dim}d latent → {n_outputs} outputs"
+                f"Latent ratios enabled: {n_nodes} nodes × {latent_dim}d latent -> {n_outputs} outputs"
             )
 
         add_tu_output_mapping(params, stack, nodelist, namespace, n_outputs)
@@ -179,8 +180,8 @@ def aggregation(
         params: ParameterTree,
         node_id: ArrayLike,
         key: PRNGKey,
-        tu_enabled_random_vars: Optional[ArrayLike] = None,
-        network_id: Optional[ArrayLike] = None,
+        tu_enabled_random_vars: ArrayLike | None = None,
+        network_id: ArrayLike | None = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         assert input.shape == input_shapes[0], f"Invalid input shape {input.shape}"
@@ -465,8 +466,8 @@ def inv_aggregation(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-        tu_enabled_random_vars: Optional[ArrayLike] = None,
-        network_id: Optional[ArrayLike] = None,
+        tu_enabled_random_vars: ArrayLike | None = None,
+        network_id: ArrayLike | None = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         original_slot = params[f"{namespace}/original_slots"][node_id]

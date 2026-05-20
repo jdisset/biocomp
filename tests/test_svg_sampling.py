@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test SVG sampling correctly captures edges of the image."""
 
+import os
 import numpy as np
 import pytest
 from pathlib import Path
@@ -9,7 +12,8 @@ from biocomp.design_targets import SVGTarget
 
 TESTS_DIR = Path(__file__).parent
 TEST_TOP_BAR_SVG = TESTS_DIR / "resources" / "designs" / "test_top_bar.svg"
-MIT_T_SHARP_SVG = Path("${BIOCOMP_ROOT}/Designs/MIT_T_sharp.svg").expanduser()
+_BIOCOMP_ROOT = os.environ.get("BIOCOMP_ROOT")
+MIT_T_SHARP_SVG = Path(_BIOCOMP_ROOT) / "Designs" / "MIT_T_sharp.svg" if _BIOCOMP_ROOT else Path("/nonexistent")
 
 
 @pytest.fixture
@@ -29,8 +33,8 @@ class TestSVGSamplingEdges:
         """The SVG has a bar at top (SVG y=0). After get_lattice, last row should be high.
 
         Grid generation uses descending y_vals (from vh to 0), so:
-        - Row 0 corresponds to SVG bottom (y=vh) → background → low value
-        - Row -1 corresponds to SVG top (y=0) → bar → high value
+        - Row 0 corresponds to SVG bottom (y=vh) -> background -> low value
+        - Row -1 corresponds to SVG top (y=0) -> bar -> high value
         """
         _, Y_grid = top_bar_target.get_lattice(resolution=(32, 32), seed=0)
 
@@ -81,20 +85,14 @@ class TestSVGSamplingEdges:
         )
 
 
-@pytest.mark.skipif(
-    not MIT_T_SHARP_SVG.exists() and not Path("/home/jean/MIT Dropbox/Jean Disset/Biocomp_v2/Designs/MIT_T_sharp.svg").exists(),
-    reason="MIT_T_sharp.svg not found"
-)
+@pytest.mark.skipif(not MIT_T_SHARP_SVG.exists(), reason="MIT_T_sharp.svg not found (set $BIOCOMP_ROOT)")
 class TestMITTSharpSampling:
     """Test MIT_T_sharp.svg sampling - the T's horizontal bar should reach the top."""
 
     @pytest.fixture
     def mit_t_sharp_target(self):
-        svg_path = MIT_T_SHARP_SVG
-        if not svg_path.exists():
-            svg_path = Path("/home/jean/MIT Dropbox/Jean Disset/Biocomp_v2/Designs/MIT_T_sharp.svg")
         return SVGTarget(
-            path=svg_path,
+            path=MIT_T_SHARP_SVG,
             name="MIT_T_sharp",
             blur_sigma=0.0,
         )

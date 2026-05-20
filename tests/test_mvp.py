@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for measured_vs_predicted scatter plot rendering."""
 
 import numpy as np

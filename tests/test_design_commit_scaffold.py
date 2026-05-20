@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test commit behavior with complex scaffold recipes used in design runs."""
 
 import pytest

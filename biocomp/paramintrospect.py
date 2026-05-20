@@ -1,9 +1,12 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Parameter introspection for BNN nodes - single source of truth for param display."""
-
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
+from collections.abc import Callable
 import numpy as np
 
 if TYPE_CHECKING:
@@ -65,7 +68,7 @@ IntrospectFn = Callable[
 ]
 
 
-def get_tu_prob(params: "ParameterTree", network_id: int, tu_idx: int) -> float:
+def get_tu_prob(params: ParameterTree, network_id: int, tu_idx: int) -> float:
     """Get TU activation probability from params. Returns 1.0 if TU masking not enabled."""
     from biocomp.tumasking import TU_ALWAYS_ENABLED, get_log_alpha_from_params
 
@@ -86,9 +89,9 @@ def is_tu_enabled(prob: float, threshold: float = TU_THRESHOLD) -> bool:
 
 
 def get_input_mask_status(
-    params: "ParameterTree",
-    stack: "ComputeStack",
-    node: "StackNode",
+    params: ParameterTree,
+    stack: ComputeStack,
+    node: StackNode,
     namespace: str,
     node_idx: int,
 ) -> list[InputSlot]:
@@ -150,7 +153,7 @@ def get_input_mask_status(
 
 
 def _build_tu_id_mapping(
-    stack: "ComputeStack", network_id: int
+    stack: ComputeStack, network_id: int
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Build mappings from tu_id to display name and cotx group.
 
@@ -194,8 +197,8 @@ def _normalize_tu_ids(
 
 
 def introspect_stack(
-    stack: "ComputeStack",
-    params: "ParameterTree",
+    stack: ComputeStack,
+    params: ParameterTree,
     network_id: int,
     local_only: bool = True,
 ) -> list[NodeParamInfo]:
@@ -253,8 +256,8 @@ def _fmt_inputs(inputs: list[InputSlot]) -> str:
 
 
 def format_network_params(
-    stack: "ComputeStack",
-    params: "ParameterTree",
+    stack: ComputeStack,
+    params: ParameterTree,
     network_id: int,
     local_only: bool = True,
 ) -> str:
@@ -314,8 +317,8 @@ def format_network_params(
 
 
 def get_network_param_dict(
-    stack: "ComputeStack",
-    params: "ParameterTree",
+    stack: ComputeStack,
+    params: ParameterTree,
     network_id: int,
     local_only: bool = True,
 ) -> dict:
@@ -383,10 +386,10 @@ def _fmt_input_compact(inputs: list[InputSlot]) -> str:
     parts = []
     for inp in inputs:
         src = inp.source_node or f"slot_{inp.slot_idx}"
-        sym = "✗" if inp.is_masked else "✓"
+        sym = "x" if inp.is_masked else "+"
         color = "red" if inp.is_masked else "green"
         parts.append(f"[{color}]{src} {sym}[/{color}]")
-    return "← " + ", ".join(parts)
+    return "<- " + ", ".join(parts)
 
 
 def _render_tu_table(console, tu_data: dict) -> None:
@@ -454,7 +457,7 @@ def _render_tu_table(console, tu_data: dict) -> None:
                             tl_str = val_fmt
 
             lock = "🔒" if no_masking else ""
-            status = "✓" if is_enabled else "✗"
+            status = "+" if is_enabled else "x"
             status_styled = f"[green]{status}[/green]" if is_enabled else f"[red]{status}[/red]"
             ratio_display = ratio_str + ratio_range if ratio_str != "-" else "-"
 
@@ -512,8 +515,8 @@ def _render_ungrouped_rich(console, infos: list[NodeParamInfo]) -> None:
 
 
 def format_network_params_rich(
-    stack: "ComputeStack",
-    params: "ParameterTree",
+    stack: ComputeStack,
+    params: ParameterTree,
     network_id: int,
     console=None,
 ) -> None:
@@ -604,8 +607,8 @@ def _get_committed_tu_ids(network) -> set[str]:
 
 def format_committed_network_params_rich(
     committed_network,
-    stack: "ComputeStack",
-    params: "ParameterTree",
+    stack: ComputeStack,
+    params: ParameterTree,
     network_id: int,
     console=None,
 ) -> None:

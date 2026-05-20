@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.jaxutils import flat_concat
 from biocomp.compute import StackNode, ComputeStack
 import jax
@@ -15,7 +17,6 @@ from biocomp.nodeutils import (
     NON_GRAD_TAG,
 )
 from biocomp.utils import get_logger
-from typing import Optional
 from biocomp.neuralutils import (
     ACTIVATION_FUNCTIONS,
     INITIALIZERS,
@@ -26,7 +27,7 @@ from biocomp.neuralutils import (
     dummy_mlp,
     uniform_initializer,
 )
-from typing import Callable
+from collections.abc import Callable
 from biocomp.context import total_context_dim
 
 
@@ -245,8 +246,8 @@ def sequestron_ERN(
         params: ParameterTree,
         node_id: ArrayLike,
         key,
-        tu_enabled_random_vars: Optional[ArrayLike] = None,
-        network_id: Optional[ArrayLike] = None,
+        tu_enabled_random_vars: ArrayLike | None = None,
+        network_id: ArrayLike | None = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         assert len(values) == len(input_shapes)

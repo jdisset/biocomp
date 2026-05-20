@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Loss functions for circuit design optimization."""
-
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -162,21 +164,7 @@ def compute_grid_losses(
     return_contributions: bool = False,
     **kw,
 ) -> GridLossResult:
-    """Compute grid-based losses - shared between tuner and design mode.
-
-    This is the SINGLE SOURCE OF TRUTH for grid loss computation.
-    Both TunerSession and grid_distance_loss MUST call this function.
-
-    Args:
-        Y_pred: Predicted grid, shape (H, W)
-        Y_target: Target grid, shape (H, W)
-        weights: GridLossWeights instance. If None, constructed from **kw.
-        return_contributions: If True, compute per-pixel LNCC contribution
-        **kw: Backward-compatible kwargs (w_sinkhorn, w_lncc, etc.) used if weights is None.
-
-    Returns:
-        GridLossResult with scalar losses and optional per-pixel contributions
-    """
+    """SSOT for grid loss computation - shared between tuner and design mode."""
     assert Y_pred.shape == Y_target.shape, f"Shape mismatch: {Y_pred.shape} vs {Y_target.shape}"
     assert Y_pred.ndim == 2, f"Expected 2D grid, got {Y_pred.ndim}D"
 
@@ -188,7 +176,7 @@ def compute_grid_losses(
     Y_pred = _sanitize(Y_pred.astype(jnp.float32))
     Y_target = _sanitize(Y_target.astype(jnp.float32))
 
-    # sinkhorn is expensive — guard with w > 0
+    # sinkhorn is expensive -- guard with w > 0
     sinkhorn_l = (
         sinkhorn_divergence_conv(
             proj_nonneg_ste(Y_pred), proj_nonneg_ste(Y_target),
@@ -527,20 +515,7 @@ def _ratio_mask_coupling_single_target(
     target_idx: int | jnp.ndarray,
     ratios_are_3d: bool,
 ) -> jnp.ndarray:
-    """Compute coupling penalty for a single target's tu_log_alpha.
-
-    Args:
-        params: Parameter tree containing ratios, output_tu_indices, node_network_ids
-        ratio_paths: List of paths to ratio parameters
-        tu_log_alpha_2d: TU log_alpha for one target, shape (n_networks, n_tus)
-        min_ratio_threshold: Coupling activates only when normalized ratio < this
-        target_idx: Which target's ratios to slice (used when ratios_are_3d=True)
-        ratios_are_3d: If True, expect ratios shape (n_targets, n_nodes, n_outputs) and slice by target_idx.
-                       If False, expect ratios shape (n_nodes, n_outputs) and target_idx is ignored.
-
-    Returns:
-        Scalar coupling penalty for this target
-    """
+    """Coupling penalty for one target's tu_log_alpha (2D)."""
     assert tu_log_alpha_2d.ndim == 2, (
         f"tu_log_alpha_2d must be 2D (n_networks, n_tus), got shape {tu_log_alpha_2d.shape}. "
         f"This function processes one target at a time."
@@ -639,33 +614,14 @@ def ratio_mask_coupling_penalty(
     min_ratio_threshold: float = 0.005,
     return_per_target: bool = False,
 ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
-    """Coupling loss: push down tu_log_alpha when ratio is below threshold.
+    """Coupling loss: push down tu_log_alpha when ratio/max_ratio < min_ratio_threshold.
 
-    ONLY activates when normalized_ratio < min_ratio_threshold. When ratios are in
-    acceptable range, this returns 0 (no coupling).
-
-    This creates gradient pressure to disable TUs (via hard-concrete) when their
-    corresponding ratios are too small, unifying the two disabling mechanisms.
-
-    Uses MAX normalization (ratio / max_ratio) not sum normalization, so the
-    threshold has consistent meaning regardless of TU count. E.g., threshold=0.005
-    means "ratio is less than 0.5% of the largest ratio in that aggregation".
-
-    Args:
-        params: Parameter tree containing ratios, output_tu_indices, node_network_ids
-        ratio_paths: List of paths to ratio parameters (e.g., ['local/layer_3/ratios'])
-        tu_log_alpha: TU log_alpha array, shape (n_targets, n_networks, n_tus) or (n_networks, n_tus)
-        min_ratio_threshold: Coupling activates when (ratio/max_ratio) < this (default 0.005 = 0.5%)
-        return_per_target: If True, also return per-target breakdown shape (n_targets,)
-
-    Returns:
-        If return_per_target=False: Scalar coupling penalty (0 if all ratios are above threshold)
-        If return_per_target=True: (scalar, per_target_penalty) where per_target has shape (n_targets,)
-
-    Note: Runtime value checks (NaN, bounds) tested via checkify in tests.
+    Creates gradient pressure to disable TUs whose corresponding ratios are tiny,
+    unifying the two disabling mechanisms. Uses MAX normalization so threshold
+    semantics are TU-count independent. Returns 0 when all ratios are above threshold.
     """
     assert isinstance(ratio_paths, list), f"ratio_paths must be a list, got {type(ratio_paths)}"
-    assert isinstance(min_ratio_threshold, (int, float)), (
+    assert isinstance(min_ratio_threshold, int | float), (
         f"min_ratio_threshold must be numeric, got {type(min_ratio_threshold)}"
     )
     assert 0 <= min_ratio_threshold <= 1, (
@@ -848,13 +804,7 @@ def compute_all_losses(x, y, yhatdep, lossfunc, n_inputs_per_network=2):
 
 
 def _compute_tu_stats(params) -> dict:
-    """Compute TU masking statistics for logging.
-
-    Includes diagnostic metrics for convergence analysis:
-    - mask_entropy: binary entropy of probabilities (high=exploring, low=committed)
-    - boundary_count: TUs with prob in [0.3, 0.7] (still deciding)
-    - below_floor_count: TUs with prob < 0.2 (in the "graveyard")
-    """
+    """TU masking stats for logging (mask entropy, boundary_count, below_floor_count, ...)."""
     log_alpha = get_full_log_alpha(params)
     if log_alpha is None:
         return {}
@@ -959,27 +909,11 @@ HYPEROPT_SCHEDULE_NAMESPACE = "hyperopt_schedules"
 
 
 def normalize_schedule_spec(spec):
-    """Convert various schedule specifications to universal three-phase params.
-
-    Supports:
-        - float/int: Constant schedule (all phases same value)
-        - dict with 'start', 'end': Linear schedule over all steps
-        - dict with 'phase1_value', etc.: Full three-phase schedule
-        - callable: Optax schedule (NOT for hyperopt mode, use for backward compat only)
-
-    Returns:
-        dict with keys: phase1_frac, phase2_frac, phase1_value, phase2_end_value, phase3_end_value
-        OR the original callable if spec is a callable (backward compat mode)
-
-    Example:
-        normalize_schedule_spec(0.5)  # constant 0.5
-        normalize_schedule_spec({'start': 1.0, 'end': 0.1})  # linear decay
-        normalize_schedule_spec({'phase1_frac': 0.4, ...})  # explicit three-phase
-    """
+    """Convert float / {start,end} dict / full three-phase dict / callable into universal three-phase params."""
     if callable(spec):
         return spec
 
-    if isinstance(spec, (int, float)):
+    if isinstance(spec, int | float):
         return {
             "phase1_frac": 0.0,
             "phase2_frac": 0.0,
@@ -1012,22 +946,7 @@ def normalize_schedule_spec(spec):
 
 
 def init_schedule_params(schedule_specs: dict[str, any]) -> dict[str, jnp.ndarray]:
-    """Initialize schedule parameters for hyperopt mode.
-
-    Args:
-        schedule_specs: Dict mapping schedule names to specs (float, dict, or callable).
-                       Callables are skipped (use standard optax mode).
-
-    Returns:
-        Dict mapping param paths to JAX arrays for the params tree.
-
-    Example:
-        init_schedule_params({
-            'lambda_l0': {'phase1_value': 0.0, 'phase3_end_value': 0.01},
-            'tu_temperature': {'start': 1.0, 'end': 0.02},
-            'lambda_spread': 0.001,  # constant
-        })
-    """
+    """Build hyperopt schedule param arrays from a dict of specs (callables skipped)."""
     result = {}
     for name, spec in schedule_specs.items():
         normalized = normalize_schedule_spec(spec)
@@ -1046,21 +965,7 @@ _SCHEDULE_FALLBACK_WARNED: set[str] = set()
 def _get_schedule_value(
     params, step, total_steps, schedule_name, schedule_or_value, schedule_ns=None
 ):
-    """Get schedule value, supporting both optax schedules and dynamic JAX-native mode.
-
-    Args:
-        params: ParameterTree with schedule params (if schedule_ns is provided)
-        step: Current optimization step
-        total_steps: Total steps (for JAX schedule computation)
-        schedule_name: Name of the schedule (e.g., 'lambda_l0', 'tu_temperature')
-        schedule_or_value: Fallback optax schedule or constant value
-        schedule_ns: Namespace path for dynamic schedule params. If provided, reads
-            schedule params from params[f"{schedule_ns}/{schedule_name}_*"] and uses
-            jax_three_phase_schedule. If None, uses as_schedule(schedule_or_value).
-
-    Returns:
-        Scalar JAX array with the schedule value at the current step
-    """
+    """Schedule value at `step`: uses params-driven three-phase if `schedule_ns` set, else `schedule_or_value`."""
     if schedule_ns is None:
         return as_schedule(schedule_or_value)(step)
 
@@ -1117,20 +1022,11 @@ def _make_loss_func(
 ):
     """Create the loss function for design optimization.
 
-    Args:
-        tu_n_samples: DEPRECATED - ignored. Binary TU masking is now deterministic.
-            Kept for API compatibility.
-        lambda_coupling: Weight for ratio-mask coupling penalty. When a ratio is below
-            min_ratio_threshold, this creates gradient pressure to push down tu_log_alpha.
-        min_ratio_threshold: Coupling only activates when normalized ratio < this.
-            Set to 0 to disable coupling entirely.
-        lambda_ern_tying: Weight for ERN TU tying penalty. When an ERN's positive input
-            (mRNA target) is disabled, push the negative input (ERN protein) to also be
-            disabled. Set to 0 to disable (default).
-        hyperopt_schedule_ns: If provided, read schedule params from this namespace in
-            the params tree and use jax_three_phase_schedule for recompilation-free hyperopt.
-            Expected params: {ns}/{sched}_phase1_frac, _phase2_frac, _phase1_value, etc.
-        hyperopt_total_steps: Total steps for JAX schedule computation (required if hyperopt_schedule_ns is set).
+    Notable kwargs:
+        tu_n_samples: DEPRECATED, ignored (binary TU masking is deterministic).
+        lambda_ern_tying: weight for one-way ERN tying penalty (pos disabled -> push neg down).
+        hyperopt_schedule_ns / hyperopt_total_steps: enable recompilation-free hyperopt by
+            reading three-phase schedule params from the params tree.
     """
     if hyperopt_schedule_ns and not hyperopt_total_steps:
         raise ValueError("hyperopt_total_steps required when hyperopt_schedule_ns is set")

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import numpy as np
 
 from biocomp.designutils import compute_grid_metrics, side_by_side_txt_plot

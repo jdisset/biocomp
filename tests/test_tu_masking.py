@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for TU masking in design mode.
 
 Key success criteria:
@@ -734,8 +736,8 @@ def test_tu_mask_boundary_threshold(lib, design_stack):
 
         # set TUs at boundary: first at -0.1 (disabled), second at +0.1 (enabled)
         tu_log_alpha = jnp.zeros((n_networks, n_tus))
-        tu_log_alpha = tu_log_alpha.at[:, 0].set(-0.1)  # sigmoid ≈ 0.475 < 0.5 → disabled
-        tu_log_alpha = tu_log_alpha.at[:, 1].set(0.1)  # sigmoid ≈ 0.525 > 0.5 → enabled
+        tu_log_alpha = tu_log_alpha.at[:, 0].set(-0.1)  # sigmoid ≈ 0.475 < 0.5 -> disabled
+        tu_log_alpha = tu_log_alpha.at[:, 1].set(0.1)  # sigmoid ≈ 0.525 > 0.5 -> enabled
         params.at(TU_LOG_ALPHA_PATH, tu_log_alpha, overwrite=True)
 
         # commit to verify it works, but we're testing the threshold behavior

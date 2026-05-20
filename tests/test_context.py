@@ -1,12 +1,12 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for the context embedding system."""
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from biocomp.context import (
     CONTEXT_EMBEDDINGS,
-    ContextEmbedding,
     init_context_params,
     resolve_context_vector,
     total_context_dim,
@@ -124,7 +124,7 @@ def test_init_context_params_idempotent():
     ce = CONTEXT_EMBEDDINGS[0]
     original_means = params[_codebook_means_path(ce.name)].copy()
 
-    # Call again — should not overwrite
+    # Call again -- should not overwrite
     init_context_params(params, networks, jax.random.PRNGKey(999))
     np.testing.assert_array_equal(params[_codebook_means_path(ce.name)], original_means)
 

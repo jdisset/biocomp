@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test compute stack for complex_twolayers network
 
 This test validates the complex two-layer ERN network with design mode features:
 - 3 CoTransfections (x1, x2 inputs + b bias)
-- 3 ERNs in 2 layers (CasE + Csy4 → PgU)
+- 3 ERNs in 2 layers (CasE + Csy4 -> PgU)
 - Variable uORFs (u1=none, u2=all, u3=all except none)
 - Unlocked bias parameter
 - 4 fluorescent outputs
@@ -1077,22 +1079,22 @@ if __name__ == "__main__":
 
     print("Running structure test...")
     test_complex_twolayers_structure(lib_instance, recipe_instance)
-    print("✓ Structure test passed\n")
+    print("+ Structure test passed\n")
 
     print("Running parameter constraints test...")
     test_complex_twolayers_parameter_constraints(lib_instance, recipe_instance)
-    print("✓ Parameter constraints test passed\n")
+    print("+ Parameter constraints test passed\n")
 
     print("Running forward pass test...")
     test_complex_twolayers_forward_pass(lib_instance, recipe_instance)
-    print("✓ Forward pass test passed\n")
+    print("+ Forward pass test passed\n")
 
     print("Running reproducibility test...")
     test_complex_twolayers_reproducibility(lib_instance, recipe_instance)
-    print("✓ Reproducibility test passed\n")
+    print("+ Reproducibility test passed\n")
 
     print("Running variability test...")
     test_complex_twolayers_variability(lib_instance, recipe_instance)
-    print("✓ Variability test passed\n")
+    print("+ Variability test passed\n")
 
     print("All tests passed!")

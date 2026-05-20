@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for biocomp.fingerprint - deterministic network fingerprinting."""
 
 import numpy as np

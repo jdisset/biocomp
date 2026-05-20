@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for inv_aggregation normalization invariance.
 
 Key invariant: linear scaling of ratios should NOT change predictions since

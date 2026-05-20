@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for RatioSpec and dict-based ratio syntax."""
 
 import pytest

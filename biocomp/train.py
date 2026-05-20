@@ -1,17 +1,17 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 ### {{{                          --     imports     --
 from __future__ import annotations
-
-from typing import TYPE_CHECKING, Callable, Optional, NamedTuple, Tuple
+from typing import NamedTuple
+from collections.abc import Callable
 import time
 
+import optax
 from . import datautils as du
 from . import utils as ut
 from .parameters import ParameterTree
+from .compute import ComputeStack
 from biocomp.utils import EncodedPartialFunction
-
-if TYPE_CHECKING:
-    import optax
-    from .compute import ComputeStack
 from pydantic import Field
 from biocomp.logging_config import get_logger
 from biocomp.optimutils import (
@@ -138,8 +138,8 @@ class CompiledTrainingStep(NamedTuple):
     """
 
     compiled_step: Callable
-    stack: "ComputeStack"  # noqa: F821
-    optimizer: "optax.GradientTransformation"  # noqa: F821
+    stack: ComputeStack  # noqa: F821
+    optimizer: optax.GradientTransformation  # noqa: F821
     num_z: int
 
 
@@ -179,7 +179,7 @@ def _compile_with_cache(jitable_base, sample_args, stack, training_config):
 
 def compile_training_step(
     dman: du.DataManager,
-    training_config: "TrainingConfig",
+    training_config: TrainingConfig,
     compute_config,
     enable_jax_tqdm: bool = False,
 ) -> CompiledTrainingStep:
@@ -268,7 +268,7 @@ _GRAD_NODE_TYPES = ["translation", "transcription", "output", "source_new", "sou
 
 def _enable_jacfwd_if_needed(stack, negative_grad_penalty) -> None:
     """Regenerate stack.apply with jacfwd gradients when negative_grad_penalty is active."""
-    if isinstance(negative_grad_penalty, (int, float)) and negative_grad_penalty == 0:
+    if isinstance(negative_grad_penalty, int | float) and negative_grad_penalty == 0:
         return
     if hasattr(stack, "_generate_apply_method"):
         stack._generate_apply_method(get_grads_for=_GRAD_NODE_TYPES)
@@ -303,7 +303,7 @@ def stable_sigma(logstd, *, min_std=1e-3):
 
 
 class InverseLayerPairSpec(NamedTuple):
-    """One entry per unique (fwd_layer, inv_layer) pair — not per node.
+    """One entry per unique (fwd_layer, inv_layer) pair -- not per node.
 
     All nodes within a layer share MLP weights and (with sample_embeddings=True)
     draw IID rate overrides, so a single representative evaluation suffices.
@@ -438,7 +438,7 @@ def _single_inverse_cycle_sample(
     x_target = jnp.array([x0], dtype=dtype)
     fwd_input = jnp.broadcast_to(x0, spec.fwd_input_shape)
 
-    # Representative node: node_id=0, network_id=0 — all nodes in a layer
+    # Representative node: node_id=0, network_id=0 -- all nodes in a layer
     # share MLP weights and (with sample_embeddings) draw IID rate overrides.
     node_id = jnp.asarray(0, dtype=jnp.int32)
     network_id = jnp.asarray(0, dtype=jnp.int32)
@@ -609,9 +609,9 @@ def _prepare_inverse_consistency_context(
     embedding_high,
     weight=None,
 ):
-    # Skip pair discovery entirely when weight is statically zero —
+    # Skip pair discovery entirely when weight is statically zero --
     # avoids tracing layer-pair HLO ops that would be dead code.
-    if isinstance(weight, (int, float)) and weight == 0:
+    if isinstance(weight, int | float) and weight == 0:
         return [], {}, int(batch_size), bool(sample_embeddings), float(embedding_low), float(embedding_high)
 
     pair_specs, pair_counts = _discover_inverse_layer_pair_specs(stack)
@@ -1312,10 +1312,10 @@ def start(
     training_config: TrainingConfig,
     compute_config,
     dispatch: LoggerDispatch | None = None,
-    xy_batches: Optional[Tuple] = None,
+    xy_batches: tuple | None = None,
     enable_jax_tqdm: bool = False,
-    init_params: Optional[ParameterTree] = None,
-    cached_step: Optional[CompiledTrainingStep] = None,
+    init_params: ParameterTree | None = None,
+    cached_step: CompiledTrainingStep | None = None,
     skip_weight_init: bool = False,
     skip_loss_history: bool = False,
 ):

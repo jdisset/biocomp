@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test that committed networks produce identical predictions as pre-commit with TU masking.
 
 Verifies the critical invariant: applying TU masks during forward pass must

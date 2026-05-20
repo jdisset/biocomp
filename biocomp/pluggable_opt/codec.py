@@ -1,4 +1,6 @@
-from typing import Callable
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+from collections.abc import Callable
 
 import jax.numpy as jnp
 from jax import flatten_util

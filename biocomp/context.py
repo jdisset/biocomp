@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Context embedding system for per-network conditioning.
 
-Provides a "context bus" — a flat embedding vector resolved from categorical
+Provides a "context bus" -- a flat embedding vector resolved from categorical
 context variables (e.g. cell_type) that conditions every MLP via dense_mlp's
 `context` parameter.
 
@@ -101,7 +103,7 @@ def init_context_params(
 ) -> None:
     """Initialize context embedding codebooks and per-network index mapping.
 
-    Idempotent. `allow_create=False` skips creation when params lack the codebook —
+    Idempotent. `allow_create=False` skips creation when params lack the codebook --
     required back-compat for models trained before context embeddings existed.
     """
     if not CONTEXT_EMBEDDINGS:
@@ -127,7 +129,7 @@ def init_context_params(
         params[means_path] = jax.random.normal(k1, (n_values, ce.embedding_dim)) * 0.1
         params[logstdevs_path] = jnp.full((n_values, ce.embedding_dim), -3.0)
 
-        # Build value→index mapping
+        # Build value->index mapping
         value_to_idx = {v: i for i, v in enumerate(ce.available_values)}
 
         # Per-network index array
@@ -166,7 +168,7 @@ def resolve_context_vector(
         return None
 
     # Sentinel check: if the first embedding's codebook isn't in params, context
-    # was never initialized (old model). Return None → dense_mlp no-ops.
+    # was never initialized (old model). Return None -> dense_mlp no-ops.
     sentinel = _codebook_means_path(CONTEXT_EMBEDDINGS[0].name)
     if sentinel not in params:
         return None

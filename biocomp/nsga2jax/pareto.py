@@ -1,6 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Pareto dominance and non-dominated sorting for multi-objective optimization."""
-
-from __future__ import annotations
 
 import jax
 import jax.numpy as jnp

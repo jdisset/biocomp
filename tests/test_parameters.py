@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """
 Comprehensive test suite for the biocomp.parameters module.
 
@@ -796,7 +798,7 @@ class TestPerformanceAndLargeStructures:
         def simple_loss(params):
             total = 0.0
             for _path, value in params.data.iter_leaves():
-                if isinstance(value, (np.ndarray, jnp.ndarray)):
+                if isinstance(value, np.ndarray | jnp.ndarray):
                     total += jnp.sum(value**2)
             return total
 

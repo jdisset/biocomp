@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test design stack and prediction consistency.
 
 These tests verify the invariants protected by the TU masking/commit consistency refactor:

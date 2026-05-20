@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test compute stack with simplified nodes
 
 This test file validates that the compute stack correctly executes simple node functions
@@ -37,7 +39,7 @@ def manual_simple_single_reporter(params: ParameterTree, X, random_vars: jnp.nda
     - Transcription uses hEF1a (only option)
     - Translation uses 00_empty_tc (no uORF, only option)
 
-    Path: input → inv_output → inv_translation → inv_transcription → inv_source → source → transcription → translation → output
+    Path: input -> inv_output -> inv_translation -> inv_transcription -> inv_source -> source -> transcription -> translation -> output
 
     This computation is completely hardcoded - we manually:
     1. Look up the exact embeddings we know should be used
@@ -119,11 +121,11 @@ def manual_simple_two_reporters(params: ParameterTree, X, random_vars: jnp.ndarr
     - Both use 00_empty_tc for translation (no uORF, only option)
 
     Path for output 0 (eBFP2):
-      input → inv_output → inv_translation[0,2] → inv_transcription[0,2] → inv_source → inv_aggregation(÷0.833)
-      → aggregation(×[0.833,0.167]) → [source0, source1]
-      → [transcription0[4,5], transcription1[6,7]]
-      → [translation0[0,1], translation1[2,3]]
-      → output[0,1]
+      input -> inv_output -> inv_translation[0,2] -> inv_transcription[0,2] -> inv_source -> inv_aggregation(÷0.833)
+      -> aggregation(×[0.833,0.167]) -> [source0, source1]
+      -> [transcription0[4,5], transcription1[6,7]]
+      -> [translation0[0,1], translation1[2,3]]
+      -> output[0,1]
     """
     # Extract embeddings - same for both branches
     qrate_tc = params["shared/quantization/values/tc_rate"][0, 0]
@@ -369,8 +371,8 @@ def manual_simple_single_ern(params: ParameterTree, X, random_vars: jnp.ndarray,
     The ERN path (output slot 0) is NOT tested since ERN nodes are non-invertible.
 
     Invertible path:
-      input → inv_output → inv_translation → inv_transcription → inv_source → inv_aggregation(÷1/3, slot 2)
-      → aggregation(×[1/3,1/3,1/3]) → source2 → transcription2 → translation2 → output[1]
+      input -> inv_output -> inv_translation -> inv_transcription -> inv_source -> inv_aggregation(÷1/3, slot 2)
+      -> aggregation(×[1/3,1/3,1/3]) -> source2 -> transcription2 -> translation2 -> output[1]
     """
     # Extract embeddings
     qrate_tc = params["shared/quantization/values/tc_rate"][0, 0]

@@ -1,6 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Genetic operators for NSGA-II: SBX crossover and polynomial mutation."""
-
-from __future__ import annotations
 
 import jax
 import jax.numpy as jnp

@@ -9,7 +9,7 @@ for reproducibility.
 
 Unlike standard neural networks, **Biomorphic Neural Networks (BNNs)** map
 directly to biological processes. A key feature of these circuits is the use of
-**Endoribonucleases (ERNs)**—specific proteins (like CasE or Csy4) that
+**Endoribonucleases (ERNs)**--specific proteins (like CasE or Csy4) that
 recognize and cleave specific RNA hairpins. This cleavage suppresses the
 translation of downstream genes, providing the essential non-linear inhibitory
 mechanism required for complex logic and neuromorphic behavior.
@@ -103,7 +103,7 @@ discrete DNA parts, providing designs for experimental validation.
 
 ## General Overview
 
-The codebase uses a **Graph Rewriting System** to translate biological intent into computation. The system starts with a "Central Dogma Graph" representing the physical flow of genetic information (DNA $\to$ RNA $\to$ Protein). It then iteratively applies declarative rewriting rules (defined in `biorules.py`) to transform this biological topology into a computational graph. This graph is finally compiled into a **Compute Stack**—a flattened, JAX-based structure optimized for highly parallel execution, allowing the simulation and training of thousands of different genetic circuit variations simultaneously.
+The codebase uses a **Graph Rewriting System** to translate biological intent into computation. The system starts with a "Central Dogma Graph" representing the physical flow of genetic information (DNA $\to$ RNA $\to$ Protein). It then iteratively applies declarative rewriting rules (defined in `biorules.py`) to transform this biological topology into a computational graph. This graph is finally compiled into a **Compute Stack**--a flattened, JAX-based structure optimized for highly parallel execution, allowing the simulation and training of thousands of different genetic circuit variations simultaneously.
 
 ## Module Descriptions
 

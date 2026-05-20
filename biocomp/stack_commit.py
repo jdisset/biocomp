@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Commit helpers to separate structural pruning from quantization/collapse.
 
 This module provides the core commit functionality extracted from ComputeStack.commit().
@@ -9,7 +11,6 @@ Key abstractions:
 - rebuild_network_from_recipe(): Recipe roundtrip for clean graph structure
 - commit_networks(): Core orchestration function
 """
-
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -60,7 +61,7 @@ class CommitResult:
     diagnostics: dict[str, object] = field(default_factory=dict)
 
 
-def _make_empty_network(original: "Network") -> "Network":
+def _make_empty_network(original: Network) -> Network:
     """Create an empty placeholder network preserving name and metadata."""
     from .graphengine import GraphState
     from .network import Network
@@ -86,7 +87,7 @@ class CommitOptions:
     max_rebuild_workers: int = 8
 
     @classmethod
-    def for_structure_only(cls) -> "CommitOptions":
+    def for_structure_only(cls) -> CommitOptions:
         """Commit structural changes only (pruning), no embedding collapse."""
         return cls(
             collapse_to_part=False,
@@ -96,7 +97,7 @@ class CommitOptions:
         )
 
     @classmethod
-    def for_final(cls) -> "CommitOptions":
+    def for_final(cls) -> CommitOptions:
         """Full commit with embedding collapse/quantization."""
         return cls(collapse_to_part=True, preserve_ratio_states=False)
 
@@ -132,7 +133,7 @@ class CommitReport:
 
 
 def prune_network_tus(
-    net: "Network",
+    net: Network,
     net_idx: int,
     log_alpha: jnp.ndarray | None,
     tu_id_to_idx: dict[str, int] | None,
@@ -244,7 +245,7 @@ def prune_network_tus(
 
 
 def _renormalize_aggregation_after_cascade(
-    net: "Network",
+    net: Network,
     disabled_source_keys: set[tuple[str, str]],
 ) -> None:
     """Renormalize aggregation ratios after cascade-disabled sources are removed."""
@@ -271,7 +272,7 @@ def _renormalize_aggregation_after_cascade(
 
 
 def rebuild_network_from_recipe(
-    net: "Network",
+    net: Network,
     net_idx: int,
     strip_ern_recs: set[tuple[str, str]],
     options: CommitOptions,
@@ -302,6 +303,7 @@ def rebuild_network_from_recipe(
         original_input_proteins = net.get_inverted_input_proteins()
     except (AssertionError, IndexError, KeyError):
         original_input_proteins = None
+    original_input_axes = net.get_input_axes()
 
     output_nodes = [n for n in net.compute_graph.nodes.values() if n.node_type == "output"]
     if len(output_nodes) != 1:
@@ -398,7 +400,10 @@ def rebuild_network_from_recipe(
         try:
             rebuilt_input_proteins = rebuilt_net.get_inverted_input_proteins()
             if set(rebuilt_input_proteins) == set(original_input_proteins):
-                rebuilt_net.apply_input_order(original_input_proteins)
+                if original_input_axes is not None:
+                    rebuilt_net.apply_input_axes(original_input_axes)
+                else:
+                    rebuilt_net.apply_input_order(original_input_proteins)
                 logger.debug(
                     f"COMMIT: Restored input ordering {original_input_proteins} "
                     f"(was {rebuilt_input_proteins})"
@@ -410,13 +415,13 @@ def rebuild_network_from_recipe(
 
 
 def commit_networks(
-    networks: list["Network"],
-    layers: list["StackLayer"],
-    params: "ParameterTree",
+    networks: list[Network],
+    layers: list[StackLayer],
+    params: ParameterTree,
     options: CommitOptions,
     tu_id_to_idx: dict[str, int] | None = None,
     node_map: dict[tuple[int, int], tuple[int, int]] | None = None,
-) -> tuple[list["Network"], CommitReport]:
+) -> tuple[list[Network], CommitReport]:
     """Core commit implementation.
 
     This is the main function that ComputeStack.commit() delegates to.
@@ -510,7 +515,7 @@ def commit_networks(
 
         if options.roundtrip_rebuild:
 
-            def _rebuild(net_idx_and_net: tuple[int, "Network"]) -> CommitResult:
+            def _rebuild(net_idx_and_net: tuple[int, Network]) -> CommitResult:
                 net_idx, net = net_idx_and_net
                 strip_ern_recs = dead_ern_recs_by_net.get(net_idx, set())
                 return rebuild_network_from_recipe(net, net_idx, strip_ern_recs, options)
@@ -534,7 +539,7 @@ def commit_networks(
                 for i, cr in enumerate(commit_results)
             ]
         else:
-            # No roundtrip rebuild — all networks are OK by definition
+            # No roundtrip rebuild -- all networks are OK by definition
             report.commit_results = [
                 CommitResult(status=CommitStatus.OK, network=net) for net in network_copies
             ]
@@ -564,11 +569,11 @@ def commit_networks(
 
 
 def commit_structure(
-    stack: "ComputeStack",
-    params: "ParameterTree",
+    stack: ComputeStack,
+    params: ParameterTree,
     lock_ratios: bool = False,  # Deprecated name, kept for compatibility
     **kwargs,
-) -> tuple[list["Network"], CommitReport]:
+) -> tuple[list[Network], CommitReport]:
     """Commit only structural changes (pruning, graph cleanup) without collapsing embeddings."""
     assert stack.layers is not None, "Stack must be built before committing"
     options = CommitOptions.for_structure_only()
@@ -589,10 +594,10 @@ def commit_structure(
 
 
 def commit_final(
-    stack: "ComputeStack",
-    params: "ParameterTree",
+    stack: ComputeStack,
+    params: ParameterTree,
     **kwargs,
-) -> tuple[list["Network"], CommitReport]:
+) -> tuple[list[Network], CommitReport]:
     """Full commit including collapse/quantization to discrete parts."""
     assert stack.layers is not None, "Stack must be built before committing"
     options = CommitOptions.for_final()

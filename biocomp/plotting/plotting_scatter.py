@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 # {{{                          --     imports     --
 # ···············································································
-from typing import Optional, Sequence
+from collections.abc import Sequence
 from numpy.typing import NDArray as NdArray
 from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
@@ -194,9 +196,9 @@ def grid_histogram(
     output_name: str,
     rescaler,
     ax,
-    title: Optional[str] = None,
-    xtitle: Optional[str] = None,
-    ytitle: Optional[str] = None,
+    title: str | None = None,
+    xtitle: str | None = None,
+    ytitle: str | None = None,
     xlims=(None, None),
     ylims=(None, None),
     vlims=(0, None),

@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for latent ratio overparameterization feature.
 
 Tests use real components (no mocks) to verify:
 1. Latent decoder MLP produces valid, differentiable outputs
 2. DesignConfig fields are correctly added
-3. Gradients flow through the full latent → ratio → loss path
+3. Gradients flow through the full latent -> ratio -> loss path
 """
 
 import jax
@@ -138,4 +140,4 @@ class TestLatentRatioGradientFlow:
             z = z - 0.1 * grad
         final_loss = loss_fn(z)
 
-        assert final_loss < initial_loss, f"Loss should decrease: {initial_loss:.4f} → {final_loss:.4f}"
+        assert final_loss < initial_loss, f"Loss should decrease: {initial_loss:.4f} -> {final_loss:.4f}"

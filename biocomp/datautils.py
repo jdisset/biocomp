@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 # {{{                          --     imports     --
 # ···············································································
 import numpy as np
@@ -12,7 +14,8 @@ from multiprocessing import Pool
 import itertools
 from .network import Network
 from pydantic import BaseModel, Field
-from typing import Optional, Union, Tuple, Callable, Literal
+from typing import Literal
+from collections.abc import Callable
 from functools import partial
 from rich.table import Table
 from rich.console import Console
@@ -22,13 +25,13 @@ from biocomp.config import BIOCOMP_CONSTANTS
 
 logger = get_logger(__name__)
 
-PathLike = Union[str, Path]
+PathLike = str | Path
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 ## {{{                       --     data rescaler     --
 
-NumLike = Union[float, int, np.ndarray]
+NumLike = float | int | np.ndarray
 NdArray = np.ndarray
 
 
@@ -205,8 +208,8 @@ class CompressedSymLogRescaler(DataRescaler):
 
 def load_data_file(
     data_file_path: PathLike,
-    proteins: Optional[list[str]] = None,
-    error_handler: Optional[Callable] = None,
+    proteins: list[str] | None = None,
+    error_handler: Callable | None = None,
     use_store=None,
     force_reload=False,
 ):
@@ -267,10 +270,10 @@ Available: {available_columns}
 def get_network_data(
     network: Network,
     data_file_path: PathLike,
-    color_aliases: Optional[dict[str, str]] = None,
-    error_handler: Optional[Callable] = None,
+    color_aliases: dict[str, str] | None = None,
+    error_handler: Callable | None = None,
     **kwargs,
-) -> Optional[np.ndarray]:
+) -> np.ndarray | None:
     # we want to reorder data columns to match the network's output
 
     out_proteins = escape(network.get_output_proteins())
@@ -299,7 +302,7 @@ def get_network_data(
 def get_network_XY(
     network: Network,
     data_file_path: PathLike,
-    color_aliases: Optional[dict[str, str]] = None,
+    color_aliases: dict[str, str] | None = None,
     **kwargs,
 ):
     Y = get_network_data(network, data_file_path, color_aliases, **kwargs)
@@ -392,7 +395,7 @@ def sample_batches_w_coord_threshold(
     return Xbatches, Ybatches
 
 
-def sample_batches(args: tuple) -> Tuple[NdArray, NdArray]:
+def sample_batches(args: tuple) -> tuple[NdArray, NdArray]:
     """Density-balanced training batches.
 
     Thin wrapper over ``density_balanced_indices`` for the
@@ -420,15 +423,15 @@ import jax.numpy as jnp  # noqa: E402
     static_argnames=("batch_size", "n_batches", "density_threshold_quantile"),
 )
 def sample_batches_jax(
-    X: jnp.ndarray,  # [N, x_feats]  –  padded
-    Y: jnp.ndarray,  # [N, y_feats]  –  padded
-    densities: jnp.ndarray,  # [N]           –  padded
-    valid_mask: jnp.ndarray,  # [N] bool      –  True for real rows
+    X: jnp.ndarray,  # [N, x_feats]  -  padded
+    Y: jnp.ndarray,  # [N, y_feats]  -  padded
+    densities: jnp.ndarray,  # [N]           -  padded
+    valid_mask: jnp.ndarray,  # [N] bool      -  True for real rows
     batch_size: int,
     n_batches: int,
     density_threshold_quantile: float,
     key: jax.random.PRNGKey,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Sample `n_batches`×`batch_size` points, never touching padded rows."""
     EPS = 1e-16
     penalty = 1.0
@@ -522,7 +525,7 @@ def _selection_proba_from_threshold(densities: NdArray, threshold: float) -> NdA
     """Selection-probability formula given a density threshold.
 
     SSOT for the per-point inclusion probability used by every density-
-    balanced sampler. Below threshold → full mass; above → damped by
+    balanced sampler. Below threshold -> full mass; above -> damped by
     ``threshold / (density * HIGH_DENSITIES_PENALTY)``. Renormalises to 1.
     """
     EPSILON = BIOCOMP_CONSTANTS["sampling"]["epsilon_probability"]
@@ -549,8 +552,8 @@ def density_balanced_indices(
     knn_k: int = 64,
     density_threshold_quantile: float = 0.025,
     seed: int = 0,
-    densities: Optional[NdArray] = None,
-    selection_proba: Optional[NdArray] = None,
+    densities: NdArray | None = None,
+    selection_proba: NdArray | None = None,
 ) -> NdArray:
     """Density-balanced bootstrap indices via kNN density + quantile threshold.
 
@@ -626,9 +629,9 @@ class DataManager:
         X: list[NdArray],
         Y: list[NdArray],
         networks: list[Network],
-        weights: Optional[list[float]] = None,
+        weights: list[float] | None = None,
         data_cfg: DataConfig = DEFAULT_DATA_CONFIG,
-        cache_location: Optional[Union[Path, str]] = DEFAULT_DATA_CACHE_DIR,
+        cache_location: Path | str | None = DEFAULT_DATA_CACHE_DIR,
         n_workers: int = 1,
         jax_sampling: bool = True,
     ):

@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Regression test: logged vs committed predictions must match with use_latent_ratios=True."""
 
 import pytest

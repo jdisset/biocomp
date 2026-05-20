@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for auto_name_from_l1 feature in Network.to_recipe()
 
 Tests the automatic TU naming based on L1-level construct matching from parts database.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for genetic operators: SBX crossover and polynomial mutation."""
 
 import jax

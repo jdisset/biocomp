@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """TU masking for learnable enable/disable decisions.
 
 Binary masking with Straight-Through Estimator (STE).
@@ -155,7 +157,7 @@ def compute_binary_mask_multi(
     """Compute binary mask for multiple TU indices. Enabled if ANY TU enabled.
 
     All TUs receive gradients proportional to their contribution (via softmax),
-    while forward pass uses hard OR (any TU enabled → edge enabled).
+    while forward pass uses hard OR (any TU enabled -> edge enabled).
 
     Args:
         tu_indices: TU indices array, shape (max_tus,). Padding uses -1.
@@ -178,7 +180,7 @@ def compute_binary_mask_multi(
     weights = jax.nn.softmax(jnp.where(valid_mask, la_vals / softmax_temperature, -1e9))
     soft_or = jnp.sum(weights * masked_vals)
 
-    # Hard OR for forward pass (any enabled → 1.0)
+    # Hard OR for forward pass (any enabled -> 1.0)
     hard_any = jnp.where(jnp.max(masked_vals) > 0.5, 1.0, 0.0)
 
     # STE: forward uses hard_any, backward uses soft_or
@@ -269,7 +271,7 @@ def l0_penalty(
     # Penalty only above floor, normalized to [0, 1] range
     above_floor = jnp.maximum(prob - floor_prob, 0.0) / (1.0 - floor_prob)
     if leak_coef > 0:
-        # Leak: positive penalty below floor → GD pushes prob UP toward floor
+        # Leak: positive penalty below floor -> GD pushes prob UP toward floor
         # At prob=0: penalty = leak (max pressure to re-enable)
         # At prob=floor: penalty = 0 (no extra pressure)
         below_floor = jnp.maximum(floor_prob - prob, 0.0) / floor_prob
@@ -361,7 +363,7 @@ def decode_latent_tu_masking(
     W2: ArrayLike,
     b2: ArrayLike,
 ) -> jnp.ndarray:
-    """Decode latent code to log_alpha via MLP: z → GELU(W1@z + b1) → W2@h + b2."""
+    """Decode latent code to log_alpha via MLP: z -> GELU(W1@z + b1) -> W2@h + b2."""
     z, W1, b1, W2, b2 = map(jnp.asarray, (z, W1, b1, W2, b2))
     assert z.ndim == 1, f"z must be 1D (latent_dim,), got {z.ndim}D"
     assert W1.ndim == 2, f"W1 must be 2D (hidden_dim, latent_dim), got {W1.ndim}D"

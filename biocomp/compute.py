@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 ### {{{                          --     imports     --
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import ClassVar, Callable, Optional, Union, Any, TypeVar
+from typing import ClassVar, Optional, Any, TypeVar
+from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
@@ -34,8 +37,8 @@ import dracon as dr
 logger = get_logger(__name__)
 
 
-PRNGKey = Union[jnp.ndarray, np.ndarray, int]
-NdArray = Union[jnp.ndarray, np.ndarray]
+PRNGKey = jnp.ndarray | np.ndarray | int
+NdArray = jnp.ndarray | np.ndarray
 
 T = TypeVar("T")
 
@@ -46,8 +49,8 @@ class StackNode:
 
     network_id: int  # id of the network in the stack
     node_id: int  # id of the node in the network's compute graph
-    layer_number: Optional[int] = None  # what layer in the stack this node is in
-    node_position_in_layer: Optional[int] = None  # what position in the layer this node is in
+    layer_number: int | None = None  # what layer in the stack this node is in
+    node_position_in_layer: int | None = None  # what position in the layer this node is in
 
     @staticmethod
     def generate_type_signature(graph: GraphState, node_id: int) -> str:
@@ -114,8 +117,8 @@ class ComputeConfig(ArbitraryModel):
     used by the implementations to store and share information across nodes.
     """
 
-    node_functions: Optional[dict[str, EncodedPartialFunction]] = None
-    extra: Optional[dict[str, Any]] = None
+    node_functions: dict[str, EncodedPartialFunction] | None = None
+    extra: dict[str, Any] | None = None
 
     OUTPUT_WEIGHT_PATH: ClassVar[str] = "shared/NN/grouped_output/l0/w"
 
@@ -215,20 +218,20 @@ def _compute_layer_namespace(layer_id: int, node_type: str, n_outputs: int) -> s
 class StackLayer:
     nodes: list[StackNode]
     stack: Optional["ComputeStack"] = None
-    layer_id: Optional[int] = None
+    layer_id: int | None = None
 
     # information about the function to apply
-    f_type: Optional[str] = None
-    f_out_shapes: Optional[list[tuple[int]]] = None
-    f_input_shapes: Optional[list[tuple[int]]] = None
+    f_type: str | None = None
+    f_out_shapes: list[tuple[int]] | None = None
+    f_input_shapes: list[tuple[int]] | None = None
 
-    f_prepare: Optional[Callable] = None
-    f_apply: Optional[Callable] = None
-    f_commit: Optional[Callable] = None
-    f_introspect: Optional[Callable] = None
+    f_prepare: Callable | None = None
+    f_apply: Callable | None = None
+    f_commit: Callable | None = None
+    f_introspect: Callable | None = None
 
     # parameter namespace for this layer (e.g., "local/5/aggregation_2x")
-    namespace: Optional[str] = None
+    namespace: str | None = None
 
     is_built: bool = False
 
@@ -363,31 +366,31 @@ class StackLayer:
 @dataclass
 class ComputeStack:
     networks: list[Network]
-    layers: Optional[list[StackLayer]] = None
+    layers: list[StackLayer] | None = None
 
-    layers_start_index: Optional[list[int]] = None
-    output_shape: Optional[tuple[int]] = None
+    layers_start_index: list[int] | None = None
+    output_shape: tuple[int] | None = None
 
     # node_map is (network_id, compute_node_id) -> (layer_id, node_loc)
-    node_map: Optional[dict[tuple[int, int], tuple[int, int]]] = None
+    node_map: dict[tuple[int, int], tuple[int, int]] | None = None
 
-    total_nb_of_outputs: Optional[int] = None
-    total_nb_of_inputs: Optional[int] = None
-    max_nb_of_outputs_per_network: Optional[int] = None
+    total_nb_of_outputs: int | None = None
+    total_nb_of_inputs: int | None = None
+    max_nb_of_outputs_per_network: int | None = None
 
     is_assembled: bool = False
     is_built: bool = False
     number_of_nodes: int = 0
 
-    apply: Optional[Callable] = None
+    apply: Callable | None = None
 
-    post_process_callbacks: Optional[list[Callable]] = None
+    post_process_callbacks: list[Callable] | None = None
 
     # TU masking support (for design mode)
-    tu_id_to_idx: Optional[dict[str, int]] = None
+    tu_id_to_idx: dict[str, int] | None = None
     n_tus: int = 0
-    inverse_tu_ids: Optional[set[str]] = None  # TUs feeding inverse nodes (never disabled)
-    no_masking_tu_ids: Optional[set[str]] = None  # TUs with no_masking=True in recipe
+    inverse_tu_ids: set[str] | None = None  # TUs feeding inverse nodes (never disabled)
+    no_masking_tu_ids: set[str] | None = None  # TUs with no_masking=True in recipe
 
     def get_node(self, network_id: int, node_id: int):
         """Look up a node from compute_graph by network_id and node_id."""
@@ -882,8 +885,7 @@ class ComputeStack:
     def each_node(self):
         assert self.layers is not None, "Stack has no layers"
         for layer in self.layers:
-            for node in layer.nodes:
-                yield node
+            yield from layer.nodes
 
     def register_post_process(self, callback: Callable):
         if self.post_process_callbacks is None:
@@ -898,7 +900,7 @@ class ComputeStack:
         return params
 
     def split_stack_outputs_per_network(
-        self, yhat: T, max_samples: Optional[int] = None
+        self, yhat: T, max_samples: int | None = None
     ) -> list[T]:
         """
         split a stacked output into per-network outputs
@@ -1282,9 +1284,9 @@ class ComputeStack:
             inputs: NdArray,
             random_vars: NdArray,
             key: PRNGKey,
-            overwrite_values: Optional[NdArray] = None,
-            overwrite_at: Optional[NdArray] = None,
-            tu_enabled_random_vars: Optional[NdArray] = None,
+            overwrite_values: NdArray | None = None,
+            overwrite_at: NdArray | None = None,
+            tu_enabled_random_vars: NdArray | None = None,
         ) -> tuple[NdArray, NdArray]:
             """
             The core of the apply method. Jittable. Applies the entire stack.
@@ -1332,7 +1334,7 @@ class ComputeStack:
             stack_aux = {}
             stack_grad_wrt_inputs = jnp.array([])
 
-            # Derive a single base key for fold_in — each node derives its own
+            # Derive a single base key for fold_in -- each node derives its own
             # key deterministically via jax.random.fold_in(base_node_key, node_key_id).
             # Forward/inverse pairs share the same node_key_id (via ArrayRef),
             # so they get identical keys regardless of layer ordering.

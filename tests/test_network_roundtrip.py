@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.library import LibraryContext
 from biocomp.recipe import Recipe, CoTransfection, TranscriptionUnit, Slot
 from biocomp.network import recipe_to_networks
@@ -125,7 +127,7 @@ def cotx_equals_assert(c1: CoTransfection, c2: CoTransfection, path: str):
             assert fb1.value.max == fb2.value.max, (
                 f"{path}/fluo_bias/value: NumRange.max mismatch ({fb1.value.max} vs {fb2.value.max})"
             )
-        elif isinstance(fb1.value, (int, float)) and isinstance(fb2.value, (int, float)):
+        elif isinstance(fb1.value, int | float) and isinstance(fb2.value, int | float):
             assert abs(fb1.value - fb2.value) < 1e-9, (
                 f"{path}/fluo_bias/value: Numeric mismatch ({fb1.value} vs {fb2.value})"
             )
@@ -297,8 +299,11 @@ def test_metadata_preservation(lib):  # noqa: F811
     """Test that recipe metadata is preserved through roundtrip"""
     original = Recipe(
         name="test_metadata",
-        description="Test recipe with metadata",
-        metadata={"experiment": "roundtrip_test", "version": 1},
+        metadata={
+            "description": "Test recipe with metadata",
+            "experiment": "roundtrip_test",
+            "version": 1,
+        },
         content=[
             CoTransfection(
                 units=[
@@ -312,11 +317,9 @@ def test_metadata_preservation(lib):  # noqa: F811
     with LibraryContext.with_library(lib):
         networks = recipe_to_networks(original, invert=True)
         networks[0].metadata.update(original.metadata)
-        networks[0].metadata["description"] = original.description
 
         reconstructed = networks[0].to_recipe()
 
-        assert reconstructed.description == original.description
         for k, v in original.metadata.items():
             assert reconstructed.metadata[k] == v, f"metadata[{k!r}] mismatch: {reconstructed.metadata[k]!r} != {v!r}"
 

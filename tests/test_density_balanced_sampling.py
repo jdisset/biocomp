@@ -1,6 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for the density-balanced sampling SSOT helpers in biocomp.datautils."""
-
-from __future__ import annotations
 
 import numpy as np
 import pytest
@@ -26,10 +26,10 @@ def test_selection_proba_high_density_damped():
     """Above the threshold, selection probability should fall as 1/density."""
     densities = np.array([1.0, 2.0, 4.0, 8.0])
     p = _selection_proba_from_threshold(densities, threshold=2.0)
-    # densities[0] (=1.0) is below threshold → full mass; the bigger ones are damped.
+    # densities[0] (=1.0) is below threshold -> full mass; the bigger ones are damped.
     # Ratio between consecutive damped points should reflect the density ratio.
     p_norm = p / p[0]
-    assert pytest.approx(p_norm[2] / p_norm[3], rel=1e-6) == 2.0  # 1/4 vs 1/8 → ratio 2
+    assert pytest.approx(p_norm[2] / p_norm[3], rel=1e-6) == 2.0  # 1/4 vs 1/8 -> ratio 2
 
 
 def test_selection_proba_handles_nan_densities():
@@ -107,7 +107,7 @@ def test_density_balanced_indices_zero_samples():
 
 def test_density_balanced_indices_handles_exact_duplicates():
     """Exact duplicates inflate kNN density (~1/eps^d) but stay finite, so
-    selection_proba rounds to ~0 and duplicates are effectively excluded — the
+    selection_proba rounds to ~0 and duplicates are effectively excluded -- the
     same outcome we'd want from a dedup pass, without the bookkeeping."""
     rng = np.random.default_rng(0)
     n_dup = 50

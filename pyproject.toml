@@ -69,6 +69,7 @@ authors = [{name = "Jean Disset", email = "jdisset@mit.edu"}]
 version = "0.0.1"
 readme = "README.md"
 description = "Automated design and predictions of neuromorphic synthetic biology circuits."
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = [
 	"assertpy",

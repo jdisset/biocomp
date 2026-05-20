@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for unified TU masking (get_tu_masks) supporting both binary and Hard Concrete modes."""
 
 import pytest

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test that commit() produces predictions matching apply() for latent ratios.
 
 This module tests for a critical bug where the aggregation commit() function

@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from .library import PartsLibrary as PartsLibrary
 from dataclasses import dataclass
-from typing import Callable, Optional
+from collections.abc import Callable
 import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
@@ -20,10 +22,8 @@ class LayerInstance:
     prepare: Callable[[ParameterTree, list[StackNode], PRNGKey], None]
     apply: Callable[[NDArray, NDArray, ParameterTree, NodeID, NDArray], ResultAndAux]
     output_shapes: list[tuple[int]]
-    commit: Optional[Callable[[ParameterTree, list[StackNode], ComputeStack], None]] = None
-    introspect: Optional[
-        Callable[[ParameterTree, list[StackNode], ComputeStack, int, bool], list]
-    ] = None
+    commit: Callable[[ParameterTree, list[StackNode], ComputeStack], None] | None = None
+    introspect: Callable[[ParameterTree, list[StackNode], ComputeStack, int, bool], list] | None = None
 
     def __post_init__(self):
         assert all(isinstance(shape, tuple) for shape in self.output_shapes), (
@@ -95,7 +95,7 @@ def add_node_key_ids(params: ParameterTree, num_nodes: int, namespace: str):
     """Allocate sequential node_key_ids for deterministic per-node key derivation via fold_in.
 
     Each node gets a globally unique integer ID. During apply, the node's key is
-    computed as ``jax.random.fold_in(base_key, node_key_id)`` — so forward/inverse
+    computed as ``jax.random.fold_in(base_key, node_key_id)`` -- so forward/inverse
     pairs that share the same ID (via ArrayRef) get identical keys.
     """
     prev = get_prev_num_node_keys(params)
@@ -107,7 +107,7 @@ def add_node_key_ids(params: ParameterTree, num_nodes: int, namespace: str):
 def _reference_forward_ids(stack, params, nodelist, inv_namespace, id_name: str):
     """Make inverse layer reference forward layer's IDs via ArrayRef.
 
-    Generic helper — works for both ``random_variable_id`` and ``node_key_id``.
+    Generic helper -- works for both ``random_variable_id`` and ``node_key_id``.
     """
     all_forward_exist = all(node.get_forward_stacknode(stack) is not None for node in nodelist)
     if not all_forward_exist:

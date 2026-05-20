@@ -1,9 +1,9 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from typing import (
     Any,
-    Optional,
     Literal,
     Annotated,
-    Union,
 )
 from pydantic import BaseModel, Field, model_validator
 
@@ -32,10 +32,10 @@ class EdgeConstraint(BaseModel):
     node bindings for the edge endpoints as "{edge_name}_source" and "{edge_name}_target".
     """
 
-    source_var: Optional[str] = None
-    target_var: Optional[str] = None
+    source_var: str | None = None
+    target_var: str | None = None
     properties: dict[str, Any] = {}
-    contains: Optional[list[str]] = None  # list of part names that must be in edge content
+    contains: list[str] | None = None  # list of part names that must be in edge content
     bind_endpoints: bool = True  # automatically bind source and target nodes
 
 
@@ -59,7 +59,7 @@ class MatchQuery(BaseModel):
 
     # For complex, non-structural logic.
     # eval'd with the context of each match dict.
-    where_filter_function: Optional[str] = None
+    where_filter_function: str | None = None
 
     @model_validator(mode="after")
     def check_variable_consistency(self) -> "MatchQuery":
@@ -182,10 +182,10 @@ class RewireEdgesTo(ActionBase):
 class EditEdge(ActionBase):
     action_type: Literal["edit_edge"] = "edit_edge"
     edge_var: str  # Name of the bound edge variable to modify
-    source_var: Optional[str] = None  # New source node (if changing)
-    target_var: Optional[str] = None  # New target node (if changing)
-    properties: Optional[dict[str, Any]] = None  # New properties to set
-    content: Optional[list[str]] = None  # New part names for content
+    source_var: str | None = None  # New source node (if changing)
+    target_var: str | None = None  # New target node (if changing)
+    properties: dict[str, Any] | None = None  # New properties to set
+    content: list[str] | None = None  # New part names for content
 
 
 class CopyEdge(ActionBase):
@@ -193,24 +193,13 @@ class CopyEdge(ActionBase):
     source_edge_var: str  # Name of the bound edge variable to copy from
     source_var: str  # New source node variable name
     target_var: str  # New target node variable name
-    properties: Optional[dict[str, Any]] = None  # Additional/override properties
-    content: Optional[list[str]] = None  # Override content (if None, copies original content)
-    content_type: Optional[str] = None  # Override content_type (if None, copies original)
+    properties: dict[str, Any] | None = None  # Additional/override properties
+    content: list[str] | None = None  # Override content (if None, copies original content)
+    content_type: str | None = None  # Override content_type (if None, copies original)
 
 
 AnyAction = Annotated[
-    Union[
-        AddNode,
-        AddEdge,
-        SetProperties,
-        DeleteNode,
-        DeleteEdge,
-        RewireEdgesFrom,
-        RewireEdgesTo,
-        EditEdge,
-        CopyEdge,
-        DeleteProperties,
-    ],
+    AddNode | AddEdge | SetProperties | DeleteNode | DeleteEdge | RewireEdgesFrom | RewireEdgesTo | EditEdge | CopyEdge | DeleteProperties,
     Field(discriminator="action_type"),
 ]
 
@@ -222,4 +211,4 @@ class GraphRewritingRule(BaseModel):
     run_until_stable: bool = False
     yield_strategy: Literal["batched", "per_match", "cartesian_product_by_key"] = "batched"
     # For cartesian_product_by_key: which variable to group by (e.g., "numeric")
-    cartesian_product_key: Optional[str] = None
+    cartesian_product_key: str | None = None

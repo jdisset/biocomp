@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import dracon as dr
 
 BIOCOMP_COLORS = dr.load("pkg:biocomp:config/biocomp_colors.yaml")

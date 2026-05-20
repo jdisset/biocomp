@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """TU masking strategies - SSOT for all TU masking behavior.
 
 This module provides the single source of truth for TU masking. All TU masking
@@ -16,8 +18,6 @@ Shape Contract:
     - Inner shape at get_*: (n_net, n_tus)
     - get_log_alpha(params, network_id) indexes params[PATH][network_id] -> (n_tus,)
 """
-
-from __future__ import annotations
 
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol

@@ -1,15 +1,16 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Pure Pydantic schema for the parts database.
 
-Each model is the source of truth for one parts-db table — used by dracon as a
+Each model is the source of truth for one parts-db table -- used by dracon as a
 typed YAML tag (!Part, !L0, !L1, ...) and as the validation surface for both
 direct construction and field-by-field FK checks (performed in library.py).
 
 No SQL: the parts database is yaml-on-disk with a pickle cache (see
-biocomp.library). Field aliases (5'UTR, 3'UTR) are pure Pydantic — they survive
+biocomp.library). Field aliases (5'UTR, 3'UTR) are pure Pydantic -- they survive
 yaml round-trip via the alias_generator on Pydantic's ConfigDict.
 """
 
-from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 import json5
 
@@ -60,41 +61,41 @@ class Part(PartsRecord):
 
 class L0(PartsRecord):
     id: str
-    notes: Optional[str] = None
+    notes: str | None = None
     constructed: bool
     backbone: str
-    part_1: Optional[str] = None
-    part_2: Optional[str] = None
-    part_3: Optional[str] = None
-    part_4: Optional[str] = None
-    part_5: Optional[str] = None
-    part_6: Optional[str] = None
+    part_1: str | None = None
+    part_2: str | None = None
+    part_3: str | None = None
+    part_4: str | None = None
+    part_5: str | None = None
+    part_6: str | None = None
 
 
 class L1(PartsRecord):
     id: str
-    notes: Optional[str] = None
+    notes: str | None = None
     constructed: bool
     backbone: str
-    insulator: Optional[str] = None
-    promoter: Optional[str] = None
-    utr5: Optional[str] = None
-    gene: Optional[str] = None
-    utr3: Optional[str] = None
-    terminator: Optional[str] = None
+    insulator: str | None = None
+    promoter: str | None = None
+    utr5: str | None = None
+    gene: str | None = None
+    utr3: str | None = None
+    terminator: str | None = None
 
 
 class L2(PartsRecord):
     id: str
-    notes: Optional[str] = None
+    notes: str | None = None
     constructed: bool
     backbone: str
-    slot_1: Optional[str] = None
-    slot_2: Optional[str] = None
-    slot_3: Optional[str] = None
-    slot_4: Optional[str] = None
-    slot_5: Optional[str] = None
-    slot_6: Optional[str] = None
+    slot_1: str | None = None
+    slot_2: str | None = None
+    slot_3: str | None = None
+    slot_4: str | None = None
+    slot_5: str | None = None
+    slot_6: str | None = None
 
 
 class SequestronType(PartsRecord):

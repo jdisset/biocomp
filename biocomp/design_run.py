@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -44,12 +46,12 @@ def _create_norm_ratios_hook(direct_ratio_paths: list[str], source_ratio_paths: 
 
 
 def run_design(
-    dmanager: "DesignManager",
-    dconf: "DesignConfig",
-    model: "BiocompModel",
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    model: BiocompModel,
     dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
-    initial_params: "ParameterTree" | None = None,
+    initial_params: ParameterTree | None = None,
     initial_step: int = 0,
     select_best_synced_params: bool = False,
     best_synced_score_fn=None,
@@ -98,7 +100,7 @@ def run_design(
         sanitize_grads=True,
     )
 
-    def step(params: "ParameterTree", opt_state: optax.OptState, step_key, xs, ys):
+    def step(params: ParameterTree, opt_state: optax.OptState, step_key, xs, ys):
         keys = jax.random.split(step_key, dconf.n_replicates)
         assert_that(xs).has_shape((
             dconf.n_replicates,
@@ -139,8 +141,6 @@ def run_design(
         total_steps=session.total_steps,
     )
 
-    logger.info("=" * 60)
-    logger.info("STARTING OPTIMIZATION LOOP")
-    logger.info("=" * 60)
+    logger.info("starting optimization loop")
 
     return run_kernel(ctx, session.initial_params, adapter)

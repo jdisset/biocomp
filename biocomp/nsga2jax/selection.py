@@ -1,6 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Selection operators for NSGA-II."""
-
-from __future__ import annotations
 
 from functools import partial
 

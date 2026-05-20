@@ -1,13 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from typing import (
-    Callable,
-    Optional,
-    Union,
-    Tuple,
     Any,
-    List,
-    Sequence,
     Self,
 )
+from collections.abc import Callable, Sequence
 import jax
 import jax.numpy as jnp
 import h5py
@@ -37,7 +34,7 @@ def is_equal(a, b, close_ok=False):
         return True
     if type(a) is not type(b):
         return False
-    if isinstance(a, (np.ndarray, jnp.ndarray)):
+    if isinstance(a, np.ndarray | jnp.ndarray):
         if close_ok:
             return np.allclose(a, b)
         return np.all(a == b)
@@ -50,7 +47,7 @@ def pretty_str(x):
     msg = ""
     if isinstance(x, str):
         msg = x
-    elif isinstance(x, (np.ndarray, jnp.ndarray)):
+    elif isinstance(x, np.ndarray | jnp.ndarray):
         if x.size <= 15:
             with np.printoptions(precision=3):
                 msg = str(x)
@@ -63,7 +60,7 @@ def pretty_str(x):
                     array_str = f"<{typestr} tracer>"
                 msg = f"{x.shape} {x.dtype} {typestr} array:\n{array_str}"
 
-    elif isinstance(x, (list, tuple)):
+    elif isinstance(x, list | tuple):
         chars = "()" if isinstance(x, tuple) else "[]"
         max_lines = 5
         max_elem_per_line = 5
@@ -108,7 +105,7 @@ def register_deserializer(cls, func):
         deserializers[cls.__name__] = func
 
 
-def serializer(types: Union[Sequence, type]):
+def serializer(types: Sequence | type):
     if isinstance(types, type):
         types = (types,)
 
@@ -120,7 +117,7 @@ def serializer(types: Union[Sequence, type]):
     return decorator
 
 
-def deserializer(types: Union[Sequence, type]):
+def deserializer(types: Sequence | type):
     if isinstance(types, type):
         types = (types,)
 
@@ -204,7 +201,7 @@ class ParamPath:
             return key.strip("/").split("/")
         elif isinstance(key, ParamPath):
             return key.path
-        elif isinstance(key, (list, tuple)):
+        elif isinstance(key, list | tuple):
             return key
         else:
             raise ValueError(f"Invalid key type: {type(key)}")
@@ -345,7 +342,7 @@ class PTree:
                 result.extend(
                     val.visualize_tree_structure(seen, depth + 1, prefix=prefix + "/value")
                 )
-            elif isinstance(val, (np.ndarray, jnp.ndarray)):
+            elif isinstance(val, np.ndarray | jnp.ndarray):
                 result.append(f"{indent}● #{node_id} [Leaf Array shape={val.shape}]")
             else:
                 result.append(f"{indent}● #{node_id} [Leaf {type(val).__name__}]")
@@ -411,7 +408,7 @@ class PTree:
             if type(self.value) is not type(other.value):
                 return False
 
-            if isinstance(self.value, (np.ndarray, jnp.ndarray)):
+            if isinstance(self.value, np.ndarray | jnp.ndarray):
                 return np.all(self.value == other.value)
 
             if isinstance(self.value, PTree):
@@ -659,7 +656,7 @@ class ArrayRef:
         return r
 
     def push_back(self, array_path, id):
-        if not isinstance(id, (list, tuple)):
+        if not isinstance(id, list | tuple):
             id = (id,)
 
         if array_path not in self.paths:
@@ -710,7 +707,7 @@ class ArrayRef:
         return hash(self.get().tobytes())
 
     def __getitem__(self, key):
-        if isinstance(key, (int, slice)):
+        if isinstance(key, int | slice):
             return self.view()[key]
         else:
             raise TypeError(f"ArrayRef can only be indexed with int or slice, not {type(key)}")
@@ -724,8 +721,8 @@ class ArrayRef:
 @dataclass(order=False)
 class ArrayRefPath:
     actual_path: ParamPath
-    paths: List[ParamPath]
-    indices: List[Tuple[int, int]]
+    paths: list[ParamPath]
+    indices: list[tuple[int, int]]
 
     def __eq__(self, other):
         if not isinstance(other, ArrayRefPath):
@@ -821,7 +818,7 @@ class ParameterTree:
     def __contains__(self, path):
         return path in self.data
 
-    def at(self, path, value=None, tags=None, overwrite: Optional[bool] = False):
+    def at(self, path, value=None, tags=None, overwrite: bool | None = False):
         """
         overwrite = True -> overwrite existing value
         overwrite = False -> return existing value
@@ -841,11 +838,11 @@ class ParameterTree:
     def visualize_tree_structure(self):
         return "\n".join(self.data.visualize_tree_structure())
 
-    def get_leaves_by_path(self, paths_to_get: List[ParamPath]) -> List[Any]:
+    def get_leaves_by_path(self, paths_to_get: list[ParamPath]) -> list[Any]:
         """
         Efficiently retrieves the leaf values for a specific list of paths.
         """
-        if not isinstance(paths_to_get, (list, tuple)):
+        if not isinstance(paths_to_get, list | tuple):
             paths_to_get = [paths_to_get]
 
         # convert to a set for quick lookups
@@ -983,7 +980,7 @@ class ParameterTree:
         )
 
     def update_leaves_by_path(
-        self, paths_to_update: List[ParamPath], update_func: Callable[[Any], Any]
+        self, paths_to_update: list[ParamPath], update_func: Callable[[Any], Any]
     ) -> "ParameterTree":
         """
         Applies a function to specific leaves of the data PTree and returns a new ParameterTree.
@@ -1325,7 +1322,7 @@ def save_ptree_to_hdf5_group(ptree: PTree, h5_group: h5py.Group):
                 leaf_value.indices, dtype=object if not leaf_value.indices else None
             )
 
-        elif isinstance(leaf_value, (np.ndarray, jnp.ndarray)):
+        elif isinstance(leaf_value, np.ndarray | jnp.ndarray):
             current_group.create_dataset(leaf_name, data=np.asarray(leaf_value))
 
         elif leaf_value is None:

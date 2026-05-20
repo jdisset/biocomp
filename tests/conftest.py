@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """pytest configuration for biocomp tests."""
 import os
 from pathlib import Path

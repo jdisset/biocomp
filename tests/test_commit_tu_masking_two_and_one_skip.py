@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for TU masking commit behavior using the two_and_one_skip scaffold.
 
 Verifies:
@@ -571,7 +573,7 @@ class TestCompleteDisableScenarios:
             verify_tu_present(recipe, "b_direct_out")
 
     def test_all_ern_pairs_and_direct_outs(self, lib, scaffold_stack):
-        """Disable all ERN pairs AND direct_outs → empty recipe.
+        """Disable all ERN pairs AND direct_outs -> empty recipe.
 
         When all output-producing TUs are disabled (ERN pairs + direct outputs),
         only markers remain. But in design mode (inverted network), markers provide
@@ -597,7 +599,7 @@ class TestCompleteDisableScenarios:
 
             tu_names = get_tu_names_from_recipe(recipe)
 
-            # With all outputs disabled, network is invalid → empty recipe
+            # With all outputs disabled, network is invalid -> empty recipe
             assert tu_names == set(), (
                 f"Expected empty recipe when all output TUs disabled, got: {tu_names}"
             )
@@ -775,8 +777,8 @@ class TestMultiNetworkMasking:
     def test_multi_net_different_masks(self, lib, multi_network_stack):
         """Test per-network masking with different patterns.
 
-        Network 0: all *_a- disabled → CasE_rec stripped from *_a+
-        Network 1: all *_b+ disabled → cascade removes *_b- AND *_a+ (Csy4 producers)
+        Network 0: all *_a- disabled -> CasE_rec stripped from *_a+
+        Network 1: all *_b+ disabled -> cascade removes *_b- AND *_a+ (Csy4 producers)
         """
         with LibraryContext.with_library(lib):
             stack, tu_ids, tu_id_to_idx = multi_network_stack
@@ -822,7 +824,7 @@ class TestMultiNetworkMasking:
             assert "x1_b+" in tus_0
             assert "x1_b-" in tus_0
 
-            # Network 1: *_b+ disabled → cascade removes *_b- AND *_a+ (Csy4 producers)
+            # Network 1: *_b+ disabled -> cascade removes *_b- AND *_a+ (Csy4 producers)
             assert "x1_b+" not in tus_1
             assert "x1_b-" not in tus_1
             assert "x1_a+" not in tus_1  # Cascade from Csy4 ERN!

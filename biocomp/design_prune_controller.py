@@ -1,36 +1,27 @@
-"""Extracted helpers for the hard-pruning loop in design_pruning.py.
-
-Deduplicates:
-- build_stack_from_dconf: 2 callsites with identical dconf param plumbing
-- evaluate_segment_snapshot: pre/post eval blocks (~60 lines each)
-- compare_snapshots: regression detection logic
-"""
-
-from __future__ import annotations
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+"""Helpers for the hard-pruning loop in design_pruning.py."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import jax
 import numpy as np
 
+from .compute import ComputeStack
+from .design import DesignConfig, DesignManager
+from .parameters import ParameterTree
 from .logging_config import get_logger
-
-if TYPE_CHECKING:
-    from .compute import ComputeStack
-    from .design import DesignConfig, DesignManager
-    from biocomptools.modelmodel import BiocompModel
-    from .parameters import ParameterTree
+from biocomptools.modelmodel import BiocompModel
 
 logger = get_logger(__name__)
 
 
 def build_stack_from_dconf(
-    dmanager: "DesignManager",
-    dconf: "DesignConfig",
-    model: "BiocompModel",
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    model: BiocompModel,
     lock_ratios: bool = False,
-) -> "ComputeStack":
+) -> ComputeStack:
     """Build a ComputeStack from a DesignManager using DesignConfig parameters.
 
     Consolidates the repeated build_stack(..., use_latent_ratios=dconf.X, ...) pattern.
@@ -57,10 +48,10 @@ class SegmentSnapshot:
 
 
 def evaluate_segment_snapshot(
-    dmanager: "DesignManager",
-    dconf: "DesignConfig",
-    model: "BiocompModel",
-    params: "ParameterTree",
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    model: BiocompModel,
+    params: ParameterTree,
     key: jax.Array,
     *,
     n_eval_samples: int = 256,

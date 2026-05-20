@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test design mode: commitment, recipe serialization, and prediction roundtrip.
 
 Tests:
@@ -191,7 +193,7 @@ def test_ratios_are_locked_after_commit(lib, simple_design_recipe):
             if cotx.ratios:
                 for ratio in cotx.ratios:
                     assert not isinstance(ratio, NumRange), f"Ratio should be locked, got NumRange: {ratio}"
-                    assert isinstance(ratio, (int, float)), f"Ratio should be numeric, got {type(ratio)}"
+                    assert isinstance(ratio, int | float), f"Ratio should be numeric, got {type(ratio)}"
 
 
 def test_topk_selection_not_biased():
@@ -872,7 +874,7 @@ def test_different_replicates_produce_different_commits(lib, simple_design_recip
             # Check if any ratios differ
             has_difference = any(
                 abs(r0 - r1) > 1e-6 for r0, r1 in zip(ratios0, ratios1, strict=False)
-                if isinstance(r0, (int, float)) and isinstance(r1, (int, float))
+                if isinstance(r0, int | float) and isinstance(r1, int | float)
             )
             assert has_difference, "Different replicates should produce different ratios"
 

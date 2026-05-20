@@ -1,9 +1,8 @@
-from __future__ import annotations
-
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Mapping, TypeAlias
-
-StepHistoryLike: TypeAlias = Mapping[str, Any] | "StepHistorySnapshot"
+from typing import Any
+from collections.abc import Iterator, Mapping
 
 
 @dataclass(frozen=True)
@@ -13,7 +12,7 @@ class StepHistorySnapshot(Mapping[str, Any]):
     data: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_raw(cls, value: object) -> StepHistorySnapshot:
+    def from_raw(cls, value: object) -> "StepHistorySnapshot":
         if isinstance(value, cls):
             return value
         if isinstance(value, Mapping):
@@ -45,6 +44,9 @@ class StepHistorySnapshot(Mapping[str, Any]):
 
     def __len__(self) -> int:
         return len(self.data)
+
+
+StepHistoryLike = Mapping[str, Any] | StepHistorySnapshot
 
 
 def ensure_step_history_snapshot(

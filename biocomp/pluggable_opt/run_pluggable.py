@@ -1,5 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -74,10 +75,9 @@ class PluggableStepAdapter:
 
         pbar.close()
 
-        logger.info("=" * 60)
-        logger.info(f"OPTIMIZATION COMPLETE in {self.timer.total():.2f}s")
         logger.info(
-            f"  Final loss: {float(opt_state.best_loss):.6f}, steps: {int(opt_state.step)}"
+            f"optimization done in {self.timer.total():.2f}s; "
+            f"final loss={float(opt_state.best_loss):.6f}, steps={int(opt_state.step)}"
         )
         self.timer.summary()
 
@@ -110,10 +110,10 @@ class PluggableStepAdapter:
 
 
 def run_pluggable(
-    dmanager: "DesignManager",
-    dconf: "DesignConfig",
+    dmanager: DesignManager,
+    dconf: DesignConfig,
     model,
-    dispatch: "LoggerDispatch | None" = None,
+    dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
 ):
     optimizer = dconf.pluggable_optimizer
@@ -128,9 +128,7 @@ def run_pluggable(
     )
     initial_params = jax.tree.map(lambda x: x.squeeze(0), session.initial_params)
 
-    logger.info("=" * 60)
-    logger.info("DESIGN OPTIMIZATION (PLUGGABLE OPTIMIZER)")
-    logger.info("=" * 60)
+    logger.info("design optimization (pluggable optimizer)")
 
     session.timer.start("codec", "[5/5] Creating codec...")
     codec = GenomeCodec.from_params(
@@ -226,8 +224,6 @@ def run_pluggable(
         total_steps=0,
     )
 
-    logger.info("=" * 60)
-    logger.info("STARTING OPTIMIZATION LOOP")
-    logger.info("=" * 60)
+    logger.info("starting optimization loop")
 
     return run_kernel(ctx, initial_params, adapter)

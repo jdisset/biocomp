@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Design evaluation functions extracted from design.py.
 
 Provides:
@@ -6,7 +8,6 @@ Provides:
 - sample_for_evaluation: sample evaluation data for design quality assessment
 - evaluate_design: evaluate design quality using training-consistent losses
 """
-
 from __future__ import annotations
 
 from enum import Enum
@@ -70,9 +71,9 @@ def extract_target_slice(
 
 
 def sample_for_evaluation(
-    dmanager: "DesignManager",
-    dconf: "DesignConfig",
-    final_params: "ParameterTree",
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    final_params: ParameterTree,
     n_eval_samples: int,
     key: jax.Array,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -119,10 +120,10 @@ def sample_for_evaluation(
 
 
 def evaluate_design(
-    dmanager: "DesignManager",
-    dconf: "DesignConfig",
+    dmanager: DesignManager,
+    dconf: DesignConfig,
     model,  # BiocompModel
-    final_params: "ParameterTree",
+    final_params: ParameterTree,
     xraw: jnp.ndarray,
     yraw: jnp.ndarray,
     key: jax.Array,

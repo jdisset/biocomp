@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.jaxutils import flat_concat
 from biocomp.compute import StackNode, ComputeStack
 import jax
@@ -18,7 +20,6 @@ from biocomp.nodeutils import (
     reference_forward_key_ids,
 )
 from biocomp.utils import get_logger
-from typing import Optional
 
 from biocomp.neuralutils import (
     ACTIVATION_FUNCTIONS,
@@ -296,9 +297,9 @@ def transform_nn(
         params: ParameterTree,
         node_id: ArrayLike,
         key: PRNGKey,
-        tu_enabled_random_vars: Optional[ArrayLike] = None,
-        network_id: Optional[ArrayLike] = None,
-        rate_override: Optional[ArrayLike] = None,
+        tu_enabled_random_vars: ArrayLike | None = None,
+        network_id: ArrayLike | None = None,
+        rate_override: ArrayLike | None = None,
         **_kwargs,
     ) -> tuple[ArrayLike, dict]:
         k1, k2, k3 = jax.random.split(key, 3)

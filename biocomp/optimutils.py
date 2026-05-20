@@ -1,10 +1,13 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 ### {{{                          --     imports     --
 from assertpy import assert_that
 import optax
 import random
 import os
 import time
-from typing import List, Literal, Callable, Optional, NamedTuple, Union
+from typing import Literal, NamedTuple
+from collections.abc import Callable
 
 from biocomp.utils import (
     EncodedPartialFunction,
@@ -162,12 +165,12 @@ def build_two_timescale_optimizer(
 
 class OptimConfig(ArbitraryModel):
     optimizer_stack: list[EncodedPartialFunction] = DEFAULT_OPTIMIZER
-    seed: Optional[int] = None
+    seed: int | None = None
     batches_per_step: int = 4
     batch_size: int = 32
     n_epochs: float = 3
     n_replicates: int = 16
-    keep_in_history: Union[List[str], Literal["all"]] = ["loss"]
+    keep_in_history: list[str] | Literal["all"] = ["loss"]
 
     def model_post_init(self, *args, **kwargs):
         super().model_post_init(*args, **kwargs)
@@ -248,7 +251,7 @@ def extract_learning_rate(opt_state):
                     opt_state,
                     "learning_rate",
                     default=None,
-                    filtering=lambda path, value: isinstance(value, (float, int))
+                    filtering=lambda path, value: isinstance(value, float | int)
                     or (hasattr(value, "shape") and hasattr(value, "dtype")),
                 )
             except (KeyError, ValueError, TypeError):
@@ -282,7 +285,7 @@ def make_training_step(
     scannable=True,
     updates_need_vmap=False,
     static_tags=None,
-    post_update_hook: Optional[Callable] = None,
+    post_update_hook: Callable | None = None,
     sanitize_grads: bool = False,
 ):
     from jax import value_and_grad
@@ -934,8 +937,7 @@ def optimize(
         dispatch.on_end(step_offset + n_total_steps, config, step_history, stack)
 
     # Final summary
-    logger.info("=" * 60)
-    logger.info("OPTIMIZATION COMPLETE")
+    logger.info("optimization done")
     logger.info(f"  Compilation:    {compile_time:.2f}s")
     logger.info(f"  Loop time:      {total_loop_time:.2f}s ({n_total_steps} steps)")
     logger.info(f"  Final sync:     {sync_time:.2f}s")
@@ -961,6 +963,5 @@ def optimize(
     if isinstance(step_history, dict):
         step_history["latest_params"] = params
         step_history["params"] = params
-    logger.info("=" * 60)
 
     return params, loss_history, StepHistorySnapshot.from_raw(step_history)

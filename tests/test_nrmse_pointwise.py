@@ -1,6 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for `compute_nrmse_pointwise` (subsample-level local-σ nRMSE)."""
-
-from __future__ import annotations
 
 import numpy as np
 import pytest
@@ -16,9 +16,9 @@ def test_zero_for_perfect_prediction():
 
 
 def test_one_when_error_equals_local_sigma():
-    """When |gt - pred| = σ_local everywhere AND tolerance ≪ σ, nrmse → 1."""
+    """When |gt - pred| = σ_local everywhere AND tolerance ≪ σ, nrmse -> 1."""
     sigma = np.full(500, 0.2)
-    gt = np.full(500, 0.5)  # constant gt → tolerance term dominated by abs_tol
+    gt = np.full(500, 0.5)  # constant gt -> tolerance term dominated by abs_tol
     pred = gt + sigma
     # With σ=0.2 and tol²≈(0.05*0.5+0.01)² ≈ 0.0012, the denom is ≈ √(0.04+0.0012) ≈ 0.203.
     # nrmse ≈ 0.2 / 0.203 ≈ 0.985.
@@ -35,13 +35,13 @@ def test_local_sigma_weighting():
     sigma_split = np.where(np.arange(n) < n // 2, 0.05, 0.20)
     nrmse_uniform = compute_nrmse_pointwise(gt, pred, sigma_uniform, global_range=1.0)
     nrmse_split = compute_nrmse_pointwise(gt, pred, sigma_split, global_range=1.0)
-    # The split-σ case has half the points at σ=0.05 → contribute 4× more to mean(sq_norm).
-    # → split nrmse > uniform nrmse.
+    # The split-σ case has half the points at σ=0.05 -> contribute 4× more to mean(sq_norm).
+    # -> split nrmse > uniform nrmse.
     assert nrmse_split > nrmse_uniform
 
 
 def test_finite_when_sigma_zero_thanks_to_tolerance():
-    """σ=0 must NOT blow up — the tolerance floor catches it."""
+    """σ=0 must NOT blow up -- the tolerance floor catches it."""
     gt = np.full(100, 0.5)
     pred = gt + 0.01
     sigma = np.zeros(100)

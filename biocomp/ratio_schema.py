@@ -1,5 +1,5 @@
-from __future__ import annotations
-
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from typing import Any
 
 RATIO_SCHEMA_VERSION = 1

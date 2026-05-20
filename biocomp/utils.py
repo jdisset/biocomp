@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 ### {{{                          --     imports     --
 from biocomp.logging_config import get_logger
-from typing import List, Callable
+from collections.abc import Callable
 from pathlib import Path
 from dracon.merge import dict_like
-from typing import Type, Union
 from rich import print as rprint
 import sys
 from copy import deepcopy
@@ -24,18 +25,16 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                           --     types     --
 from typing import (
-    Dict,
     Any,
-    Optional,
-    Sequence,
     TypeVar,
     Generic,
     Annotated,
 )
+from collections.abc import Sequence
 
 T = TypeVar("T")
 R = TypeVar("R")
-PathLike = Union[str, Path]
+PathLike = str | Path
 
 
 class ArbitraryModel(BaseModel):
@@ -83,7 +82,7 @@ def timer(name=None, logger=None):
 # ···············································································
 
 
-def save(data: Any, path: Union[str, Path], overwrite: bool = False, rename_if_exists: bool = True):
+def save(data: Any, path: str | Path, overwrite: bool = False, rename_if_exists: bool = True):
     import pickle
 
     path = Path(path)
@@ -99,7 +98,7 @@ def save(data: Any, path: Union[str, Path], overwrite: bool = False, rename_if_e
         pickle.dump(data, file)
 
 
-def load(path: Union[str, Path]) -> Any:
+def load(path: str | Path) -> Any:
     import pickle
 
     path = Path(path)
@@ -117,9 +116,9 @@ def load(path: Union[str, Path]) -> Any:
 def get_cache(
     gen_f: Callable[[], T],
     signature: str,
-    cache_location: Optional[PathLike],
+    cache_location: PathLike | None,
     create_dir: bool = True,
-    serializer: Optional[dict[str, Callable]] = None,
+    serializer: dict[str, Callable] | None = None,
 ) -> T:
     """
     Get a cached value or generate it if it doesn't exist.
@@ -189,7 +188,7 @@ class PartialFunction(ArbitraryModel, Generic[T, R]):
     A partial function that can be serialized and deserialized
     """
 
-    func: Union[str, Callable]  # 'module.fname' or 'fname' or function
+    func: str | Callable  # 'module.fname' or 'fname' or function
     args: list = []
     kwargs: dict = {}
     modules: list = []
@@ -248,7 +247,7 @@ class PartialFunction(ArbitraryModel, Generic[T, R]):
 
     def get_impl(
         self,
-        extra_module_names: Optional[List[str]] = None,
+        extra_module_names: list[str] | None = None,
         force_refresh=False,
     ) -> Callable:
         if self._func is not None and not force_refresh:
@@ -335,7 +334,7 @@ def get_fname(func: Callable) -> str:
 def encode_function(func: Callable | Any, **kwargs) -> PartialFunction:
     import inspect
 
-    if isinstance(func, (PartialFunction, PartialFunctionResult)):
+    if isinstance(func, PartialFunction | PartialFunctionResult):
         new_pf = func
         new_pf.kwargs.update(kwargs)
         if not isinstance(new_pf.func, str):
@@ -368,8 +367,8 @@ EncodedPartialFunction = Annotated[PartialFunction, BeforeValidator(encode_funct
 
 def decode_type(
     type_str: str,
-    available_module_names: Optional[List[str]] = None,
-) -> Type:
+    available_module_names: list[str] | None = None,
+) -> type:
     """
     If it exists, returns the first type found
     with the given name in the given modules
@@ -471,7 +470,7 @@ and merge it with the (potentially sparse) user's config file to get the full ne
 _CONFIGURABLE_FUNCTIONS = {}
 
 
-def get_configurable_functions(namespace: str = "default") -> Dict:
+def get_configurable_functions(namespace: str = "default") -> dict:
     if namespace not in _CONFIGURABLE_FUNCTIONS:
         _CONFIGURABLE_FUNCTIONS[namespace] = {}
     return _CONFIGURABLE_FUNCTIONS[namespace]
@@ -500,7 +499,7 @@ def configurable_decorator(namespace: str = "default") -> Callable:
 
 
 def generate_base_nested_config(
-    available_functions: Optional[Dict] = None,
+    available_functions: dict | None = None,
     function_config_suffix: str = "_params",
     add_defaults: bool = False,
     namespace: str = "default",
@@ -558,9 +557,9 @@ def updated_dict(d1, d2):
 
 def nested_resolve(
     input_dict: Any,
-    already_seen: Optional[Dict] = None,
+    already_seen: dict | None = None,
     resolve_key: Callable[[str], bool] = partial(resolve_if_ends_with, suffix="_params"),
-) -> Dict:
+) -> dict:
     if already_seen is None:
         already_seen = {}
 
@@ -578,8 +577,8 @@ def nested_resolve(
 
 
 def generate_full_nested_config(
-    user_config: Optional[Dict] = None,
-    empty_config: Optional[Dict] = None,
+    user_config: dict | None = None,
+    empty_config: dict | None = None,
     namespace: str = "default",
     **kw,
 ):
@@ -612,12 +611,12 @@ if BIOCOMP_ROOT_PATH is None:
 
 
 def list_like(obj) -> bool:
-    return isinstance(obj, (list, tuple))
+    return isinstance(obj, list | tuple)
 
 
-def as_list(obj: Any) -> Union[list, tuple]:
+def as_list(obj: Any) -> list | tuple:
     """Put obj in a list if it's not already a list or tuple"""
-    return [obj] if not isinstance(obj, (list, tuple)) else obj
+    return [obj] if not isinstance(obj, list | tuple) else obj
 
 
 def flatten_single(t) -> list:
@@ -649,7 +648,7 @@ def isSubset(l1: Sequence, l2: Sequence) -> bool:
 ## {{{                        --     dict utils     --
 
 
-def remove_keys(d: Dict, keys: Sequence):
+def remove_keys(d: dict, keys: Sequence):
     # ignored_keys = [k for k in keys if k in d]
     new_dict = {k: v for k, v in d.items() if k not in keys}
     return new_dict

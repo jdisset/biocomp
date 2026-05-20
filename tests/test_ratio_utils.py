@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for ratio_utils.py - the SSOT for ratio decoding and normalization."""
 
 import pytest

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Build-time functions for ComputeStack assembly.
 
 This module contains all the complex graph traversal and layer building algorithms
@@ -5,10 +7,11 @@ that are used only during the one-time build process of a ComputeStack.
 """
 
 from __future__ import annotations
+
 from copy import deepcopy
 from collections import deque
 from queue import PriorityQueue
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from biocomp.graphengine import GraphState
 from biocomp import utils as ut
@@ -71,7 +74,7 @@ def make_all_topo_nodes(networks: list[Network]) -> list[list[list[tuple]]]:
 
 def get_networks_current_batch_number(
     networks: list[Network], type_dict: dict[str, list[tuple]]
-) -> list[Optional[int]]:
+) -> list[int | None]:
     """Determines the current (minimum) batch number for each network.
     The batch number is the order in which a node should be computed (topological order of a network).
     type_dict maps node types to the list of all (NodeKey, batch_order) tuples for nodes not yet in the stack.
@@ -90,7 +93,7 @@ def get_networks_current_batch_number(
 
 
 def make_layer_from_current_batches(
-    current_batches: list[Optional[int]], type_dict: dict[str, list[tuple]], t: str
+    current_batches: list[int | None], type_dict: dict[str, list[tuple]], t: str
 ) -> tuple[StackLayer, dict[str, list[tuple]]]:
     """
     Creates a ComputeLayer from the nodes of type t that have a batch_order <= current_batches[network_id]

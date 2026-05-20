@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for ERN TU tying penalty in design loss functions."""
 
 import pytest

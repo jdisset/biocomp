@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from itertools import product
 from biocomp.graphengine import GraphState, GraphBuilder, InverseSpec
 
@@ -70,7 +72,7 @@ def invert_all_paths(graph: GraphState, mode: str = "shortest") -> list[GraphSta
             for node_id, slot in path[1:]:
                 node = nodes_by_id[node_id]
                 if node.node_type == "output":
-                    # Create inv_output node for the output → protein inversion
+                    # Create inv_output node for the output -> protein inversion
                     output_len = len([e for e in graph.edges.values() if e.target_id == node_id])
                     inv_out_id = builder.add_node(
                         "inv_output",

@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Compilation caching for training and inference.
 
 Two-level cache:
-1. In-process dict cache (by signature) — avoids recompilation
+1. In-process dict cache (by signature) -- avoids recompilation
    when loggers create new NetworkModel instances within the same run.
-2. Disk cache via serialize_executable — avoids recompilation across
+2. Disk cache via serialize_executable -- avoids recompilation across
    process restarts (best-effort; some executables can't be deserialized
    due to XLA backend limitations like unsupported iota instruction).
 """
@@ -18,7 +20,8 @@ import json
 import os
 import pickle
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, TypeVar
+from typing import TYPE_CHECKING, TypeVar
+from collections.abc import Callable
 
 from biocomp.logging_config import get_logger
 from biocomp import utils as ut
@@ -156,7 +159,7 @@ def training_config_compilation_dump(training_config: TrainingConfig) -> str:
     """JSON dump of training config fields that affect compilation.
 
     Excludes seed, n_epochs, n_batches, keep_in_history, streaming_batches,
-    clear_source_data — these don't affect the compiled function's structure.
+    clear_source_data -- these don't affect the compiled function's structure.
     """
     d = training_config.model_dump(mode="json")
     for key in (
@@ -219,17 +222,7 @@ def cached_compile(
     signature: str,
     cache_dir: Path | str | None = None,
 ) -> T:
-    """Cache a compiled JAX executable with two-level caching.
-
-    Level 1: In-process dict cache (always hits within same run).
-    Level 2: Disk cache via serialize_executable (best-effort, may fail
-             for some executables due to XLA backend limitations).
-
-    Args:
-        compile_fn: zero-arg callable that returns a jax.stages.Compiled
-        signature: deterministic cache key
-        cache_dir: override cache directory (defaults to COMPILATION_CACHE_DIR)
-    """
+    """Cache a compiled JAX executable: in-process dict (always) + disk via serialize_executable (best-effort)."""
     if signature in _PROCESS_CACHE:
         logger.debug(f"In-process cache hit for {signature[:16]}")
         return _PROCESS_CACHE[signature]  # type: ignore[return-value]

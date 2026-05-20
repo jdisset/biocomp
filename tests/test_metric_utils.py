@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Comprehensive tests for biocomp.metric_utils.
 
 Tests cover basic regression metrics, grid-based metrics, validation objectives,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test TU masking equivalence with recipe modification.
 
 This test verifies that TU masking produces outputs equivalent to physically

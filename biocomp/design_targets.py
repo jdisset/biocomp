@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Target classes and sampling configs for design optimization."""
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -33,13 +35,13 @@ class LatticeSampling(SamplingConfig):
     noise_std: float = 0.0
 
 
-SamplingConfigUnion = Union[UniformSampling, LatticeSampling]
+SamplingConfigUnion = UniformSampling | LatticeSampling
 
 
 class TargetBase(BaseModel, ABC):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    name: Optional[str] = None
+    name: str | None = None
     latent_x: tuple[float, float] = (0.0, 0.6)
     latent_y: tuple[float, float] = (0.0, 0.6)
 
@@ -55,7 +57,7 @@ class TargetBase(BaseModel, ABC):
 
 
 class SVGTarget(TargetBase):
-    path: Union[str, Path]
+    path: str | Path
     viewbox_x: tuple[float, float] = (0.0, 1.0)
     viewbox_y: tuple[float, float] = (0.0, 1.0)
     latent_out: tuple[float, float] = (0.05, 0.45)
@@ -72,7 +74,7 @@ class SVGTarget(TargetBase):
                 self.viewbox_y = (0.1, 1.0)
         return self
 
-    def _sample(self, n: int, seed: int, grid: Optional[tuple[int, int]], jitter: float = 0.0):
+    def _sample(self, n: int, seed: int, grid: tuple[int, int] | None, jitter: float = 0.0):
         return sample_from_svg(
             self.path,
             n=n,
@@ -106,12 +108,12 @@ class SVGTarget(TargetBase):
 class DataTarget(TargetBase):
     X: np.ndarray
     Y: np.ndarray
-    z_slice: Optional[float] = None
+    z_slice: float | None = None
     z_tolerance: float = 0.05
-    original_network: Optional[Network] = None
+    original_network: Network | None = None
     scale_to_latent: bool = True  # If True, rescale X to fit in latent_x/latent_y
-    _lattice_X: Optional[np.ndarray] = None
-    _lattice_Y: Optional[np.ndarray] = None
+    _lattice_X: np.ndarray | None = None
+    _lattice_Y: np.ndarray | None = None
 
     @model_validator(mode="after")
     def _rescale_x_to_latent(self):
@@ -192,4 +194,4 @@ class DataTarget(TargetBase):
         return self.X[indices], Y_sampled[:, None] if Y_sampled.ndim == 1 else Y_sampled
 
 
-TargetUnion = Union[SVGTarget, DataTarget]
+TargetUnion = SVGTarget | DataTarget

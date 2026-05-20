@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Pluggable optimization components for design mode."""
 
 from .codec import GenomeCodec

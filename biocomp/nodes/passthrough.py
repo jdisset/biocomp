@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from jax.typing import ArrayLike
 import jax.numpy as jnp
 import numpy as np

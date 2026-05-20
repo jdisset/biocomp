@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 # {{{                          --     imports     --
 # ···············································································
 
@@ -16,7 +18,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import difflib
 import os
-from typing import Sequence
+from collections.abc import Sequence
 from matplotlib import colors as mcolors
 import dracon as dr
 from biocomp.logging_config import get_logger
@@ -89,7 +91,7 @@ def get_reordered_protein_names(
       - list of ints / protein names / aliases / ``"*"``: explicit permutation
         into network order.
 
-    Never silently falls back to alphabetical or any other heuristic — that
+    Never silently falls back to alphabetical or any other heuristic -- that
     fallback was the root cause of the X-column scrambling bug class
     (see bugs/eval-x-axis-permutation-iRFP720.md). Callers wanting a
     display-order sort must request it explicitly via the protein-name list
@@ -133,7 +135,7 @@ def get_reordered_protein_names(
                         else:
                             raise ValueError(f"Invalid protein name: {iname}")
                 else:
-                    assert isinstance(iname, (int, np.integer)), f"Invalid protein index: {iname}"
+                    assert isinstance(iname, int | np.integer), f"Invalid protein index: {iname}"
                     assert iname in range(len(input_names)), f"Invalid protein index: {iname}"
                     resolved.append(int(iname))
         else:
@@ -229,13 +231,13 @@ def format_powers(x, *_, n_decimals=1):
     sign = "-" if x < 0 else ""
     E = int(np.floor(np.log10(abs_x)))
     mantissa = round(abs_x / 10**E, n_decimals)
-    # Renormalize when rounding overflows the mantissa (e.g. 9.99 → 10 with
+    # Renormalize when rounding overflows the mantissa (e.g. 9.99 -> 10 with
     # n_decimals=0, which would print "10e3" instead of "1e4").
     if mantissa >= 10:
         mantissa /= 10
         E += 1
     if abs(mantissa - round(mantissa)) < 10 ** (-n_decimals - 1):
-        return r"${0}{1:.0f}e{2}$".format(sign, mantissa, E)
+        return rf"${sign}{mantissa:.0f}e{E}$"
     return r"${0}{1:.{3}f}e{2}$".format(sign, mantissa, E, n_decimals)
 
 
@@ -278,7 +280,7 @@ def _install_overlap_skip(ax, axis: str, min_gap_px: float = 2.0):
 
     Walks the rendered tick labels once on the first ``draw_event`` after
     layout is settled, then disconnects. Iterates from the high-value end
-    so the largest values always win — matches user intuition (`1e6` is
+    so the largest values always win -- matches user intuition (`1e6` is
     more important than `1e3` to keep when they collide).
 
     Idempotent across redraws: state flag prevents re-firing, and
@@ -467,6 +469,8 @@ def setup_transformed_axis(
     xaxis_lims=None,
     yaxis_lims=None,
     rescaler=None,
+    x_rescaler=None,
+    y_rescaler=None,
     setup_xaxis_params=None,
     setup_yaxis_params=None,
     **kw,
@@ -475,11 +479,13 @@ def setup_transformed_axis(
         setup_yaxis_params = {}
     if setup_xaxis_params is None:
         setup_xaxis_params = {}
+    xr = x_rescaler if x_rescaler is not None else rescaler
+    yr = y_rescaler if y_rescaler is not None else rescaler
     if xaxis_lims is not None:
         xaxis_lims = setup_xaxis(
             ax,
             xaxis_lims,
-            rescaler,
+            xr,
             **setup_xaxis_params,
             **kw,
         )
@@ -488,7 +494,7 @@ def setup_transformed_axis(
         yaxis_lims = setup_yaxis(
             ax,
             yaxis_lims,
-            rescaler,
+            yr,
             **setup_yaxis_params,
             **kw,
         )
@@ -806,7 +812,7 @@ def weighted_kde_1d(
 def _smooth_otsu_threshold(values: np.ndarray, bias: float = 0.5) -> float:
     """Otsu's method with a smooth bias knob.
 
-    Standard Otsu maximizes `w0 * w1 * (mu0 - mu1)**2` — the product
+    Standard Otsu maximizes `w0 * w1 * (mu0 - mu1)**2` -- the product
     `w0 * w1` (balanced-split term) penalizes thresholds far from the
     median while `(mu0 - mu1)**2` rewards class separation.
 
@@ -934,8 +940,17 @@ def heatmap(
     xlims = np.array([xy_grid[:, 0].min(), xy_grid[:, 0].max()])
     ylims = np.array([xy_grid[:, 1].min(), xy_grid[:, 1].max()])
     vmin, vmax = vlims
-    vmin = vmin if vmin is not None else np.nanmin(output_values)
-    vmax = vmax if vmax is not None else np.nanmax(output_values)
+    # All-NaN output (e.g. a network whose calibrated y dropped to NaN) would
+    # propagate through `np.nanmin` -> NaN -> matplotlib axis-limit error. Fall
+    # back to a degenerate [0, 1] range; the colorbar will look uninformative
+    # but the figure renders instead of corrupting downstream layout.
+    finite = np.isfinite(output_values)
+    if not finite.any():
+        vmin = 0.0 if vmin is None else vmin
+        vmax = 1.0 if vmax is None else vmax
+    else:
+        vmin = vmin if vmin is not None else np.nanmin(output_values)
+        vmax = vmax if vmax is not None else np.nanmax(output_values)
 
     Z = output_values.reshape((xres, yres)).T
 
@@ -961,18 +976,21 @@ def heatmap(
         Z_contour[0, :] = 0
         Z_contour[-1, :] = 0
 
-        # resolve symbolic contour levels:
-        #   "X%"           → Xth percentile of the slice's grid output
-        #   "otsu"         → vanilla Otsu's threshold
-        #   "otsu:<bias>"  → smooth-Otsu, bias in [0,1] (0.5 == vanilla)
-        if isinstance(contours, (list, np.ndarray)):
+        # resolve symbolic contour levels against the slice's smoothed grid:
+        #   "X%"           -> Xth percentile of the slice's grid output
+        #   "otsu"         -> vanilla Otsu's threshold
+        #   "otsu:<bias>"  -> smooth-Otsu, bias in [0,1] (0.5 == vanilla)
+        if isinstance(contours, list | tuple | np.ndarray):
             finite_vals = output_values[np.isfinite(output_values)]
             contours = [_resolve_symbolic_level(c, finite_vals) for c in contours]
+            contours = [c for c in contours if not isinstance(c, str)]
+            if not contours:
+                contours = None
 
         # main visible contours (solid lines)
         cntrs = ax.contour(
             Z_contour.T,
-            levels=contours if isinstance(contours, (list, np.ndarray)) else contours,
+            levels=contours if isinstance(contours, list | np.ndarray) else contours,
             linewidths=contours_linewidth,
             linestyles=contours_linestyle,
             extent=[*xlims, *ylims],
@@ -1005,7 +1023,7 @@ def heatmap(
                 ax.contour(
                     Z_contour.T,
                     levels=cntrs.levels
-                    if isinstance(cntrs.levels, (list, np.ndarray))
+                    if isinstance(cntrs.levels, list | np.ndarray)
                     else [cntrs.levels],
                     extent=[*xlims, *ylims],
                     alpha=0.4,

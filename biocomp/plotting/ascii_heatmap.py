@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import numpy as np
 from numpy.typing import NDArray
 from typing import Literal

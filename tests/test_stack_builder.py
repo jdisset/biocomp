@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test cases for stack_builder module - topological ordering and graph building.
 
 Focus: Defensive programming tests for edge cases like cycles, disconnected graphs.

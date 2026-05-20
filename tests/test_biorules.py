@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test biological graph rewriting rules and CDG/compute graph generation
 
 This test suite validates:
@@ -21,22 +23,22 @@ pytest_plugins = ["test_declarative_recipes"]
 # ============================================================================
 
 def test_cdg_simple_single_reporter(lib, simple_single_reporter):
-    """Test CDG generation for simplest network: 1 TU → 3 nodes (DNA, RNA, PRT)"""
+    """Test CDG generation for simplest network: 1 TU -> 3 nodes (DNA, RNA, PRT)"""
     with LibraryContext.with_library(lib):
         recipe = simple_single_reporter
         cdg = build_central_dogma_graph_direct(recipe.content, lib, dual=False)
 
-        # Should have 3 nodes: DNA → RNA → PRT
+        # Should have 3 nodes: DNA -> RNA -> PRT
         assert len(cdg.nodes) == 3, f"Expected 3 nodes, got {len(cdg.nodes)}"
 
         # Check node types
         node_types = [n.node_type for n in cdg.nodes.values()]
         assert node_types == ["DNA", "RNA", "PRT"]
 
-        # Check edges: DNA→RNA, RNA→PRT
+        # Check edges: DNA->RNA, RNA->PRT
         assert len(cdg.edges) == 2
-        assert cdg.get_edge(0, 1) is not None  # DNA→RNA
-        assert cdg.get_edge(1, 2) is not None  # RNA→PRT
+        assert cdg.get_edge(0, 1) is not None  # DNA->RNA
+        assert cdg.get_edge(1, 2) is not None  # RNA->PRT
 
         # Check content
         dna_node = cdg.get_node(0)
@@ -121,7 +123,7 @@ def test_cdg_multi_aggregation_ern(lib, multi_aggregation_ern):
         recipe = multi_aggregation_ern
         cdg = build_central_dogma_graph_direct(recipe.content, lib, dual=False)
 
-        # 6 TUs but 2 share RNA/PRT nodes → 16 nodes instead of 18
+        # 6 TUs but 2 share RNA/PRT nodes -> 16 nodes instead of 18
         assert len(cdg.nodes) == 16
 
         # Check node distribution

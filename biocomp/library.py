@@ -1,4 +1,6 @@
-from typing import Dict, List, Tuple, Any
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+from typing import Any
 import pandas as pd
 import pickle
 import glob as _glob
@@ -67,7 +69,7 @@ class PartsLibrary(BaseModel):
     categories: pd.DataFrame
     sequestrons: pd.DataFrame
     sequestron_types: pd.DataFrame
-    # Computed views — overwritten in model_post_init. Default to empty so type is non-Optional.
+    # Computed views -- overwritten in model_post_init. Default to empty so type is non-Optional.
     pc: pd.DataFrame = Field(default_factory=pd.DataFrame)
     seqs: pd.DataFrame = Field(default_factory=pd.DataFrame)
 
@@ -86,7 +88,7 @@ class PartsLibrary(BaseModel):
         # produced by dracon !include + !each over per-id YAML files.
         if isinstance(v, pd.DataFrame):
             return v
-        if isinstance(v, (list, tuple)):
+        if isinstance(v, list | tuple):
             _, pk = PARTS_SCHEMA[info.field_name]
             return _records_to_indexed_df(list(v), pk)
         return v
@@ -129,7 +131,7 @@ class PartsLibrary(BaseModel):
         """
         out: dict[str, list[PartsRecord]] = {}
         for field, (model_cls, pk) in PARTS_SCHEMA.items():
-            # Names of optional fields (by alias) — only these get empty-string→absent cleanup.
+            # Names of optional fields (by alias) -- only these get empty-string->absent cleanup.
             optional_aliases = {
                 (f.alias or name)
                 for name, f in model_cls.model_fields.items()
@@ -146,7 +148,7 @@ class PartsLibrary(BaseModel):
                     if k in optional_aliases and (is_nan or is_empty):
                         continue
                     if is_nan:
-                        # Required field but NaN — preserve as None so pydantic surfaces the issue.
+                        # Required field but NaN -- preserve as None so pydantic surfaces the issue.
                         cleaned[k] = None
                     else:
                         cleaned[k] = v
@@ -184,15 +186,15 @@ class PartsLibrary(BaseModel):
         """Enable all sequestrons"""
         self.seqs["enabled"] = True
 
-    def enable_sequestrons(self, sequestron_types: List[str]) -> None:
+    def enable_sequestrons(self, sequestron_types: list[str]) -> None:
         """Enable specific sequestron types"""
         self.seqs.loc[self.seqs.type.isin(sequestron_types), "enabled"] = True
 
-    def disable_sequestrons(self, sequestron_types: List[str]) -> None:
+    def disable_sequestrons(self, sequestron_types: list[str]) -> None:
         """Disable specific sequestron types"""
         self.seqs.loc[self.seqs.type.isin(sequestron_types), "enabled"] = False
 
-    def set_enabled_sequestrons(self, sequestron_types: List[str]) -> None:
+    def set_enabled_sequestrons(self, sequestron_types: list[str]) -> None:
         """Set which sequestron types should be enabled"""
         self.disable_all_sequestrons()
         self.enable_sequestrons(sequestron_types)
@@ -208,17 +210,17 @@ class PartsLibrary(BaseModel):
             self.parts, self.categories, left_on="category", right_index=True, how="left"
         )
 
-    def add_sequestron(self, dic: Dict) -> None:
+    def add_sequestron(self, dic: dict) -> None:
         """Add a new sequestron"""
         self.sequestrons = pd.concat([self.sequestrons, pd.DataFrame([dic])], ignore_index=True)
         self.seqs = self.sequestrons.merge(self.sequestron_types, left_on="type", right_index=True)
 
-    def get_rna(self, dna: str) -> Tuple[str, ...]:
+    def get_rna(self, dna: str) -> tuple[str, ...]:
         """Get RNA for given DNA"""
         d = self.pc.loc[dna]
         return tuple(d[d.transcripted == 1].index)
 
-    def get_prt(self, dna: str) -> Tuple[str, ...]:
+    def get_prt(self, dna: str) -> tuple[str, ...]:
         """Get protein for given DNA"""
         d = self.pc.loc[dna]
         return tuple(d[d.translated == 1].index)
@@ -252,7 +254,7 @@ def _build_dracon_loader():
     """Construct a DraconLoader pre-loaded with every parts schema type as a short tag.
 
     Single source of truth for the tag vocabulary used by both load_lib_from_yaml
-    and dump_lib_to_yaml — same loader can compose YAML *into* records and emit
+    and dump_lib_to_yaml -- same loader can compose YAML *into* records and emit
     records back *out* under the same short names.
     """
     from dracon import DraconLoader, SymbolEntry, auto_symbol
@@ -268,7 +270,7 @@ def _build_dracon_loader():
 def _is_cache_fresh(parts_dir: Path, cache_pickle: Path) -> bool:
     """Makefile-style freshness check: is the pickle newer than every yaml source?
 
-    Bails on the first source newer than the cache — ~3 ms for ~450 files vs
+    Bails on the first source newer than the cache -- ~3 ms for ~450 files vs
     ~15 ms for content-hashing. mtime+directory-mtime jointly catch edits,
     additions, and deletions (POSIX filesystems bump parent dir mtime on
     create/unlink).

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import os as _os
 
 # enable JAX persistent compilation cache for faster repeated runs

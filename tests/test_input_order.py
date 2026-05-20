@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for input_order functionality in Recipe and Network
 
 input_order allows explicit control over the order of input proteins
@@ -122,7 +124,7 @@ def test_input_order_reverses_two_inputs(lib, two_input_recipe):
 
         # now build with reversed input_order
         reversed_order = list(reversed(natural_order))
-        two_input_recipe.input_order = reversed_order
+        two_input_recipe.input_axes = reversed_order
         networks_reordered = recipe_to_networks(two_input_recipe, invert=True)
         net_reordered = networks_reordered[0]
 
@@ -142,7 +144,7 @@ def test_input_order_three_inputs(lib, three_input_recipe):
 
         # specify explicit order: [2, 0, 1]
         desired_order = [natural_order[2], natural_order[0], natural_order[1]]
-        three_input_recipe.input_order = desired_order
+        three_input_recipe.input_axes = desired_order
         networks_reordered = recipe_to_networks(three_input_recipe, invert=True)
         net_reordered = networks_reordered[0]
 
@@ -157,18 +159,18 @@ def test_input_order_stored_in_metadata(lib, two_input_recipe):
         net = networks[0]
         natural_order = net.get_inverted_input_proteins()
 
-        two_input_recipe.input_order = list(reversed(natural_order))
+        reversed_order = list(reversed(natural_order))
+        two_input_recipe.input_axes = reversed_order
         networks_reordered = recipe_to_networks(two_input_recipe, invert=True)
         net_reordered = networks_reordered[0]
 
-        assert net_reordered.get_input_order() == two_input_recipe.input_order
+        assert net_reordered.get_input_order() == reversed_order
 
 
 def test_input_order_no_effect_without_inversion(lib, two_input_recipe):
     """Test that input_order has no effect when invert=False"""
     with LibraryContext.with_library(lib):
-        two_input_recipe.input_order = ["should", "not", "matter"]
-        # this should not raise, input_order is ignored when invert=False
+        two_input_recipe.input_axes = ["should", "not", "matter"]
         networks = recipe_to_networks(two_input_recipe, invert=False)
         assert len(networks) == 1
 
@@ -182,7 +184,7 @@ def test_input_order_validation_duplicates():
     """Test that duplicate proteins in input_order are rejected"""
     from pydantic import ValidationError
 
-    with pytest.raises(ValidationError, match="duplicates"):
+    with pytest.raises((ValidationError, AssertionError), match="duplicate"):
         Recipe(
             name="test",
             content=[],
@@ -197,8 +199,7 @@ def test_input_order_validation_missing_protein(lib, two_input_recipe):
         net = networks[0]
         natural_order = net.get_inverted_input_proteins()
 
-        # only include one of the two input proteins
-        two_input_recipe.input_order = [natural_order[0]]
+        two_input_recipe.input_axes = [natural_order[0]]
 
         with pytest.raises(AssertionError, match="missing"):
             recipe_to_networks(two_input_recipe, invert=True)
@@ -211,10 +212,9 @@ def test_input_order_validation_extra_protein(lib, two_input_recipe):
         net = networks[0]
         natural_order = net.get_inverted_input_proteins()
 
-        # add an extra protein that's not an input
-        two_input_recipe.input_order = natural_order + ["FAKE_PROTEIN"]
+        two_input_recipe.input_axes = natural_order + ["FAKE_PROTEIN"]
 
-        with pytest.raises(AssertionError, match="extra"):
+        with pytest.raises((AssertionError, ValueError), match="extra|matches neither"):
             recipe_to_networks(two_input_recipe, invert=True)
 
 
@@ -239,9 +239,8 @@ def test_input_order_affects_get_input_from_output(lib, two_input_recipe):
         input_natural = net_natural.get_input_from_output(output_arr)
         assert input_natural.shape == (1, 2)
 
-        # now with reversed input_order
         reversed_order = list(reversed(natural_order))
-        two_input_recipe.input_order = reversed_order
+        two_input_recipe.input_axes = reversed_order
         networks_reordered = recipe_to_networks(two_input_recipe, invert=True)
         net_reordered = networks_reordered[0]
 

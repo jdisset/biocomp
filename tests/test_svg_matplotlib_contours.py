@@ -1,7 +1,9 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Tests for matplotlib-generated SVG contour plots.
 
 These tests verify that SVGs exported from matplotlib (e.g., contourf plots)
-are correctly parsed and sampled, particularly handling the pt→px unit conversion.
+are correctly parsed and sampled, particularly handling the pt->px unit conversion.
 """
 
 import os
@@ -67,7 +69,7 @@ class TestMatplotlibContourSVGs:
 
     @pytest.mark.skipif(not ERIC_DESIGNS_DIR.exists(), reason="Eric designs not found")
     def test_pt_to_px_scaling_handled(self):
-        """Verify pt→px scaling is correctly handled."""
+        """Verify pt->px scaling is correctly handled."""
         svg_path = ERIC_DESIGNS_DIR / "bandpass+high.svg"
 
         paths, greys, (vx, vy, vw, vh) = _extract_shapes_from_svg(svg_path, max_is_black=True)

@@ -1,10 +1,11 @@
-from __future__ import annotations
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import jax
 import jax.nn
 import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
-from typing import Callable
+from collections.abc import Callable
 
 PRNGKey = ArrayLike
 

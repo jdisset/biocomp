@@ -1,4 +1,7 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 ## {{{                          --     imports     --
+from __future__ import annotations
 import numpy as np
 from .plotting_core import (
     format_powers,
@@ -12,15 +15,16 @@ from .plotting_smooth import (
 
 from . import plotting_core as pc
 from biocomp.plotutils import PlotFunctionResult
-from typing import Union, Sequence, List, Tuple, Dict, Any, Optional, Callable
+from typing import Any
+from collections.abc import Sequence, Callable
 from functools import partial
 
 from biocomp import utils as ut
 from matplotlib.axes import Axes
 from matplotlib.transforms import Bbox
 
-NdArray = Union[np.ndarray]
-NumLike = Union[int, float, np.number]
+NdArray = np.ndarray
+NumLike = int | float | np.number
 configurable = pc.configurable
 
 
@@ -160,8 +164,8 @@ plot_front = partial(
 )
 plot_back = partial(plot_face, visible_spines=["top", "right"], hidden_spines=["bottom", "left"])
 
-V3d = Union[Tuple[float, float, float], np.ndarray]
-V2d = Union[Tuple[float, float], np.ndarray]
+V3d = tuple[float, float, float] | np.ndarray
+V2d = tuple[float, float] | np.ndarray
 
 
 def draw_tick(
@@ -169,7 +173,7 @@ def draw_tick(
     position: V3d,
     direction: V3d,
     length: float,
-    props: Dict[str, Any],
+    props: dict[str, Any],
     project: Callable[[V3d], V2d],
 ):
     # , position, direction, length, props, project):
@@ -186,7 +190,7 @@ def draw_text(
     ax: Axes,
     position: V3d,
     label: str,
-    props: Dict[str, Any],
+    props: dict[str, Any],
     project: Callable[[V3d], V2d],
     offset: V2d = (0, 0),
     offset_units: str = "axes",
@@ -222,9 +226,9 @@ def draw_z_ticks_along_axis(
     xpos: float,
     ypos: float,
     project: Callable[[V3d], V2d],
-    axis_offset: Optional[V2d] = None,
-    ticks: Optional[NdArray] = None,
-    tick_props: Optional[Union[List, Dict[str, Any]]] = None,
+    axis_offset: V2d | None = None,
+    ticks: NdArray | None = None,
+    tick_props: list | dict[str, Any] | None = None,
     **_,
 ):
     xpos, ypos = np.array([xpos, ypos]) + axis_offset
@@ -240,7 +244,7 @@ def draw_z_labels(
     ax: Axes,
     xpos: float,
     ypos: float,
-    labels: List[Tuple[NumLike, str, str]],
+    labels: list[tuple[NumLike, str, str]],
     axis_offset: V2d,
     project: Callable[[V3d], V2d],
     **props,
@@ -264,7 +268,7 @@ def draw_z_title(
     project: Callable[[V3d], V2d],
     zaxis_labelpad: int = 0,
     axis_offset: V2d = (0, 0),
-    z_title: Optional[str] = None,
+    z_title: str | None = None,
     **title_props,
 ):
     labelpad = to_data_units(zaxis_labelpad, ax)
@@ -318,7 +322,7 @@ def cabinet_project(pos: V3d, alpha: float = 45.0, d: float = 0.5) -> V2d:
     return np.array([x + d * z * np.cos(alpha), y + d * z * np.sin(alpha)])
 
 
-def get_axis_offsets(cube_edge_props: Dict[str, Any], xlim: V2d, ylim: V2d):
+def get_axis_offsets(cube_edge_props: dict[str, Any], xlim: V2d, ylim: V2d):
     axis_offsets = {}
     for edge, props in cube_edge_props.items():
         if "offset" in props:
@@ -333,16 +337,16 @@ def get_axis_offsets(cube_edge_props: Dict[str, Any], xlim: V2d, ylim: V2d):
 
 def plot_3d_stack(
     ax,
-    slice_functions: List,
-    slice_zpositions: List,
-    xlim: Tuple[float, float],
-    ylim: Tuple[float, float],
-    zlim: Tuple[float, float],
-    zticks: Dict[str, NdArray],
+    slice_functions: list,
+    slice_zpositions: list,
+    xlim: tuple[float, float],
+    ylim: tuple[float, float],
+    zlim: tuple[float, float],
+    zticks: dict[str, NdArray],
     project: Callable[[V3d], V2d],
-    zlabels: Optional[List[Tuple[NumLike, str, str]]] = None,
-    cube_edge_props: Dict[str, Any] = DEFAULT_CUBE_EDGE_PROPS,
-    z_title: Optional[str] = None,
+    zlabels: list[tuple[NumLike, str, str]] | None = None,
+    cube_edge_props: dict[str, Any] = DEFAULT_CUBE_EDGE_PROPS,
+    z_title: str | None = None,
     zaxis_labelpad: int = 0,
     **_,
 ):
@@ -458,7 +462,7 @@ def front_face_bl(
     ylims,
     input_names: Sequence[str],
     rescaler: pc.DataRescaler,
-    labelpad: Tuple = (20, 24),
+    labelpad: tuple = (20, 24),
     ticks=False,
     xtitle=None,
     ytitle=None,
@@ -537,21 +541,21 @@ def smooth_3d(
     ylims=(None, None),
     zlims=(None, None),
     vlims=(None, None),
-    draw_colorbar: Optional[bool] = None,  # None means only last slice
-    cube_edge_props: Dict = DEFAULT_CUBE_EDGE_PROPS,
+    draw_colorbar: bool | None = None,  # None means only last slice
+    cube_edge_props: dict = DEFAULT_CUBE_EDGE_PROPS,
     projection_angle: float = PROJ_ALPHA,  # in degrees
     projection_diag_coef: float = PROJ_D,
     colorbar_position=(1.1, 0.4),
     colorbar_size=(0.04, 0.52),
-    colorbar_params: Dict = None,
+    colorbar_params: dict = None,
     show_inner_spines=True,
     show_slice_ticks=True,
-    smooth_2d_params: Dict = None,
+    smooth_2d_params: dict = None,
     show_front_face_ticks: bool = False,
-    xtitle: Optional[str] = None,
-    ytitle: Optional[str] = None,
-    ztitle: Optional[str] = None,
-    title: Optional[str] = None,
+    xtitle: str | None = None,
+    ytitle: str | None = None,
+    ztitle: str | None = None,
+    title: str | None = None,
     xaxis_labelpad: int = 20,
     yaxis_labelpad: int = 24,
     zaxis_labelpad: int = 0,
@@ -575,25 +579,45 @@ def smooth_3d(
 
     all_grid_data: list[GridData] = []
 
-    # Resolve symbolic contour thresholds globally across all Y values, so
-    # every slice in the cube clips against the same level. Supports the
-    # same string forms as smooth_2d: "otsu", "otsu:<bias>", "X%".
+    # Resolve symbolic contour thresholds (e.g. "otsu", "70%", "otsu:0.85")
+    # globally against the union of all per-face smoothed grids -- that way
+    # every face clips at the same level, the level reflects what's actually
+    # visible on the cube (not the raw-Y distribution which differs from
+    # the KDE-smoothed grid distribution), and `knn_grid` results are cached
+    # so the subsequent per-face render reuses them for free.
     hp = smooth_2d_params.get("heatmap_params", {})
     contours = hp.get("contours")
-    if isinstance(contours, list) and any(isinstance(c, str) for c in contours):
-        finite_y = Y[np.isfinite(Y)]
-        if len(finite_y) > 0:
-            from .plotting_core import _resolve_symbolic_level
+    if isinstance(contours, list | tuple) and any(isinstance(c, str) for c in contours):
+        from .plotting_smooth import knn_grid
+        from .plotting_core import _resolve_symbolic_level
 
-            resolved = [_resolve_symbolic_level(c, finite_y) for c in contours]
-            smooth_2d_params = {**smooth_2d_params, "heatmap_params": {**hp, "contours": resolved}}
+        knn_grid_params = smooth_2d_params.get("knn_grid_params", {}) or {}
+        all_grid_vals: list[np.ndarray] = []
+        for zentry in zslices:
+            for pos in np.atleast_1d(zentry):
+                _, ov = knn_grid(
+                    X, Y, xlims, ylims,
+                    **{**knn_grid_params, "zslice": np.atleast_1d(pos)},
+                )
+                ov = np.asarray(ov)
+                all_grid_vals.append(ov[np.isfinite(ov)])
+        if all_grid_vals:
+            cube_finite = np.concatenate(all_grid_vals) if len(all_grid_vals) > 1 else all_grid_vals[0]
+            if cube_finite.size > 0:
+                resolved = [_resolve_symbolic_level(c, cube_finite) for c in contours]
+                resolved = [c for c in resolved if not isinstance(c, str)]
+                if resolved:
+                    smooth_2d_params = {
+                        **smooth_2d_params,
+                        "heatmap_params": {**hp, "contours": resolved},
+                    }
 
     project = partial(cabinet_project, alpha=projection_angle, d=projection_diag_coef)
 
     if isinstance(ax, Axes):
         ax = [ax]
 
-    assert isinstance(ax, (list, tuple, np.ndarray)), f"ax must be a list or tuple, got {ax}"
+    assert isinstance(ax, list | tuple | np.ndarray), f"ax must be a list or tuple, got {ax}"
 
     if len(ax) != len(zslices):
         raise ValueError(
@@ -611,9 +635,9 @@ def smooth_3d(
     def plot_smooth_data_slice(
         sl_ax: Axes,
         zslice: NdArray,
-        colorbar_ax: Optional[Axes] = None,
+        colorbar_ax: Axes | None = None,
         show_spines=show_inner_spines,
-        slice_index: Optional[int] = None,
+        slice_index: int | None = None,
     ):
         res = smooth_2d(
             X,
@@ -698,7 +722,7 @@ def smooth_3d(
         np.asarray(zlims) + np.array((0.1, 0)), rescaler=rescaler, skip_ticklabel_range=(-10, 2000)
     )
 
-    major_zlabels: List[Tuple[NumLike, str, str]] = [(float(z), s, "major") for z, s in zlabels]
+    major_zlabels: list[tuple[NumLike, str, str]] = [(float(z), s, "major") for z, s in zlabels]
 
     # remove first major ticks
     zticks["major"] = np.asarray(zticks["major"])

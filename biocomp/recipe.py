@@ -1,11 +1,14 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.utils import flatten
 from collections.abc import Sequence as ABCSequence
 from pathlib import Path
-from typing import Union, Optional, Annotated
+from typing import Annotated, Literal
 from biocomp.library import LibraryContext, PartsLibrary, get_l0_parts, get_l1_parts, get_l1_from_l2
 from pydantic import (
     BaseModel,
     BeforeValidator,
+    ConfigDict,
     Field,
     model_serializer,
     model_validator,
@@ -15,7 +18,7 @@ from biocomp.logging_config import get_logger
 from biocomp.part_embeddings import EMBEDDINGS_BY_NAME, EMBEDDINGS_BY_CATEGORY
 
 logger = get_logger(__name__)
-PathLike = Union[str, Path]
+PathLike = str | Path
 
 RATIO_PRECISION = 5  # precision for ratio rounding (number of decimal places)
 
@@ -30,9 +33,9 @@ class NumRange(BaseModel):
     If init is provided, it sets the initial value for optimization.
     """
 
-    min: Optional[float] = None
-    max: Optional[float] = None
-    init: Optional[float] = None
+    min: float | None = None
+    max: float | None = None
+    init: float | None = None
 
     def contains(self, value: float) -> bool:
         """Check if value is within range"""
@@ -64,21 +67,21 @@ class FluoIntensity(BaseModel):
     """
 
     tu_id: int  # index of the TU in the cotx that has the fluorescent reporter
-    value: Union[NumRange, float] = Field(default_factory=lambda: NumRange(min=0.0))
-    protein: Optional[str] = None  # if None, assumes there's a single marker protein in the TU
+    value: NumRange | float = Field(default_factory=lambda: NumRange(min=0.0))
+    protein: str | None = None  # if None, assumes there's a single marker protein in the TU
     units: str = "AU"  # e.g. "EBFP2 mapped PacBlue"
 
     def is_locked(self) -> bool:
         """Check if bias is locked (fixed value) or unlocked (range)"""
-        return isinstance(self.value, (int, float))
+        return isinstance(self.value, int | float)
 
-    def get_value(self) -> Optional[float]:
+    def get_value(self) -> float | None:
         """Get the fixed value if locked, None if unlocked"""
         if self.is_locked():
             return float(self.value)  # type: ignore
         return None
 
-    def get_range(self) -> Optional[NumRange]:
+    def get_range(self) -> NumRange | None:
         """Get the range if unlocked, None if locked"""
         if not self.is_locked():
             return self.value  # type: ignore
@@ -111,8 +114,8 @@ class RatioSpec(BaseModel):
     """
 
     value: float
-    min: Optional[float] = None
-    max: Optional[float] = None
+    min: float | None = None
+    max: float | None = None
     locked: bool = False
 
     @model_validator(mode="after")
@@ -138,7 +141,7 @@ class RatioSpec(BaseModel):
     def is_locked(self) -> bool:
         return self.locked
 
-    def to_num_range(self) -> Optional[NumRange]:
+    def to_num_range(self) -> NumRange | None:
         if self.locked:
             return None
         return NumRange(min=self.min, max=self.max)
@@ -149,11 +152,11 @@ class RatioSpec(BaseModel):
         return f"RatioSpec({self.value}, [{self.min}, {self.max}])"
 
 
-def _convert_ratio_value(v) -> Union[NumRange, float, RatioSpec]:
+def _convert_ratio_value(v) -> NumRange | float | RatioSpec:
     """Convert a ratio value from YAML/dict to proper type."""
-    if isinstance(v, (NumRange, RatioSpec)):
+    if isinstance(v, NumRange | RatioSpec):
         return v
-    if isinstance(v, (int, float)):
+    if isinstance(v, int | float):
         return round(float(v), RATIO_PRECISION)
     if isinstance(v, dict):
         if "min" in v and "max" in v and "value" not in v:
@@ -163,8 +166,8 @@ def _convert_ratio_value(v) -> Union[NumRange, float, RatioSpec]:
 
 
 def _convert_ratios_input(
-    ratios_input: Union[list, dict, None], units: list["TranscriptionUnit"]
-) -> Optional[list[Union[NumRange, float, RatioSpec]]]:
+    ratios_input: list | dict | None, units: list["TranscriptionUnit"]
+) -> list[NumRange | float | RatioSpec] | None:
     """Convert ratios from various input formats to canonical list format.
 
     Supports:
@@ -180,7 +183,7 @@ def _convert_ratios_input(
 
     if isinstance(ratios_input, dict):
         tu_names = [u.name for u in units]
-        result: list[Union[NumRange, float, RatioSpec]] = []
+        result: list[NumRange | float | RatioSpec] = []
         for tu_name in tu_names:
             if tu_name not in ratios_input:
                 raise ValueError(
@@ -206,13 +209,13 @@ class Slot(BaseModel):
     """Transcription Units are made of slots which contain either a part or a list of
     possible parts that map to a quantized parameter"""
 
-    part: Optional[Union[str, list[Optional[str]]]] = None
+    part: str | list[str | None] | None = None
 
     # does this slot map to a parameter aka embedding, like "tl_rate" or "tc_rate"?
-    maps_to_parameter: Optional[str] = Field(default=None, exclude=True)
+    maps_to_parameter: str | None = Field(default=None, exclude=True)
 
     # unique identifier for shared ("linked") parts across transcription units
-    ref_id: Optional[str] = Field(
+    ref_id: str | None = Field(
         default=None, description="Reference ID for shared parts", exclude=True
     )
 
@@ -254,7 +257,7 @@ class Slot(BaseModel):
         if self.maps_to_parameter is not None and not isinstance(self.part, list):
             self.part = [self.part]  # type: ignore
 
-    def __mapped_parameter(self, part_name: Optional[str]) -> Optional[str]:
+    def __mapped_parameter(self, part_name: str | None) -> str | None:
         """Returns the name of the parameter a part maps to, or None if it doesn't map to any"""
         lib = LibraryContext.get_library()
         if part_name is not None:
@@ -289,7 +292,7 @@ def convert_to_slot(value):
         raise ValueError(f"Cannot convert {type(value)} to Slot")
 
 
-SlotType = Annotated[Union[Slot, str, list[Optional[str]]], BeforeValidator(convert_to_slot)]
+SlotType = Annotated[Slot | str | list[str | None], BeforeValidator(convert_to_slot)]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 
@@ -299,10 +302,10 @@ class TranscriptionUnit(BaseModel):
     name: str = ""
     slots: list[SlotType] = []
     params: dict = Field(default_factory=dict, exclude=True)  # param name -> value
-    source: Optional[str] = None  # plasmid name, for example
-    position_in_source: Optional[int] = None
+    source: str | None = None  # plasmid name, for example
+    position_in_source: int | None = None
     no_masking: bool = False  # if True, TU cannot be disabled during design (always mask=1)
-    param_ref_ids: dict[str, Optional[str]] = Field(
+    param_ref_ids: dict[str, str | None] = Field(
         default_factory=dict, exclude=True
     )  # param name -> ref_id
 
@@ -349,7 +352,7 @@ class TranscriptionUnit(BaseModel):
                 parts.update(name for name in p if isinstance(name, str))
         return parts
 
-    def to_parts(self) -> list[Union[str, list[str]]]:
+    def to_parts(self) -> list[str | list[str]]:
         """Convert slots back to a parts representation"""
         return [s.part if not isinstance(s.part, list) else s.part for s in self.slots]  # type: ignore
 
@@ -370,10 +373,10 @@ RatiosInput = list[RatioType] | dict[str, float | dict]
 
 
 class CoTransfection(BaseModel):
-    name: Optional[str] = None
+    name: str | None = None
     units: list[Unit]
-    ratios: Optional[RatiosInput] = None
-    fluo_bias: Optional[FluoIntensity] = None
+    ratios: RatiosInput | None = None
+    fluo_bias: FluoIntensity | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "CoTransfection":
@@ -419,7 +422,7 @@ class CoTransfection(BaseModel):
             return r.value
         return float(r)
 
-    def _get_ratio_range(self, r: RatioType) -> Optional[NumRange]:
+    def _get_ratio_range(self, r: RatioType) -> NumRange | None:
         if isinstance(r, NumRange):
             return r
         if isinstance(r, RatioSpec):
@@ -431,14 +434,14 @@ class CoTransfection(BaseModel):
             return False
         return any(self._is_ratio_unlocked(r) for r in self.ratios)
 
-    def get_locked_ratios(self) -> Optional[list[float]]:
+    def get_locked_ratios(self) -> list[float] | None:
         if self.ratios is None:
             return None
         if self.has_unlocked_ratios():
             return None
         return [self._get_ratio_value(r) for r in self.ratios]
 
-    def get_ratio_ranges(self) -> list[Optional[NumRange]]:
+    def get_ratio_ranges(self) -> list[NumRange | None]:
         if self.ratios is None:
             return [None] * len(self.units)
         return [self._get_ratio_range(r) for r in self.ratios]
@@ -465,8 +468,8 @@ class CoTransfection(BaseModel):
         return self.fluo_bias is not None
 
     def get_tu_ratio(
-        self, tu_index: int | str, wrt: Optional[int | str] = None
-    ) -> Optional[Union[NumRange, float]]:
+        self, tu_index: int | str, wrt: int | str | None = None
+    ) -> NumRange | float | None:
         """Get the ratio for a specific TU by index or name, optionally relative to another TU."""
         rel_index = None
         if isinstance(tu_index, str):
@@ -557,31 +560,89 @@ CoTxList = Annotated[list[CoTransfection], BeforeValidator(process_cotx_list)]
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
+AxisLabel = Literal["x", "y", "z"]
+
+
+class InputAxis(BaseModel):
+    """One entry of a recipe's `input_axes` list: an input column identity
+    (protein name or cotx group name) and an optional plot-axis label.
+
+    Names are resolved against a Network at build time -- either form works
+    and may be mixed within one list.
+    """
+
+    name: str
+    axis: AxisLabel | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_scalar(cls, v):
+        if isinstance(v, str):
+            return {"name": v}
+        if isinstance(v, InputAxis):
+            return v.model_dump()
+        return v
+
+
+def _parse_input_axes(v):
+    if v is None:
+        return None
+    if isinstance(v, dict):
+        return [{"name": k, "axis": a} for k, a in v.items()]
+    if isinstance(v, list):
+        return v
+    raise ValueError(f"input_axes must be list, dict, or None -- got {type(v).__name__}")
+
+
 class Recipe(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    metadata: Optional[dict] = None
+    model_config = ConfigDict(validate_assignment=True)
+
+    name: str | None = None
+    display_name: str | None = None
+    metadata: dict | None = None
     content: CoTxList = []
-    input_order: Optional[list[str]] = None  # ordered list of input protein names
-    axis_mapping: Optional[dict[str, str]] = None  # cotx_name -> axis (x, y)
+    input_axes: Annotated[
+        list[InputAxis] | None, BeforeValidator(_parse_input_axes)
+    ] = None
     cell_type: str = "HEK293FT"
 
-    @model_validator(mode="after")
-    def _validate_input_order(self) -> "Recipe":
-        if self.input_order is None:
-            return self
-        assert len(self.input_order) == len(set(self.input_order)), (
-            f"input_order contains duplicates: {self.input_order}"
-        )
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_input_fields(cls, data):
+        if not isinstance(data, dict):
+            return data
+        legacy_order = data.pop("input_order", None)
+        legacy_axis_mapping = data.pop("axis_mapping", None)
+        if data.get("input_axes") is not None:
+            return data
+        if legacy_order is None and legacy_axis_mapping is None:
+            return data
+        axes: list[dict] = []
+        labelled: set[str] = set()
+        if legacy_axis_mapping:
+            for name, axis in legacy_axis_mapping.items():
+                axes.append({"name": name, "axis": axis})
+                labelled.add(name)
+        if legacy_order:
+            for name in legacy_order:
+                if name in labelled:
+                    continue
+                axes.append({"name": name})
+        data["input_axes"] = axes
+        return data
 
     @model_validator(mode="after")
-    def _validate_axis_mapping(self) -> "Recipe":
-        if self.axis_mapping is None:
+    def _validate_input_axes(self) -> "Recipe":
+        if not self.input_axes:
             return self
-        valid_axes = {"x", "y"}
-        for cotx, axis in self.axis_mapping.items():
-            assert axis in valid_axes, f"axis_mapping[{cotx}] must be 'x' or 'y', got '{axis}'"
+        names = [ax.name for ax in self.input_axes]
+        assert len(names) == len(set(names)), (
+            f"input_axes contains duplicate names: {names}"
+        )
+        labels = [ax.axis for ax in self.input_axes if ax.axis is not None]
+        assert len(labels) == len(set(labels)), (
+            f"input_axes contains duplicate axis labels: {labels}"
+        )
         return self
 
     def strip_orphan_ern_proteins(self) -> "Recipe":
@@ -651,7 +712,7 @@ class Recipe(BaseModel):
         `_metadata:` block before `!biocomp.recipe.Recipe`.
 
         Handles the design-pipeline convention where recipe files are written
-        as `yaml.dump({'_metadata': ...}) + dracon.dump(recipe)` — stripping
+        as `yaml.dump({'_metadata': ...}) + dracon.dump(recipe)` -- stripping
         the metadata preamble before handing the remainder to Dracon.
         """
         import dracon as dr
@@ -669,28 +730,72 @@ class Recipe(BaseModel):
                 return recipe
         raise TypeError(f"loaded object is not a Recipe: {type(obj)}")
 
+    def has_input_axes(self) -> bool:
+        return bool(self.input_axes)
+
+    @property
+    def input_order(self) -> list[str] | None:
+        if not self.input_axes:
+            return None
+        return [ax.name for ax in self.input_axes]
+
+    @property
+    def axis_mapping(self) -> dict[str, str] | None:
+        if not self.input_axes:
+            return None
+        labels = {ax.name: ax.axis for ax in self.input_axes if ax.axis is not None}
+        return labels or None
+
     def has_input_order(self) -> bool:
-        """Check if recipe has explicit input order defined."""
-        return self.input_order is not None and len(self.input_order) > 0
+        return self.has_input_axes()
 
     def has_axis_mapping(self) -> bool:
-        """Check if recipe has axis_mapping defined (for design scaffolds)."""
-        return self.axis_mapping is not None and len(self.axis_mapping) > 0
+        return self.axis_mapping is not None
 
-    def get_input_order_from_axis_mapping(self) -> Optional[list[str]]:
-        """Convert axis_mapping to input_order (x first, then y)."""
-        if not self.has_axis_mapping():
+    def _cotx_to_marker_protein(self, candidates: set[str]) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for cotx in self.content:
+            if not cotx.name:
+                continue
+            for tu in cotx.units:
+                for slot in reversed(tu.slots or []):
+                    slot_name = slot.part if hasattr(slot, "part") else str(slot)
+                    if isinstance(slot_name, str) and slot_name in candidates:
+                        mapping[cotx.name] = slot_name
+                        break
+                if cotx.name in mapping:
+                    break
+        return mapping
+
+    def resolve_input_axes(self, network) -> list[InputAxis] | None:
+        """Resolve recipe-level `input_axes` (which may reference either cotx
+        names or protein names) to a list anchored on the network's input
+        proteins. Returns None if the recipe declares no axes or the network
+        has no inputs. Raises ValueError on an unresolvable name.
+        """
+        if not self.has_input_axes():
             return None
-        x_cotx = None
-        y_cotx = None
-        for cotx, axis in self.axis_mapping.items():
-            if axis == "x":
-                x_cotx = cotx
-            elif axis == "y":
-                y_cotx = cotx
-        if x_cotx is None or y_cotx is None:
+        proteins = set(network.get_inverted_input_proteins())
+        if not proteins:
             return None
-        return [x_cotx, y_cotx]
+        cotx_to_protein = self._cotx_to_marker_protein(proteins)
+        resolved: list[InputAxis] = []
+        for ax in self.input_axes:
+            if ax.name in proteins:
+                resolved.append(InputAxis(name=ax.name, axis=ax.axis))
+            elif ax.name in cotx_to_protein:
+                resolved.append(InputAxis(name=cotx_to_protein[ax.name], axis=ax.axis))
+            else:
+                raise ValueError(
+                    f"input_axes name {ax.name!r} matches neither a network "
+                    f"input protein ({sorted(proteins)}) nor a cotx marker "
+                    f"({sorted(cotx_to_protein)})"
+                )
+        return resolved
+
+    def resolve_input_order(self, network) -> list[str] | None:
+        axes = self.resolve_input_axes(network)
+        return [ax.name for ax in axes] if axes is not None else None
 
 
 def default_input_order_for_network(network) -> list[str]:
@@ -742,7 +847,7 @@ def expand_tu_from_lib(names, lib: PartsLibrary, **tu_args) -> list[Transcriptio
     return [TranscriptionUnit(slots=names, **tu_args)]
 
 
-def name_transcription_unit(tu: TranscriptionUnit, lib: PartsLibrary) -> Optional[str]:
+def name_transcription_unit(tu: TranscriptionUnit, lib: PartsLibrary) -> str | None:
     parts = tu.to_parts()
     flat_parts = []
     for part in parts:
@@ -797,7 +902,7 @@ def rename_all_L1_tus(recipe: Recipe, lib: PartsLibrary) -> Recipe:
 
     return Recipe(
         name=recipe.name,
-        description=recipe.description,
+        display_name=recipe.display_name,
         metadata=recipe.metadata,
         content=renamed_cotx_list,
     )
@@ -824,7 +929,7 @@ def expand_all_tus_from_lib(recipe: Recipe, lib: PartsLibrary) -> Recipe:
             # Preserve TUs that already carry an explicit decomposition
             # (e.g. from an inline `slots:` in the recipe JSON5). Only
             # expand when the unit has no slots or a single trivial slot
-            # equal to its plasmid name — the shape produced by
+            # equal to its plasmid name -- the shape produced by
             # `TranscriptionUnit(name=plasmid, source=plasmid)` when no
             # slots were given.
             slots = list(unit.slots or [])
@@ -843,11 +948,10 @@ def expand_all_tus_from_lib(recipe: Recipe, lib: PartsLibrary) -> Recipe:
         )
     return Recipe(
         name=recipe.name,
-        description=recipe.description,
+        display_name=recipe.display_name,
         metadata=recipe.metadata,
         content=expanded_cotx_list,
-        input_order=recipe.input_order,
-        axis_mapping=recipe.axis_mapping,
+        input_axes=recipe.input_axes,
         cell_type=recipe.cell_type,
     )
 
@@ -872,31 +976,33 @@ def dict_to_recipe(raw_recipe_object):
             CoTransfection(name=c.get("name", f"cotx{i + 1}"), units=units, ratios=ratios)
         )
 
-    if "description" in raw_recipe_object:
-        desc, desc_dict = parse_description(raw_recipe_object["description"])
-        if "metadata" not in raw_recipe_object:
-            raw_recipe_object["metadata"] = {}
-        if desc_dict:
-            raw_recipe_object["metadata"].update(desc_dict)
-        raw_recipe_object["description"] = desc
+    if "metadata" not in raw_recipe_object:
+        raw_recipe_object["metadata"] = {}
+    metadata = raw_recipe_object["metadata"]
 
-    # First-class Recipe fields that should go on the model directly rather
-    # than getting swept into `metadata`.
-    FIRST_CLASS_FIELDS = {"name", "description", "metadata", "content",
-                          "input_order", "axis_mapping", "cell_type"}
-    metadata = raw_recipe_object.get("metadata", {})
+    # Legacy JSON5/YAML may carry top-level `description`; fold it into metadata.
+    if "description" in raw_recipe_object and "description" not in metadata:
+        metadata["description"] = raw_recipe_object["description"]
+
+    if metadata.get("description"):
+        desc, desc_dict = parse_description(metadata["description"])
+        if desc_dict:
+            metadata.update(desc_dict)
+        metadata["description"] = desc
+
+    FIRST_CLASS_FIELDS = {"name", "display_name", "metadata", "content",
+                          "input_axes", "input_order", "axis_mapping", "cell_type"}
     for k, v in raw_recipe_object.items():
-        if k not in FIRST_CLASS_FIELDS:
+        if k not in FIRST_CLASS_FIELDS and k != "description":
             print(f"Adding extra field '{k}' to recipe metadata")
             metadata[k] = v
 
     recipe_kwargs = dict(
         name=raw_recipe_object.get("name", f"recipe{len(raw_recipe_object)}"),
-        description=raw_recipe_object.get("description"),
-        metadata=raw_recipe_object.get("metadata"),
+        metadata=metadata,
         content=cotxlist,
     )
-    for optional_field in ("input_order", "axis_mapping", "cell_type"):
+    for optional_field in ("display_name", "input_axes", "input_order", "axis_mapping", "cell_type"):
         if optional_field in raw_recipe_object:
             recipe_kwargs[optional_field] = raw_recipe_object[optional_field]
     recipe = Recipe(**recipe_kwargs)

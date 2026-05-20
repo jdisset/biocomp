@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 # {{{                          --     imports     --
 # ···············································································
 import numpy as np
@@ -10,20 +12,14 @@ from dracon.utils import dict_like, list_like
 import string
 import os
 from typing import (
-    Union,
     Self,
     Literal,
     Annotated,
-    Sequence,
-    List,
-    Tuple,
-    Dict,
     Any,
-    Optional,
-    Callable,
     TypeVar,
     TypeAlias,
 )
+from collections.abc import Sequence, Callable
 import matplotlib as mpl
 
 from matplotlib.axes import Axes
@@ -75,10 +71,10 @@ class PlotFunctionResult:
 ## {{{                      --     plot data class     --
 
 T = TypeVar("T")
-Pair: TypeAlias = Tuple[T, T]
-ListOrSingle: TypeAlias = Union[List[T], T]
+Pair: TypeAlias = tuple[T, T]
+ListOrSingle: TypeAlias = list[T] | T
 NdArray: TypeAlias = np.ndarray
-NumLike: TypeAlias = Union[np.ndarray, float, int]
+NumLike: TypeAlias = np.ndarray | float | int
 
 
 class DataDimensions(BaseModel):
@@ -91,22 +87,22 @@ def asarray(x):
 
 
 class PlotData(ArbitraryModel):
-    xval: Annotated[Optional[NdArray], BeforeValidator(asarray)]
-    yval: Annotated[Optional[NdArray], BeforeValidator(asarray)]
+    xval: Annotated[NdArray | None, BeforeValidator(asarray)]
+    yval: Annotated[NdArray | None, BeforeValidator(asarray)]
 
-    input_names: List[str] = []
-    output_name: str | List[str] = "output"
+    input_names: list[str] = []
+    output_name: str | list[str] = "output"
 
     # Canonical protein-name identity of each X column, in the network's
     # `get_inverted_input_proteins()` namespace (no display aliases applied).
-    # `None` means "X is not anchored to a specific network's wiring" — the
+    # `None` means "X is not anchored to a specific network's wiring" -- the
     # boundary assertions at NetworkPrediction will skip identity checking
     # in that case (used for design-space PlotData with placeholder X1/X2
     # labels). Producers of network-aligned PlotData (extract_*_from_network)
     # MUST set this so X-column scrambling can be detected at handoff.
-    column_proteins: Optional[List[str]] = None
+    column_proteins: list[str] | None = None
 
-    metadata: Dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
 
     force_single_output: bool = True
 
@@ -176,10 +172,10 @@ class PlotData(ArbitraryModel):
 
 
 class LazyPlotData(PlotData):
-    get_xy: Callable[[PlotData], Tuple[NdArray, NdArray]]
+    get_xy: Callable[[PlotData], tuple[NdArray, NdArray]]
 
-    xval: Annotated[Optional[NdArray], BeforeValidator(asarray)] = None
-    yval: Annotated[Optional[NdArray], BeforeValidator(asarray)] = None
+    xval: Annotated[NdArray | None, BeforeValidator(asarray)] = None
+    yval: Annotated[NdArray | None, BeforeValidator(asarray)] = None
 
     @property
     def x(self) -> NdArray:
@@ -236,19 +232,19 @@ SequenceND: TypeAlias = Sequence[T] | Sequence[Sequence[T]] | Sequence[Sequence[
 
 class FigAx(ArbitraryModel):
     figure: Figure
-    ax: Annotated[Optional[SequenceND[Axes]], BeforeValidator(ax_to_list)] = None
+    ax: Annotated[SequenceND[Axes] | None, BeforeValidator(ax_to_list)] = None
     subfigs: Any = None
-    _subax_cache: Dict[int, Dict[str, Any]] = PrivateAttr(default_factory=dict)
+    _subax_cache: dict[int, dict[str, Any]] = PrivateAttr(default_factory=dict)
 
     @property
-    def flat_ax(self) -> List[Axes]:
+    def flat_ax(self) -> list[Axes]:
         return ut.flatten(self.ax)
 
     @property
     def n_axes(self) -> int:
         return len(self.flat_ax)
 
-    def subdivide(self, axnum: int, spec: Dict[str, Any]) -> Dict[str, Any]:
+    def subdivide(self, axnum: int, spec: dict[str, Any]) -> dict[str, Any]:
         """Subdivide ``flat_ax[axnum]`` into named sub-axes per ``spec``.
 
         Idempotent + cached by ``axnum``: multiple plot tasks targeting the
@@ -284,7 +280,7 @@ class FigAx(ArbitraryModel):
         parent.remove()
         fig = self.figure
 
-        out: Dict[str, Any] = {}
+        out: dict[str, Any] = {}
         for name, region in spec["regions"].items():
             x = bbox.x0 + region["x"] * bbox.width
             y = bbox.y0 + region["y"] * bbox.height
@@ -323,7 +319,7 @@ class FigAx(ArbitraryModel):
 def compute_shared_vlims(
     y,
     quantiles: Sequence[float] = (0.01, 0.99),
-    rescaler: Optional[DataRescaler] = None,
+    rescaler: DataRescaler | None = None,
 ) -> tuple:
     """Quantile-based shared color scale for a Y array (in latent space).
 
@@ -359,10 +355,10 @@ def get_figsize_default():
 class SimpleLayout(FigureLayout):
     rows: int = 1
     cols: int = 1
-    axes_size: Optional[Pair[float]] = None
-    kwargs: Dict[str, Any] = {}
-    wspace: Optional[float] = None
-    hspace: Optional[float] = None
+    axes_size: Pair[float] | None = None
+    kwargs: dict[str, Any] = {}
+    wspace: float | None = None
+    hspace: float | None = None
 
     def make_figure(self, **kw):
         if self.axes_size is None:
@@ -388,12 +384,12 @@ class SimpleLayout(FigureLayout):
 class GridLayout(FigureLayout):
     rows: int = 1
     cols: int = 1
-    axes_size: Optional[Pair[float]] = None
-    kwargs: Dict[str, Any] = {}
-    wspace: Optional[float] = None
-    hspace: Optional[float] = None
-    col_widths: Optional[List[float]] = None
-    row_heights: Optional[List[float]] = None
+    axes_size: Pair[float] | None = None
+    kwargs: dict[str, Any] = {}
+    wspace: float | None = None
+    hspace: float | None = None
+    col_widths: list[float] | None = None
+    row_heights: list[float] | None = None
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -473,15 +469,15 @@ class MultiRowGridLayout(FigureLayout):
 
     ``rows`` is a list of per-row column-width lists (relative within the row).
     ``row_heights`` is a list of relative row heights. Both are normalised
-    internally — the absolute scale is set by ``figure_size``.
+    internally -- the absolute scale is set by ``figure_size``.
 
     ``flat_ax`` ordering is row-major: row 0 cells first (left-to-right),
     then row 1, etc. That matches the ``axnum`` convention the row template
     uses to dispatch atomic tasks.
     """
 
-    rows: List[List[float]]
-    row_heights: List[float]
+    rows: list[list[float]]
+    row_heights: list[float]
     figure_size: Pair[float] = (12.0, 8.0)
     wspace: float = 0.2
     hspace: float = 0.2
@@ -491,8 +487,8 @@ class MultiRowGridLayout(FigureLayout):
     # original column count, but its frame/spines/ticks are hidden so the
     # column reads as pure whitespace. Same shape as `rows`. Default
     # `None` = no gaps (preserves original behaviour).
-    gap_mask: Optional[List[List[bool]]] = None
-    kwargs: Dict[str, Any] = {}
+    gap_mask: list[list[bool]] | None = None
+    kwargs: dict[str, Any] = {}
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -528,7 +524,7 @@ class MultiRowGridLayout(FigureLayout):
             **self.kwargs,
             **kw,
         )
-        axes: List[List[Axes]] = []
+        axes: list[list[Axes]] = []
         for i, row_widths in enumerate(self.rows):
             inner = outer[i].subgridspec(
                 1, len(row_widths), width_ratios=row_widths, wspace=self.wspace
@@ -553,14 +549,14 @@ def sanitize_for_json(obj, max_depth: int = 50, _depth: int = 0):
     """Recursively convert objects to JSON-serializable form, including tuple keys."""
     if _depth > max_depth:
         return str(obj)
-    if obj is None or isinstance(obj, (bool, int, float, str)):
+    if obj is None or isinstance(obj, bool | int | float | str):
         return obj
     if isinstance(obj, tuple):
         return [sanitize_for_json(v, max_depth, _depth + 1) for v in obj]
     if dict_like(obj):
         return {
             (
-                str(k) if not isinstance(k, (str, int, float, bool, type(None))) else k
+                str(k) if not isinstance(k, str | int | float | bool | type(None)) else k
             ): sanitize_for_json(v, max_depth, _depth + 1)
             for k, v in obj.items()
         }
@@ -568,7 +564,7 @@ def sanitize_for_json(obj, max_depth: int = 50, _depth: int = 0):
         return [sanitize_for_json(v, max_depth, _depth + 1) for v in obj]
     if isinstance(obj, np.ndarray):
         return obj.tolist()
-    if isinstance(obj, (np.integer, np.floating)):
+    if isinstance(obj, np.integer | np.floating):
         return obj.item()
     if hasattr(obj, "__dict__"):
         return {
@@ -590,11 +586,11 @@ class MergeSpec(ArbitraryModel):
     mode: Literal["grid", "pages"] = "grid"
     rows: int = 1
     cols: int = 1
-    row_heights: Optional[List[float]] = None
-    col_widths: Optional[List[float]] = None
+    row_heights: list[float] | None = None
+    col_widths: list[float] | None = None
     output_dir: str = "./"
     output_file: str = "merged.png"
-    title: Optional[str] = None
+    title: str | None = None
     hspace: int = 10
     vspace: int = 10
     bg_color: str = "white"
@@ -606,25 +602,25 @@ class MergeSpec(ArbitraryModel):
 
 
 class FigureSpec(ArbitraryModel):
-    title: Optional[str] = None
-    title_kwargs: Dict[str, Any] = {}
+    title: str | None = None
+    title_kwargs: dict[str, Any] = {}
     # Optional second line rendered separately via `fig.text()` so it can
     # carry different kwargs (e.g. `fontweight: normal` while the bold
     # `figure.titleweight` rcParam keeps the main title bold). Positioned
     # via its own `subtitle_kwargs` (x/y in figure-coord fractions);
     # defaults sit just below the title.
-    subtitle: Optional[str] = None
-    subtitle_kwargs: Dict[str, Any] = {}
+    subtitle: str | None = None
+    subtitle_kwargs: dict[str, Any] = {}
     output_dir: str = "./"
-    output_file: Optional[str] = "unnamed.png"
+    output_file: str | None = "unnamed.png"
     # Additional output paths to write the same figure to (each may use a
     # different format/extension). Useful when one render should be saved as
     # both PDF and SVG, etc. Paths are resolved exactly like `output_path`.
-    extra_output_paths: List[str] = []
-    extra_args: Dict[str, Any] = {}
+    extra_output_paths: list[str] = []
+    extra_args: dict[str, Any] = {}
     layout: FigureLayout = Field(default_factory=SimpleLayout)
     dpi: int = 300
-    metadata: Dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
 
     @property
     def output_path(self) -> Path:
@@ -654,6 +650,8 @@ class FigureSpec(ArbitraryModel):
             "CreationDate": datetime.now().isoformat(),
         }
 
+        figax.figure.canvas.draw()
+
         paths = [self.output_path] + [Path(p) for p in self.extra_output_paths]
         tight_bbox = None
         if len(paths) > 1:
@@ -670,7 +668,7 @@ class FigureSpec(ArbitraryModel):
         return bbox.padded(pad, pad) if pad else bbox
 
     def _save_to_path(
-        self, figax: FigAx, output_path: Path, full_metadata: Dict[str, Any],
+        self, figax: FigAx, output_path: Path, full_metadata: dict[str, Any],
         bbox_inches=None,
     ) -> None:
         import shutil
@@ -739,12 +737,12 @@ class FigureSpec(ArbitraryModel):
                 raise FileNotFoundError(f"Could not save to cloud-synced directory: {output_path}")
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def _postprocess_svg(self, svg_path: Path, full_metadata: Dict[str, Any]) -> None:
+    def _postprocess_svg(self, svg_path: Path, full_metadata: dict[str, Any]) -> None:
         """Post-process SVG file to add custom metadata and attributes"""
         import re
 
         # Read the original SVG content
-        with open(svg_path, "r", encoding="utf-8") as f:
+        with open(svg_path, encoding="utf-8") as f:
             svg_content = f.read()
 
         # Find and update biocomp-tagged elements
@@ -864,8 +862,8 @@ def extract_plot_data_from_network(
     network: Network,
     X: NdArray,
     Y: NdArray,
-    input_order: Optional[Sequence[int] | Sequence[str]] = None,
-    protein_aliases: Optional[Dict[str, str]] = None,
+    input_order: Sequence[int] | Sequence[str] | None = None,
+    protein_aliases: dict[str, str] | None = None,
     only_dependent_outputs: bool = True,
     **kw,
 ) -> PlotData:
@@ -900,9 +898,9 @@ def extract_plot_data_from_network(
 
 def extract_lazy_plot_data_from_network(
     network: Network,
-    get_XY: Callable[[PlotData], Tuple[NdArray, NdArray]],
-    input_order: Optional[Sequence[int] | Sequence[str] | Literal["inv"]] = None,
-    protein_aliases: Optional[Dict[str, str]] = None,
+    get_XY: Callable[[PlotData], tuple[NdArray, NdArray]],
+    input_order: Sequence[int] | Sequence[str] | Literal["inv"] | None = None,
+    protein_aliases: dict[str, str] | None = None,
     only_dependent_outputs: bool = True,
     **kw,
 ) -> LazyPlotData:
@@ -914,7 +912,7 @@ def extract_lazy_plot_data_from_network(
         f"extract_lazy_plot_data: {network.name} input_order={input_order} inputs={input_names} output={output_name}"
     )
 
-    def get_xy(pdata: PlotData) -> Tuple[NdArray, NdArray]:
+    def get_xy(pdata: PlotData) -> tuple[NdArray, NdArray]:
         logger.debug("get_xy({pdata}) called")
         assert isinstance(pdata, PlotData), f"pdata must be a PlotData, got {type(pdata)}"
         X, Y = get_XY(pdata)
@@ -949,6 +947,269 @@ def extract_lazy_plot_data_from_network(
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                        --     misc utils     --
+
+
+def diagonal_xy(X, angle_deg=45.0):
+    X = np.asarray(X)
+    th = np.deg2rad(angle_deg)
+    c, s = np.cos(th), np.sin(th)
+    return np.column_stack([c * X[:, 1] - s * X[:, 0], s * X[:, 1] + c * X[:, 0]])
+
+
+def diagonal_xy_raw(X_lat, rescaler, angle_deg=45.0):
+    X_raw = np.asarray(rescaler.inv(X_lat))
+    th = np.deg2rad(angle_deg)
+    c, s = np.cos(th), np.sin(th)
+    s_raw = c * X_raw[:, 1] - s * X_raw[:, 0]
+    t_raw = s * X_raw[:, 1] + c * X_raw[:, 0]
+    return np.column_stack([rescaler.fwd(s_raw), rescaler.fwd(t_raw)])
+
+
+def diagonal_slice_path_latent(t_raw, s_raw_arr, rescaler, angle_deg=45.0):
+    th = np.deg2rad(angle_deg)
+    c, s = np.cos(th), np.sin(th)
+    s_arr = np.asarray(s_raw_arr)
+    x1_raw = c * t_raw - s * s_arr
+    x2_raw = c * s_arr + s * t_raw
+    return np.asarray(rescaler.fwd(x1_raw)), np.asarray(rescaler.fwd(x2_raw))
+
+
+def plot_diagonal_paths(ax, t_raw_values, s_raw_range, rescaler,
+                        colors=None, n=400, angle_deg=45.0, line_props=None):
+    s_arr = np.linspace(s_raw_range[0], s_raw_range[1], n)
+    line_props = dict(line_props or {})
+    for i, t_raw in enumerate(t_raw_values):
+        x1_lat, x2_lat = diagonal_slice_path_latent(t_raw, s_arr, rescaler, angle_deg)
+        kw = dict(line_props)
+        if colors is not None:
+            kw["color"] = colors[i]
+        ax.plot(x1_lat, x2_lat, **kw)
+
+
+_SLICE_AXES = ("x", "y", "s", "t")
+
+
+def slice_panel_args(slice_axis, X_lat, rescaler, slice_values_raw, input_names=None):
+    """Build (X, slices_latent, input_names) for `smooth_1d` panel given a slice mode.
+
+    slice_axis: one of "x" | "y" | "s" | "t" -- the axis along which the 1D curve
+                varies. The orthogonal axis is what's held fixed (sliced).
+    X_lat:      (N, 2) latent-space inputs in native order [col 0, col 1].
+    slice_values_raw: list of raw-fluo values to slice at, in the units of the
+                      sliced (held-fixed) axis.
+    input_names: optional [name_col0, name_col1] in native order (typically
+                 [activator, inhibitor]). Used to build display labels.
+    """
+    if slice_axis not in _SLICE_AXES:
+        raise ValueError(f"slice_axis must be one of {_SLICE_AXES}, got {slice_axis!r}")
+    X_lat = np.asarray(X_lat)
+    slices_latent = [[float(v)] for v in rescaler.fwd(np.asarray(slice_values_raw))]
+    n0, n1 = (input_names or ["x", "y"])
+
+    if slice_axis == "x":
+        X = X_lat
+        names = [n0, n1]
+    elif slice_axis == "y":
+        X = X_lat[:, [1, 0]]
+        names = [n1, n0]
+    elif slice_axis == "s":
+        X = diagonal_xy_raw(X_lat, rescaler)
+        names = [f"({n0} − {n1}) / √2", f"({n0} + {n1}) / √2"]
+    else:  # "t"
+        X = diagonal_xy_raw(X_lat, rescaler)[:, [1, 0]]
+        names = [f"({n0} + {n1}) / √2", f"({n0} − {n1}) / √2"]
+
+    return {"X": X, "slices_latent": slices_latent, "input_names": names}
+
+
+def plot_slice_overlay(ax, slice_axis, slice_values_raw, rescaler,
+                       var_range_raw=None, colors=None, n=400, line_props=None):
+    """Overlay 1D-slice paths on a 2D heatmap (latent display coords)."""
+    if slice_axis not in _SLICE_AXES:
+        raise ValueError(f"slice_axis must be one of {_SLICE_AXES}, got {slice_axis!r}")
+    line_props = dict(line_props or {})
+
+    if slice_axis in ("x", "y"):
+        slice_lat = rescaler.fwd(np.asarray(slice_values_raw))
+        draw = ax.axhline if slice_axis == "x" else ax.axvline
+        for i, v in enumerate(slice_lat):
+            kw = dict(line_props)
+            if colors is not None:
+                kw["color"] = colors[i]
+            draw(float(v), **kw)
+        return
+
+    if var_range_raw is None:
+        raise ValueError(f"var_range_raw required for slice_axis={slice_axis!r}")
+    cos45 = sin45 = np.cos(np.deg2rad(45.0))
+    var_arr = np.linspace(var_range_raw[0], var_range_raw[1], n)
+    for i, fixed_raw in enumerate(slice_values_raw):
+        if slice_axis == "s":
+            x1_raw = cos45 * fixed_raw - sin45 * var_arr
+            x2_raw = cos45 * var_arr + sin45 * fixed_raw
+        else:  # "t"
+            x1_raw = cos45 * var_arr - sin45 * fixed_raw
+            x2_raw = cos45 * fixed_raw + sin45 * var_arr
+        x1_lat = rescaler.fwd(x1_raw)
+        x2_lat = rescaler.fwd(x2_raw)
+        kw = dict(line_props)
+        if colors is not None:
+            kw["color"] = colors[i]
+        ax.plot(x1_lat, x2_lat, **kw)
+
+
+def plot_slice_chords(ax, X, Y, slices, xlims, rescaler=None, colors=None,
+                      knn_stats_params=None, res=100, n_curve=200,
+                      chord_props=None, **_kw):
+    """Draw a `linear-in-raw-fluo` reference curve per slice.
+
+    The reference is the straight line in RAW fluo space connecting each
+    smoothed slice's leftmost / rightmost finite endpoints, mapped back
+    to the latent display via `rescaler.fwd`. Curved on the heatmap by
+    construction — that curvature is the log warp, not the biology.
+    Deviation between the actual smoothed slice and this reference is
+    nonlinearity in the molecular mechanism's native units.
+
+    Falls back to a straight latent-space chord when `rescaler is None`.
+    """
+    from biocomp.plotting.plotting_core import knn_stats, build_tree
+
+    X = np.asarray(X)
+    Y = np.asarray(Y)
+    slices = np.asarray(slices)
+    knn_stats_params = dict(knn_stats_params or {})
+    knn_radius = float(knn_stats_params.get("radius", 0.075))
+
+    xmin = float(X[:, 0].min() if xlims[0] is None else xlims[0])
+    xmax = float(X[:, 0].max() if xlims[1] is None else xlims[1])
+    xquery_min = max(xmin, float(X[:, 0].min()) + knn_radius * 0.5)
+    xquery_max = min(xmax, float(X[:, 0].max()) - knn_radius)
+    xq = np.linspace(xquery_min, xquery_max, res)
+
+    tree = build_tree(X)
+    nslices = slices.shape[0]
+    n_input = X.shape[1]
+    chord_props = dict(chord_props or {})
+
+    for i in range(nslices):
+        query = xq.reshape(-1, 1)
+        if n_input > 1:
+            query = np.hstack([query, np.tile(slices[i], (query.shape[0], 1))])
+        knn_mean = np.asarray(knn_stats(query, Y, tree=tree, stats=["mean"],
+                                        **knn_stats_params)).reshape(-1)
+        finite = np.isfinite(knn_mean)
+        if not finite.any():
+            continue
+        idx = np.where(finite)[0]
+        x_lo_lat, x_hi_lat = float(xq[idx[0]]), float(xq[idx[-1]])
+        y_lo_lat, y_hi_lat = float(knn_mean[idx[0]]), float(knn_mean[idx[-1]])
+
+        kw = dict(chord_props)
+        if colors is not None:
+            kw["color"] = colors[i]
+
+        if rescaler is None:
+            ax.plot([x_lo_lat, x_hi_lat], [y_lo_lat, y_hi_lat], **kw)
+            continue
+
+        x_lo_raw, x_hi_raw = float(rescaler.inv(x_lo_lat)), float(rescaler.inv(x_hi_lat))
+        y_lo_raw, y_hi_raw = float(rescaler.inv(y_lo_lat)), float(rescaler.inv(y_hi_lat))
+        x_raw = np.linspace(x_lo_raw, x_hi_raw, n_curve)
+        t = (x_raw - x_lo_raw) / (x_hi_raw - x_lo_raw)
+        y_raw = y_lo_raw + t * (y_hi_raw - y_lo_raw)
+        ax.plot(rescaler.fwd(x_raw), rescaler.fwd(y_raw), **kw)
+
+
+def plot_addition_vs_removal_overlay(
+    ax,
+    X_lat,
+    Y_lat,
+    slice_values_raw,
+    anchor_raw_values,
+    rescaler,
+    colors=None,
+    knn_stats_params=None,
+    max_centroid_offset_frac=0.0,
+    line_props=None,
+    res=200,
+    **_kw,
+):
+    """Compare 'add inhibitor' vs 'remove activator' on the x-mode slice plot.
+
+    Slice plot's x-axis is the inhibitor (X_lat col 0); each slice is at a
+    fixed activator level (X_lat col 1). For each (anchor x1, slice x2)
+    pair, draws a comparison curve emerging from the anchor point
+    (x1 = anchor, x2 = slice_value) and extending rightward as x2 sweeps
+    from slice_value down to 0. Shifts are in LATENT units so the comparison
+    is a clean translation of y_lat(x2_lat) at fixed x1 — preserving the
+    floor / transition / saturation shape of the surface. One latent step
+    = one fold change of either knob (matches the original slice's
+    parameterization, which is also linear in latent).
+
+    Smoothing matches `smooth_1d` (same tree, kernel, and centroid-offset
+    boundary filter). `colors`, if provided, has length
+    len(anchor_raw_values): one color per anchor, shared across slices.
+    """
+    from biocomp.plotting.plotting_core import knn_stats, build_tree
+
+    X_lat = np.asarray(X_lat)
+    Y_lat = np.asarray(Y_lat)
+    anchor_raw_values = list(anchor_raw_values)
+    if not anchor_raw_values:
+        return
+
+    knn_stats_params = dict(knn_stats_params or {})
+    knn_stats_params.pop("avg_method", None)
+    knn_radius = float(knn_stats_params.get("radius", 0.075))
+    knn_stats_params["radius"] = knn_radius
+    sigma_in_radius = float(knn_stats_params.get("sigma_in_radius", 3.0))
+    offset_cutoff = (
+        max_centroid_offset_frac * (knn_radius / sigma_in_radius)
+        if max_centroid_offset_frac > 0.0
+        else None
+    )
+
+    line_props = dict(line_props or {})
+    tree = build_tree(X_lat)
+
+    for a, anchor_raw in enumerate(anchor_raw_values):
+        anchor_lat = float(rescaler.fwd(float(anchor_raw)))
+        kw_base = dict(line_props)
+        if colors is not None:
+            kw_base["color"] = colors[a]
+        for slice_raw in slice_values_raw:
+            slice_lat = float(rescaler.fwd(float(slice_raw)))
+            delta_lat = np.linspace(0.0, slice_lat, res)
+            x2_lat = slice_lat - delta_lat
+            plot_x_lat = anchor_lat + delta_lat
+            query = np.column_stack([np.full(res, anchor_lat), x2_lat])
+
+            requested = ["mean", "variance"]
+            if offset_cutoff is not None:
+                requested.append("centroid_offset")
+            knn_result = knn_stats(
+                query, Y_lat, tree=tree, stats=requested, **knn_stats_params,
+            )
+            if offset_cutoff is not None:
+                knn_mean, _knn_var, knn_offset = knn_result
+                boundary = np.asarray(knn_offset) > offset_cutoff
+                y_lat = np.where(boundary, np.nan, np.asarray(knn_mean).reshape(-1))
+            else:
+                knn_mean, _knn_var = knn_result
+                y_lat = np.asarray(knn_mean).reshape(-1)
+
+            ax.plot(plot_x_lat, y_lat, **kw_base)
+
+
+class IdentityRescaler:
+    def fwd(self, x):
+        return np.asarray(x)
+
+    def inv(self, x):
+        return np.asarray(x)
+
+
+IDENTITY_RESCALER = IdentityRescaler()
 
 
 def make_xy_grid(xmin, xmax, ymin=None, ymax=None, xres=100, yres=None):
@@ -993,7 +1254,9 @@ scformat = ShortScientificFormatter()
 ## {{{                          --     main smooth dispatcher (route to 1D, 2D, 3D)    --
 
 from .plotting.plotting_3d import smooth_3d  # noqa: E402
-from .plotting.plotting_smooth import smooth_2d, smooth_1d  # noqa: E402
+from .plotting.plotting_smooth import (  # noqa: E402
+    smooth_2d, smooth_1d, smooth_grad_magnitude_2d, gradient_field_2d,
+)
 from .plotting.plotting_scatter import grid_histogram  # noqa: E402
 
 
@@ -1008,7 +1271,7 @@ def combine_dicts(*kwarg_lists):
 def histogram(
     plot_data: PlotData,
     ax,
-    rescaler: Optional[DataRescaler] = None,
+    rescaler: DataRescaler | None = None,
     grid_histogram_params=None,
     **kw,
 ):
@@ -1046,7 +1309,7 @@ def smooth(
     plot_data: PlotData,
     ax,
     rescaler: DataRescaler,
-    force_dim: Optional[int] = None,
+    force_dim: int | None = None,
     smooth_1d_params=None,
     smooth_2d_params=None,
     smooth_3d_params=None,
@@ -1128,7 +1391,7 @@ def smooth_txt(
     plot_data: PlotData,
     ax=None,
     rescaler: DataRescaler = None,
-    force_dim: Optional[int] = None,
+    force_dim: int | None = None,
     smooth_1d_params=None,
     smooth_2d_params=None,
     smooth_3d_params=None,
@@ -1248,7 +1511,7 @@ def normalized_violin(
     plot_data: PlotData,
     ax,
     rescaler,
-    title: Optional[str] = None,
+    title: str | None = None,
     xlims=(0, 1),
     ylims=(0, 1),
     vlims=(0, 1.5),

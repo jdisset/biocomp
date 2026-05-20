@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Comprehensive tests for JAX-native schedule system.
 
 Tests focus on:

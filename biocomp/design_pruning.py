@@ -1,5 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from __future__ import annotations
-
 from typing import TYPE_CHECKING
 from copy import deepcopy
 
@@ -25,9 +26,9 @@ logger = get_logger(__name__)
 
 
 def _flatten_replicates_into_networks(
-    dmanager: "DesignManager",
+    dmanager: DesignManager,
     n_replicates: int,
-) -> "DesignManager":
+) -> DesignManager:
     """Flatten replicates into the network dimension for hard-pruning mode.
 
     Deep copies each network for each replicate so they can diverge independently
@@ -44,14 +45,14 @@ def _flatten_replicates_into_networks(
     return dmanager.model_copy(update={"networks": flattened})
 
 
-def _expand_params_for_merge(params: "ParameterTree") -> "ParameterTree":
+def _expand_params_for_merge(params: ParameterTree) -> ParameterTree:
     return jax.tree.map(
         lambda x: x.reshape((1, 1) + x.shape) if hasattr(x, "ndim") and x.ndim >= 0 else x,
         params,
     )
 
 
-def _get_tag_names(params: "ParameterTree", path_str: str) -> list[str] | None:
+def _get_tag_names(params: ParameterTree, path_str: str) -> list[str] | None:
     if params.tags is None:
         return None
     try:
@@ -63,12 +64,12 @@ def _get_tag_names(params: "ParameterTree", path_str: str) -> list[str] | None:
     return [name for name, flag in zip(params.tagnames, tag_flags, strict=False) if flag]
 
 
-def _set_param_value(params: "ParameterTree", path_str: str, value) -> None:
+def _set_param_value(params: ParameterTree, path_str: str, value) -> None:
     tag_names = _get_tag_names(params, path_str)
     params.at(path_str, value, overwrite=True, tags=tag_names)
 
 
-def _ensure_output_tu_indices(params: "ParameterTree", stack: "ComputeStack") -> None:
+def _ensure_output_tu_indices(params: ParameterTree, stack: ComputeStack) -> None:
     if stack.layers is None:
         return
     if stack.tu_id_to_idx is None:
@@ -90,7 +91,7 @@ def _ensure_output_tu_indices(params: "ParameterTree", stack: "ComputeStack") ->
 
 
 def _get_node_ratios(
-    params: "ParameterTree",
+    params: ParameterTree,
     namespace: str,
     node_idx: int,
     n_outputs: int,
@@ -105,8 +106,8 @@ _DEFAULT_RATIO_MAX = 10.0
 
 
 def _store_learned_ratio_inits(
-    params: "ParameterTree",
-    stack: "ComputeStack",
+    params: ParameterTree,
+    stack: ComputeStack,
 ) -> None:
     """Update aggregation ratio_schema with learned ratios as init values.
 
@@ -160,8 +161,8 @@ def _store_learned_ratio_inits(
 
 
 def _collect_ratio_pruning_candidates(
-    params: "ParameterTree",
-    stack: "ComputeStack",
+    params: ParameterTree,
+    stack: ComputeStack,
     network_id: int,
     ratio_threshold: float,
 ) -> tuple[set[str], set[str], dict[str, float]]:
@@ -289,9 +290,9 @@ def _extract_output_tu_ids(network) -> set[str]:
 
 
 def identify_tus_to_prune(
-    params: "ParameterTree",
-    stack: "ComputeStack",
-    dmanager: "DesignManager",
+    params: ParameterTree,
+    stack: ComputeStack,
+    dmanager: DesignManager,
     ratio_threshold: float,
     use_soft_pruning: bool,
     preserve_minimum: int,
@@ -474,8 +475,8 @@ def identify_tus_to_prune(
 
 
 def _apply_hard_pruning_mask(
-    params: "ParameterTree",
-    stack: "ComputeStack",
+    params: ParameterTree,
+    stack: ComputeStack,
     tus_to_remove: dict[int, set[str]],
     auto_lock_topology_tus: bool = True,
 ) -> int:
@@ -519,9 +520,9 @@ def _apply_hard_pruning_mask(
 
 
 def _merge_surviving_params(
-    old_params: "ParameterTree",
-    new_params: "ParameterTree",
-) -> "ParameterTree":
+    old_params: ParameterTree,
+    new_params: ParameterTree,
+) -> ParameterTree:
     """Transfer compatible params from old to new by path + shape matching."""
     from biocomp.parameters import isArrayRef
 
@@ -577,11 +578,11 @@ def _merge_surviving_params(
 
 
 def transfer_params_to_new_stack(
-    old_params: "ParameterTree",
-    old_stack: "ComputeStack",
-    new_params: "ParameterTree",
-    new_stack: "ComputeStack",
-) -> tuple["ParameterTree", dict[str, int]]:
+    old_params: ParameterTree,
+    old_stack: ComputeStack,
+    new_params: ParameterTree,
+    new_stack: ComputeStack,
+) -> tuple[ParameterTree, dict[str, int]]:
     """Transfer compatible + semantic parameters from old stack/params to new stack/params."""
     expanded_old_params = _expand_params_for_merge(old_params)
     merged_params = _merge_surviving_params(expanded_old_params, new_params)
@@ -590,8 +591,8 @@ def transfer_params_to_new_stack(
 
 
 def _build_aggregation_ratio_maps(
-    params: "ParameterTree",
-    stack: "ComputeStack",
+    params: ParameterTree,
+    stack: ComputeStack,
 ) -> tuple[dict[tuple[int, tuple[str, ...]], np.ndarray], dict[tuple[int, str], float]]:
     """Build ratio carry-over maps for exact-node and per-source restoration.
 
@@ -649,8 +650,8 @@ def _get_bias_protein(extra: dict) -> str | None:
 
 
 def _build_bias_map(
-    params: "ParameterTree",
-    stack: "ComputeStack",
+    params: ParameterTree,
+    stack: ComputeStack,
 ) -> dict[tuple[int, str], dict[str, np.ndarray]]:
     bias_map: dict[tuple[int, str], dict[str, np.ndarray]] = {}
     if stack.layers is None:
@@ -690,8 +691,8 @@ def _sorted_incoming_edges(node, stack):
 
 
 def _build_rate_map(
-    params: "ParameterTree",
-    stack: "ComputeStack",
+    params: ParameterTree,
+    stack: ComputeStack,
 ) -> dict[tuple[int, str, tuple[str, ...]], np.ndarray]:
     rate_map: dict[tuple[int, str, tuple[str, ...]], np.ndarray] = {}
     if stack.layers is None:
@@ -781,8 +782,8 @@ def _restore_ratio_target(
 def _restore_aggregation_ratios(
     exact_ratio_map: dict[tuple[int, tuple[str, ...]], np.ndarray],
     source_ratio_map: dict[tuple[int, str], float],
-    params: "ParameterTree",
-    stack: "ComputeStack",
+    params: ParameterTree,
+    stack: ComputeStack,
 ) -> int:
     restored = 0
     if stack.layers is None:
@@ -844,8 +845,8 @@ def _restore_aggregation_ratios(
 
 def _restore_bias_values(
     bias_map: dict[tuple[int, str], dict[str, np.ndarray]],
-    params: "ParameterTree",
-    stack: "ComputeStack",
+    params: ParameterTree,
+    stack: ComputeStack,
 ) -> int:
     restored = 0
     if stack.layers is None:
@@ -882,8 +883,8 @@ def _restore_bias_values(
 
 def _restore_rate_values(
     rate_map: dict[tuple[int, str, tuple[str, ...]], np.ndarray],
-    params: "ParameterTree",
-    stack: "ComputeStack",
+    params: ParameterTree,
+    stack: ComputeStack,
 ) -> int:
     restored = 0
     if stack.layers is None:
@@ -924,10 +925,10 @@ def _restore_rate_values(
 
 
 def _restore_params_by_semantics(
-    old_params: "ParameterTree",
-    old_stack: "ComputeStack",
-    new_params: "ParameterTree",
-    new_stack: "ComputeStack",
+    old_params: ParameterTree,
+    old_stack: ComputeStack,
+    new_params: ParameterTree,
+    new_stack: ComputeStack,
 ) -> dict[str, int]:
     exact_ratio_map, source_ratio_map = _build_aggregation_ratio_maps(old_params, old_stack)
     bias_map = _build_bias_map(old_params, old_stack)
@@ -977,16 +978,16 @@ def _is_valid_network(network) -> bool:
 
 
 def hard_prune_and_rebuild(
-    dmanager: "DesignManager",
-    dconf: "DesignConfig",
-    model: "BiocompModel",
-    stack: "ComputeStack",
-    params: "ParameterTree",
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    model: BiocompModel,
+    stack: ComputeStack,
+    params: ParameterTree,
     tus_to_remove: dict[int, set[str]],
     key: jax.Array,
     lock_ratios: bool = False,
     keep_network_indices: list[int] | None = None,
-) -> tuple["DesignManager", "ComputeStack", "ParameterTree"]:
+) -> tuple[DesignManager, ComputeStack, ParameterTree]:
     """Execute hard pruning: mark TUs disabled, commit, rebuild."""
     from .design import DesignManager, initialize_params
     from .stack_commit import commit_structure
@@ -1014,7 +1015,7 @@ def hard_prune_and_rebuild(
 
         def _commit_and_filter(
             removed_tus: dict[int, set[str]],
-        ) -> tuple["ParameterTree", list[Network], list[tuple[int, Network]], int]:
+        ) -> tuple[ParameterTree, list[Network], list[tuple[int, Network]], int]:
             candidate_params = deepcopy(params)
             applied_count = _apply_hard_pruning_mask(
                 candidate_params,
@@ -1244,12 +1245,12 @@ def hard_prune_and_rebuild(
 
 
 def run_with_hard_pruning(
-    dmanager: "DesignManager",
-    dconf: "DesignConfig",
-    model: "BiocompModel",
+    dmanager: DesignManager,
+    dconf: DesignConfig,
+    model: BiocompModel,
     dispatch: LoggerDispatch | None = None,
     lock_ratios: bool = False,
-) -> tuple["ParameterTree", list, StepHistorySnapshot, "DesignManager", "DesignConfig"]:
+) -> tuple[ParameterTree, list, StepHistorySnapshot, DesignManager, DesignConfig]:
     """Design optimization with periodic hard-pruning."""
     from .design import start
     from .design_session import PhaseTimer as _PhaseTimer
@@ -1270,9 +1271,7 @@ def run_with_hard_pruning(
         )
 
     timer = _PhaseTimer()
-    logger.info("=" * 60)
-    logger.info("DESIGN OPTIMIZATION WITH HARD-PRUNING")
-    logger.info("=" * 60)
+    logger.info("design optimization with hard-pruning")
 
     _, _, loop_key = jax.random.split(dconf.seed_key, 3)
 
@@ -1673,9 +1672,7 @@ def run_with_hard_pruning(
             else:
                 logger.info("[HARD-PRUNE] No pruning or top-network filtering applied")
 
-    logger.info("=" * 60)
-    logger.info(f"HARD-PRUNING OPTIMIZATION COMPLETE in {timer.total():.2f}s")
-    logger.info("=" * 60)
+    logger.info(f"hard-pruning optimization done in {timer.total():.2f}s")
 
     assert segment_params is not None, "No optimization segments were run"
     assert final_step_history is not None, (

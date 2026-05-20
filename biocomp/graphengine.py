@@ -1,4 +1,6 @@
-from typing import Optional, Literal, Union, Dict, List, Any, Set, Tuple
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
+from typing import Literal, Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from copy import deepcopy
 from itertools import chain
@@ -10,7 +12,7 @@ from collections import defaultdict, Counter
 logger = get_logger(__name__)
 
 
-NodeType = Union[
+NodeType = (
     Literal[
         "output",
         "sequestron_ERN",
@@ -24,9 +26,9 @@ NodeType = Union[
         "inv_translation",
         "inv_output",
         "input",
-    ],
-    str,
-]
+    ]
+    | str
+)
 
 INVERSE_NODE_TYPES: frozenset[str] = frozenset(
     {"inv_aggregation", "inv_source", "inv_transcription", "inv_translation", "inv_output"}
@@ -37,14 +39,8 @@ def is_inverse_node_type(node_type: str) -> bool:
     return node_type in INVERSE_NODE_TYPES
 
 
-"""
-Some notes on input/output slots (for me, mostly):
-- nodes can have multiple inputs and output slots, which are basically "hubs" of unordered connections
-- THERE IS NO ORDER GUARANTEE for edges connected to the same input/output slot other than "it's stable and reproducible for a given graph so long as node ids don't change"
-- that's fine for some nodes like the transforms inputs (transcription/translation) or the negative and positive "input hubs" of ERNs
-- some nodes like aggregation and inputs really do care about their output channel though so for those the edges are connected from a specific output slot
-- output node cares about the input channel (because it maps to a consistent protein ordering)
-"""
+# Slots = unordered "hubs" of connections. No edge order guarantee except stability per-graph.
+# Some nodes (aggregation, input, output) DO care about slot index because slots map to channels.
 
 
 class Part(BaseModel):
@@ -160,9 +156,9 @@ class NodeExtra(ExtraBase):
             return None
         if isinstance(value, list):
             return [str(v) for v in value]
-        if isinstance(value, (tuple, set)):
+        if isinstance(value, tuple | set):
             return [str(v) for v in value]
-        if isinstance(value, (str, int)):
+        if isinstance(value, str | int):
             return [str(value)]
         return value
 
@@ -173,7 +169,7 @@ class GraphEdge(BaseModel):
     from_output_slot: int
     to_input_slot: int
     content: tuple[Part, ...]
-    content_type: Optional[Literal["DNA", "RNA", "PRT"]] = None
+    content_type: Literal["DNA", "RNA", "PRT"] | None = None
     # Embedding choices carried by the edge; allow multiple possible values per key
     content_embedding_names: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     extra: EdgeExtra = Field(default_factory=EdgeExtra)
@@ -188,7 +184,7 @@ class InverseSpec(BaseModel):
 class GraphNode(BaseModel):
     node_id: int
     node_type: NodeType
-    is_inverse_of: Optional[InverseSpec] = None
+    is_inverse_of: InverseSpec | None = None
     extra: NodeExtra = Field(default_factory=NodeExtra)
 
 
@@ -197,15 +193,15 @@ class GraphState(BaseModel):
     edges: dict[tuple[int, int, int, int], GraphEdge]
     # key for edges is (source_id, target_id, from_output_slot, to_input_slot)
 
-    def get_node(self, node_id: int) -> Optional[GraphNode]:
+    def get_node(self, node_id: int) -> GraphNode | None:
         return self.nodes.get(node_id)
 
-    def get_nodes_by_type(self, node_type: str) -> List[GraphNode]:
+    def get_nodes_by_type(self, node_type: str) -> list[GraphNode]:
         return [n for n in self.nodes.values() if n.node_type == node_type]
 
     def get_edge(
         self, source_id: int, target_id: int, from_output_slot: int = 0, to_input_slot: int = 0
-    ) -> Optional[GraphEdge]:
+    ) -> GraphEdge | None:
         return self.edges.get((source_id, target_id, from_output_slot, to_input_slot))
 
     def get_outgoing_edges(self, node_id: int) -> list[GraphEdge]:
@@ -214,7 +210,7 @@ class GraphState(BaseModel):
         o_edges.sort(key=lambda e: (e.target_id, e.from_output_slot, e.to_input_slot))
         return o_edges
 
-    def get_downstream_nodes_by_output_slot(self, source_id: int, output_slot: int) -> List[int]:
+    def get_downstream_nodes_by_output_slot(self, source_id: int, output_slot: int) -> list[int]:
         """Returns the list of target node ids connected to the given source node's output slot."""
         target_ids = [
             e.target_id
@@ -229,7 +225,7 @@ class GraphState(BaseModel):
         i_edges.sort(key=lambda e: (e.source_id, e.from_output_slot, e.to_input_slot))
         return i_edges
 
-    def get_downstream_nodes(self, node_id: int) -> List[Tuple[GraphNode, GraphEdge]]:
+    def get_downstream_nodes(self, node_id: int) -> list[tuple[GraphNode, GraphEdge]]:
         connected = []
         for edge in self.get_outgoing_edges(node_id):
             target_node = self.get_node(edge.target_id)
@@ -239,7 +235,7 @@ class GraphState(BaseModel):
 
     def get_upstream_nodes(
         self, node_id: int, recursive=False
-    ) -> List[Tuple[GraphNode, GraphEdge]]:
+    ) -> list[tuple[GraphNode, GraphEdge]]:
         connected = []
         for edge in self.get_incoming_edges(node_id):
             source_node = self.get_node(edge.source_id)
@@ -262,11 +258,7 @@ class GraphState(BaseModel):
         return len(set(e.from_output_slot for e in edges))
 
     def get_max_output_slot(self, node_id: int) -> int:
-        """Returns the maximum output slot index + 1 (i.e., required number of outputs).
-
-        This differs from get_nb_outgoing_slots which counts unique slots.
-        For sparse slots (e.g., 0, 7), this returns 8 while get_nb_outgoing_slots returns 2.
-        """
+        """Max output slot index + 1 (required outputs). Differs from `get_nb_outgoing_slots` for sparse slots."""
         edges = self.get_outgoing_edges(node_id)
         if not edges:
             return 0
@@ -318,15 +310,7 @@ class GraphState(BaseModel):
         return batches
 
     def validate_integrity(self) -> None:
-        """Validate graph integrity - check for dangling edges.
-
-        Raises AssertionError if:
-        - An edge references a source_id that doesn't exist in nodes
-        - An edge references a target_id that doesn't exist in nodes
-
-        This is a defensive check to catch bugs in graph rewriting rules
-        that delete nodes without properly rewiring or deleting edges.
-        """
+        """Defensive: assert no edge references a missing source_id or target_id (dangling-edge check)."""
         node_ids = set(self.nodes.keys())
         for edge_key, edge in self.edges.items():
             assert edge.source_id in node_ids, (
@@ -343,17 +327,17 @@ class GraphState(BaseModel):
 
 class GraphBuilder:
     def __init__(self, graph: GraphState):
-        self.nodes: Dict[int, GraphNode] = {
+        self.nodes: dict[int, GraphNode] = {
             node_id: deepcopy(node) for node_id, node in graph.nodes.items()
         }
-        self.edges: Dict[tuple[int, int, int, int], GraphEdge] = {
+        self.edges: dict[tuple[int, int, int, int], GraphEdge] = {
             (e.source_id, e.target_id, e.from_output_slot, e.to_input_slot): deepcopy(e)
             for e in graph.edges.values()
         }
         self.next_id = max(self.nodes.keys(), default=-1) + 1
 
     def add_node(
-        self, node_type: str, extra: dict | None = None, is_inverse_of: Optional[InverseSpec] = None
+        self, node_type: str, extra: dict | None = None, is_inverse_of: InverseSpec | None = None
     ) -> int:
         node_id = self.next_id
         self.next_id += 1
@@ -408,13 +392,13 @@ class GraphBuilder:
             if not (e.source_id == source_id and e.target_id == target_id)
         }
 
-    def set_node_properties(self, node_id: int, properties: Dict):
+    def set_node_properties(self, node_id: int, properties: dict):
         if node_id in self.nodes:
             for key, value in properties.items():
                 if isinstance(value, str):
                     try:
                         evaluated = eval(value)
-                        if isinstance(evaluated, (list, dict)):
+                        if isinstance(evaluated, list | dict):
                             properties[key] = evaluated
                     except (SyntaxError, NameError) as e:
                         logger.warning(f"Template evaluation failed for property '{key}': {value!r} - {e}")
@@ -491,9 +475,9 @@ class GraphBuilder:
 
 def match_properties_generic(
     obj: Any,
-    properties: Dict[str, Any],
-    special_cases: Optional[Dict[str, str]] = None,
-    fallback_dict: Optional[str] = None,
+    properties: dict[str, Any],
+    special_cases: dict[str, str] | None = None,
+    fallback_dict: str | None = None,
 ) -> bool:
     for key, expected in properties.items():
         if special_cases and key in special_cases:
@@ -534,7 +518,7 @@ def match_edge_properties(edge: GraphEdge, constraint: EdgeConstraint) -> bool:
     return True
 
 
-def _extract_node_ids(objects: List[Union[GraphNode, GraphEdge]]) -> set[int]:
+def _extract_node_ids(objects: list[GraphNode | GraphEdge]) -> set[int]:
     return {obj.node_id for obj in objects if isinstance(obj, GraphNode)}
 
 
@@ -543,8 +527,8 @@ def _connects_nodes(edge: GraphEdge, source_id: int, target_id: int) -> bool:
 
 
 def find_edges_matching_constraint(
-    edges: List[GraphEdge], constraint: EdgeConstraint, node_assignment: Dict[str, GraphNode]
-) -> List[GraphEdge]:
+    edges: list[GraphEdge], constraint: EdgeConstraint, node_assignment: dict[str, GraphNode]
+) -> list[GraphEdge]:
     source_node = node_assignment.get(constraint.source_var) if constraint.source_var else None
     target_node = node_assignment.get(constraint.target_var) if constraint.target_var else None
 
@@ -563,14 +547,14 @@ def find_edges_matching_constraint(
 
 
 def has_edge_in_graph(
-    source_node: GraphNode, target_node: GraphNode, edges: List[GraphEdge]
+    source_node: GraphNode, target_node: GraphNode, edges: list[GraphEdge]
 ) -> bool:
     return any(_connects_nodes(edge, source_node.node_id, target_node.node_id) for edge in edges)
 
 
 def find_matches(
     rule: GraphRewritingRule, target_graph: GraphState, debug: bool = False
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     node_vars = list(rule.query.bind.keys())
     edge_vars = list(rule.query.bind_edges.keys())
 
@@ -586,7 +570,7 @@ def find_matches(
     sorted_node_vars = sorted(node_vars, key=lambda v: len(node_candidates[v]))
     matches = []
 
-    def check_constraints(assignment: Dict[str, GraphNode]) -> bool:
+    def check_constraints(assignment: dict[str, GraphNode]) -> bool:
         def check_edge_exists(constraint, should_exist=True):
             source, target = constraint.source_var, constraint.target_var
 
@@ -654,7 +638,7 @@ def find_matches(
             check_edge_exists(c, False) for c in rule.query.where_not_connected
         )
 
-    def backtrack_nodes(var_idx: int, assignment: Dict[str, GraphNode]):
+    def backtrack_nodes(var_idx: int, assignment: dict[str, GraphNode]):
         if var_idx == len(sorted_node_vars):
             if check_constraints(assignment):
                 backtrack_edges(0, assignment, {})
@@ -668,7 +652,7 @@ def find_matches(
             del assignment[var_name]
 
     def backtrack_edges(
-        edge_idx: int, node_assignment: Dict[str, GraphNode], edge_assignment: Dict[str, GraphEdge]
+        edge_idx: int, node_assignment: dict[str, GraphNode], edge_assignment: dict[str, GraphEdge]
     ):
         if edge_idx == len(edge_vars):
             full_assignment = {**node_assignment, **edge_assignment}
@@ -717,10 +701,7 @@ def find_matches(
 
 
 def sorted_with_indices(lst):
-    """Return (sorted_list, indices_for_reordering).
-
-    indices_for_reordering[i] gives the index in the original list where sorted[i] came from.
-    """
+    """Return (sorted_list, indices) where sorted_list[i] == lst[indices[i]]."""
     indexed = list(enumerate(lst))
     sorted_indexed = sorted(indexed, key=lambda x: x[1])
     sorted_list = [item for _, item in sorted_indexed]
@@ -729,14 +710,11 @@ def sorted_with_indices(lst):
 
 
 def reorder_list(lst, indices):
-    """Reorder list according to indices.
-
-    Result[i] = lst[indices[i]]
-    """
+    """Result[i] = lst[indices[i]]."""
     return [lst[i] for i in indices]
 
 
-def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEdge]]) -> Any:
+def expand_template(template_str: str, match: dict[str, GraphNode | GraphEdge]) -> Any:
     """Expand template strings, preserving types for simple expressions.
 
     Only supports simple expressions of the form "{{ expr }}" where the entire string
@@ -768,7 +746,7 @@ def expand_template(template_str: str, match: Dict[str, Union[GraphNode, GraphEd
 
 # pyright: reportAttributeAccessIssue=false
 def _process_match(
-    match: Dict[str, Union[GraphNode, GraphEdge]],
+    match: dict[str, GraphNode | GraphEdge],
     rule: GraphRewritingRule,
     builder: GraphBuilder,
     match_index: int = 0,
@@ -796,7 +774,7 @@ def _process_match(
 
     match_with_index["__match_index__"] = IndexHolder(match_index)  # type: ignore[assignment]
 
-    def expand_props(props: Dict[str, Any]) -> Dict[str, Any]:
+    def expand_props(props: dict[str, Any]) -> dict[str, Any]:
         result = {}
         for k, v in props.items():
             if isinstance(v, dict):
@@ -809,7 +787,7 @@ def _process_match(
             result[k] = expanded
         return result
 
-    def get_node_id(var: str) -> Optional[int]:
+    def get_node_id(var: str) -> int | None:
         return local_nodes.get(var) or var_to_node_id.get(var)
 
     for action in rule.actions:
@@ -1014,7 +992,7 @@ def _process_match(
 
 def apply_actions(
     rule: GraphRewritingRule,
-    matches: List[Dict[str, Union[GraphNode, GraphEdge]]],
+    matches: list[dict[str, GraphNode | GraphEdge]],
     target_graph: GraphState,
     debug: bool = False,
 ) -> GraphState:
@@ -1160,18 +1138,11 @@ def apply_rule(
 
 def apply_rule_sequence(
     rules: list[GraphRewritingRule],
-    graphs: Union[GraphState, list[GraphState]],
+    graphs: GraphState | list[GraphState],
     debug: bool = False,
     validate: bool = True,
 ) -> list[GraphState]:
-    """Apply a sequence of rules to a list of graphs, returning all resulting graphs.
-
-    Args:
-        rules: List of GraphRewritingRules to apply in sequence
-        graphs: Input graph(s)
-        debug: If True, print debug info during rule application
-        validate: If True, validate graph integrity after each rule (defensive)
-    """
+    """Apply a sequence of rules to graph(s); `validate` enables defensive integrity check after each rule."""
     with trace_scope("apply_rule_sequence", component="network") as scope:
         if not isinstance(graphs, list):
             graphs = [graphs]
@@ -1310,7 +1281,7 @@ def get_isomorphism_diff(
     compare_content_embedding_names: bool = False,
     unordered_outgoing_types: set[str] | None = None,
     unordered_incoming_types: set[str] | None = None,
-) -> Optional[str]:
+) -> str | None:
     if len(graph1.nodes) != len(graph2.nodes):
         return (
             f"Graphs have a different number of nodes ({len(graph1.nodes)} vs {len(graph2.nodes)})."
@@ -1364,10 +1335,10 @@ def _get_canonical_invariants_for_diffing(
     graph,
     compare_extra: bool,
     compare_content_embedding_names: bool,
-    unordered_outgoing_types: Optional[Set[str]] = None,
-    unordered_incoming_types: Optional[Set[str]] = None,
+    unordered_outgoing_types: set[str] | None = None,
+    unordered_incoming_types: set[str] | None = None,
     iterations=5,
-) -> Tuple[Dict[Any, int], Dict[int, str]]:
+) -> tuple[dict[Any, int], dict[int, str]]:
     unordered_out = unordered_outgoing_types or set()
     unordered_in = unordered_incoming_types or set()
 

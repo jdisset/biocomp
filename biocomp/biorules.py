@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.graphrules import (
     GraphRewritingRule,
     MatchQuery,
@@ -218,12 +220,12 @@ def make_ern_rule(ern_name="CasE", ern_rec_name="CasE_rec"):
                 },
             ),
             DeleteNode(node_var="negative_target"),  # Auto-bound target node
-            # Rewire the PRT edge (negative input): translation → sequestron (to_input_slot=0)
+            # Rewire the PRT edge (negative input): translation -> sequestron (to_input_slot=0)
             EditEdge(edge_var="negative", target_var="sequestron", properties={"to_input_slot": 0}),
             CopyEdge(
                 source_edge_var="positive", target_var="positive_target", source_var="sequestron"
             ),
-            # Rewire the RNA edge (positive input): transcription → sequestron (to_input_slot=1)
+            # Rewire the RNA edge (positive input): transcription -> sequestron (to_input_slot=1)
             EditEdge(edge_var="positive", target_var="sequestron", properties={"to_input_slot": 1}),
         ],
         yield_strategy="batched",

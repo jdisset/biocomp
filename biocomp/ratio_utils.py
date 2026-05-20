@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Ratio utilities - SSOT for ratio decoding and normalization.
 
 This module provides the single source of truth for ratio-related operations.
 All ratio decoding (latent MLP vs direct) and normalization logic lives here.
 """
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -27,7 +28,7 @@ def _decode_latent_ratios(z, W1, b1, W2, b2):
 
 
 def decode_ratios(
-    params: "ParameterTree",
+    params: ParameterTree,
     namespace: str,
     node_idx: int,
     n_outputs: int,
@@ -65,7 +66,7 @@ def decode_ratios(
 
 
 def decode_ratios_numpy(
-    params: "ParameterTree",
+    params: ParameterTree,
     namespace: str,
     node_idx: int,
     n_outputs: int,

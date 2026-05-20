@@ -1,9 +1,9 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from typing import (
     Any,
-    Optional,
-    Tuple,
-    Sequence,
 )
+from collections.abc import Sequence
 from pydantic import BaseModel, ConfigDict
 import pandas as pd
 import numpy as np
@@ -64,9 +64,9 @@ class Network(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    name: Optional[str] = None
+    name: str | None = None
     metadata: dict[str, Any] = {}
-    compute_graph: Optional[GraphState] = None
+    compute_graph: GraphState | None = None
 
     def __hash__(self):
         if self.compute_graph is not None:
@@ -116,7 +116,7 @@ class Network(BaseModel):
         """Compatibility method for old code expecting get_nb_inputs()"""
         return self.nb_inputs
 
-    def get_input_from_output(self, output_arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    def get_input_from_output(self, output_arr: np.ndarray | None) -> np.ndarray | None:
         """Given an array of output values, returns the columns that are inputs of the inverted network,
         properly ordered by input number"""
         assert self.compute_graph is not None
@@ -340,21 +340,23 @@ class Network(BaseModel):
                 extra=new_extra,
             )
 
-    def apply_input_order(self, input_order: list[str]) -> None:
-        """Reorder input positions to match the specified protein order.
-
-        This modifies the input_position values in the compute graph so that
-        get_inverted_input_proteins() returns proteins in the specified order.
-
-        Args:
-            input_order: List of protein names in the desired input order.
-                         Must contain exactly the proteins that are inputs.
+    def apply_input_axes(self, axes: "list") -> None:
+        """Bake an `input_axes` list (protein-name anchored) into the compute
+        graph: writes `input_position` on each input node and stores the axes
+        list in `metadata["input_axes"]`. Axis labels (x/y/z) are preserved
+        as a free annotation.
         """
+        from biocomp.recipe import InputAxis
+
         assert self.compute_graph is not None, "compute_graph required"
         inputs = self.compute_graph.get_nodes_by_type("input")
         assert len(inputs) > 0, "no input nodes found"
 
-        # build mapping: protein name -> input node
+        resolved_axes = [
+            ax if isinstance(ax, InputAxis) else InputAxis.model_validate(ax)
+            for ax in axes
+        ]
+
         output_proteins = self.get_output_proteins()
         protein_to_input_node: dict[str, GraphNode] = {}
         for node in inputs:
@@ -366,17 +368,14 @@ class Network(BaseModel):
             )
             protein_to_input_node[protein_name] = node
 
-        # validate input_order contains exactly the input proteins
-        current_input_proteins = set(protein_to_input_node.keys())
-        requested_proteins = set(input_order)
-        assert current_input_proteins == requested_proteins, (
-            f"input_order mismatch: have {sorted(current_input_proteins)}, "
-            f"requested {sorted(requested_proteins)}"
+        current = set(protein_to_input_node.keys())
+        requested = {ax.name for ax in resolved_axes}
+        assert current == requested, (
+            f"input_axes mismatch: have {sorted(current)}, requested {sorted(requested)}"
         )
 
-        # assign new input positions based on order in input_order
-        for new_pos, protein_name in enumerate(input_order):
-            node = protein_to_input_node[protein_name]
+        for new_pos, ax in enumerate(resolved_axes):
+            node = protein_to_input_node[ax.name]
             new_extra = dict(node.extra)
             new_extra["input_position"] = new_pos
             self.compute_graph.nodes[node.node_id] = GraphNode(
@@ -386,16 +385,32 @@ class Network(BaseModel):
                 extra=new_extra,
             )
 
-        # store input_order in metadata for reference
-        self.metadata["input_order"] = input_order
+        self.metadata["input_axes"] = resolved_axes
 
-    def get_input_order(self) -> Optional[list[str]]:
-        """Get the explicit input order if one was set, None otherwise."""
-        return self.metadata.get("input_order")
+    def apply_input_order(
+        self,
+        input_order: list[str],
+        axis_labels: dict[str, str] | None = None,
+    ) -> None:
+        from biocomp.recipe import InputAxis
+
+        labels = axis_labels or {}
+        self.apply_input_axes(
+            [InputAxis(name=p, axis=labels.get(p)) for p in input_order]
+        )
+
+    def get_input_axes(self) -> list | None:
+        return self.metadata.get("input_axes")
+
+    def has_input_axes(self) -> bool:
+        return bool(self.metadata.get("input_axes"))
+
+    def get_input_order(self) -> list[str] | None:
+        axes = self.get_input_axes()
+        return [ax.name for ax in axes] if axes else None
 
     def has_input_order(self) -> bool:
-        """Check if network has explicit input order defined."""
-        return "input_order" in self.metadata and self.metadata["input_order"] is not None
+        return self.has_input_axes()
 
     def get_zero_ratio_source_ids(self) -> set[str]:
         """Get source_ids that have zero ratio in their aggregation node.
@@ -983,36 +998,27 @@ class Network(BaseModel):
                 )
             )
 
-        excluded = {"name", "description", "input_order"}
+        excluded = {"name", "input_order", "input_axes", "axis_mapping"}
         metadata_dict = {k: v for k, v in self.metadata.items() if k not in excluded}
 
-        # derive valid markers from TUs (not stale input nodes)
-        input_order = self.metadata.get("input_order")
-        if input_order is not None:
-            actual_marker_proteins = set()
+        axes = self.metadata.get("input_axes")
+        if axes:
+            marker_proteins: set[str] = set()
             for cotx in content:
                 for tu in cotx.units:
-                    if tu.slots:
-                        last_slot = tu.slots[-1]
-                        protein = last_slot.part if hasattr(last_slot, "part") else str(last_slot)
+                    for slot in tu.slots or []:
+                        protein = slot.part if hasattr(slot, "part") else str(slot)
                         if isinstance(protein, str):
-                            actual_marker_proteins.add(protein)
-
-            valid_input_order = [p for p in input_order if p in actual_marker_proteins]
-            if len(valid_input_order) != len(input_order):
-                input_order = None
-
-        axis_mapping = self.metadata.get("axis_mapping")
-        if axis_mapping is not None and input_order is None:
-            axis_mapping = None
+                            marker_proteins.add(protein)
+            if not all(ax.name in marker_proteins for ax in axes):
+                axes = None
 
         return Recipe(
             name=self.name or self.metadata.get("name"),
-            description=self.metadata.get("description"),
+            display_name=self.metadata.get("display_name"),
             metadata=metadata_dict if metadata_dict else None,
             content=content,
-            input_order=input_order,
-            axis_mapping=axis_mapping,
+            input_axes=axes,
         )
 
     def _extract_cotx_groups(self) -> dict[str, dict]:
@@ -1256,7 +1262,7 @@ class Network(BaseModel):
         slots = []
         for _category, name, emb in parts:
             # unwrap single-element lists to a single value (for committed networks)
-            is_collapsed = isinstance(name, (list, tuple)) and len(name) == 1
+            is_collapsed = isinstance(name, list | tuple) and len(name) == 1
             if is_collapsed:
                 name = name[0]
             slot = Slot(part=name)
@@ -1290,7 +1296,7 @@ class Network(BaseModel):
         # convert dict to NumRange, otherwise return as float
         if isinstance(value_raw, dict):
             return NumRange(min=value_raw.get("min"), max=value_raw.get("max"))
-        elif isinstance(value_raw, (int, float)):
+        elif isinstance(value_raw, int | float):
             return float(value_raw)
         return None
 
@@ -1738,10 +1744,10 @@ def assign_ern_layer_ids(graph: GraphState) -> GraphState:
 
 def recipe_to_networks(
     recipe: Recipe,
-    rules: Optional[list[GraphRewritingRule]] = None,
+    rules: list[GraphRewritingRule] | None = None,
     invert=True,
     inversion_mode: str = "all",
-    lib: Optional[PartsLibrary] = None,
+    lib: PartsLibrary | None = None,
     skip_input_order_validation: bool = False,
 ) -> list[Network]:
     from biocomp.inversion import invert_all_paths
@@ -1831,68 +1837,34 @@ def recipe_to_networks(
             base_name = recipe.name or "network"
             net.name = f"{base_name}_{dependent_outputs_names}"
 
-            # Apply input_order if specified (only for inverted networks with inputs)
-            effective_input_order = recipe.input_order
-
-            # If no input_order but axis_mapping is specified, derive input_order from it
-            if effective_input_order is None and recipe.axis_mapping is not None and invert:
+            if invert and recipe.has_input_axes():
                 input_proteins = net.get_inverted_input_proteins()
                 if len(input_proteins) > 0:
-                    input_protein_set = set(input_proteins)
+                    try:
+                        resolved_axes = recipe.resolve_input_axes(net)
+                    except ValueError as e:
+                        if skip_input_order_validation:
+                            resolved_axes = None
+                        else:
+                            raise AssertionError(str(e)) from e
 
-                    # Build cotx_name -> marker_protein from recipe content
-                    # A marker is a TU whose output protein is in the input_proteins list
-                    cotx_to_protein: dict[str, str] = {}
-                    for cotx in recipe.content:
-                        cotx_name = cotx.name
-                        if not cotx_name:
-                            continue
-                        for tu in cotx.units:
-                            for slot in reversed(tu.slots or []):
-                                slot_name = slot.part if hasattr(slot, "part") else str(slot)
-                                if isinstance(slot_name, str) and slot_name in input_protein_set:
-                                    cotx_to_protein[cotx_name] = slot_name
-                                    break
-                            if cotx_name in cotx_to_protein:
-                                break
-
-                    # Convert axis_mapping to input_order (x first, then y)
-                    x_protein = None
-                    y_protein = None
-                    for cotx_name, axis in recipe.axis_mapping.items():
-                        protein = cotx_to_protein.get(cotx_name)
-                        if protein:
-                            if axis == "x":
-                                x_protein = protein
-                            elif axis == "y":
-                                y_protein = protein
-
-                    if x_protein and y_protein:
-                        effective_input_order = [x_protein, y_protein]
-                        net.metadata["axis_mapping"] = recipe.axis_mapping
-
-            if effective_input_order is not None and invert:
-                input_proteins = net.get_inverted_input_proteins()
-                if len(input_proteins) > 0:
-                    proteins_match = set(input_proteins) == set(effective_input_order)
-                    if proteins_match:
-                        # input_order applies to this inversion
-                        net.apply_input_order(effective_input_order)
-                    elif skip_input_order_validation:
-                        # Skip validation (used during commit when TU pruning may invalidate input_order)
-                        pass
-                    else:
-                        # Validate that input_order is correct for original recipe construction
-                        missing = set(input_proteins) - set(effective_input_order)
-                        assert not missing, (
-                            f"input_order missing proteins: {missing}. "
-                            f"Network has inputs: {input_proteins}, recipe specifies: {effective_input_order}"
-                        )
-                        extra = set(effective_input_order) - set(input_proteins)
-                        assert not extra, (
-                            f"input_order contains extra proteins not in network inputs: {extra}. "
-                            f"Network has inputs: {input_proteins}, recipe specifies: {effective_input_order}"
-                        )
+                    if resolved_axes is not None:
+                        resolved_set = {ax.name for ax in resolved_axes}
+                        if set(input_proteins) == resolved_set:
+                            net.apply_input_axes(resolved_axes)
+                        elif not skip_input_order_validation:
+                            missing = set(input_proteins) - resolved_set
+                            extra = resolved_set - set(input_proteins)
+                            assert not missing, (
+                                f"input_axes missing proteins: {missing}. "
+                                f"Network has inputs: {input_proteins}, "
+                                f"recipe resolves to: {sorted(resolved_set)}"
+                            )
+                            assert not extra, (
+                                f"input_axes contains extra proteins not in network inputs: {extra}. "
+                                f"Network has inputs: {input_proteins}, "
+                                f"recipe resolves to: {sorted(resolved_set)}"
+                            )
 
             scope.event(
                 "network_created",
@@ -1929,7 +1901,7 @@ class NetworkConstructionError(Exception):
     pass
 
 
-def _check_for_split_sequestron(graph: GraphState, recipe_name: Optional[str] = None):
+def _check_for_split_sequestron(graph: GraphState, recipe_name: str | None = None):
     """Raise NotImplementedError if orphan transcription nodes exist (split sequestron case)."""
     orphans = [
         nid
@@ -1971,7 +1943,7 @@ def graphstate_to_cdg_df(graph: GraphState) -> pd.DataFrame:
     return pd.DataFrame.from_dict(node_data, orient="index")
 
 
-def _get_dna(tu: TranscriptionUnit, lib: PartsLibrary) -> Tuple[list[str], dict[str, list[str]]]:
+def _get_dna(tu: TranscriptionUnit, lib: PartsLibrary) -> tuple[list[str], dict[str, list[str]]]:
     content = [s.part for s in tu.slots if s.maps_to_parameter is None and s.part is not None]
     return content, tu.params
 
@@ -2169,7 +2141,7 @@ def _build_cdg_dual_from_preprocessed(
     # Create a mapping from (source_id, cotx_group) to normalized ratio and range info
     from biocomp.recipe import NumRange, FluoIntensity, RatioSpec
 
-    source_cotx_to_ratio_map: dict[tuple[str | None, str], tuple[float, Optional[NumRange]]] = {}
+    source_cotx_to_ratio_map: dict[tuple[str | None, str], tuple[float, NumRange | None]] = {}
     cotx_to_fluo_bias: dict[str, FluoIntensity] = {}  # cotx_group -> FluoIntensity
 
     for i, cotx in enumerate(recipe or []):
@@ -2296,7 +2268,7 @@ def _build_cdg_dual_from_preprocessed(
             # Add fluo_bias info if this cotx has a bias
             if cotx_group in cotx_to_fluo_bias:
                 fluo_bias = cotx_to_fluo_bias[cotx_group]
-                if isinstance(fluo_bias.value, (int, float)):
+                if isinstance(fluo_bias.value, int | float):
                     bias_value_dict = fluo_bias.value
                 else:
                     bias_value_dict = {"min": fluo_bias.value.min, "max": fluo_bias.value.max}
@@ -2586,7 +2558,7 @@ def old_network_compg_to_graphstate(old_network) -> GraphState:
     def to_list(v):
         if v is None:
             return []
-        if isinstance(v, (list, tuple)):
+        if isinstance(v, list | tuple):
             return list(v)
         return [v]
 
@@ -2707,7 +2679,7 @@ def get_uorf_value(params):
     if "tl_rate" in params:
         u = (
             params["tl_rate"][0].split("_")[0]
-            if isinstance(params["tl_rate"], (list, tuple))
+            if isinstance(params["tl_rate"], list | tuple)
             else params["tl_rate"].split("_")[0]
         )
         try:
@@ -2836,7 +2808,7 @@ def _uorf_values_for_ern_slot(network, ern_id: int, slot: int, tu_info) -> int:
         ERN_ERNuORFsum_NxCasE case).
       - Source nodes carrying multiple TUs (e.g. L2 plasmids expanded into
         CasER+eYFP *and* eBFP2 TUs) collapsed to one entry when keyed by
-        source_id — the CasER1x uORF got clobbered by the eBFP2 TU.
+        source_id -- the CasER1x uORF got clobbered by the eBFP2 TU.
     """
     graph = network.compute_graph
     assert graph is not None
@@ -2847,7 +2819,7 @@ def _uorf_values_for_ern_slot(network, ern_id: int, slot: int, tu_info) -> int:
     if not incoming:
         return 0
 
-    # One entry per TU (not per source — L2 plasmids expand to multiple TUs
+    # One entry per TU (not per source -- L2 plasmids expand to multiple TUs
     # sharing a source node).
     tu_by_id = {tu["tu_id"]: tu for tu in tu_info if tu["tu_id"]}
 
@@ -3057,7 +3029,7 @@ def _embedding_part_names(embedding_value) -> list[str]:
     """
     if not embedding_value:
         return []
-    if isinstance(embedding_value, (list, tuple)):
+    if isinstance(embedding_value, list | tuple):
         items = list(embedding_value)
     else:
         items = [embedding_value]
@@ -3109,8 +3081,8 @@ def get_all_tu_info(network, lib=None) -> list[dict]:
 
         for edge in outgoing_dna:
             tu_id_full = edge.extra.tu_id[0] if edge.extra.tu_id else None
-            tu_name: Optional[str]
-            cotx_idx: Optional[int] = None
+            tu_name: str | None
+            cotx_idx: int | None = None
             if tu_id_full:
                 tu_name = tu_id_full.rsplit("_cotx", 1)[0]
                 suffix = tu_id_full.rsplit("_cotx", 1)
@@ -3124,7 +3096,7 @@ def get_all_tu_info(network, lib=None) -> list[dict]:
 
             # Downstream translation node (via RNA edge out of the transcription
             # node that `edge` targets). Used by uORF-per-ERN extraction.
-            translation_id: Optional[int] = None
+            translation_id: int | None = None
             for rna in network.compute_graph.edges.values():
                 if rna.source_id == edge.target_id and rna.content_type == "RNA":
                     tgt = network.compute_graph.nodes.get(rna.target_id)
@@ -3183,7 +3155,7 @@ def get_all_tu_info(network, lib=None) -> list[dict]:
 
 
 def get_all_parts(network, lib=None):
-    """Per-TU parts (name → category) — includes content AND embedded parts.
+    """Per-TU parts (name -> category) -- includes content AND embedded parts.
 
     Fix: earlier versions missed the promoter and 5'UTR/uORF because those
     parts are carried on edges as `tc_rate` / `tl_rate` embedding names
@@ -3213,7 +3185,7 @@ def get_all_parts(network, lib=None):
 def flatten(lst):
     result = []
     for item in lst:
-        if isinstance(item, (list, tuple)):
+        if isinstance(item, list | tuple):
             result.extend(flatten(item))
         else:
             result.append(item)

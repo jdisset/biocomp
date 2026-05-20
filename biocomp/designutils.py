@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import numpy as np
 from numpy.typing import NDArray
 import re
 from matplotlib.colors import to_rgb
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from svgelements import SVG, Shape, Group
 
@@ -121,7 +123,7 @@ def _extract_shapes_from_svg(svg_path, max_is_black):
 
     vx = svg.viewbox.x if svg.viewbox else 0
     vy = svg.viewbox.y if svg.viewbox else 0
-    # Use svgelements' computed width/height which includes unit conversion (pt→px).
+    # Use svgelements' computed width/height which includes unit conversion (pt->px).
     # This ensures path coordinates and sample point coordinates are in the same space.
     # Without this, SVGs with pt units (like matplotlib exports) have mismatched coordinates.
     vw = svg.width if svg.width else (svg.viewbox.width if svg.viewbox else 100)
@@ -340,12 +342,10 @@ def sample_from_data(
     X: NdArray,  # input data, already latent-space rescaled (n_samples, n_dims)
     Y: NdArray,  # corresponding outputs (n_samples,) or (n_samples, 1)
     n: int = 1,  # how many grids to generate. if grid_jitter_std is 0, they will be duplicates
-    zslice: Optional[NdArray] = None,  # for >2D data, slice value(s) for dims beyond 2
-    xlims: Optional[tuple[float, float]] = None,
-    ylims: Optional[tuple[float, float]] = None,
-    vlims: Optional[
-        tuple[float, float]
-    ] = None,  # output value clipping (not used in sampling, but returned for reference)
+    zslice: NdArray | None = None,  # for >2D data, slice value(s) for dims beyond 2
+    xlims: tuple[float, float] | None = None,
+    ylims: tuple[float, float] | None = None,
+    vlims: tuple[float, float] | None = None,  # output value clipping (not used in sampling, but returned for reference)
     sampling_grid: tuple[int, int] = (48, 48),
     grid_jitter_std: float = 0.0,
     k: int = 128,
@@ -464,8 +464,8 @@ def sample_from_data(
 def data_to_lattice_2d(
     X: NdArray,
     Y: NdArray,
-    xlims: Optional[tuple[float, float]] = None,
-    ylims: Optional[tuple[float, float]] = None,
+    xlims: tuple[float, float] | None = None,
+    ylims: tuple[float, float] | None = None,
     resolution: tuple[int, int] = (48, 48),
     k: int = 128,
     min_points: int = 20,

@@ -1,10 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Stacked polynomial fitting (from calibrie.utils).
 
 Canonical source: calibrie/calibrie/utils.py
 Copied here to avoid calibrie's heavy __init__ import chain (dearpygui).
 """
-
-from __future__ import annotations
 
 from functools import partial
 

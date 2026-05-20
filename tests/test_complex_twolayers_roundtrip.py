@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test commit-export-rebuild roundtrip for complex_twolayers network
 
 Validates:
@@ -464,7 +466,7 @@ if __name__ == "__main__":
 
     print("Running ratio count validation test...")
     test_ratio_count_validation(lib_instance)
-    print("✓ Ratio count validation test passed\n")
+    print("+ Ratio count validation test passed\n")
 
     with LibraryContext.with_library(lib_instance):
         recipe_instance = Recipe(
@@ -478,15 +480,15 @@ if __name__ == "__main__":
 
     print("Running ratio range bounds test...")
     test_ratio_range_bounds(lib_instance, recipe_instance)
-    print("✓ Ratio range bounds test passed\n")
+    print("+ Ratio range bounds test passed\n")
 
     print("Running source output slots test...")
     test_source_output_slots(lib_instance)
-    print("✓ Source output slots test passed\n")
+    print("+ Source output slots test passed\n")
 
     print("Running shared source network structure test...")
     test_shared_source_network_structure(lib_instance)
-    print("✓ Shared source network structure test passed\n")
+    print("+ Shared source network structure test passed\n")
 
     # Run parametrized roundtrip tests on all recipes
     print("Running roundtrip tests on all recipe variants...\n")
@@ -609,6 +611,6 @@ if __name__ == "__main__":
         test_rebuild_structure(recipe)
         test_ratios_preserved(recipe)
         test_outputs_match(recipe)
-        print(f"✓ All roundtrip tests passed for {recipe_name}\n")
+        print(f"+ All roundtrip tests passed for {recipe_name}\n")
 
     print("All tests passed!")

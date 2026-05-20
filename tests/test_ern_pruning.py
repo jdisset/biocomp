@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test ERN node pruning during design commit with TU masking."""
 
 import pytest

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from biocomp.compute import StackNode, ComputeStack
 import jax
 from jax.typing import ArrayLike

@@ -1,13 +1,14 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import logging
 from rich.logging import RichHandler
-from typing import Optional, Dict
 from pathlib import Path
 
 
 DEFAULT_FORMAT = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
 DEFAULT_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-DEFAULT_LOGGER_LEVELS: Dict[str, int] = {
+DEFAULT_LOGGER_LEVELS: dict[str, int] = {
     "matplotlib": logging.INFO,
     "matplotlib.font_manager": logging.INFO,
     "PIL": logging.WARNING,
@@ -25,9 +26,9 @@ DEFAULT_LOGGER_LEVELS: Dict[str, int] = {
 
 def setup_logging(
     default_level: int = logging.INFO,
-    log_file: Optional[Path] = None,
+    log_file: Path | None = None,
     rich_logging: bool = True,
-    logger_levels: Optional[Dict[str, int]] = None,
+    logger_levels: dict[str, int] | None = None,
 ) -> None:
     """Configure logging for the biocomp project."""
     # Remove any existing handlers
@@ -65,7 +66,7 @@ def setup_logging(
         logging.getLogger(logger_name).setLevel(level)
 
 
-def get_logger(name: str, level: Optional[int] = None) -> logging.Logger:
+def get_logger(name: str, level: int | None = None) -> logging.Logger:
     """Get a logger with the specified name and optional level."""
     logger = logging.getLogger(name)
     if level is not None:

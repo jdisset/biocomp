@@ -1,14 +1,16 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """DesignSession: shared initialization for design optimization runners.
 
 This module provides a single source of truth for design session setup,
 eliminating duplicated initialization code across run_design, run_pluggable,
 and run_with_hard_pruning.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
+from collections.abc import Callable
 import time
 
 import jax
@@ -59,12 +61,12 @@ class DesignSession:
     All design runners should use DesignSession.create().
     """
 
-    dmanager: "DesignManager"
-    dconf: "DesignConfig"
-    model: "BiocompModel"
-    stack: "ComputeStack"
-    strategy: "TUMaskingStrategy"
-    initial_params: "ParameterTree"
+    dmanager: DesignManager
+    dconf: DesignConfig
+    model: BiocompModel
+    stack: ComputeStack
+    strategy: TUMaskingStrategy
+    initial_params: ParameterTree
     xbatches: jnp.ndarray
     ybatches: jnp.ndarray
     loss_fn: Callable
@@ -84,21 +86,19 @@ class DesignSession:
     @classmethod
     def create(
         cls,
-        dmanager: "DesignManager",
-        dconf: "DesignConfig",
-        model: "BiocompModel",
+        dmanager: DesignManager,
+        dconf: DesignConfig,
+        model: BiocompModel,
         lock_ratios: bool = False,
-        initial_params: "ParameterTree | None" = None,
+        initial_params: ParameterTree | None = None,
         n_replicates_override: int | None = None,
         sample_shape_override: tuple[int, ...] | None = None,
-    ) -> "DesignSession":
+    ) -> DesignSession:
         """Create a design session with all shared initialization."""
         from .design import initialize_params, _create_loss_function, get_ratio_paths_and_sources
 
         timer = PhaseTimer()
-        logger.info("=" * 60)
-        logger.info("DESIGN SESSION INITIALIZATION")
-        logger.info("=" * 60)
+        logger.info("design session initialization")
 
         pkey, bkey, loop_key = jax.random.split(dconf.seed_key, 3)
         n_replicates = n_replicates_override if n_replicates_override is not None else dconf.n_replicates
@@ -189,8 +189,7 @@ class DesignSession:
         )
         timer.end("loss_fn")
 
-        logger.info("-" * 60)
-        logger.info(f"SESSION INIT COMPLETE in {timer.total():.2f}s")
+        logger.info(f"session init done in {timer.total():.2f}s")
         timer.summary()
 
         return cls(

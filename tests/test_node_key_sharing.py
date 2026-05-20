@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test that forward/inverse node pairs share embedding noise via node_key_id.
 
 The key reuse fix in compute.py uses fold_in(base_key, node_key_id) to derive

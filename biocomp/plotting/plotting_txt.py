@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 import numpy as np
-from typing import Sequence, Any
+from typing import Any
+from collections.abc import Sequence
 
 from .ascii_heatmap import heatmap_with_labels
 

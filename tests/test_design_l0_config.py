@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 """Test that L0 penalty is correctly configured in design YAML configs.
 
 This test was added after discovering that the L0 penalty schedule was accidentally

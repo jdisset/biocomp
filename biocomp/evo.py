@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Jean Disset
 from . import jaxutils as ut
 import jax
 import jax.numpy as jnp
