@@ -3,7 +3,6 @@
 from typing import Any
 import pandas as pd
 import pickle
-import glob as _glob
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from biocomp.models import (
     Part,
@@ -262,8 +261,6 @@ def _build_dracon_loader():
     loader = DraconLoader()
     for model_cls in (Part, L0, L1, L2, Category, Sequestron, SequestronType, PartsLibrary):
         loader.context.define(SymbolEntry(model_cls.__name__, auto_symbol(model_cls)))
-    loader.context["glob"] = _glob.glob
-    loader.context["sorted"] = sorted
     return loader
 
 
@@ -339,7 +336,12 @@ def dump_lib_to_yaml(lib: PartsLibrary, parts_dir: str | Path) -> None:
             fname = f"{base}.yaml" if n == 0 else f"{base}__{n}.yaml"
             (parts_dir / subdir / fname).write_text(loader.dump(rec))
 
-    (parts_dir / "index.yaml").write_text(_INDEX_YAML_TEMPLATE)
+    (parts_dir / "index.yaml").write_text(_canonical_index_yaml())
+
+
+def _canonical_index_yaml() -> str:
+    """Return the canonical parts-db index template shipped with biocomp."""
+    return (Path(__file__).parent / "config" / "parts_db_index.yaml").read_text()
 
 
 def _safe_filename(pk: str) -> str:
@@ -347,26 +349,6 @@ def _safe_filename(pk: str) -> str:
     bad = "/\\:<>|\"?*"
     out = "".join("_" if c in bad else c for c in pk).strip(". ")
     return out or "_"
-
-
-_INDEX_YAML_TEMPLATE = """\
-!PartsLibrary
-categories:       !include file:$DIR/primitives/categories.yaml
-parts:            !include file:$DIR/primitives/parts.yaml
-sequestron_types: !include file:$DIR/primitives/sequestron_types.yaml
-L0s:
-  !each(f) ${sorted(glob('$DIR/L0/*.yaml'))}:
-    - !include file:${f}
-L1s:
-  !each(f) ${sorted(glob('$DIR/L1/*.yaml'))}:
-    - !include file:${f}
-L2s:
-  !each(f) ${sorted(glob('$DIR/L2/*.yaml'))}:
-    - !include file:${f}
-sequestrons:
-  !each(f) ${sorted(glob('$DIR/sequestrons/*.yaml'))}:
-    - !include file:${f}
-"""
 
 
 _LOAD_LIB_CACHE: dict[Any, PartsLibrary] = {}
