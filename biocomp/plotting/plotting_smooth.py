@@ -2,16 +2,8 @@
 # Copyright (c) 2026 Jean Disset
 """Smooth (KNN-conditioned) plotting facade.
 
-Re-exports the public API from the split submodules:
-    - `plotting_smooth_1d`  -- 1D smooth curves (smooth_1d + linear fit helpers)
-    - `plotting_smooth_2d`  -- 2D heatmaps, colorbar, KNN grid, gradient field
-    - `plotting_violin`     -- voxel-conditioned violin plotting
-
-The legacy module-level `smooth_line_plot` / `smooth_line_slices` (older callers)
-remain defined here to avoid pulling additional imports into the split modules.
-
-WATCH OUT: `plotting_3d.py` imports `smooth_2d` and `GridData` from this module,
-and lazy-imports `knn_grid`/`colorbar`. The re-exports below preserve that contract.
+Re-exports 1D / 2D kernels and hosts the legacy network-aware
+`smooth_line_plot` / `smooth_line_slices` callers.
 """
 
 import numpy as np
@@ -65,17 +57,6 @@ from .plotting_smooth_2d import (
     print_rc_params,
     smooth_2d,
     smooth_grad_magnitude_2d,
-)
-from .plotting_violin import (
-    _as_xy_arrays,
-    _compute_voxel_distributions,
-    _effective_map_from_voxels,
-    _make_voxel_query_grid,
-    _query_ticks_for_effective_centers,
-    _query_ticks_for_effective_clusters,
-    _tick_aggregation_from_voxels,
-    _weighted_mean_and_median,
-    smooth_voxel_conditioned_violin,
 )
 
 
@@ -243,9 +224,6 @@ __all__ = [
     "print_rc_params",
     "smooth_2d",
     "smooth_grad_magnitude_2d",
-    # violin
-    "smooth_voxel_conditioned_violin",
-    # legacy line
     "smooth_line_plot",
     "smooth_line_slices",
 ]

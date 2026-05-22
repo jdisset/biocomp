@@ -11,7 +11,7 @@ import pytest
 
 from scipy import stats
 
-from biocomp.plotting.plotting_mvp import (
+from jeanplot.plots.mvp import (
     measured_vs_predicted,
     _clean_paired,
     _axis_lims,
