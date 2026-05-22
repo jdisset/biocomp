@@ -590,12 +590,6 @@ def generate_full_nested_config(
     namespace: str = "default",
     **kw,
 ):
-    from biocomp._legacy_deprecation import warn_legacy
-
-    warn_legacy(
-        "biocomp.utils.generate_full_nested_config",
-        "jeanplot cascade-fill (PaperTheme + @panel_from)",
-    )
     if empty_config is None:
         empty_config = generate_base_nested_config(namespace=namespace, **kw)
     if user_config is None:
