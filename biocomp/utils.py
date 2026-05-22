@@ -184,8 +184,12 @@ def get_cache(
 
 
 class PartialFunction(ArbitraryModel, Generic[T, R]):
-    """
-    A partial function that can be serialized and deserialized
+    """Deprecated for plotting: use direct callables / `!fn:target` aliases.
+
+    Still actively used by `paper-jobs/design/design_configs/base.yaml` for
+    optimizer / loss-function serialization, so no warning at construction.
+    The legacy plotting consumers (`PlotTask.plot_method`,
+    `PlotConfig.prepare_func`) emit their own deprecation warnings.
     """
 
     func: str | Callable  # 'module.fname' or 'fname' or function
@@ -477,9 +481,13 @@ def get_configurable_functions(namespace: str = "default") -> dict:
 
 
 def configurable(func: Callable, namespace: str = "default") -> Callable:
+    """Deprecated: replaced by jeanplot's @panel_from + cascade-fill.
+
+    The deprecation warning fires in `generate_full_nested_config` (the only
+    legitimate consumer), not at decorator-application time -- decorators run
+    on every import of biocomp.plotting and would drown the migrated path."""
     import inspect
 
-    """Decorator to add a function and its arguments to the list of configurable functions."""
     local_conf_functions = get_configurable_functions(namespace)
     sig = inspect.signature(func)
     # fkwargs = list(sig.parameters.keys())
@@ -582,6 +590,12 @@ def generate_full_nested_config(
     namespace: str = "default",
     **kw,
 ):
+    from biocomp._legacy_deprecation import warn_legacy
+
+    warn_legacy(
+        "biocomp.utils.generate_full_nested_config",
+        "jeanplot cascade-fill (PaperTheme + @panel_from)",
+    )
     if empty_config is None:
         empty_config = generate_base_nested_config(namespace=namespace, **kw)
     if user_config is None:

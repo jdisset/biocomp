@@ -34,6 +34,7 @@ from pydantic import (
 from pathlib import Path
 from biocomp.plotting import plotting_core as pc
 from biocomp.logging_config import get_logger
+from biocomp._legacy_deprecation import warn_legacy
 
 
 configurable = ut.configurable_decorator("biocomp.plotting")
@@ -360,6 +361,10 @@ class SimpleLayout(FigureLayout):
     wspace: float | None = None
     hspace: float | None = None
 
+    def model_post_init(self, *a, **kw):
+        super().model_post_init(*a, **kw)
+        warn_legacy("biocomp.plotutils.SimpleLayout", "jeanplot.Figure + Container layout")
+
     def make_figure(self, **kw):
         if self.axes_size is None:
             self.axes_size = get_figsize_default()
@@ -394,6 +399,7 @@ class GridLayout(FigureLayout):
     def __init__(self, **data):
         super().__init__(**data)
         self._validate_dimensions()
+        warn_legacy("biocomp.plotutils.GridLayout", "jeanplot.Figure + Container layout")
 
     def _validate_dimensions(self) -> None:
         if self.col_widths is not None:
@@ -492,6 +498,10 @@ class MultiRowGridLayout(FigureLayout):
 
     def __init__(self, **data):
         super().__init__(**data)
+        warn_legacy(
+            "biocomp.plotutils.MultiRowGridLayout",
+            "jeanplot.Figure + Container with row/col layouts",
+        )
         assert len(self.rows) == len(self.row_heights), (
             f"rows ({len(self.rows)}) / row_heights ({len(self.row_heights)}) length mismatch"
         )
@@ -596,6 +606,10 @@ class MergeSpec(ArbitraryModel):
     bg_color: str = "white"
     delete_intermediates: bool = True
 
+    def model_post_init(self, *a, **kw):
+        super().model_post_init(*a, **kw)
+        warn_legacy("biocomp.plotutils.MergeSpec", "jeanplot.Figure merge_subfigures")
+
     @property
     def output_path(self) -> Path:
         return Path(self.output_dir) / self.output_file
@@ -621,6 +635,10 @@ class FigureSpec(ArbitraryModel):
     layout: FigureLayout = Field(default_factory=SimpleLayout)
     dpi: int = 300
     metadata: dict[str, Any] = {}
+
+    def model_post_init(self, *a, **kw):
+        super().model_post_init(*a, **kw)
+        warn_legacy("biocomp.plotutils.FigureSpec", "jeanplot.panels.figure.Figure")
 
     @property
     def output_path(self) -> Path:
