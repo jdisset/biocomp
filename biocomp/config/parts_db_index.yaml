@@ -5,7 +5,7 @@
 # per-id yaml files under L0/ L1/ L2/ sequestrons/ into a single PartsLibrary.
 
 !PartsLibrary
-!define _files_under: !fn
+!define _all: !fn
   !require sub: "subdir under parts-db containing per-id *.yaml files"
   !fn :
     !each(f) ${sorted([x for x in listdir(DIR + '/' + sub) if x.endswith('.yaml')])}:
@@ -14,7 +14,7 @@
 categories:       !include file:$DIR/primitives/categories.yaml
 parts:            !include file:$DIR/primitives/parts.yaml
 sequestron_types: !include file:$DIR/primitives/sequestron_types.yaml
-L0s:          !_files_under L0
-L1s:          !_files_under L1
-L2s:          !_files_under L2
-sequestrons:  !_files_under sequestrons
+L0s:          !_all L0
+L1s:          !_all L1
+L2s:          !_all L2
+sequestrons:  !_all sequestrons
