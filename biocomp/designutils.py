@@ -372,7 +372,7 @@ def sample_from_data(
         X_grid: Grid coordinates (n * xres * yres, 2)
         Y_grid: Interpolated output values (n, yres, xres)
     """
-    from biocomp.plotting.plotting_core import knn_stats, build_tree
+    from jeanplot.plots.smooth_kernel import knn_stats, build_tree
     from biocomp.plotutils import make_xy_grid
 
     X = np.asarray(X)

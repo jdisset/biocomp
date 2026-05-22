@@ -1,21 +1,13 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-# {{{                          --     imports     --
-# ···············································································
+"""Network-aware 3D scatter (matplotlib + plotly). Generic density helpers live in jeanplot.plots.scatter."""
+
 import numpy as np
 import matplotlib.pyplot as plt
-from . import plotting_core as pc
-from .plotting_core import (
-    get_reordered_protein_names,
-    network_ticks_and_labels,
-)
 
-configurable = pc.configurable
-##────────────────────────────────────────────────────────────────────────────}}}
+from .plotting_core import get_reordered_protein_names, network_ticks_and_labels
 
 
-# ---- scatter plots
-### {{{                            --     3D     --
 def scatter_3d_interactive(
     x,
     y,
@@ -166,12 +158,3 @@ def scatter_3d(
         ax.view_init(elev=10, azim=azim)
 
 
-##────────────────────────────────────────────────────────────────────────────}}}
-
-
-# SSOT: density colormap helpers and grid_histogram come from jeanplot.
-from jeanplot.plots.scatter import (  # noqa: E402, F401
-    DEFAULT_DENSITY_CMAP,
-    grid_histogram,
-    make_density_cmap,
-)

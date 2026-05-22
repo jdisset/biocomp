@@ -1090,7 +1090,7 @@ def plot_slice_chords(ax, X, Y, slices, xlims, rescaler=None, colors=None,
 
     Falls back to a straight latent-space chord when `rescaler is None`.
     """
-    from biocomp.plotting.plotting_core import knn_stats, build_tree
+    from jeanplot.plots.smooth_kernel import knn_stats, build_tree
 
     X = np.asarray(X)
     Y = np.asarray(Y)
@@ -1168,7 +1168,7 @@ def plot_addition_vs_removal_overlay(
     boundary filter). `colors`, if provided, has length
     len(anchor_raw_values): one color per anchor, shared across slices.
     """
-    from biocomp.plotting.plotting_core import knn_stats, build_tree
+    from jeanplot.plots.smooth_kernel import knn_stats, build_tree
 
     X_lat = np.asarray(X_lat)
     Y_lat = np.asarray(Y_lat)
@@ -1271,11 +1271,14 @@ scformat = ShortScientificFormatter()
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                          --     main smooth dispatcher (route to 1D, 2D, 3D)    --
 
-from jeanplot.plots.smooth_3d import smooth_3d  # noqa: E402
-from .plotting.plotting_smooth import (  # noqa: E402
-    smooth_2d, smooth_1d, smooth_grad_magnitude_2d, gradient_field_2d,
+from jeanplot.plots.smooth_1d import smooth_1d  # noqa: E402
+from jeanplot.plots.smooth_2d import (  # noqa: E402
+    gradient_field_2d,
+    smooth_2d,
+    smooth_grad_magnitude_2d,
 )
-from .plotting.plotting_scatter import grid_histogram  # noqa: E402
+from jeanplot.plots.smooth_3d import smooth_3d  # noqa: E402
+from jeanplot.plots.scatter import grid_histogram  # noqa: E402
 
 
 def combine_dicts(*kwarg_lists):

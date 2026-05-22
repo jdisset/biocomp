@@ -1,27 +1,17 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""Density plot helpers.
-
-`density_plot_1d` and its quantile-band primitives are shimmed from jeanplot.
-`fluo_densities` is biology-specific (depends on `LogPolyLogRescaler` and
-`get_bio_color`) and stays in biocomp.
-"""
+"""Fluorescence density plot (biology-specific)."""
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from collections.abc import Sequence
-from biocomp.plotting.plotting_core import get_bio_color, get_transformed_ticks_and_labels
-from biocomp.datautils import LogPolyLogRescaler
 
-from jeanplot.plots.density import (  # noqa: F401
-    _RANGE_BANDS,
-    _RANGE_LABEL_KW,
-    _draw_quantile_bands,
-    _pct_label,
-    density_plot_1d,
-)
+from biocomp.datautils import LogPolyLogRescaler
+from biocomp.plotting.plotting_core import get_bio_color
+from jeanplot.plots.density import density_plot_1d
+from jeanplot.plots.ticks import get_transformed_ticks_and_labels
 
 
 def _finite_1d(col: np.ndarray) -> np.ndarray:
