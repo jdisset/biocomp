@@ -28,8 +28,14 @@ from .plotting_core import (
     setup_transformed_axis,
 )
 
-# Re-exports from split submodules (public API surface).
-from .plotting_smooth_1d import (
+from jeanplot.data.grid import (  # noqa: F401
+    GridData,
+    extract_grid_data,
+    grid_data_from_b64,
+    grid_data_to_b64,
+)
+from jeanplot.plots.colorbar import colorbar  # noqa: F401
+from jeanplot.plots.smooth_1d import (  # noqa: F401
     DEFAULT_MARKER_ROTATION,
     _annotate_theta,
     _draw_tail_fits,
@@ -37,9 +43,14 @@ from .plotting_smooth_1d import (
     make_n_props,
     smooth_1d,
 )
-from .plotting_smooth_2d import (
-    GridData,
+from jeanplot.plots.smooth_2d import (  # noqa: F401
     KnnGradientField,
+    gradient_field_2d,
+    knn_gradient_grid,
+    smooth_2d,
+    smooth_grad_magnitude_2d,
+)
+from jeanplot.plots.smooth_kernel import (  # noqa: F401
     _KNN_GRID_CACHE,
     _KNN_GRID_CACHE_MAX,
     _finite_xy,
@@ -47,16 +58,7 @@ from .plotting_smooth_2d import (
     _render_smooth_heatmap,
     _resolve_lims,
     _resolve_vlims,
-    colorbar,
-    extract_grid_data,
-    gradient_field_2d,
-    grid_data_from_b64,
-    grid_data_to_b64,
-    knn_gradient_grid,
     knn_grid,
-    print_rc_params,
-    smooth_2d,
-    smooth_grad_magnitude_2d,
 )
 
 
@@ -221,7 +223,6 @@ __all__ = [
     "grid_data_to_b64",
     "knn_gradient_grid",
     "knn_grid",
-    "print_rc_params",
     "smooth_2d",
     "smooth_grad_magnitude_2d",
     "smooth_line_plot",

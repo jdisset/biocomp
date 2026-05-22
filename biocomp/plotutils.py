@@ -1271,7 +1271,7 @@ scformat = ShortScientificFormatter()
 ##────────────────────────────────────────────────────────────────────────────}}}
 ## {{{                          --     main smooth dispatcher (route to 1D, 2D, 3D)    --
 
-from .plotting.plotting_3d import smooth_3d  # noqa: E402
+from jeanplot.plots.smooth_3d import smooth_3d  # noqa: E402
 from .plotting.plotting_smooth import (  # noqa: E402
     smooth_2d, smooth_1d, smooth_grad_magnitude_2d, gradient_field_2d,
 )
@@ -1415,7 +1415,7 @@ def smooth_txt(
     smooth_3d_params=None,
     **kw,
 ):
-    from biocomp.plotting.plotting_txt import smooth_1d_txt, smooth_2d_txt, smooth_3d_txt
+    from jeanplot.plots.txt import smooth_1d_txt, smooth_2d_txt, smooth_3d_txt
 
     if smooth_3d_params is None:
         smooth_3d_params = {}

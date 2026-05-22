@@ -4,19 +4,15 @@
 
 import numpy as np
 import pytest
-from biocomp.plotting.ascii_heatmap import (
+from jeanplot.plots.ascii_heatmap import (
     heatmap,
     heatmap_with_labels,
     heatmap_bigram,
     _resample_nearest,
     _resample_mean,
 )
-from biocomp.plotting.plotting_txt import (
-    TextPlotResult,
-    smooth_1d_txt,
-    smooth_2d_txt,
-    get_txt_plot_function,
-)
+from jeanplot.plots.txt import TextPlotResult, smooth_1d_txt, smooth_2d_txt
+from biocomp.plotting.plotting_txt import get_txt_plot_function
 
 
 class TestAsciiHeatmap:
@@ -163,7 +159,7 @@ class TestSmooth2dTxt:
 
 class TestGetTxtPlotFunction:
     def test_exact_match(self):
-        func = get_txt_plot_function("biocomp.plotting.plotting_smooth.smooth_1d")
+        func = get_txt_plot_function("jeanplot.plots.smooth_1d.smooth_1d")
         assert func is smooth_1d_txt
 
     def test_suffix_match(self):

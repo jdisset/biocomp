@@ -499,7 +499,7 @@ def compute_single_density(args):
     Helper function to compute density for a single file/sample.
     Supports both KDE and kNN methods. Rebuilds estimator in worker process.
     """
-    from biocomp.plotting.knn_utils_np import knn_density_chunked
+    from jeanplot.knn.density import knn_density_chunked
 
     method, x, chunksize, cache_dir, signature, method_params = args
 
@@ -564,7 +564,7 @@ def density_balanced_indices(
         return np.array([], dtype=np.intp)
     if selection_proba is None:
         if densities is None:
-            from biocomp.plotting.knn_utils_np import knn_density_chunked
+            from jeanplot.knn.density import knn_density_chunked
 
             densities = knn_density_chunked(X, k=knn_k)
         selection_proba = density_balanced_selection_proba(

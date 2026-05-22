@@ -15,7 +15,7 @@ import jax.numpy as jnp
 
 from biocomp.logging_config import get_logger
 from biocomp.designloss import GridLossWeights
-from biocomp.plotting.ascii_heatmap import CMAP_S
+from jeanplot.plots.ascii_heatmap import CMAP_S
 
 if TYPE_CHECKING:
     from biocomp.compute import ComputeStack
@@ -662,7 +662,7 @@ def evaluate_recipe_with_sublosses(
         RecipeEvaluationResult with prediction, target, sublosses, and txt-plot
     """
     from biocomp.designloss import compute_grid_losses
-    from biocomp.plotting.plotting_txt import smooth_2d_txt
+    from jeanplot.plots.txt import smooth_2d_txt
 
     if key is None:
         key = jax.random.PRNGKey(42)
@@ -896,7 +896,7 @@ def side_by_side_txt_plot(
               Also includes training_penalties, training_grid_total, delta_grid if provided.
               Empty dict if compute_metrics=False.
     """
-    from biocomp.plotting.ascii_heatmap import heatmap
+    from jeanplot.plots.ascii_heatmap import heatmap
 
     assert target_grid.ndim == 2, f"target_grid must be 2D, got {target_grid.ndim}D"
     assert prediction_grid.ndim == 2, f"prediction_grid must be 2D, got {prediction_grid.ndim}D"
