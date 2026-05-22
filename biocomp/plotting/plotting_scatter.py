@@ -2,14 +2,10 @@
 # Copyright (c) 2026 Jean Disset
 # {{{                          --     imports     --
 # ···············································································
-from collections.abc import Sequence
-from numpy.typing import NDArray as NdArray
-from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import matplotlib.pyplot as plt
 from . import plotting_core as pc
 from .plotting_core import (
-    setup_transformed_axis,
     get_reordered_protein_names,
     network_ticks_and_labels,
 )
@@ -39,9 +35,7 @@ def scatter_3d_interactive(
 
     xmin, xmax = xlims  # noqa: F841
 
-    input_order, output_pos, input_names, output_name = get_reordered_protein_names(
-        network, **kw
-    )
+    input_order, output_pos, input_names, output_name = get_reordered_protein_names(network, **kw)
 
     random_order = np.random.permutation(len(x))
     y = y[random_order, output_pos]
@@ -175,134 +169,9 @@ def scatter_3d(
 ##────────────────────────────────────────────────────────────────────────────}}}
 
 
-def make_density_cmap(name=None, alpha_start=1.0, alpha_end=1.0, base_cmap="Spectral_r"):
-    """Create a custom colormap for density visualization."""
-    ncolors = 256
-    color_array = plt.get_cmap(base_cmap)(range(ncolors))
-    color_array[:, -1] = np.linspace(alpha_start, alpha_end, ncolors)
-    map = LinearSegmentedColormap.from_list(name=name, colors=color_array)
-    map.set_under("w", alpha=0)
-    return map
-
-
-DEFAULT_DENSITY_CMAP = make_density_cmap("density", alpha_start=1.0, alpha_end=1.0)
-
-
-@configurable
-def grid_histogram(
-    X: NdArray,
-    Y: NdArray,
-    input_names: Sequence[str],
-    output_name: str,
-    rescaler,
-    ax,
-    title: str | None = None,
-    xtitle: str | None = None,
-    ytitle: str | None = None,
-    xlims=(None, None),
-    ylims=(None, None),
-    vlims=(0, None),
-    draw_xlabel=True,
-    draw_ylabel=True,
-    res=300,  # bins per unit
-    draw_colorbar=True,
-    use_log_density=True,
-    cmap=None,
-    margins=0.01,
-    noise_smooth=0.25,
-    colorbar_params: dict = None,
-):
-    if colorbar_params is None:
-        colorbar_params = {}
-    assert X.shape[1] == 1
-    assert Y.shape[1] == 1
-
-    mask = ~(np.isnan(X) | np.isnan(Y))
-    X = X[mask]
-    Y = Y[mask]
-
-    xmin, xmax = np.min(X), np.max(X)
-    ymin, ymax = np.min(Y), np.max(Y)
-
-    xmin = xmin if xlims[0] is None else xlims[0]
-    xmax = xmax if xlims[1] is None else xlims[1]
-    ymin = ymin if ylims[0] is None else ylims[0]
-    ymax = ymax if ylims[1] is None else ylims[1]
-    xmargins = margins * (xmax - xmin)
-    ymargins = margins * (ymax - ymin)
-    xmin -= xmargins
-    xmax += xmargins
-    ymin -= ymargins
-    ymax += ymargins
-
-    nbins_x = int(res * (xmax - xmin))
-    nbins_y = int(res * (ymax - ymin))
-
-    if noise_smooth > 0:
-        xres = (xmax - xmin) / nbins_x
-        yres = (ymax - ymin) / nbins_y
-        X = X + np.random.normal(size=X.shape) * noise_smooth * xres
-        Y = Y + np.random.normal(size=Y.shape) * noise_smooth * yres
-
-    h, xedges, yedges = np.histogram2d(
-        X,
-        Y,
-        bins=[nbins_x, nbins_y],
-        range=[[xmin, xmax], [ymin, ymax]],
-        density=False,
-    )
-    h = np.ma.masked_where(h == 0, h)
-
-    from biocomp.datautils import IdentityRescaler, LogPlusOneRescaler
-
-    density_rescaler = IdentityRescaler() if not use_log_density else LogPlusOneRescaler()
-
-    h = density_rescaler.fwd(h)
-
-    if cmap is None:
-        cmap = DEFAULT_DENSITY_CMAP
-
-    setup_transformed_axis(
-        ax,
-        xaxis_lims=[xmin, xmax],
-        yaxis_lims=[ymin, ymax],
-        rescaler=rescaler,
-        margins=0.0,
-    )
-
-    im = ax.imshow(
-        h.T,
-        extent=[xmin, xmax, ymin, ymax],
-        origin="lower",
-        aspect="auto",
-        cmap=cmap,
-        vmin=vlims[0],
-        vmax=vlims[1],
-        interpolation="nearest",
-    )
-
-    ax.set_clip_path(ax.patch)
-
-    if draw_xlabel:
-        ax.set_xlabel(xtitle if xtitle is not None else input_names[0])
-    if draw_ylabel:
-        ax.set_ylabel(ytitle if ytitle is not None else output_name)
-    if title is not None:
-        ax.set_title(title)
-
-    # show grid, including minor grid
-    ax.grid(color="k", alpha=0.25, linestyle="-", linewidth=0.2, which="major")
-    ax.grid(color="k", alpha=0.1, linestyle="-", linewidth=0.1, which="minor")
-
-    if draw_colorbar:
-        from biocomp.plotting.plotting_smooth import colorbar
-
-        cbar = colorbar(
-            ax,
-            im,
-            density_rescaler,
-            vlims,
-            **{**colorbar_params, "label": "Density"},
-        )
-
-    return im, cbar
+# SSOT: density colormap helpers and grid_histogram come from jeanplot.
+from jeanplot.plots.scatter import (  # noqa: E402, F401
+    DEFAULT_DENSITY_CMAP,
+    grid_histogram,
+    make_density_cmap,
+)

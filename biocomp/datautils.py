@@ -5,7 +5,7 @@
 import numpy as np
 import pandas as pd
 from . import utils as ut
-from .utils import ArbitraryModel, escape
+from .utils import escape
 from pathlib import Path
 from .compute import ComputeStack
 from tqdm import tqdm
@@ -35,25 +35,17 @@ NumLike = float | int | np.ndarray
 NdArray = np.ndarray
 
 
-class DataRescaler(ArbitraryModel):
-    def fwd(self, x):
-        raise NotImplementedError
-
-    def inv(self, y):
-        raise NotImplementedError
+# SSOT: canonical DataRescaler / IdentityRescaler live in jeanplot.data.rescaler.
+# Subclasses below extend the jeanplot base with biology-specific transforms.
+from jeanplot.data.rescaler import (  # noqa: E402, F401
+    DataRescaler,
+    IdentityRescaler,
+)
 
 
 class ValueRange(BaseModel):
     min: float = 0
     max: float = 1
-
-
-class IdentityRescaler(DataRescaler):
-    def fwd(self, x):
-        return x
-
-    def inv(self, y):
-        return y
 
 
 class LogPlusOneRescaler(DataRescaler):
@@ -376,17 +368,22 @@ def sample_batches_w_coord_threshold(
     assert densities.shape == (X.shape[0],)
 
     if density_threshold_coords is not None:
-        kde_points = kde.dataset if hasattr(kde, 'dataset') else None
-        kde_bw = kde.factor if hasattr(kde, 'factor') else None
+        kde_points = kde.dataset if hasattr(kde, "dataset") else None
+        kde_bw = kde.factor if hasattr(kde, "factor") else None
         p = compute_selection_probabilities(
-            X, densities, density_threshold_quantile, density_threshold_coords,
-            kde_points, kde_bw,
+            X,
+            densities,
+            density_threshold_quantile,
+            density_threshold_coords,
+            kde_points,
+            kde_bw,
         )
     else:
         p = density_balanced_selection_proba(densities, density_threshold_quantile)
 
     indices = density_balanced_indices(
-        X, n_samples=batch_size * n_batches,
+        X,
+        n_samples=batch_size * n_batches,
         selection_proba=p,
         seed=int(np.random.randint(0, 2**28)),
     )
@@ -404,7 +401,8 @@ def sample_batches(args: tuple) -> tuple[NdArray, NdArray]:
     """
     X, Y, batch_size, n_batches, densities, density_threshold_quantile, key = args
     indices = density_balanced_indices(
-        X, n_samples=batch_size * n_batches,
+        X,
+        n_samples=batch_size * n_batches,
         densities=densities,
         density_threshold_quantile=density_threshold_quantile,
         seed=int(key),
@@ -481,7 +479,7 @@ class DataConfig(BaseModel):
     calibration_artifact_threshold_low: float = -700.0
     calibration_artifact_threshold_high: float = 2e7
     build_inverse: bool | str = Field(
-        default='all',
+        default="all",
         description="Whether to build inverse nodes. 'all' = all inversions, True = all, False = no inversion.",
     )
 
@@ -567,9 +565,11 @@ def density_balanced_indices(
     if selection_proba is None:
         if densities is None:
             from biocomp.plotting.knn_utils_np import knn_density_chunked
+
             densities = knn_density_chunked(X, k=knn_k)
         selection_proba = density_balanced_selection_proba(
-            densities, density_threshold_quantile,
+            densities,
+            density_threshold_quantile,
         )
     rng = np.random.RandomState(seed)
     return rng.choice(len(selection_proba), size=int(n_samples), p=selection_proba, replace=True)
@@ -883,7 +883,8 @@ class DataManager:
             *[
                 sample_batches_jax(x, y, d, m, batch_size, n_batches, q, k)
                 for x, y, d, m, k in zip(X_pad, Y_pad, D_pad, M_pad, keys, strict=False)
-            ], strict=False
+            ],
+            strict=False,
         )
 
         if concat_along_feature_axis:
@@ -920,7 +921,8 @@ class DataManager:
                 self._X,
                 self._Y,
                 self._densities,
-                all_keys, strict=False,
+                all_keys,
+                strict=False,
             )
         ]
 
