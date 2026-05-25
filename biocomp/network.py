@@ -1484,6 +1484,9 @@ class Network(BaseModel):
         hide_markers: bool = True,
         disabled_tu_ids: set[str] | None = None,
         hide_disabled: bool = False,
+        show_tu_labels: bool = True,
+        axis_tags: dict[str, str] | None = None,
+        bias_axis_tag: str | None = None,
     ):
         """Convert Network to jeanplot CircuitData for visualization.
 
@@ -1491,6 +1494,10 @@ class Network(BaseModel):
             hide_markers: If True, hide TUs that are markers
             disabled_tu_ids: Set of TU IDs to mark as disabled (for styling)
             hide_disabled: If True, completely remove disabled TUs from output
+            show_tu_labels: If False, TU header labels (e.g. "L1.PguR_eYFP") are omitted
+            axis_tags: Per-marker-protein label drawn to the LEFT of the dashed box
+                (e.g. ``{"mMaroon1": "X_1"}``). Additive — does not replace the marker tag.
+            bias_axis_tag: Axis tag for source groups that have no input-marker (e.g. ``"B"``)
         """
         from jeanplot.gene import CircuitData, TUData, PartData, SourceData, InteractionData
 
@@ -1566,8 +1573,9 @@ class Network(BaseModel):
             parts.sort(key=lambda p: PART_ORDER.index(p.role) if p.role in PART_ORDER else 99)
             return parts
 
-        def get_source_reporter(node) -> str | None:
-            """Get the reporter/fluo_marker protein name from a source node."""
+        def get_source_reporters(node) -> list[str]:
+            out: list[str] = []
+            seen: set[str] = set()
             for edge in graph.get_outgoing_edges(node.node_id):
                 if edge.content_type != "DNA":
                     continue
@@ -1576,14 +1584,21 @@ class Network(BaseModel):
                     cat = getattr(p, "category", None)
                     if not cat and lib and pname in lib.parts.index:
                         cat = lib.parts.loc[pname].category
-                    if cat == "fluo_marker":
-                        return pname
+                    if cat == "fluo_marker" and pname not in seen:
+                        seen.add(pname)
+                        out.append(pname)
+            return out
+
+        def pick_marker(reporters: list[str]) -> str | None:
+            for r in reporters:
+                if r in markers:
+                    return r
             return None
 
         tus: dict[str, TUData] = {}
         source_to_tus: dict[int, list[str]] = {}
-        source_id_to_tu_id: dict[str, str] = {}  # source_id -> tu_id mapping
-        source_to_reporter: dict[int, str | None] = {}  # node_id -> reporter protein
+        source_id_to_tu_id: dict[str, str] = {}
+        source_to_reporters: dict[int, list[str]] = {}
 
         for node in graph.get_nodes_by_type("source"):
             name = node.extra.get("name", "")
@@ -1591,11 +1606,12 @@ class Network(BaseModel):
             tu_id = f"{name}_{cotx_group}" if name else f"tu_{node.node_id}"
             source_id = node.extra.get("source_id")
 
-            # Check if this source's reporter protein is a marker (input protein)
-            reporter = get_source_reporter(node)
-            source_to_reporter[node.node_id] = reporter
-            is_marker = reporter in markers if reporter else False
-            if hide_markers and is_marker:
+            reporters = get_source_reporters(node)
+            source_to_reporters[node.node_id] = reporters
+            # hide only a pure transfection-marker plasmid (every reporter is an input);
+            # an L2 construct that also carries an output reporter must stay visible
+            is_pure_marker = bool(reporters) and all(r in markers for r in reporters)
+            if hide_markers and is_pure_marker:
                 continue
 
             is_disabled = tu_id in disabled_tu_ids or name in disabled_tu_ids
@@ -1605,7 +1621,7 @@ class Network(BaseModel):
             parts = get_parts_for_source(node)
             tus[tu_id] = TUData(
                 id=tu_id,
-                name=name or tu_id,
+                name=(name or tu_id) if show_tu_labels else None,
                 parts=parts,
                 source_id=source_id,
                 disabled=is_disabled,
@@ -1626,15 +1642,14 @@ class Network(BaseModel):
             if not tu_ids:
                 continue
 
-            # Find marker by checking which connected source has a marker reporter protein
             marker = None
             for edge in graph.get_outgoing_edges(agg_id):
                 src_node = graph.nodes.get(edge.target_id)
-                if src_node and src_node.node_type == "source":
-                    reporter = source_to_reporter.get(src_node.node_id)
-                    if reporter and reporter in markers:
-                        marker = reporter
-                        break
+                if not (src_node and src_node.node_type == "source"):
+                    continue
+                marker = pick_marker(source_to_reporters.get(src_node.node_id, []))
+                if marker:
+                    break
 
             # Extract ratios and compute min-normalized values per TU
             slot_entries = get_slot_entries(node.extra, require=False)
@@ -1656,17 +1671,16 @@ class Network(BaseModel):
                             tus[tid].ratio_normalized = norm_ratio
                             break
 
-                # Find the marker source's normalized ratio
                 if marker:
                     for edge in graph.get_outgoing_edges(agg_id):
                         src_node = graph.nodes.get(edge.target_id)
                         if src_node and src_node.node_type == "source":
-                            reporter = source_to_reporter.get(src_node.node_id)
-                            if reporter == marker:
+                            if marker in source_to_reporters.get(src_node.node_id, []):
                                 sid = str(src_node.extra.get("source_id", src_node.node_id))
                                 marker_ratio = source_id_to_normalized.get(sid)
                                 break
 
+            axis_tag = (axis_tags or {}).get(marker) if marker else bias_axis_tag
             sources.append(
                 SourceData(
                     id=str(agg_id),
@@ -1676,8 +1690,17 @@ class Network(BaseModel):
                     ratios=ratios,
                     marker=marker,
                     marker_ratio=marker_ratio,
+                    axis_tag=axis_tag,
                 )
             )
+
+        # Part ids inside a TU are namespaced (`{source_node_id}_{pname}`); the
+        # interaction must reference that exact id so jeanplot's path resolver
+        # `//{tu_id}/{part_id}` finds the child. Build {(tu_id, name) -> part_id}
+        # from the already-constructed TUData so we don't reinvent the scheme.
+        part_id_for: dict[tuple[str, str], str] = {
+            (tu.id, p.name): p.id for tu in tus.values() for p in tu.parts
+        }
 
         interactions: list[InteractionData] = []
         for ern in graph.get_nodes_by_type("sequestron_ERN"):
@@ -1708,14 +1731,20 @@ class Network(BaseModel):
 
                 target_tus = neg_edge.extra.get("tu_id", [])
                 for source_tu in source_tus:
+                    src_part_id = part_id_for.get((source_tu, ern_part))
+                    if src_part_id is None:
+                        continue
                     for target_tu in target_tus:
+                        tgt_part_id = part_id_for.get((target_tu, rec_part))
+                        if tgt_part_id is None:
+                            continue
                         interactions.append(
                             InteractionData(
                                 id=f"int_{ern.node_id}_{interaction_idx}",
                                 source_tu=source_tu,
-                                source_part=ern_part,
+                                source_part=src_part_id,
                                 target_tu=target_tu,
-                                target_part=rec_part,
+                                target_part=tgt_part_id,
                                 interaction_type="inhibition",
                             )
                         )
