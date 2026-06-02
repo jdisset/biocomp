@@ -12,6 +12,7 @@ import pytest
 from biocomp.metric_utils import (
     mse,
     rmse,
+    ermse,
     mae,
     r_squared,
     pearson_r,
@@ -562,6 +563,22 @@ class TestGridStatsDataclass:
         assert "grid_kl" in d
         assert "grid_kl_similarity" in d
         assert "grid_r_squared" in d
+
+
+class TestErmse:
+    def test_excess_over_floor(self):
+        # sqrt(0.25 - 0.09) = sqrt(0.16) = 0.4
+        assert ermse(0.25, 0.09) == pytest.approx(0.4)
+
+    def test_clamped_when_model_beats_floor(self):
+        assert ermse(0.09, 0.25) == 0.0
+
+    def test_zero_at_floor(self):
+        assert ermse(0.5, 0.5) == 0.0
+
+    def test_equivalent_to_pythagorean_rmse(self):
+        mrmse, krmse = 0.3, 0.2
+        assert ermse(mrmse**2, krmse**2) == pytest.approx(np.sqrt(mrmse**2 - krmse**2))
 
 
 if __name__ == "__main__":
