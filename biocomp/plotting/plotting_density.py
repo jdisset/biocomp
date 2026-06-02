@@ -103,6 +103,7 @@ def fluo_densities(
     lpl_compression: float = 0.4,
     zero_threshold: float = 4500,
     n_inputs: int | None = None,
+    show_summary: bool = True,
 ) -> tuple[Figure | None, list[Axes]]:
     n_channels = len(channel_names)
     assert rawdata.shape[1] >= n_channels, (
@@ -196,7 +197,7 @@ def fluo_densities(
         f"{pct_above:.1f}% above null-point in all input channels\n"
         f"{global_below:.1f}% below null-point in all channels"
     )
-    if fig is not None:
+    if show_summary and fig is not None:
         fig.text(
             0.5,
             0.97,
