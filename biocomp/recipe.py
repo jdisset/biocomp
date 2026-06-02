@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
+import re
+
 from biocomp.utils import flatten
 from collections.abc import Sequence as ABCSequence
 from pathlib import Path
@@ -617,17 +619,33 @@ class Recipe(BaseModel):
             return data
         if legacy_order is None and legacy_axis_mapping is None:
             return data
-        axes: list[dict] = []
-        labelled: set[str] = set()
-        if legacy_axis_mapping:
-            for name, axis in legacy_axis_mapping.items():
-                axes.append({"name": name, "axis": axis})
-                labelled.add(name)
-        if legacy_order:
-            for name in legacy_order:
-                if name in labelled:
+        order = list(legacy_order or [])
+        # Resolve each axis_mapping label onto a column name. A key is either a
+        # real name (present in input_order, or a cotx/protein name resolved
+        # downstream) or a positional slot token like `x1`/`x2` (1-based) that
+        # legacy matrices paired with a protein-named input_order. A positional
+        # key not present in input_order maps its label onto input_order[i-1].
+        pos_rx = re.compile(r"^[a-zA-Z](\d+)$")
+        label_for: dict[str, str] = {}
+        extra: list[dict] = []
+        for name, axis in (legacy_axis_mapping or {}).items():
+            m = pos_rx.match(name)
+            if name not in order and m and order:
+                i = int(m.group(1)) - 1
+                if 0 <= i < len(order):
+                    label_for[order[i]] = axis
                     continue
-                axes.append({"name": name})
+            if name in order:
+                label_for[name] = axis
+            else:
+                extra.append({"name": name, "axis": axis})
+        axes: list[dict] = []
+        for name in order:
+            ax: dict = {"name": name}
+            if name in label_for:
+                ax["axis"] = label_for[name]
+            axes.append(ax)
+        axes.extend(extra)
         data["input_axes"] = axes
         return data
 
