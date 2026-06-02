@@ -98,6 +98,13 @@ def rmse(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> float:
     return float(np.sqrt(mse(y_true, y_pred, validate=validate)))
 
 
+def ermse(mse_model: float, mse_floor: float) -> float:
+    """excess RMSE: sqrt(max(0, mMSE - kMSE)). Model error above the kernel
+    noise floor (kRMSE). Noise-corrected, same units as RMSE. Aggregate over
+    groups by averaging in MSE space first, then calling once."""
+    return float(np.sqrt(max(0.0, float(mse_model) - float(mse_floor))))
+
+
 def mae(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> float:
     """mean absolute error, ignoring non-finite values."""
     yt, yp = _to_1d(y_true), _to_1d(y_pred)
@@ -523,6 +530,7 @@ DEFAULT_GRIDSTATS_PARAMS: dict = {
     "hypercube_max": 0.7,
     "k": 256,
     "radius": 0.1,
+    "sigma_in_radius": 3.0,
     "min_points": 20,
     # Density-balanced subsample (same selection logic as training batches)
     # used to evaluate `model_rmse_latent` / `kernel_rmse_latent`. Removes
@@ -560,6 +568,7 @@ class GridStatsFields(BaseModel):
     gridstats_hypercube_max: float = DEFAULT_GRIDSTATS_PARAMS["hypercube_max"]
     gridstats_k: int = DEFAULT_GRIDSTATS_PARAMS["k"]
     gridstats_radius: float = DEFAULT_GRIDSTATS_PARAMS["radius"]
+    gridstats_sigma_in_radius: float = DEFAULT_GRIDSTATS_PARAMS["sigma_in_radius"]
     gridstats_min_points: int = DEFAULT_GRIDSTATS_PARAMS["min_points"]
     gridstats_subsample_n: int = DEFAULT_GRIDSTATS_PARAMS["subsample_n"]
     gridstats_subsample_knn_k: int = DEFAULT_GRIDSTATS_PARAMS["subsample_knn_k"]
@@ -575,6 +584,7 @@ class GridStatsFields(BaseModel):
             "hypercube_max": self.gridstats_hypercube_max,
             "k": self.gridstats_k,
             "radius": self.gridstats_radius,
+            "sigma_in_radius": self.gridstats_sigma_in_radius,
             "min_points": self.gridstats_min_points,
             "subsample_n": self.gridstats_subsample_n,
             "subsample_knn_k": self.gridstats_subsample_knn_k,
