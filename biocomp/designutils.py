@@ -372,7 +372,7 @@ def sample_from_data(
         X_grid: Grid coordinates (n * xres * yres, 2)
         Y_grid: Interpolated output values (n, yres, xres)
     """
-    from jeanplot.plots.smooth_kernel import knn_stats, build_tree
+    from jeanplot.plots.smooth_kernel import smooth_stats, build_tree
     from biocomp.plotutils import make_xy_grid
 
     X = np.asarray(X)
@@ -445,7 +445,7 @@ def sample_from_data(
             xquery_full = xy_query
 
         # get KNN interpolated values
-        output_values = knn_stats(
+        output_values = smooth_stats(
             xquery_full, Y_clean, tree=tree, stats="mean", k=k, min_points=min_points
         )
         output_values = np.asarray(output_values).squeeze()

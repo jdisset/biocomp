@@ -1072,7 +1072,7 @@ def plot_slice_chords(ax, X, Y, slices, xlims, rescaler=None, colors=None,
 
     Falls back to a straight latent-space chord when `rescaler is None`.
     """
-    from jeanplot.plots.smooth_kernel import knn_stats, build_tree
+    from jeanplot.plots.smooth_kernel import smooth_stats, build_tree
 
     X = np.asarray(X)
     Y = np.asarray(Y)
@@ -1095,7 +1095,7 @@ def plot_slice_chords(ax, X, Y, slices, xlims, rescaler=None, colors=None,
         query = xq.reshape(-1, 1)
         if n_input > 1:
             query = np.hstack([query, np.tile(slices[i], (query.shape[0], 1))])
-        knn_mean = np.asarray(knn_stats(query, Y, tree=tree, stats=["mean"],
+        knn_mean = np.asarray(smooth_stats(query, Y, tree=tree, stats=["mean"],
                                         **knn_stats_params)).reshape(-1)
         finite = np.isfinite(knn_mean)
         if not finite.any():
@@ -1150,7 +1150,7 @@ def plot_addition_vs_removal_overlay(
     boundary filter). `colors`, if provided, has length
     len(anchor_raw_values): one color per anchor, shared across slices.
     """
-    from jeanplot.plots.smooth_kernel import knn_stats, build_tree
+    from jeanplot.plots.smooth_kernel import smooth_stats, build_tree
 
     X_lat = np.asarray(X_lat)
     Y_lat = np.asarray(Y_lat)
@@ -1187,7 +1187,7 @@ def plot_addition_vs_removal_overlay(
             requested = ["mean", "variance"]
             if offset_cutoff is not None:
                 requested.append("centroid_offset")
-            knn_result = knn_stats(
+            knn_result = smooth_stats(
                 query, Y_lat, tree=tree, stats=requested, **knn_stats_params,
             )
             if offset_cutoff is not None:

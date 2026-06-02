@@ -10,7 +10,7 @@ network-aware callers.
 import numpy as np
 import matplotlib.pyplot as plt
 
-from jeanplot.plots.smooth_kernel import build_tree, knn_stats
+from jeanplot.plots.smooth_kernel import build_tree, smooth_stats
 from jeanplot.plots.ticks import format_powers, setup_transformed_axis
 
 from .plotting_core import get_reordered_protein_names
@@ -39,7 +39,7 @@ def smooth_line_plot(
         assert slice_at.shape == (x.shape[1] - 1,)
         xquery = np.concatenate([xquery, np.tile(slice_at, (xquery.shape[0], 1))], axis=1)
 
-    z = knn_stats(xquery, y, tree=tree, stats="mean", **kw)
+    z = smooth_stats(xquery, y, tree=tree, stats="mean", **kw)
     ax.plot(xquery[:, 0], z, label=label, color=color, lw=lw, marker=marker, markevery=markevery)
 
     ax.set_xlabel(input_names[0])
