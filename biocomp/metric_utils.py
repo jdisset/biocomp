@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Jean Disset
-"""Centralized metric calculations for biocomp.
+"""Centralized biocomp metrics: nRMSE, NRE, SNR, grid stats, distributional
+objectives, RegressionStats — all the biocomp-domain validation logic.
 
-Single source of truth for all validation metrics: MSE, RMSE, MAE, nRMSE, NRE, SNR, R², etc.
-All functions apply defensive programming: assert early, fail loud.
+The elementary kernels (mse, rmse, mae, r_squared, max_error) are re-imported
+from jeanplot.stats, the SSOT for the generic formulas. We add the domain layer
+(space-mismatch checks, p-value, grids, objectives) on top.
 
 Space conventions:
   - LATENT space: normalized [0, 1] range used by the model
@@ -21,6 +23,15 @@ from typing import Any, TypeAlias
 import numpy as np
 from scipy import stats as scipy_stats
 from pydantic import BaseModel
+
+# SSOT: jeanplot owns the generic NaN-robust kernels; we re-export + build on them.
+from jeanplot.stats import (
+    mae as mae,
+    max_error as max_error,
+    mse as mse,
+    r_squared as r_squared,
+    rmse as rmse,
+)
 
 
 NdArray: TypeAlias = np.ndarray
@@ -81,23 +92,6 @@ def _warn_space_mismatch(y_true: NdArray, y_pred: NdArray) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def mse(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> float:
-    """mean squared error, ignoring non-finite values (nan if no valid pairs)."""
-    yt, yp = _to_1d(y_true), _to_1d(y_pred)
-    if validate:
-        _validate_same_length(yt, yp)
-        _warn_space_mismatch(yt, yp)
-    mask = _finite_mask(yt, yp)
-    if not np.any(mask):
-        return float("nan")
-    return float(np.mean((yp[mask] - yt[mask]) ** 2))
-
-
-def rmse(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> float:
-    """root mean squared error."""
-    return float(np.sqrt(mse(y_true, y_pred, validate=validate)))
-
-
 def ermse(mse_model: float, mse_floor: float) -> float:
     """excess RMSE: sqrt(max(0, mMSE - kMSE)). Model error above the kernel
     noise floor (kRMSE). Noise-corrected, same units as RMSE. Aggregate over
@@ -105,37 +99,9 @@ def ermse(mse_model: float, mse_floor: float) -> float:
     return float(np.sqrt(max(0.0, float(mse_model) - float(mse_floor))))
 
 
-def mae(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> float:
-    """mean absolute error, ignoring non-finite values."""
-    yt, yp = _to_1d(y_true), _to_1d(y_pred)
-    if validate:
-        _validate_same_length(yt, yp)
-        _warn_space_mismatch(yt, yp)
-    mask = _finite_mask(yt, yp)
-    if not np.any(mask):
-        return float("nan")
-    return float(np.mean(np.abs(yp[mask] - yt[mask])))
-
-
-def r_squared(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> float:
-    """R² = 1 - SS_res/SS_tot (nan if SS_tot is zero / constant y_true)."""
-    yt, yp = _to_1d(y_true), _to_1d(y_pred)
-    if validate:
-        _validate_same_length(yt, yp)
-        _warn_space_mismatch(yt, yp)
-    mask = _finite_mask(yt, yp)
-    if not np.any(mask):
-        return float("nan")
-    yt_v, yp_v = yt[mask], yp[mask]
-    ss_res = np.sum((yp_v - yt_v) ** 2)
-    ss_tot = np.sum((yt_v - np.mean(yt_v)) ** 2)
-    if ss_tot < EPSILON:
-        return float("nan")
-    return float(1.0 - ss_res / ss_tot)
-
-
 def pearson_r(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> tuple[float, float]:
-    """pearson correlation coefficient and p-value ((nan, nan) if <3 valid pairs)."""
+    """pearson correlation coefficient AND p-value ((nan, nan) if <3 valid pairs).
+    For just the coefficient, the SSOT is jeanplot.stats.pearson_r."""
     yt, yp = _to_1d(y_true), _to_1d(y_pred)
     if validate:
         _validate_same_length(yt, yp)
@@ -144,17 +110,6 @@ def pearson_r(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> tup
         return float("nan"), float("nan")
     r, p = scipy_stats.pearsonr(yt[mask], yp[mask])
     return float(r), float(p)
-
-
-def max_error(y_true: NdArray, y_pred: NdArray, *, validate: bool = True) -> float:
-    """maximum absolute error."""
-    yt, yp = _to_1d(y_true), _to_1d(y_pred)
-    if validate:
-        _validate_same_length(yt, yp)
-    mask = _finite_mask(yt, yp)
-    if not np.any(mask):
-        return float("nan")
-    return float(np.max(np.abs(yp[mask] - yt[mask])))
 
 
 def percentile_error(

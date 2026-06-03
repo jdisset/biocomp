@@ -99,6 +99,7 @@ dependencies = [
 	"h5py",
 	"svgpath2mpl",
 	"svgelements>=1.9.0",
+	"jeanplot",
 ]
 
 [tool.hatch.build.targets.wheel]
