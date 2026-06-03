@@ -359,7 +359,9 @@ def _discover_inverse_layer_pair_specs(
         layer_key = (fwd_stacknode.layer_number, inv_stacknode.layer_number)
         if layer_key in seen:
             # Increment n_node_pairs on the existing spec
-            idx = next(i for i, s in enumerate(pair_specs) if (s.fwd_layer_id, s.inv_layer_id) == layer_key)
+            idx = next(
+                i for i, s in enumerate(pair_specs) if (s.fwd_layer_id, s.inv_layer_id) == layer_key
+            )
             pair_specs[idx] = pair_specs[idx]._replace(
                 n_node_pairs=pair_specs[idx].n_node_pairs + 1,
             )
@@ -403,6 +405,7 @@ def _apply_pair_node(
     key,
     network_id,
     rate_override=None,
+    context_vector=None,
 ):
     kwargs = {
         "random_vars": random_vars,
@@ -413,6 +416,8 @@ def _apply_pair_node(
     }
     if rate_override is not None:
         kwargs["rate_override"] = rate_override
+    if context_vector is not None:
+        kwargs["context_vector"] = context_vector
     return apply_f(*inputs, **kwargs)
 
 
@@ -443,6 +448,12 @@ def _single_inverse_cycle_sample(
     node_id = jnp.asarray(0, dtype=jnp.int32)
     network_id = jnp.asarray(0, dtype=jnp.int32)
 
+    # Same context the forward path concatenates onto every MLP; None for
+    # context-free models, so the shared weights stay base-sized as before.
+    from biocomp.context import resolve_context_vector
+
+    context_vector = resolve_context_vector(params, network_id, sample_key)
+
     if spec.is_multi_input:
         zeros = jnp.zeros((spec.n_fwd_inputs, *spec.fwd_input_shape), dtype=dtype)
         stacked_inputs = zeros.at[spec.output_slot].set(fwd_input)
@@ -459,6 +470,7 @@ def _single_inverse_cycle_sample(
         key=sample_key,
         network_id=network_id,
         rate_override=rate_override,
+        context_vector=context_vector,
     )
 
     if spec.is_slotted_output:
@@ -476,6 +488,7 @@ def _single_inverse_cycle_sample(
         key=sample_key,
         network_id=network_id,
         rate_override=rate_override,
+        context_vector=context_vector,
     )
     recon = jnp.ravel(inv_out)[:1]
     return jnp.mean((recon - x_target) ** 2)
@@ -612,7 +625,14 @@ def _prepare_inverse_consistency_context(
     # Skip pair discovery entirely when weight is statically zero --
     # avoids tracing layer-pair HLO ops that would be dead code.
     if isinstance(weight, int | float) and weight == 0:
-        return [], {}, int(batch_size), bool(sample_embeddings), float(embedding_low), float(embedding_high)
+        return (
+            [],
+            {},
+            int(batch_size),
+            bool(sample_embeddings),
+            float(embedding_low),
+            float(embedding_high),
+        )
 
     pair_specs, pair_counts = _discover_inverse_layer_pair_specs(stack)
     total_node_pairs = sum(s.n_node_pairs for s in pair_specs)
@@ -1300,6 +1320,8 @@ class TrainingConfig(OptimConfig):
     n_batches: int = 2048
     streaming_batches: bool = False  # generate batches on-demand to reduce memory
     clear_source_data: bool = True  # clear DataManager data after batch generation
+    # Freeze the backbone and train ONLY the cell_type embedding (embed-only transfer).
+    train_context_only: bool = False
 
 
 ##────────────────────────────────────────────────────────────────────────────}}}
@@ -1443,6 +1465,15 @@ def start(
 
     if training_config.clear_source_data and not streaming_mode:
         dman.clear_source_data()
+
+    if training_config.train_context_only:
+        from biocomp.context import freeze_non_context_shared
+
+        n_frozen = freeze_non_context_shared(params)
+        logger.info(
+            f"train_context_only: froze {n_frozen} shared backbone params, "
+            "training the cell_type embedding only"
+        )
 
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
 
