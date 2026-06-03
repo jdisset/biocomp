@@ -92,6 +92,46 @@ def _indices_path(name: str) -> str:
     return f"global/context/{name}_indices"
 
 
+# ── Value sets ────────────────────────────────────────────────────────────────
+
+
+def derive_context_values(
+    networks: list, override: dict[str, list[str]] | None = None
+) -> dict[str, list[str]]:
+    """Effective per-context-var value list for a set of networks.
+
+    Default value first (index 0, the unknown-fallback row), then the remaining
+    distinct values present in the networks, sorted for determinism. `override`
+    (e.g. a loaded model's stored values) wins per context var so codebook rows stay
+    aligned with how the model was trained. The set of cell types a model knows is
+    thus derived from its data, not a global constant.
+    """
+    out: dict[str, list[str]] = {}
+    for ce in CONTEXT_EMBEDDINGS:
+        if override is not None and ce.name in override:
+            out[ce.name] = list(override[ce.name])
+            continue
+        present = {net.metadata.get(ce.name, ce.default_value) for net in networks}
+        out[ce.name] = [ce.default_value, *sorted(present - {ce.default_value})]
+    return out
+
+
+def infer_context_values_from_params(params: ParameterTree) -> dict[str, list[str]]:
+    """Best-effort value list for a legacy model that has a codebook but stored no
+    values: take the seed `available_values` (default first), truncated to the
+    codebook row count. For the original single-cell-type models this yields the
+    default alone, which is correct."""
+    out: dict[str, list[str]] = {}
+    for ce in CONTEXT_EMBEDDINGS:
+        means_path = _codebook_means_path(ce.name)
+        if means_path not in params:
+            continue
+        n = int(params[means_path].shape[0])
+        seed = [ce.default_value, *[v for v in ce.available_values if v != ce.default_value]]
+        out[ce.name] = seed[:n]
+    return out
+
+
 # ── Initialization ────────────────────────────────────────────────────────────
 
 
@@ -100,56 +140,119 @@ def init_context_params(
     networks: list,
     key: ArrayLike,
     allow_create: bool = True,
-) -> None:
-    """Initialize context embedding codebooks and per-network index mapping.
+    context_values: dict[str, list[str]] | None = None,
+) -> dict[str, list[str]]:
+    """Initialize context codebooks and (always) the per-network index mapping.
 
-    Idempotent. `allow_create=False` skips creation when params lack the codebook --
-    required back-compat for models trained before context embeddings existed.
+    The codebook is created once, sized to the effective value list (derived from
+    `networks`, or taken from `context_values` for a loaded model). The per-network
+    index array is rebuilt every call so evaluation over new networks maps correctly;
+    a value absent from this model's codebook falls back to the default row.
+    `allow_create=False` skips a context var whose codebook is missing (back-compat
+    for models trained before context embeddings existed). Returns the effective
+    value list per context var (for persisting on the model).
     """
+    used: dict[str, list[str]] = {}
     if not CONTEXT_EMBEDDINGS:
-        return
+        return used
+
+    values = derive_context_values(networks, context_values)
 
     for ce in CONTEXT_EMBEDDINGS:
         means_path = _codebook_means_path(ce.name)
         logstdevs_path = _codebook_logstdevs_path(ce.name)
         indices_path = _indices_path(ce.name)
 
-        if not allow_create and means_path not in params:
-            logger.info(f"Context embedding '{ce.name}' not in loaded params; skipping (back-compat).")
-            continue
+        ce_values = values[ce.name]
+        used[ce.name] = ce_values
 
-        if means_path in params:
-            logger.debug(f"Context embedding '{ce.name}' already initialized, skipping")
-            continue
+        if means_path not in params:
+            if not allow_create:
+                logger.info(
+                    f"Context embedding '{ce.name}' not in loaded params; skipping (back-compat)."
+                )
+                continue
+            key, k1 = jax.random.split(key)
+            params[means_path] = jax.random.normal(k1, (len(ce_values), ce.embedding_dim)) * 0.1
+            params[logstdevs_path] = jnp.full((len(ce_values), ce.embedding_dim), -3.0)
 
-        key, k1 = jax.random.split(key)
-        n_values = len(ce.available_values)
-
-        # Codebook: small random init for means, conservative logstdevs
-        params[means_path] = jax.random.normal(k1, (n_values, ce.embedding_dim)) * 0.1
-        params[logstdevs_path] = jnp.full((n_values, ce.embedding_dim), -3.0)
-
-        # Build value->index mapping
-        value_to_idx = {v: i for i, v in enumerate(ce.available_values)}
-
-        # Per-network index array
+        # Per-network index array, rebuilt every call (unknown value -> default row).
+        value_to_idx = {v: i for i, v in enumerate(ce_values)}
+        default_idx = value_to_idx[ce.default_value]
         indices = []
         for net in networks:
             val = net.metadata.get(ce.name, ce.default_value)
             if val not in value_to_idx:
-                logger.warning(
-                    f"Context '{ce.name}': unknown value '{val}' for network '{net.name}', "
-                    f"using default '{ce.default_value}'"
+                logger.debug(
+                    f"Context '{ce.name}': '{val}' not in this model's codebook "
+                    f"{ce_values}; using default '{ce.default_value}'."
                 )
-                val = ce.default_value
-            indices.append(value_to_idx[val])
+            indices.append(value_to_idx.get(val, default_idx))
 
-        params.at(indices_path, jnp.array(indices, dtype=jnp.int32), tags=[NON_GRAD_TAG])
+        params.at(
+            indices_path,
+            jnp.array(indices, dtype=jnp.int32),
+            tags=[NON_GRAD_TAG],
+            overwrite=True,
+        )
 
         logger.info(
-            f"Context embedding '{ce.name}': {n_values} values, dim={ce.embedding_dim}, "
-            f"{len(networks)} networks mapped"
+            f"Context embedding '{ce.name}': {len(ce_values)} values {ce_values}, "
+            f"dim={ce.embedding_dim}, {len(networks)} networks mapped"
         )
+    return used
+
+
+def grow_context_codebook(
+    params: ParameterTree,
+    source_shared: ParameterTree,
+    source_values: dict[str, list[str]],
+    target_values: dict[str, list[str]],
+    key: ArrayLike,
+) -> None:
+    """Rebuild each context codebook in `params` to `target_values`, copying trained
+    rows from a pretrained model by VALUE (so warm-start grows the codebook instead of
+    overwriting it). Values shared with the source keep their learned mean/logstdev;
+    new values get a fresh init. Robust to value-ordering differences. Mutates
+    `params` and re-tags the codebook as shared."""
+    for ce in CONTEXT_EMBEDDINGS:
+        means_path = _codebook_means_path(ce.name)
+        logstdevs_path = _codebook_logstdevs_path(ce.name)
+        if means_path not in source_shared or ce.name not in source_values:
+            continue
+        src_idx = {v: i for i, v in enumerate(source_values[ce.name])}
+        tgt = target_values[ce.name]
+        key, k1 = jax.random.split(key)
+        means = jax.random.normal(k1, (len(tgt), ce.embedding_dim)) * 0.1
+        logstdevs = jnp.full((len(tgt), ce.embedding_dim), -3.0)
+        src_means = source_shared[means_path]
+        src_logstdevs = source_shared[logstdevs_path]
+        for j, v in enumerate(tgt):
+            if v in src_idx:
+                means = means.at[j].set(src_means[src_idx[v]])
+                logstdevs = logstdevs.at[j].set(src_logstdevs[src_idx[v]])
+        params.at(means_path, means, tags=["shared"], overwrite=True)
+        params.at(logstdevs_path, logstdevs, tags=["shared"], overwrite=True)
+
+
+# ── Freezing ──────────────────────────────────────────────────────────────────
+
+
+CONTEXT_PATH_PREFIX = "shared/context/"
+
+
+def freeze_non_context_shared(params: ParameterTree) -> int:
+    """Tag every trainable shared param OUTSIDE `shared/context/` as non_grad, so a
+    warm-started run trains ONLY the cell_type embedding (the rung-1/2 'embed-only'
+    mode). The existing static/dynamic split already excludes `non_grad`, so no other
+    plumbing is needed. Returns the number of params frozen."""
+    n = 0
+    for path, _ in list(params.data.iter_leaves()):
+        sp = str(path)
+        if sp.startswith("shared/") and not sp.startswith(CONTEXT_PATH_PREFIX):
+            params.tag(path, ["non_grad"])
+            n += 1
+    return n
 
 
 # ── Resolution (JIT-compatible) ──────────────────────────────────────────────
