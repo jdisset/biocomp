@@ -980,7 +980,7 @@ class ParameterTree:
         )
 
     def update_leaves_by_path(
-        self, paths_to_update: list[ParamPath], update_func: Callable[[Any], Any]
+        self, paths_to_update: list[ParamPath | str], update_func: Callable[[Any], Any]
     ) -> "ParameterTree":
         """
         Applies a function to specific leaves of the data PTree and returns a new ParameterTree.

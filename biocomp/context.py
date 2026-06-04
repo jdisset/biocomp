@@ -10,6 +10,8 @@ Adding a new context variable = add one entry to CONTEXT_EMBEDDINGS.
 No node code changes needed.
 """
 
+from collections.abc import Callable
+
 import jax
 import jax.numpy as jnp
 from pydantic import BaseModel
@@ -95,25 +97,35 @@ def _indices_path(name: str) -> str:
 # ── Value sets ────────────────────────────────────────────────────────────────
 
 
+def _ordered_values(ce: ContextEmbedding, values: set[str]) -> list[str]:
+    # row 0 = default (the unknown-fallback row), then the rest sorted for determinism
+    return [ce.default_value, *sorted(values - {ce.default_value})]
+
+
 def derive_context_values(
     networks: list, override: dict[str, list[str]] | None = None
 ) -> dict[str, list[str]]:
-    """Effective per-context-var value list for a set of networks.
-
-    Default value first (index 0, the unknown-fallback row), then the remaining
-    distinct values present in the networks, sorted for determinism. `override`
-    (e.g. a loaded model's stored values) wins per context var so codebook rows stay
-    aligned with how the model was trained. The set of cell types a model knows is
-    thus derived from its data, not a global constant.
-    """
+    """Per-context-var value list a set of networks needs. `override` (e.g. a loaded
+    model's stored values) wins per var so codebook rows stay aligned with how the model
+    was trained. So a model's known cell types come from its data, not a global constant."""
     out: dict[str, list[str]] = {}
     for ce in CONTEXT_EMBEDDINGS:
         if override is not None and ce.name in override:
             out[ce.name] = list(override[ce.name])
             continue
-        present = {net.metadata.get(ce.name, ce.default_value) for net in networks}
-        out[ce.name] = [ce.default_value, *sorted(present - {ce.default_value})]
+        out[ce.name] = _ordered_values(
+            ce, {net.metadata.get(ce.name, ce.default_value) for net in networks}
+        )
     return out
+
+
+def union_context_values(*value_dicts: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Warm-start GROW semantics: per-var union of all inputs, so a fine-tune never drops
+    a cell type the pretrained model knew (e.g. embed-only on line B keeps line A's row)."""
+    return {
+        ce.name: _ordered_values(ce, set().union(*(d.get(ce.name, []) for d in value_dicts)))
+        for ce in CONTEXT_EMBEDDINGS
+    }
 
 
 def infer_context_values_from_params(params: ParameterTree) -> dict[str, list[str]]:
@@ -253,6 +265,39 @@ def freeze_non_context_shared(params: ParameterTree) -> int:
             params.tag(path, ["non_grad"])
             n += 1
     return n
+
+
+def make_codebook_freeze_hook(params: ParameterTree) -> Callable | None:
+    """Post-update hook for embed-only: pin every codebook row NOT referenced by the
+    training data to its warm-start value, so only the adapted line's row moves (the
+    codebook is a single leaf, so per-leaf tagging can't freeze it row-wise; decoupled
+    weight decay / Adam momentum can't drift a pinned row). Active rows are data-driven:
+    the indices the forward path uses. None when context is uninitialized."""
+    if not CONTEXT_EMBEDDINGS:
+        return None
+
+    def per_rep(arr, base_ndim):  # codebook (2d) and indices (1d) are replicated on axis 0
+        return arr[0] if arr.ndim > base_ndim else arr
+
+    pinned: dict[str, tuple[jnp.ndarray, jnp.ndarray]] = {}
+    for ce in CONTEXT_EMBEDDINGS:
+        ipath = _indices_path(ce.name)
+        if ipath not in params:
+            continue
+        active = jnp.unique(per_rep(params[ipath], 1))
+        for path in (_codebook_means_path(ce.name), _codebook_logstdevs_path(ce.name)):
+            buf = per_rep(params[path], 2)
+            trainable = jnp.zeros(buf.shape[0], bool).at[active].set(True)[:, None]
+            pinned[path] = (buf, trainable)
+    if not pinned:
+        return None
+
+    def hook(p: ParameterTree, *a, **kw) -> ParameterTree:
+        for path, (buf, trainable) in pinned.items():
+            p = p.update_leaves_by_path([path], lambda v, b=buf, t=trainable: jnp.where(t, v, b))
+        return p
+
+    return hook
 
 
 # ── Resolution (JIT-compatible) ──────────────────────────────────────────────

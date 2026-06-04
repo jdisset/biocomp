@@ -1466,13 +1466,15 @@ def start(
     if training_config.clear_source_data and not streaming_mode:
         dman.clear_source_data()
 
+    post_update_hook = None
     if training_config.train_context_only:
-        from biocomp.context import freeze_non_context_shared
+        from biocomp.context import freeze_non_context_shared, make_codebook_freeze_hook
 
         n_frozen = freeze_non_context_shared(params)
+        post_update_hook = make_codebook_freeze_hook(params)
         logger.info(
-            f"train_context_only: froze {n_frozen} shared backbone params, "
-            "training the cell_type embedding only"
+            f"train_context_only: froze {n_frozen} shared backbone params + pinned "
+            "non-active codebook rows; training the adapted line's embedding only"
         )
 
     static, dynamic = params.filter_by_tag(["non_grad", "local"])
@@ -1502,6 +1504,7 @@ def start(
             optimizer,
             fields_to_keep_in_history=training_config.keep_in_history,
             scannable=True,
+            post_update_hook=post_update_hook,
         )
 
         def step(params: ParameterTree, opt_state, step_key, xs, ys, num_z):
