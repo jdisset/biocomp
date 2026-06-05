@@ -84,6 +84,14 @@ def _aligned_quantization_kl_inputs(params):
     return qvalues, logstds, counts, original_counts_sum
 
 
+def _gaussian_kl(values, logstds, counts, counts_sum):
+    """Count-weighted mean KL(N(value, σ) || N(0,1)) with σ = stable_sigma(logstds).
+    Shared kernel for the part (quantization) and context codebooks."""
+    std = stable_sigma(logstds, min_std=1e-3)
+    kl = 0.5 * (counts * (values**2 + std**2 - 1 - 2 * logstds)).sum() / counts_sum
+    return kl, std
+
+
 def _quantization_kl_loss(params, kl_weight, step):
     """KL(q || N(0,1)) for variational codebook embeddings, weighted by usage counts.
 
@@ -94,9 +102,23 @@ def _quantization_kl_loss(params, kl_weight, step):
     """
     klw = as_schedule(kl_weight)(step)
     qvalues, logstds, counts, original_counts_sum = _aligned_quantization_kl_inputs(params)
-    std = stable_sigma(logstds, min_std=1e-3)
-    kl = 0.5 * (counts * (qvalues**2 + std**2 - 1 - 2 * logstds)).sum() / original_counts_sum * klw
-    return kl, klw, qvalues, logstds, counts, std
+    kl, std = _gaussian_kl(qvalues, logstds, counts, original_counts_sum)
+    return kl * klw, klw, qvalues, logstds, counts, std
+
+
+def _context_kl_loss(params, kl_weight, step):
+    """KL(q || N(0,1)) on the context codebooks, so the cell-type space is regularized
+    exactly like the part embeddings -- a few-shot line lands in a smooth, prior-anchored
+    region instead of overfitting/collapsing. Zero for context-free models."""
+    import jax.numpy as jnp
+
+    from biocomp.context import context_codebook_kl_inputs
+
+    inputs = context_codebook_kl_inputs(params)
+    if inputs is None:
+        return jnp.asarray(0.0)
+    kl, _ = _gaussian_kl(*inputs)
+    return kl * as_schedule(kl_weight)(step)
 
 
 def generate_batches(
@@ -731,6 +753,7 @@ def sorting_loss(
         )
 
         kl_loss, klw, qvalues, logstds, counts, std = _quantization_kl_loss(params, kl_weight, step)
+        kl_loss = kl_loss + _context_kl_loss(params, kl_weight, step)
 
         if grads_wrt_inputs.size > 0:
             negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))
@@ -1154,6 +1177,7 @@ def energy_sampling_loss(
         aux = {"yhat": yhat, "grads_wrt_inputs": grads_wrt_inputs, "full_output": full_output}
 
         kl_loss, klw, qvalues, logstds, counts, std = _quantization_kl_loss(params, kl_weight, step)
+        kl_loss = kl_loss + _context_kl_loss(params, kl_weight, step)
 
         if grads_wrt_inputs.size > 0:
             negative_grads = jnp.mean(jnp.clip(-grads_wrt_inputs, 0, None))

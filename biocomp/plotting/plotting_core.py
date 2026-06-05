@@ -124,6 +124,23 @@ def get_reordered_protein_names(
     return in_order, output_pos, reordered_input_names, output_name
 
 
+def circuit_axis_tags(network, input_order=None, network_index: int = 0) -> dict[str, str]:
+    """`{marker_protein: '$X_i$'}` in *display* order, so a genetic-circuit's axis
+    tags track the same `input_order` as the plotted surfaces (X_1 = first display
+    axis). `input_order=None` -> native order (identity). Tolerates the per-network
+    list-of-lists form (a single inner list broadcasts), mirroring
+    `reorder_plot_data_for_display`."""
+    if (
+        isinstance(input_order, list)
+        and input_order
+        and all(x is None or isinstance(x, list) for x in input_order)
+    ):
+        input_order = input_order[0] if len(input_order) == 1 else input_order[network_index]
+    raw = network.get_inverted_input_proteins()
+    in_order, *_ = get_reordered_protein_names(network, input_order)
+    return {raw[j]: f"$X_{{{i + 1}}}$" for i, j in enumerate(in_order)}
+
+
 def network_ticks_and_labels(network, rescaler, xmin=0, xmax=1, **kw):
     from biocomp.plotutils import ShortScientificFormatter
 

@@ -7,6 +7,8 @@ import jax.numpy as jnp
 import numpy as np
 from biocomp.context import (
     CONTEXT_EMBEDDINGS,
+    context_codebook_kl_inputs,
+    disable_context_variational,
     init_context_params,
     resolve_context_vector,
     total_context_dim,
@@ -349,3 +351,47 @@ def test_recipe_cell_type_custom():
 
     r = Recipe(cell_type="CHO")
     assert r.cell_type == "CHO"
+
+
+# ── context_codebook_kl_inputs ────────────────────────────────────────────────
+
+
+def test_context_codebook_kl_inputs_counts_and_shapes():
+    params = ParameterTree()
+    nets = _make_networks(["HEK293FT", "HEK293FT", "HEK293FT", "ARPE19"])
+    init_context_params(params, nets, jax.random.PRNGKey(0))
+
+    means, logstdevs, counts, total = context_codebook_kl_inputs(params)
+    ce = CONTEXT_EMBEDDINGS[0]
+    rows, dim = 2, ce.embedding_dim  # HEK293FT (row 0) + ARPE19 (row 1)
+    assert means.shape == (rows * dim,)
+    assert logstdevs.shape == (rows * dim,)
+    # 3 HEK networks -> row 0, 1 ARPE19 -> row 1; each count repeated across `dim` entries
+    np.testing.assert_array_equal(counts, jnp.array([3.0] * dim + [1.0] * dim))
+    assert float(total) == 4.0
+
+
+def test_context_codebook_kl_inputs_none_without_context():
+    assert context_codebook_kl_inputs(ParameterTree()) is None
+
+
+# ── disable_context_variational ───────────────────────────────────────────────
+
+
+def test_disable_context_variational_makes_resolution_deterministic():
+    params = ParameterTree()
+    init_context_params(params, _make_networks(["HEK293FT"]), jax.random.PRNGKey(0))
+    ce = CONTEXT_EMBEDDINGS[0]
+    # σ=1 so sampling would otherwise jitter the resolved vector across keys
+    params[_codebook_logstdevs_path(ce.name)] = jnp.zeros_like(
+        params[_codebook_logstdevs_path(ce.name)]
+    )
+    noisy_a = resolve_context_vector(params, 0, jax.random.PRNGKey(1))
+    noisy_b = resolve_context_vector(params, 0, jax.random.PRNGKey(2))
+    assert not jnp.allclose(noisy_a, noisy_b)  # sampling differs by key by default
+
+    disable_context_variational(params)
+    assert float(jnp.max(params[_codebook_logstdevs_path(ce.name)])) <= -100.0
+    a = resolve_context_vector(params, 0, jax.random.PRNGKey(1))
+    b = resolve_context_vector(params, 0, jax.random.PRNGKey(2))
+    assert jnp.allclose(a, b, atol=1e-3)  # pinned to the mean -> key-independent

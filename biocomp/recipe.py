@@ -286,6 +286,10 @@ def convert_to_slot(value):
     """Convert strings or lists of strings to Slot objects"""
     if isinstance(value, Slot):
         return value
+    elif value is None:
+        # an empty slot: Slot serializes part=None as None, so a round-tripped
+        # YAML carries a bare `- ` entry that loads back as None.
+        return Slot(part=None)
     elif isinstance(value, str):
         return Slot(part=value)
     elif isinstance(value, ABCSequence):
@@ -294,7 +298,7 @@ def convert_to_slot(value):
         raise ValueError(f"Cannot convert {type(value)} to Slot")
 
 
-SlotType = Annotated[Slot | str | list[str | None], BeforeValidator(convert_to_slot)]
+SlotType = Annotated[Slot | str | list[str | None] | None, BeforeValidator(convert_to_slot)]
 
 ##────────────────────────────────────────────────────────────────────────────}}}
 

@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Jean Disset
 """Target classes and sampling configs for design optimization."""
 
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Literal
@@ -195,3 +196,56 @@ class DataTarget(TargetBase):
 
 
 TargetUnion = SVGTarget | DataTarget
+
+
+# Ring (radius_frac, fill) gradient matching the paper's hand-made dot targets:
+# grey rim -> black core, so the target is a smooth bump rather than a step.
+_DOT_RINGS = ((1.0, "#D9D9D9"), (0.84, "#A6A6A6"), (0.6, "#565656"), (0.36, "black"))
+
+
+def make_dot_target(
+    cx: float = 0.5,
+    cy: float = 0.5,
+    radius: float = 0.1,
+    lo: float = 0.0,
+    hi: float = 0.6,
+    latent_out: tuple[float, float] = (0.05, 0.45),
+    name: str | None = None,
+    out_dir: str | Path | None = None,
+) -> SVGTarget:
+    """Procedural radial-dot target. Centre (cx, cy) and `radius` are in latent
+    (input-space) coordinates over the square extent [lo, hi]. Writes a temp SVG
+    (grey-rim → black-core bump) and returns an SVGTarget pinned to that extent."""
+    cx, cy, radius, lo, hi = float(cx), float(cy), float(radius), float(lo), float(hi)
+    span = hi - lo
+    assert span > 0, f"extent must be increasing, got [{lo}, {hi}]"
+    assert lo <= cx <= hi and lo <= cy <= hi, f"centre ({cx}, {cy}) outside [{lo}, {hi}]"
+    assert 0 < radius <= span, f"radius {radius} must be in (0, {span}]"
+
+    w = 1000.0
+    px = (cx - lo) / span * w
+    py = (1.0 - (cy - lo) / span) * w  # SVG y-down -> latent y-up (see sample_from_svg)
+    pr = radius / span * w
+    circles = "\n".join(
+        f'  <circle cx="{px:.3f}" cy="{py:.3f}" r="{pr * frac:.3f}" fill="{col}"/>'
+        for frac, col in _DOT_RINGS
+    )
+    svg = (
+        f'<svg width="1000" height="1000" viewBox="0 0 1000 1000" fill="none" '
+        f'xmlns="http://www.w3.org/2000/svg">\n{circles}\n</svg>\n'
+    )
+
+    name = name or f"dot_c{cx:g}-{cy:g}_r{radius:g}"
+    d = Path(out_dir) if out_dir else Path(tempfile.gettempdir()) / "biocomp_dot_targets"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{name}.svg"
+    path.write_text(svg)
+    logger.info(f"dot target '{name}': centre=({cx:g},{cy:g}) r={radius:g} extent=[{lo:g},{hi:g}] -> {path}")
+    return SVGTarget(
+        path=str(path),
+        name=name,
+        latent_x=(lo, hi),
+        latent_y=(lo, hi),
+        latent_out=latent_out,
+        transform_to_log_space=False,
+    )

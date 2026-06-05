@@ -451,7 +451,10 @@ class DesignConfig(DesignOptimConfig):
     hard_pruning_preserve_minimum_tus: int = 1
     hard_pruning_prune_margin: float = 0.1
     hard_pruning_disable_tu_masking_final_segment: bool = False
-    hard_pruning_commit_aware_final_guard: bool = True
+    # commit-aware variant needs design_prune_controller.evaluate_committed_snapshot,
+    # which is unimplemented — keep off until it exists. The non-commit-aware final
+    # guard (evaluate_segment_snapshot + loss-based best-synced selection) is complete.
+    hard_pruning_commit_aware_final_guard: bool = False
     hard_pruning_commit_aware_selection_interval: int = 64
     hard_pruning_top_percent: float | None = None
     hard_pruning_min_networks: int | None = None

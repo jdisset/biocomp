@@ -12,7 +12,14 @@ import jax.numpy as jnp
 import optax
 from types import SimpleNamespace
 
-from biocomp.train import TrainingConfig, sorting_loss, energy_sampling_loss, _quantization_kl_loss
+from biocomp.train import (
+    TrainingConfig,
+    sorting_loss,
+    energy_sampling_loss,
+    _quantization_kl_loss,
+    _gaussian_kl,
+    _context_kl_loss,
+)
 from biocomp.optimutils import make_training_step, create_counter, as_schedule
 from biocomp.parameters import ParameterTree
 from biocomp.utils import PartialFunction, PartialFunctionResult
@@ -36,17 +43,12 @@ class TestTrainingConfig:
     def test_optimizer_creation(self):
         """Test basic optimizer creation."""
         config = TrainingConfig(
-            optimizer_stack=[
-                PartialFunction(
-                    func="optax.sgd",
-                    kwargs={"learning_rate": 0.01}
-                )
-            ]
+            optimizer_stack=[PartialFunction(func="optax.sgd", kwargs={"learning_rate": 0.01})]
         )
 
         optimizer = config.optimizer
-        assert hasattr(optimizer, 'init')
-        assert hasattr(optimizer, 'update')
+        assert hasattr(optimizer, "init")
+        assert hasattr(optimizer, "update")
 
         # Test initialization with dummy params
         params = {"weights": jnp.array([1.0, 2.0])}
@@ -56,13 +58,8 @@ class TestTrainingConfig:
     def test_learning_rate_injection(self):
         """Test learning rate injection for tracking."""
         config = TrainingConfig(
-            optimizer_stack=[
-                PartialFunction(
-                    func="optax.adamw",
-                    kwargs={"learning_rate": 1e-3}
-                )
-            ],
-            keep_in_history=["loss", "learning_rate"]
+            optimizer_stack=[PartialFunction(func="optax.adamw", kwargs={"learning_rate": 1e-3})],
+            keep_in_history=["loss", "learning_rate"],
         )
 
         # Test regular optimizer
@@ -75,7 +72,7 @@ class TestTrainingConfig:
         injected_state = injected_opt.init(params)
 
         # Check that learning rate is accessible in injected version
-        lr = optax.tree_utils.tree_get(injected_state, 'learning_rate', default=None)
+        lr = optax.tree_utils.tree_get(injected_state, "learning_rate", default=None)
         assert lr is not None
         assert abs(lr - 1e-3) < 1e-6
 
@@ -85,10 +82,7 @@ class TestTrainingConfig:
         config = TrainingConfig(
             optimizer_stack=[
                 # Gradient clipping
-                PartialFunction(
-                    func="optax.clip_by_global_norm",
-                    kwargs={"max_norm": 1.0}
-                ),
+                PartialFunction(func="optax.clip_by_global_norm", kwargs={"max_norm": 1.0}),
                 # AdamW with learning rate schedule
                 PartialFunction(
                     func="optax.adamw",
@@ -101,13 +95,13 @@ class TestTrainingConfig:
                                 "peak_value": 1.5e-3,
                                 "warmup_steps": 100,
                                 "decay_steps": 1000,
-                                "end_value": 2e-5
-                            }
-                        )
-                    }
-                )
+                                "end_value": 2e-5,
+                            },
+                        ),
+                    },
+                ),
             ],
-            keep_in_history=["loss", "learning_rate"]
+            keep_in_history=["loss", "learning_rate"],
         )
 
         # Test that injection works with complex stack
@@ -119,8 +113,8 @@ class TestTrainingConfig:
         lr_found = False
         if isinstance(state, tuple):
             for state_comp in state:
-                if hasattr(state_comp, 'hyperparams') and 'learning_rate' in state_comp.hyperparams:
-                    lr = state_comp.hyperparams['learning_rate']
+                if hasattr(state_comp, "hyperparams") and "learning_rate" in state_comp.hyperparams:
+                    lr = state_comp.hyperparams["learning_rate"]
                     assert abs(lr - 5e-4) < 1e-6  # Should start at init_value
                     lr_found = True
                     break
@@ -153,7 +147,7 @@ class TestLossFunctions:
         params = {"weights": jnp.array([1.0, 2.0])}
         state = counter.init(params)
 
-        assert hasattr(state, 'count')
+        assert hasattr(state, "count")
         assert state.count == 0
 
         # Test update
@@ -196,7 +190,14 @@ class TestLossFunctions:
             self.content_embedding_names = content_embedding_names or {}
 
     class _ToyStackNode:
-        def __init__(self, network_id: int, node_id: int, layer_number: int, node_position_in_layer: int, incoming_edges=None):
+        def __init__(
+            self,
+            network_id: int,
+            node_id: int,
+            layer_number: int,
+            node_position_in_layer: int,
+            incoming_edges=None,
+        ):
             self.network_id = network_id
             self.node_id = node_id
             self.layer_number = layer_number
@@ -236,7 +237,10 @@ class TestLossFunctions:
                 content_embedding_names={"tc_rate": ("00_empty_tc",)}
             )
             self._fwd_stacknode = TestLossFunctions._ToyStackNode(
-                network_id=0, node_id=0, layer_number=0, node_position_in_layer=0,
+                network_id=0,
+                node_id=0,
+                layer_number=0,
+                node_position_in_layer=0,
                 incoming_edges=[tc_edge],
             )
             self._inv_stacknode = TestLossFunctions._ToyStackNode(
@@ -415,7 +419,9 @@ class TestLossFunctions:
             negative_grad_penalty=0.0,
         )(params, ParameterTree(), x, y, z, key, 0)
 
-        assert not jnp.allclose(aux_no_pb["sublosses"]["main_loss"], aux_full_pb["sublosses"]["main_loss"])
+        assert not jnp.allclose(
+            aux_no_pb["sublosses"]["main_loss"], aux_full_pb["sublosses"]["main_loss"]
+        )
         assert not jnp.allclose(loss_no_pb, loss_full_pb)
 
     def test_sorting_loss_z_sorting_term_changes_main_loss_when_enabled(self):
@@ -613,9 +619,10 @@ class TestLossFunctions:
         assert "inverse_consistency_loss" in aux_good["sublosses"]
         assert float(aux_good["debug"]["inverse_consistency_n_groups"]) == 1.0
         assert float(aux_good["debug"]["inverse_consistency_n_pairs"]) == 1.0
-        assert aux_bad["sublosses"]["inverse_consistency_loss"] > aux_good["sublosses"][
-            "inverse_consistency_loss"
-        ]
+        assert (
+            aux_bad["sublosses"]["inverse_consistency_loss"]
+            > aux_good["sublosses"]["inverse_consistency_loss"]
+        )
         assert loss_bad > loss_good
 
     def test_energy_sampling_loss_is_finite(self):
@@ -685,9 +692,10 @@ class TestLossFunctions:
         assert "inverse_consistency_loss" in aux_good["sublosses"]
         assert float(aux_good["debug"]["inverse_consistency_n_groups"]) == 1.0
         assert float(aux_good["debug"]["inverse_consistency_n_pairs"]) == 1.0
-        assert aux_bad["sublosses"]["inverse_consistency_loss"] > aux_good["sublosses"][
-            "inverse_consistency_loss"
-        ]
+        assert (
+            aux_bad["sublosses"]["inverse_consistency_loss"]
+            > aux_good["sublosses"]["inverse_consistency_loss"]
+        )
         assert loss_bad > loss_good
 
     def test_energy_sampling_loss_joint_differs_from_independent(self):
@@ -800,8 +808,12 @@ class TestLossFunctions:
             negative_grad_penalty=0.0,
         )(params, ParameterTree(), x, y, z, key, 0)
 
-        assert not jnp.allclose(aux_no_cov["sublosses"]["main_loss"], aux_cov["sublosses"]["main_loss"])
-        assert not jnp.allclose(aux_no_cov["sublosses"]["coverage_loss"], aux_cov["sublosses"]["coverage_loss"])
+        assert not jnp.allclose(
+            aux_no_cov["sublosses"]["main_loss"], aux_cov["sublosses"]["main_loss"]
+        )
+        assert not jnp.allclose(
+            aux_no_cov["sublosses"]["coverage_loss"], aux_cov["sublosses"]["coverage_loss"]
+        )
         assert not jnp.allclose(loss_no_cov, loss_cov)
 
     def test_energy_sampling_loss_tail_pinball_changes_main_loss(self):
@@ -837,7 +849,9 @@ class TestLossFunctions:
 
         assert "tail_pinball_loss" in aux_tail["sublosses"]
         assert float(aux_tail["debug"]["tail_pinball_weight"]) == pytest.approx(0.05)
-        assert not jnp.allclose(aux_no_tail["sublosses"]["main_loss"], aux_tail["sublosses"]["main_loss"])
+        assert not jnp.allclose(
+            aux_no_tail["sublosses"]["main_loss"], aux_tail["sublosses"]["main_loss"]
+        )
         assert not jnp.allclose(loss_no_tail, loss_tail)
 
 
@@ -860,24 +874,18 @@ class TestTrainingStep:
 
             # Simple linear model
             output = jnp.dot(x, merged["model/weights"]) + merged["model/bias"]
-            loss = jnp.mean((output - y)**2)
+            loss = jnp.mean((output - y) ** 2)
             return loss, {"output": output}
 
         self.loss_func = simple_loss
 
         # Simple optimizer
-        self.optimizer = optax.chain(
-            create_counter(),
-            optax.sgd(learning_rate=0.01)
-        )
+        self.optimizer = optax.chain(create_counter(), optax.sgd(learning_rate=0.01))
 
     def test_non_scannable_step(self):
         """Test non-scannable training step."""
         training_step = make_training_step(
-            self.loss_func,
-            self.optimizer,
-            fields_to_keep_in_history=["loss"],
-            scannable=False
+            self.loss_func, self.optimizer, fields_to_keep_in_history=["loss"], scannable=False
         )
 
         # Prepare inputs
@@ -903,10 +911,7 @@ class TestTrainingStep:
     def test_scannable_step(self):
         """Test scannable training step."""
         training_step = make_training_step(
-            self.loss_func,
-            self.optimizer,
-            fields_to_keep_in_history=["loss"],
-            scannable=True
+            self.loss_func, self.optimizer, fields_to_keep_in_history=["loss"], scannable=True
         )
 
         # Prepare inputs
@@ -939,13 +944,8 @@ class TestTrainingStep:
         """Test learning rate tracking in training step."""
         # Create optimizer with learning rate injection
         config = TrainingConfig(
-            optimizer_stack=[
-                PartialFunction(
-                    func="optax.adamw",
-                    kwargs={"learning_rate": 1e-3}
-                )
-            ],
-            keep_in_history=["loss", "learning_rate"]
+            optimizer_stack=[PartialFunction(func="optax.adamw", kwargs={"learning_rate": 1e-3})],
+            keep_in_history=["loss", "learning_rate"],
         )
 
         injected_optimizer = config.create_optimizer_with_lr_injection()
@@ -954,7 +954,7 @@ class TestTrainingStep:
             self.loss_func,
             injected_optimizer,
             fields_to_keep_in_history=["loss", "learning_rate"],
-            scannable=False
+            scannable=False,
         )
 
         # Prepare inputs
@@ -981,12 +981,7 @@ class TestLearningRateExtraction:
     def test_fixed_learning_rate(self):
         """Test extraction of fixed learning rate."""
         config = TrainingConfig(
-            optimizer_stack=[
-                PartialFunction(
-                    func="optax.adamw",
-                    kwargs={"learning_rate": 1e-3}
-                )
-            ]
+            optimizer_stack=[PartialFunction(func="optax.adamw", kwargs={"learning_rate": 1e-3})]
         )
 
         optimizer = config.create_optimizer_with_lr_injection()
@@ -994,18 +989,14 @@ class TestLearningRateExtraction:
         state = optimizer.init(params)
 
         # Test tree_get method
-        lr = optax.tree_utils.tree_get(state, 'learning_rate', default=None)
+        lr = optax.tree_utils.tree_get(state, "learning_rate", default=None)
         assert lr is not None
         assert abs(lr - 1e-3) < 1e-6
 
     def test_scheduled_learning_rate(self):
         """Test extraction of scheduled learning rate."""
         schedule = optax.warmup_cosine_decay_schedule(
-            init_value=1e-7,
-            peak_value=1e-3,
-            warmup_steps=5,
-            decay_steps=20,
-            end_value=1e-5
+            init_value=1e-7, peak_value=1e-3, warmup_steps=5, decay_steps=20, end_value=1e-5
         )
 
         # Test direct optax injection
@@ -1016,11 +1007,11 @@ class TestLearningRateExtraction:
         state = optimizer.init(params)
 
         # Check hyperparams access
-        assert hasattr(state, 'hyperparams')
-        assert 'learning_rate' in state.hyperparams
+        assert hasattr(state, "hyperparams")
+        assert "learning_rate" in state.hyperparams
 
         # Initial learning rate should be close to init_value
-        lr = state.hyperparams['learning_rate']
+        lr = state.hyperparams["learning_rate"]
         assert abs(lr - 1e-7) < 1e-8
 
 
@@ -1031,12 +1022,7 @@ class TestIntegration:
         """Test a minimal training loop."""
         # Set up
         config = TrainingConfig(
-            optimizer_stack=[
-                PartialFunction(
-                    func="optax.adamw",
-                    kwargs={"learning_rate": 1e-3}
-                )
-            ],
+            optimizer_stack=[PartialFunction(func="optax.adamw", kwargs={"learning_rate": 1e-3})],
             keep_in_history=["loss", "learning_rate"],
             n_replicates=1,
             batches_per_step=2,
@@ -1056,7 +1042,7 @@ class TestIntegration:
                 merged = dynamic
 
             output = jnp.dot(x, merged["model/weights"]) + merged["model/bias"]
-            loss = jnp.mean((output - y)**2)
+            loss = jnp.mean((output - y) ** 2)
             return loss, {"output": output}
 
         # Set up training
@@ -1065,10 +1051,7 @@ class TestIntegration:
         opt_state = optimizer.init(dynamic)
 
         training_step = make_training_step(
-            loss_func,
-            optimizer,
-            fields_to_keep_in_history=config.keep_in_history,
-            scannable=False
+            loss_func, optimizer, fields_to_keep_in_history=config.keep_in_history, scannable=False
         )
 
         # Run training steps
@@ -1135,7 +1118,9 @@ class TestKLNormalization:
     """Test KL loss normalization for multi-dimensional embeddings."""
 
     @staticmethod
-    def _make_kl_params(rate_dim: int, values: list[list[float]], logstds: list[list[float]], counts: list[float]) -> ParameterTree:
+    def _make_kl_params(
+        rate_dim: int, values: list[list[float]], logstds: list[list[float]], counts: list[float]
+    ) -> ParameterTree:
         params = ParameterTree()
         params.at(
             "shared/quantization/values/tc",
@@ -1290,7 +1275,12 @@ class TestKLNormalization:
         def kl_1d_d0(vals):
             p = ParameterTree()
             p.at("shared/quantization/values/tc", vals, tags=["shared"], overwrite=True)
-            p.at("shared/quantization/logstdevs/tc", jnp.full((2, 1), logstd_val), tags=["shared"], overwrite=True)
+            p.at(
+                "shared/quantization/logstdevs/tc",
+                jnp.full((2, 1), logstd_val),
+                tags=["shared"],
+                overwrite=True,
+            )
             p.at("shared/quantization/counts/tc", counts, tags=["shared"], overwrite=True)
             kl, *_ = _quantization_kl_loss(p, kl_weight=1.0, step=0)
             return kl
@@ -1317,13 +1307,59 @@ class TestKLNormalization:
             logstds=[[-1.0], [0.5]],
             counts=[1.0, 4.0],
         )
-        kl, klw, qvalues, logstds, counts, std = _quantization_kl_loss(params, kl_weight=1.0, step=0)
+        kl, klw, qvalues, logstds, counts, std = _quantization_kl_loss(
+            params, kl_weight=1.0, step=0
+        )
 
         from biocomp.train import stable_sigma
+
         mu = qvalues
         s = stable_sigma(logstds, min_std=1e-3)
         expected = 0.5 * (counts * (mu**2 + s**2 - 1 - 2 * logstds)).sum() / counts.sum()
         assert float(kl) == pytest.approx(float(expected), rel=1e-6)
+
+
+def test_gaussian_kl_penalizes_collapse_and_large_mean():
+    one, n = jnp.ones(1), jnp.asarray(1.0)
+    kl_collapsed, _ = _gaussian_kl(jnp.zeros(1), jnp.array([-3.0]), one, n)  # sigma -> 0
+    kl_mid, _ = _gaussian_kl(jnp.zeros(1), jnp.array([-1.0]), one, n)
+    assert float(kl_collapsed) > float(kl_mid)  # more collapse -> larger penalty (anti-collapse)
+    kl_bigmean, _ = _gaussian_kl(jnp.array([2.0]), jnp.array([-1.0]), one, n)
+    assert float(kl_bigmean) > float(kl_mid)  # mean far from 0 -> larger penalty (shrinkage)
+
+
+def test_gaussian_kl_count_weighted_average():
+    # weighting by counts and normalizing by counts_sum = a weighted mean of per-entry KL
+    v, ls = jnp.array([0.0, 1.0]), jnp.array([-2.0, -1.0])
+    counts = jnp.array([3.0, 1.0])
+    kl, std = _gaussian_kl(v, ls, counts, counts.sum())
+    per = 0.5 * (v**2 + std**2 - 1 - 2 * ls)
+    expected = float((counts * per).sum() / 4.0)
+    assert float(kl) == pytest.approx(expected, rel=1e-6)
+
+
+def test_context_kl_loss_zero_without_context():
+    assert float(_context_kl_loss(ParameterTree(), 0.2, 0)) == 0.0
+
+
+def test_context_kl_loss_penalizes_collapsed_codebook():
+    from biocomp.context import (
+        CONTEXT_EMBEDDINGS,
+        _codebook_logstdevs_path,
+        _codebook_means_path,
+        _indices_path,
+    )
+
+    ce = CONTEXT_EMBEDDINGS[0]
+    p = ParameterTree()
+    p[_codebook_means_path(ce.name)] = jnp.zeros((2, ce.embedding_dim))
+    p[_codebook_logstdevs_path(ce.name)] = jnp.full((2, ce.embedding_dim), -3.0)  # init/collapsed
+    p[_indices_path(ce.name)] = jnp.array([0, 0, 1], dtype=jnp.int32)
+    collapsed = float(_context_kl_loss(p, 0.2, 0))
+    assert collapsed > 0.0  # the prior penalizes the as-initialized collapsed embedding
+
+    p[_codebook_logstdevs_path(ce.name)] = jnp.full((2, ce.embedding_dim), -1.0)
+    assert float(_context_kl_loss(p, 0.2, 0)) < collapsed  # less collapse -> smaller penalty
 
 
 if __name__ == "__main__":

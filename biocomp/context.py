@@ -94,6 +94,36 @@ def _indices_path(name: str) -> str:
     return f"global/context/{name}_indices"
 
 
+# ── KL prior inputs ───────────────────────────────────────────────────────────
+
+
+def context_codebook_kl_inputs(params: ParameterTree):
+    """Flattened (means, logstdevs, counts, total_count) across every context codebook,
+    for a KL(q || N(0,1)) prior on the cell-type space -- the SAME treatment the part
+    embeddings get. Each row is weighted by the number of networks using that value, so a
+    cell type keeps the same KL-vs-reconstruction balance no matter how few circuits use it
+    (the few-shot row is regularized, not swamped). Returns None for a context-free model.
+
+    Expects single-replicate params (the per-replicate loss), so the index array is 1-D.
+    """
+    means, logstdevs, counts = [], [], []
+    total = jnp.asarray(0.0)
+    for ce in CONTEXT_EMBEDDINGS:
+        means_path = _codebook_means_path(ce.name)
+        if means_path not in params:
+            continue
+        m = params[means_path]  # (rows, dim)
+        ls = params[_codebook_logstdevs_path(ce.name)]
+        per_row = jnp.bincount(params[_indices_path(ce.name)], length=m.shape[0]).astype(m.dtype)
+        total = total + per_row.sum()
+        means.append(m.reshape(-1))
+        logstdevs.append(ls.reshape(-1))
+        counts.append(jnp.repeat(per_row, m.shape[1]))  # one count per (row, dim) entry
+    if not means:
+        return None
+    return jnp.concatenate(means), jnp.concatenate(logstdevs), jnp.concatenate(counts), total
+
+
 # ── Value sets ────────────────────────────────────────────────────────────────
 
 
@@ -331,3 +361,17 @@ def resolve_context_vector(
         pieces.append(emb)
 
     return jnp.concatenate(pieces)
+
+
+def disable_context_variational(params: ParameterTree, floor: float = -100.0) -> None:
+    """In-place: pin every context codebook's logstdevs to `floor` (σ ≈ 0) so inference uses
+    the codebook MEAN with no sampling -- the eval-time counterpart of the part embeddings'
+    `disable_variational`. `resolve_context_vector` always samples (no flag), so callers that
+    turn off the part noise at inference must call this too, or a regularized cell-type
+    embedding (σ ≈ 1) injects real noise into every prediction."""
+    for ce in CONTEXT_EMBEDDINGS:
+        path = _codebook_logstdevs_path(ce.name)
+        if path in params:
+            # preserve the leaf's tags (e.g. "shared") -- a plain reassignment drops them and
+            # changes the pytree metadata, which trips the jitted apply's input-structure check.
+            params.at(path, jnp.ones_like(params[path]) * floor, tags=params.get_tags(path), overwrite=True)
